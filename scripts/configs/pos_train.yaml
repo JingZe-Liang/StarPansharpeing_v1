@@ -1,0 +1,164 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - _self_
+  # hydra overrides
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  _target_: accelerate.Accelerator
+  mixed_precision: bf16
+  dataloader_config:
+    _target_: accelerate.utils.DataLoaderConfiguration
+    split_batches: False
+    even_batches: False
+    non_blocking: True
+    dispatch_batches: None
+    use_seedable_sampler: False
+    use_stateful_dataloader: False
+  project_config:
+    _target_: accelerate.utils.ProjectConfiguration
+    project_dir: log_file
+    total_limit: 5
+    automatic_checkpoint_naming: true
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+    adjust_scheduler: false
+    sync_with_dataloader: false
+    sync_each_batch: false
+
+dataset:
+  used: MMSeg_YREB
+  num_workers: 4
+  shuffle_size: 100
+  dataset_names_to_bs:
+    MMSeg_YREB: 64
+    DCF_2019: 32
+
+  dataset_names_to_n_channels:
+    MMSeg_YREB: 12
+    DCF_2019: 8
+
+  MMSeg_YREB:
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+
+  DCF_2019:
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0007.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0008.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0009.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0011.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0012.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0013.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0000.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0001.tar
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+
+  wds_path: ${dataset[${dataset.used}]}
+  channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
+  batch_size: ${dataset.dataset_names_to_bs[${dataset.used}]}
+
+tokenizer:
+  enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
+  dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+  config:
+    attn_resolutions: [32]
+    channels: 128
+    channels_mult: [2, 4, 4]
+    dropout: 0.0
+    in_channels: ${dataset.channels}
+    spatial_compression: 8
+    num_res_blocks: 2
+    out_channels: ${dataset.channels}
+    resolution: 1024
+    patch_size: 4
+    patch_method: haar
+    latent_channels: 16
+    z_channels: 16
+    z_factor: 1
+    name: CI
+    formulation: AE
+    encoder: Default
+    decoder: Default
+    act_checkpoint: true
+
+vq_loss:
+  _target_: losses.gan_loss.loss.VQLPIPSWithDiscriminator
+  disc_ndf: 64
+  perceptual_weight: 0.0 # do not support for hyperspectral images
+  loss_ssim: true
+  use_actnorm: false
+  disc_in_channels: ${dataset.channels}
+  lecam_loss_weight: 0.05
+  disc_weight: 0.8
+  gen_loss_weight: 0.1
+
+ema:
+  beta: 0.999
+  update_after_step: 100
+  update_every: 2
+
+train:
+  proj_dir: cosmos1/models/tokenizer/runs/
+  finetune_strategy: finetune_all
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 200_000
+  save_every: 500
+
+  tokenizer_optimizer:
+    _target_: optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
+
+  disc_optimizer:
+    _target_: optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
+
+  tokenizer_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 2
+
+  disc_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 2
+
+  log:
+    run_comment: cosmos_tokenizer_pos_training
+    log_with_time: true
+    visualize_every: 200
+    log_every: 10
+
+  debug: false
