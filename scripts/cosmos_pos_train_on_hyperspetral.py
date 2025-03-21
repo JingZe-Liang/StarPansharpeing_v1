@@ -3,17 +3,19 @@ import sys
 import time
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 import accelerate
 import hydra
 import numpy as np
 import PIL.Image as Image
-import tifffile
 import torch
 import torch.nn as nn
 import webdataset as wds
+import yaml
 from accelerate import Accelerator
 from accelerate.state import PartialState
+from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
@@ -21,13 +23,16 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
+sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
+sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
+from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.cosmos.networks.configs import continuous_image
 
-to_dict = partial(OmegaConf.to_container, resolve=True)
+to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
-OmegaConf.registerregister_new_resolver_resolver("eval", lambda x: eval(x))
+OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -35,65 +40,6 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 # 1. add diffusion, rectify flow, or inductive moumentumn matching to the decoder
 # 2. add BSQ or LFQ to discretize
 # 3. add rectify flow for continuous latents; maskbit or maskgit for discrete latents
-
-
-def tiff_decoder(key, x):
-    if key.endswith(".tiff"):
-        return tifffile.imread(io.BytesIO(x))
-    else:
-        return x
-
-
-def get_dict_tensor_mapper(to_neg_1_1=True):
-    def wds_to_dict_tensor_mapper(sample):
-        img = torch.as_tensor(sample["img.tiff"]).float()
-        img = img / img.max()
-        if to_neg_1_1:
-            img = img * 2 - 1
-        img = img.permute(-1, 0, 1)
-
-        return {"img": img}
-
-    return wds_to_dict_tensor_mapper
-
-
-def get_hyperspectral_dataloaders(
-    wds_paths: str | list[str],
-    batch_size: int,
-    num_workers: int,
-    shuffle_size: int = 100,
-    to_neg_1_1: bool = True,
-):
-    dict_mapper = get_dict_tensor_mapper(to_neg_1_1)
-
-    part_state = PartialState()
-    is_ddp = part_state.use_distributed
-
-    dataset = wds.WebDataset(
-        wds_paths,
-        resampled=True,
-        shardshuffle=True if is_ddp else False,
-        cache_size=shuffle_size,
-        nodesplitter=wds.shardlists.split_by_node
-        if is_ddp
-        else wds.shardlists.single_node_only,
-        seed=2025,
-        verbose=True,
-        detshuffle=True if shuffle_size > 0 else False,
-    )
-    dataset = dataset.decode(tiff_decoder)
-    dataset = dataset.map(dict_mapper)
-
-    dataloader = wds.WebLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        persistent_workers=True,
-        prefetch_factor=6,
-        drop_last=False,
-    )
-
-    return dataset, dataloader
 
 
 class StepsCounter:
@@ -146,17 +92,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
-        accelerate.utils.set_seed(42, device_specific=True, deterministic=False)
+        accelerate.utils.set_seed(2025, device_specific=True, deterministic=False)
 
         # logger
         log_file = self.configure_logger()
-        log_dir = log_file.parent
-        if not self.train_cfg.debug:
-            log_dir.mkdir(parents=True, exist_ok=True)
 
         # attributes
-        self.proj_dir = log_dir
-        self.accelerator.project_configuration.project_dir = self.proj_dir
         self.device = self.accelerator.device
         self.dtype = {
             "fp16": torch.float16,
@@ -177,7 +118,7 @@ class CosmosHyperspectralTokenizerTrainer:
             ] in [2, 3]
 
         # pretrained tokenizer
-        tokenizer_config = continuous_image  # to_dict(self.tokenizer_cfg.config)
+        tokenizer_config = to_cont(self.tokenizer_cfg.config)
         self.tokenizer_encoder, self._enc_model_mody_keys = (
             load_jit_model_shape_matched(
                 cfg.tokenizer.enc_path,
@@ -255,8 +196,23 @@ class CosmosHyperspectralTokenizerTrainer:
             log_file = log_file / self.train_cfg.log.run_comment
         log_file = log_file / "log.log"
 
+        # when distributed, there should be the same log_file
+        if self.accelerator.use_distributed:
+            input_lst = [log_file] * self.accelerator.num_processes
+            output_lst = [None] * self.accelerator.num_processes
+            torch.distributed.scatter_object_list(
+                input_lst,
+                output_lst,
+            )
+            log_file: Path = output_lst[self.accelerator.process_index]
+            assert isinstance(log_file, Path), "log_file type should be Path"
+
+        # logger
         self.logger.remove()
-        log_format = "<green>[{time:MM-DD HH:mm:ss}]</green> - <level>[{level}]</level> - <level>{message}</level>"
+        log_format = (
+            "<green>[{time:MM-DD HH:mm:ss}]</green>"
+            " - <level>[{level}]</level> - <level>{message}</level>"
+        )
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
@@ -275,7 +231,49 @@ class CosmosHyperspectralTokenizerTrainer:
             colorize=True,
         )
 
+        # make log dir
+        log_dir = log_file.parent
+        if not self.train_cfg.debug:
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+        # copy cfg
+        yaml_cfg = OmegaConf.to_yaml(self.cfg, resolve=False)
+        cfg_cp_path = log_file.parent / "config" / "config_total.yaml"
+        with open(cfg_cp_path, "w") as f:
+            f.write(yaml_cfg)
+        self.logger.info(f"[Cfg]: configuration saved to {cfg_cp_path}")
+
+        # accelerate project configuration
+        self.proj_dir = log_dir
+        self.accelerator.project_configuration.project_dir = self.proj_dir
+
+        # tensorboard logger
+        tenb_dir = log_dir / "tensorboard"
+        self.accelerator.project_configuration.logging_dir = tenb_dir
+        if self.accelerator.is_main_process:
+            self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
+            self.accelerator.init_trackers("train")
+
+            self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(
+                "tensorboard"
+            )
+
         return log_file
+
+    def tenb_log_any(
+        self, log_type: Literal["metric", "image"], logs: dict, step: int, **kwargs
+    ):
+        if not hasattr(self, "tb_logger") or not self.accelerator.is_main_process:
+            return
+        assert log_type in [
+            "metric",
+            "image",
+        ], "log_type must be one of [metric, image]"
+
+        if log_type == "metric":
+            self.tb_logger.log(logs, step=step)
+        elif log_type == "image":
+            self.tb_logger.log_images(logs, step=step)
 
     def log_msg(self, *msgs, only_rank_one=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
@@ -612,9 +610,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 psnr_fn.update(x_q, recon_q)
                 ssim_fn.update(x_q, recon_q)
 
-        with (
-            self.accelerator.accumulate()
-        ):  # Warning: accumualte may cause some layers' params without gradient
+        with self.accelerator.accumulate(
+            self.tokenizer_encoder,
+            self.tokenizer_decoder,
+            self.vq_loss_fn.discriminator,
+        ):  # Warn: accumualte may cause some layers' params without gradient
             _, recon = self.forward_tokenizer(x)
 
             # loss
@@ -637,10 +637,15 @@ class CosmosHyperspectralTokenizerTrainer:
             _log_disc_losses = self.format_log(log_disc_loss=log_disc_loss)
 
             self.log_msg(
-                f'[Train State]: {self.tokenizer_optim.param_groups[0]["lr"]:.4e} | [Step]: {self.global_step}/{self.train_cfg.max_steps}'
+                f"[Train State]: {self.tokenizer_optim.param_groups[0]["lr"]:.4e} | "
+                + "[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
             self.log_msg(f"[Train Disc]: {_log_disc_losses}")
+
+            # tensorboard log
+            self.tenb_log_any("metric", log_token_loss, self.global_step)
+            self.tenb_log_any("metric", log_disc_loss, self.global_step)
 
         if (
             quality_track_n >= 0
@@ -690,9 +695,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 yield batch
 
     def train_loop(self):
-        self.log_msg("[Train]: start training")
-
         _stop_train_and_save = False
+        self.accelerator.wait_for_everyone()
+
+        self.log_msg("[Train]: start training", only_rank_one=False)
         for batch in self.infinity_train_loader():
             # train step
             self.train_step(batch)
@@ -720,7 +726,8 @@ class CosmosHyperspectralTokenizerTrainer:
     def save_ema(self):
         self.accelerator.wait_for_everyone()
         ema_path = self.proj_dir / "ema" / "ema.safetensors"
-        ema_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.accelerator.is_main_process:
+            ema_path.parent.mkdir(parents=True, exist_ok=True)
 
         enc_params = self.accelerator.unwrap_model(
             self.ema_encoder.ema_model
@@ -739,7 +746,8 @@ class CosmosHyperspectralTokenizerTrainer:
             discriminator=disc_params,
             counter=counter_params,
         )
-        self.accelerator.save(ema_ckpt, ema_path)
+        if self.accelerator.is_main_process:
+            self.accelerator.save(ema_ckpt, ema_path)
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
         self.accelerator.wait_for_everyone()
 
@@ -819,15 +827,17 @@ class CosmosHyperspectralTokenizerTrainer:
             recon_np = to_img(recon)
         else:
             # prefix some channels for RGB channels
-            _prefixed_rgb_channels = {
-                12: [4, 3, 2],
-                13: [4, 3, 2],
-                8: [4, 2, 0],
-                4: [3, 2, 1],
-                224: [128, 68, 32],
-                50: [25, 15, 5],
-            }
-            rgb_channels = _prefixed_rgb_channels[c]
+            # _prefixed_rgb_channels = {
+            #     12: [4, 3, 2],
+            #     13: [4, 3, 2],
+            #     8: [4, 2, 0],
+            #     4: [3, 2, 1],
+            #     224: [128, 68, 32],
+            #     50: [25, 15, 5],
+            # }
+            rgb_channels = to_cont(
+                self.dataset_cfg.rgb_channels
+            )  # _prefixed_rgb_channels[c]
             x_np = to_img(x[:, rgb_channels])
             recon_np = to_img(recon[:, rgb_channels])
 
@@ -841,7 +851,8 @@ class CosmosHyperspectralTokenizerTrainer:
             img_name = f"{self.global_step}_{img_name}"
 
         save_path = Path(self.proj_dir) / "train_vis" / img_name
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.accelerator.is_main_process:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
         if self.accelerator.is_main_process:
             img_to_save.save(save_path)
 
@@ -849,17 +860,17 @@ class CosmosHyperspectralTokenizerTrainer:
         self.accelerator.wait_for_everyone()
 
     def run(self):
-        with self.logger.catch():
-            self.train_loop()
+        self.train_loop()
 
 
 if __name__ == "__main__":
     # load config
-    hydra.initialize("configs", version_base=None)
+    hydra.initialize("configs/cosmos", version_base=None)
     cfg = hydra.compose(config_name="pos_train")
 
-    trainer = CosmosHyperspectralTokenizerTrainer(cfg)
-    trainer.run()
+    with logger.catch():
+        trainer = CosmosHyperspectralTokenizerTrainer(cfg)
+        trainer.run()
 
 
 """

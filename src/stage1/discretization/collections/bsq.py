@@ -252,11 +252,29 @@ class BinarySphericalQuantizer(nn.Module):
 
 
 if __name__ == "__main__":
-    K = 8
+    K = 18
     # zq = torch.randint(0, 2, (4, 32, K), dtype=torch.bfloat16, device='cuda') * 2 - 1
-    zq = torch.zeros((4, 32, K), dtype=torch.bfloat16, device="cuda") * 2 - 1
-    basis = (2 ** torch.arange(K - 1, -1, -1)).to(torch.bfloat16).cuda()
-    zq.requires_grad = True
-    h = codebook_entropy(zq, basis, K)
-    h.backward()
-    print(zq.grad, zq)
+
+    latent = torch.randn(1, 18, 64, 64)
+    bsq = BinarySphericalQuantizer(
+        embed_dim=18,
+        l2_norm=True,
+        persample_entropy_compute="analytical",
+        beta=0.0,
+        gamma=1.0,
+        gamma0=1.0,
+        zeta=1.0,
+        inv_temperature=1.0,
+        cb_entropy_compute="group",
+        input_format="bchw",
+        group_size=1,
+    )
+    latent_q = bsq(latent)
+    print(latent_q)
+
+    # zq = torch.zeros((4, 32, K), dtype=torch.bfloat16, device="cuda") * 2 - 1
+    # basis = (2 ** torch.arange(K - 1, -1, -1)).to(torch.bfloat16).cuda()
+    # zq.requires_grad = True
+    # h = codebook_entropy(zq, basis, K)
+    # h.backward()
+    # print(zq.grad, zq)

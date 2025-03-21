@@ -2,7 +2,7 @@ import torch
 from einops import pack
 from torch import einsum, nn
 
-from vector_quantize_pytorch.vector_quantize_pytorch import VectorQuantize
+from .vector_quantize_pytorch import VectorQuantize
 
 
 def exists(val):

@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from cosmos1.models.tokenizer.inference.utils import (
+from .utils import (
     load_decoder_model,
     load_encoder_model,
     load_model,
@@ -46,7 +46,9 @@ class CausalVideoTokenizer(torch.nn.Module):
         self._device = device
         self._dtype = getattr(torch, dtype)
         self._full_model = (
-            load_model(checkpoint, tokenizer_config, device).to(self._dtype) if checkpoint is not None else None
+            load_model(checkpoint, tokenizer_config, device).to(self._dtype)
+            if checkpoint is not None
+            else None
         )
         self._enc_model = (
             load_encoder_model(checkpoint_enc, tokenizer_config, device).to(self._dtype)
@@ -70,7 +72,9 @@ class CausalVideoTokenizer(torch.nn.Module):
         """
         if self._full_model is not None:
             output_tensor = self._full_model(input_tensor)
-            output_tensor = output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
+            output_tensor = (
+                output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
+            )
         else:
             output_latent = self.encode(input_tensor)[0]
             output_tensor = self.decode(output_latent)
@@ -109,7 +113,9 @@ class CausalVideoTokenizer(torch.nn.Module):
         Returns:
             The reconstructed tensor, layout [B,3,1+(T-1)*8,H*16,W*16] in range [-1..1].
         """
-        assert input_latent.ndim >= 4, "input latent should be of 5D for continuous and 4D for discrete."
+        assert (
+            input_latent.ndim >= 4
+        ), "input latent should be of 5D for continuous and 4D for discrete."
         return self._dec_model(input_latent)
 
     def forward(
@@ -137,7 +143,9 @@ class CausalVideoTokenizer(torch.nn.Module):
 
             # Spatio-temporally pad input_video so it's evenly divisible.
             padded_input_video, crop_region = pad_video_batch(input_video)
-            input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+            input_tensor = numpy2tensor(
+                padded_input_video, dtype=self._dtype, device=self._device
+            )
             output_tensor = self.autoencode(input_tensor)
             padded_output_video = tensor2numpy(output_tensor)
             output_video = unpad_video_batch(padded_output_video, crop_region)

@@ -11,7 +11,7 @@ from torch import nn
 from torch.amp import autocast
 from torch.nn import Module
 
-from vector_quantize_pytorch.finite_scalar_quantization import FSQ
+from .finite_scalar_quantization import FSQ
 
 # helper functions
 

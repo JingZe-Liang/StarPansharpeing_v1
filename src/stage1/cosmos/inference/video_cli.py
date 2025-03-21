@@ -41,15 +41,15 @@ from typing import Any
 import numpy as np
 from loguru import logger as logging
 
-from cosmos1.models.tokenizer.inference.utils import (
+from ..networks import TokenizerConfigs
+from .utils import (
     get_filepaths,
     get_output_filepath,
     read_video,
     resize_video,
     write_video,
 )
-from cosmos1.models.tokenizer.inference.video_lib import CausalVideoTokenizer
-from cosmos1.models.tokenizer.networks import TokenizerConfigs
+from .video_lib import CausalVideoTokenizer
 
 
 def _parse_args() -> tuple[Namespace, dict[str, Any]]:
@@ -129,7 +129,9 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         default="cuda",
         help="Device for invoking the model.",
     )
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory.")
+    parser.add_argument(
+        "--output_dir", type=str, default=None, help="Output directory."
+    )
     parser.add_argument(
         "--output_fps",
         type=float,
@@ -156,8 +158,14 @@ if args.mode == "torch" and args.tokenizer_type not in ["CV", "DV"]:
 def _run_eval() -> None:
     """Invokes JIT-compiled CausalVideoTokenizer on an input video."""
 
-    if args.checkpoint_enc is None and args.checkpoint_dec is None and args.checkpoint is None:
-        logging.warning("Aborting. Both encoder or decoder JIT required. Or provide the full autoencoder JIT model.")
+    if (
+        args.checkpoint_enc is None
+        and args.checkpoint_dec is None
+        and args.checkpoint is None
+    ):
+        logging.warning(
+            "Aborting. Both encoder or decoder JIT required. Or provide the full autoencoder JIT model."
+        )
         return
 
     if args.mode == "torch":

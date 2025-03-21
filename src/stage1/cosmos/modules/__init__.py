@@ -15,10 +15,10 @@
 
 from enum import Enum
 
-from cosmos1.models.tokenizer.modules.distributions import GaussianDistribution, IdentityDistribution
-from cosmos1.models.tokenizer.modules.layers2d import Decoder, Encoder
-from cosmos1.models.tokenizer.modules.layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
-from cosmos1.models.tokenizer.modules.quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
+from .distributions import GaussianDistribution, IdentityDistribution
+from .layers2d import Decoder, Encoder
+from .layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
+from .quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
 
 
 class EncoderType(Enum):

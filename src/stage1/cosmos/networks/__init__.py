@@ -15,14 +15,14 @@
 
 from enum import Enum
 
-from cosmos1.models.tokenizer.networks.configs import continuous_image as continuous_image_dict
-from cosmos1.models.tokenizer.networks.configs import continuous_video as continuous_video_dict
-from cosmos1.models.tokenizer.networks.configs import discrete_image as discrete_image_dict
-from cosmos1.models.tokenizer.networks.configs import discrete_video as discrete_video_dict
-from cosmos1.models.tokenizer.networks.continuous_image import ContinuousImageTokenizer
-from cosmos1.models.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
-from cosmos1.models.tokenizer.networks.discrete_image import DiscreteImageTokenizer
-from cosmos1.models.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
+from .configs import continuous_image as continuous_image_dict
+from .configs import continuous_video as continuous_video_dict
+from .configs import discrete_image as discrete_image_dict
+from .configs import discrete_video as discrete_video_dict
+from .continuous_image import ContinuousImageTokenizer
+from .continuous_video import CausalContinuousVideoTokenizer
+from .discrete_image import DiscreteImageTokenizer
+from .discrete_video import CausalDiscreteVideoTokenizer
 
 
 class TokenizerConfigs(Enum):

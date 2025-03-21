@@ -22,6 +22,7 @@ Adapted from: https://github.com/lucidrains/magvit2-pytorch/blob/
 https://github.com/lucidrains/magvit2-pytorch/blob/
 9f49074179c912736e617d61b32be367eb5f993a/LICENSE
 """
+
 import math
 from typing import Tuple, Union
 
@@ -31,8 +32,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger as logging
 
-from cosmos1.models.tokenizer.modules.patching import Patcher, Patcher3D, UnPatcher, UnPatcher3D
-from cosmos1.models.tokenizer.modules.utils import (
+from .patching import Patcher, Patcher3D, UnPatcher, UnPatcher3D
+from .utils import (
     CausalNormalize,
     batch2space,
     batch2time,
@@ -100,7 +101,9 @@ class CausalConv3d(nn.Module):
 class CausalUpsample3d(nn.Module):
     def __init__(self, in_channels: int) -> None:
         super().__init__()
-        self.conv = CausalConv3d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv = CausalConv3d(
+            in_channels, in_channels, kernel_size=3, stride=1, padding=1
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.repeat_interleave(2, dim=3).repeat_interleave(2, dim=4)
@@ -145,17 +148,38 @@ class CausalHybridUpsample3d(nn.Module):
     ) -> None:
         super().__init__()
         self.conv1 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=(3, 1, 1), stride=1, time_stride=1, padding=0)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=(3, 1, 1),
+                stride=1,
+                time_stride=1,
+                padding=0,
+            )
             if temporal_up
             else nn.Identity()
         )
         self.conv2 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=(1, 3, 3), stride=1, time_stride=1, padding=1)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=(1, 3, 3),
+                stride=1,
+                time_stride=1,
+                padding=1,
+            )
             if spatial_up
             else nn.Identity()
         )
         self.conv3 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, time_stride=1, padding=0)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=1,
+                stride=1,
+                time_stride=1,
+                padding=0,
+            )
             if spatial_up or temporal_up
             else nn.Identity()
         )
@@ -195,17 +219,38 @@ class CausalHybridDownsample3d(nn.Module):
     ) -> None:
         super().__init__()
         self.conv1 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=(1, 3, 3), stride=2, time_stride=1, padding=0)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=(1, 3, 3),
+                stride=2,
+                time_stride=1,
+                padding=0,
+            )
             if spatial_down
             else nn.Identity()
         )
         self.conv2 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=(3, 1, 1), stride=1, time_stride=2, padding=0)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=(3, 1, 1),
+                stride=1,
+                time_stride=2,
+                padding=0,
+            )
             if temporal_down
             else nn.Identity()
         )
         self.conv3 = (
-            CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, time_stride=1, padding=0)
+            CausalConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=1,
+                stride=1,
+                time_stride=1,
+                padding=0,
+            )
             if spatial_down or temporal_down
             else nn.Identity()
         )
@@ -251,10 +296,14 @@ class CausalResnetBlock3d(nn.Module):
         out_channels = in_channels if out_channels is None else out_channels
 
         self.norm1 = CausalNormalize(in_channels, num_groups=num_groups)
-        self.conv1 = CausalConv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.conv1 = CausalConv3d(
+            in_channels, out_channels, kernel_size=3, stride=1, padding=1
+        )
         self.norm2 = CausalNormalize(out_channels, num_groups=num_groups)
         self.dropout = torch.nn.Dropout(dropout)
-        self.conv2 = CausalConv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = CausalConv3d(
+            out_channels, out_channels, kernel_size=3, stride=1, padding=1
+        )
         self.nin_shortcut = (
             CausalConv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
             if in_channels != out_channels
@@ -350,10 +399,18 @@ class CausalAttnBlock(nn.Module):
         super().__init__()
 
         self.norm = CausalNormalize(in_channels, num_groups=num_groups)
-        self.q = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.k = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.v = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.proj_out = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.q = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.k = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.v = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.proj_out = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h_ = x
@@ -391,10 +448,18 @@ class CausalTemporalAttnBlock(nn.Module):
         super().__init__()
 
         self.norm = CausalNormalize(in_channels, num_groups=num_groups)
-        self.q = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.k = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.v = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.proj_out = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.q = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.k = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.v = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+        self.proj_out = CausalConv3d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h_ = x
@@ -449,11 +514,15 @@ class EncoderBase(nn.Module):
 
         # Patcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
-        self.patcher = Patcher(patch_size, ignore_kwargs.get("patch_method", "rearrange"))
+        self.patcher = Patcher(
+            patch_size, ignore_kwargs.get("patch_method", "rearrange")
+        )
         in_channels = in_channels * patch_size * patch_size
 
         # downsampling
-        self.conv_in = CausalConv3d(in_channels, channels, kernel_size=3, stride=1, padding=1)
+        self.conv_in = CausalConv3d(
+            in_channels, channels, kernel_size=3, stride=1, padding=1
+        )
 
         # num of groups for GroupNorm, num_groups=1 for LayerNorm.
         num_groups = ignore_kwargs.get("num_groups", _LEGACY_NUM_GROUPS)
@@ -504,7 +573,9 @@ class EncoderBase(nn.Module):
 
         # end
         self.norm_out = CausalNormalize(block_in, num_groups=num_groups)
-        self.conv_out = CausalConv3d(block_in, z_channels, kernel_size=3, stride=1, padding=1)
+        self.conv_out = CausalConv3d(
+            block_in, z_channels, kernel_size=3, stride=1, padding=1
+        )
 
     def patcher3d(self, x: torch.Tensor) -> torch.Tensor:
         x, batch_size = time2batch(x)
@@ -571,16 +642,24 @@ class DecoderBase(nn.Module):
 
         # UnPatcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
-        self.unpatcher = UnPatcher(patch_size, ignore_kwargs.get("patch_method", "rearrange"))
+        self.unpatcher = UnPatcher(
+            patch_size, ignore_kwargs.get("patch_method", "rearrange")
+        )
         out_ch = out_channels * patch_size * patch_size
 
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        logging.info("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
+        logging.info(
+            "Working with z of shape {} = {} dimensions.".format(
+                self.z_shape, np.prod(self.z_shape)
+            )
+        )
 
         # z to block_in
-        self.conv_in = CausalConv3d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
+        self.conv_in = CausalConv3d(
+            z_channels, block_in, kernel_size=3, stride=1, padding=1
+        )
 
         # num of groups for GroupNorm, num_groups=1 for LayerNorm.
         num_groups = ignore_kwargs.get("num_groups", _LEGACY_NUM_GROUPS)
@@ -629,7 +708,9 @@ class DecoderBase(nn.Module):
 
         # end
         self.norm_out = CausalNormalize(block_in, num_groups=num_groups)
-        self.conv_out = CausalConv3d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
+        self.conv_out = CausalConv3d(
+            block_in, out_ch, kernel_size=3, stride=1, padding=1
+        )
 
     def unpatcher3d(self, x: torch.Tensor) -> torch.Tensor:
         x, batch_size = time2batch(x)
@@ -690,16 +771,22 @@ class EncoderFactorized(nn.Module):
 
         # Patcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
-        self.patcher3d = Patcher3D(patch_size, ignore_kwargs.get("patch_method", "rearrange"))
+        self.patcher3d = Patcher3D(
+            patch_size, ignore_kwargs.get("patch_method", "rearrange")
+        )
         in_channels = in_channels * patch_size * patch_size * patch_size
 
         # calculate the number of downsample operations
-        self.num_spatial_downs = int(math.log2(spatial_compression)) - int(math.log2(patch_size))
+        self.num_spatial_downs = int(math.log2(spatial_compression)) - int(
+            math.log2(patch_size)
+        )
         assert (
             self.num_spatial_downs <= self.num_resolutions
         ), f"Spatially downsample {self.num_resolutions} times at most"
 
-        self.num_temporal_downs = int(math.log2(temporal_compression)) - int(math.log2(patch_size))
+        self.num_temporal_downs = int(math.log2(temporal_compression)) - int(
+            math.log2(patch_size)
+        )
         assert (
             self.num_temporal_downs <= self.num_resolutions
         ), f"Temporally downsample {self.num_resolutions} times at most"
@@ -713,7 +800,9 @@ class EncoderFactorized(nn.Module):
                 stride=1,
                 padding=1,
             ),
-            CausalConv3d(channels, channels, kernel_size=(3, 1, 1), stride=1, padding=0),
+            CausalConv3d(
+                channels, channels, kernel_size=(3, 1, 1), stride=1, padding=0
+            ),
         )
 
         curr_res = resolution // patch_size
@@ -778,7 +867,9 @@ class EncoderFactorized(nn.Module):
         # end
         self.norm_out = CausalNormalize(block_in, num_groups=1)
         self.conv_out = nn.Sequential(
-            CausalConv3d(block_in, z_channels, kernel_size=(1, 3, 3), stride=1, padding=1),
+            CausalConv3d(
+                block_in, z_channels, kernel_size=(1, 3, 3), stride=1, padding=1
+            ),
             CausalConv3d(
                 z_channels,
                 z_channels,
@@ -836,13 +927,21 @@ class DecoderFactorized(nn.Module):
 
         # UnPatcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
-        self.unpatcher3d = UnPatcher3D(patch_size, ignore_kwargs.get("patch_method", "rearrange"))
+        self.unpatcher3d = UnPatcher3D(
+            patch_size, ignore_kwargs.get("patch_method", "rearrange")
+        )
         out_ch = out_channels * patch_size * patch_size * patch_size
 
         # calculate the number of upsample operations
-        self.num_spatial_ups = int(math.log2(spatial_compression)) - int(math.log2(patch_size))
-        assert self.num_spatial_ups <= self.num_resolutions, f"Spatially upsample {self.num_resolutions} times at most"
-        self.num_temporal_ups = int(math.log2(temporal_compression)) - int(math.log2(patch_size))
+        self.num_spatial_ups = int(math.log2(spatial_compression)) - int(
+            math.log2(patch_size)
+        )
+        assert (
+            self.num_spatial_ups <= self.num_resolutions
+        ), f"Spatially upsample {self.num_resolutions} times at most"
+        self.num_temporal_ups = int(math.log2(temporal_compression)) - int(
+            math.log2(patch_size)
+        )
         assert (
             self.num_temporal_ups <= self.num_resolutions
         ), f"Temporally upsample {self.num_resolutions} times at most"
@@ -850,12 +949,20 @@ class DecoderFactorized(nn.Module):
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        logging.info("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
+        logging.info(
+            "Working with z of shape {} = {} dimensions.".format(
+                self.z_shape, np.prod(self.z_shape)
+            )
+        )
 
         # z to block_in
         self.conv_in = nn.Sequential(
-            CausalConv3d(z_channels, block_in, kernel_size=(1, 3, 3), stride=1, padding=1),
-            CausalConv3d(block_in, block_in, kernel_size=(3, 1, 1), stride=1, padding=0),
+            CausalConv3d(
+                z_channels, block_in, kernel_size=(1, 3, 3), stride=1, padding=1
+            ),
+            CausalConv3d(
+                block_in, block_in, kernel_size=(3, 1, 1), stride=1, padding=0
+            ),
         )
 
         # middle
@@ -915,9 +1022,12 @@ class DecoderFactorized(nn.Module):
                 else:
                     temporal_up = 0 < i_level_reverse < self.num_temporal_ups + 1
                 spatial_up = temporal_up or (
-                    i_level_reverse < self.num_spatial_ups and self.num_spatial_ups > self.num_temporal_ups
+                    i_level_reverse < self.num_spatial_ups
+                    and self.num_spatial_ups > self.num_temporal_ups
                 )
-                up.upsample = CausalHybridUpsample3d(block_in, spatial_up=spatial_up, temporal_up=temporal_up)
+                up.upsample = CausalHybridUpsample3d(
+                    block_in, spatial_up=spatial_up, temporal_up=temporal_up
+                )
                 curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 

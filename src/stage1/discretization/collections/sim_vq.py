@@ -9,7 +9,7 @@ from einx import get_at
 from torch import nn
 from torch.nn import Module
 
-from vector_quantize_pytorch.vector_quantize_pytorch import rotate_to
+from .vector_quantize_pytorch import rotate_to
 
 # helper functions
 

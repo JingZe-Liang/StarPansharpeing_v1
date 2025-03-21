@@ -11,7 +11,7 @@ from einops import rearrange, reduce
 from einx import get_at
 from torch.nn import Module, ModuleList
 
-from vector_quantize_pytorch.sim_vq import SimVQ, pack_one
+from .sim_vq import SimVQ, pack_one
 
 # helper functions
 

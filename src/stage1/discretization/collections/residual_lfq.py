@@ -11,7 +11,7 @@ from torch import nn
 from torch.amp import autocast
 from torch.nn import Module
 
-from vector_quantize_pytorch.lookup_free_quantization import LFQ
+from .lookup_free_quantization import LFQ
 
 # helper functions
 

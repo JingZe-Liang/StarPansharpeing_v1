@@ -12,6 +12,7 @@ defaults:
 accelerator:
   _target_: accelerate.Accelerator
   mixed_precision: bf16
+  log_with: tensorboard
   dataloader_config:
     _target_: accelerate.utils.DataLoaderConfiguration
     split_batches: False
@@ -22,7 +23,11 @@ accelerator:
     use_stateful_dataloader: False
   project_config:
     _target_: accelerate.utils.ProjectConfiguration
-    project_dir: log_file
+    # ==================
+    # placeholder, changed by code
+    project_dir: runs/stage1_cosmos/
+    logging_dir: runs/stage1_cosmos/tensorboard
+    # ==================
     total_limit: 5
     automatic_checkpoint_naming: true
   gradient_accumulation_plugin:
@@ -33,7 +38,7 @@ accelerator:
     sync_each_batch: false
 
 dataset:
-  used: MMSeg_YREB
+  used: DCF_2019
   num_workers: 4
   shuffle_size: 100
   dataset_names_to_bs:
@@ -43,6 +48,10 @@ dataset:
   dataset_names_to_n_channels:
     MMSeg_YREB: 12
     DCF_2019: 8
+
+  dataset_names_to_rgb_channes:
+    MMSeg_YREB: [4, 3, 2]
+    DCF_2019: [4, 2, 0]
 
   MMSeg_YREB:
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
@@ -69,13 +78,11 @@ dataset:
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
-    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0000.tar
-    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0001.tar
-    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DFC_2020_public-13_bands-px_256-MSI-0002.tar
 
   wds_path: ${dataset[${dataset.used}]}
   channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
   batch_size: ${dataset.dataset_names_to_bs[${dataset.used}]}
+  rgb_channels: ${dataset.dataset_names_to_rgb_channes[${dataset.used}]}
 
 tokenizer:
   enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
@@ -102,7 +109,7 @@ tokenizer:
     act_checkpoint: true
 
 vq_loss:
-  _target_: losses.gan_loss.loss.VQLPIPSWithDiscriminator
+  _target_: src.stage1.cosmos.losses.gan_loss.loss.VQLPIPSWithDiscriminator
   disc_ndf: 64
   perceptual_weight: 0.0 # do not support for hyperspectral images
   loss_ssim: true
@@ -118,7 +125,7 @@ ema:
   update_every: 2
 
 train:
-  proj_dir: cosmos1/models/tokenizer/runs/
+  proj_dir: runs/stage1_cosmos/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -128,14 +135,14 @@ train:
   save_every: 500
 
   tokenizer_optimizer:
-    _target_: optim.mars.MARS
+    _target_: src.utilities.optim.mars.MARS
     _partial_: true
     lr: 3.0e-4
     weight_decay: 1.0e-6
     betas: [0.9, 0.95]
 
   disc_optimizer:
-    _target_: optim.mars.MARS
+    _target_: src.utilities.optim.mars.MARS
     _partial_: true
     lr: 3.0e-4
     weight_decay: 1.0e-6

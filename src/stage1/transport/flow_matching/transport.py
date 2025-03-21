@@ -228,7 +228,7 @@ class Sampler:
 
     def __init__(
         self,
-        transport,
+        transport: Transport,
     ):
         """Constructor for a general sampler; supporting different sampling methods
         Args:
