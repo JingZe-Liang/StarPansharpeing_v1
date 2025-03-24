@@ -29,6 +29,7 @@ from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.cosmos.networks.configs import continuous_image
+from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
@@ -40,46 +41,6 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 # 1. add diffusion, rectify flow, or inductive moumentumn matching to the decoder
 # 2. add BSQ or LFQ to discretize
 # 3. add rectify flow for continuous latents; maskbit or maskgit for discrete latents
-
-
-class StepsCounter:
-    def __init__(self, step_names: list[str]):
-        # all set to 0
-        self.step_names = step_names
-        for name in step_names:
-            setattr(self, f"n_{name}_steps", 0)
-
-    def __repr__(self):
-        return f"StepsCounter({self.state_dict()})"
-
-    def state_dict(self):
-        return {
-            f"n_{name}_steps": getattr(self, f"n_{name}_steps")
-            for name in self.step_names
-        }
-
-    def load_state_dict(self, state_dict):
-        for name in self.step_names:
-            assert name in state_dict, f"Key {name} missing in state_dict"
-            setattr(self, f"n_{name}_steps", state_dict[f"n_{name}_steps"])
-
-    def update(self, name: str, update_n: int = 1):
-        n_step = self.get(name)
-        setattr(self, f"n_{name}_steps", n_step + update_n)
-
-    def get(self, name: str):
-        step_name = f"n_{name}_steps"
-        assert hasattr(self, step_name), f"Key {step_name} missing in state_dict"
-
-        return getattr(self, step_name)
-
-    def __getitem__(self, name: str):
-        return self.get(name)
-
-    def __setitem__(self, name: str, value: int):
-        name_set = f"n_{name}_steps"
-        assert hasattr(self, name_set), f"Key {name_set} missing in state_dict"
-        setattr(self, name_set, value)
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -144,8 +105,15 @@ class CosmosHyperspectralTokenizerTrainer:
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = get_hyperspectral_dataloaders(
-            wds_paths=self.dataset_cfg.wds_path,
-            batch_size=self.dataset_cfg.batch_size,
+            wds_paths=self.dataset_cfg.wds_path_train,
+            batch_size=self.dataset_cfg.batch_size_train,
+            num_workers=self.dataset_cfg.num_workers,
+            shuffle_size=self.dataset_cfg.shuffle_size,
+            to_neg_1_1=True,
+        )
+        self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
+            wds_paths=self.dataset_cfg.wds_path_val,
+            batch_size=self.dataset_cfg.batch_size_val,
             num_workers=self.dataset_cfg.num_workers,
             shuffle_size=self.dataset_cfg.shuffle_size,
             to_neg_1_1=True,
@@ -703,6 +671,9 @@ class CosmosHyperspectralTokenizerTrainer:
             # train step
             self.train_step(batch)
 
+            if self.global_step % self.val_cfg.val_duration == 0:
+                self.val_loop()
+
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
@@ -718,6 +689,67 @@ class CosmosHyperspectralTokenizerTrainer:
                     "[Train]: max training step budget reached, stop training and save"
                 )
                 break
+
+    def finite_val_loader(self):
+        if self.val_dataloader is None:
+            raise ValueError("No validation dataloader found")
+
+        for batch in self.val_dataloader:
+            yield batch
+
+    def val_step(self, batch: dict):
+        img = batch["img"].to(self.device, self.dtype)
+        with torch.no_grad():
+            _, recon = self.forward_tokenizer(img, ema=True)
+
+        return recon
+
+    def val_loop(self):
+        if not hasattr(self, "_val_loader_iter"):
+            # state in the loader generator
+            self._val_loader_iter = iter(self.finite_val_loader())
+
+        # track psnr and ssim
+        psnr_fn = PeakSignalNoiseRatio().to(device=self.device, dtype=self.dtype)
+        ssim_fn = StructuralSimilarityIndexMeasure().to(
+            device=self.device, dtype=self.dtype
+        )
+
+        for val_iter in range(self.val_cfg.max_val_iters):
+            batch = next(self._val_loader_iter)
+            recon = self.val_step(batch)
+
+            recon_for_metrics = self.to_rgb(recon)
+            batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
+
+            psnr_fn.update(batch_img_rgb, recon_for_metrics)
+            ssim_fn.update(batch_img_rgb, recon_for_metrics)
+
+        psnr_val = psnr_fn.compute()
+        ssim_val = ssim_fn.compute()
+
+        # gather
+        if self.accelerator.use_distributed:
+            psnr_val = torch.distributed.reduce(
+                psnr_val, op=torch.distributed.ReduceOp.AVG
+            )
+            ssim_val = torch.distributed.reduce(
+                ssim_val, op=torch.distributed.ReduceOp.AVG
+            )
+
+        if self.accelerator.is_main_process:
+            psnr_val = psnr_val.item()
+            ssim_val = ssim_val.item()
+
+            self.log_msg(f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f}")
+            self.tenb_log_any(
+                "metric",
+                {"psnr": psnr_val, "ssim": ssim_val},
+                step=self.global_step,
+            )
+
+            # visualize the last val batch
+            self.visualize_reconstruction(recon, add_step=True, img_name="val_sampled")
 
     def save_state(self):
         self.accelerator.save_state()

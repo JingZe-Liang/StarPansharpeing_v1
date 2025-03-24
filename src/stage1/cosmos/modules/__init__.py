@@ -16,7 +16,7 @@
 from enum import Enum
 
 from .distributions import GaussianDistribution, IdentityDistribution
-from .layers2d import Decoder, Encoder
+from .layers2d import Decoder, DecoderDiff, Encoder
 from .layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
 from .quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
 
@@ -27,6 +27,7 @@ class EncoderType(Enum):
 
 class DecoderType(Enum):
     Default = Decoder
+    Diffusion = DecoderDiff
 
 
 class Encoder3DType(Enum):

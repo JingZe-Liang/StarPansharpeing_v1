@@ -152,7 +152,7 @@ class DiTBlock(nn.Module):
         return x
 
     def forward(self, x, c, mask=None):
-        if self.act_checkpoint:
+        if self.act_checkpoint and self.training:
             return checkpoint.checkpoint(
                 self.forward_fn, x, c, mask, use_reentrant=True
             )

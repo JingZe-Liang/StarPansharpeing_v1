@@ -1,4 +1,4 @@
-from src.stage1.transport.flow_matching.transport import (
+from src.utilities.transport.flow_matching.transport import (
     ModelType,
     PathType,
     Sampler,

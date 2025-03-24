@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import torch as th
 
@@ -113,11 +115,22 @@ class ICPlan:
         velocity = var * score - drift
         return velocity
 
+    def get_velocity_from_noise(self, noise, x, t):
+        t = expand_t_like_x(t, x)
+        alpha_t, d_alpha_t = self.compute_alpha_t(t)
+        sigma_t, d_sigma_t = self.compute_sigma_t(t)
+        mean = x
+        reverse_alpha_ratio = alpha_t / d_alpha_t
+        var = reverse_alpha_ratio * d_sigma_t - sigma_t
+        velocity = (noise * var + mean) / reverse_alpha_ratio
+        return velocity
+
     def compute_mu_t(self, t, x0, x1):
         """Compute the mean of time-dependent density p_t"""
         t = expand_t_like_x(t, x1)
         alpha_t, _ = self.compute_alpha_t(t)
         sigma_t, _ = self.compute_sigma_t(t)
+        # xt = t * x1 + (1 - t) * x0
         return alpha_t * x1 + sigma_t * x0
 
     def compute_xt(self, t, x0, x1):

@@ -7,13 +7,17 @@ from diffusers import AutoencoderKL
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
-from src.stage1.discretization.collections import BinarySphericalQuantizer
+from src.stage1.discretization.collections import (
+    BinarySphericalQuantizer,
+    DiagonalGaussianDistribution,
+    LogitLaplaceLoss,
+)
 from src.stage1.one_d_tokenizer.semanticist import vision_transformer
 from src.stage1.one_d_tokenizer.semanticist.diffusion_transfomer import DiT
 from src.stage1.one_d_tokenizer.semanticist.vision_transformer import VisionTransformer
-from src.stage1.transport.diffusion import create_diffusion
-from src.stage1.transport.flow_matching import create_transport
-from src.stage1.transport.flow_matching.transport import Sampler
+from src.utilities.transport.diffusion import create_diffusion
+from src.utilities.transport.flow_matching import create_transport
+from src.utilities.transport.flow_matching.transport import Sampler
 
 
 class DiT_with_autoenc_cond(DiT):
@@ -262,8 +266,9 @@ class DiffuseSlot(nn.Module):
         decoder_block_checkpoint: bool = False,
         compile_model: bool = False,
         learn_sigma: bool = False,
-        fm_sample_type: str = "ode",
-        quantizer: BinarySphericalQuantizer | None = None,
+        fm_sample_type: str | None = "ode",
+        quantizer_type: str | None = None,
+        quantizer_kwargs: dict | None = None,
     ):
         super().__init__()
         self.img_channels = img_channels
@@ -284,7 +289,11 @@ class DiffuseSlot(nn.Module):
         # train and generate diffusion
         self.diffusion_type = diffusion_type
         self.fm_sample_type = fm_sample_type
-        assert fm_sample_type in ["sde", "ode"], 'fm_sample_type must be "sde" or "ode"'
+        if diffusion_type == "fm":
+            assert fm_sample_type in [
+                "sde",
+                "ode",
+            ], 'fm_sample_type must be "sde" or "ode"'
         if diffusion_type == "diffusion":
             self.diffusion = create_diffusion(
                 timestep_respacing="", learn_sigma=learn_sigma
@@ -315,6 +324,20 @@ class DiffuseSlot(nn.Module):
                     f"[Patch Size]: patch size={decoder_patch_size} is too small, may use lots of GPU mem."
                 )
 
+        # double channel
+        if self.diffusion_type in ("diffusion", "fm"):
+            assert (
+                quantizer_type != "kl"
+            ), "when using kl quantizer, diffusion_type should can not be any diffusion"
+        if self.diffusion_type == "fm":
+            double_out_channel = False
+            if learn_sigma:
+                logger.warning(
+                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True"
+                )
+        elif self.diffusion_type == "diffusion":
+            double_out_channel = learn_sigma
+
         self.dit = DiT_with_autoenc_cond_models[dit_model](  # DiT-L-2
             input_size=self.dit_input_size,
             in_channels=self.dit_in_channels,
@@ -327,7 +350,7 @@ class DiffuseSlot(nn.Module):
             # zd dim
             z_dim=768,
             block_checkpoint=decoder_block_checkpoint,
-            learn_sigma=learn_sigma,
+            learn_sigma=double_out_channel,
         )
         self.dit: DiT_with_autoenc_cond
 
@@ -373,7 +396,67 @@ class DiffuseSlot(nn.Module):
         self.encoder2slot = nn.Linear(self.num_channels, slot_dim)
 
         # * quantizer ==========
-        self.quantizer = quantizer
+        if not self.distill_from_pretrained_vae:
+            if self.norm_slots:
+                self.norm_slots = False
+                logger.warning(
+                    f"[Quantizer]: norm_slots is True, set to False for any quantizer"
+                )
+
+            # attributes
+            self.quantizer_type = quantizer_type
+            if quantizer_kwargs is None:
+                quantizer_kwargs = {}
+
+            # init quantizer
+            if quantizer_type == "bsq":
+                _default_kwargs = dict(
+                    embed_dim=slot_dim,
+                    l2_norm=True,
+                    persample_entropy_compute="analytical",
+                    beta=0.0,
+                    gamma=1.0,
+                    gamma0=1.0,
+                    zeta=1.0,
+                    inv_temperature=1.0,
+                    cb_entropy_compute="group",
+                    input_format="blc",
+                    group_size=1,
+                )
+                kwargs = (
+                    _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
+                )
+                self.quantizer_kwargs = kwargs
+                self.bsq_logit_laplace = self.quantizer_kwargs.pop(
+                    "logit_laplace", False
+                )
+                if self.bsq_logit_laplace:
+                    self.bsq_logt_lap_loss = LogitLaplaceLoss(logit_laplace_eps=0.1)
+                    logger.warning(
+                        f"[Quantizer]: Logit Laplace Loss is not implemented yet,"
+                        "it will not take any effect"
+                    )
+                self.quantizer = BinarySphericalQuantizer(**kwargs)
+            elif quantizer_type == "kl":
+                self.kl_weight = quantizer_kwargs.get("kl_weight", 1e-6)
+                logvar_init = quantizer_kwargs.get("logvar_init", 0.0)
+                self.logvar = nn.Parameter(
+                    torch.ones(size=()) * logvar_init, requires_grad=False
+                )
+                self.quantizer_kwargs = {}
+                self.quantizer = DiagonalGaussianDistribution
+            elif quantizer_type is None:
+                self.quantizer = None
+                self.quantizer_kwargs = {}
+                logger.info("Do not use quantizer")
+            else:
+                raise ValueError("quantizer_type must be bsq, kl, or None")
+        else:
+            if self.quantizer_type is not None:
+                logger.warning(
+                    f"[Quantizer]: distill from pretrained vae, ignore quantizer_type={self.quantizer_type}"
+                )
+            self.quantizer = None
 
         # * token sampler ==========
         self.nested_sampler = NestedSampler(num_slots)
@@ -437,20 +520,33 @@ class DiffuseSlot(nn.Module):
 
         return x
 
-    def encode_slots(self, x):
+    def encode_slots(
+        self, x
+    ):  # -> tuple[Any | Tensor, Any | Tensor, Any | dict[str, Tensor]]:
         # encode and projection
         slots = self.encoder(x, is_causal=self.enc_causal)
         slots = self.encoder2slot(slots)
 
         # quantize
         if self.quantizer is not None:
-            slots, quantizer_loss, quan_info = self.quantizer(slots)
+            if self.quantizer_type == "bsq":
+                slots, quantizer_loss, quan_info = self.quantizer(slots)
+            elif self.quantizer_type == "kl":
+                posteriors = self.quantizer(slots, mean_std_split_dim=-1)
+                slots = posteriors.sample()
+                kl = posteriors.kl()
+                kl_loss = kl.sum() / kl.shape[0]
+                quan_info = dict(
+                    recon_div_var=torch.exp(self.logvar),  # recon_loss / recon_div_var
+                    kl_loss=kl_loss * self.kl_weight,
+                )
+                quantizer_loss = quan_info["kl_loss"]
         else:
             quantizer_loss = torch.tensor(0.0).to(x)
             quan_info = {}
 
         # norm the feature
-        if self.norm_slots:
+        if self.norm_slots and self.quantizer is None:
             slots_std = torch.std(slots, dim=-1, keepdim=True)
             slots_mean = torch.mean(slots, dim=-1, keepdim=True)
             slots = (slots - slots_mean) / slots_std
@@ -509,6 +605,7 @@ class DiffuseSlot(nn.Module):
                 model=self.dit,
                 x1=x_vae,
                 model_kwargs=model_kwargs,
+                get_pred_x_clean=get_pred_x_clean,
             )
 
         # diffusion with dit
@@ -575,7 +672,7 @@ class DiffuseSlot(nn.Module):
 
         # losses
         # * decoder and loss
-        losses: dict = self.forward_with_latents(
+        losses: dict | torch.Tensor = self.forward_with_latents(
             x_vae,
             slots,
             z,
@@ -585,11 +682,12 @@ class DiffuseSlot(nn.Module):
             cfg,
             get_pred_x_clean,
         )
-        if get_pred_x_clean:
-            others["pred_x_clean"] = losses.pop("pred_x_clean")
-
-        # update losses
-        losses["quantizer_loss"] = quantizer_loss
+        if not sample:
+            # get diffusion one-step predicted x start
+            if get_pred_x_clean:
+                others["pred_x_clean"] = losses.pop("pred_x_clean")
+            # update losses
+            losses["quantizer_loss"] = quantizer_loss
 
         return losses, others
 
@@ -654,6 +752,7 @@ class DiffuseSlot(nn.Module):
                     num_steps=25,
                     last_step="Mean",
                 )
+                samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
             elif self.fm_sample_type == "ode":
                 diffusion_sample_fn = self.gen_diffusion.sample_ode(
                     sampling_method="dopri5",
@@ -661,8 +760,7 @@ class DiffuseSlot(nn.Module):
                     atol=1e-4,
                     rtol=1e-4,
                 )
-
-            samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
+                samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
 
         if cfg != 1.0:
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
@@ -733,6 +831,8 @@ if __name__ == "__main__":
         num_sampling_steps: "250"
         ckpt_path: None
     """
+
+    torch.cuda.set_device(1)
     tokenizer = DiffuseSlot(
         encoder="vit_base_patch16",
         dit_model="DiT-B-8",
@@ -745,9 +845,11 @@ if __name__ == "__main__":
         vae=None,
         encoder_block_checkpoint=True,
         decoder_block_checkpoint=True,
-        diffusion_type="diffusion",
+        diffusion_type="fm",
         learn_sigma=True,
         compile_model=False,
+        quantizer_type=None,
+        fm_sample_type="ode",
     ).cuda()
     tokenizer.encoder = tokenizer.encoder.to(torch.bfloat16)
     tokenizer.encoder2slot = tokenizer.encoder2slot.to(torch.bfloat16)
@@ -825,8 +927,8 @@ if __name__ == "__main__":
         with torch.autocast("cuda", dtype=torch.bfloat16):
             y = tokenizer(
                 x, sample=True, epoch=None, inference_with_n_slots=-1, cfg=2.0
-            )
+            )[0]
         print(y.shape)
 
-    run_forward_backward()
-    # run_sampling()
+    # run_forward_backward()
+    run_sampling()

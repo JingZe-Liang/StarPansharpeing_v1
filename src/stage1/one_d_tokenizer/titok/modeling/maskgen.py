@@ -2,52 +2,51 @@
 
 Copyright (2024) Bytedance Ltd. and/or its affiliates
 
-Licensed under the Apache License, Version 2.0 (the "License"); 
-you may not use this file except in compliance with the License. 
-You may obtain a copy of the License at 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0 
+    http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software 
-distributed under the License is distributed on an "AS IS" BASIS, 
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-See the License for the specific language governing permissions and 
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import numpy as np
-from tqdm import tqdm
-import math
-import torch
-import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
-from einops import rearrange
 import json
-from open_clip.transformer import text_global_pool
-from omegaconf import OmegaConf
+import math
 from pathlib import Path
 
+import numpy as np
+import torch
+import torch.nn as nn
 from diffusers.models.attention import JointTransformerBlock
 from diffusers.models.normalization import AdaLayerNormContinuous
+from einops import rearrange
+from huggingface_hub import PyTorchModelHubMixin
+from omegaconf import OmegaConf
+from open_clip.transformer import text_global_pool
+from torch.utils.checkpoint import checkpoint
+from tqdm import tqdm
 
 from modeling.modules import BaseModel
 from modeling.modules.blocks import WeightTiedLMHead
 from modeling.modules.losses import DiffLoss
 from modeling.quantizer import DiagonalGaussianDistribution
 
-from huggingface_hub import PyTorchModelHubMixin
 
-
-def get_masking_ratio(progress, mode = "arccos") -> torch.Tensor:
-    """ Get masking ratio. """
+def get_masking_ratio(progress, mode="arccos") -> torch.Tensor:
+    """Get masking ratio."""
     if not isinstance(progress, torch.Tensor):
         r = torch.tensor(progress)
     else:
         r = progress
     if mode == "root":
-        val_to_mask = 1 - (r ** 0.5)
+        val_to_mask = 1 - (r**0.5)
     elif mode == "square":
-        val_to_mask = 1 - (r ** 2)
+        val_to_mask = 1 - (r**2)
     elif mode == "cosine":
         val_to_mask = torch.cos(r * math.pi * 0.5)
     elif mode == "arccos":
@@ -55,20 +54,27 @@ def get_masking_ratio(progress, mode = "arccos") -> torch.Tensor:
     elif mode == "linear":
         val_to_mask = 1 - r
     else:
-        raise ValueError("Invalid mode. Choose between 'linear','square', 'cosine', 'arccos', 'root'.")
+        raise ValueError(
+            "Invalid mode. Choose between 'linear','square', 'cosine', 'arccos', 'root'."
+        )
     return val_to_mask
+
 
 def open_clip_text_encoding(clip_tokenizer, clip_encoder, text):
     idxs = clip_tokenizer(text).to(clip_encoder.token_embedding.weight.device)
     cast_dtype = clip_encoder.transformer.get_cast_dtype()
-    x = clip_encoder.token_embedding(idxs).to(cast_dtype)  # [batch_size, n_ctx, d_model]
+    x = clip_encoder.token_embedding(idxs).to(
+        cast_dtype
+    )  # [batch_size, n_ctx, d_model]
 
     x = x + clip_encoder.positional_embedding.to(cast_dtype)
 
     for block in clip_encoder.transformer.resblocks[:-1]:
         x = block(x, attn_mask=clip_encoder.attn_mask)
     x_penultimate = x
-    x = clip_encoder.transformer.resblocks[-1](x_penultimate, attn_mask=clip_encoder.attn_mask)
+    x = clip_encoder.transformer.resblocks[-1](
+        x_penultimate, attn_mask=clip_encoder.attn_mask
+    )
 
     x = clip_encoder.ln_final(x)  # [batch_size, n_ctx, transformer.width]
 
@@ -78,13 +84,25 @@ def open_clip_text_encoding(clip_tokenizer, clip_encoder, text):
 
     return x_penultimate, pooled_embed
 
+
 def mask_by_order(mask_len, order, bsz, seq_len):
     masking = torch.zeros(bsz, seq_len).cuda()
-    masking = torch.scatter(masking, dim=-1, index=order[:, :mask_len.long()], src=torch.ones(bsz, seq_len).cuda()).bool()
+    masking = torch.scatter(
+        masking,
+        dim=-1,
+        index=order[:, : mask_len.long()],
+        src=torch.ones(bsz, seq_len).cuda(),
+    ).bool()
     return masking
 
 
-class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "text-to-image-generation"], repo_url="https://github.com/bytedance/1d-tokenizer", license="apache-2.0"):
+class MaskGen_VQ(
+    BaseModel,
+    PyTorchModelHubMixin,
+    tags=["arxiv:2501.07730", "text-to-image-generation"],
+    repo_url="https://github.com/bytedance/1d-tokenizer",
+    license="apache-2.0",
+):
     def __init__(self, config):
         if isinstance(config, dict):
             config = OmegaConf.create(config)
@@ -100,35 +118,42 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         self.text_embed_dim = config.model.vq_model.get("text_embed_dim", 768)
         self.micro_condition = config.model.maskgen.micro_condition
         self.micro_condition_embed_dim = config.model.maskgen.micro_condition_embed_dim
-        self.sample_aesthetic_score = config.model.maskgen.get("sample_aesthetic_score", 6.0)
+        self.sample_aesthetic_score = config.model.maskgen.get(
+            "sample_aesthetic_score", 6.0
+        )
         self.text_drop_prob = config.model.maskgen.text_drop_prob
 
-        self.text_embed_proj = nn.Linear(
-            self.text_embed_dim,
-            embed_dim
-        )
+        self.text_embed_proj = nn.Linear(self.text_embed_dim, embed_dim)
         if self.micro_condition:
             self.cond_pooled_proj = nn.Linear(
                 self.text_embed_dim + self.micro_condition_embed_dim, embed_dim
             )
         else:
-            self.cond_pooled_proj = nn.Linear(
-                self.text_embed_dim, embed_dim
-            )
+            self.cond_pooled_proj = nn.Linear(self.text_embed_dim, embed_dim)
 
-        self.blocks = nn.ModuleList([
-            JointTransformerBlock(
-                dim=embed_dim,
-                num_attention_heads=num_heads,
-                attention_head_dim=embed_dim//num_heads,
-                context_pre_only=d==(depth-1)
-            ) for d in range(depth)])
+        self.blocks = nn.ModuleList(
+            [
+                JointTransformerBlock(
+                    dim=embed_dim,
+                    num_attention_heads=num_heads,
+                    attention_head_dim=embed_dim // num_heads,
+                    context_pre_only=d == (depth - 1),
+                )
+                for d in range(depth)
+            ]
+        )
 
-        self.norm = AdaLayerNormContinuous(embed_dim, embed_dim, elementwise_affine=False, eps=1e-6)
+        self.norm = AdaLayerNormContinuous(
+            embed_dim, embed_dim, elementwise_affine=False, eps=1e-6
+        )
 
-        self.embeddings = nn.Embedding(target_codebook_size + 1 + condition_num_classes + 1, embed_dim)  # one additional token for masking, keep unused 1001 for compatibility
+        self.embeddings = nn.Embedding(
+            target_codebook_size + 1 + condition_num_classes + 1, embed_dim
+        )  # one additional token for masking, keep unused 1001 for compatibility
 
-        self.pos_embed = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, image_seq_len, embed_dim)), 0., 0.02)
+        self.pos_embed = nn.init.trunc_normal_(
+            nn.Parameter(torch.zeros(1, image_seq_len, embed_dim)), 0.0, 0.02
+        )
 
         if config.model.maskgen.get("weight_tying", True):
             self.lm_head = WeightTiedLMHead(self.embeddings, target_codebook_size)
@@ -139,8 +164,12 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         self.image_seq_len = image_seq_len
         self.mask_token_id = target_codebook_size
         self.target_codebook_size = target_codebook_size
-        self.none_condition_id = self.condition_num_classes + self.target_codebook_size + 1
-        self.mask_schedule_strategy = config.model.maskgen.get("mask_schedule_strategy", "arccos")
+        self.none_condition_id = (
+            self.condition_num_classes + self.target_codebook_size + 1
+        )
+        self.mask_schedule_strategy = config.model.maskgen.get(
+            "mask_schedule_strategy", "arccos"
+        )
 
         self.initialize_weights()
 
@@ -148,12 +177,16 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
-        if (isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d)):
-            module.weight.data = nn.init.trunc_normal_(module.weight.data, mean=0.0, std=0.02)
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+            module.weight.data = nn.init.trunc_normal_(
+                module.weight.data, mean=0.0, std=0.02
+            )
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
-            module.weight.data = nn.init.trunc_normal_(module.weight.data, mean=0.0, std=0.02)
+            module.weight.data = nn.init.trunc_normal_(
+                module.weight.data, mean=0.0, std=0.02
+            )
         elif isinstance(module, nn.LayerNorm):
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -170,7 +203,7 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         dict_config = OmegaConf.to_container(self.config)
         # Save as JSON
         file_path = Path(save_directory) / "config.json"
-        with open(file_path, 'w') as json_file:
+        with open(file_path, "w") as json_file:
             json.dump(dict_config, json_file, indent=4)
         super()._save_pretrained(save_directory)
 
@@ -180,10 +213,10 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
 
         timesteps = torch.zeros((batch_size,), device=device).float().uniform_(0, 1.0)
         mask_ratio = get_masking_ratio(timesteps, self.mask_schedule_strategy)
-        mask_ratio = torch.clamp(mask_ratio, min=1e-6, max=1.)
+        mask_ratio = torch.clamp(mask_ratio, min=1e-6, max=1.0)
         num_token_masked = (seq_len * mask_ratio).round().clamp(min=1)
         batch_randperm = torch.rand(batch_size, seq_len, device=device).argsort(dim=-1)
-        masks = batch_randperm < rearrange(num_token_masked, 'b -> b 1')
+        masks = batch_randperm < rearrange(num_token_masked, "b -> b 1")
         masked_tokens = torch.where(masks, self.mask_token_id, input_tokens)
         return masked_tokens, masks
 
@@ -195,13 +228,23 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
     ):
         # In this case, the condition is a list of strings
         # By default, we assume using open-clip for text encoding
-        condition = condition + [""] # add null embedding
-        condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, condition)
+        condition = condition + [""]  # add null embedding
+        condition, condition_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, condition
+        )
         # set condition to null embedding
-        drop_label_mask = (torch.rand((condition.shape[0] - 1, 1, 1), dtype=torch.float) < self.text_drop_prob).to(condition)
-        condition = condition[:-1] * (1.0 - drop_label_mask) + condition[-1:] * drop_label_mask
+        drop_label_mask = (
+            torch.rand((condition.shape[0] - 1, 1, 1), dtype=torch.float)
+            < self.text_drop_prob
+        ).to(condition)
+        condition = (
+            condition[:-1] * (1.0 - drop_label_mask) + condition[-1:] * drop_label_mask
+        )
 
-        condition_pooled = condition_pooled[:-1] * (1.0 - drop_label_mask) + condition_pooled[-1:] * drop_label_mask
+        condition_pooled = (
+            condition_pooled[:-1] * (1.0 - drop_label_mask)
+            + condition_pooled[-1:] * drop_label_mask
+        )
 
         return condition, condition_pooled
 
@@ -236,14 +279,13 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
         return emb
 
-
     def concat_micro_cond(
         self,
         condition,
         aesthetic_score,
     ):
         conds = [condition.squeeze(1)]
-        conds.append(self.get_sinusoidal_encoding(aesthetic_score*100))
+        conds.append(self.get_sinusoidal_encoding(aesthetic_score * 100))
         conds = torch.cat(conds, dim=-1).unsqueeze(1)
 
         return conds
@@ -277,7 +319,7 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         condition_pooled = self.cond_pooled_proj(condition_pooled)
 
         x = embeddings
-        x = x + self.pos_embed[:, :x.shape[1]]
+        x = x + self.pos_embed[:, : x.shape[1]]
 
         for blk in self.blocks:
             condition, x = blk(x, condition, condition_pooled.squeeze(1))
@@ -304,42 +346,50 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
     ):
         assert guidance_decay in ["linear", "cosine", "none", "flippedcosine"]
 
-        condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, captions)
-        none_cond, none_cond_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, [""])
+        condition, condition_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, captions
+        )
+        none_cond, none_cond_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, [""]
+        )
         num_samples = condition.shape[0]
         device = condition.device
         none_cond = none_cond.repeat(num_samples, 1, 1)
         none_cond_pooled = none_cond_pooled.repeat(num_samples, 1, 1)
 
-        ids = torch.full((num_samples, self.image_seq_len), self.mask_token_id, device=device)
-        cfg_scale = guidance_scale if guidance_decay == "none" else 0.
+        ids = torch.full(
+            (num_samples, self.image_seq_len), self.mask_token_id, device=device
+        )
+        cfg_scale = guidance_scale if guidance_decay == "none" else 0.0
         if sample_aesthetic_score is not None:
-            sample_aesthetic_score = torch.full((num_samples*2,), self.sample_aesthetic_score, device=device)
+            sample_aesthetic_score = torch.full(
+                (num_samples * 2,), self.sample_aesthetic_score, device=device
+            )
 
         # Add gumbel noise
         def log(t, eps=1e-20):
             return torch.log(t.clamp(min=eps))
+
         def gumbel_noise(t):
             noise = torch.zeros_like(t).uniform_(0, 1)
             return -log(-log(noise))
+
         def add_gumbel_noise(t, temperature):
             return t + temperature * gumbel_noise(t)
 
         for step in range(num_sample_steps):
-            ratio = 1. * (step + 1) / num_sample_steps
+            ratio = 1.0 * (step + 1) / num_sample_steps
             annealed_temp = randomize_temperature * (1.0 - ratio)
-            is_mask = (ids == self.mask_token_id)
+            is_mask = ids == self.mask_token_id
 
             if guidance_decay == "cosine":
                 # ref: https://github.com/sail-sg/MDT/blob/441d6a1d49781dbca22b708bbd9ed81e9e3bdee4/masked_diffusion/models.py#L513C13-L513C23
                 scale_pow = torch.ones((1), device=device) * guidance_decay_scale_pow
-                scale_step = (1 - torch.cos(
-                    (ratio ** scale_pow) * torch.pi)) * 1/2
+                scale_step = (1 - torch.cos((ratio**scale_pow) * torch.pi)) * 1 / 2
                 cfg_scale = (guidance_scale - 1) * scale_step + 1
             elif guidance_decay == "flippedcosine":
                 scale_pow = torch.ones((1), device=device) * guidance_decay_scale_pow
-                scale_step = (torch.cos(
-                    (ratio ** scale_pow) * torch.pi)) * 1/2
+                scale_step = (torch.cos((ratio**scale_pow) * torch.pi)) * 1 / 2
                 cfg_scale = (guidance_scale - 1) * scale_step + 1
             elif guidance_decay == "linear":
                 cfg_scale = ratio * (guidance_scale - 1) + 1
@@ -367,7 +417,8 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             sampled_ids = add_gumbel_noise(prob_ids, annealed_temp).argmax(dim=-1)
 
             sampled_logits = torch.squeeze(
-                torch.gather(logits, dim=-1, index=torch.unsqueeze(sampled_ids, -1)), -1)
+                torch.gather(logits, dim=-1, index=torch.unsqueeze(sampled_ids, -1)), -1
+            )
             sampled_ids = torch.where(is_mask, sampled_ids, ids)
             sampled_logits = torch.where(is_mask, sampled_logits, +np.inf).float()
 
@@ -376,17 +427,19 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             mask_len = torch.floor(self.image_seq_len * mask_ratio).to(device)
             mask_len = torch.maximum(
                 torch.Tensor([1]).to(device),
-                torch.minimum(torch.sum(is_mask, dim=-1, keepdims=True) - 1, mask_len)
+                torch.minimum(torch.sum(is_mask, dim=-1, keepdims=True) - 1, mask_len),
             )[0].squeeze()
 
             if prob_sorting:
-                confidence = add_gumbel_noise(sampled_logits, annealed_temp) # How sorting works with gumbel noise? -> sampling without replacement
+                confidence = add_gumbel_noise(
+                    sampled_logits, annealed_temp
+                )  # How sorting works with gumbel noise? -> sampling without replacement
             else:
                 confidence = sampled_logits
 
             sorted_confidence, _ = torch.sort(confidence, axis=-1)
-            cut_off = sorted_confidence[:, mask_len.long() - 1:mask_len.long()]
-            masking = (confidence <= cut_off)
+            cut_off = sorted_confidence[:, mask_len.long() - 1 : mask_len.long()]
+            masking = confidence <= cut_off
             if step == num_sample_steps - 1:
                 ids = sampled_ids
             else:
@@ -395,9 +448,15 @@ class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         return ids
 
 
-class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "text-to-image-generation"], repo_url="https://github.com/bytedance/1d-tokenizer", license="apache-2.0"):
-    """ MaskGen-KL Variant
-    """
+class MaskGen_KL(
+    BaseModel,
+    PyTorchModelHubMixin,
+    tags=["arxiv:2501.07730", "text-to-image-generation"],
+    repo_url="https://github.com/bytedance/1d-tokenizer",
+    license="apache-2.0",
+):
+    """MaskGen-KL Variant"""
+
     def __init__(self, config):
         if isinstance(config, dict):
             config = OmegaConf.create(config)
@@ -426,27 +485,48 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         # Condition
         self.condition_embed_dim = self.text_embed_dim
         if self.micro_condition:
-            self.condition_embed_dim = self.condition_embed_dim + self.micro_condition_embed_dim
+            self.condition_embed_dim = (
+                self.condition_embed_dim + self.micro_condition_embed_dim
+            )
 
         self.text_emb = nn.Linear(self.text_embed_dim, self.decoder_embed_dim)
-        self.text_pooled_emb = nn.Linear(self.condition_embed_dim, self.decoder_embed_dim)
+        self.text_pooled_emb = nn.Linear(
+            self.condition_embed_dim, self.decoder_embed_dim
+        )
 
         # --------------------------------------------------------------------------
         # MM-DiT Blocks
 
-        self.decoder_blocks = nn.ModuleList([
-            JointTransformerBlock(dim=self.decoder_embed_dim, num_attention_heads=self.decoder_num_heads, attention_head_dim=self.decoder_embed_dim//self.decoder_num_heads, context_pre_only=d==(self.decoder_depth-1)) for d in range(self.decoder_depth)
-        ])
-        self.decoder_norm = AdaLayerNormContinuous(self.decoder_embed_dim, self.decoder_embed_dim, elementwise_affine=False, eps=1e-6)
+        self.decoder_blocks = nn.ModuleList(
+            [
+                JointTransformerBlock(
+                    dim=self.decoder_embed_dim,
+                    num_attention_heads=self.decoder_num_heads,
+                    attention_head_dim=self.decoder_embed_dim // self.decoder_num_heads,
+                    context_pre_only=d == (self.decoder_depth - 1),
+                )
+                for d in range(self.decoder_depth)
+            ]
+        )
+        self.decoder_norm = AdaLayerNormContinuous(
+            self.decoder_embed_dim,
+            self.decoder_embed_dim,
+            elementwise_affine=False,
+            eps=1e-6,
+        )
 
         # --------------------------------------------------------------------------
         # MaskGen-KL decoder specifics
         self.z_proj = nn.Linear(self.token_embed_dim, self.decoder_embed_dim, bias=True)
         self.z_proj_ln = nn.LayerNorm(self.decoder_embed_dim, eps=1e-6)
-        self.decoder_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len, self.decoder_embed_dim))
+        self.decoder_pos_embed_learned = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.decoder_embed_dim)
+        )
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
 
-        self.diffusion_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len, self.decoder_embed_dim))
+        self.diffusion_pos_embed_learned = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.decoder_embed_dim)
+        )
 
         self.diffloss = DiffLoss(self.config)
 
@@ -454,9 +534,9 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
 
     def initialize_weights(self):
         # parameters
-        torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.decoder_pos_embed_learned, std=.02)
-        torch.nn.init.normal_(self.diffusion_pos_embed_learned, std=.02)
+        torch.nn.init.normal_(self.mask_token, std=0.02)
+        torch.nn.init.normal_(self.decoder_pos_embed_learned, std=0.02)
+        torch.nn.init.normal_(self.diffusion_pos_embed_learned, std=0.02)
 
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
@@ -480,7 +560,7 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         dict_config = OmegaConf.to_container(self.config)
         # Save as JSON
         file_path = Path(save_directory) / "config.json"
-        with open(file_path, 'w') as json_file:
+        with open(file_path, "w") as json_file:
             json.dump(dict_config, json_file, indent=4)
         super()._save_pretrained(save_directory)
 
@@ -490,8 +570,8 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         h_, w_ = h // p, w // p
 
         x = x.reshape(bsz, c, h_, p, w_, p)
-        x = torch.einsum('nchpwq->nhwcpq', x)
-        x = x.reshape(bsz, h_ * w_, c * p ** 2)
+        x = torch.einsum("nchpwq->nhwcpq", x)
+        x = x.reshape(bsz, h_ * w_, c * p**2)
         return x  # [n, l, d]
 
     def unpatchify(self, x):
@@ -501,7 +581,7 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         h_, w_ = self.seq_h, self.seq_w
 
         x = x.reshape(bsz, h_, w_, c, p, p)
-        x = torch.einsum('nhwcpq->nchpwq', x)
+        x = torch.einsum("nhwcpq->nchpwq", x)
         x = x.reshape(bsz, c, h_ * p, w_ * p)
         return x  # [n, c, h, w]
 
@@ -519,11 +599,15 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         # generate token mask
         bsz, seq_len, embed_dim = x.shape
         mask_rate = get_masking_ratio(timesteps)
-        mask_rate = torch.clamp(mask_rate, min=1e-6, max=1.)
+        mask_rate = torch.clamp(mask_rate, min=1e-6, max=1.0)
         num_masked_tokens = int(torch.ceil(seq_len * mask_rate))
         mask = torch.zeros(bsz, seq_len, device=x.device)
-        mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
-                             src=torch.ones(bsz, seq_len, device=x.device))
+        mask = torch.scatter(
+            mask,
+            dim=-1,
+            index=orders[:, :num_masked_tokens],
+            src=torch.ones(bsz, seq_len, device=x.device),
+        )
         return mask
 
     def forward_mae_decoder(self, x, mask, condition, condition_pooled):
@@ -533,12 +617,16 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
 
         # dropping
         mask = mask.float()
-        x = x[(1-mask).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
+        x = x[(1 - mask).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
 
         # pad mask tokens
-        mask_tokens = self.mask_token.repeat(mask.shape[0], mask.shape[1], 1).to(x.dtype)
+        mask_tokens = self.mask_token.repeat(mask.shape[0], mask.shape[1], 1).to(
+            x.dtype
+        )
         x_after_pad = mask_tokens.clone()
-        x_after_pad[(1 - mask).nonzero(as_tuple=True)] = x.reshape(x.shape[0] * x.shape[1], x.shape[2])
+        x_after_pad[(1 - mask).nonzero(as_tuple=True)] = x.reshape(
+            x.shape[0] * x.shape[1], x.shape[2]
+        )
 
         # decoder position embedding
         x = x_after_pad + self.decoder_pos_embed_learned
@@ -546,7 +634,9 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         # apply Transformer blocks
         if self.grad_checkpointing and not torch.jit.is_scripting():
             for block in self.decoder_blocks:
-                condition, x = checkpoint(block, x, condition, condition_pooled.squeeze(1))
+                condition, x = checkpoint(
+                    block, x, condition, condition_pooled.squeeze(1)
+                )
         else:
             for block in self.decoder_blocks:
                 condition, x = block(x, condition, condition_pooled.squeeze(1))
@@ -558,19 +648,26 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
     def forward_loss(self, z, target, mask, text_condition):
         bsz, seq_len, _ = target.shape
         target = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
-        z = z.reshape(bsz*seq_len, -1).repeat(self.diffusion_batch_mul, 1)
-        mask = mask.reshape(bsz*seq_len).repeat(self.diffusion_batch_mul)
-        text_condition=text_condition.repeat(self.seq_len, 1).repeat(self.diffusion_batch_mul, 1)
-        loss, loss_dict = self.diffloss(target=target, z=z, mask=mask, text_condition=text_condition)
+        z = z.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
+        mask = mask.reshape(bsz * seq_len).repeat(self.diffusion_batch_mul)
+        text_condition = text_condition.repeat(self.seq_len, 1).repeat(
+            self.diffusion_batch_mul, 1
+        )
+        loss, loss_dict = self.diffloss(
+            target=target, z=z, mask=mask, text_condition=text_condition
+        )
         return loss, loss_dict
-
 
     def forward(self, imgs, condition, condition_pooled, aes_score):
         condition = self.text_emb(condition)
 
         if self.micro_condition:
-            micro_condition = self.get_sinusoidal_encoding(aes_score * 100, self.micro_condition_embed_dim)
-            condition_pooled = torch.cat([condition_pooled.squeeze(1), micro_condition], dim=1)
+            micro_condition = self.get_sinusoidal_encoding(
+                aes_score * 100, self.micro_condition_embed_dim
+            )
+            condition_pooled = torch.cat(
+                [condition_pooled.squeeze(1), micro_condition], dim=1
+            )
             condition_pooled = condition_pooled.unsqueeze(1)
 
         condition_pooled = self.text_pooled_emb(condition_pooled)
@@ -592,10 +689,14 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         z = self.forward_mae_decoder(x, mask, condition, condition_pooled)
 
         # diffloss prepartion
-        loss, loss_dict = self.forward_loss(z=z, target=gt_latents, mask=mask, text_condition=condition_pooled.squeeze(1))
+        loss, loss_dict = self.forward_loss(
+            z=z,
+            target=gt_latents,
+            mask=mask,
+            text_condition=condition_pooled.squeeze(1),
+        )
 
         return loss, loss_dict
-
 
     def get_sinusoidal_encoding(self, x, d_model=256):
         # Create position encoding
@@ -603,7 +704,10 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         encoding = torch.zeros((batch_size, d_model), device=x.device)
 
         # Calculate the wavelengths
-        wavelengths = torch.pow(10000, -torch.arange(0, d_model, 2, dtype=torch.float, device=x.device) / d_model)
+        wavelengths = torch.pow(
+            10000,
+            -torch.arange(0, d_model, 2, dtype=torch.float, device=x.device) / d_model,
+        )
 
         # Reshape x_normalized and wavelengths for broadcasting
         # x_normalized: (batch_size, 1)
@@ -617,45 +721,73 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
 
         return encoding
 
-
     def preprocess_condition(
         self,
         condition,
         clip_tokenizer,
         clip_encoder,
     ):
+        condition = condition + [""]  # add null embedding
 
-        condition = condition + [""] # add null embedding
-
-        condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, condition)
+        condition, condition_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, condition
+        )
 
         drop_latent_mask = torch.rand(condition.size(0) - 1) < self.text_drop_prob
-        drop_latent_mask = drop_latent_mask.unsqueeze(-1).unsqueeze(-1).cuda().to(condition.dtype)
+        drop_latent_mask = (
+            drop_latent_mask.unsqueeze(-1).unsqueeze(-1).cuda().to(condition.dtype)
+        )
 
-        condition = drop_latent_mask * condition[-1:] + (1 - drop_latent_mask) * condition[:-1]
-        condition_pooled = drop_latent_mask * condition_pooled[-1:] + (1 - drop_latent_mask) * condition_pooled[:-1]
+        condition = (
+            drop_latent_mask * condition[-1:] + (1 - drop_latent_mask) * condition[:-1]
+        )
+        condition_pooled = (
+            drop_latent_mask * condition_pooled[-1:]
+            + (1 - drop_latent_mask) * condition_pooled[:-1]
+        )
 
         return condition, condition_pooled
 
-
-    def sample_tokens(self, bsz, clip_tokenizer, clip_encoder, num_iter=32, cfg=3.0, cfg_schedule="linear", captions=[""], aes_scores=6.0, temperature=1.0, progress=False):
+    def sample_tokens(
+        self,
+        bsz,
+        clip_tokenizer,
+        clip_encoder,
+        num_iter=32,
+        cfg=3.0,
+        cfg_schedule="linear",
+        captions=[""],
+        aes_scores=6.0,
+        temperature=1.0,
+        progress=False,
+    ):
         # init and sample generation orders
         mask = torch.ones(bsz, self.seq_len).cuda()
         tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
         orders = self.sample_orders(bsz)
 
-        condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, captions)
+        condition, condition_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, captions
+        )
 
-        fake_condition, fake_condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, [""])
+        fake_condition, fake_condition_pooled = open_clip_text_encoding(
+            clip_tokenizer, clip_encoder, [""]
+        )
         fake_condition = fake_condition.repeat(bsz, 1, 1)
         fake_condition_pooled = fake_condition_pooled.repeat(bsz, 1, 1)
 
         if self.micro_condition:
             if isinstance(aes_scores, float):
                 aes_scores = torch.full((bsz,), aes_scores, device="cuda")
-            micro_condition = self.get_sinusoidal_encoding((aes_scores * 100), self.micro_condition_embed_dim)
-            condition_pooled = torch.cat([condition_pooled.squeeze(1), micro_condition], dim=1).unsqueeze(1)
-            fake_condition_pooled = torch.cat([fake_condition_pooled.squeeze(1), micro_condition], dim=1).unsqueeze(1)
+            micro_condition = self.get_sinusoidal_encoding(
+                (aes_scores * 100), self.micro_condition_embed_dim
+            )
+            condition_pooled = torch.cat(
+                [condition_pooled.squeeze(1), micro_condition], dim=1
+            ).unsqueeze(1)
+            fake_condition_pooled = torch.cat(
+                [fake_condition_pooled.squeeze(1), micro_condition], dim=1
+            ).unsqueeze(1)
 
         condition = self.text_emb(condition)
         fake_condition = self.text_emb(fake_condition)
@@ -674,22 +806,28 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             if not cfg == 1.0:
                 tokens = torch.cat([tokens, tokens], dim=0)
                 cur_condition = torch.cat([condition, fake_condition], dim=0)
-                cur_condition_pooled = torch.cat([condition_pooled, fake_condition_pooled], dim=0)
+                cur_condition_pooled = torch.cat(
+                    [condition_pooled, fake_condition_pooled], dim=0
+                )
                 mask = torch.cat([mask, mask], dim=0)
             else:
                 cur_condition = condition
                 cur_condition_pooled = condition_pooled
 
             # mae decoder
-            z = self.forward_mae_decoder(tokens, mask, cur_condition, cur_condition_pooled)
+            z = self.forward_mae_decoder(
+                tokens, mask, cur_condition, cur_condition_pooled
+            )
 
             # mask ratio for the next round, following MaskGIT and MAGE.
-            mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
+            mask_ratio = np.cos(math.pi / 2.0 * (step + 1) / num_iter)
             mask_len = torch.Tensor([np.floor(self.seq_len * mask_ratio)]).cuda()
 
             # masks out at least one for the next iteration
-            mask_len = torch.maximum(torch.Tensor([1]).cuda(),
-                                     torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
+            mask_len = torch.maximum(
+                torch.Tensor([1]).cuda(),
+                torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len),
+            )
 
             # get masking for next iteration and locations to be predicted in this iteration
             mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
@@ -714,7 +852,9 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
 
             if not cfg == 1.0:
-                sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
+                sampled_token_latent, _ = sampled_token_latent.chunk(
+                    2, dim=0
+                )  # Remove null class samples
                 mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
 
             cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent

@@ -532,7 +532,7 @@ class GaussianDiffusion:
             # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
 
-            indices = tqdm(indices)
+            indices = tqdm(indices, leave=False, desc="Diffusion sampling ...")
 
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
@@ -850,7 +850,7 @@ class GaussianDiffusion:
 
         if get_pred_x_clean:
             with th.no_grad():
-                terms["pred_xstart"] = self.p_mean_variance(
+                terms["pred_x_clean"] = self.p_mean_variance(
                     model=model,
                     x=x_t,
                     t=t,

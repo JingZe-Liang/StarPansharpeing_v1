@@ -1,5 +1,6 @@
-from .bsq import BinarySphericalQuantizer
+from .bsq import BinarySphericalQuantizer, LogitLaplaceLoss
 from .finite_scalar_quantization import FSQ
+from .kl_continuous import DiagonalGaussianDistribution
 from .latent_quantization import LatentQuantize
 from .lookup_free_quantization import LFQ
 from .random_projection_quantizer import RandomProjectionQuantizer

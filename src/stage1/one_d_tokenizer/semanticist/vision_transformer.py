@@ -142,7 +142,7 @@ class Block(nn.Module):
         return x
 
     def forward(self, x, attn_mask=None):
-        if self.act_checkpoint:
+        if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, attn_mask, use_reentrant=True)
         else:
             return self.forward_fn(x, attn_mask)

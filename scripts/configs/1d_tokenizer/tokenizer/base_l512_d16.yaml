@@ -1,0 +1,24 @@
+_target_: src.stage1.one_d_tokenizer.semanticist.diffuse_slot.DiffuseSlot
+encoder: vit_base_patch16
+drop_path_rate: 0.1
+img_channels: ${dataset.channels}
+enc_img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
+enc_causal: true
+num_slots: 512
+slot_dim: 16
+norm_slots: false
+enable_nest: true
+enable_nest_after: 2000 # after n_iters enable nest latent sampler
+vae: null # no use pretrained vae
+dit_model: DiT-B-8
+diffusion_type: fm
+use_repa: False
+repa_encoder_depth: 8
+repa_loss_weight: 1.0
+dit_in_channels: ${tokenizer.slot_dim}
+encoder_block_checkpoint: true
+decoder_block_checkpoint: true
+compile_model: true
+learn_sigma: true
+num_sampling_steps: ddim25
+fm_sample_type: ode # not used for diffusion

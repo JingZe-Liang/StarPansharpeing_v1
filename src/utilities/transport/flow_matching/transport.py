@@ -2,6 +2,7 @@ import enum
 
 import numpy as np
 import torch as th
+import tqdm
 
 from . import path
 from .integrators import ode, sde
@@ -115,7 +116,9 @@ class Transport:
         t = t.to(x1)
         return t, x0, x1
 
-    def training_losses(self, model, x1, model_kwargs=None):
+    def training_losses(
+        self, model, x1, model_kwargs=None, get_pred_x_clean: bool = True
+    ):
         """Loss for training the score model
         Args:
         - model: backbone model; could be score, noise, or velocity
@@ -139,7 +142,11 @@ class Transport:
                 *([-1] * (len(ut.shape))), model_output.shape[-1]
             )
         B, C = xt.shape[:2]
-        assert model_output.shape == (B, C, *xt.shape[2:])
+        assert model_output.shape == (B, C, *xt.shape[2:]), (
+            f"Expected model output shape to be (B, C, *xt.shape[2:]), "
+            f"but got {model_output.shape} instead. "
+            f"Batch size: {B}, Channels: {C}, Spatial dimensions: {xt.shape[2:]}"
+        )
 
         terms = {}
         terms["pred"] = model_output
@@ -161,6 +168,20 @@ class Transport:
                 terms["loss"] = mean_flat(weight * ((model_output - x0) ** 2))
             else:
                 terms["loss"] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2))
+
+        if get_pred_x_clean:
+            alpha_t, d_alpha_t = self.path_sampler.compute_alpha_t(t)
+            sigma_t, d_sigma_t = self.path_sampler.compute_sigma_t(t)
+            if self.model_type == ModelType.NOISE:
+                pred_v = self.path_sampler.get_velocity_from_noise(model_output, xt, t)
+            elif self.model_type == ModelType.SCORE:
+                pred_v = self.path_sampler.get_velocity_from_score(model_output, xt, t)
+            else:
+                prev_v = model_output
+            # velocity = d_alpha_t * x1 + d_sigma_t * x0
+            # pred_x_clean = (velocity - d_sigma_t * x0) / d_alpha_t
+            pred_x_clean = (prev_v - d_sigma_t * x0) / d_alpha_t
+            terms["pred_x_clean"] = pred_x_clean
 
         return terms
 
@@ -368,6 +389,7 @@ class Sampler:
         rtol=1e-3,
         reverse=False,
         temperature=1.0,
+        progress=False,
     ):
         """returns a sampling function with given ODE settings
         Args:
@@ -386,6 +408,20 @@ class Sampler:
             )
         else:
             drift = self.drift
+
+        def drift_progress_wrapper_fn(drift_fn: callable, tbar):
+            def wrapper_fn(x, t, model, **model_kwargs):
+                drift = drift_fn(x, t, model, **model_kwargs)
+                tbar.update(1)
+                return drift
+
+            return wrapper_fn
+
+        if progress:
+            from tqdm import tqdm
+
+            tbar = tqdm(range(num_steps), desc="sampling")
+            drift = drift_progress_wrapper_fn(drift, tbar)
 
         t0, t1 = self.transport.check_interval(
             self.transport.train_eps,

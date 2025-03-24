@@ -4,7 +4,7 @@ from torch import autocast
 
 class DiagonalGaussianDistribution(object):
     @autocast("cuda", enabled=False)
-    def __init__(self, parameters, deterministic=False):
+    def __init__(self, parameters, deterministic=False, mean_std_split_dim: int = -1):
         """Initializes a Gaussian distribution instance given the parameters.
 
         Args:
@@ -15,7 +15,9 @@ class DiagonalGaussianDistribution(object):
                 is purely based on mean (i.e., std = 0).
         """
         self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters.float(), 2, dim=1)
+        self.mean, self.logvar = torch.chunk(
+            parameters.float(), 2, dim=mean_std_split_dim
+        )
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)

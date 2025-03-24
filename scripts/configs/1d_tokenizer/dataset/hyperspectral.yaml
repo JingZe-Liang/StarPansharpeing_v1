@@ -1,0 +1,60 @@
+used: MMSeg_YREB
+shuffle_size: 100
+num_workers: 4
+
+dataset_names_to_bs:
+  MMSeg_YREB: 48
+  DCF_2019: 32
+
+dataset_names_to_n_channels:
+  MMSeg_YREB: 12
+  DCF_2019: 8
+
+dataset_names_to_rgb_channes:
+  MMSeg_YREB: [4, 3, 2]
+  DCF_2019: [4, 2, 0]
+
+dataset_names_to_img_size:
+  MMSeg_YREB: 256
+  DCF_2019: 512
+
+MMSeg_YREB_train:
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+
+MMSeg_YREB_val:
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+
+DCF_2019_train:
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0007.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0008.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0009.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0011.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0012.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0013.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+
+DCF_2019_val:
+  - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+
+train_name: ${dataset.used}_train
+val_name: ${dataset.used}_val
+wds_path_train: ${dataset[${dataset.train_name}]}
+wds_path_val: ${dataset[${dataset.val_name}]}
+channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
+batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
+batch_size_val: 4
+rgb_channels: ${dataset.dataset_names_to_rgb_channes[${dataset.used}]}

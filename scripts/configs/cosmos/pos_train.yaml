@@ -169,3 +169,7 @@ train:
     log_every: 10
 
   debug: false
+
+val:
+  val_duration: 1000
+  max_val_iters: 4 # val only `max_val_iters` batches

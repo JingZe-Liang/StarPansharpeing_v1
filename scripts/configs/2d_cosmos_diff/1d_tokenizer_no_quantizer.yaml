@@ -6,7 +6,7 @@ hydra:
 defaults:
   - _self_
   # tokenizer
-  - tokenizer: base_l512_d16
+  - tokenizer: cosmos_base
   - dataset: hyperspectral
   # hydra overrides
   - override hydra/hydra_logging: disabled
