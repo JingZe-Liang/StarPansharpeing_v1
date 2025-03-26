@@ -2,7 +2,8 @@ import enum
 
 import numpy as np
 import torch as th
-import tqdm
+from loguru import logger
+from tqdm import tqdm
 
 from . import path
 from .integrators import ode, sde
@@ -17,6 +18,7 @@ class ModelType(enum.Enum):
     NOISE = enum.auto()  # the model predicts epsilon
     SCORE = enum.auto()  # the model predicts \nabla \log p(x)
     VELOCITY = enum.auto()  # the model predicts v(x)
+    X1 = enum.auto()
 
 
 class PathType(enum.Enum):
@@ -152,6 +154,8 @@ class Transport:
         terms["pred"] = model_output
         if self.model_type == ModelType.VELOCITY:
             terms["loss"] = mean_flat(((model_output - ut) ** 2))
+        elif self.model_type == ModelType.X1:
+            terms["loss"] = th.nn.functional.l1_loss(model_output, x1)
         else:
             _, drift_var = self.path_sampler.compute_drift(xt, t)
             sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
@@ -176,11 +180,15 @@ class Transport:
                 pred_v = self.path_sampler.get_velocity_from_noise(model_output, xt, t)
             elif self.model_type == ModelType.SCORE:
                 pred_v = self.path_sampler.get_velocity_from_score(model_output, xt, t)
+            elif self.model_type == ModelType.X1:
+                pred_v = model_output - x0
             else:
-                prev_v = model_output
+                pred_v = model_output
             # velocity = d_alpha_t * x1 + d_sigma_t * x0
             # pred_x_clean = (velocity - d_sigma_t * x0) / d_alpha_t
-            pred_x_clean = (prev_v - d_sigma_t * x0) / d_alpha_t
+
+            # pred_x_clean = (prev_v - d_sigma_t * x0) / d_alpha_t
+            pred_x_clean = x0 + pred_v
             terms["pred_x_clean"] = pred_x_clean
 
         return terms
@@ -257,8 +265,13 @@ class Sampler:
         """
 
         self.transport = transport
-        self.drift = self.transport.get_drift()
-        self.score = self.transport.get_score()
+        if transport.model_type != ModelType.X1:
+            self.drift = self.transport.get_drift()
+            self.score = self.transport.get_score()
+        else:
+            logger.info(
+                f"[Flow Matching]: model_type is {self.transport.model_type}, drift and score are not needed"
+            )
 
     def __get_sde_diffusion_and_drift(
         self,
@@ -336,6 +349,9 @@ class Sampler:
         - temperature: temperature scaling for the noise during sampling; default to 1.0
         """
 
+        if self.transport.model_type == ModelType.X1:
+            raise ValueError("Model type X1 is not supported for SDE sampling")
+
         if last_step is None:
             last_step_size = 0.0
 
@@ -390,6 +406,7 @@ class Sampler:
         reverse=False,
         temperature=1.0,
         progress=False,
+        clip_for_x1_pred: bool = True,
     ):
         """returns a sampling function with given ODE settings
         Args:
@@ -402,26 +419,6 @@ class Sampler:
         - reverse: whether solving the ODE in reverse (data to noise); default to False
         - temperature: temperature scaling for the drift during sampling; default to 1.0
         """
-        if reverse:
-            drift = lambda x, t, model, **kwargs: self.drift(
-                x, th.ones_like(t) * (1 - t), model, **kwargs
-            )
-        else:
-            drift = self.drift
-
-        def drift_progress_wrapper_fn(drift_fn: callable, tbar):
-            def wrapper_fn(x, t, model, **model_kwargs):
-                drift = drift_fn(x, t, model, **model_kwargs)
-                tbar.update(1)
-                return drift
-
-            return wrapper_fn
-
-        if progress:
-            from tqdm import tqdm
-
-            tbar = tqdm(range(num_steps), desc="sampling")
-            drift = drift_progress_wrapper_fn(drift, tbar)
 
         t0, t1 = self.transport.check_interval(
             self.transport.train_eps,
@@ -432,18 +429,62 @@ class Sampler:
             last_step_size=0.0,
         )
 
-        _ode = ode(
-            drift=drift,
-            t0=t0,
-            t1=t1,
-            sampler_type=sampling_method,
-            num_steps=num_steps,
-            atol=atol,
-            rtol=rtol,
-            temperature=temperature,
-        )
+        if self.transport.model_type == ModelType.X1:
+            assert not reverse, "Model type X1 reverse mode is not implemnted yet"
 
-        return _ode.sample
+            # ignore the self.drift
+            def _sample_fn_loop(
+                x0,
+                model_fn,
+                **model_kwargs,
+            ):
+                # simple euler method
+                xt = x0.clone()
+                xt_s = []
+                for t in tqdm(th.linspace(t0, t1, num_steps), desc="sampling ..."):
+                    t = t.repeat(xt.size(0)).to(xt)
+                    x1_pred = model_fn(xt, t, **model_kwargs)
+                    delta_t = (t1 - t0) / num_steps
+                    assert delta_t > 0, "t1 must be larger than t0"
+                    if clip_for_x1_pred:
+                        x1_pred.clip_(min=-1, max=1)
+                    xt = xt + delta_t * (x1_pred - x0)
+                    xt_s.append(xt)
+                return th.stack(xt_s, dim=0)
+
+            return _sample_fn_loop
+        else:
+            if reverse:
+                drift = lambda x, t, model, **kwargs: self.drift(
+                    x, th.ones_like(t) * (1 - t), model, **kwargs
+                )
+            else:
+                drift = self.drift
+
+            def drift_progress_wrapper_fn(drift_fn: callable, tbar):
+                def wrapper_fn(x, t, model, **model_kwargs):
+                    drift = drift_fn(x, t, model, **model_kwargs)
+                    tbar.update(1)
+                    return drift
+
+                return wrapper_fn
+
+            if progress:
+                tbar = tqdm(range(num_steps), desc="sampling")
+                drift = drift_progress_wrapper_fn(drift, tbar)
+
+            _ode = ode(
+                drift=drift,
+                t0=t0,
+                t1=t1,
+                sampler_type=sampling_method,
+                num_steps=num_steps,
+                atol=atol,
+                rtol=rtol,
+                temperature=temperature,
+            )
+
+            return _ode.sample
 
     def sample_ode_likelihood(
         self,

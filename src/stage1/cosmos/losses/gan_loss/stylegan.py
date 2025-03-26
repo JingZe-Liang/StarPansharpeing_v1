@@ -2,9 +2,7 @@ import numpy as np
 import torch
 
 from .stylegan_utils import misc
-from .stylegan_utils.ops import bias_act
-from .stylegan_utils.ops import upfirdn2d
-from .stylegan_utils.ops import conv2d_resample
+from .stylegan_utils.ops import bias_act, conv2d_resample, upfirdn2d
 
 
 def normalize_2nd_moment(x, dim=1, eps=1e-8):

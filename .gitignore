@@ -132,3 +132,5 @@ dmypy.json
 runs/
 .ruff_cache/
 .vscode/
+*.png
+*.jpg

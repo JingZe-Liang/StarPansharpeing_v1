@@ -38,9 +38,10 @@ accelerator:
     sync_each_batch: false
 
 dataset:
-  used: DCF_2019
-  num_workers: 4
+  used: MMSeg_YREB
   shuffle_size: 100
+  num_workers: 4
+
   dataset_names_to_bs:
     MMSeg_YREB: 64
     DCF_2019: 32
@@ -49,17 +50,24 @@ dataset:
     MMSeg_YREB: 12
     DCF_2019: 8
 
-  dataset_names_to_rgb_channes:
+  dataset_names_to_rgb_channels:
     MMSeg_YREB: [4, 3, 2]
     DCF_2019: [4, 2, 0]
 
-  MMSeg_YREB:
+  dataset_names_to_img_size:
+    MMSeg_YREB: 256
+    DCF_2019: 512
+
+  MMSeg_YREB_train:
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
 
-  DCF_2019:
+  MMSeg_YREB_val:
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+
+  DCF_2019_train:
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
@@ -79,10 +87,17 @@ dataset:
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
     - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
 
-  wds_path: ${dataset[${dataset.used}]}
+  DCF_2019_val:
+    - /HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+
+  train_name: ${dataset.used}_train
+  val_name: ${dataset.used}_val
+  wds_path_train: ${dataset[${dataset.train_name}]}
+  wds_path_val: ${dataset[${dataset.val_name}]}
   channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
-  batch_size: ${dataset.dataset_names_to_bs[${dataset.used}]}
-  rgb_channels: ${dataset.dataset_names_to_rgb_channes[${dataset.used}]}
+  batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
+  batch_size_val: 4
+  rgb_channels: ${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
 
 tokenizer:
   enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"

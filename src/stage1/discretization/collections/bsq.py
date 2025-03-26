@@ -1,7 +1,23 @@
+from collections import namedtuple
+
 import torch
 import torch.nn as nn
 from einops import rearrange, reduce
 from torch.autograd import Function
+
+# Create named tuple for return values
+LossBreakdown = namedtuple(
+    "LossBreakdown",
+    [
+        "zq",
+        "total_loss",
+        "H",
+        "used_codes",
+        "indices",
+        "group_indices",
+        "avg_prob",
+    ],
+)
 
 
 def _inmap(x, eps=0.1):
@@ -144,8 +160,6 @@ class BinarySphericalQuantizer(nn.Module):
         else:
             used_codes = None
 
-        q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
-
         if self.soft_entropy:
             persample_entropy, cb_entropy, avg_prob = self.soft_entropy_loss(z)
             entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
@@ -157,6 +171,7 @@ class BinarySphericalQuantizer(nn.Module):
             cb_entropy = codebook_entropy(zq, self.basis, self.embed_dim)
             entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
 
+        q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
         zq = zq * q_scale
 
         # commit loss
@@ -165,16 +180,19 @@ class BinarySphericalQuantizer(nn.Module):
         if self.input_format == "bchw":
             zq = rearrange(zq, "b h w c -> b c h w")
 
-        return (
-            zq,
-            commit_loss + self.zeta * entropy_penalty / self.inv_temperature,
-            {
-                "H": cb_entropy,
-                "used_codes": used_codes,
-                "indices": indices,
-                "group_indices": group_indices,
-                "avg_prob": avg_prob,
-            },
+        # entropy penalty loss
+        H_penalty_loss = self.zeta * entropy_penalty / self.inv_temperature
+
+        return LossBreakdown(
+            zq=zq,
+            total_loss=commit_loss + H_penalty_loss,
+            commit_loss=commit_loss,
+            entropy_penalty=H_penalty_loss,
+            H=cb_entropy,
+            used_codes=used_codes,
+            indices=indices,
+            group_indices=group_indices,
+            avg_prob=avg_prob,
         )
 
     def soft_entropy_loss(self, z):

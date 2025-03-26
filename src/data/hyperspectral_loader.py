@@ -41,8 +41,7 @@ def get_hyperspectral_dataloaders(
     dataset = wds.WebDataset(
         wds_paths,
         resampled=True,
-        shardshuffle=True if is_ddp else False,
-        cache_size=shuffle_size,
+        shardshuffle=shuffle_size if is_ddp else False,
         nodesplitter=wds.shardlists.split_by_node
         if is_ddp
         else wds.shardlists.single_node_only,

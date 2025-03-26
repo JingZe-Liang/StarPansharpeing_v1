@@ -99,6 +99,43 @@ continuous_image_diff = dict(
     act_checkpoint=True,
 )
 
+continuous_image_diff_unet_decoder = dict(
+    # The attention resolution for res blocks.
+    attn_resolutions=[32],
+    # The base number of channels.
+    channels=128,
+    # The channel multipler for each resolution.
+    channels_mult=[2, 4, 4],
+    dropout=0.0,
+    in_channels=12,
+    # The spatial compression ratio.
+    spatial_compression=8,
+    # The number of layers in each res block.
+    num_res_blocks=2,
+    out_channels=12,
+    resolution=512,
+    patch_size=4,
+    decoder_patch_size=4,
+    patch_method="haar",
+    # The output latent dimension (channels).
+    latent_channels=16,
+    # The encoder output channels just before sampling.
+    # Which is also the decoder's input channels.
+    z_channels=16,
+    # A factor over the z_channels, to get the total channels the encoder should output.
+    # For a VAE for instance, we want to output the mean and variance, so we need 2 * z_channels.
+    z_factor=1,
+    name="CIDiff_unet_decoder",
+    # What formulation to use, either "AE" or "VAE".
+    # Chose VAE here, since the pre-trained ckpt were of a VAE formulation.
+    formulation=ContinuousFormulation.AE.name,
+    # Specify type of encoder ["Default", "LiteVAE"]
+    encoder=EncoderType.Default.name,
+    # Specify type of decoder ["Default"]
+    decoder=DecoderType.DarwinUnet.name,
+    act_checkpoint=True,
+)
+
 discrete_image = dict(
     # The attention resolution for res blocks.
     attn_resolutions=[32],

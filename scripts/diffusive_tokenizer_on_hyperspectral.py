@@ -18,7 +18,6 @@ from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler
-from cv2 import PSNR
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
@@ -29,8 +28,8 @@ sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.losses.gan_loss import VQLPIPSWithDiscriminator
-from src.stage1.one_d_tokenizer.semanticist.diffuse_slot import DiffuseSlot
 from src.stage1.cosmos.two_dim_diffusion_slots import TwoDimDiffusionSlots
+from src.stage1.one_d_tokenizer.semanticist.diffuse_slot import DiffuseSlot
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -161,8 +160,8 @@ class OneDimensionHyperspectralTokenizerTrainer:
             input_lst = [log_file] * self.accelerator.num_processes
             output_lst = [None] * self.accelerator.num_processes
             torch.distributed.scatter_object_list(
-                input_lst,
                 output_lst,
+                input_lst,
             )
             log_file: Path = output_lst[self.accelerator.process_index]
             assert isinstance(log_file, Path), "log_file type should be Path"
@@ -300,7 +299,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
         ):
             tokenizer_optim = hydra.utils.instantiate(
                 self.train_cfg.tokenizer_optimizer
-            )(self._get_tokeniz0er_params())
+            )(self._get_tokenizer_params())
             if self.use_disc:
                 disc_optim = hydra.utils.instantiate(self.train_cfg.disc_optimizer)(
                     self._get_disc_params()
@@ -477,16 +476,16 @@ class OneDimensionHyperspectralTokenizerTrainer:
             if use_ema:
                 return self.accelerator.unwrap_model(
                     self.ema_tokenizer
-                ).ema_model.final_layer.linear.weight
+                ).ema_model.decoder.get_last_layer()
             else:
                 return self.accelerator.unwrap_model(
                     self.tokenizer
-                ).final_layer.linear.weight
+                ).decoder.get_last_layer()
         else:
             if use_ema:
                 return self.accelerator.unwrap_model(
                     self.ema_decoder
-                ).ema_model.decoder.conv_out.weight
+                ).ema_model.decoder.get_last_layer()
             else:
                 return self.accelerator.unwrap_model(
                     self.tokenizer_decoder
@@ -982,8 +981,8 @@ class OneDimensionHyperspectralTokenizerTrainer:
 
 if __name__ == "__main__":
     # load config
-    hydra.initialize("configs/1d_tokenizer", version_base=None)
-    cfg = hydra.compose(config_name="1d_tokenizer_no_quantizer")
+    hydra.initialize("configs/2d_cosmos_diff", version_base=None)
+    cfg = hydra.compose(config_name="2d_cosmos_no_quantizer")
 
     with logger.catch():
         trainer = OneDimensionHyperspectralTokenizerTrainer(cfg)

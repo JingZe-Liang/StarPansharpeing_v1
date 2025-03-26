@@ -72,6 +72,7 @@ class ResnetBlock(nn.Module):
         in_channels: int,
         out_channels: int = None,
         dropout: float,
+        use_residual_factor: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -92,8 +93,10 @@ class ResnetBlock(nn.Module):
             if in_channels != out_channels
             else nn.Identity()
         )
-
         self.act_checkpoint = kwargs.get("act_checkpoint", False)
+        self.use_residual_factor = use_residual_factor
+        if use_residual_factor:
+            self.residual_factor = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
     def forward_fn(
         self,
@@ -112,6 +115,8 @@ class ResnetBlock(nn.Module):
         h = self.conv2(h)
 
         x = self.nin_shortcut(x)
+        if self.use_residual_factor:
+            h = h * self.residual_factor
 
         return x + h
 
@@ -138,61 +143,57 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         out_channels: int | None = None,
         dropout: float = 0.0,
         act_checkpoint: bool = False,
+        use_residual_factor: bool = False,
     ):
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
         )
         self.in_channels = in_channels
         self.slot_dim = slot_dim
         self.time_dim = time_dim
-        self.time_to_hidden = nn.Sequential(
+        self.time_to_hidden = nn.Linear(time_dim, in_channels)
+        self.slot_to_hidden = nn.Conv2d(
+            slot_dim, in_channels, kernel_size=3, stride=1, padding=1
+        )
+        self.slots_t_to_mod = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(time_dim, out_channels),
+            nn.Conv2d(in_channels, in_channels * 2, 3, 1, 1),
         )
-        self.slot_to_hidden = nn.Sequential(
-            Normalize(slot_dim, num_groups=1),
-            nn.Conv2d(
-                slot_dim,
-                out_channels,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-            ),
-        )
-        self.slots_t_to_mod = nn.Conv2d(
-            out_channels,
-            out_channels * 3,
-            1,
-            1,
-        )
+
+        # zero out the last conv for condition
+        self.slots_t_to_mod[-1].weight.data.zero_()
+        self.slots_t_to_mod[-1].bias.data.zero_()
 
     def forward_fn(self, x, slots, t):
         # interpolate 2d
-        slots = F.interpolate(slots, size=x.shape[-2:], mode="bilinear")
+        slots = F.interpolate(slots, size=x.shape[-2:], mode="nearest")
         slots = self.slot_to_hidden(slots)
         t = self.time_to_hidden(t)
         slots_t = slots + t[..., None, None]
-        scale, shift, gate = self.slots_t_to_mod(slots_t).chunk(3, dim=1)
+        scale, shift = self.slots_t_to_mod(slots_t).chunk(2, dim=1)
 
         # base forward
         h = x
         h = self.norm1(h)
+        h = h * (1 + scale) + shift
+
         h = nonlinearity(h)
         h = self.conv1(h)
-
-        # scale and shift
-        h = h * (1 + scale) + shift
 
         # base forward
         h = self.norm2(h)
         h = nonlinearity(h)
         h = self.dropout(h)
-        h = self.conv2(h) * gate
+        h = self.conv2(h)
 
         x = self.nin_shortcut(x)
+
+        if self.use_residual_factor:
+            h = h * self.residual_factor
 
         return x + h
 
@@ -205,7 +206,9 @@ class ResnetBlockSlotsInjected(ResnetBlock):
 
 
 class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int, act_checkpoint: bool):
+    def __init__(
+        self, in_channels: int, act_checkpoint: bool, use_residual_factor: bool = False
+    ):
         super().__init__()
 
         self.norm = Normalize(in_channels)
@@ -217,6 +220,9 @@ class AttnBlock(nn.Module):
         )
 
         self.act_checkpoint = act_checkpoint
+        self.use_residual_factor = use_residual_factor
+        if self.use_residual_factor:
+            self.residual_factor = nn.Parameter(torch.zeros(1, in_channels, 1, 1))
 
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
         # TODO (freda): Consider reusing implementations in Attn `imaginaire`,
@@ -244,6 +250,8 @@ class AttnBlock(nn.Module):
         h_ = h_.reshape(b, c, h, w)
 
         h_ = self.proj_out(h_)
+        if self.use_residual_factor:
+            h_ = h_ * self.residual_factor
 
         return x + h_
 
@@ -266,6 +274,7 @@ class Encoder(nn.Module):
         z_channels: int,
         spatial_compression: int,
         act_checkpoint: bool = False,
+        use_residual_factor: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -280,6 +289,10 @@ class Encoder(nn.Module):
             patch_size, ignore_kwargs.get("patch_method", "rearrange")
         )
         in_channels = in_channels * patch_size * patch_size
+        logging.info(
+            f'[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, '
+            f'patch_method: {ignore_kwargs.get("patch_method", "rearrange")}'
+        )
 
         # calculate the number of downsample operations
         self.num_downsamples = int(math.log2(spatial_compression)) - int(
@@ -310,11 +323,18 @@ class Encoder(nn.Module):
                         out_channels=block_out,
                         dropout=dropout,
                         act_checkpoint=act_checkpoint,
+                        use_residual_factor=use_residual_factor,
                     )
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in, act_checkpoint=act_checkpoint))
+                    attn.append(
+                        AttnBlock(
+                            block_in,
+                            act_checkpoint=act_checkpoint,
+                            use_residual_factor=use_residual_factor,
+                        )
+                    )
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -330,13 +350,19 @@ class Encoder(nn.Module):
             out_channels=block_in,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
         )
-        self.mid.attn_1 = AttnBlock(block_in, act_checkpoint=act_checkpoint)
+        self.mid.attn_1 = AttnBlock(
+            block_in,
+            act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
+        )
         self.mid.block_2 = ResnetBlock(
             in_channels=block_in,
             out_channels=block_in,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
         )
 
         # end
@@ -385,6 +411,7 @@ class Decoder(nn.Module):
         z_channels: int,
         spatial_compression: int,
         act_checkpoint: bool = False,
+        use_residual_factor: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -429,6 +456,7 @@ class Decoder(nn.Module):
             out_channels=block_in,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
         )
         self.mid.attn_1 = AttnBlock(block_in, act_checkpoint=act_checkpoint)
         self.mid.block_2 = ResnetBlock(
@@ -436,6 +464,7 @@ class Decoder(nn.Module):
             out_channels=block_in,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
         )
 
         # upsampling
@@ -451,11 +480,18 @@ class Decoder(nn.Module):
                         out_channels=block_out,
                         dropout=dropout,
                         act_checkpoint=act_checkpoint,
+                        use_residual_factor=use_residual_factor,
                     )
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in, act_checkpoint=act_checkpoint))
+                    attn.append(
+                        AttnBlock(
+                            block_in,
+                            act_checkpoint=act_checkpoint,
+                            use_residual_factor=use_residual_factor,
+                        )
+                    )
             up = nn.Module()
             up.block = block
             up.attn = attn
@@ -493,6 +529,9 @@ class Decoder(nn.Module):
         h = self.conv_out(h)
         h = self.unpatcher(h)
         return h
+
+    def get_last_layer(self):
+        return self.conv_out.weight
 
 
 # *==============================================================
@@ -553,10 +592,45 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
+class FinalLayer(nn.Module):
+    """
+    The final layer of DiT.
+    """
+
+    def __init__(
+        self,
+        hidden_size,
+        patch_size,
+        out_channels,
+        z_channels,
+        t_channels,
+    ):
+        super().__init__()
+        self.norm_final = Normalize(hidden_size)
+        self.conv = nn.Conv2d(
+            hidden_size, patch_size * patch_size * out_channels, 3, 1, 1
+        )
+        self.t_embd = nn.Linear(t_channels, hidden_size, bias=True)
+        self.z_embd = nn.Conv2d(z_channels, hidden_size, 1, 1)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Conv2d(hidden_size, 2 * hidden_size, 1, 1)
+        )
+
+    def forward(self, x, z, t):
+        c = (
+            self.z_embd(F.interpolate(z, size=x.shape[-2:], mode="nearest"))
+            + self.t_embd(t)[..., None, None]
+        )
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = self.norm_final(x) * (1 + scale) + shift
+        x = self.conv(x)
+        return x
+
+
 class DecoderDiff(nn.Module):
     def __init__(
         self,
-        out_channels: int,  # rgb or hyperspectral image channes
+        out_channels: int,  # rgb or hyperspectral image channels
         channels: int,
         channels_mult: list[int],
         num_res_blocks: int,
@@ -574,6 +648,8 @@ class DecoderDiff(nn.Module):
         decoder_patch_size: int = 4,
         patch_method: str = "rearrange",
         unpatch_type: Literal["upsample", "unpatch"] = "unpatch",
+        time_scale: float = 1.0,
+        use_residual_factor: bool = False,
         **_discard_kwargs,
     ):
         super().__init__()
@@ -587,7 +663,8 @@ class DecoderDiff(nn.Module):
 
         logging.info(
             f"[Decoder]: use acheckpoint: {act_checkpoint}\n"
-            f"diffusion conditioning inject strategy: {diff_cond_inject_strategy}"
+            f"diffusion conditioning inject strategy: {diff_cond_inject_strategy}\n"
+            f"use_residual_factor: {use_residual_factor}",
         )
 
         # Patcher
@@ -638,6 +715,7 @@ class DecoderDiff(nn.Module):
             raise NotImplementedError("unpatcher_type must be 'upsample' or 'unpatch'")
 
         block_in = channels * channels_mult[self.num_resolutions - 1]
+        t_in = block_in
 
         # z to block_in
         cat_x_z_in = conv_in_ch * 2
@@ -646,15 +724,21 @@ class DecoderDiff(nn.Module):
         )
 
         # timestep embedder
-        self.t_embedder = TimestepEmbedder(block_in)  # base channels
+        self.t_embedder = TimestepEmbedder(t_in, time_scale=time_scale)  # base channels
 
         # block class
         if diff_cond_inject_strategy in ("inject_part", "inject_full"):
             block_class = partial(
-                ResnetBlockSlotsInjected, slot_dim=conv_in_ch, time_dim=block_in
+                ResnetBlockSlotsInjected,
+                slot_dim=conv_in_ch,
+                time_dim=t_in,
+                use_residual_factor=use_residual_factor,
             )
         elif diff_cond_inject_strategy == "cat":
-            block_class = ResnetBlock
+            block_class = partial(
+                ResnetBlock,
+                use_residual_factor=use_residual_factor,
+            )
         else:
             raise ValueError(
                 "diff_cond_inject_strategy must be either 'inject' or 'cat'"
@@ -664,7 +748,7 @@ class DecoderDiff(nn.Module):
         self.mid = nn.Module()
         self.mid.block_1 = block_class(
             in_channels=block_in,
-            out_channels=block_in,
+            out_channels=t_in,
             dropout=dropout,
             act_checkpoint=act_checkpoint,
         )
@@ -672,6 +756,7 @@ class DecoderDiff(nn.Module):
         if diff_cond_inject_strategy == "inject_part":
             mid_blk_2_cls = ResnetBlock
         elif diff_cond_inject_strategy == "inject_full":
+            mid_blk_2_cls = block_class
             logging.warning(
                 f"[Decoder Block]: diffusion condition injection strategy is {diff_cond_inject_strategy}, "
                 "it will inject condition in every residual block, may cause GPU usage high"
@@ -693,7 +778,14 @@ class DecoderDiff(nn.Module):
             block_out = channels * channels_mult[i_level]
             for blk_level in range(self.num_res_blocks + 1):
                 if diff_cond_inject_strategy == "inject_part":
-                    inner_class = block_class if blk_level == 0 else ResnetBlock
+                    inner_class = (
+                        block_class
+                        if blk_level == 0
+                        else partial(
+                            ResnetBlock,
+                            use_residual_factor=use_residual_factor,
+                        )
+                    )
                 else:
                     inner_class = block_class
                 block.append(
@@ -722,11 +814,21 @@ class DecoderDiff(nn.Module):
             self.up.insert(0, up)
 
         # end
-        self.norm_out = Normalize(block_in)
+        # self.norm_out = Normalize(block_in)
         out_mul = 2.0 if learn_sigma else 1.0
-        self.conv_out = torch.nn.Conv2d(
-            block_in, int(out_ch * out_mul), kernel_size=3, stride=1, padding=1
+        # self.conv_out = torch.nn.Conv2d(
+        #     block_in, int(out_ch * out_mul), kernel_size=3, stride=1, padding=1
+        # )
+        self.final_layer = FinalLayer(
+            block_in,
+            decoder_patch_size,
+            int(out_channels * out_mul),
+            conv_in_ch,
+            t_in,
         )
+        # zero-out the final layer
+        self.final_layer.conv.weight.data.zero_()
+        self.final_layer.conv.bias.data.zero_()
 
         # cfg null condition
         self.null_cond = nn.Parameter(torch.zeros(1, z_channels, z_res, z_res))
@@ -759,7 +861,7 @@ class DecoderDiff(nn.Module):
         x = self.patcher(x)
         z = self.embed_cond(z)
         h = torch.cat(
-            [x, F.interpolate(z, size=x.shape[-2:], mode="bilinear")],
+            [x, F.interpolate(z, size=x.shape[-2:], mode="nearest")],
             dim=1,
         )
 
@@ -781,9 +883,9 @@ class DecoderDiff(nn.Module):
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
 
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
+        # h = self.norm_out(h)
+        # h = nonlinearity(h)
+        h = self.final_layer(h, z, t)
         h = self.unpatcher(h)
         return h
 
@@ -800,6 +902,9 @@ class DecoderDiff(nn.Module):
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
+
+    def get_last_layer(self):
+        return self.final_layer.conv.weight
 
 
 if __name__ == "__main__":
@@ -884,17 +989,17 @@ if __name__ == "__main__":
             16,
             8,
             True,
-            diff_cond_inject_strategy="inject_part",
+            diff_cond_inject_strategy="inject_full",
             decoder_patch_size=4,
             z_cfg_drop=0.3,
             unpatch_type="unpatch",
         )
         dtype = torch.bfloat16
-        device = torch.device("cuda")
+        device = torch.device("cuda:1")
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        bs = 12
+        bs = 1
         img = torch.randn(bs, 8, 512, 512).to(device, dtype)
         xt = torch.randn(bs, 8, 512, 512).to(device, dtype)
         t = torch.randint(0, 1000, (bs,)).to(device, dtype)

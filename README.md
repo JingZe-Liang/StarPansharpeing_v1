@@ -9,7 +9,7 @@ Base on them, we **will** train two versions of hyperspectral image generators:
 
 there are two ways:
 
-|  Continuous Latents | Discrete Latents |
+|  Continuous Latents | **Discrete** Latents |
 | :---: | :---: |
 | Diffusion/Flow Matching/IMM _v.s_ MAR (with diffusive head) | MaskGiT, Autoregressive, or Discrete Diffusion |
 

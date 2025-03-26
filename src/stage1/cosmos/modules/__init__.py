@@ -17,6 +17,7 @@ from enum import Enum
 
 from .distributions import GaussianDistribution, IdentityDistribution
 from .layers2d import Decoder, DecoderDiff, Encoder
+from .unets.darwin_unet import UNet as DarwinUnet
 from .layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
 from .quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
 
@@ -28,6 +29,7 @@ class EncoderType(Enum):
 class DecoderType(Enum):
     Default = Decoder
     Diffusion = DecoderDiff
+    DarwinUnet = DarwinUnet
 
 
 class Encoder3DType(Enum):

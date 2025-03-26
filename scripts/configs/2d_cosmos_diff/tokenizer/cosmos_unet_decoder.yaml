@@ -1,5 +1,5 @@
 _target_: src.stage1.cosmos.two_dim_diffusion_slots.TwoDimDiffusionSlots
-tokenizer_cfg:
+encoder_cfg:
   attn_resolutions: [32]
   channels: 128
   channels_mult: [2, 4, 4]
@@ -19,25 +19,39 @@ tokenizer_cfg:
   formulation: "AE"
   encoder: "Default"
   decoder: "Diffusion"
-  diff_cond_inject_strategy: "inject_full"
   time_scale: 1000.0
-  z_cfg_drop: 0.2
+  z_cfg_drop: 0.1
   act_checkpoint: false
-  use_residual_factor: false
+decoder_cfg:
+  image_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
+  in_channel: ${dataset.channels}
+  inner_channel: 64
+  out_channel: ${dataset.channels}
+  res_blocks: 2
+  attn_res: [32]
+  z_channels: 16
+  dropout: 0.1
+  z_cfg_drop: 0.1
+  channel_mults: [1, 2, 4, 4]
+  conv_resample: true
+  act_checkpoint: true
+  num_heads: 12
+  num_head_channels: -1
+  num_heads_upsample: -1
+  use_scale_shift_norm: true
+  time_scale: 1000.0
+  resblock_updown: true
+  t_embed_type: cosine
+  use_new_attention_order: false
 enc_path: null
 dec_path: null
 use_repa: false
 img_channels: ${dataset.channels}
 enc_img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
+compile_model: false
+learn_sigma: false
 diffusion_type: fm
 num_sampling_steps: ddim25
-learn_sigma: false
 fm_sample_type: ode
-fm_options:
-  path_type: Linear
-  prediction: x1
-  train_eps: 1.0e-4
-  sample_eps: 1.0e-4
-compile_model: false
 quantizer_type:
 quantizer_kwargs:

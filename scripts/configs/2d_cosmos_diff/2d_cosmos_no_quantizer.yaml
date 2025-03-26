@@ -52,8 +52,8 @@ vq_loss:
   use_actnorm: false
   disc_in_channels: ${dataset.channels}
   lecam_loss_weight: 0.05
-  disc_weight: 0.8
-  gen_loss_weight: 0.1
+  disc_weight: 0.1
+  gen_loss_weight:
 
 ema:
   beta: 0.999
@@ -61,7 +61,7 @@ ema:
   update_every: 2
 
 train:
-  proj_dir: runs/stage1_1d_tok/
+  proj_dir: runs/stage1_cosmos_diffusive/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -69,7 +69,7 @@ train:
   visualize_every: 200
   max_steps: 200_000
   save_every: 1000
-  use_disc: false
+  use_disc: true
 
   tokenizer_optimizer:
     _target_: src.utilities.optim.mars.MARS

@@ -45,7 +45,9 @@ def build_pretrained_cosmos_tokenizer(
 class TwoDimDiffusionSlots(nn.Module):
     def __init__(
         self,
-        tokenizer_cfg: DictConfig | dict,
+        tokenizer_cfg: DictConfig | dict | None = None,
+        encoder_cfg: DictConfig | dict | None = None,
+        decoder_cfg: DictConfig | dict | None = None,
         enc_path: str | None = None,
         dec_path: str | None = None,
         use_repa: bool = False,
@@ -55,6 +57,8 @@ class TwoDimDiffusionSlots(nn.Module):
         compile_model: bool = False,
         learn_sigma: bool = False,
         diffusion_type: Literal["diffusion", "fm"] = "diffusion",
+        fm_options: dict | None = None,
+        diffusion_options: dict | None = None,
         num_sampling_steps: str = "ddim25",
         fm_sample_type: str | None = "ode",
         quantizer_type: str | None = None,
@@ -62,8 +66,18 @@ class TwoDimDiffusionSlots(nn.Module):
     ):
         super().__init__()
 
-        if isinstance(tokenizer_cfg, DictConfig):
-            tokenizer_cfg = OmegaConf.to_container(tokenizer_cfg)
+        def to_dict_any(cfg: DictConfig):
+            if isinstance(cfg, DictConfig):
+                cfg = OmegaConf.to_container(tokenizer_cfg)
+            assert isinstance(cfg, dict), "cfg must be a DictConfig or a dict"
+            return cfg
+
+        if tokenizer_cfg is not None:
+            encoder_cfg = decoder_cfg = to_dict_any(tokenizer_cfg)
+        else:
+            assert encoder_cfg is not None and decoder_cfg is not None
+            encoder_cfg = to_dict_any(encoder_cfg)
+            decoder_cfg = to_dict_any(decoder_cfg)
 
         self.img_channels = img_channels
         self.enc_img_size = enc_img_size
@@ -77,20 +91,25 @@ class TwoDimDiffusionSlots(nn.Module):
                 "ode",
             ], 'fm_sample_type must be "sde" or "ode"'
         if diffusion_type == "diffusion":
-            self.diffusion = create_diffusion(
-                timestep_respacing="", learn_sigma=learn_sigma
+            _train_diff_opts = (
+                dict(timestep_respacing="", learn_sigma=learn_sigma)
+                if diffusion_options is None
+                else diffusion_options
             )
+            self.diffusion = create_diffusion(**_train_diff_opts)
             self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps)
         elif diffusion_type == "fm":
-            v = False
-            self.diffusion = create_transport(
-                "Linear", "velocity", train_eps=1e-4, sample_eps=1e-4
+            fm_default_options = dict(
+                path_type="Linear",
+                prediction="velocity",
             )
+            _options = fm_default_options if fm_options is None else fm_options
+            self.diffusion = create_transport(**_options)
             self.gen_diffusion = Sampler(self.diffusion)
         else:
             raise ValueError("diffusion_type must be diffusion or fm")
 
-        # double channel
+        # double channels
         if self.diffusion_type in ("diffusion", "fm"):
             assert (
                 quantizer_type != "kl"
@@ -99,7 +118,8 @@ class TwoDimDiffusionSlots(nn.Module):
             double_out_channel = False
             if learn_sigma:
                 logger.warning(
-                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True"
+                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True, "
+                    "set it to False"
                 )
         elif self.diffusion_type == "diffusion":
             double_out_channel = learn_sigma
@@ -122,8 +142,8 @@ class TwoDimDiffusionSlots(nn.Module):
             )
         else:
             logger.info(f"[Tokenizer]: building a new Cosmos tokenizer")
-            self.encoder = Encoder(**tokenizer_cfg)
-            self.decoder = DecoderDiff(**tokenizer_cfg)
+            self.encoder = Encoder(**encoder_cfg)
+            self.decoder = DecoderDiff(**decoder_cfg)
 
         # * compile models =================
 
@@ -147,7 +167,7 @@ class TwoDimDiffusionSlots(nn.Module):
         if quantizer_kwargs is None:
             quantizer_kwargs = {}
 
-        z_channels = tokenizer_cfg["z_channels"]
+        z_channels = decoder_cfg["z_channels"]
 
         # init quantizer
         if quantizer_type == "bsq":
@@ -161,8 +181,8 @@ class TwoDimDiffusionSlots(nn.Module):
                 zeta=1.0,
                 inv_temperature=1.0,
                 cb_entropy_compute="group",
-                input_format="blc",
-                group_size=1,
+                input_format="bchw",
+                group_size=8,
             )
             kwargs = _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
             self.quantizer_kwargs = kwargs
@@ -185,7 +205,7 @@ class TwoDimDiffusionSlots(nn.Module):
         elif quantizer_type is None:
             self.quantizer = None
             self.quantizer_kwargs = {}
-            logger.info("Do not use quantizer")
+            logger.info("[Tokenizer]: Do not use quantizer")
         else:
             raise ValueError("quantizer_type must be bsq, kl, or None")
 
@@ -253,9 +273,7 @@ class TwoDimDiffusionSlots(nn.Module):
 
         return losses, others
 
-    def encode(
-        self, x
-    ):  # -> tuple[Any | Tensor, Any | Tensor, Any | dict[str, Tensor]]:
+    def encode(self, x):
         # encode and projection
         enc = self.encoder(x)
 
@@ -500,6 +518,12 @@ if __name__ == "__main__":
         diffusion_type="fm",
         learn_sigma=True,
         compile_model=False,
+        fm_options=dict(
+            path_type="Linear",
+            prediction="x1",
+            train_eps=1e-4,
+            sample_eps=1e-4,
+        ),
         quantizer_type=None,
         fm_sample_type="ode",
     ).cuda()

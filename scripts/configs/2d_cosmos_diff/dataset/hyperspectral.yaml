@@ -3,8 +3,8 @@ shuffle_size: 100
 num_workers: 4
 
 dataset_names_to_bs:
-  MMSeg_YREB: 48
-  DCF_2019: 32
+  MMSeg_YREB: 16
+  DCF_2019: 12
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
