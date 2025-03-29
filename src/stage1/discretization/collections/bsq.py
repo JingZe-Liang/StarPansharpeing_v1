@@ -9,8 +9,8 @@ from torch.autograd import Function
 LossBreakdown = namedtuple(
     "LossBreakdown",
     [
-        "zq",
-        "total_loss",
+        "commit_loss",
+        "entropy_penalty",
         "H",
         "used_codes",
         "indices",
@@ -106,7 +106,7 @@ class BinarySphericalQuantizer(nn.Module):
         self.input_format = input_format
         assert (
             self.embed_dim % group_size == 0
-        ), "embed_dim must be divisible by group_size"
+        ), f"embed_dim {self.embed_dim} must be divisible by group_size {group_size}"
         self.num_groups = self.embed_dim // group_size
         self.group_size = group_size
         assert persample_entropy_compute in [
@@ -183,16 +183,19 @@ class BinarySphericalQuantizer(nn.Module):
         # entropy penalty loss
         H_penalty_loss = self.zeta * entropy_penalty / self.inv_temperature
 
-        return LossBreakdown(
-            zq=zq,
-            total_loss=commit_loss + H_penalty_loss,
-            commit_loss=commit_loss,
-            entropy_penalty=H_penalty_loss,
-            H=cb_entropy,
-            used_codes=used_codes,
-            indices=indices,
-            group_indices=group_indices,
-            avg_prob=avg_prob,
+        total_loss = commit_loss + H_penalty_loss
+        return (
+            zq,
+            total_loss,
+            LossBreakdown(
+                commit_loss=commit_loss,
+                entropy_penalty=H_penalty_loss,
+                H=cb_entropy,
+                used_codes=used_codes,
+                indices=indices,
+                group_indices=group_indices,
+                avg_prob=avg_prob,
+            ),
         )
 
     def soft_entropy_loss(self, z):

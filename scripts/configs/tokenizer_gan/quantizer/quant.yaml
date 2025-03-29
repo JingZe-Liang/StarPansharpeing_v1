@@ -1,0 +1,50 @@
+used: bsq
+norm_z: true
+
+bsq:
+  _target_: src.stage1.discretization.collections.bsq.BinarySphericalQuantizer
+  embed_dim: ${tokenizer.config.z_channels}
+  beta: 0.25
+  gamma0: 1
+  gamma: 1
+  zeta: 1
+  inv_temperature: 1
+  group_size: 9
+  cb_entropy_compute: group
+  persample_entropy_compute: group
+  l2_norm: true
+  input_format: bchw
+
+lfq:
+  _target_: src.stage1.discretization.collections.lookup_free_quantization.LFQ
+  dim: ${tokenizer.config.z_channels}
+  commitment_loss_weight: 1.0
+  diversity_gamma: 1.0
+  num_codebooks: 2
+  codebook_scale: 1.0
+  channel_first: true
+  spherical: true
+  experimental_softplus_entropy_loss: false
+
+vq_advance:
+  _target_: src.stage1.discretization.collections.vector_quantize_pytorch.VectorQuantize
+  dim: ${tokenizer.config.z_channels}
+  codebook_size: 2048
+  heads: 1
+  use_cosine_sim: false
+  channel_last: false
+  stochastic_sample_codes: false
+  learnable_codebook: true
+  straight_through: false
+  rotation_trick: true
+  ema_update: false
+  accept_image_fmap: true
+  codebook_diversity_loss_weight: 0.05
+  codebook_diversity_temperature: 100.0
+  orthogonal_reg_weight: 0.1
+  manual_in_place_optimizer_update: true
+
+none: null
+
+quant: ${quantizer[${quantizer.used}]}
+quant_type: ${eval:"'${quantizer.used}' if '${quantizer.used}' != 'none' else None"}

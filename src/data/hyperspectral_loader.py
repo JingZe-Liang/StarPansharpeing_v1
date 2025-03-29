@@ -62,3 +62,36 @@ def get_hyperspectral_dataloaders(
     )
 
     return dataset, dataloader
+
+
+if __name__ == "__main__":
+    # Test config
+    test_wds_path = [
+        "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
+        "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0001.tar",
+        "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0002.tar",
+        "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
+    ]
+    test_batch_size = 32
+    test_num_workers = 2
+    test_shuffle_size = 300
+
+    # Get test dataloader
+    test_dataset, test_loader = get_hyperspectral_dataloaders(
+        wds_paths=test_wds_path,
+        batch_size=test_batch_size,
+        num_workers=test_num_workers,
+        shuffle_size=test_shuffle_size,
+        to_neg_1_1=True,
+    )
+
+    # Test multiple batches
+    num_batches_to_test = 5
+    for i, batch in enumerate(test_loader):
+        if i >= num_batches_to_test:
+            break
+        img_tensor = batch["img"]
+        print(f"\nBatch {i+1}:")
+        print(f"Shape: {img_tensor.shape}")
+        print(f"Value range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
+        print(f"Data type: {img_tensor.dtype}")

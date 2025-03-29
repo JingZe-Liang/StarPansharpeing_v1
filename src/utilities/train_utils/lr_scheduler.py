@@ -37,7 +37,6 @@ def get_cosine_schedule_reduced_restart_with_warmup(
 
         max_lr = 1.0 / (reduced_factor**cycle_num)
 
-        # 直接从max_lr开始余弦退火
         return max_lr * (0.5 * (1.0 + math.cos(math.pi * cycle_progress)))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)

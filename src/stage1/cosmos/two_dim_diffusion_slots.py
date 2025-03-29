@@ -45,22 +45,27 @@ def build_pretrained_cosmos_tokenizer(
 class TwoDimDiffusionSlots(nn.Module):
     def __init__(
         self,
+        # tokenizer (encoder and decoder)
         tokenizer_cfg: DictConfig | dict | None = None,
         encoder_cfg: DictConfig | dict | None = None,
         decoder_cfg: DictConfig | dict | None = None,
         enc_path: str | None = None,
         dec_path: str | None = None,
-        use_repa: bool = False,
         img_channels: int = 8,  # multispectral or hyperspectral images
+        # repa loss
+        use_repa: bool = False,
         enc_img_size: int = 256,
         repa_loss_weight: float = 0.1,
+        # model compilation
         compile_model: bool = False,
-        learn_sigma: bool = False,
+        # diffusions
         diffusion_type: Literal["diffusion", "fm"] = "diffusion",
         fm_options: dict | None = None,
         diffusion_options: dict | None = None,
         num_sampling_steps: str = "ddim25",
         fm_sample_type: str | None = "ode",
+        # quantizer
+        norm_z: bool = True,
         quantizer_type: str | None = None,
         quantizer_kwargs: dict | None = None,
     ):
@@ -92,13 +97,17 @@ class TwoDimDiffusionSlots(nn.Module):
             ], 'fm_sample_type must be "sde" or "ode"'
         if diffusion_type == "diffusion":
             _train_diff_opts = (
-                dict(timestep_respacing="", learn_sigma=learn_sigma)
+                dict(timestep_respacing="", learn_sigma=False)
                 if diffusion_options is None
                 else diffusion_options
             )
+            self.learn_sigma = learn_sigma = _train_diff_opts.get("learn_sigma", False)
+            _generate_diff_opts = _train_diff_opts.copy()
+            _generate_diff_opts["timestep_respacing"] = num_sampling_steps
             self.diffusion = create_diffusion(**_train_diff_opts)
-            self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps)
+            self.gen_diffusion = create_diffusion(**_generate_diff_opts)
         elif diffusion_type == "fm":
+            self.learn_sigma = False
             fm_default_options = dict(
                 path_type="Linear",
                 prediction="velocity",
@@ -166,7 +175,7 @@ class TwoDimDiffusionSlots(nn.Module):
         self.quantizer_type = quantizer_type
         if quantizer_kwargs is None:
             quantizer_kwargs = {}
-
+        self.norm_z = quantizer_kwargs.pop("pre_quant_norm", False) or norm_z
         z_channels = decoder_cfg["z_channels"]
 
         # init quantizer
@@ -182,7 +191,7 @@ class TwoDimDiffusionSlots(nn.Module):
                 inv_temperature=1.0,
                 cb_entropy_compute="group",
                 input_format="bchw",
-                group_size=8,
+                group_size=z_channels // 2,
             )
             kwargs = _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
             self.quantizer_kwargs = kwargs
@@ -269,13 +278,15 @@ class TwoDimDiffusionSlots(nn.Module):
             if get_pred_x_clean:
                 others["pred_x_clean"] = losses.pop("pred_x_clean")
             # update losses
-            losses["quantizer_loss"] = quantizer_loss
+            losses["q_loss"] = quantizer_loss
 
         return losses, others
 
     def encode(self, x):
         # encode and projection
         enc = self.encoder(x)
+        if self.norm_z:
+            enc = F.normalize(enc, dim=1)  # [b,c,h,w]
 
         # quantize
         if self.quantizer is not None:
@@ -381,7 +392,7 @@ class TwoDimDiffusionSlots(nn.Module):
                 get_pred_x_clean=get_pred_x_clean,
             )
 
-        # diffusion with dit
+        # diffusion with decoder
         loss_dict = self.diffusion.training_losses(**train_losses_inp)
         diff_loss = loss_dict["loss"].mean()
         losses["diff_loss"] = diff_loss
@@ -473,6 +484,12 @@ class TwoDimDiffusionSlots(nn.Module):
 
         return samples
 
+    def eval(self):
+        self.encoder.eval()
+        self.decoder.eval()
+        if isinstance(self.quantizer, nn.Module):
+            self.quantizer.eval()
+
 
 def build_mlp(hidden_size, projector_dim, z_dim):
     return nn.Sequential(
@@ -515,14 +532,16 @@ if __name__ == "__main__":
         img_channels=12,
         enc_img_size=512,
         use_repa=False,
-        diffusion_type="fm",
-        learn_sigma=True,
+        diffusion_type="diffusion",
         compile_model=False,
         fm_options=dict(
             path_type="Linear",
             prediction="x1",
             train_eps=1e-4,
             sample_eps=1e-4,
+        ),
+        diffusion_options=dict(
+            timestep_respacing="", noise_schedule="linear", learn_sigma=False
         ),
         quantizer_type=None,
         fm_sample_type="ode",

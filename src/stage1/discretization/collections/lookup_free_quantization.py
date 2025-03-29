@@ -25,7 +25,8 @@ from torch.nn import Module
 Return = namedtuple("Return", ["quantized", "indices", "entropy_aux_loss"])
 
 LossBreakdown = namedtuple(
-    "LossBreakdown", ["per_sample_entropy", "batch_entropy", "commitment"]
+    "LossBreakdown",
+    ["per_sample_entropy", "batch_entropy", "commitment", "indices", "q_loss"],
 )
 
 # distributed helpers
@@ -275,7 +276,7 @@ class LFQ(Module):
         self,
         x,
         inv_temperature=100.0,
-        return_loss_breakdown=False,
+        return_loss_breakdown=True,
         mask=None,
     ):
         """
@@ -481,4 +482,39 @@ class LFQ(Module):
         if not return_loss_breakdown:
             return ret
 
-        return ret, LossBreakdown(per_sample_entropy, codebook_entropy, commit_loss)
+        # use this for loss logs
+        return (
+            x,
+            aux_loss,
+            LossBreakdown(
+                per_sample_entropy, codebook_entropy, commit_loss, indices, aux_loss
+            ),
+        )
+
+
+if __name__ == "__main__":
+    torch.cuda.set_device(1)
+    bsq = LFQ(
+        dim=12,
+        commitment_loss_weight=0.0,
+        num_codebooks=1,
+        spherical=False,
+        channel_first=True,
+        experimental_softplus_entropy_loss=False,
+    ).cuda()
+
+    z = torch.randn(32, 12, 32, 32).cuda()
+    z = F.normalize(z, dim=1)
+
+    zq, loss, loss_breakdown = bsq(z, return_loss_breakdown=True)
+    print(zq.shape)
+    print(loss)
+    print(
+        loss_breakdown.per_sample_entropy,
+        loss_breakdown.batch_entropy,
+        loss_breakdown.commitment,
+    )
+    import time
+
+    time.sleep(20)
+    print(torch.cuda.memory_summary(device=torch.device("cuda:1")))

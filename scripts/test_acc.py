@@ -1,11 +1,30 @@
 import accelerate
+import safetensors
 import torch
-from accelerate.utils import ProjectConfiguration
+from accelerate.utils import load_state_dict
+from safetensors.torch import load_file, save_file
 
-accelerator = accelerate.Accelerator(
-    log_with="tensorboard",
-    project_config=ProjectConfiguration(project_dir="test", logging_dir="test/tenb"),
-)
-accelerator.init_trackers("test")
-track = accelerator.get_tracker("tensorboard")
-track.log({"psnr": 20}, step=1)
+# file_path = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-03-28_02-19-46/cosmos_tokenizer_pos_training/ema/ema.pt"
+# ckpt = load_state_dict(file_path)
+# print(ckpt)
+
+# pass
+
+
+# d = {
+#     # "model_1": {"a": torch.randn(1, 2, 3), "b": torch.randn(1, 2, 3)},
+#     # "model_2": {"c": torch.randn(1, 2, 3), "d": torch.randn(1, 2, 3)},
+#     "a": torch.randn(1, 2, 3), "b": torch.randn(1, 2, 3)
+# }
+
+# save_file(d, "test.safetensors")
+
+
+accelerator = accelerate.Accelerator()
+net = torch.nn.Conv2d(
+    3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False
+).cuda()
+net_c = torch.compile(net)
+
+print(net_c.state_dict().keys())
+print(accelerator.unwrap_model(net_c, keep_torch_compile=False).state_dict().keys())

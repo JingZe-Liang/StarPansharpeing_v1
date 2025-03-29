@@ -116,6 +116,13 @@ class DiT_with_autoenc_cond(DiT):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
+    def get_last_layer(self):
+        return self.final_layer.linear.weight
+
+
+# 256 x256 -> 256 / 512 = 256 / 128
+# --> vq gan: 64/128 (kl, vq)
+
 
 #################################################################################
 #                                   DiT Configs                                  #
@@ -244,29 +251,33 @@ class NestedSampler(nn.Module):
 class DiffuseSlot(nn.Module):
     def __init__(
         self,
+        enable_nest: bool = False,
+        enable_nest_after: int = -1,
+        vae: str | None = "stabilityai/sd-vae-ft-ema",
+        # diffusion or fm kwargs
+        diffusion_type: str = "diffusion",
+        num_sampling_steps: str = "ddim25",
+        fm_sample_type: str | None = "ode",
+        diffusion_options: dict | None = None,
+        fm_options: dict | None = None,
+        # repa
+        use_repa: bool = False,
+        repa_encoder_depth: int = 8,
+        repa_loss_weight: float = 1.0,
+        # models
         encoder: str = "vit_base_patch16",
-        drop_path_rate: float = 0.1,
+        dit_model: str = "DiT-B-4",
         img_channels: int = 8,  # multispectral or hyperspectral images
         enc_img_size: int = 256,
         enc_causal: bool = True,
         num_slots: int = 256,
         slot_dim: int = 16,
         norm_slots: bool = False,
-        enable_nest: bool = False,
-        enable_nest_after: int = -1,
-        vae: str | None = "stabilityai/sd-vae-ft-ema",
-        dit_model: str = "DiT-B-4",
-        diffusion_type: str = "diffusion",
-        num_sampling_steps: str = "ddim25",
-        use_repa: bool = False,
-        repa_encoder_depth: int = 8,
-        repa_loss_weight: float = 1.0,
-        dit_in_channels: int = 16,
+        drop_path_rate: float = 0.1,
         encoder_block_checkpoint: bool = False,
         decoder_block_checkpoint: bool = False,
         compile_model: bool = False,
-        learn_sigma: bool = False,
-        fm_sample_type: str | None = "ode",
+        # quantier
         quantizer_type: str | None = None,
         quantizer_kwargs: dict | None = None,
     ):
@@ -294,28 +305,49 @@ class DiffuseSlot(nn.Module):
                 "sde",
                 "ode",
             ], 'fm_sample_type must be "sde" or "ode"'
+
         if diffusion_type == "diffusion":
-            self.diffusion = create_diffusion(
-                timestep_respacing="", learn_sigma=learn_sigma
-            )
-            self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps)
+            default_diffusion_options = {
+                "timestep_respacing": "",
+                "learn_sigma": False,
+                "predict_xstart": False,
+            }
+
+            _train_diff_opts = default_diffusion_options.copy()
+            if diffusion_options is not None:
+                _train_diff_opts.update(diffusion_options)
+
+            _generate_diff_opts = _train_diff_opts.copy()
+            _generate_diff_opts["timestep_respacing"] = num_sampling_steps
+            self.learn_sigma = learn_sigma = _train_diff_opts.get("learn_sigma", False)
+
+            self.diffusion = create_diffusion(**_train_diff_opts)
+            self.gen_diffusion = create_diffusion(**_generate_diff_opts)
+
         elif diffusion_type == "fm":
-            v = False
-            self.diffusion = create_transport(
-                "Linear", "velocity", train_eps=1e-4, sample_eps=1e-4
-            )
+            self.learn_sigma = learn_sigma = False
+            fm_default_options = {
+                "path_type": "Linear",
+                "prediction": "velocity",
+                "train_eps": 1e-4,
+                "sample_eps": 1e-4,
+            }
+
+            _options = fm_default_options.copy()
+            if fm_options is not None:
+                _options.update(fm_options)
+
+            self.diffusion = create_transport(**_options)
             self.gen_diffusion = Sampler(self.diffusion)
-        else:
-            raise ValueError("diffusion_type must be diffusion or fm")
 
         # * dit decoder ==============
         self.distill_from_pretrained_vae = vae is not None
         if self.distill_from_pretrained_vae:
-            self.encoder_factor = 8 if "mar" not in vae else 16
-            self.dit_input_size = enc_img_size // self.encoder_factor
+            self.encoder_patch_sz = 8 if "mar" not in vae else 16
+            self.dit_input_size = enc_img_size // self.encoder_patch_sz
             self.dit_in_channels = 4 if "mar" not in vae else 16
         else:
-            self.encoder_factor = 16  # fixed 16 patch size
+            self.encoder_patch_sz = 16  # fixed 16 patch size
             self.dit_input_size = enc_img_size
             self.dit_in_channels = img_channels
             decoder_patch_size = int(dit_model[-1])
@@ -338,7 +370,8 @@ class DiffuseSlot(nn.Module):
         elif self.diffusion_type == "diffusion":
             double_out_channel = learn_sigma
 
-        self.dit = DiT_with_autoenc_cond_models[dit_model](  # DiT-L-2
+        z_dim = 768
+        self.decoder = DiT_with_autoenc_cond_models[dit_model](  # DiT-L-2
             input_size=self.dit_input_size,
             in_channels=self.dit_in_channels,
             # slots
@@ -348,11 +381,11 @@ class DiffuseSlot(nn.Module):
             use_repa=use_repa,
             encoder_depth=repa_encoder_depth,
             # zd dim
-            z_dim=768,
+            z_dim=z_dim,
             block_checkpoint=decoder_block_checkpoint,
             learn_sigma=double_out_channel,
         )
-        self.dit: DiT_with_autoenc_cond
+        self.decoder: DiT_with_autoenc_cond
 
         # * pretrained vae ===============
         if self.distill_from_pretrained_vae:
@@ -380,10 +413,10 @@ class DiffuseSlot(nn.Module):
 
         # * compile models =================
         logger.info(f"[Compile]: compile models ...") if compile_model else None
-        self.dit = (
-            torch.compile(self.dit, mode="reduce-overhead")
+        self.decoder = (
+            torch.compile(self.decoder, mode="reduce-overhead")
             if compile_model
-            else self.dit
+            else self.decoder
         )
         self.encoder = (
             torch.compile(self.encoder, mode="reduce-overhead")
@@ -397,16 +430,16 @@ class DiffuseSlot(nn.Module):
 
         # * quantizer ==========
         if not self.distill_from_pretrained_vae:
-            if self.norm_slots:
-                self.norm_slots = False
-                logger.warning(
-                    f"[Quantizer]: norm_slots is True, set to False for any quantizer"
-                )
-
             # attributes
             self.quantizer_type = quantizer_type
             if quantizer_kwargs is None:
                 quantizer_kwargs = {}
+
+            if self.norm_slots:
+                self.norm_slots = quantizer_kwargs.get("pre_quant_norm", False)
+                logger.warning(
+                    f"[Quantizer]: norm_slots is True, set to False for any quantizer"
+                )
 
             # init quantizer
             if quantizer_type == "bsq":
@@ -414,14 +447,14 @@ class DiffuseSlot(nn.Module):
                     embed_dim=slot_dim,
                     l2_norm=True,
                     persample_entropy_compute="analytical",
-                    beta=0.0,
+                    beta=0.0,  # commitment loss
                     gamma=1.0,
                     gamma0=1.0,
                     zeta=1.0,
                     inv_temperature=1.0,
                     cb_entropy_compute="group",
                     input_format="blc",
-                    group_size=1,
+                    group_size=slot_dim // 2,
                 )
                 kwargs = (
                     _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
@@ -430,7 +463,7 @@ class DiffuseSlot(nn.Module):
                 self.bsq_logit_laplace = self.quantizer_kwargs.pop(
                     "logit_laplace", False
                 )
-                if self.bsq_logit_laplace:
+                if self.bsq_logit_laplace:  # no used
                     self.bsq_logt_lap_loss = LogitLaplaceLoss(logit_laplace_eps=0.1)
                     logger.warning(
                         f"[Quantizer]: Logit Laplace Loss is not implemented yet,"
@@ -465,13 +498,14 @@ class DiffuseSlot(nn.Module):
 
         # * summary ================
         logger.info(
-            f"[Diffusion Tokenizer]: decoder_model={dit_model}, tokenizer factor={self.encoder_factor} \n"
+            f"[Diffusion Tokenizer]:\ndecoder_model={dit_model}, tokenizer factor={self.encoder_patch_sz} \n"
             f"decoder image (latent) size={self.dit_input_size} \n"
-            f"decoder patch size={self.dit.patch_size}\n"
+            f"decoder patch size={self.decoder.patch_size}\n"
             f"tokenizer dim={self.dit_in_channels}, num latents={self.num_slots} \n"
             f"encoder causal={self.enc_causal}, encoder={self.encoder.__class__.__name__} \n"
             f"use pretrained vae={self.distill_from_pretrained_vae}\n"
             f"use repa={self.use_repa}, repa_loss_weight={self.repa_loss_weight}\n"
+            f"norm slots={self.norm_slots}\n"
         )
 
     # * ==========================================================
@@ -520,9 +554,7 @@ class DiffuseSlot(nn.Module):
 
         return x
 
-    def encode_slots(
-        self, x
-    ):  # -> tuple[Any | Tensor, Any | Tensor, Any | dict[str, Tensor]]:
+    def encode_slots(self, x):
         # encode and projection
         slots = self.encoder(x, is_causal=self.enc_causal)
         slots = self.encoder2slot(slots)
@@ -545,11 +577,15 @@ class DiffuseSlot(nn.Module):
             quantizer_loss = torch.tensor(0.0).to(x)
             quan_info = {}
 
-        # norm the feature
-        if self.norm_slots and self.quantizer is None:
-            slots_std = torch.std(slots, dim=-1, keepdim=True)
-            slots_mean = torch.mean(slots, dim=-1, keepdim=True)
-            slots = (slots - slots_mean) / slots_std
+        if self.norm_slots:
+            # norm the feature, continuous
+            if self.quantizer is None:
+                slots_std = torch.std(slots, dim=-1, keepdim=True)
+                slots_mean = torch.mean(slots, dim=-1, keepdim=True)
+                slots = (slots - slots_mean) / slots_std
+            # has quantizer, discrete
+            else:
+                slots = F.normalize(slots, dim=-1)
 
         return slots, quantizer_loss, quan_info
 
@@ -594,7 +630,7 @@ class DiffuseSlot(nn.Module):
         if self.diffusion_type == "diffusion":
             t = torch.randint(0, 1000, (x_vae.shape[0],), device=device)
             train_losses_inp = dict(
-                model=self.dit,
+                model=self.decoder,
                 x_start=x_vae,
                 t=t,
                 model_kwargs=model_kwargs,
@@ -602,7 +638,7 @@ class DiffuseSlot(nn.Module):
             )
         else:
             train_losses_inp = dict(
-                model=self.dit,
+                model=self.decoder,
                 x1=x_vae,
                 model_kwargs=model_kwargs,
                 get_pred_x_clean=get_pred_x_clean,
@@ -617,18 +653,18 @@ class DiffuseSlot(nn.Module):
 
         # repa loss: dino feature and dit feature
         if self.use_repa:
-            assert self.dit._repa_hook is not None and z is not None
-            z_tilde = self.dit._repa_hook  # dit features
+            assert self.decoder._repa_hook is not None and z is not None
+            z_from_enc = self.decoder._repa_hook  # dit features
 
-            if z_tilde.shape[1] != z.shape[1]:
-                z_tilde = interpolate_features(z_tilde, z.shape[1])
+            if z_from_enc.shape[1] != z.shape[1]:
+                z_from_enc = interpolate_features(z_from_enc, z.shape[1])
 
             # norm
-            z_tilde = F.normalize(z_tilde, dim=-1)
+            z_from_enc = F.normalize(z_from_enc, dim=-1)
             z = F.normalize(z, dim=-1)
 
             # loss
-            repa_loss = -torch.sum(z_tilde * z, dim=-1)
+            repa_loss = -torch.sum(z_from_enc * z, dim=-1)
             losses["repa_loss"] = repa_loss.mean() * self.repa_loss_weight
         else:
             losses["repa_loss"] = torch.tensor(0.0).to(x_vae)
@@ -672,6 +708,8 @@ class DiffuseSlot(nn.Module):
 
         # losses
         # * decoder and loss
+        # if sample, `losses` is sampled Tensor
+        # else: `losses` is a dict
         losses: dict | torch.Tensor = self.forward_with_latents(
             x_vae,
             slots,
@@ -687,7 +725,7 @@ class DiffuseSlot(nn.Module):
             if get_pred_x_clean:
                 others["pred_x_clean"] = losses.pop("pred_x_clean")
             # update losses
-            losses["quantizer_loss"] = quantizer_loss
+            losses["q_loss"] = quantizer_loss
 
         return losses, others
 
@@ -719,7 +757,7 @@ class DiffuseSlot(nn.Module):
         # sample
         if cfg != 1.0:
             z = torch.cat([z, z], 0)
-            null_slots = self.dit.null_cond.expand(batch_size, -1, -1)
+            null_slots = self.decoder.null_cond.expand(batch_size, -1, -1)
             slots = torch.cat([slots, null_slots], 0)
 
             if drop_mask is not None:
@@ -727,10 +765,10 @@ class DiffuseSlot(nn.Module):
                 drop_mask = torch.cat([drop_mask, null_cond_mask], 0)
 
             model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask, cfg_scale=cfg)
-            sample_fn = self.dit.forward_with_cfg
+            sample_fn = self.decoder.forward_with_cfg
         else:
             model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask)
-            sample_fn = self.dit.forward
+            sample_fn = self.decoder.forward
 
         # * diffusion sampling
         if self.diffusion_type == "diffusion":
@@ -759,6 +797,7 @@ class DiffuseSlot(nn.Module):
                     num_steps=25,
                     atol=1e-4,
                     rtol=1e-4,
+                    progress=True,
                 )
                 samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
 
@@ -776,7 +815,17 @@ class DiffuseSlot(nn.Module):
         super().train(mode)
         if self.distill_from_pretrained_vae:
             self.vae.eval()
+            if hasattr(self, "repa_encoder"):
+                if isinstance(self.repa_encoder, nn.Module):
+                    self.repa_encoder.eval()
         return self
+
+    def eval(self):
+        self.encoder.eval()
+        self.encoder2slot.eval()
+        self.decoder.eval()
+        if isinstance(self.quantizer, nn.Module):
+            self.quantizer.eval()
 
 
 def build_mlp(hidden_size, projector_dim, z_dim):
@@ -846,14 +895,19 @@ if __name__ == "__main__":
         encoder_block_checkpoint=True,
         decoder_block_checkpoint=True,
         diffusion_type="fm",
-        learn_sigma=True,
+        fm_options={
+            "path_type": "Linear",
+            "prediction": "velocity",
+            "train_eps": 1e-4,
+            "sample_eps": 1e-4,
+        },
         compile_model=False,
         quantizer_type=None,
         fm_sample_type="ode",
     ).cuda()
     tokenizer.encoder = tokenizer.encoder.to(torch.bfloat16)
     tokenizer.encoder2slot = tokenizer.encoder2slot.to(torch.bfloat16)
-    tokenizer.dit = tokenizer.dit.to(torch.bfloat16)
+    tokenizer.decoder = tokenizer.decoder.to(torch.bfloat16)
     x = torch.randn(7, 8, 512, 512).cuda().to(torch.bfloat16)
     opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4)
 

@@ -418,7 +418,7 @@ class Decoder(nn.Module):
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
 
-        logging.info(f"[Decoder]: use acheckpoint: {act_checkpoint}")
+        logging.info(f"[Decoder]: use activation checkpoint: {act_checkpoint}")
 
         # UnPatcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
@@ -662,7 +662,7 @@ class DecoderDiff(nn.Module):
         self.out_channels = out_channels
 
         logging.info(
-            f"[Decoder]: use acheckpoint: {act_checkpoint}\n"
+            f"[Decoder]: use activation checkpoint: {act_checkpoint}\n"
             f"diffusion conditioning inject strategy: {diff_cond_inject_strategy}\n"
             f"use_residual_factor: {use_residual_factor}",
         )

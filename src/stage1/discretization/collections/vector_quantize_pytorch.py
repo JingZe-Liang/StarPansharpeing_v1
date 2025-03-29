@@ -930,6 +930,7 @@ LossBreakdown = namedtuple(
         "codebook_diversity",
         "orthogonal_reg",
         "inplace_optimize",
+        "embed_ind",
     ],
 )
 
@@ -1172,7 +1173,7 @@ class VectorQuantize(Module):
         lens=None,
         sample_codebook_temp=None,
         freeze_codebook=False,
-        return_loss_breakdown=False,
+        return_loss_breakdown=True,
         codebook_transform_fn: Callable | None = None,
     ):
         orig_input, input_requires_grad = x, x.requires_grad
@@ -1463,6 +1464,39 @@ class VectorQuantize(Module):
             codebook_diversity_loss,
             orthogonal_reg_loss,
             inplace_optimize_loss,
+            embed_ind,
         )
 
-        return quantize, embed_ind, loss, loss_breakdown
+        return quantize, loss, loss_breakdown
+
+
+if __name__ == "__main__":
+    # test codebook
+    codebook = VectorQuantize(
+        dim=8,
+        codebook_size=4096,
+        heads=1,
+        use_cosine_sim=False,
+        channel_last=False,
+        stochastic_sample_codes=True,
+        learnable_codebook=True,
+        straight_through=False,
+        rotation_trick=True,
+        ema_update=False,
+        accept_image_fmap=True,
+        codebook_diversity_loss_weight=0.0,
+        codebook_diversity_temperature=100.0,
+        orthogonal_reg_weight=0.0,
+        layernorm_after_project_in=False,
+        commitment_weight=0.25,
+        manual_in_place_optimizer_update=True,
+    ).cuda()
+
+    print(list(codebook.parameters())[0].shape)
+    x = torch.randn(1, 8, 32, 32).cuda()
+
+    quantized, loss, loss_bd = codebook(x, return_loss_breakdown=True)
+
+    print(quantized.shape)
+    print(loss)
+    print(loss_bd)

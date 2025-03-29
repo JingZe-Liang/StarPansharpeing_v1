@@ -42,7 +42,7 @@ accelerator:
 
 loss:
   repa_loss_weight: 0.1 # not used
-  quantizer_loss_weight: 0.1
+  quantizer_loss_weight: 1.0
 
 vq_loss:
   _target_: src.stage1.cosmos.losses.gan_loss.loss.VQLPIPSWithDiscriminator

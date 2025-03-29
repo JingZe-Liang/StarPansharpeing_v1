@@ -1,4 +1,3 @@
-import io
 import sys
 import time
 from functools import partial
@@ -12,10 +11,7 @@ import numpy as np
 import PIL.Image as Image
 import torch
 import torch.nn as nn
-import webdataset as wds
-import yaml
 from accelerate import Accelerator
-from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
@@ -48,7 +44,7 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 #                                                |-----> vq (discrete)              --> autoregressive/maskgit
 
 
-class OneDimensionHyperspectralTokenizerTrainer:
+class DiffusiveHyperspectralTokenizerTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.tokenizer_cfg = cfg.tokenizer
@@ -395,15 +391,11 @@ class OneDimensionHyperspectralTokenizerTrainer:
         cfg: float = 1.0,
     ):
         with self.accelerator.autocast():
+            # if not sample: losses has keys
+            # pred_x_clean, diff_loss, quantizer_loss
             if not ema:
-                losses, terms = self.tokenizer.forward(
-                    x,
-                    sample=False,
-                    epoch=self.global_step,
-                    get_pred_x_clean=True,
-                    cfg=cfg,
-                )
-            else:
+                if sample:
+                    self.accelerator.unwrap_model(self.tokenizer).eval()
                 losses, terms = self.tokenizer.forward(
                     x,
                     sample=sample,
@@ -411,6 +403,23 @@ class OneDimensionHyperspectralTokenizerTrainer:
                     get_pred_x_clean=True,
                     cfg=cfg,
                 )
+            else:
+                self.accelerator.unwrap_model(self.ema_tokenizer.ema_model).eval()
+                losses, terms = self.ema_tokenizer.ema_model.forward(
+                    x,
+                    sample=sample,
+                    epoch=self.global_step,
+                    get_pred_x_clean=True,
+                    cfg=cfg,
+                )
+
+        if sample:
+            if ema:
+                self.accelerator.unwrap_model(self.ema_tokenizer.ema_model).train()
+            else:
+                self.accelerator.unwrap_model(self.tokenizer).train()
+
+            assert torch.is_tensor(losses), "if sampled, must output a sampled image"
 
         return losses, terms
 
@@ -418,10 +427,11 @@ class OneDimensionHyperspectralTokenizerTrainer:
         self,
         x,
         recon,
-        last_layer,
         train_tokenizer: bool = True,
         split: str = "train",
         ema: bool = False,
+        q_loss=None,
+        q_loss_break=None,
     ):
         if ema:
             _non_ema_disc = self.vq_loss_fn.discriminator
@@ -431,20 +441,27 @@ class OneDimensionHyperspectralTokenizerTrainer:
 
         # loss
         with self.accelerator.autocast():
-            disc_loss, log_disc = self.vq_loss_fn(
+            disc_train_loss_d, log_disc = self.vq_loss_fn.forward(
                 x,
                 recon,
                 optim_idx,
                 self.global_step,
+                q_loss_total=q_loss,
+                q_loss_breakdown=q_loss_break,
                 last_layer=self.get_last_layer(),
                 split=split,
+                add_prefix=False,
             )
+            if train_tokenizer:
+                loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
+            else:
+                loss = disc_train_loss_d["disc_loss"]
 
         # back
         if ema:
             self.vq_loss_fn.discriminator = _non_ema_disc
 
-        return disc_loss, log_disc
+        return loss, log_disc
 
     def get_global_step(self, mode="train"):
         # TODO: add val state
@@ -528,25 +545,38 @@ class OneDimensionHyperspectralTokenizerTrainer:
         losses: dict,
         terms: dict,
     ):
+        log_losses_from_diffusion = {}
+
+        # losses
         repa_loss_weighted = losses["repa_loss"] * self.loss_cfg.repa_loss_weight
-        quant_loss_weighted = (
-            losses["quantizer_loss"] * self.loss_cfg.quantizer_loss_weight
-        )
+        if not self.use_disc:
+            # process in this if not use discriminator
+            quant_loss_weighted = (
+                losses["quantizer_loss"] * self.loss_cfg.quantizer_loss_weight
+            )
+            log_losses_from_diffusion["q_loss"] = quant_loss_weighted
+        else:
+            # process in discriminator class not in this statement
+            quant_loss_weighted = 0.0
         diffusion_loss = losses["diff_loss"] + repa_loss_weighted + quant_loss_weighted
-        log_losses_from_diffusion = {
-            "train/total_loss": diffusion_loss,
-            "train/diff_loss": losses["diff_loss"],
-            "train/repa_loss": repa_loss_weighted,
-            "train/quantizer_loss": quant_loss_weighted,
-        }
+
+        # log
+        log_losses_from_diffusion.update(
+            {
+                "total_loss": diffusion_loss,
+                "diff_loss": losses["diff_loss"],
+                "repa_loss": repa_loss_weighted,
+            }
+        )
 
         if self.use_disc:
             gen_loss, log_losses = self.forward_discriminator(
                 x,
                 recon,
-                last_layer=self.get_last_layer(which_model="tokenizer"),
                 train_tokenizer=True,
                 split="train",
+                q_loss=losses["q_loss"],
+                q_loss_break=terms["quan_info"],
             )  # l2, ssim, generator loss
             gen_loss += diffusion_loss
             log_losses.update(log_losses_from_diffusion)
@@ -574,7 +604,6 @@ class OneDimensionHyperspectralTokenizerTrainer:
         disc_loss, log_disc = self.forward_discriminator(
             x,
             recon,
-            last_layer=self.get_last_layer(),
             train_tokenizer=False,
             split="train",
         )
@@ -626,7 +655,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
             quan_info = terms["quan_info"]
 
             # loss
-            tokenizer_loss, log_token_loss = self.train_tokenizer_step(
+            tokenizer_loss, log_tokenizer_loss = self.train_tokenizer_step(
                 x, recon, losses, terms
             )
             if self.use_disc:
@@ -644,7 +673,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_tok_losses = self.format_log(log_token_loss=log_token_loss)
+            _log_tok_losses = self.format_log(log_token_loss=log_tokenizer_loss)
             if self.use_disc:
                 _log_disc_losses = self.format_log(log_disc_loss=log_disc_loss)
 
@@ -657,7 +686,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
                 self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", log_token_loss, self.global_step)
+            self.tenb_log_any("metric", log_tokenizer_loss, self.global_step)
             if self.use_disc:
                 self.tenb_log_any("metric", log_disc_loss, self.global_step)
 
@@ -678,7 +707,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
             sampled, _ = self.forward_tokenizer(
                 batch["img"].to(self.device).to(self.dtype),
                 sample=True,
-                ema=True,
+                ema=self.val_cfg.sample_use_ema,
                 cfg=self.val_cfg.sample_cfg,
             )
 
@@ -692,34 +721,41 @@ class OneDimensionHyperspectralTokenizerTrainer:
         ), "At least one of the logs should be provided"
 
         n_round = 3
-        split = "train"
 
         strings = []
         if log_token_loss is not None:
             # perceptual loss is not supported for hyperspectral images
             _log_token = [
-                f'diff_loss: {log_token_loss[f"{split}/diff_loss"]:.{n_round}f}',
-                f'repa_loss: {log_token_loss[f"{split}/repa_loss"]:.{n_round}f}',
-                f'quantizer_loss: {log_token_loss[f"{split}/quantizer_loss"]:.{n_round}f}',
+                f'diff_loss: {log_token_loss["diff_loss"]:.{n_round}f}',
+                f'repa_loss: {log_token_loss["repa_loss"]:.{n_round}f}',
             ]
             if self.use_disc:
                 _log_token_from_disc = [
-                    f'recon_loss: {log_token_loss[f"{split}/reconstruct_loss"]:.{n_round}f}',
-                    f'ssim_loss: {log_token_loss[f"{split}/ssim_loss"]:.{n_round}f}',
-                    f'g_loss: {log_token_loss[f"{split}/g_loss"]:.{n_round}f}',
+                    f'recon_loss: {log_token_loss["reconstruct_loss"]:.{n_round}f}',
+                    f'ssim_loss: {log_token_loss["ssim_loss"]:.{n_round}f}',
+                    f'g_loss: {log_token_loss["g_loss"]:.{n_round}f}',
                 ]
                 _log_token.extend(_log_token_from_disc)
-
+            if self.quantizer_type is not None:
+                _log_q = [
+                    f'quantizer_loss: {log_token_loss["q_loss"]:.{n_round}f}',
+                ]
+                _log_token.extend(_log_q)
             strings.extend(_log_token)
         else:
             _log_disc = [
-                f'disc_loss: {log_disc_loss[f"{split}/disc_loss"]:.{n_round}f}',
-                f'logits_real: {log_disc_loss[f"{split}/logits_real"]:.{n_round}f}',
-                f'logits_fake: {log_disc_loss[f"{split}/logits_fake"]:.{n_round}f}',
-                f'lecam_loss: {log_disc_loss[f"{split}/lecam_loss"]:.{n_round}f}',
-                f'non_saturate_d_loss: {log_disc_loss[f"{split}/non_saturated_d_loss"]:.{n_round}f}',
+                f'disc_loss: {log_disc_loss["disc_loss"]:.{n_round}f}',
+                f'logits_real: {log_disc_loss["logits_real"]:.{n_round}f}',
+                f'logits_fake: {log_disc_loss["logits_fake"]:.{n_round}f}',
+                f'lecam_loss: {log_disc_loss["lecam_loss"]:.{n_round}f}',
             ]
             strings.extend(_log_disc)
+            if "r1_scale" in log_disc_loss:
+                _disc_reg_logs = [
+                    f'r1_scale: {log_disc_loss["r1_scale"]:.{n_round}f}',
+                    f'r1_loss: {log_disc_loss["r1_loss"]:.{n_round}f}',
+                ]
+                strings.extend(_disc_reg_logs)
 
         return " - ".join(strings)
 
@@ -819,36 +855,52 @@ class OneDimensionHyperspectralTokenizerTrainer:
 
     def save_ema(self):
         self.accelerator.wait_for_everyone()
-        ema_path = self.proj_dir / "ema" / "ema.safetensors"
+        ema_path = (
+            self.proj_dir / "ema" / "ema.pt"
+        )  # can not load by safetensors, if is a nested dict
+        assert ema_path.suffix == ".pt", "Only .pt file is supported"
+
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # * is compiled model
         if self.tokenizer_cfg.compile_model:
+            # must unwarp the model by encoder, decoder, quantizer one by one
+            # or it still contains `_orig_module` prefix key
+
             get_state_dict = lambda model: self.accelerator.unwrap_model(
                 model, keep_torch_compile=False
             ).state_dict()
-            ema_model: DiffuseSlot = self.ema_tokenizer.ema_model
+            ema_model: DiffuseSlot | TwoDimDiffusionSlots = (
+                self.accelerator.unwrap_model(
+                    self.ema_tokenizer.ema_model, keep_torch_compile=False
+                )
+            )
             encoder_params = get_state_dict(ema_model.encoder)
-            dit_params = get_state_dict(ema_model.dit)
-            encoder2slot_params = get_state_dict(ema_model.encoder2slot)
-            if ema_model.quantizer is not None:
-                quantizer_params = get_state_dict(ema_model.quantizer)
-            else:
-                quantizer_params = {}
+            decoder_params = get_state_dict(ema_model.decoder)
 
             # tokenizer total params
             tokenizer_params = {
                 "encoder": encoder_params,
-                "dit": dit_params,
-                "encoder2slot": encoder2slot_params,
-                "quantizer": quantizer_params,
+                "decoder": decoder_params,
             }
+            if hasattr(ema_model, "encoder2slot"):
+                encoder2slot_params = get_state_dict(ema_model.encoder2slot)
+                tokenizer_params["encoder2slot"] = encoder2slot_params
+            if ema_model.quantizer is not None:
+                quantizer_params = get_state_dict(ema_model.quantizer)
+                tokenizer_params["quantizer"] = quantizer_params
+
+        # * if not compiled
         else:
             tokenizer_params = self.accelerator.unwrap_model(
                 self.ema_tokenizer.ema_model, keep_torch_compile=False
             ).state_dict()
+
+        # * train state
         counter_params = self.train_state.state_dict()
 
+        # * if has discriminator
         ema_ckpt = dict(
             tokenizer=tokenizer_params,
             counter=counter_params,
@@ -859,28 +911,39 @@ class OneDimensionHyperspectralTokenizerTrainer:
             ).state_dict()
             ema_ckpt["discriminator"] = disc_params
 
+        # * save
         if self.accelerator.is_main_process:
             self.accelerator.save(ema_ckpt, ema_path)
+
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
         self.accelerator.wait_for_everyone()
 
     def load_from_ema(self, ema_path: str, strict: bool = True):
+        # because safetensors does not support nested dict
+        # loading a nested ckpt with extension .safetensors.pt will raise an HeaderTooLarge Error
+        assert ema_path.endswith("pt"), "Only .pt file is supported"
+
+        # load state dict
         ckpt = accelerate.utils.load_state_dict(ema_path)
         tokenizer_params = ckpt["tokenizer"]
         counter_params = ckpt["counter"]
         if self.use_disc:
             disc_params = ckpt["discriminator"]
 
-        # load
-        tokenizer, disc = list(
-            map(
-                self.accelerator.unwrap_model,
-                [self.ema_tokenizer, self.ema_vq_disc],
+        # load into models
+        tokenizer = self.accelerator.unwrap_model(self.tokenizer)
+        tokenizer.encoder.load_state_dict(tokenizer_params["encoder"], strict=strict)
+        tokenizer.decoder.load_state_dict(tokenizer_params["decoder"], strict=strict)
+        if hasattr(tokenizer, "encoder2slot"):
+            tokenizer.encoder2slot.load_state_dict(
+                tokenizer_params["encoder2slot"], strict
             )
-        )
-
-        tokenizer.load_state_dict(tokenizer_params, strict=strict)
+        if tokenizer.quantizer is not None:
+            tokenizer.quantizer.load_state_dict(
+                tokenizer_params["quantizer"], strict=strict
+            )
         if self.use_disc:
+            disc = self.accelerator.unwrap_model(self.vq_loss_fn.discriminator)
             disc.load_state_dict(disc_params, strict=strict)
         self.train_state.load_state_dict(counter_params, strict=strict)
 
@@ -895,7 +958,7 @@ class OneDimensionHyperspectralTokenizerTrainer:
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
-        self.accelerator.load_state(path)
+        self.accelerator.load_state(path, weights_only=False)
         self.accelerator.wait_for_everyone()
 
     def distributed_mean_dict(self, d: dict):
@@ -976,14 +1039,19 @@ class OneDimensionHyperspectralTokenizerTrainer:
         self.accelerator.wait_for_everyone()
 
     def run(self):
+        if self.train_cfg.resume_path is not None:
+            self.resume(self.train_cfg.resume_path)
+        elif self.train_cfg.ema_load_path is not None:
+            self.load_from_ema(self.train_cfg.ema_load_path)
+
         self.train_loop()
 
 
 if __name__ == "__main__":
     # load config
-    hydra.initialize("configs/2d_cosmos_diff", version_base=None)
-    cfg = hydra.compose(config_name="2d_cosmos_no_quantizer")
+    hydra.initialize("configs/1d_tokenizer", version_base=None)
+    cfg = hydra.compose(config_name="1d_tokenizer_no_quantizer")
 
     with logger.catch():
-        trainer = OneDimensionHyperspectralTokenizerTrainer(cfg)
+        trainer = DiffusiveHyperspectralTokenizerTrainer(cfg)
         trainer.run()

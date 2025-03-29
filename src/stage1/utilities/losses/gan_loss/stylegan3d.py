@@ -6,11 +6,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transcoder.models.discriminator.stylegan import (
+
+from .stylegan import (
     FullyConnectedLayer,
     MinibatchStdLayer,
 )
-from transcoder.utils.misc import grad_inspect_hook
+
+
+def grad_inspect_hook(grad, name=None, enabled=True, terminate=False):
+    if enabled:
+        print(f"grad abs mean of {name} is {grad.abs().mean()}")
+        if terminate:
+            exit()
 
 
 class ScaledLeakyReLU(nn.Module):
