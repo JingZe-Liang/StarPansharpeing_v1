@@ -16,8 +16,9 @@ class StepsCounter:
 
     def load_state_dict(self, state_dict):
         for name in self.step_names:
-            assert name in state_dict, f"Key {name} missing in state_dict"
-            setattr(self, f"n_{name}_steps", state_dict[f"n_{name}_steps"])
+            n_ = f"n_{name}_steps"
+            assert n_ in state_dict, f"Key {n_} missing in state_dict"
+            setattr(self, n_, state_dict[n_])
 
     def update(self, name: str, update_n: int = 1):
         n_step = self.get(name)
@@ -35,7 +36,7 @@ class StepsCounter:
     def __setitem__(self, name: str, value: int):
         name_set = f"n_{name}_steps"
         assert hasattr(self, name_set), f"Key {name_set} missing in state_dict"
-        setattr(self, name_set, torch.tensor(value))
+        setattr(self, name_set, value)
 
 
 if __name__ == "__main__":

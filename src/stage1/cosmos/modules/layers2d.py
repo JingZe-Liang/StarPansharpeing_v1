@@ -42,6 +42,20 @@ from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
 
 
+class RMSNorm2d(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim)[None, :, None, None])
+
+    def _norm(self, x):
+        return x * torch.rsqrt(torch.mean(x * x, dim=1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
 class Upsample(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
@@ -1045,13 +1059,13 @@ if __name__ == "__main__":
 
     @func_mem_wrapper
     def test_auto_enc_dec():
-        img_size = 256
+        img_size = 512
         # 1024/4=256
         # 256/2=128
         encoder = Encoder(
             8,
             128,
-            [2, 2, 4],
+            [2, 2, 2, 4],
             2,
             [32],
             0.1,
@@ -1059,12 +1073,12 @@ if __name__ == "__main__":
             16,
             8,
             True,
-            patch_size=4,
+            patch_size=1,
         )
         decoder = Decoder(
             8,
             128,
-            [2, 2, 4],
+            [2, 2, 2, 4],
             2,
             [32],
             0.1,
@@ -1072,15 +1086,15 @@ if __name__ == "__main__":
             16,
             8,
             act_checkpoint=True,
-            patch_size=4,
+            patch_size=1,
         )
         dtype = torch.bfloat16
-        device = torch.device("cuda")
+        device = torch.device("cuda:1")
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
         bs = 4
-        img = torch.randn(bs, 8, 512, 512).to(device, dtype)
+        img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
 
         slots = encoder(img)
         recon = decoder(slots)
@@ -1103,6 +1117,9 @@ if __name__ == "__main__":
             dec_n += p.numel()
 
         print(f"encoder params: {enc_n / 1e6}, dec params: {dec_n / 1e6}")
+        import time
+
+        time.sleep(10)
 
     test_auto_enc_dec()
     # test_diff_enc_dec()

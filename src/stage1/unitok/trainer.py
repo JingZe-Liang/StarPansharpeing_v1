@@ -1,20 +1,20 @@
-import sys
 import math
-import torch
+import sys
 from copy import deepcopy
 from pprint import pformat
 from typing import Callable, Optional, Tuple
-import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
 
-from utils import config, nan, dist
-from utils.optimizer import AmpOptimizer
+import torch
+import torch.nn.functional as F
+from open_clip.loss import ClipLoss
+from torch.nn.parallel import DistributedDataParallel as DDP
+from utils import config, dist, nan
 from utils.diffaug import DiffAug
+from utils.logger import MetricLogger, wandb_log
 from utils.loss import hinge_loss, linear_loss, softplus_loss
 from utils.lpips import LPIPS
 from utils.misc import unwrap_model
-from utils.logger import MetricLogger, wandb_log
-from open_clip.loss import ClipLoss
+from utils.optimizer import AmpOptimizer
 
 
 class Trainer(object):

@@ -3,17 +3,17 @@ dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI16
 config:
   attn_resolutions: [32]
   channels: 128
-  channels_mult: [2, 4, 4]
+  channels_mult: [2, 2, 4, 4]
   dropout: 0.0
   in_channels: ${dataset.channels}
   spatial_compression: 16
   num_res_blocks: 2
   out_channels: ${dataset.channels}
-  resolution: 1024
-  patch_size: 4
+  resolution: 512
+  patch_size: 1
   patch_method: haar
-  latent_channels: 18
-  z_channels: 18
+  latent_channels: 16
+  z_channels: 16
   z_factor: 1
   name: CI
   formulation: AE

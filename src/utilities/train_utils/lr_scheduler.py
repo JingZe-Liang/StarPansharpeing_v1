@@ -11,6 +11,7 @@ def get_cosine_schedule_reduced_restart_with_warmup(
     num_cycles: float = 0.5,
     reduced_factor: float = 2,
     last_epoch: int = -1,
+    min_lr: float = 0.0,
 ) -> torch.optim.lr_scheduler.LambdaLR:
     """
     Cosine annealing learning rate scheduler with warmup.
@@ -23,6 +24,7 @@ def get_cosine_schedule_reduced_restart_with_warmup(
         num_cycles: Number of cycles
         reduced_factor: Factor by which maximum learning rate decreases after each cycle
         last_epoch: The index of last epoch
+        min_lr: Minimum learning rate to decay to
     """
 
     def lr_lambda(current_step: int) -> float:
@@ -36,8 +38,10 @@ def get_cosine_schedule_reduced_restart_with_warmup(
         cycle_progress = (progress * num_cycles) % 1.0
 
         max_lr = 1.0 / (reduced_factor**cycle_num)
-
-        return max_lr * (0.5 * (1.0 + math.cos(math.pi * cycle_progress)))
+        # Modified to decay to min_lr
+        return min_lr + (max_lr - min_lr) * (
+            0.5 * (1.0 + math.cos(math.pi * cycle_progress))
+        )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
@@ -49,6 +53,7 @@ def get_cosine_schedule_reduced_with_warmup(
     num_cycles: float = 0.5,
     reduced_factor: float = 2,
     last_epoch: int = -1,
+    min_lr: float = 0.0,
 ) -> torch.optim.lr_scheduler.LambdaLR:
     """
     Cosine annealing learning rate scheduler with warmup.
@@ -62,6 +67,7 @@ def get_cosine_schedule_reduced_with_warmup(
         num_cycles: Number of cycles
         reduced_factor: Factor by which maximum learning rate decreases after each cycle
         last_epoch: The index of last epoch
+        min_lr: Minimum learning rate to decay to
     """
 
     def lr_lambda(current_step: int) -> float:
@@ -78,15 +84,17 @@ def get_cosine_schedule_reduced_with_warmup(
 
         if cycle_num == 0:
             # 第一个周期直接从max_lr开始余弦下降
-            return max_lr * (0.5 * (1.0 + math.cos(math.pi * cycle_progress)))
+            return min_lr + (max_lr - min_lr) * (
+                0.5 * (1.0 + math.cos(math.pi * cycle_progress))
+            )
         else:
             # 后续周期从max_lr/2缓慢上升到max_lr再下降
             if cycle_progress < 0.5:
-                return max_lr * (
+                return min_lr + (max_lr - min_lr) * (
                     0.5 + 0.5 * math.cos(math.pi * (1 - 2 * cycle_progress))
                 )
             else:
-                return max_lr * (
+                return min_lr + (max_lr - min_lr) * (
                     0.5 * (1 + math.cos(math.pi * (2 * cycle_progress - 1)))
                 )
 
@@ -114,6 +122,7 @@ def __plot_lr_schedule():
         num_training_steps=num_training_steps,
         num_cycles=num_cycles,
         reduced_factor=reduced_factor,
+        min_lr=0.1,
     )
 
     # 计算每个step的学习率

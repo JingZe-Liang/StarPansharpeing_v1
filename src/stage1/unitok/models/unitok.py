@@ -1,12 +1,13 @@
-import timm
-import torch
-import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
 from contextlib import nullcontext
 
-from models.vitamin import GeGluMlp, ViTaminDecoder
+import numpy as np
+import timm
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from models.quant import VectorQuantizerM
+from models.vitamin import GeGluMlp, ViTaminDecoder
 from models.vqvae import AttnProjection
 
 

@@ -1,26 +1,26 @@
 import gc
+import glob
 import os
 import sys
 import time
-import glob
+from functools import partial
+
 import torch
 import wandb
-from functools import partial
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-from trainer import Trainer
-from models import build_unitok, build_discriminator
-from utils import config, misc, dist
-from utils.lpips import LPIPS
-from utils.data import build_clip_transforms, build_vae_transforms, load_data
-from utils.optimizer import build_optimizer
-from utils.visualizer import setup_visualizer
-from utils.scheduler import LRScheduler
-from utils.eval_fid import eval_fid
-from utils.logger import SmoothedValue, MetricLogger, ProfileLogger, wandb_log
-from open_clip.tokenizer import tokenize
+from models import build_discriminator, build_unitok
 from open_clip.loss import ClipLoss
+from open_clip.tokenizer import tokenize
+from torch.nn.parallel import DistributedDataParallel as DDP
+from trainer import Trainer
+from utils import config, dist, misc
+from utils.data import build_clip_transforms, build_vae_transforms, load_data
 from utils.eval_acc import evaluate as eval_clip
+from utils.eval_fid import eval_fid
+from utils.logger import MetricLogger, ProfileLogger, SmoothedValue, wandb_log
+from utils.lpips import LPIPS
+from utils.optimizer import build_optimizer
+from utils.scheduler import LRScheduler
+from utils.visualizer import setup_visualizer
 
 
 def maybe_auto_resume(args: config.Args, pattern="ckpt*.pth"):

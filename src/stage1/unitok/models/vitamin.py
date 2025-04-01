@@ -888,21 +888,21 @@ def count_stage_params(model: nn.Module, prefix="none"):
 
 
 if __name__ == "__main__":
-    # ViTaminDecoder('vitamin_base', img_size=256, patch_size=16)
-    # model = timm.create_model(
-    #     'vitamin_base',
-    #     fc_norm=True,
-    #     drop_rate=0.0,
-    #     num_classes=0,
-    #     global_pool='',
-    #     mlp_layer=GeGluMlp,
-    #     class_token=False,
-    #     reg_tokens=32,
-    #     img_size=256,
-    #     patch_size=1,
-    #     drop_path_rate=0.1,
-    # )
-    # print(model.has_class_token)
-    # print(model.num_prefix_tokens)
-    # print(model.pos_embed.shape)
-    Stem(64, 64)
+    # ViTaminDecoder("vitamin_base", img_size=256, patch_size=16)
+    model = timm.create_model(
+        "vitamin_base",
+        fc_norm=True,
+        drop_rate=0.0,
+        num_classes=0,
+        global_pool="",
+        mlp_layer=GeGluMlp,
+        class_token=False,
+        reg_tokens=32,
+        img_size=256,
+        patch_size=1,
+        drop_path_rate=0.1,
+    )
+    print(model.has_class_token)
+    print(model.num_prefix_tokens)
+    print(model.pos_embed.shape)
+    # Stem(64, 64)

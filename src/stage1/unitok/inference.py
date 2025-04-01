@@ -1,11 +1,12 @@
-import os
-import torch
 import argparse
-from PIL import Image
-from utils.config import Args
+import os
+
+import torch
 from models.unitok import UniTok
+from PIL import Image
+from torchvision.transforms import InterpolationMode, transforms
+from utils.config import Args
 from utils.data import normalize_01_into_pm1
-from torchvision.transforms import transforms, InterpolationMode
 
 
 def save_img(img: torch.Tensor, path):

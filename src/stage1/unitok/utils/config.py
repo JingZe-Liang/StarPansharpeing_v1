@@ -1,12 +1,12 @@
 import os
-import sys
-import torch
 import random
-import numpy as np
-from tap import Tap
-from typing import Optional, Union
+import sys
 from collections import OrderedDict
+from typing import Optional, Union
 
+import numpy as np
+import torch
+from tap import Tap
 from utils import dist
 
 

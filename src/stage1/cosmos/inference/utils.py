@@ -140,7 +140,7 @@ def save_jit_model(
 
     Args:
         model: JIT compiled model loaded onto `config.checkpoint.jit.device`.
-        jit_filepath: The filepath to the JIT-compiled model.
+        jit_filepath: The filepath to the JIT-compiled model.`
     """
     torch.jit.save(model, jit_filepath)
 

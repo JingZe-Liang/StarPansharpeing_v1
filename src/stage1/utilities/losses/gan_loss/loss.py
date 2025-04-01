@@ -9,8 +9,10 @@ from accelerate.state import AcceleratorState, PartialState
 from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
+from pytorch_wavelets import DWTForward
 
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
+from .patchgan_disc_maskbit import NLayerDiscriminatorv2
 from .patchgan_discriminator import NLayerDiscriminator, weights_init
 from .stylegan import StyleGANDiscriminator
 from .stylegan3d import StyleGAN3DDiscriminator
@@ -114,8 +116,6 @@ def non_saturate_gen_loss(logits_fake):
     B = logits_fake.shape[0]
     logits_fake = logits_fake.reshape(B, -1)
     logits_fake = torch.mean(logits_fake, dim=-1)
-    # stable logits
-    logits_fake = torch.clamp(logits_fake, min=-5.0, max=5.0)
 
     gen_loss = torch.mean(
         _sigmoid_cross_entropy_with_logits(
@@ -123,7 +123,7 @@ def non_saturate_gen_loss(logits_fake):
         )
     )
 
-    return gen_loss * 0.5
+    return gen_loss
 
 
 def non_saturate_discriminator_loss(logits_real, logits_fake):
@@ -218,10 +218,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss_weight: float = 1.0,
         img_is_neg1_to_1: bool = True,
         # generator loss
+        reconstruction_loss_type: str | None = "l1",
         reconstruction_weight: float = 1.0,
         gen_loss_weight: float | None = None,
         # quantizer losses
-        quantizer_type: str = "bsq",
+        quantizer_type: str | None = None,
         # other losses
         lecam_loss_weight: float | None = None,
         loss_ssim: bool = False,
@@ -234,6 +235,22 @@ class VQLPIPSWithDiscriminator(nn.Module):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla", "non_saturate"]
         assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", None]
+        assert disc_network_type in [
+            "patchgan",
+            "patchgan_v2",
+            "stylegan",
+            "stylegan3d",
+        ]
+        if force_not_use_recon_loss:
+            assert reconstruction_loss_type in ["l1", "l2", "dwt"]
+
+        # state
+        self.device = PartialState().device
+        self.dtype = {
+            "fp16": torch.float16,
+            "no": torch.float32,
+            "bf16": torch.bfloat16,
+        }[AcceleratorState().mixed_precision]
 
         self.reconstruction_weight = reconstruction_weight
         self.quantizer_type = quantizer_type
@@ -243,13 +260,20 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.discriminator_weight = disc_weight
         self.disc_network_type = disc_network_type
         self.disc_conditional = disc_conditional
-        self.with_ssim = loss_ssim
+        self.use_ssim = loss_ssim
         self.num_frames = num_frames
+        self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
         if force_not_use_recon_loss:
             logger.warning(
                 "[VQ fn loss]: not use reconstruction loss, "
                 "make sure you will compute this main loss elsewhere"
+            )
+
+        # * if is dwt reocn loss
+        if self.reconstruction_loss_type == "dwt":
+            self.dwt = DWTForward(J=1, mode="zero", wave="haar").to(
+                self.device, self.dtype
             )
 
         # * quantizer options
@@ -268,12 +292,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 codebook_enlarge_ratio=3,
                 codebook_enlarge_steps=2000,
             )
-        logger.info(f"[VQ loss]: use quantizer type={quantizer_type}")
+        logger.info(f"[VQ fn loss]: use quantizer type={quantizer_type}")
         self.quantizer_options = quantizer_options or default_quant_opts
         self.vq_options_check()
-
-        # state
-        self.device = PartialState().device
 
         # * perceptual loss
         self.use_perceptual_loss = False
@@ -306,9 +327,18 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 ndf=disc_ndf,
             ).apply(weights_init)
             # spectral norm
-            for layer in self.discriminator.modules():
-                if isinstance(layer, (nn.Conv2d, nn.Linear)):
-                    nn.utils.spectral_norm(layer)
+            # for layer in self.discriminator.modules():
+            #     if isinstance(layer, (nn.Conv2d, nn.Linear)):
+            #         nn.utils.spectral_norm(layer)
+        elif disc_network_type.lower() == "patchgan_v2":  # from maskbit paper
+            self.discriminator = NLayerDiscriminatorv2(
+                num_channels=disc_in_channels,
+                hidden_channels=disc_ndf,
+                num_stages=disc_num_layers,
+                # suggested in the original paper
+                blur_kernel_size=4,
+                blur_resample=True,
+            )
         elif disc_network_type.lower() == "stylegan":
             self.discriminator = StyleGANDiscriminator(
                 0,
@@ -702,6 +732,38 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return log
 
+    def reconstruction_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
+        # recon loss
+        if self.reconstruction_loss_type == "mse":
+            recon_loss = F.mse_loss(inputs, targets)
+        elif self.reconstruction_loss_type == "l1":
+            recon_loss = F.l1_loss(inputs, targets)
+        elif self.reconstruction_loss_type == "dwt":
+            # Haar dwt compuation
+            assert hasattr(self, "dwt"), "dwt mode not found"
+            with torch.autocast(device_type="cuda"):
+                inp_l, inp_h = self.dwt(inputs)
+                tar_l, tar_h = self.dwt(targets)
+
+            # cat along channels
+            inp_dwt = torch.cat([inp_l, *(inp_h[0].unbind(dim=2))], dim=1)
+            tgt_dwt = torch.cat([tar_l, *(tar_h[0].unbind(dim=2))], dim=1)
+
+            # loss
+            # recon_loss = (inp_dwt - tgt_dwt).pow(2).mean()
+            recon_loss = F.l1_loss(inp_dwt, tgt_dwt)
+        else:
+            raise NotImplementedError(
+                f"Reconstruction loss type {self.recon_loss_type} not implemented."
+            )
+
+        if self.ssim_weight > 0.0 and self.use_ssim:
+            ssim_loss = self.ssim_loss(inputs, targets) * self.ssim_weight
+        else:
+            ssim_loss = self.zero
+
+        return dict(recon_loss=recon_loss, ssim_loss=ssim_loss)
+
     def gen_loss(
         self,
         inputs: torch.Tensor,
@@ -721,32 +783,22 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 reconstructions, "(n t) c h w -> n c t h w", t=self.num_frames
             )
 
-        # * generator update
-        if not self.force_not_use_recon_loss:
-            rec_loss = torch.abs(
-                input=inputs.contiguous() - reconstructions.contiguous()
-            )
+        # * construction loss
+        if self.force_not_use_recon_loss:
+            assert outer_recon_loss is not None, "outer_recon_loss is None"
         else:
-            assert outer_recon_loss is not None, "outer_recon_loss should not be None"
-            rec_loss = outer_recon_loss
-
-        # * ssim loss
-        if self.with_ssim:
-            ssim_loss = (
-                self.ssim_loss((inputs + 1) / 2, (reconstructions + 1) / 2)
-                * self.ssim_weight
-            )
-        else:
-            ssim_loss = torch.tensor(0.0).to(inputs)
+            recon_loss_d = self.reconstruction_loss(inputs, reconstructions)
+            recon_loss = recon_loss_d["recon_loss"]
+            ssim_loss = recon_loss_d["ssim_loss"]
 
         # * perceptual loss
-        nll_loss = rec_loss * self.reconstruction_weight
+        nll_loss = recon_loss * self.reconstruction_weight
         if self.use_perceptual_loss:
             p_loss_dict = self.perceptual_loss(inputs, reconstructions)
             percep_loss_ = p_loss_dict["perceptual_loss"]
             gram_loss_ = p_loss_dict["gram_loss"]
             p_loss = percep_loss_ * self.perceptual_weight
-            gram_loss = gram_loss_ * self.gram_weight
+            gram_loss = gram_loss_ * self.perceptual_weight
             nll_loss = nll_loss + p_loss + gram_loss
         else:
             p_loss = self.zero
@@ -775,11 +827,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         g_loss = d_weight * disc_factor * g_loss
 
-        # * nll_loss (L1 + LPIPS) + codebook_loss (entropy_loss) + commitment_loss + g_loss (GAN Loss)
         # basic losses
-        loss = (
-            nll_loss + ssim_loss + g_loss
-        )  # + scale_codebook_loss + loss_break.commitment * self.commit_weight
+        loss = nll_loss + ssim_loss + g_loss
 
         # * quantization losses
         q_loss, q_loss_logs = self.q_loss(q_loss_total, q_loss_breakdown, global_step)
@@ -790,7 +839,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             split=split,
             total_loss=loss,
             nll_loss=nll_loss,
-            reconstruction_loss=rec_loss,
+            reconstruction_loss=recon_loss,
             gen_loss=g_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,

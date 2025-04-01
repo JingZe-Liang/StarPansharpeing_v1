@@ -1,19 +1,17 @@
+import datetime
 import os
 import time
-import wandb
-import torch
-import GPUtil
-import colorama
-import datetime
-import numpy as np
+from collections import defaultdict, deque
 from math import log10
-from collections import deque
-from typing import Dict, List
-import torch.distributed as tdist
-from collections import defaultdict
-from typing import Iterator, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
-from utils import config, misc, dist
+import colorama
+import GPUtil
+import numpy as np
+import torch
+import torch.distributed as tdist
+import wandb
+from utils import config, dist, misc
 
 
 class SmoothedValue(object):
