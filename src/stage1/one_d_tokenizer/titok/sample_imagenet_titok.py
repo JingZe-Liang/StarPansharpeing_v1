@@ -2,19 +2,19 @@
 
 Copyright (2024) Bytedance Ltd. and/or its affiliates
 
-Licensed under the Apache License, Version 2.0 (the "License"); 
-you may not use this file except in compliance with the License. 
-You may obtain a copy of the License at 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0 
+    http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software 
-distributed under the License is distributed on an "AS IS" BASIS, 
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-See the License for the specific language governing permissions and 
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
 limitations under the License.
 
-Reference: 
+Reference:
     https://github.com/facebookresearch/DiT/blob/main/sample_ddp.py
 """
 
@@ -71,8 +71,16 @@ def main():
 
     if rank == 0:
         # downloads from hf
-        hf_hub_download(repo_id="fun-research/TiTok", filename=f"{config.experiment.tokenizer_checkpoint}", local_dir="./")
-        hf_hub_download(repo_id="fun-research/TiTok", filename=f"{config.experiment.generator_checkpoint}", local_dir="./")
+        hf_hub_download(
+            repo_id="fun-research/TiTok",
+            filename=f"{config.experiment.tokenizer_checkpoint}",
+            local_dir="./",
+        )
+        hf_hub_download(
+            repo_id="fun-research/TiTok",
+            filename=f"{config.experiment.generator_checkpoint}",
+            local_dir="./",
+        )
     dist.barrier()
 
     titok_tokenizer = demo_util.get_titok_tokenizer(config)
@@ -93,19 +101,25 @@ def main():
         print(f"Total number of images that will be sampled: {num_fid_samples}")
 
     samples_needed_this_gpu = int(num_fid_samples // dist.get_world_size())
-    assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    assert (
+        samples_needed_this_gpu % n == 0
+    ), "samples_needed_this_gpu must be divisible by the per-GPU batch size"
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
 
-    all_classes = list(range(config.model.generator.condition_num_classes)) * (num_fid_samples // config.model.generator.condition_num_classes)
+    all_classes = list(range(config.model.generator.condition_num_classes)) * (
+        num_fid_samples // config.model.generator.condition_num_classes
+    )
     subset_len = len(all_classes) // world_size
-    all_classes = np.array(all_classes[rank * subset_len: (rank+1)*subset_len], dtype=np.int64)
+    all_classes = np.array(
+        all_classes[rank * subset_len : (rank + 1) * subset_len], dtype=np.int64
+    )
     cur_idx = 0
 
     for _ in pbar:
-        y = torch.from_numpy(all_classes[cur_idx * n: (cur_idx+1)*n]).to(device)
+        y = torch.from_numpy(all_classes[cur_idx * n : (cur_idx + 1) * n]).to(device)
         cur_idx += 1
 
         samples = demo_util.sample_fn(
@@ -117,7 +131,7 @@ def main():
             num_sample_steps=config.model.generator.num_steps,
             guidance_scale=config.model.generator.guidance_scale,
             guidance_decay=config.model.generator.guidance_decay,
-            device=device
+            device=device,
         )
         # Save samples to disk as individual .png files
         for i, sample in enumerate(samples):
@@ -132,6 +146,7 @@ def main():
         print("Done.")
     dist.barrier()
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     main()

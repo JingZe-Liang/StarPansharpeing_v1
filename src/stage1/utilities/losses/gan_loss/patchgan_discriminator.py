@@ -5,7 +5,9 @@ import torch.nn as nn
 
 
 class ActNorm(nn.Module):
-    def __init__(self, num_features, logdet=False, affine=True, allow_reverse_init=False):
+    def __init__(
+        self, num_features, logdet=False, affine=True, allow_reverse_init=False
+    ):
         assert affine
         super().__init__()
         self.logdet = logdet
@@ -18,8 +20,20 @@ class ActNorm(nn.Module):
     def initialize(self, input):
         with torch.no_grad():
             flatten = input.permute(1, 0, 2, 3).contiguous().view(input.shape[1], -1)
-            mean = flatten.mean(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
-            std = flatten.std(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
+            mean = (
+                flatten.mean(1)
+                .unsqueeze(1)
+                .unsqueeze(2)
+                .unsqueeze(3)
+                .permute(1, 0, 2, 3)
+            )
+            std = (
+                flatten.std(1)
+                .unsqueeze(1)
+                .unsqueeze(2)
+                .unsqueeze(3)
+                .permute(1, 0, 2, 3)
+            )
 
             self.loc.data = -mean.to(input.device)
             self.scale.data = 1 / (std + 1e-6).to(input.device)

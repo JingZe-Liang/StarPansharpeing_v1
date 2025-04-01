@@ -400,7 +400,7 @@ class PretokenizedWebDataset(SimpleImageDataset):
             wds.map_dict(
                 image=transform.eval_transform,
                 handler=wds.warn_and_continue,
-            )
+            ),
         ]
 
         # Create train dataset and loader.

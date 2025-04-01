@@ -1,9 +1,10 @@
-used: bsq
-norm_z: true
+used: none
+norm_z: false
+embed_dim: 16
 
 bsq:
   _target_: src.stage1.discretization.collections.bsq.BinarySphericalQuantizer
-  embed_dim: ${tokenizer.config.z_channels}
+  embed_dim: ${quantizer.embed_dim}
   beta: 0.25
   gamma0: 1
   gamma: 1
@@ -17,7 +18,7 @@ bsq:
 
 lfq:
   _target_: src.stage1.discretization.collections.lookup_free_quantization.LFQ
-  dim: ${tokenizer.config.z_channels}
+  dim: ${quantizer.embed_dim}
   commitment_loss_weight: 1.0
   diversity_gamma: 1.0
   num_codebooks: 2
@@ -28,7 +29,7 @@ lfq:
 
 vq_advance:
   _target_: src.stage1.discretization.collections.vector_quantize_pytorch.VectorQuantize
-  dim: ${tokenizer.config.z_channels}
+  dim: ${quantizer.embed_dim}
   codebook_size: 2048
   heads: 1
   use_cosine_sim: false

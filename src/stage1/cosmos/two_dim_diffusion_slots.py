@@ -125,7 +125,7 @@ class TwoDimDiffusionSlots(nn.Module):
             ), "when using kl quantizer, diffusion_type should can not be any diffusion"
         if self.diffusion_type == "fm":
             double_out_channel = False
-            if learn_sigma:
+            if self.learn_sigma:
                 logger.warning(
                     f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True, "
                     "set it to False"
@@ -218,8 +218,11 @@ class TwoDimDiffusionSlots(nn.Module):
         else:
             raise ValueError("quantizer_type must be bsq, kl, or None")
 
+        if quantizer_type is not None:
+            logger.info(f"[Quantizer]: {quantizer_type} quantizer is used")
+
         # * ==========================================================
-        # * repa
+        # * repa loss
 
         self.use_repa = use_repa
         self.repa_loss_weight = repa_loss_weight
@@ -532,11 +535,11 @@ if __name__ == "__main__":
         img_channels=12,
         enc_img_size=512,
         use_repa=False,
-        diffusion_type="diffusion",
+        diffusion_type="fm",
         compile_model=False,
         fm_options=dict(
             path_type="Linear",
-            prediction="x1",
+            prediction="velocity",
             train_eps=1e-4,
             sample_eps=1e-4,
         ),

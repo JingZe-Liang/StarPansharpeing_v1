@@ -327,7 +327,9 @@ class TiTokEncoder(nn.Module):
         )  # shape = [*, grid ** 2 + 1, width]
 
         # * latent
-        latent_tokens = _expand_token(latent_tokens, x.shape[0]).to(x.dtype)  # [bs, n_latent]
+        latent_tokens = _expand_token(latent_tokens, x.shape[0]).to(
+            x.dtype
+        )  # [bs, n_latent]
         latent_tokens = latent_tokens + self.latent_token_positional_embedding.to(
             x.dtype
         )

@@ -1,0 +1,8 @@
+repos:
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: "v0.3.4" # 使用最新版本
+    hooks:
+      - id: ruff
+        args: [--fix] # 自动修复
+        exclude: ^(docs/|tests/) # 可以排除指定文件夹
+      - id: ruff-format

@@ -209,3 +209,50 @@ class VITBSQModel(VITVQModel):
             return h, {}, {}
         quant, loss, info = self.quantizer(h)
         return quant, loss, info
+
+
+if __name__ == "__main__":
+    # Test config from YAML
+    vit_config = {
+        "width": 768,
+        "layers": 12,
+        "heads": 12,
+        "patch_size": 8,
+        "image_size": 256,
+        "mlp_ratio": 4,
+        "drop_rate": 0.0,
+    }
+
+    torch.cuda.set_device(1)
+    # Initialize model with YAML config
+    model = VITBSQModel(
+        vitconfig=vit_config,
+        embed_dim=36,
+        embed_group_size=1,
+        l2_norm=True,
+        persample_entropy_compute="analytical",
+        post_q_l2_norm=True,
+        logit_laplace=False,
+        beta=0.25,
+    ).cuda()
+
+    # Test forward pass
+    x = torch.randn(1, 3, 256, 256).cuda()  # Batch of 1, 3 channels, 256x256
+    dec, loss, info = model(x)
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {dec.shape}")
+    print(f"Loss: {loss}")
+    print(f"Info: {info}")
+
+    # Test encode/decode
+    model.eval()
+    quant, _, _ = model.encode(x, skip_quantize=True)
+    reconstructed = model.decode(quant)
+    print(
+        f"Reconstruction difference: {torch.abs(x - reconstructed).mean().item():.4f}"
+    )
+
+    # Test clamping
+    test_values = torch.tensor([[-1.0, 0.5, 2.0]])
+    clamped = model.clamp(test_values)
+    print(f"Clamping test: {test_values} -> {clamped}")

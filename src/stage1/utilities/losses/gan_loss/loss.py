@@ -9,8 +9,8 @@ from accelerate.state import AcceleratorState, PartialState
 from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
-from lpips import LPIPS
 
+from .hyperspectral_percep_loss import LIPIPSHyperpspectral
 from .patchgan_discriminator import NLayerDiscriminator, weights_init
 from .stylegan import StyleGANDiscriminator
 from .stylegan3d import StyleGAN3DDiscriminator
@@ -114,13 +114,16 @@ def non_saturate_gen_loss(logits_fake):
     B = logits_fake.shape[0]
     logits_fake = logits_fake.reshape(B, -1)
     logits_fake = torch.mean(logits_fake, dim=-1)
+    # stable logits
+    logits_fake = torch.clamp(logits_fake, min=-5.0, max=5.0)
+
     gen_loss = torch.mean(
         _sigmoid_cross_entropy_with_logits(
             labels=torch.ones_like(logits_fake), logits=logits_fake
         )
     )
 
-    return gen_loss
+    return gen_loss * 0.5
 
 
 def non_saturate_discriminator_loss(logits_real, logits_fake):
@@ -208,7 +211,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
         quantizer_options: dict | None = None,
         # perceptual loss
         perceptual_weight: float = 1.0,
-        perceptual_type: str | None = "vgg",
+        perceptual_type: str | None = "resnet",
+        perceptual_groups_to_select: int | float | None = None,  # group on all channels
+        perceptual_loss_on_logits: bool = False,
+        gram_model: str | None = "vgg",
+        gram_loss_weight: float = 1.0,
+        img_is_neg1_to_1: bool = True,
         # generator loss
         reconstruction_weight: float = 1.0,
         gen_loss_weight: float | None = None,
@@ -260,6 +268,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 codebook_enlarge_ratio=3,
                 codebook_enlarge_steps=2000,
             )
+        logger.info(f"[VQ loss]: use quantizer type={quantizer_type}")
         self.quantizer_options = quantizer_options or default_quant_opts
         self.vq_options_check()
 
@@ -267,12 +276,19 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.device = PartialState().device
 
         # * perceptual loss
+        self.use_perceptual_loss = False
         if perceptual_weight > 0 and perceptual_type is not None:
-            if perceptual_type == "vgg":
-                self.perceptual_loss = LPIPS(net="vgg").cuda().eval()
-            # TODO: add resnet perceptual loss used in MaskBit
-            else:
-                raise ValueError(f"Unknown perceptual loss '{perceptual_type}'.")
+            self.use_perceptual_loss = True
+            self.perceptual_loss = LIPIPSHyperpspectral(
+                perceptual_type,
+                group_size=3,
+                num_groups_to_select=perceptual_groups_to_select,
+                padding_mode="repeat",
+                compute_on_logits=perceptual_loss_on_logits,
+                img_is_neg1_to_1=img_is_neg1_to_1,
+                gram_loss_weight=gram_loss_weight,
+                use_gram_model=gram_model,
+            ).cuda()
         self.perceptual_weight = perceptual_weight
 
         # * LeCAM ema loss
@@ -289,6 +305,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 use_actnorm=use_actnorm,
                 ndf=disc_ndf,
             ).apply(weights_init)
+            # spectral norm
+            for layer in self.discriminator.modules():
+                if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                    nn.utils.spectral_norm(layer)
         elif disc_network_type.lower() == "stylegan":
             self.discriminator = StyleGANDiscriminator(
                 0,
@@ -338,6 +358,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "can not compute adaptive loss weight when ",
                 "force_not_use_recon_loss=True and perceptual_weight<0.0",
             )
+
+        # zero buffer
+        self.register_buffer("zero", torch.tensor(0.0), persistent=False)
 
     def calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
         if last_layer is not None:
@@ -622,6 +645,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gen_loss: torch.Tensor,
         ssim_loss: torch.Tensor | None = None,
         percep_loss: torch.Tensor | None = None,
+        gram_loss: torch.Tensor | None = None,
         real_g_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
@@ -637,6 +661,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "reconstruct_loss": reconstruction_loss.detach().mean(),
                 "ssim_loss": ssim_loss.detach().mean(),
                 "perceptual_loss": percep_loss.detach().mean(),
+                "gram_loss": gram_loss.detach().mean(),
                 "d_weight": torch.tensor(0.0),
                 "disc_factor": torch.tensor(0.0),
                 "g_loss": torch.tensor(0.0),
@@ -649,6 +674,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "nll_loss": nll_loss.detach(),
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
                     "perceptual_loss": percep_loss.detach().mean(),
+                    "gram_loss": gram_loss.detach().mean(),
                     "ssim_loss": ssim_loss.detach().mean(),
                     # discriminator loss
                     "d_weight": disc_weight,
@@ -663,6 +689,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 log = {
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
                     "perceptual_loss": percep_loss.detach().mean(),
+                    "gram_loss": gram_loss.detach().mean(),
                     "g_loss": real_g_loss.detach(),
                 }
 
@@ -714,11 +741,16 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * perceptual loss
         nll_loss = rec_loss * self.reconstruction_weight
-        if self.perceptual_weight > 0:
-            p_loss = self.perceptual_loss(inputs, reconstructions)
-            nll_loss = nll_loss + self.perceptual_weight * p_loss
+        if self.use_perceptual_loss:
+            p_loss_dict = self.perceptual_loss(inputs, reconstructions)
+            percep_loss_ = p_loss_dict["perceptual_loss"]
+            gram_loss_ = p_loss_dict["gram_loss"]
+            p_loss = percep_loss_ * self.perceptual_weight
+            gram_loss = gram_loss_ * self.gram_weight
+            nll_loss = nll_loss + p_loss + gram_loss
         else:
-            p_loss = torch.tensor([0.0])
+            p_loss = self.zero
+            gram_loss = self.zero
         nll_loss = torch.mean(nll_loss)
 
         # * (un)conditional gan loss
@@ -762,6 +794,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             gen_loss=g_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,
+            gram_loss=gram_loss,
             real_g_loss=real_g_loss if not self.training else None,
             disc_weight=d_weight,
             quantizer_logs=q_loss_logs,
@@ -806,9 +839,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.disc_factor, global_step, threshold=self.discriminator_iter_start
         )
 
-        # ---------------------------------------------------------------------------------------
-        # Non-Saturate Loss is the Format of GAN Training, for D Loss, We still adopt Hinge Loss
-        # ---------------------------------------------------------------------------------------
+        # * ---------------------------------------------------------------------------------------
+        # * Non-Saturate Loss is the Format of GAN Training, for D Loss, We still adopt Hinge Loss
+        # * ---------------------------------------------------------------------------------------
+
         if self.lecam_loss_weight is not None:
             self.lecam_ema.update(logits_real, logits_fake)
             lecam_loss = lecam_reg(logits_real, logits_fake, self.lecam_ema)
@@ -822,8 +856,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
             disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
             d_loss = disc_factor * disc_loss_out
 
-        # r1 regularization loss
+        # r1 regularization loss from stylegan 2
         # for stablized training
+        """
+        non-sature loss: real logits: +5, fake logits: -5
+        hinge loss: logits_real >> logits_fake; logits_real: (1., 2.), logits_fake: (-1., -2.)
+        """
         if self.disc_reg_freq > 0 and (global_step + 1) % self.disc_reg_freq == 0:
             inputs.requires_grad = True
             logits_real = self.discriminator(inputs.contiguous())

@@ -28,28 +28,23 @@ QUANTIZE_KLASSES = (
     GroupedResidualLFQ,
     ResidualFSQ,
     GroupedResidualFSQ,
-    LatentQuantize
+    LatentQuantize,
 )
 
 # classes
 
+
 class Sequential(Module):
-    def __init__(
-        self,
-        *fns: Module
-    ):
+    def __init__(self, *fns: Module):
         super().__init__()
-        assert sum([int(isinstance(fn, QUANTIZE_KLASSES)) for fn in fns]) == 1, 'this special Sequential must contain exactly one quantizer'
+        assert (
+            sum([int(isinstance(fn, QUANTIZE_KLASSES)) for fn in fns]) == 1
+        ), "this special Sequential must contain exactly one quantizer"
 
         self.fns = ModuleList(fns)
 
-    def forward(
-        self,
-        x,
-        **kwargs
-    ):
+    def forward(self, x, **kwargs):
         for fn in self.fns:
-
             if not isinstance(fn, QUANTIZE_KLASSES):
                 x = fn(x)
                 continue

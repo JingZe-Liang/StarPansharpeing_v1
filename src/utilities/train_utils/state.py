@@ -35,4 +35,13 @@ class StepsCounter:
     def __setitem__(self, name: str, value: int):
         name_set = f"n_{name}_steps"
         assert hasattr(self, name_set), f"Key {name_set} missing in state_dict"
-        setattr(self, name_set, value)
+        setattr(self, name_set, torch.tensor(value))
+
+
+if __name__ == "__main__":
+    sc = StepsCounter(["train", "val"])
+    print(sc.train)
+
+    # accelerator = accelerate.Accelerator()
+
+    # accelerator.save_model(sc, "./")

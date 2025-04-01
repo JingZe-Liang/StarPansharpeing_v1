@@ -4,10 +4,18 @@ from omegaconf import OmegaConf
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
+import sys
 
-@hydra.main(config_path="configs/cosmos", config_name="pos_train")
+sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
+
+
+@hydra.main(
+    config_path="configs/tokenizer_gan",
+    config_name="cosmos_post_train",
+    version_base=None,
+)
 def main(args):
-    print(OmegaConf.to_container(args.dataset, resolve=True))
+    hydra.utils.instantiate(args.vq_loss)
 
 
 main()

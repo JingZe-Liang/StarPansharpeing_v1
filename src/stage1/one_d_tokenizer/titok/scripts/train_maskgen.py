@@ -2,18 +2,19 @@
 
 Copyright (2024) Bytedance Ltd. and/or its affiliates
 
-Licensed under the Apache License, Version 2.0 (the "License"); 
-you may not use this file except in compliance with the License. 
-You may obtain a copy of the License at 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0 
+    http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software 
-distributed under the License is distributed on an "AS IS" BASIS, 
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-See the License for the specific language governing permissions and 
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import math
 import os
 from pathlib import Path
@@ -26,14 +27,21 @@ from omegaconf import OmegaConf
 from utils.logger import setup_logger
 
 from utils.train_utils import (
-    get_config, create_clip_model,
-    create_model_and_loss_module, get_tatitok_tokenizer,
-    create_optimizer, create_lr_scheduler, create_dataloader,
-    auto_resume, save_checkpoint, train_one_epoch_t2i_generator)
+    get_config,
+    create_clip_model,
+    create_model_and_loss_module,
+    get_tatitok_tokenizer,
+    create_optimizer,
+    create_lr_scheduler,
+    create_dataloader,
+    auto_resume,
+    save_checkpoint,
+    train_one_epoch_t2i_generator,
+)
 
 
 def main():
-    workspace = os.environ.get('WORKSPACE', '')
+    workspace = os.environ.get("WORKSPACE", "")
     torch.hub.set_dir(workspace + "/models/hub")
 
     config = get_config()
@@ -61,8 +69,11 @@ def main():
         split_batches=False,
     )
 
-    logger = setup_logger(name="MaskGen", log_level="INFO",
-     output_file=f"{output_dir}/log{accelerator.process_index}.txt")
+    logger = setup_logger(
+        name="MaskGen",
+        log_level="INFO",
+        output_file=f"{output_dir}/log{accelerator.process_index}.txt",
+    )
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -88,15 +99,18 @@ def main():
         raise NotImplementedError
 
     model, ema_model, loss_module = create_model_and_loss_module(
-        config, logger, accelerator, model_type=model_type)
+        config, logger, accelerator, model_type=model_type
+    )
 
     clip_encoder, clip_tokenizer = create_clip_model()
 
-    optimizer, _ = create_optimizer(config, logger, model, loss_module,
-                                    need_discrminator=False)
+    optimizer, _ = create_optimizer(
+        config, logger, model, loss_module, need_discrminator=False
+    )
 
     lr_scheduler, _ = create_lr_scheduler(
-        config, logger, accelerator, optimizer, discriminator_optimizer=None)
+        config, logger, accelerator, optimizer, discriminator_optimizer=None
+    )
 
     train_dataloader, _ = create_dataloader(config, logger, accelerator)
 
@@ -109,22 +123,33 @@ def main():
     if config.training.use_ema:
         ema_model.to(accelerator.device)
 
-    total_batch_size_without_accum = config.training.per_gpu_batch_size * accelerator.num_processes
+    total_batch_size_without_accum = (
+        config.training.per_gpu_batch_size * accelerator.num_processes
+    )
     num_batches = math.ceil(
-        config.experiment.max_train_examples / total_batch_size_without_accum)
+        config.experiment.max_train_examples / total_batch_size_without_accum
+    )
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-    num_update_steps_per_epoch = math.ceil(num_batches / config.training.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        num_batches / config.training.gradient_accumulation_steps
+    )
 
     # Afterwards we recalculate our number of training epochs.
     # Note: We are not doing epoch based training here, but just using this for book keeping and being able to
     # reuse the same training loop with other datasets/loaders.
-    num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
+    num_train_epochs = math.ceil(
+        config.training.max_train_steps / num_update_steps_per_epoch
+    )
 
     # Start training.
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
-    logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
-    logger.info(f"  Instantaneous batch size per gpu = { config.training.per_gpu_batch_size}")
+    logger.info(
+        f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}"
+    )
+    logger.info(
+        f"  Instantaneous batch size per gpu = { config.training.per_gpu_batch_size}"
+    )
     logger.info(f"""  Total train batch size (w. parallel, distributed & accumulation) = {(
         config.training.per_gpu_batch_size *
         accelerator.num_processes *
@@ -133,21 +158,27 @@ def main():
     first_epoch = 0
 
     global_step, first_epoch = auto_resume(
-        config, logger, accelerator, ema_model, num_update_steps_per_epoch,
-        strict=True)
+        config, logger, accelerator, ema_model, num_update_steps_per_epoch, strict=True
+    )
 
     for current_epoch in range(first_epoch, num_train_epochs):
         accelerator.print(f"Epoch {current_epoch}/{num_train_epochs-1} started.")
-        global_step = train_one_epoch_t2i_generator(config, logger, accelerator,
-                            model, ema_model, loss_module,
-                            optimizer,
-                            lr_scheduler,
-                            train_dataloader,
-                            tokenizer,
-                            clip_tokenizer,
-                            clip_encoder,
-                            global_step,
-                            model_type=model_type)
+        global_step = train_one_epoch_t2i_generator(
+            config,
+            logger,
+            accelerator,
+            model,
+            ema_model,
+            loss_module,
+            optimizer,
+            lr_scheduler,
+            train_dataloader,
+            tokenizer,
+            clip_tokenizer,
+            clip_encoder,
+            global_step,
+            model_type=model_type,
+        )
         # Stop training if max steps is reached.
         if global_step >= config.training.max_train_steps:
             accelerator.print(

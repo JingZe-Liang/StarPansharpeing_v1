@@ -82,9 +82,13 @@ def get_cosine_schedule_reduced_with_warmup(
         else:
             # 后续周期从max_lr/2缓慢上升到max_lr再下降
             if cycle_progress < 0.5:
-                return max_lr * (0.5 + 0.5 * math.cos(math.pi * (1 - 2 * cycle_progress)))
+                return max_lr * (
+                    0.5 + 0.5 * math.cos(math.pi * (1 - 2 * cycle_progress))
+                )
             else:
-                return max_lr * (0.5 * (1 + math.cos(math.pi * (2 * cycle_progress - 1))))
+                return max_lr * (
+                    0.5 * (1 + math.cos(math.pi * (2 * cycle_progress - 1)))
+                )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 

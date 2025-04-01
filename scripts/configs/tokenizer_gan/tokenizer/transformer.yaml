@@ -1,5 +1,6 @@
 _target_: src.stage1.two_d_vit_tokenizer.tokenizer.VITBSQModel
 vitconfig:
+  in_channels: ${dataset.channels}
   image_size: 256
   patch_size: 8
   width: 768
@@ -7,11 +8,21 @@ vitconfig:
   heads: 12
   mlp_ratio: 4
   drop_rate: 0.0
-
+dvitconfig:
+  out_channels: ${dataset.channels}
+  image_size: 256
+  patch_size: 8
+  width: 768
+  layers: 12
+  heads: 12
+  mlp_ratio: 4
+  drop_rate: 0.0
 embed_dim: 18
-embed_group_size: 9
+embed_group_size: 1
 l2_norm: True
 persample_entropy_compute: "analytical"
 post_q_l2_norm: True
 logit_laplace: False
-beta: 0.25 # commitment
+beta: 0. # commitment
+selective_checkpointing: true
+clamp_range: [-1, 1]

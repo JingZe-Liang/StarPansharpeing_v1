@@ -41,7 +41,9 @@ def update_fn(
         if c_t_norm > 1.0:
             c_t = c_t / c_t_norm
         exp_avg.mul_(beta1).add_(c_t, alpha=1.0 - beta1)
-        if (mars_type == "mars-adamw") or (mars_type == "mars-shampoo" and not is_grad_2d):
+        if (mars_type == "mars-adamw") or (
+            mars_type == "mars-shampoo" and not is_grad_2d
+        ):
             exp_avg_sq.mul_(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
             bias_correction1 = 1.0 - beta1**step
             bias_correction2 = 1.0 - beta2**step
@@ -94,7 +96,9 @@ def update_fn(
                 .mul(bias_correction1)
             )
         real_update_tmp = (
-            -lr * lr_1d_factor * torch.mul(p.data, weight_decay_1d).add(exp_avg.div(denom))
+            -lr
+            * lr_1d_factor
+            * torch.mul(p.data, weight_decay_1d).add(exp_avg.div(denom))
         )
         p.data.add_(real_update_tmp)
     return exp_avg, exp_avg_sq
@@ -125,7 +129,11 @@ class MARS(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        assert mars_type in ["mars-adamw", "mars-lion", "mars-shampoo"], "MARS type not supported"
+        assert mars_type in [
+            "mars-adamw",
+            "mars-lion",
+            "mars-shampoo",
+        ], "MARS type not supported"
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -260,7 +268,11 @@ class MARS(Optimizer):
                 # pdb.set_trace()
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                 last_grad = state["last_grad"]
-                lr, wd, beta1, beta2 = group["lr"], group["weight_decay"], *group["betas"]
+                lr, wd, beta1, beta2 = (
+                    group["lr"],
+                    group["weight_decay"],
+                    *group["betas"],
+                )
                 if amsgrad:
                     max_exp_avg_sq = state["max_exp_avg_sq"]
                 else:
@@ -292,7 +304,9 @@ class MARS(Optimizer):
                     optimize_1d=self.optimize_1d,
                     lr_1d_factor=self.lr_1d_factor,
                     betas_1d=self.betas_1d,
-                    weight_decay_1d=self.weight_decay if self.optimize_1d else self.weight_decay_1d,
+                    weight_decay_1d=self.weight_decay
+                    if self.optimize_1d
+                    else self.weight_decay_1d,
                 )
                 if self.is_approx:
                     state["last_grad"] = grad

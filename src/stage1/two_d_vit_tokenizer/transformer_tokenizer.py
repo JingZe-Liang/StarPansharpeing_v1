@@ -255,6 +255,7 @@ class Transformer(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
+        in_channels: int,
         image_size: int,
         patch_size: int,
         width: int,
@@ -295,7 +296,7 @@ class TransformerEncoder(nn.Module):
             raise ValueError(f"Unsupported normalization: {norm_layer}")
 
         self.conv1 = nn.Linear(
-            in_features=3 * self.patch_size[0] * self.patch_size[1],
+            in_features=in_channels * self.patch_size[0] * self.patch_size[1],
             out_features=width,
             bias=not ln_pre,
         )
@@ -410,6 +411,7 @@ class TransformerEncoder(nn.Module):
 class TransformerDecoder(nn.Module):
     def __init__(
         self,
+        out_channels: int,
         image_size: int,
         patch_size: int,
         width: int,
@@ -460,7 +462,7 @@ class TransformerDecoder(nn.Module):
             )
             self.conv_out = nn.Linear(
                 in_features=dim_ffn_output,
-                out_features=3
+                out_features=out_channels
                 * self.patch_size[0]
                 * self.patch_size[1]
                 * (1 + logit_laplace),
@@ -469,7 +471,7 @@ class TransformerDecoder(nn.Module):
             self.ffn = nn.Identity()
             self.conv_out = nn.Linear(
                 in_features=width,
-                out_features=3
+                out_features=out_channels
                 * self.patch_size[0]
                 * self.patch_size[1]
                 * (1 + logit_laplace),

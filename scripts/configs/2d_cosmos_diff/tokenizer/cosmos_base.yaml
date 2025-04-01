@@ -3,9 +3,9 @@ tokenizer_cfg:
   attn_resolutions: [32]
   channels: 128
   channels_mult: [2, 4, 4]
-  dropout: 0.1
+  dropout: 0.0
   in_channels: ${dataset.channels}
-  spatial_compression: 8
+  spatial_compression: 16
   num_res_blocks: 2
   out_channels: 12
   resolution: ${dataset.dataset_names_to_img_size[${dataset.used}]}
@@ -31,7 +31,6 @@ img_channels: ${dataset.channels}
 enc_img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
 diffusion_type: fm
 num_sampling_steps: ddim25
-learn_sigma: false
 fm_sample_type: ode
 fm_options:
   path_type: Linear

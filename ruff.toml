@@ -12,7 +12,7 @@ docstring-code-line-length = 20
 [lint]
 # D - Enable all `pydocstyle` rules, limiting to those that adhere to the Pep257 convention enabled via `convention = "pep257"` below
 select = ["E501", "I", "E", "W"]
-ignore = ["E402","D103","I001","E731","E741","D202","D403","E731","E501","PLR0913"]
+ignore = ["E402","D103","I001","E731","E741","D202","D403","E731","E501","PLR0913","W291","E722","W293"]
 
 
 [lint.pylint]

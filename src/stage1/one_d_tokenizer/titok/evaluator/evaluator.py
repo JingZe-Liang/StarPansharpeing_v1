@@ -2,17 +2,17 @@
 
 Copyright (2024) Bytedance Ltd. and/or its affiliates
 
-Licensed under the Apache License, Version 2.0 (the "License"); 
-you may not use this file except in compliance with the License. 
-You may obtain a copy of the License at 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0 
+    http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software 
-distributed under the License is distributed on an "AS IS" BASIS, 
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-See the License for the specific language governing permissions and 
-limitations under the License. 
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 """
 
 import warnings
@@ -26,7 +26,9 @@ import torch.nn.functional as F
 from .inception import get_inception_model
 
 
-def get_covariance(sigma: torch.Tensor, total: torch.Tensor, num_examples: int) -> torch.Tensor:
+def get_covariance(
+    sigma: torch.Tensor, total: torch.Tensor, num_examples: int
+) -> torch.Tensor:
     """Computes covariance of the input tensor.
 
     Args:
@@ -53,7 +55,7 @@ class VQGANEvaluator:
         enable_inception_score: bool = True,
         enable_codebook_usage_measure: bool = False,
         enable_codebook_entropy_measure: bool = False,
-        num_codebook_entries: int = 1024
+        num_codebook_entries: int = 1024,
     ):
         """Initializes VQGAN Evaluator.
 
@@ -100,27 +102,31 @@ class VQGANEvaluator:
         )
         self._rfid_real_sigma = torch.zeros(
             (self._rfid_num_features, self._rfid_num_features),
-            dtype=torch.float64, device=self._device
+            dtype=torch.float64,
+            device=self._device,
         )
         self._rfid_real_total = torch.zeros(
             self._rfid_num_features, dtype=torch.float64, device=self._device
         )
         self._rfid_fake_sigma = torch.zeros(
             (self._rfid_num_features, self._rfid_num_features),
-            dtype=torch.float64, device=self._device
+            dtype=torch.float64,
+            device=self._device,
         )
         self._rfid_fake_total = torch.zeros(
             self._rfid_num_features, dtype=torch.float64, device=self._device
         )
 
         self._set_of_codebook_indices = set()
-        self._codebook_frequencies = torch.zeros((self._num_codebook_entries), dtype=torch.float64, device=self._device)
+        self._codebook_frequencies = torch.zeros(
+            (self._num_codebook_entries), dtype=torch.float64, device=self._device
+        )
 
     def update(
         self,
         real_images: torch.Tensor,
         fake_images: torch.Tensor,
-        codebook_indices: Optional[torch.Tensor] = None
+        codebook_indices: Optional[torch.Tensor] = None,
     ):
         """Updates the metrics with the given images.
 
@@ -147,12 +153,16 @@ class VQGANEvaluator:
             inception_probabilities_fake = F.softmax(inception_logits_fake, dim=-1)
 
         if self._enable_inception_score:
-            probabiliies_sum = torch.sum(inception_probabilities_fake, 0, dtype=torch.float64)
+            probabiliies_sum = torch.sum(
+                inception_probabilities_fake, 0, dtype=torch.float64
+            )
 
             log_prob = torch.log(inception_probabilities_fake + self._is_eps)
             if log_prob.dtype != inception_probabilities_fake.dtype:
                 log_prob = log_prob.to(inception_probabilities_fake)
-            kl_sum = torch.sum(inception_probabilities_fake * log_prob, 0, dtype=torch.float64)
+            kl_sum = torch.sum(
+                inception_probabilities_fake * log_prob, 0, dtype=torch.float64
+            )
 
             self._is_prob_total += probabiliies_sum
             self._is_total_kl_d += kl_sum
@@ -160,11 +170,15 @@ class VQGANEvaluator:
         if self._enable_rfid:
             real_inception_images = (real_images * 255).to(torch.uint8)
             features_real = self._inception_model(real_inception_images)
-            if (features_real['2048'].shape[0] != features_fake['2048'].shape[0] or
-                features_real['2048'].shape[1] != features_fake['2048'].shape[1]):
-                raise ValueError(f"Number of features should be equal for real and fake.")
+            if (
+                features_real["2048"].shape[0] != features_fake["2048"].shape[0]
+                or features_real["2048"].shape[1] != features_fake["2048"].shape[1]
+            ):
+                raise ValueError(
+                    f"Number of features should be equal for real and fake."
+                )
 
-            for f_real, f_fake in zip(features_real['2048'], features_fake['2048']):
+            for f_real, f_fake in zip(features_real["2048"], features_fake["2048"]):
                 self._rfid_real_total += f_real
                 self._rfid_fake_total += f_fake
 
@@ -172,12 +186,15 @@ class VQGANEvaluator:
                 self._rfid_fake_sigma += torch.outer(f_fake, f_fake)
 
         if self._enable_codebook_usage_measure:
-            self._set_of_codebook_indices |= set(torch.unique(codebook_indices, sorted=False).tolist())
+            self._set_of_codebook_indices |= set(
+                torch.unique(codebook_indices, sorted=False).tolist()
+            )
 
         if self._enable_codebook_entropy_measure:
-            entries, counts = torch.unique(codebook_indices, sorted=False, return_counts=True)
+            entries, counts = torch.unique(
+                codebook_indices, sorted=False, return_counts=True
+            )
             self._codebook_frequencies.index_add_(0, entries.int(), counts.double())
-
 
     def result(self) -> Mapping[Text, torch.Tensor]:
         """Returns the evaluation result."""
@@ -192,7 +209,9 @@ class VQGANEvaluator:
             if log_mean_probs.dtype != self._is_prob_total.dtype:
                 log_mean_probs = log_mean_probs.to(self._is_prob_total)
             excess_entropy = self._is_prob_total * log_mean_probs
-            avg_kl_d = torch.sum(self._is_total_kl_d - excess_entropy) / self._num_examples
+            avg_kl_d = (
+                torch.sum(self._is_total_kl_d - excess_entropy) / self._num_examples
+            )
 
             inception_score = torch.exp(avg_kl_d).item()
             eval_score["InceptionScore"] = inception_score
@@ -200,8 +219,12 @@ class VQGANEvaluator:
         if self._enable_rfid:
             mu_real = self._rfid_real_total / self._num_examples
             mu_fake = self._rfid_fake_total / self._num_examples
-            sigma_real = get_covariance(self._rfid_real_sigma, self._rfid_real_total, self._num_examples)
-            sigma_fake = get_covariance(self._rfid_fake_sigma, self._rfid_fake_total, self._num_examples)
+            sigma_real = get_covariance(
+                self._rfid_real_sigma, self._rfid_real_total, self._num_examples
+            )
+            sigma_fake = get_covariance(
+                self._rfid_fake_sigma, self._rfid_fake_total, self._num_examples
+            )
 
             mu_real, mu_fake = mu_real.cpu(), mu_fake.cpu()
             sigma_real, sigma_fake = sigma_real.cpu(), sigma_fake.cpu()
@@ -220,21 +243,33 @@ class VQGANEvaluator:
             tr_covmean = np.trace(covmean)
 
             if not np.isfinite(covmean).all():
-                tr_covmean = np.sum(np.sqrt((
-                    (np.diag(sigma_real) * self._rfid_eps) * (np.diag(sigma_fake) * self._rfid_eps))
-                    / (self._rfid_eps * self._rfid_eps)
-                ))
+                tr_covmean = np.sum(
+                    np.sqrt(
+                        (
+                            (np.diag(sigma_real) * self._rfid_eps)
+                            * (np.diag(sigma_fake) * self._rfid_eps)
+                        )
+                        / (self._rfid_eps * self._rfid_eps)
+                    )
+                )
 
-            rfid = float(diff.dot(diff).item() + torch.trace(sigma_real) + torch.trace(sigma_fake)
+            rfid = float(
+                diff.dot(diff).item()
+                + torch.trace(sigma_real)
+                + torch.trace(sigma_fake)
                 - 2 * tr_covmean
             )
             if torch.isnan(torch.tensor(rfid)) or torch.isinf(torch.tensor(rfid)):
-                warnings.warn("The product of covariance of train and test features is out of bounds.")
+                warnings.warn(
+                    "The product of covariance of train and test features is out of bounds."
+                )
 
             eval_score["rFID"] = rfid
 
         if self._enable_codebook_usage_measure:
-            usage = float(len(self._set_of_codebook_indices)) / self._num_codebook_entries
+            usage = (
+                float(len(self._set_of_codebook_indices)) / self._num_codebook_entries
+            )
             eval_score["CodebookUsage"] = usage
 
         if self._enable_codebook_entropy_measure:

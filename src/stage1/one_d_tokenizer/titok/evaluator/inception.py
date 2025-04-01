@@ -1,11 +1,12 @@
 """This file is for Inception model borrowed from torch metrics / fidelity.
 
 This file may have been modified by Bytedance Ltd. and/or its affiliates (“Bytedance's Modifications”).
-All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates. 
+All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates.
 
 Reference:
     https://github.com/mseitzer/pytorch-fid/blob/master/src/pytorch_fid/inception.py
 """
+
 # Copyright The Lightning team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,8 +25,18 @@ import torch.nn.functional as F
 
 from torch_fidelity.feature_extractor_base import FeatureExtractorBase
 from torch_fidelity.helpers import vassert
-from torch_fidelity.feature_extractor_inceptionv3 import BasicConv2d, InceptionA, InceptionB, InceptionC, InceptionD, InceptionE_1, InceptionE_2
-from torch_fidelity.interpolate_compat_tensorflow import interpolate_bilinear_2d_like_tensorflow1x
+from torch_fidelity.feature_extractor_inceptionv3 import (
+    BasicConv2d,
+    InceptionA,
+    InceptionB,
+    InceptionC,
+    InceptionD,
+    InceptionE_1,
+    InceptionE_2,
+)
+from torch_fidelity.interpolate_compat_tensorflow import (
+    interpolate_bilinear_2d_like_tensorflow1x,
+)
 
 try:
     from torchvision.models.utils import load_state_dict_from_url
@@ -34,16 +45,17 @@ except ImportError:
 
 
 # Note: Compared shasum and models should be the same.
-FID_WEIGHTS_URL = 'https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth'
+FID_WEIGHTS_URL = "https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth"
+
 
 class FeatureExtractorInceptionV3(FeatureExtractorBase):
     INPUT_IMAGE_SIZE = 299
 
     def __init__(
-            self,
-            name,
-            features_list,
-            **kwargs,
+        self,
+        name,
+        features_list,
+        **kwargs,
     ):
         """
         InceptionV3 feature extractor for 2D RGB 24bit images.
@@ -93,7 +105,7 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         self.fc = torch.nn.Linear(2048, 1008)
 
         state_dict = load_state_dict_from_url(FID_WEIGHTS_URL, progress=True)
-        #state_dict = torch.load(FID_WEIGHTS_URL, map_location='cpu')
+        # state_dict = torch.load(FID_WEIGHTS_URL, map_location='cpu')
         self.load_state_dict(state_dict)
 
         self.to(self.feature_extractor_internal_dtype)
@@ -101,8 +113,11 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         self.eval()
 
     def forward(self, x):
-        vassert(torch.is_tensor(x) and x.dtype == torch.uint8, 'Expecting image as torch.Tensor with dtype=torch.uint8')
-        vassert(x.dim() == 4 and x.shape[1] == 3, f'Input is not Bx3xHxW: {x.shape}')
+        vassert(
+            torch.is_tensor(x) and x.dtype == torch.uint8,
+            "Expecting image as torch.Tensor with dtype=torch.uint8",
+        )
+        vassert(x.dim() == 4 and x.shape[1] == 3, f"Input is not Bx3xHxW: {x.shape}")
         features = {}
         remaining_features = self.features_list.copy()
 
@@ -129,9 +144,11 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         x = self.MaxPool_1(x)
         # N x 64 x 73 x 73
 
-        if '64' in remaining_features:
-            features['64'] = F.adaptive_avg_pool2d(x, output_size=(1, 1)).squeeze(-1).squeeze(-1)
-            remaining_features.remove('64')
+        if "64" in remaining_features:
+            features["64"] = (
+                F.adaptive_avg_pool2d(x, output_size=(1, 1)).squeeze(-1).squeeze(-1)
+            )
+            remaining_features.remove("64")
             if len(remaining_features) == 0:
                 return features
 
@@ -142,9 +159,11 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         x = self.MaxPool_2(x)
         # N x 192 x 35 x 35
 
-        if '192' in remaining_features:
-            features['192'] = F.adaptive_avg_pool2d(x, output_size=(1, 1)).squeeze(-1).squeeze(-1)
-            remaining_features.remove('192')
+        if "192" in remaining_features:
+            features["192"] = (
+                F.adaptive_avg_pool2d(x, output_size=(1, 1)).squeeze(-1).squeeze(-1)
+            )
+            remaining_features.remove("192")
             if len(remaining_features) == 0:
                 return features
 
@@ -165,9 +184,14 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         x = self.Mixed_6e(x)
         # N x 768 x 17 x 17
 
-        if '768' in remaining_features:
-            features['768'] = F.adaptive_avg_pool2d(x, output_size=(1, 1)).squeeze(-1).squeeze(-1).to(torch.float32)
-            remaining_features.remove('768')
+        if "768" in remaining_features:
+            features["768"] = (
+                F.adaptive_avg_pool2d(x, output_size=(1, 1))
+                .squeeze(-1)
+                .squeeze(-1)
+                .to(torch.float32)
+            )
+            remaining_features.remove("768")
             if len(remaining_features) == 0:
                 return features
 
@@ -183,17 +207,17 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
         x = torch.flatten(x, 1)
         # N x 2048
 
-        if '2048' in remaining_features:
-            features['2048'] = x
-            remaining_features.remove('2048')
+        if "2048" in remaining_features:
+            features["2048"] = x
+            remaining_features.remove("2048")
             if len(remaining_features) == 0:
                 return features
 
-        if 'logits_unbiased' in remaining_features:
+        if "logits_unbiased" in remaining_features:
             x = x.mm(self.fc.weight.T)
             # N x 1008 (num_classes)
-            features['logits_unbiased'] = x
-            remaining_features.remove('logits_unbiased')
+            features["logits_unbiased"] = x
+            remaining_features.remove("logits_unbiased")
             if len(remaining_features) == 0:
                 return features
 
@@ -202,20 +226,20 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
             x = self.fc(x)
             # N x 1008 (num_classes)
 
-        features['logits'] = x
+        features["logits"] = x
         return features
 
     @staticmethod
     def get_provided_features_list():
-        return '64', '192', '768', '2048', 'logits_unbiased', 'logits'
+        return "64", "192", "768", "2048", "logits_unbiased", "logits"
 
     @staticmethod
     def get_default_feature_layer_for_metric(metric):
         return {
-            'isc': 'logits_unbiased',
-            'fid': '2048',
-            'kid': '2048',
-            'prc': '2048',
+            "isc": "logits_unbiased",
+            "fid": "2048",
+            "kid": "2048",
+            "prc": "2048",
         }[metric]
 
     @staticmethod
@@ -225,6 +249,7 @@ class FeatureExtractorInceptionV3(FeatureExtractorBase):
     @staticmethod
     def get_dummy_input_for_compile():
         return (torch.rand([1, 3, 4, 4]) * 255).to(torch.uint8)
+
 
 def get_inception_model():
     model = FeatureExtractorInceptionV3("inception_model", ["2048", "logits_unbiased"])

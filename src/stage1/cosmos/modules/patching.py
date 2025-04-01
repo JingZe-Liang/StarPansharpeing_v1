@@ -169,8 +169,7 @@ class Patcher3D(Patcher):
     def _arrange(self, x):
         xi, xv = torch.split(x, [1, x.shape[2] - 1], dim=2)
         x = torch.cat([xi.repeat_interleave(self.patch_size, dim=2), xv], dim=2)
-        x = rearrange(
-        ).contiguous()
+        x = rearrange().contiguous()
         return x
 
 

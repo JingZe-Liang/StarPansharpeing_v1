@@ -24,6 +24,7 @@ https://github.com/CompVis/stable-diffusion/blob/
 """
 
 import math
+import sys
 from functools import partial
 from typing import Literal
 
@@ -36,6 +37,7 @@ import torch.nn.functional as F
 from loguru import logger as logging
 from torch.utils.checkpoint import checkpoint
 
+sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
 
@@ -328,6 +330,7 @@ class Encoder(nn.Module):
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
+                    logging.info(f"[Encoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
                             block_in,
@@ -485,6 +488,7 @@ class Decoder(nn.Module):
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
+                    logging.info(f"[Decoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
                             block_in,
@@ -677,7 +681,7 @@ class DecoderDiff(nn.Module):
         # z embedding
         self.z_embedding = nn.Conv2d(z_channels, conv_in_ch, 1, 1, 0)
 
-        z_res = resolution // _discard_kwargs.get("spatial_compression", 8)
+        z_res = resolution // spatial_compression
         self.z_shape = (1, z_channels, z_res, z_res)
         curr_res = resolution // decoder_patch_size
         logging.info(
@@ -838,6 +842,11 @@ class DecoderDiff(nn.Module):
         bs = z.shape[0]
         null_cond_interp = self.null_cond
         if null_cond_interp.shape[-2] != z.shape[-2]:
+            if self.training:
+                raise ValueError(
+                    f"null_cond_interp.shape[-2] ({null_cond_interp.shape[-2:]})!= z.shape[-2] ({z.shape[-2:]})"
+                )
+
             null_cond_interp = F.interpolate(
                 null_cond_interp, size=z.shape[-2], mode="bicubic"
             )
@@ -846,7 +855,7 @@ class DecoderDiff(nn.Module):
             drop_ids = torch.rand(bs, 1, 1, 1).to(z) < self.z_cfg_drop
             z = torch.where(
                 drop_ids,
-                self.null_cond.repeat(bs, 1, 1, 1),
+                null_cond_interp.repeat(bs, 1, 1, 1),
                 z,
             )
 
@@ -974,7 +983,7 @@ if __name__ == "__main__":
             0.1,
             512,
             16,
-            8,
+            16,
             True,
             patch_size=4,
         )
@@ -987,7 +996,7 @@ if __name__ == "__main__":
             0.1,
             512,
             16,
-            8,
+            16,
             True,
             diff_cond_inject_strategy="inject_full",
             decoder_patch_size=4,
@@ -1036,6 +1045,9 @@ if __name__ == "__main__":
 
     @func_mem_wrapper
     def test_auto_enc_dec():
+        img_size = 256
+        # 1024/4=256
+        # 256/2=128
         encoder = Encoder(
             8,
             128,
@@ -1043,10 +1055,11 @@ if __name__ == "__main__":
             2,
             [32],
             0.1,
-            1024,
+            img_size,
             16,
             8,
             True,
+            patch_size=4,
         )
         decoder = Decoder(
             8,
@@ -1055,10 +1068,11 @@ if __name__ == "__main__":
             2,
             [32],
             0.1,
-            1024,
+            img_size,
             16,
             8,
             act_checkpoint=True,
+            patch_size=4,
         )
         dtype = torch.bfloat16
         device = torch.device("cuda")
@@ -1090,5 +1104,5 @@ if __name__ == "__main__":
 
         print(f"encoder params: {enc_n / 1e6}, dec params: {dec_n / 1e6}")
 
-    # test_auto_enc_dec()
-    test_diff_enc_dec()
+    test_auto_enc_dec()
+    # test_diff_enc_dec()

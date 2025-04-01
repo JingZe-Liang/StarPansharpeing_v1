@@ -23,9 +23,10 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
-from src.stage1.cosmos.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.cosmos.two_dim_diffusion_slots import TwoDimDiffusionSlots
 from src.stage1.one_d_tokenizer.semanticist.diffuse_slot import DiffuseSlot
+from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
+from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -83,9 +84,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
             ] in [2, 3]
 
         # pretrained tokenizer
-        self.tokenizer: DiffuseSlot | TwoDimDiffusionSlots = hydra.utils.instantiate(
-            cfg.tokenizer
-        )
+        self.tokenizer = hydra.utils.instantiate(cfg.tokenizer)
+        self.tokenizer: DiffuseSlot | TwoDimDiffusionSlots | VITBSQModel | VITVQModel
         self.quantizer_type = self.tokenizer.quantizer_type
         self.quantizer_kwargs = self.tokenizer.quantizer_kwargs
 
@@ -599,7 +599,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
     def train_disc_step(self, x: torch.Tensor, recon: torch.Tensor):
         if not self.use_disc:
-            return
+            return torch.tensor(0.0).to(self.device), {}
 
         disc_loss, log_disc = self.forward_discriminator(
             x,
@@ -700,7 +700,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
             )
 
         if self.global_step % self.train_cfg.log.visualize_every == 0:
-            self.visualize_reconstruction(x, recon, add_step=False)
+            self.visualize_reconstruction(
+                x, recon, add_step=True, img_name="recon/train_recon"
+            )
 
     def val_step(self, batch):
         with torch.no_grad():
@@ -736,12 +738,21 @@ class DiffusiveHyperspectralTokenizerTrainer:
                     f'g_loss: {log_token_loss["g_loss"]:.{n_round}f}',
                 ]
                 _log_token.extend(_log_token_from_disc)
+
+            if self.vq_loss_fn.use_perceptual_loss:
+                _log_percep_loss = [
+                    f"p_loss: {log_token_loss['perceptual_loss']:.{n_round}f}"
+                ]
+                _log_token.extend(_log_percep_loss)
+
             if self.quantizer_type is not None:
                 _log_q = [
                     f'quantizer_loss: {log_token_loss["q_loss"]:.{n_round}f}',
                 ]
                 _log_token.extend(_log_q)
+
             strings.extend(_log_token)
+
         else:
             _log_disc = [
                 f'disc_loss: {log_disc_loss["disc_loss"]:.{n_round}f}',
@@ -846,7 +857,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
             # visualize the last val batch
             self.visualize_reconstruction(
-                sampled, add_step=True, img_name="val_sampled"
+                batch["img"], sampled, add_step=True, img_name="val_sampled/sampled"
             )
 
     def save_state(self):
@@ -863,7 +874,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # * is compiled model
+        # * is compiled model ==============
         if self.tokenizer_cfg.compile_model:
             # must unwarp the model by encoder, decoder, quantizer one by one
             # or it still contains `_orig_module` prefix key
@@ -891,7 +902,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 quantizer_params = get_state_dict(ema_model.quantizer)
                 tokenizer_params["quantizer"] = quantizer_params
 
-        # * if not compiled
+        # * if not compiled ==============
         else:
             tokenizer_params = self.accelerator.unwrap_model(
                 self.ema_tokenizer.ema_model, keep_torch_compile=False
@@ -1025,7 +1036,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
-            img_name = f"step_{str(self.global_step).zfill(6)}_{img_name}.jpg"
+            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
         else:
             img_name = f"{img_name}.jpg"
 
@@ -1049,8 +1060,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
 if __name__ == "__main__":
     # load config
-    hydra.initialize("configs/1d_tokenizer", version_base=None)
-    cfg = hydra.compose(config_name="1d_tokenizer_no_quantizer")
+    hydra.initialize("configs/2d_cosmos_diff", version_base=None)
+    cfg = hydra.compose(config_name="2d_cosmos_no_quantizer")
 
     with logger.catch():
         trainer = DiffusiveHyperspectralTokenizerTrainer(cfg)

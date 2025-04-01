@@ -1,11 +1,12 @@
 """This file contains some base class implementation for models.
 
 This file may have been modified by Bytedance Ltd. and/or its affiliates (“Bytedance's Modifications”).
-All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates. 
+All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates.
 
 Reference:
     https://github.com/huggingface/open-muse/blob/main/muse/modeling_utils.py
 """
+
 import os
 from typing import Union, Callable, Dict, Optional
 
@@ -13,7 +14,6 @@ import torch
 
 
 class BaseModel(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
 
@@ -26,7 +26,7 @@ class BaseModel(torch.nn.Module):
         """Saves a model and its configuration file to a directory.
 
         Args:
-            save_directory: A string or os.PathLike, directory to which to save. 
+            save_directory: A string or os.PathLike, directory to which to save.
                 Will be created if it doesn't exist.
             save_function: A Callable function, the function to use to save the state dictionary.
                 Useful on distributed training like TPUs when one need to replace `torch.save` by
@@ -57,7 +57,7 @@ class BaseModel(torch.nn.Module):
         self,
         pretrained_model_path: Union[str, os.PathLike],
         strict_loading: bool = True,
-        torch_dtype: Optional[torch.dtype] = None
+        torch_dtype: Optional[torch.dtype] = None,
     ):
         r"""Instantiates a pretrained pytorch model from a pre-trained model configuration.
 
@@ -76,7 +76,9 @@ class BaseModel(torch.nn.Module):
         # If pretrained_model_path is a directory, set model_file to the path of the
         # file "pytorch_model.bin" in this directory.
         elif os.path.isdir(pretrained_model_path):
-            pretrained_model_path = os.path.join(pretrained_model_path, "pytorch_model.bin")
+            pretrained_model_path = os.path.join(
+                pretrained_model_path, "pytorch_model.bin"
+            )
             if os.path.isfile(pretrained_model_path):
                 model_file = pretrained_model_path
             else:
@@ -101,7 +103,9 @@ class BaseModel(torch.nn.Module):
         # Set model in evaluation mode to deactivate DropOut modules by default.
         self.eval()
 
-    def num_parameters(self, only_trainable: bool = False, exclude_embeddings: bool = False) -> int:
+    def num_parameters(
+        self, only_trainable: bool = False, exclude_embeddings: bool = False
+    ) -> int:
         """Gets the number of parameters in the module.
 
         Args:
@@ -119,9 +123,18 @@ class BaseModel(torch.nn.Module):
                 if isinstance(module_type, torch.nn.Embedding)
             ]
             non_embedding_parameters = [
-                parameter for name, parameter in self.named_parameters() if name not in embedding_param_names
+                parameter
+                for name, parameter in self.named_parameters()
+                if name not in embedding_param_names
             ]
-            return sum(p.numel() for p in non_embedding_parameters if p.requires_grad or not only_trainable)
+            return sum(
+                p.numel()
+                for p in non_embedding_parameters
+                if p.requires_grad or not only_trainable
+            )
         else:
-            return sum(p.numel() for p in self.parameters() if p.requires_grad or not only_trainable)
-
+            return sum(
+                p.numel()
+                for p in self.parameters()
+                if p.requires_grad or not only_trainable
+            )
