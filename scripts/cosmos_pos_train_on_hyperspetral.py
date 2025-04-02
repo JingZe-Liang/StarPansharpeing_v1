@@ -1193,17 +1193,22 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-if __name__ == "__main__":
-    # load config
-    _key = "unicosmos_f16c16p1"
-    _configs = {
-        "cosmos_sep_f16c16p4": "cosmos_post_train",
-        "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
-    }[_key]
+_key = "unicosmos_f16c16p2"
+_configs = {
+    "cosmos_sep_f16c16p4": "cosmos_post_train",
+    "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
+    "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
+}[_key]
 
-    hydra.initialize("configs/tokenizer_gan", version_base=None)
-    cfg = hydra.compose(config_name=_configs)
 
+@hydra.main(
+    config_path="configs/tokenizer_gan", config_name=_configs, version_base=None
+)
+def main(cfg):
     with logger.catch():
         trainer = CosmosHyperspectralTokenizerTrainer(cfg)
         trainer.run()
+
+
+if __name__ == "__main__":
+    main()

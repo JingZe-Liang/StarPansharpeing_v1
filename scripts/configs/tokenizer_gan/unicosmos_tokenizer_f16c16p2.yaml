@@ -1,0 +1,116 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - _self_
+  # tokenizer ==========
+  - dataset: hyperspectral
+  - tokenizer: uni_cosmos_f16c16p2
+  - quantizer: quant
+  - accelerator: base
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+vq_loss:
+  _target_: src.stage1.utilities.VQLPIPSWithDiscriminator
+  disc_network_type: patchgan_v2
+  disc_ndf: 128
+  use_actnorm: false
+  disc_input_size: ${dataset.img_size}
+  disc_in_channels: ${dataset.channels}
+  # perceptual
+  perceptual_weight: 0.1
+  perceptual_type: resnet
+  perceptual_groups_to_select: null
+  perceptual_loss_on_logits: false
+  gram_model: null
+  gram_loss_weight: 1.0
+  # ssim loss
+  loss_ssim: true
+  ssim_weight: 0.1
+  # lecam
+  lecam_loss_weight: 0.001
+  # recon loss
+  reconstruction_weight: 4.0
+  reconstruction_loss_type: l1
+  force_not_use_recon_loss: false # compute the reconstruction loss outside
+  # gen and disc losses
+  gen_loss_weight: null
+  disc_weight: 0.02
+  disc_start: 0
+  disc_reg_r1: 10
+  disc_reg_freq: 0 # 0 means disabled
+  disc_loss: non_saturate
+  # quantizer
+  quantizer_type: null
+  quantizer_options:
+    quantizer_loss_weight: 0.1
+    codebook_enlarge_ratio: 3.0
+    codebook_enlarge_steps: 2000
+
+ema:
+  beta: 0.99
+  update_after_step: 1000
+  update_every: 2
+
+train:
+  proj_dir: runs/stage1_cosmos/
+  finetune_strategy: finetune_all
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 200_000
+  save_every: 500
+  seperate_enc_dec: false
+  resume_path:
+  ema_load_path: #/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-02_02-15-54/cosmos_tokenizer_pos_training/ema
+
+  tokenizer_optimizer:
+    _target_: src.utilities.optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    eps: 1.0e-8
+
+  disc_optimizer:
+    _target_: src.utilities.optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    eps: 1.0e-8
+    betas: [0.8, 0.95]
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 3
+    reduced_factor: 2
+    min_lr: 2.0e-5
+
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 3
+    reduced_factor: 2
+    min_lr: 2.0e-5
+
+  log:
+    run_comment: unicosmos_f16c16p2
+    log_with_time: True
+    visualize_every: 200
+    log_every: 10
+
+  debug: false
+
+val:
+  val_duration: 1000
+  max_val_iters: 4 # val only `max_val_iters` batches

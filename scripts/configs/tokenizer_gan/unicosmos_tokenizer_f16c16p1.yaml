@@ -36,7 +36,7 @@ vq_loss:
   lecam_loss_weight: 0.001
   # recon loss
   reconstruction_weight: 4.0
-  reconstruction_loss_type: dwt
+  reconstruction_loss_type: l1
   force_not_use_recon_loss: false # compute the reconstruction loss outside
   # gen and disc losses
   gen_loss_weight: null
@@ -73,14 +73,14 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.mars.MARS
     _partial_: true
-    lr: 2.0e-4
+    lr: 3.0e-4
     weight_decay: 1.0e-6
     eps: 1.0e-8
 
   disc_optimizer:
     _target_: src.utilities.optim.mars.MARS
     _partial_: true
-    lr: 2.0e-4
+    lr: 3.0e-4
     weight_decay: 1.0e-6
     eps: 1.0e-8
     betas: [0.8, 0.95]

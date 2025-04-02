@@ -23,9 +23,10 @@ We are cooking the codes, stay tuned.
 ## TODO
 1. add dino v2 discriminator from UniTok
 2. add SANA linear attention triton kernels
-3. cook diffusion tokenizer (maybe diffusion timestep t cost the model capacity ??)
+3. cook diffusion tokenizer (maybe diffusion timestep $t$ cost the model capacity ??)
 4. cook discrete tokenizer
 5. add thera (antialias neural heat field) code into encoder (maybe decoder, both?)
+6. add CAMEL optimizer from SANA
 
 
 ## Contributors
