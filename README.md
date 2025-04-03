@@ -22,11 +22,15 @@ We are cooking the codes, stay tuned.
 
 ## TODO
 1. add dino v2 discriminator from UniTok
-2. add SANA linear attention triton kernels
+2. add SANA triton kernels (~~triton rms~~, triton attention)
 3. cook diffusion tokenizer (maybe diffusion timestep $t$ cost the model capacity ??)
-4. cook discrete tokenizer
-5. add thera (antialias neural heat field) code into encoder (maybe decoder, both?)
-6. add CAMEL optimizer from SANA
+4. add thera (antialias neural heat field) code into encoder (maybe decoder, both?)
+5. ~~add CAMEL optimizer from SANA~~
+6. cook discrete tokenizer (**maybe later, it is hard to cook**)
+
+## Checks
+- [ ] Check using the pretrained Cosmos tokenizer on RGB images, whether it will cause the reconstructed image to be blurry.
+
 
 
 ## Contributors

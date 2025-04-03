@@ -120,7 +120,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def setup_tokenizer(self):
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = cfg.vq_loss.quantizer_type
+        self.quantizer_type: str | None = self.cfg.vq_loss.quantizer_type
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
         if self.train_cfg.seperate_enc_dec:
@@ -130,7 +130,7 @@ class CosmosHyperspectralTokenizerTrainer:
             tokenizer_config = to_cont(self.tokenizer_cfg.config)
             self.tokenizer_encoder, self._enc_model_mody_keys = (
                 load_jit_model_shape_matched(
-                    cfg.tokenizer.enc_path,
+                    self.cfg.tokenizer.enc_path,
                     tokenizer_config,
                     device=self.device,
                     part="encoder",
@@ -138,7 +138,7 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.tokenizer_decoder, self._dec_model_mody_keys = (
                 load_jit_model_shape_matched(
-                    cfg.tokenizer.dec_path,
+                    self.cfg.tokenizer.dec_path,
                     tokenizer_config,
                     device=self.device,
                     part="decoder",
@@ -150,15 +150,15 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer_decoder: nn.Module
 
             # quantizer
-            if cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(cfg.quantizer.quant).to(
+            if self.cfg.quantizer.quant is not None:
+                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
                     self.device
                 )
             else:
                 self.quantizer = None
 
             self.use_quantizer = self.quantizer is not None
-            self.norm_z = cfg.quantizer.norm_z
+            self.norm_z = self.cfg.quantizer.norm_z
             if not self.sep_enc_dec:
                 assert (
                     not self.norm_z
@@ -179,7 +179,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
-            self.tokenizer = hydra.utils.instantiate(cfg.tokenizer)
+            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
             self.tokenizer: VITVQModel | VITBSQModel | CosmosTokenizer
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = hasattr(self, "quantizer")
@@ -394,7 +394,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     # performs poor, and still consume GPU mem.
 
                     params = get_tokenizer_params_from_keys(not_pretrained_keys)
-
                 else:
                     raise ValueError(
                         f"Unknown finetune strategy: {self.train_cfg.finetune_strategy}"
@@ -688,9 +687,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return gen_loss, log_losses
 
-    def train_disc_step(self, x: torch.Tensor, recon: torch.Tensor):
+    def train_disc_step(self, x: torch.Tensor, tokenizer_out: dict):
         disc_loss, log_disc = self.forward_discriminator(
-            x, recon, train_tokenizer=False, split="train"
+            x, tokenizer_out, train_tokenizer=False, split="train"
         )
 
         if self.accelerator.sync_gradients:
@@ -740,7 +739,7 @@ class CosmosHyperspectralTokenizerTrainer:
         with self.accelerator.accumulate(*_accum_models):
             out_d = self.forward_tokenizer(x)
 
-            # loss
+            # train tokenizer and discriminator
             tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
             disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
@@ -1193,11 +1192,14 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f16c16p2"
+_key = "cosmos_sep_f8c32p4"
 _configs = {
-    "cosmos_sep_f16c16p4": "cosmos_post_train",
+    "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
+    "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
+    "cosmos_sep_f8c32p4": "cosmos_post_train_f8c32p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
+    "sana_f8c16p1": "cdae_f8c16p1",
 }[_key]
 
 

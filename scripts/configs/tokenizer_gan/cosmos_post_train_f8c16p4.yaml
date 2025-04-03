@@ -4,27 +4,33 @@ hydra:
     dir: .
 
 defaults:
-  - _self_
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: uni_cosmos_f16c16p2
+  - tokenizer: cosmos_pretrained_f8c16p4
   - quantizer: quant
   - accelerator: base
+  # self ============
+  - _self_
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+dataset:
+  dataset_names_to_bs:
+    MMSeg_YREB: 28
+    DCF_2019: 32
+
 vq_loss:
   _target_: src.stage1.utilities.VQLPIPSWithDiscriminator
-  disc_network_type: patchgan
+  disc_network_type: patchgan_v2
   disc_ndf: 128
   use_actnorm: false
   disc_input_size: ${dataset.img_size}
   disc_in_channels: ${dataset.channels}
   # perceptual
   perceptual_weight: 0.1
-  perceptual_type: resnet
+  perceptual_type: vgg
   perceptual_groups_to_select: null
   perceptual_loss_on_logits: false
   gram_model: null
@@ -66,7 +72,7 @@ train:
   visualize_every: 200
   max_steps: 200_000
   save_every: 500
-  seperate_enc_dec: false
+  seperate_enc_dec: true
   resume_path:
   ema_load_path:
 
@@ -83,7 +89,6 @@ train:
     lr: 3.0e-4
     weight_decay: 1.0e-6
     eps: 1.0e-8
-    betas: [0.8, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -104,7 +109,7 @@ train:
     min_lr: 2.0e-5
 
   log:
-    run_comment: unicosmos_f16c16p2
+    run_comment: cosmos_tokenizer_pos_training
     log_with_time: True
     visualize_every: 200
     log_every: 10

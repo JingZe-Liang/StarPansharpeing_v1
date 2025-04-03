@@ -297,7 +297,8 @@ class Encoder(nn.Module):
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
 
-        logging.info(f"[Encoder]: use acheckpoint: {act_checkpoint}")
+        logging.info(f"[Encoder]: use activation checkpoint: {act_checkpoint}")
+        logging.info(f"[Encoder]: z_channels: {z_channels}")
 
         # Patcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
@@ -436,6 +437,7 @@ class Decoder(nn.Module):
         self.num_res_blocks = num_res_blocks
 
         logging.info(f"[Decoder]: use activation checkpoint: {act_checkpoint}")
+        logging.info(f"[Decoder]: z_channels: {z_channels}")
 
         # UnPatcher.
         patch_size = ignore_kwargs.get("patch_size", 1)

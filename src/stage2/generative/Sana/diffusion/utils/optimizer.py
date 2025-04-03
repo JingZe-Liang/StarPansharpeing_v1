@@ -151,8 +151,10 @@ def build_optimizer(model, optimizer_cfg):
 
     if hasattr(model, "module"):
         model = model.module
+
     # set optimizer constructor
     optimizer_cfg.setdefault("constructor", "MyOptimizerConstructor")
+
     # parameter-wise setting: cancel weight decay for some specific modules
     custom_keys = dict()
     for name, module in model.named_modules():
@@ -166,6 +168,7 @@ def build_optimizer(model, optimizer_cfg):
     if given_cfg:
         paramwise_cfg.merge_from_dict(dict(cfg=given_cfg))
     optimizer_cfg["paramwise_cfg"] = paramwise_cfg.cfg
+
     # build optimizer
     optimizer = mm_build_optimizer(model, optimizer_cfg)
 

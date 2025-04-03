@@ -1,0 +1,4 @@
+_target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.DCAE
+cfg:
+  _target_: src.stage1.sana_dcae.ae_model_zoo.create_dc_ae_model_cfg
+  name: dc-ae-f16c16

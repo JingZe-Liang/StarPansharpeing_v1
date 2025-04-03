@@ -33,9 +33,6 @@ import numpy as np
 import pyrallis
 import torch
 from accelerate import Accelerator, InitProcessGroupKwargs, skip_first_batches
-from PIL import Image
-from termcolor import colored
-
 from diffusion import DPMS, FlowEuler, Scheduler
 from diffusion.data.builder import build_dataloader, build_dataset
 from diffusion.data.wids import DistributedRangedSampler
@@ -61,6 +58,8 @@ from diffusion.utils.misc import (
     set_random_seed,
 )
 from diffusion.utils.optimizer import auto_scale_lr, build_optimizer
+from PIL import Image
+from termcolor import colored
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

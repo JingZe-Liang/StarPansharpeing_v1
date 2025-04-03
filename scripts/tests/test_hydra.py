@@ -10,12 +10,14 @@ sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 
 
 @hydra.main(
-    config_path="configs/tokenizer_gan",
-    config_name="cosmos_post_train",
+    config_path="../configs/tokenizer_gan",
+    config_name="cosmos_post_train_f8c32p4",
     version_base=None,
 )
 def main(args):
-    hydra.utils.instantiate(args.vq_loss)
+    # hydra.utils.instantiate(args.vq_loss)
+    # print(args.dataset.batch_size_val)
+    print(hydra.utils.instantiate(args.tokenizer))
 
 
 main()

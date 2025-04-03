@@ -1,0 +1,12 @@
+_target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.DCAE
+cfg:
+  _target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.dc_ae_f8c16
+  name: dc-ae-f8c16
+  pretrained_path: null
+  extra:
+    encoder:
+      act_checkpoint: true
+      in_channels: ${dataset.channels}
+    decoder:
+      act_checkpoint: true
+      in_channels: ${dataset.channels}

@@ -4,16 +4,27 @@ hydra:
     dir: .
 
 defaults:
-  - _self_
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: uni_cosmos_f16c16p2
+  - tokenizer: cosmos_pretrained_f8c16p4 # change c after
   - quantizer: quant
   - accelerator: base
+  # self ============
+  - _self_
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
+
+dataset:
+  dataset_names_to_bs:
+    MMSeg_YREB: 22
+    DCF_2019: 32
+
+tokenizer:
+  config:
+    latent_channels: 32 # c=32
+    z_channels: 32
 
 vq_loss:
   _target_: src.stage1.utilities.VQLPIPSWithDiscriminator
@@ -24,19 +35,19 @@ vq_loss:
   disc_in_channels: ${dataset.channels}
   # perceptual
   perceptual_weight: 0.1
-  perceptual_type: resnet
-  perceptual_groups_to_select: null
+  perceptual_type: convnext_s
+  perceptual_groups_to_select: 0.5
   perceptual_loss_on_logits: false
-  gram_model: null
+  gram_model: vgg
   gram_loss_weight: 1.0
   # ssim loss
   loss_ssim: true
-  ssim_weight: 0.1
+  ssim_weight: 0.
   # lecam
   lecam_loss_weight: 0.001
   # recon loss
   reconstruction_weight: 4.0
-  reconstruction_loss_type: l1
+  reconstruction_loss_type: dwt
   force_not_use_recon_loss: false # compute the reconstruction loss outside
   # gen and disc losses
   gen_loss_weight: null
@@ -66,7 +77,7 @@ train:
   visualize_every: 200
   max_steps: 200_000
   save_every: 500
-  seperate_enc_dec: false
+  seperate_enc_dec: true
   resume_path:
   ema_load_path:
 
@@ -83,14 +94,13 @@ train:
     lr: 3.0e-4
     weight_decay: 1.0e-6
     eps: 1.0e-8
-    betas: [0.8, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
     min_lr: 2.0e-5
 
@@ -99,12 +109,12 @@ train:
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
     min_lr: 2.0e-5
 
   log:
-    run_comment: unicosmos_f16c16p2
+    run_comment: cosmos_tokenizer_f8c32p4
     log_with_time: True
     visualize_every: 200
     log_every: 10

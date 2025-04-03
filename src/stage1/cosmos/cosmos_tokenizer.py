@@ -24,7 +24,9 @@ class ContinuousImageTokenizer(nn.Module):
         self.decoder = Decoder(z_channels=z_channels, **kwargs)
 
         self.quant_conv = nn.Sequential(
-            RMSNorm2d(z_factor * z_channels),
+            RMSNorm2d(z_factor * z_channels)
+            if kwargs.get("norm_in_quant_conv", False)
+            else nn.Identity(),
             torch.nn.Conv2d(z_factor * z_channels, z_factor * latent_channels, 1),
         )
         self.post_quant_conv = torch.nn.Conv2d(latent_channels, z_channels, 1)

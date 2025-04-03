@@ -1,5 +1,7 @@
+import copy
 from typing import Literal
 
+import open_clip
 import torch as th
 import torch.nn as nn
 from loguru import logger
@@ -33,14 +35,17 @@ class LIPIPSHyperpspectral(nn.Module):
 
     def __init__(
         self,
-        model_type: Literal["vgg", "lpips-vgg", "resnet", "convnext_s"],
+        model_type: Literal[
+            "vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"
+        ],
         group_size: int = 3,
         num_groups_to_select: int | None = None,
         padding_mode: Literal["zero", "repeat"] = "zero",
         compute_on_logits: bool = True,
-        img_is_neg1_to_1: bool = False,
+        img_is_neg1_to_1: bool = True,
         use_gram_model: str | None = "vgg",
         gram_loss_weight: float = 1.0,
+        **kwargs,
     ):
         super().__init__()
         self.model_type = model_type
@@ -60,6 +65,9 @@ class LIPIPSHyperpspectral(nn.Module):
 
         # Initialize backbone model
         if model_type in ("vgg", "lpips-vgg"):
+            assert (
+                not compute_on_logits
+            ), "LPIPS-VGG does not support computing on logits"
             if self.use_lpips_vgg:
                 self.model = LPIPS(net="vgg").eval()
             else:
@@ -68,6 +76,7 @@ class LIPIPSHyperpspectral(nn.Module):
         elif model_type == "resnet":
             self.model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
             return_nodes = {
+                "layer1": "features_1",
                 "layer2": "features_2",
                 "layer4": "features_4",
                 "fc": "logits",
@@ -82,6 +91,52 @@ class LIPIPSHyperpspectral(nn.Module):
                 "features.4": "features_4",
                 "classifier": "logits",
             }
+        elif model_type == "remote_clip_RN50":
+            assert (
+                "clip_model_ckpt_path" in kwargs
+            ), "clip_model_ckpt_path must be specified for remote_clip_RN50"
+
+            # Zihan note: this is a bit nasty, because it load the
+            # whole clip model (with ununsed text model) but anyway, it is simple and works fine
+
+            clip, *_ = open_clip.create_model_and_transforms("RN50")
+            clip.load_state_dict(torch.load(kwargs["clip_model_ckpt_path"]))
+            visual = copy.deepcopy(clip.visual).eval()
+            del clip
+
+            class Norm(nn.Module):
+                def __init__(self):
+                    super().__init__()
+
+                def forward(self, x):
+                    return nn.functional.normalize(x, dim=-1)
+
+            # wrap visual model
+            class WrappedClipVisual(nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.body = model
+                    self.final_norm = Norm()
+
+                def forward(self, x):
+                    x = self.body(x)
+                    x = self.final_norm(x)
+                    return x
+
+            self.model = WrappedClipVisual(visual)
+
+            return_nodes = {
+                "body.layer1": "features_1",
+                "body.layer2": "features_2",
+                "body.layer4": "features_4",
+                "final_norm": "logits",
+            }
+        else:
+            raise NotImplementedError(
+                f"Unsupported model type: {model_type}. "
+                "Currently supported types are: vgg, lpips-vgg, resnet, "
+                "convnext_s, remote_clip_RN50"
+            )
 
         if not compute_on_logits and not self.use_lpips_vgg:
             self.model = create_feature_extractor(self.model, return_nodes=return_nodes)
@@ -250,10 +305,10 @@ class LIPIPSHyperpspectral(nn.Module):
     def _preprare_for_percep_model(self, input, target):
         # Resize to 224x224 for pretrained models
         input = th.nn.functional.interpolate(
-            input, size=224, mode="bilinear", align_corners=False
+            input, size=224, mode="bilinear", align_corners=True
         )
         target = th.nn.functional.interpolate(
-            target, size=224, mode="bilinear", align_corners=False
+            target, size=224, mode="bilinear", align_corners=True
         )
 
         # Normalize
@@ -340,7 +395,7 @@ class LIPIPSHyperpspectral(nn.Module):
         else:
             assert (
                 self.num_groups_to_select is None
-            ), "num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
+            ), f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
 
         assert self.use_gram_model in (
             "vgg",
