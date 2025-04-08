@@ -1,0 +1,41 @@
+_target_: src.stage1.one_d_tokenizer.flowmo.models.FlowMo
+width: 6
+config:
+  data:
+    image_size: ${dataset.img_size}
+  model:
+    code_length: 256
+    enc_depth: 8
+    dec_depth: 12
+    patch_size: 8
+    context_dim: 16
+    mup_width: 4
+    enable_cfg: true
+    posttrain_sample: false
+    posttrain_sample_enable_cfg: 1.5
+    posttrain_sample_k: 8
+    enable_mup: false
+    quantization_type: noop
+    enc_mup_width: null
+    decoder_act_checkpoint: true
+    encoder_act_checkpoint: true
+  opt:
+    schedule: "lognormal"
+    use_lpips: true
+  eval:
+    reconstruction: true
+    state_dict_key: "model_ema_state_dict"
+    eval_dir: ""
+    eval_baseline: ""
+    continuous: true
+    force_ckpt_path: null
+    subsample_rate: 1
+    sampling:
+      sample_steps: 25
+      schedule: "pow_0.25"
+      cfg: 1.5
+      mode: "rf"
+      cfg_interval: "(.17,1.02)"
+
+quantizer_type: ${.config.quantization_type}
+quantizer_kwargs: null

@@ -14,18 +14,22 @@ from typing import List, Tuple
 
 import einops
 import torch
+import torch.utils.checkpoint
 from einops import rearrange, repeat
+from loguru import logger
 from mup import MuReadout
-from torch import Tensor, nn
+from torch import Tensor, dtype, nn
 
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 from src.stage1.one_d_tokenizer.FlowMo.flowmo import lookup_free_quantize
 
-MUP_ENABLED = os.getenv("MUP_ENABLED", "False") == "True"
-COMPILE_ENABLED = os.getenv("COMPILE_ENABLED", "False") == "True"
+MUP_ENABLED = False or (os.getenv("MUP_ENABLED", "False") in ("True", "1", "true"))
+COMPILE_ENABLED = False or (
+    os.getenv("COMPILE_ENABLED", "False") in ("True", "1", "true")
+)
 
 if COMPILE_ENABLED:
     may_compiled = torch.compile
+    logger.info('[Model]: "torch.compile" is enabled')
 else:
     import functools
 
@@ -604,7 +608,6 @@ class FlowMo(nn.Module):
         self.encoder = Flux(encoder_params, name="encoder")
         self.decoder = Flux(decoder_params, name="decoder")
 
-    @may_compiled
     def encode(self, img):
         b, c, h, w = img.shape
 
@@ -625,6 +628,7 @@ class FlowMo(nn.Module):
             self.code_length,
             self.patch_size,
         )
+
         pred, _, decode_aux = self.decoder(
             img, img_idxs, code, txt_idxs, timesteps=timesteps
         )
@@ -634,12 +638,22 @@ class FlowMo(nn.Module):
     def decode(self, *args, **kwargs):
         return self._decode(*args, **kwargs)
 
-    @may_compiled
+    # @may_compiled
     def decode_checkpointed(self, *args, **kwargs):
         # Need to compile(checkpoint), not checkpoint(compile)
         assert not kwargs, kwargs
         return torch.utils.checkpoint.checkpoint(
             self._decode,
+            *args,
+            # WARNING: Do not use_reentrant=True with compile, it will silently
+            # produce incorrect gradients!
+            use_reentrant=False,
+        )
+
+    # @may_compiled
+    def encode_checkpointed(self, *args, **kwargs):
+        return torch.utils.checkpoint.checkpoint(
+            self.encode,
             *args,
             # WARNING: Do not use_reentrant=True with compile, it will silently
             # produce incorrect gradients!
@@ -657,6 +671,7 @@ class FlowMo(nn.Module):
         """
         b, t, f = code.shape
         indices = None
+        quan_info = {}
         if self.config.model.quantization_type in ("noop", None):
             quantized = code
             quantizer_loss = torch.tensor(0.0).to(code.device)
@@ -681,7 +696,7 @@ class FlowMo(nn.Module):
                 fg=self.config.model.codebook_size_for_entropy,
             )
 
-            (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
+            (quantized, entropy_aux_loss, indices), quan_info = self.quantizer(
                 code, return_loss_breakdown=True
             )
             assert quantized.shape == code.shape
@@ -689,12 +704,12 @@ class FlowMo(nn.Module):
 
             quantizer_loss = (
                 entropy_aux_loss * self.config.model.entropy_loss_weight
-                + breakdown.commitment * self.config.model.commit_loss_weight
+                + quan_info.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
         else:
             raise NotImplementedError
-        return code, indices, quantizer_loss
+        return code, indices, quantizer_loss, quan_info
 
     def forward(
         self,
@@ -705,13 +720,16 @@ class FlowMo(nn.Module):
     ):
         aux = {}
 
-        code, encode_aux = self.encode(img)
+        if self.config.model.encoder_act_checkpoint:
+            code, encode_aux = self.encode_checkpointed(img)
+        else:
+            code, encode_aux = self.encode(img)
 
         aux["original_code"] = code
 
         b, t, f = code.shape
 
-        code, _, aux["quantizer_loss"] = self._quantize(code)
+        code, _, aux["quantizer_loss"], aux["quan_info"] = self._quantize(code)
 
         mask = torch.ones_like(code[..., :1])  # (b, 1, f)
         code = torch.concatenate([code, mask], axis=-1)  # (b, t, f + 1)
@@ -724,7 +742,10 @@ class FlowMo(nn.Module):
             ]  # (b, 1, 1)
             code = code * cfg_mask
 
-        v_est, decode_aux = self.decode(noised_img, code, timesteps)
+        if self.config.model.decoder_act_checkpoint:
+            v_est, decode_aux = self.decode_checkpointed(noised_img, code, timesteps)
+        else:
+            v_est, decode_aux = self.decode(noised_img, code, timesteps)
         aux.update(decode_aux)
 
         if self.config.model.posttrain_sample:
@@ -765,7 +786,7 @@ class FlowMo(nn.Module):
                 z = z - dt[:, None, None, None] * vc
         return z
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def reconstruct(self, images, dtype=torch.bfloat16, code=None):
         """
         Args:
@@ -782,7 +803,7 @@ class FlowMo(nn.Module):
             if code is None:
                 x = images.cuda()
                 prequantized_code = model.encode(x)[0].cuda()
-                code, _, _ = model._quantize(prequantized_code)
+                code, *_ = model._quantize(prequantized_code)
 
             z = torch.randn((bs, self.image_channels, h, w)).cuda()
 
@@ -933,6 +954,8 @@ if __name__ == "__main__":
             "enable_mup": False,
             "quantization_type": "noop",
             "enc_mup_width": None,
+            "decoder_act_checkpoint": True,
+            "encoder_act_checkpoint": True,
         },
         "opt": {
             "schedule": "lognormal",
@@ -958,9 +981,11 @@ if __name__ == "__main__":
 
     cfg = OmegaConf.create(cfg_dict)
     print(cfg)
+    dtype = torch.bfloat16
 
-    model = FlowMo(4, cfg).cuda()
-    x = torch.randn(1, 3, 256, 256).cuda()
+    torch.cuda.set_device(2)
+    model = FlowMo(4, cfg).cuda().to(dtype)
+    x = torch.randn(8, 3, 512, 512).cuda().to(dtype)
 
     # code, aux = model.encode(x)
     # print(code.shape)
@@ -976,16 +1001,26 @@ if __name__ == "__main__":
     # print(flop_count_table(FlopCountAnalysis(model, (x, x, torch.rand(x.shape[0])))))
 
     # * loss
-    loss, aux = rf_loss(cfg, model=model, batch={"image": x}, aux_state=None)
-    print(loss)
 
-    opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+    # for p in model.encoder.parameters():
+    #     p.requires_grad_(False)
+    # model.encoder.eval()
 
-    opt.zero_grad()
-    loss.backward()
-    opt.step()
+    # opt = torch.optim.AdamW(model.decoder.parameters(), lr=1e-4, foreach=True)
 
-    torch.cuda.memory_summary(device="cuda:0")
+    from src.utilities.optim import CAME8BitWrapper
+
+    opt = CAME8BitWrapper(model.parameters(), lr=1e-4)
+
+    for _ in range(100):
+        with torch.autocast("cuda", dtype):
+            loss, aux = rf_loss(cfg, model=model, batch={"image": x}, aux_state=None)
+        print(loss)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    print(torch.cuda.memory_summary(device="cuda:2"))
 
     # * sample
     # sample = model.reconstruct(x)

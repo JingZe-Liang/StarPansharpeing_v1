@@ -1,0 +1,89 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer
+  - tokenizer: flowmo_t512d16p8
+  - dataset: hyperspectral
+  - vq_loss: remote_clip_RN50
+  - accelerator: base
+  - _self_
+  # hydra overrides
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+loss:
+  repa_loss_weight: 0 # not used
+  quantizer_loss_weight: 1.0
+  lpips_loss: 
+    _target_: src.stage1.utilities.losses.gan_loss.hyperspectral_percep_loss.LIPIPSHyperpspectral
+    model_type: remote_clip_RN50
+    group_size: 3
+    use_gram_model: null
+    compute_on_logits: false
+    num_groups_to_select: 0.5
+
+ema:
+  beta: 0.99
+  update_after_step: 100
+  update_every: 2
+
+train:
+  proj_dir: runs/stage1_1d_tok/
+  finetune_strategy: finetune_all
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 200_000
+  save_every: 1000
+  use_disc: false
+  use_lpips: true
+  resume_path:
+  ema_load_path:
+
+  tokenizer_optimizer:
+    _target_: src.utilities.optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
+
+  disc_optimizer:
+    _target_: src.utilities.optim.mars.MARS
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 4
+    reduced_factor: 2
+
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 4
+    reduced_factor: 2
+
+  log:
+    run_comment: flowmo_no_quant_t512p8
+    log_with_time: true
+    visualize_every: 200
+    log_every: 10
+
+  debug: false
+
+val:
+  sample_cfg: 1.0
+  sample_use_ema: false
+  val_duration: 1000
+  max_val_iters: 4 # val only `max_val_iters` batches

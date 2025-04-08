@@ -18,15 +18,20 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.two_dim_diffusion_slots import TwoDimDiffusionSlots
+from src.stage1.one_d_tokenizer.FlowMo.flowmo.flowmo_tokenizer import FlowMoTokenizer
 from src.stage1.one_d_tokenizer.semanticist.diffuse_slot import DiffuseSlot
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
+from src.stage1.utilities.losses.gan_loss.hyperspectral_percep_loss import (
+    LIPIPSHyperpspectral,
+)
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -55,6 +60,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
         self.use_disc = cfg.train.use_disc
+        self.use_lpips = cfg.train.use_lpips
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
@@ -85,7 +91,13 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # pretrained tokenizer
         self.tokenizer = hydra.utils.instantiate(cfg.tokenizer)
-        self.tokenizer: DiffuseSlot | TwoDimDiffusionSlots | VITBSQModel | VITVQModel
+        self.tokenizer: (
+            DiffuseSlot
+            | TwoDimDiffusionSlots
+            | VITBSQModel
+            | VITVQModel
+            | FlowMoTokenizer
+        )
         self.quantizer_type = self.tokenizer.quantizer_type
         self.quantizer_kwargs = self.tokenizer.quantizer_kwargs
 
@@ -111,6 +123,15 @@ class DiffusiveHyperspectralTokenizerTrainer:
         if self.use_disc:
             self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(
                 cfg.vq_loss
+            )
+            assert hasattr(self.tokenizer, "get_last_layer"), (
+                "Tokenizer should have get_last_layer method when using adversarial loss"
+            )
+
+        # lpips loss
+        if self.use_lpips:
+            self.lpips_loss: LIPIPSHyperpspectral = hydra.utils.instantiate(
+                cfg.loss.lpips_loss
             )
 
         # optimizers and lr schedulers
@@ -510,7 +531,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
     def gradient_check(self, model: nn.Module | None):
         # safe check
-        if model is None:
+        if model is None or getattr(self.train_cfg, "gradient_check", False):
             return
 
         # check nan gradient
@@ -554,11 +575,34 @@ class DiffusiveHyperspectralTokenizerTrainer:
             quant_loss_weighted = (
                 losses["quantizer_loss"] * self.loss_cfg.quantizer_loss_weight
             )
+
+            if "lpips_loss" in losses:
+                # perceptual loss is not supported for hyperspectral images
+                lpips_loss_weighted = (
+                    losses["lpips_loss"] * self.loss_cfg.lpips_loss_weight
+                )
+            elif self.use_lpips:
+                lpips_loss_weighted = (
+                    self.lpips_loss(x, recon) * self.loss_cfg.lpips_loss_weight
+                )
+            else:
+                lpips_loss_weighted = 0.0
+
+            # TODO: repa loss in this trainer or inside the tokenizer class?
+
+            # for logs
             log_losses_from_diffusion["q_loss"] = quant_loss_weighted
         else:
-            # process in discriminator class not in this statement
+            # process in discriminator class, not here
             quant_loss_weighted = 0.0
-        diffusion_loss = losses["diff_loss"] + repa_loss_weighted + quant_loss_weighted
+
+        # sum losses
+        diffusion_loss = (
+            losses["diff_loss"]
+            + repa_loss_weighted
+            + quant_loss_weighted
+            + lpips_loss_weighted
+        )
 
         # log
         log_losses_from_diffusion.update(
@@ -577,12 +621,14 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 split="train",
                 q_loss=losses["q_loss"],
                 q_loss_break=terms["quan_info"],
-            )  # l2, ssim, generator loss
+            )  # l2, ssim, lpips, generator/disc losses
             gen_loss += diffusion_loss
             log_losses.update(log_losses_from_diffusion)
         else:
             gen_loss = diffusion_loss
             log_losses = log_losses_from_diffusion
+
+            log_losses["lpips_loss"] = lpips_loss_weighted
 
         if self.accelerator.sync_gradients:
             # backward
@@ -621,10 +667,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         return disc_loss, log_disc
 
-    def train_step(
-        self,
-        batch: dict,
-    ):
+    def train_step(self, batch: dict):
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
 
         quality_track_n = self.train_cfg.track_metrics_duration
@@ -647,12 +690,10 @@ class DiffusiveHyperspectralTokenizerTrainer:
             _accum_models.append(self.vq_loss_fn.discriminator)
 
         # train
-        with self.accelerator.accumulate(
-            _accum_models
-        ):  # Warn: accumualte may cause some layers' params without gradient
+        with self.accelerator.accumulate(_accum_models):
             losses, terms = self.forward_tokenizer(x)
-            recon = terms["pred_x_clean"]
-            quan_info = terms["quan_info"]
+            recon = terms.get("posttrain_sample", terms["pred_x_clean"])
+            quan_info = terms["quan_info"]  # TODO: print out if use_disc or not
 
             # loss
             tokenizer_loss, log_tokenizer_loss = self.train_tokenizer_step(
@@ -678,7 +719,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 _log_disc_losses = self.format_log(log_disc_loss=log_disc_loss)
 
             self.log_msg(
-                f"[Train State]: {self.tokenizer_optim.param_groups[0]["lr"]:.4e} | "
+                f"[Train State]: {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
@@ -718,9 +759,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
     def format_log(
         self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
     ) -> str:
-        assert (
-            log_token_loss is not None or log_disc_loss is not None
-        ), "At least one of the logs should be provided"
+        assert log_token_loss is not None or log_disc_loss is not None, (
+            "At least one of the logs should be provided"
+        )
 
         n_round = 3
 
@@ -728,14 +769,15 @@ class DiffusiveHyperspectralTokenizerTrainer:
         if log_token_loss is not None:
             # perceptual loss is not supported for hyperspectral images
             _log_token = [
-                f'diff_loss: {log_token_loss["diff_loss"]:.{n_round}f}',
-                f'repa_loss: {log_token_loss["repa_loss"]:.{n_round}f}',
+                f"diff_loss: {log_token_loss['diff_loss']:.{n_round}f}",
+                f"repa_loss: {log_token_loss['repa_loss']:.{n_round}f}",
+                f"lpips_loss: {log_token_loss['lpips_loss']:.{n_round}f}",
             ]
             if self.use_disc:
                 _log_token_from_disc = [
-                    f'recon_loss: {log_token_loss["reconstruct_loss"]:.{n_round}f}',
-                    f'ssim_loss: {log_token_loss["ssim_loss"]:.{n_round}f}',
-                    f'g_loss: {log_token_loss["g_loss"]:.{n_round}f}',
+                    f"recon_loss: {log_token_loss['reconstruct_loss']:.{n_round}f}",
+                    f"ssim_loss: {log_token_loss['ssim_loss']:.{n_round}f}",
+                    f"g_loss: {log_token_loss['g_loss']:.{n_round}f}",
                 ]
                 _log_token.extend(_log_token_from_disc)
 
@@ -747,7 +789,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
             if self.quantizer_type is not None:
                 _log_q = [
-                    f'quantizer_loss: {log_token_loss["q_loss"]:.{n_round}f}',
+                    f"quantizer_loss: {log_token_loss['q_loss']:.{n_round}f}",
                 ]
                 _log_token.extend(_log_q)
 
@@ -755,16 +797,16 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         else:
             _log_disc = [
-                f'disc_loss: {log_disc_loss["disc_loss"]:.{n_round}f}',
-                f'logits_real: {log_disc_loss["logits_real"]:.{n_round}f}',
-                f'logits_fake: {log_disc_loss["logits_fake"]:.{n_round}f}',
-                f'lecam_loss: {log_disc_loss["lecam_loss"]:.{n_round}f}',
+                f"disc_loss: {log_disc_loss['disc_loss']:.{n_round}f}",
+                f"logits_real: {log_disc_loss['logits_real']:.{n_round}f}",
+                f"logits_fake: {log_disc_loss['logits_fake']:.{n_round}f}",
+                f"lecam_loss: {log_disc_loss['lecam_loss']:.{n_round}f}",
             ]
             strings.extend(_log_disc)
             if "r1_scale" in log_disc_loss:
                 _disc_reg_logs = [
-                    f'r1_scale: {log_disc_loss["r1_scale"]:.{n_round}f}',
-                    f'r1_loss: {log_disc_loss["r1_loss"]:.{n_round}f}',
+                    f"r1_scale: {log_disc_loss['r1_scale']:.{n_round}f}",
+                    f"r1_loss: {log_disc_loss['r1_loss']:.{n_round}f}",
                 ]
                 strings.extend(_disc_reg_logs)
 
@@ -821,6 +863,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         ssim_fn = StructuralSimilarityIndexMeasure().to(
             device=self.device, dtype=self.dtype
         )
+        loss_metrics = MeanMetric().to(device=self.device)
 
         for val_iter in range(self.val_cfg.max_val_iters):
             batch = next(self._val_loader_iter)
@@ -832,8 +875,13 @@ class DiffusiveHyperspectralTokenizerTrainer:
             psnr_fn.update(batch_img_rgb, sampled_for_metrics)
             ssim_fn.update(batch_img_rgb, sampled_for_metrics)
 
+            # recon loss
+            loss = nn.functional.l1_loss(sampled, batch["img"].to(sampled))
+            loss_metrics.update(loss)
+
         psnr_val = psnr_fn.compute()
         ssim_val = ssim_fn.compute()
+        loss_val = loss_metrics.compute()
 
         # gather
         if self.accelerator.use_distributed:
@@ -843,12 +891,18 @@ class DiffusiveHyperspectralTokenizerTrainer:
             ssim_val = torch.distributed.reduce(
                 ssim_val, op=torch.distributed.ReduceOp.AVG
             )
+            loss_val = torch.distributed.reduce(
+                loss_val, op=torch.distributed.ReduceOp.AVG
+            )
 
         if self.accelerator.is_main_process:
             psnr_val = psnr_val.item()
             ssim_val = ssim_val.item()
+            loss_val = loss_val.item()
 
-            self.log_msg(f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f}")
+            self.log_msg(
+                f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f} | loss: {loss_val:.4f}"
+            )
             self.tenb_log_any(
                 "metric",
                 {"psnr": psnr_val, "ssim": ssim_val},
@@ -931,7 +985,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
     def load_from_ema(self, ema_path: str, strict: bool = True):
         # because safetensors does not support nested dict
-        # loading a nested ckpt with extension .safetensors.pt will raise an HeaderTooLarge Error
+        # loading a nested ckpt with extension .safetensors will raise an HeaderTooLarge Error
         assert ema_path.endswith("pt"), "Only .pt file is supported"
 
         # load state dict
@@ -949,7 +1003,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
             tokenizer.encoder2slot.load_state_dict(
                 tokenizer_params["encoder2slot"], strict
             )
-        if tokenizer.quantizer is not None:
+        if tokenizer.quantizer is not None and isinstance(
+            tokenizer.quantizer, nn.Module
+        ):
             tokenizer.quantizer.load_state_dict(
                 tokenizer_params["quantizer"], strict=strict
             )
@@ -1058,11 +1114,27 @@ class DiffusiveHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-if __name__ == "__main__":
-    # load config
-    hydra.initialize("configs/2d_cosmos_diff", version_base=None)
-    cfg = hydra.compose(config_name="2d_cosmos_no_quantizer")
+_key = "cosmos_diff_2d_no_q"
+_configs = {
+    "cosmos_diff_2d_no_q": ["configs/2d_cosmos_diff", "2d_cosmos_no_quantizer"],
+    "diff_slots_1d_t512d16": ["configs/1d_tokenizer", "1d_tokenizer_no_quantizer"],
+    "flowmo_t512_d16p8": ["configs/1d_tokenizer", "flowmo_no_quant_t512_d16p8"],
+}
+cfg = _configs.get(_key, None)
+if cfg is None:
+    raise ValueError(f"Unknown config key {_key}")
 
+
+@hydra.main(
+    config_path=cfg[0],
+    config_name=cfg[1],
+    version_base=None,
+)
+def main(cfg: DictConfig):
     with logger.catch():
         trainer = DiffusiveHyperspectralTokenizerTrainer(cfg)
         trainer.run()
+
+
+if __name__ == "__main__":
+    main()

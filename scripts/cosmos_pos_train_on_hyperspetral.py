@@ -171,13 +171,13 @@ class CosmosHyperspectralTokenizerTrainer:
             self.use_quantizer = self.quantizer is not None
             self.norm_z = self.cfg.quantizer.norm_z
             if not self.sep_enc_dec:
-                assert (
-                    not self.norm_z
-                ), "norm_z is not supported when sep_enc_dec is False"
+                assert not self.norm_z, (
+                    "norm_z is not supported when sep_enc_dec is False"
+                )
             if not self.use_quantizer:
-                assert (
-                    not self.norm_z
-                ), "norm_z can not be set when quantizer is not used"
+                assert not self.norm_z, (
+                    "norm_z can not be set when quantizer is not used"
+                )
             if self.norm_z:
                 self.log_msg(
                     "norm_z is set to True in the trainer, which is not recommanded",
@@ -428,9 +428,9 @@ class CosmosHyperspectralTokenizerTrainer:
                             "refine the whole decoder"
                         )
                     else:
-                        assert (
-                            n_layer_ft >= 0
-                        ), "n_layer_ft must be equal or bigger than 0"
+                        assert n_layer_ft >= 0, (
+                            "n_layer_ft must be equal or bigger than 0"
+                        )
                         self.log_msg(
                             f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, "
                             "use DCAE refine decoder head (phase 3) stragety for low-resolution images. "
@@ -879,7 +879,7 @@ class CosmosHyperspectralTokenizerTrainer:
             _log_disc_losses = self.format_log(log_disc_loss=log_disc_loss)
 
             self.log_msg(
-                f"[Train State]: lr {self.tokenizer_optim.param_groups[0]["lr"]:.4e} | "
+                f"[Train State]: lr {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
@@ -907,9 +907,9 @@ class CosmosHyperspectralTokenizerTrainer:
     def format_log(
         self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
     ) -> str:
-        assert (
-            log_token_loss is not None or log_disc_loss is not None
-        ), "At least one of the logs should be provided"
+        assert log_token_loss is not None or log_disc_loss is not None, (
+            "At least one of the logs should be provided"
+        )
 
         def dict_round_to_list_str(
             d: dict, n_round: int = 3, select: list[str] | None = None
@@ -1322,9 +1322,9 @@ class CosmosHyperspectralTokenizerTrainer:
             "dcae_refine_decoder_head",
             "dcae_adapt_latent",
         ]:
-            assert (
-                self.train_cfg.ema_load_path is not None
-            ), f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+            assert self.train_cfg.ema_load_path is not None, (
+                f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+            )
 
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
