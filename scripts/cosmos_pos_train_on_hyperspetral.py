@@ -18,24 +18,28 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 os.environ["HYDRA_FULL_ERROR"] = "1"
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
+import ast
+
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.cosmos_tokenizer import (
     ContinuousImageTokenizer as CosmosTokenizer,
 )
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.networks.configs import continuous_image
+from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
+OmegaConf.register_new_resolver("eval", lambda x: ast.literal_eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -56,7 +60,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
-        accelerate.utils.set_seed(2025, device_specific=True, deterministic=False)
+        accelerate.utils.set_seed(2025)
 
         # logger
         log_file = self.configure_logger()
@@ -91,6 +95,9 @@ class CosmosHyperspectralTokenizerTrainer:
             batch_size=self.dataset_cfg.batch_size_train,
             num_workers=self.dataset_cfg.num_workers,
             shuffle_size=self.dataset_cfg.shuffle_size,
+            hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
+            transform_prob=self.dataset_cfg.transform_prob,
+            random_apply=to_cont(self.dataset_cfg.random_apply),
             to_neg_1_1=True,
         )
         self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
@@ -98,6 +105,8 @@ class CosmosHyperspectralTokenizerTrainer:
             batch_size=self.dataset_cfg.batch_size_val,
             num_workers=self.dataset_cfg.num_workers,
             shuffle_size=self.dataset_cfg.shuffle_size,
+            hyper_transforms_lst=None,
+            transform_prob=0.0,
             to_neg_1_1=True,
         )
 
@@ -119,8 +128,10 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_state = StepsCounter(["train"])
 
     def setup_tokenizer(self):
+        tokenizer_name = self.train_cfg.tokenizer_name
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
         self.quantizer_type: str | None = self.cfg.vq_loss.quantizer_type
+        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
         if self.train_cfg.seperate_enc_dec:
@@ -167,6 +178,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 assert (
                     not self.norm_z
                 ), "norm_z can not be set when quantizer is not used"
+            if self.norm_z:
+                self.log_msg(
+                    "norm_z is set to True in the trainer, which is not recommanded",
+                    level="WARNING",
+                )
 
             if (
                 self.use_quantizer
@@ -179,8 +195,9 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
+            self.norm_z = False  # in the class, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-            self.tokenizer: VITVQModel | VITBSQModel | CosmosTokenizer
+            self.tokenizer: VITVQModel | VITBSQModel | CosmosTokenizer | DCAE
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = hasattr(self, "quantizer")
             self.quantizer = None
@@ -368,6 +385,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     *self._dec_model_mody_keys["not_pretrained_keys"],
                 ]
 
+                # * finetune all, different layers, first conv ===================
                 if self.train_cfg.finetune_strategy == "finetune_all":
                     params = [
                         *list(self.tokenizer_encoder.parameters()),
@@ -394,6 +412,115 @@ class CosmosHyperspectralTokenizerTrainer:
                     # performs poor, and still consume GPU mem.
 
                     params = get_tokenizer_params_from_keys(not_pretrained_keys)
+                # * finetune decoder output head, or encoder output head + decoder input head =======
+                # * from DCAE training phases 2 and 3
+                elif self.train_cfg.finetune_strategy == "dcae_refine_decoder_head":
+                    # decoder head is only refined for low-resolution images
+                    # use l1, perceptual, gan losses
+
+                    n_layer_ft = (
+                        self.train_cfg.finetune_cfg.refine_decoder_head_n_layers
+                    )
+                    if isinstance(n_layer_ft, str):
+                        assert n_layer_ft in ["all"], 'n_layer_ft must be "all"'
+                        self.log_msg(
+                            f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, "
+                            "refine the whole decoder"
+                        )
+                    else:
+                        assert (
+                            n_layer_ft >= 0
+                        ), "n_layer_ft must be equal or bigger than 0"
+                        self.log_msg(
+                            f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, "
+                            "use DCAE refine decoder head (phase 3) stragety for low-resolution images. "
+                            f"finetune the decoder last {n_layer_ft} layers and last output convs"
+                        )
+
+                    # fix the codebook if any is learnable
+                    quant_params = []
+                    if self.use_quantizer and isinstance(self.quantizer, nn.Module):
+                        self.quantizer.eval()
+
+                    # get decoder head params
+                    params = []
+                    match self.train_cfg.tokenizer_name:
+                        case "cosmos_sep":
+                            # let encoder fixed
+                            self.tokenizer_encoder.eval()
+
+                            if n_layer_ft == "all":
+                                return self.tokenizer_decoder.parameters()
+
+                            # add the conv_out layer and unpatcher layer
+                            params.extend(
+                                list(self.tokenizer_decoder[1].norm_out.parameters())
+                                + list(self.tokenizer_decoder[1].unpatcher.parameters())
+                                + list(self.tokenizer_decoder[1].conv_out.parameters())
+                            )
+
+                            # last n_layers decoder layers
+                            if n_layer_ft > 0:
+                                all_layers = list(self.tokenizer_decoder[1].up)
+                                selected_layers = all_layers[-n_layer_ft:]
+                                params.extend(
+                                    [
+                                        p
+                                        for layer in selected_layers
+                                        for p in layer.parameters()
+                                    ]
+                                )
+                        case "cosmos_uni":
+                            self.tokenizer.encoder.eval()
+
+                            if n_layer_ft == "all":
+                                return self.tokenizer.decoder.parameters()
+
+                            params.extend(
+                                list(self.tokenizer.decoder.norm_out.parameters())
+                                + list(self.tokenizer.decoder.unpatcher.parameters())
+                                + list(self.tokenizer.decoder.conv_out.parameters())
+                            )
+
+                            # last n_layers decoder layers
+                            if n_layer_ft > 0:
+                                all_layers = list(self.tokenizer.decoder.up)
+                                selected_layers = all_layers[-n_layer_ft:]
+                                params.extend(
+                                    [
+                                        p
+                                        for layer in selected_layers
+                                        for p in layer.parameters()
+                                    ]
+                                )
+                        case "dcae":
+                            self.tokenizer.encoder.eval()
+
+                            if n_layer_ft == "all":
+                                return self.tokenizer.decoder.parameters()
+
+                            params.extend(
+                                # proj out layer
+                                list(self.tokenizer.decoder.project_out)
+                            )
+
+                            if n_layer_ft > 0:
+                                stages = self.tokenizer.decoder.stages
+                                selected_layers = stages[-n_layer_ft:]
+                                for layer in selected_layers:
+                                    params.extend(list(layer.parameters()))
+                        case _:
+                            raise ValueError(
+                                f"Unknown tokenizer name: {self.train_cfg.tokenizer_name}"
+                            )
+
+                elif self.train_cfg.finetune_strategy == "dcae_adapt_latent":
+                    # adapt latents
+                    # by finetuning encoder head and decoder for high-resolution images
+                    # use l1, perceptual losses (w/o gan loss)
+
+                    raise NotImplementedError("not implemented yet")
+
                 else:
                     raise ValueError(
                         f"Unknown finetune strategy: {self.train_cfg.finetune_strategy}"
@@ -598,24 +725,9 @@ class CosmosHyperspectralTokenizerTrainer:
     def global_step(self):
         return self.get_global_step("train")
 
-    def freeze(self, mode="tokenizer"):
-        def _freeze_model(model: nn.Module, freeze=True):
-            for p in model.parameters():
-                p.requires_grad = not freeze
-
-        if mode == "tokenizer":
-            if self.sep_enc_dec:
-                _freeze_model(self.tokenizer_encoder, False)
-                _freeze_model(self.tokenizer_decoder, False)
-            else:
-                _freeze_model(self.tokenizer, False)
-            _freeze_model(self.vq_loss_fn.discriminator, True)
-        elif mode == "disc":
-            _freeze_model(self.ema_encoder, True)
-            _freeze_model(self.ema_decoder, True)
-            _freeze_model(self.vq_loss_fn.discriminator, False)
-        else:
-            raise ValueError(f"Unknown mode {mode}")
+    def may_freeze(self, model, freeze=True):
+        for p in model.parameters():
+            p.requires_grad = not freeze
 
     def get_last_layer(self, use_ema: bool = False):
         if use_ema:
@@ -637,7 +749,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients:
+        if self.accelerator.sync_gradients and getattr(
+            self.train_cfg, "grad_check", True
+        ):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -656,12 +770,16 @@ class CosmosHyperspectralTokenizerTrainer:
                             param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
                         )
 
-            if self.dtype != torch.float16:
-                self.accelerator.clip_grad_norm_(
-                    model.parameters(), self.train_cfg.max_grad_norm
-                )
+        # clip gradient by norm
+        if self.dtype != torch.float16:
+            self.accelerator.clip_grad_norm_(
+                model.parameters(), self.train_cfg.max_grad_norm
+            )
 
     def train_tokenizer_step(self, x: torch.Tensor, tok_dict: dict):
+        # freeze discriminator
+        self.may_freeze(self.vq_loss_fn.discriminator, True)
+
         # quantizer loss sent to discriminator
         gen_loss, log_losses = self.forward_discriminator(
             x,
@@ -672,6 +790,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if self.accelerator.sync_gradients:
             # backward
+            self.tokenizer_optim.zero_grad()
             self.accelerator.backward(gen_loss)
             if self.sep_enc_dec:
                 self.gradient_check(self.tokenizer_encoder)
@@ -679,7 +798,6 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 self.gradient_check(self.tokenizer)
             self.tokenizer_optim.step()
-            self.tokenizer_optim.zero_grad()
             self.tokenizer_sched.step()
 
             # ema update
@@ -688,16 +806,18 @@ class CosmosHyperspectralTokenizerTrainer:
         return gen_loss, log_losses
 
     def train_disc_step(self, x: torch.Tensor, tokenizer_out: dict):
+        self.may_freeze(self.vq_loss_fn.discriminator, False)
+
         disc_loss, log_disc = self.forward_discriminator(
             x, tokenizer_out, train_tokenizer=False, split="train"
         )
 
         if self.accelerator.sync_gradients:
             # backward
+            self.disc_optim.zero_grad()
             self.accelerator.backward(disc_loss)
             self.gradient_check(self.vq_loss_fn.discriminator)
             self.disc_optim.step()
-            self.disc_optim.zero_grad()
             self.disc_sched.step()
 
             # ema update
@@ -958,6 +1078,7 @@ class CosmosHyperspectralTokenizerTrainer:
         ssim_fn = StructuralSimilarityIndexMeasure().to(
             device=self.device, dtype=self.dtype
         )
+        loss_metrics = MeanMetric().to(device=self.device)
 
         _set_all_model_modes(train=False)
 
@@ -971,8 +1092,13 @@ class CosmosHyperspectralTokenizerTrainer:
             psnr_fn.update(batch_img_rgb, recon_for_metrics)
             ssim_fn.update(batch_img_rgb, recon_for_metrics)
 
+            # recon loss
+            loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
+            loss_metrics.update(loss)
+
         psnr_val = psnr_fn.compute()
         ssim_val = ssim_fn.compute()
+        loss_val = loss_metrics.compute()
 
         # gather
         if self.accelerator.use_distributed:
@@ -982,15 +1108,21 @@ class CosmosHyperspectralTokenizerTrainer:
             ssim_val = torch.distributed.reduce(
                 ssim_val, op=torch.distributed.ReduceOp.AVG
             )
+            loss_val = torch.distributed.reduce(
+                loss_val, op=torch.distributed.ReduceOp.AVG
+            )
 
         if self.accelerator.is_main_process:
             psnr_val = psnr_val.item()
             ssim_val = ssim_val.item()
+            loss_val = loss_val.item()
 
-            self.log_msg(f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f}")
+            self.log_msg(
+                f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f} | loss: {loss_val:.4f}"
+            )
             self.tenb_log_any(
                 "metric",
-                {"psnr": psnr_val, "ssim": ssim_val},
+                {"psnr": psnr_val, "ssim": ssim_val, "loss_val": loss_val},
                 step=self.global_step,
             )
 
@@ -1070,13 +1202,14 @@ class CosmosHyperspectralTokenizerTrainer:
             )
 
         # Load discriminator to online model
-        accelerate.utils.load_checkpoint_in_model(
-            self.vq_loss_fn.discriminator, ema_path / "discriminator"
-        )
-        # accelerate.utils.load_checkpoint_in_model(
-        #     self.train_state, ema_path / "train_state"
-        # )
-        self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
+        if self.train_cfg.finetune_strategy not in [
+            "dcae_refine_decoder_head",
+            "dcae_adapt_latent",
+        ]:
+            accelerate.utils.load_checkpoint_in_model(
+                self.vq_loss_fn.discriminator, ema_path / "discriminator"
+            )
+            # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
 
         # Load quantizer if exists
         if (
@@ -1185,6 +1318,14 @@ class CosmosHyperspectralTokenizerTrainer:
         self.accelerator.wait_for_everyone()
 
     def run(self):
+        if self.train_cfg.finetune_strategy in [
+            "dcae_refine_decoder_head",
+            "dcae_adapt_latent",
+        ]:
+            assert (
+                self.train_cfg.ema_load_path is not None
+            ), f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
         elif self.train_cfg.ema_load_path is not None:
@@ -1192,19 +1333,24 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "cosmos_sep_f8c32p4"
+_key = "cosmos_sep_f8c32p1"
 _configs = {
-    "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
+    # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
-    "cosmos_sep_f8c32p4": "cosmos_post_train_f8c32p4",
+    "cosmos_sep_f8c32p1": "cosmos_post_train_f8c32p1",
+    "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
+    # unify encoder and decoder int one model
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
+    # sana CDAE
     "sana_f8c16p1": "cdae_f8c16p1",
 }[_key]
 
 
 @hydra.main(
-    config_path="configs/tokenizer_gan", config_name=_configs, version_base=None
+    config_path="configs/tokenizer_gan",
+    config_name=_configs,
+    version_base=None,
 )
 def main(cfg):
     with logger.catch():

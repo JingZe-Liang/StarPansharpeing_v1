@@ -58,6 +58,7 @@ ema:
   update_every: 2
 
 train:
+  tokenizer_name: cosmos_uni
   proj_dir: runs/stage1_cosmos/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
@@ -69,6 +70,10 @@ train:
   seperate_enc_dec: false
   resume_path:
   ema_load_path: #/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-02_02-15-54/cosmos_tokenizer_pos_training/ema
+
+  finetune_cfg:
+    refine_decoder_head_n_layers: 2
+    adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
     _target_: src.utilities.optim.mars.MARS

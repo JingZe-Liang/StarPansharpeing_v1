@@ -18,3 +18,4 @@ formulation: AE
 encoder: Default
 decoder: Default
 act_checkpoint: true
+norm_in_quant_conv: false

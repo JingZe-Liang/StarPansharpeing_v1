@@ -10,6 +10,27 @@ from torchvision import models
 from torchvision.models.feature_extraction import create_feature_extractor
 
 
+class Norm(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return nn.functional.normalize(x, dim=-1)
+
+
+# wrap visual model
+class WrappedClipVisual(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.body = model
+        self.final_norm = Norm()
+
+    def forward(self, x):
+        x = self.body(x)
+        x = self.final_norm(x)
+        return x
+
+
 class LIPIPSHyperpspectral(nn.Module):
     """A perceptual loss module for hyperspectral images that groups channels and computes LPIPS loss.
 
@@ -64,17 +85,58 @@ class LIPIPSHyperpspectral(nn.Module):
         )
 
         # Initialize backbone model
+        self.model = self._make_perceptual_model(
+            model_type,
+            self.compute_on_logits,
+            self.use_lpips_vgg,
+            **kwargs,
+        )
+
+        # Gram loss
+        if self.use_gram_loss:
+            if (
+                self.use_gram_model == model_type
+            ):  # gram model is same as perceptual model
+                self.gram_model = self.model
+
+            else:
+                self.gram_model = self._make_perceptual_model(
+                    self.use_gram_model, False, False, **kwargs
+                )
+
+        self.assertions()
+
+        # Freeze model parameters
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        # Normalization parameters
+        self.register_buffer(
+            "mean", th.Tensor([0.485, 0.456, 0.406])[None, :, None, None]
+        )
+        self.register_buffer(
+            "std", th.Tensor([0.229, 0.224, 0.225])[None, :, None, None]
+        )
+        self.register_buffer("zero", th.tensor(0.0), persistent=False)
+
+    def _make_perceptual_model(
+        self,
+        model_type: str,
+        compute_on_logits: bool,
+        use_lpips_vgg: bool,
+        **kwargs,
+    ):
         if model_type in ("vgg", "lpips-vgg"):
             assert (
                 not compute_on_logits
             ), "LPIPS-VGG does not support computing on logits"
             if self.use_lpips_vgg:
-                self.model = LPIPS(net="vgg").eval()
+                model = LPIPS(net="vgg").eval()
             else:
-                self.model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+                model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
                 return_nodes = {"features.20": "features", "classifier.6": "logits"}
         elif model_type == "resnet":
-            self.model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+            model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
             return_nodes = {
                 "layer1": "features_1",
                 "layer2": "features_2",
@@ -82,7 +144,7 @@ class LIPIPSHyperpspectral(nn.Module):
                 "fc": "logits",
             }
         elif model_type == "convnext_s":
-            self.model = models.convnext_small(
+            model = models.convnext_small(
                 weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1
             )
             return_nodes = {
@@ -100,35 +162,16 @@ class LIPIPSHyperpspectral(nn.Module):
             # whole clip model (with ununsed text model) but anyway, it is simple and works fine
 
             clip, *_ = open_clip.create_model_and_transforms("RN50")
-            clip.load_state_dict(torch.load(kwargs["clip_model_ckpt_path"]))
+            clip.load_state_dict(th.load(kwargs["clip_model_ckpt_path"]))
             visual = copy.deepcopy(clip.visual).eval()
             del clip
 
-            class Norm(nn.Module):
-                def __init__(self):
-                    super().__init__()
-
-                def forward(self, x):
-                    return nn.functional.normalize(x, dim=-1)
-
-            # wrap visual model
-            class WrappedClipVisual(nn.Module):
-                def __init__(self, model):
-                    super().__init__()
-                    self.body = model
-                    self.final_norm = Norm()
-
-                def forward(self, x):
-                    x = self.body(x)
-                    x = self.final_norm(x)
-                    return x
-
-            self.model = WrappedClipVisual(visual)
+            model = WrappedClipVisual(visual)
 
             return_nodes = {
                 "body.layer1": "features_1",
                 "body.layer2": "features_2",
-                "body.layer4": "features_4",
+                "body.layer4": "features_3",
                 "final_norm": "logits",
             }
         else:
@@ -138,40 +181,10 @@ class LIPIPSHyperpspectral(nn.Module):
                 "convnext_s, remote_clip_RN50"
             )
 
-        if not compute_on_logits and not self.use_lpips_vgg:
-            self.model = create_feature_extractor(self.model, return_nodes=return_nodes)
+        if not compute_on_logits and not use_lpips_vgg:
+            model = create_feature_extractor(model, return_nodes=return_nodes)
 
-        # Gram loss
-        if self.use_gram_loss:
-            if self.use_gram_model == "vgg":
-                self.gram_model = models.vgg16(
-                    weights=models.VGG16_Weights.IMAGENET1K_V1
-                )
-                return_nodes = {
-                    "features.3": "features_3",
-                    "features.8": "features_8",
-                    "features.15": "features_15",
-                }
-            else:
-                raise NotImplementedError("Only VGG is supported for now")
-            self.gram_model = create_feature_extractor(
-                self.gram_model, return_nodes=return_nodes
-            )
-
-        self.assertions()
-
-        # Freeze model parameters
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-        # Normalization parameters
-        self.register_buffer(
-            "mean", th.Tensor([0.485, 0.456, 0.406])[None, :, None, None]
-        )
-        self.register_buffer(
-            "std", th.Tensor([0.229, 0.224, 0.225])[None, :, None, None]
-        )
-        self.register_buffer("zero", th.tensor(0.0), persistent=False)
+        return model
 
     def _pad_channels(self, x: th.Tensor) -> th.Tensor:
         """Pad input tensor channels to make them divisible by group_size.
@@ -293,6 +306,9 @@ class LIPIPSHyperpspectral(nn.Module):
         gram_loss = 0.0
         # Compute Gram loss for each feature layer
         for layer_name in input_features.keys():
+            if layer_name == "logits":
+                continue
+
             # Compute Gram matrices
             input_gram = self._compute_gram_matrix(input_features[layer_name])
             target_gram = self._compute_gram_matrix(target_features[layer_name])
@@ -377,7 +393,6 @@ class LIPIPSHyperpspectral(nn.Module):
             AssertionError: If any configuration is invalid
             TypeError: If num_groups_to_select has invalid type
         """
-        assert self.model_type in ["vgg", "resnet", "convnext_s"]
         assert self.padding_mode in ["zero", "repeat"]
         if self.use_lpips_vgg:
             assert (
@@ -396,11 +411,6 @@ class LIPIPSHyperpspectral(nn.Module):
             assert (
                 self.num_groups_to_select is None
             ), f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
-
-        assert self.use_gram_model in (
-            "vgg",
-            None,
-        ), 'use_gram_model must be "vgg" or None'
 
     def __repr__(self):
         return (

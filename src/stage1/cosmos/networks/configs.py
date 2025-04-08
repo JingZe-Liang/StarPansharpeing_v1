@@ -32,12 +32,12 @@ continuous_image = dict(
     # The channel multipler for each resolution.
     channels_mult=[2, 4, 4],
     dropout=0.0,
-    in_channels=12,
+    in_channels=3,
     # The spatial compression ratio.
     spatial_compression=8,
     # The number of layers in each res block.
     num_res_blocks=2,
-    out_channels=12,
+    out_channels=3,
     resolution=1024,
     patch_size=4,
     patch_method="haar",

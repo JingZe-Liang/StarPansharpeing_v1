@@ -59,3 +59,11 @@ batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
 batch_size_val: 4
 rgb_channels: ${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
 img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
+hyper_transforms_lst:
+  - grayscale
+  - rotation
+  - cutmix
+  - horizontal_flip
+  - vertical_flip
+transform_prob: 0.5
+random_apply: [1, 2]

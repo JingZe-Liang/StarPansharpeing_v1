@@ -1,17 +1,23 @@
 import io
+from typing import Sequence
 
+import numpy as np
 import tifffile
 import torch
 import webdataset as wds
 from accelerate.state import PartialState
 from kornia.augmentation import (
     AugmentationSequential,
+    RandomBoxBlur,
     RandomChannelShuffle,
     RandomCutMixV2,
+    RandomHorizontalFlip,
     RandomRotation,
     RandomSharpness,
+    RandomVerticalFlip,
 )
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
+from loguru import logger
 
 
 def tiff_decoder(key, x):
@@ -46,7 +52,9 @@ class HyperRandomGrayScale(IntensityAugmentationBase2D):
 
 
 def hyper_transform(
-    op_list: list[str], probs: list[float] | float = 0.5, random_apply: int = 2
+    op_list: tuple[str],
+    probs: tuple[float] | float = 0.5,
+    random_apply: int | tuple[int] = 2,
 ):
     if isinstance(probs, float):
         probs = [probs] * len(op_list)
@@ -57,7 +65,10 @@ def hyper_transform(
         channel_shuffle=lambda p: RandomChannelShuffle(p=p),
         sharpness=lambda p: RandomSharpness(p=p, sharpness=[0.5, 1.0]),
         rotation=lambda p: RandomRotation((-30, 30), p=p),
-        cutmix=lambda p: RandomCutMixV2(num_mix=1, p=p),
+        horizontal_flip=lambda p: RandomHorizontalFlip(p=p),
+        vertical_flip=lambda p: RandomVerticalFlip(p=p),
+        cutmix=lambda p: RandomCutMixV2(num_mix=1, p=p, cut_size=(0.4, 0.6)),
+        blur=lambda p: RandomBoxBlur((3, 3), p=p),
     )
 
     ops = []
@@ -66,7 +77,13 @@ def hyper_transform(
         ops.append(op(prob))
 
     op_seq = AugmentationSequential(
-        *ops, data_keys=["input"], random_apply=random_apply
+        *ops,
+        data_keys=["input"],
+        random_apply=tuple(random_apply)
+        if isinstance(random_apply, Sequence)
+        else random_apply,
+        same_on_batch=False,
+        keepdim=True,
     )
 
     def dict_mapper(sample):
@@ -82,25 +99,35 @@ def get_hyperspectral_dataloaders(
     num_workers: int,
     shuffle_size: int = 100,
     to_neg_1_1: bool = True,
-    hyper_transforms_lst: list[str] = [
+    hyper_transforms_lst: tuple[str] = (
         "grayscale",
         "channel_shuffle",
-        "sharpness",
         "rotation",
         "cutmix",
-    ],
-    transform_prob: list[float] | float = 0.2,
-    random_apply: int = 2,
+        "horizontal_flip",
+        "vertical_flip",
+    ),
+    transform_prob: tuple[float] | float = 0.2,
+    random_apply: int | tuple[int] = 1,
 ):
     dict_mapper = get_dict_tensor_mapper(to_neg_1_1)
+    use_transf = (
+        hyper_transforms_lst is not None
+        and len(hyper_transforms_lst) > 0
+        and transform_prob > 0
+    )
+    if use_transf:
+        transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)
+        logger.info(
+            f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
+        )
 
     part_state = PartialState()
     is_ddp = part_state.use_distributed
-    transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)
 
     dataset = wds.WebDataset(
         wds_paths,
-        resampled=True,
+        resampled=True,  # no need `iter(dataloader)` for `next` function
         shardshuffle=shuffle_size if is_ddp else False,
         nodesplitter=wds.shardlists.split_by_node
         if is_ddp
@@ -111,6 +138,8 @@ def get_hyperspectral_dataloaders(
     )
     dataset = dataset.decode(tiff_decoder)
     dataset = dataset.map(dict_mapper)
+    if use_transf:
+        dataset = dataset.map_dict(img=transform)
 
     dataloader = wds.WebLoader(
         dataset,
@@ -120,7 +149,6 @@ def get_hyperspectral_dataloaders(
         prefetch_factor=6,
         drop_last=False,
     )
-    dataloader = dataloader.map_dict(img=transform)
 
     return dataset, dataloader
 
@@ -141,15 +169,36 @@ if __name__ == "__main__":
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
         to_neg_1_1=True,
+        transform_prob=1.0,
+        random_apply=(1, 2),
     )
 
-    # Test multiple batches
-    num_batches_to_test = 5
-    for i, batch in enumerate(test_loader):
-        if i >= num_batches_to_test:
-            break
-        img_tensor = batch["img"]
-        print(f"\nBatch {i+1}:")
-        print(f"Shape: {img_tensor.shape}")
-        print(f"Value range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
-        print(f"Data type: {img_tensor.dtype}")
+    import matplotlib.pyplot as plt
+    import torchvision.utils
+
+    # Get a batch of data
+    batch = next(iter(test_loader))
+    img_tensor = batch["img"]  # shape: [N, C, H, W]
+
+    # Select [4,2,0] channels for RGB visualization for all images in the batch
+    rgb_imgs = img_tensor[:, [4, 2, 0], :, :]
+
+    # Normalize from [-1, 1] to [0, 1]
+    rgb_imgs = (rgb_imgs + 1) / 2
+
+    # Create image grid using make_grid
+    grid = torchvision.utils.make_grid(rgb_imgs, nrow=8, padding=2, normalize=False)
+
+    # Convert to numpy and adjust dimension order for plotting
+    grid_img = grid.permute(1, 2, 0).numpy()
+
+    # Display and save the grid
+    plt.figure(figsize=(15, 15))
+    plt.imshow(grid_img)
+    plt.axis("off")
+    plt.savefig("multispectral_grid.png", bbox_inches="tight", pad_inches=0, dpi=300)
+    plt.close()
+
+    print(f"Batch shape: {img_tensor.shape}")
+    print(f"Range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
+    print(f"Data type: {img_tensor.dtype}")

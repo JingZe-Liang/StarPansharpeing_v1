@@ -1,0 +1,77 @@
+global_seed: 0
+
+data:
+  batch_size: 16
+  eval_batch_size: 5
+  image_size: 256
+  num_workers: 8
+
+  imagenet_train_index: "imagenet_train_index_overall.json"
+  imagenet_train_tar: "ILSVRC2012_img_train.tar"
+  imagenet_val_index: "imagenet_val_index_overall.json"
+  imagenet_val_tar: "ILSVRC2012_img_val.tar"
+
+model:
+  enable_mup: True
+  patch_size: 4
+  mup_width: 6
+  enc_mup_width: 4
+
+  fix_initial_norms: True
+  fix_norm_mode: l2
+
+  quantization_type: lfq
+  code_length: 256
+  context_dim: 18
+  codebook_size_for_entropy: 9
+  entropy_loss_weight: 0.0025
+  commit_loss_weight: 0.000625
+
+  enc_depth: 8
+  dec_depth: 16
+  enable_cfg: True
+
+  ema_decay: 0.9999
+
+  posttrain_sample: False
+  posttrain_sample_enable_cfg: False
+  posttrain_sample_k: 8
+
+opt:
+  # Floats need to be specified with decimals to get loaded as such
+  lr: 1.0e-4
+  n_grad_acc: 2
+  schedule: fat_lognormal
+  freeze_encoder: False
+  freeze_encoder_after: 200000
+  weight_decay: 0.0
+  log_norms: True
+  lpips_weight: 0.1
+  lpips_mode: "vgg"
+
+  beta1: .9
+  beta2: .95
+
+trainer:
+  enable_bfloat16: True
+  log_every: 100
+  checkpoint_every: 5000
+  max_steps: 10000000000000
+  keep_every: 200000
+  gs_checkpoint_bucket: ""
+
+eval:
+  reconstruction: True
+  state_dict_key: model_ema_state_dict
+  eval_dir: ""
+  eval_baseline: ""
+  continuous: True
+  force_ckpt_path: null
+  subsample_rate: 1
+
+  sampling:
+    sample_steps: 25
+    schedule: "pow_0.25"
+    cfg: 1.5
+    mode: "rf"
+    cfg_interval: "(.17,1.02)"

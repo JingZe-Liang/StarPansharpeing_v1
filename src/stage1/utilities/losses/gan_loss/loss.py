@@ -207,6 +207,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_conditional: bool = False,
         disc_ndf: int = 64,
         disc_loss: str = "hinge",
+        force_disc_loss_hinge: bool = False,  # adopted from maskbit paper
         # codebook losses
         quantizer_options: dict | None = None,
         # perceptual loss
@@ -217,6 +218,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_model: str | None = "vgg",
         gram_loss_weight: float = 1.0,
         img_is_neg1_to_1: bool = True,
+        perceptual_options: dict = {},
         # generator loss
         reconstruction_loss_type: str | None = "l1",
         reconstruction_weight: float = 1.0,
@@ -309,6 +311,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 img_is_neg1_to_1=img_is_neg1_to_1,
                 gram_loss_weight=gram_loss_weight,
                 use_gram_model=gram_model,
+                **perceptual_options,
             ).cuda()
         self.perceptual_weight = perceptual_weight
 
@@ -335,7 +338,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 num_channels=disc_in_channels,
                 hidden_channels=disc_ndf,
                 num_stages=disc_num_layers,
-                # suggested in the original paper
+                # as suggested in the original paper
                 blur_kernel_size=4,
                 blur_resample=True,
             )
@@ -364,7 +367,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.discriminator_loss = hinge_d_loss
             self.generator_loss = hinge_g_loss
         elif disc_loss == "vanilla":
-            self.discriminator_loss = vanilla_d_loss
+            self.discriminator_loss = (
+                vanilla_d_loss if not force_disc_loss_hinge else hinge_d_loss
+            )
             self.generator_loss = vanilla_g_loss
         elif disc_loss == "non_saturate":
             self.discriminator_loss = non_saturate_discriminator_loss
@@ -409,7 +414,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
         d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
-        d_weight = d_weight * self.discriminator_weight
         return d_weight
 
     def forward(
@@ -786,13 +790,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * construction loss
         if self.force_not_use_recon_loss:
             assert outer_recon_loss is not None, "outer_recon_loss is None"
+            recon_loss = outer_recon_loss
+            ssim_loss = self.zero
         else:
             recon_loss_d = self.reconstruction_loss(inputs, reconstructions)
-            recon_loss = recon_loss_d["recon_loss"]
+            recon_loss = recon_loss_d["recon_loss"] * self.reconstruction_weight
             ssim_loss = recon_loss_d["ssim_loss"]
 
         # * perceptual loss
-        nll_loss = recon_loss * self.reconstruction_weight
+        nll_loss = recon_loss
         if self.use_perceptual_loss:
             p_loss_dict = self.perceptual_loss(inputs, reconstructions)
             percep_loss_ = p_loss_dict["perceptual_loss"]
@@ -806,25 +812,27 @@ class VQLPIPSWithDiscriminator(nn.Module):
         nll_loss = torch.mean(nll_loss)
 
         # * (un)conditional gan loss
-        if cond is None:
-            assert not self.disc_conditional
-            logits_fake = self.discriminator(reconstructions.contiguous())
-        else:
-            assert self.disc_conditional
-            logits_fake = self.discriminator(
-                torch.cat((reconstructions.contiguous(), cond), dim=1)
-            )
-        g_loss = self.generator_loss(logits_fake)
-
-        # * g loss weight
-        d_weight = self.gen_loss_weight_fn(nll_loss, g_loss, last_layer)
-
         disc_factor = adopt_weight(
             self.disc_factor, global_step, threshold=self.discriminator_iter_start
         )
+        d_weight = 1.0
+        g_loss = self.zero
+        if disc_factor > 0:
+            if cond is None:
+                assert not self.disc_conditional
+                logits_fake = self.discriminator(reconstructions.contiguous())
+            else:
+                assert self.disc_conditional
+                logits_fake = self.discriminator(
+                    torch.cat((reconstructions.contiguous(), cond), dim=1)
+                )
+            g_loss = self.generator_loss(logits_fake)
+
+            d_weight *= self.gen_loss_weight_fn(nll_loss, g_loss, last_layer)
+        d_weight *= self.discriminator_weight
+
         if not self.training:
             real_g_loss = disc_factor * g_loss
-
         g_loss = d_weight * disc_factor * g_loss
 
         # basic losses
@@ -873,13 +881,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
 
         # second pass for discriminator update
+        inputs = inputs.contiguous().detach().requires_grad_(True)
         if cond is None:
-            logits_real = self.discriminator(inputs.contiguous().detach())
+            logits_real = self.discriminator(inputs)
             logits_fake = self.discriminator(reconstructions.contiguous().detach())
         else:
-            logits_real = self.discriminator(
-                torch.cat((inputs.contiguous().detach(), cond), dim=1)
-            )
+            logits_real = self.discriminator(torch.cat((inputs, cond), dim=1))
             logits_fake = self.discriminator(
                 torch.cat((reconstructions.contiguous().detach(), cond), dim=1)
             )
@@ -887,22 +894,20 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_factor = adopt_weight(
             self.disc_factor, global_step, threshold=self.discriminator_iter_start
         )
-
-        # * ---------------------------------------------------------------------------------------
-        # * Non-Saturate Loss is the Format of GAN Training, for D Loss, We still adopt Hinge Loss
-        # * ---------------------------------------------------------------------------------------
-
+        disc_loss_out = self.zero
         if self.lecam_loss_weight is not None:
             self.lecam_ema.update(logits_real, logits_fake)
             lecam_loss = lecam_reg(logits_real, logits_fake, self.lecam_ema)
-            disc_loss_out = self.discriminator_loss(
-                logits_real, logits_fake
-            )  # hinge loss
             lecam_loss = lecam_loss * self.lecam_loss_weight
-            d_loss = disc_factor * (lecam_loss + disc_loss_out)
+            if disc_factor > 0.0:
+                disc_loss_out = self.discriminator_loss(
+                    logits_real, logits_fake
+                )  # hinge loss
+            d_loss = disc_factor * disc_loss_out + lecam_loss
         else:
             lecam_loss = torch.tensor(0.0)
-            disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
+            if disc_factor > 0.0:
+                disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
             d_loss = disc_factor * disc_loss_out
 
         # r1 regularization loss from stylegan 2

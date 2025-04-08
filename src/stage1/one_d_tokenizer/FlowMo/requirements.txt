@@ -1,0 +1,9 @@
+tensorboard
+omegaconf
+einops
+lpips
+mediapy
+fsspec[gcs]
+mup==1.0.0
+ipykernel
+scikit-image
