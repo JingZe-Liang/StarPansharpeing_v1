@@ -129,6 +129,7 @@ dmypy.json
 .pyre/
 
 # dev
+data
 data/
 runs/
 .ruff_cache/
