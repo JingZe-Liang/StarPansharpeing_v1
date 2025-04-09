@@ -34,4 +34,4 @@ quantizer_options:
   codebook_enlarge_ratio: 3.0
   codebook_enlarge_steps: 2000
 perceptual_options:
-  clip_model_ckpt_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src/stage1/utilities/losses/remote_clip_v2/checkpoint/RemoteCLIP-RN50.pt
+  clip_model_ckpt_path: src/stage1/utilities/losses/remote_clip_v2/checkpoint/RemoteCLIP-RN50.pt

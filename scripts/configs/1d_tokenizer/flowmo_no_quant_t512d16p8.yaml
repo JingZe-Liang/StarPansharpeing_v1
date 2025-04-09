@@ -14,16 +14,28 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+accelerator:
+  gradient_accumulation_plugin:
+    num_steps: 3
+
+dataset:
+  used: DCF_2019
+  dataset_names_to_bs:
+    MMSeg_YREB: 12
+    DCF_2019: 5
+
 loss:
   repa_loss_weight: 0 # not used
+  lpips_loss_weight: 0.1
   quantizer_loss_weight: 1.0
-  lpips_loss: 
+  lpips_loss:
     _target_: src.stage1.utilities.losses.gan_loss.hyperspectral_percep_loss.LIPIPSHyperpspectral
     model_type: remote_clip_RN50
     group_size: 3
     use_gram_model: null
     compute_on_logits: false
     num_groups_to_select: 0.5
+    clip_model_ckpt_path: src/stage1/utilities/losses/remote_clip_v2/checkpoint/RemoteCLIP-RN50.pt
 
 ema:
   beta: 0.99
@@ -40,30 +52,34 @@ train:
   max_steps: 200_000
   save_every: 1000
   use_disc: false
-  use_lpips: true
-  resume_path:
-  ema_load_path:
+  use_lpips: false
+  resume_path: runs/stage1_1d_tok/2025-04-09_22-12-29/flowmo_no_quant_t512p8/checkpoints/checkpoint_10
+  ema_load_path: #runs/stage1_1d_tok/2025-04-09_22-12-29/flowmo_no_quant_t512p8/ema/ema.pt
+
+  # quantizer settings
+  quantizer_type: ${tokenizer.config.model.quantization_type}
+  quantizer_kwargs: null
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: src.utilities.optim.CAME8BitWrapper
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 1.0e-6
-    betas: [0.9, 0.95]
+    # weight_decay: 1.0e-6
+    # betas: [0.9, 0.95]
 
   disc_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: src.utilities.optim.CAME8BitWrapper
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 1.0e-6
-    betas: [0.9, 0.95]
+    # weight_decay: 1.0e-6
+    # betas: [0.9, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 4
+    num_cycles: 1
     reduced_factor: 2
 
   disc_sched:
@@ -71,7 +87,7 @@ train:
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 4
+    num_cycles: 1
     reduced_factor: 2
 
   log:

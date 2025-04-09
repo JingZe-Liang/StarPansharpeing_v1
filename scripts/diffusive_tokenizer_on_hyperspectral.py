@@ -6,7 +6,6 @@ from typing import Literal
 
 import accelerate
 import hydra
-import ipdb
 import numpy as np
 import PIL.Image as Image
 import torch
@@ -21,8 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
+sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.two_dim_diffusion_slots import TwoDimDiffusionSlots
 from src.stage1.one_d_tokenizer.FlowMo.flowmo.flowmo_tokenizer import FlowMoTokenizer
@@ -64,6 +62,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
+        logger.info(
+            f"[Acclerator]: use gradient accumulation step: {self.accelerator.gradient_accumulation_steps}"
+        )
         accelerate.utils.set_seed(2025, device_specific=True, deterministic=False)
 
         # logger
@@ -98,8 +99,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
             | VITVQModel
             | FlowMoTokenizer
         )
-        self.quantizer_type = self.tokenizer.quantizer_type
-        self.quantizer_kwargs = self.tokenizer.quantizer_kwargs
+        self.quantizer_type = self.train_cfg.quantizer_type
+        self.quantizer_kwargs = self.train_cfg.quantizer_kwargs
 
         # dataloader
         used_dataset = self.dataset_cfg.used
@@ -124,15 +125,15 @@ class DiffusiveHyperspectralTokenizerTrainer:
             self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(
                 cfg.vq_loss
             )
-            assert hasattr(self.tokenizer, "get_last_layer"), (
-                "Tokenizer should have get_last_layer method when using adversarial loss"
-            )
+            assert hasattr(
+                self.tokenizer, "get_last_layer"
+            ), "Tokenizer should have get_last_layer method when using adversarial loss"
 
         # lpips loss
         if self.use_lpips:
             self.lpips_loss: LIPIPSHyperpspectral = hydra.utils.instantiate(
                 cfg.loss.lpips_loss
-            )
+            ).cuda()
 
         # optimizers and lr schedulers
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = (
@@ -570,31 +571,27 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # losses
         repa_loss_weighted = losses["repa_loss"] * self.loss_cfg.repa_loss_weight
+        quant_loss_weighted = 0.0
+        lpips_loss_weighted = 0.0
         if not self.use_disc:
             # process in this if not use discriminator
             quant_loss_weighted = (
                 losses["quantizer_loss"] * self.loss_cfg.quantizer_loss_weight
             )
-
-            if "lpips_loss" in losses:
-                # perceptual loss is not supported for hyperspectral images
-                lpips_loss_weighted = (
-                    losses["lpips_loss"] * self.loss_cfg.lpips_loss_weight
+            lpips_loss_weighted = (
+                # do not use gram loss?
+                0.0
+                if not self.use_lpips
+                else (
+                    losses.get("lpips_loss", None)
+                    or self.lpips_loss(recon, x)["perceptual_loss"]
                 )
-            elif self.use_lpips:
-                lpips_loss_weighted = (
-                    self.lpips_loss(x, recon) * self.loss_cfg.lpips_loss_weight
-                )
-            else:
-                lpips_loss_weighted = 0.0
+            ) * self.loss_cfg.lpips_loss_weight
 
             # TODO: repa loss in this trainer or inside the tokenizer class?
 
             # for logs
             log_losses_from_diffusion["q_loss"] = quant_loss_weighted
-        else:
-            # process in discriminator class, not here
-            quant_loss_weighted = 0.0
 
         # sum losses
         diffusion_loss = (
@@ -759,55 +756,82 @@ class DiffusiveHyperspectralTokenizerTrainer:
     def format_log(
         self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
     ) -> str:
-        assert log_token_loss is not None or log_disc_loss is not None, (
-            "At least one of the logs should be provided"
-        )
+        assert (
+            log_token_loss is not None or log_disc_loss is not None
+        ), "At least one of the logs should be provided"
+
+        def dict_round_to_list_str(
+            d: dict, n_round: int = 3, select: list[str] | None = None
+        ):
+            strings = []
+            for k, v in d.items():
+                if select is not None and k not in select:
+                    continue
+
+                if isinstance(v, (float, torch.Tensor)):
+                    if torch.is_tensor(v):
+                        if v.numel() > 1:
+                            self.log_msg(
+                                f'logs has non-scalar tensor "{k}", skip it',
+                                level="WARNING",
+                            )
+                            continue
+                        v = v.item()
+                    strings.append(f"{k}: {v:.{n_round}f}")
+                else:
+                    strings.append(f"{k}: {v}")
+            return strings
 
         n_round = 3
 
         strings = []
         if log_token_loss is not None:
             # perceptual loss is not supported for hyperspectral images
-            _log_token = [
-                f"diff_loss: {log_token_loss['diff_loss']:.{n_round}f}",
-                f"repa_loss: {log_token_loss['repa_loss']:.{n_round}f}",
-                f"lpips_loss: {log_token_loss['lpips_loss']:.{n_round}f}",
-            ]
+            _log_token = dict_round_to_list_str(
+                log_token_loss,
+                select=["diff_loss", "repa_loss", "lpips_loss"],
+            )
+
             if self.use_disc:
-                _log_token_from_disc = [
-                    f"recon_loss: {log_token_loss['reconstruct_loss']:.{n_round}f}",
-                    f"ssim_loss: {log_token_loss['ssim_loss']:.{n_round}f}",
-                    f"g_loss: {log_token_loss['g_loss']:.{n_round}f}",
-                ]
+                _log_token_from_disc = dict_round_to_list_str(
+                    log_disc_loss,
+                    select=[
+                        "reconstruct_loss",
+                        "ssim_loss",
+                        "g_loss",
+                    ],
+                )
                 _log_token.extend(_log_token_from_disc)
 
-            if self.vq_loss_fn.use_perceptual_loss:
-                _log_percep_loss = [
-                    f"p_loss: {log_token_loss['perceptual_loss']:.{n_round}f}"
-                ]
-                _log_token.extend(_log_percep_loss)
+                if self.vq_loss_fn.use_perceptual_loss:
+                    _log_percep_loss = dict_round_to_list_str(
+                        log_token_loss,
+                        select=["perceptual_loss"],
+                    )
+                    _log_token.extend(_log_percep_loss)
 
             if self.quantizer_type is not None:
-                _log_q = [
-                    f"quantizer_loss: {log_token_loss['q_loss']:.{n_round}f}",
-                ]
+                _log_q = dict_round_to_list_str(
+                    log_token_loss,
+                    select=["q_loss"],
+                )
                 _log_token.extend(_log_q)
 
             strings.extend(_log_token)
 
         else:
-            _log_disc = [
-                f"disc_loss: {log_disc_loss['disc_loss']:.{n_round}f}",
-                f"logits_real: {log_disc_loss['logits_real']:.{n_round}f}",
-                f"logits_fake: {log_disc_loss['logits_fake']:.{n_round}f}",
-                f"lecam_loss: {log_disc_loss['lecam_loss']:.{n_round}f}",
-            ]
+            _log_disc = dict_round_to_list_str(
+                log_disc_loss,
+                n_round,
+                select=["disc_loss", "logits_real", "logits_fake", "lecam_loss"],
+            )
             strings.extend(_log_disc)
             if "r1_scale" in log_disc_loss:
-                _disc_reg_logs = [
-                    f"r1_scale: {log_disc_loss['r1_scale']:.{n_round}f}",
-                    f"r1_loss: {log_disc_loss['r1_loss']:.{n_round}f}",
-                ]
+                _disc_reg_logs = dict_round_to_list_str(
+                    log_disc_loss,
+                    n_round,
+                    ["r1_loss", "r1_scale"],
+                )
                 strings.extend(_disc_reg_logs)
 
         return " - ".join(strings)
@@ -929,17 +953,15 @@ class DiffusiveHyperspectralTokenizerTrainer:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
         # * is compiled model ==============
-        if self.tokenizer_cfg.compile_model:
+        if hasattr(self.tokenizer, "_orig_mod"):
             # must unwarp the model by encoder, decoder, quantizer one by one
             # or it still contains `_orig_module` prefix key
 
             get_state_dict = lambda model: self.accelerator.unwrap_model(
                 model, keep_torch_compile=False
             ).state_dict()
-            ema_model: DiffuseSlot | TwoDimDiffusionSlots = (
-                self.accelerator.unwrap_model(
-                    self.ema_tokenizer.ema_model, keep_torch_compile=False
-                )
+            ema_model = self.accelerator.unwrap_model(
+                self.ema_tokenizer.ema_model, keep_torch_compile=False
             )
             encoder_params = get_state_dict(ema_model.encoder)
             decoder_params = get_state_dict(ema_model.decoder)
@@ -996,19 +1018,28 @@ class DiffusiveHyperspectralTokenizerTrainer:
             disc_params = ckpt["discriminator"]
 
         # load into models
-        tokenizer = self.accelerator.unwrap_model(self.tokenizer)
-        tokenizer.encoder.load_state_dict(tokenizer_params["encoder"], strict=strict)
-        tokenizer.decoder.load_state_dict(tokenizer_params["decoder"], strict=strict)
-        if hasattr(tokenizer, "encoder2slot"):
-            tokenizer.encoder2slot.load_state_dict(
-                tokenizer_params["encoder2slot"], strict
+        # if is compiled
+        if hasattr(self.tokenizer, "_orig_mod"):
+            tokenizer = self.accelerator.unwrap_model(self.tokenizer)
+            tokenizer.encoder.load_state_dict(
+                tokenizer_params["encoder"], strict=strict
             )
-        if tokenizer.quantizer is not None and isinstance(
-            tokenizer.quantizer, nn.Module
-        ):
-            tokenizer.quantizer.load_state_dict(
-                tokenizer_params["quantizer"], strict=strict
+            tokenizer.decoder.load_state_dict(
+                tokenizer_params["decoder"], strict=strict
             )
+            if hasattr(tokenizer, "encoder2slot"):
+                tokenizer.encoder2slot.load_state_dict(
+                    tokenizer_params["encoder2slot"], strict
+                )
+            if tokenizer.quantizer is not None and isinstance(
+                tokenizer.quantizer, nn.Module
+            ):
+                tokenizer.quantizer.load_state_dict(
+                    tokenizer_params["quantizer"], strict=strict
+                )
+        else:
+            tokenizer.load_state_dict(tokenizer_params, strict=strict)
+
         if self.use_disc:
             disc = self.accelerator.unwrap_model(self.vq_loss_fn.discriminator)
             disc.load_state_dict(disc_params, strict=strict)
@@ -1025,7 +1056,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
-        self.accelerator.load_state(path, weights_only=False)
+        self.accelerator.load_state(path)
         self.accelerator.wait_for_everyone()
 
     def distributed_mean_dict(self, d: dict):
@@ -1114,11 +1145,11 @@ class DiffusiveHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "cosmos_diff_2d_no_q"
+_key = "flowmo_t512_d16p8"
 _configs = {
     "cosmos_diff_2d_no_q": ["configs/2d_cosmos_diff", "2d_cosmos_no_quantizer"],
     "diff_slots_1d_t512d16": ["configs/1d_tokenizer", "1d_tokenizer_no_quantizer"],
-    "flowmo_t512_d16p8": ["configs/1d_tokenizer", "flowmo_no_quant_t512_d16p8"],
+    "flowmo_t512_d16p8": ["configs/1d_tokenizer", "flowmo_no_quant_t512d16p8"],
 }
 cfg = _configs.get(_key, None)
 if cfg is None:

@@ -1,10 +1,11 @@
 import ast
 import sys
+from pathlib import Path
 
 import torch
 from accelerate.state import AcceleratorState, is_initialized
 
-sys.path.insert(0, "/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer")
+sys.path.insert(0, __file__[: __file__.find("src") + 3])
 from src.stage1.one_d_tokenizer.FlowMo.flowmo.models import (
     FlowMo,
     _edm_to_flow_convention,
@@ -71,10 +72,7 @@ class FlowMoTokenizer(FlowMo):
         self.register_buffer("zero", torch.zeros(1))
 
     def forward_with_loss(
-        self,
-        x,
-        inferece_with_n_slots=-1,
-        aux_state: dict = None,
+        self, x, inferece_with_n_slots=-1, aux_state: dict = None, **kwargs_discard
     ):
         config = self.config
         b = x.size(0)
@@ -144,7 +142,7 @@ class FlowMoTokenizer(FlowMo):
         return losses, aux
 
     @torch.no_grad()
-    def forward_sample(self, images, dtype=None, code=None):
+    def forward_sample(self, images, dtype=None, code=None, **kwargs_discard):
         model = self
         config = self.config.eval.sampling
         dtype = (
@@ -184,7 +182,9 @@ class FlowMoTokenizer(FlowMo):
                 schedule=config.schedule,
                 cfg_interval=config.cfg_interval,
             )[-1].clip(-1, 1)
-        return samples.to(torch.float32)
+
+        _place_holder = {}
+        return samples.to(torch.float32), _place_holder
 
     def forward(self, x, sample=False, **kwargs):
         if sample:
