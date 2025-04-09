@@ -149,6 +149,7 @@ def get_hyperspectral_dataloaders(
         prefetch_factor=6,
         drop_last=False,
     )
+    logger.info(f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}")
 
     return dataset, dataloader
 

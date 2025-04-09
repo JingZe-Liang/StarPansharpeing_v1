@@ -83,6 +83,9 @@ train:
   use_disc: true
   resume_path:
   ema_load_path:
+        
+  quantizer_type: ${tokenizer.quantizer_type}
+  quantizer_kwargs: null
 
   tokenizer_optimizer:
     _target_: src.utilities.optim.mars.MARS

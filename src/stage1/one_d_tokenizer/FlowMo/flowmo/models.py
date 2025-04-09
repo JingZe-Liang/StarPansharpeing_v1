@@ -20,6 +20,7 @@ from loguru import logger
 from mup import MuReadout
 from torch import Tensor, dtype, nn
 
+sys.path.insert(0, "/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer")
 from src.stage1.one_d_tokenizer.FlowMo.flowmo import lookup_free_quantize
 
 MUP_ENABLED = False or (os.getenv("MUP_ENABLED", "False") in ("True", "1", "true"))
@@ -69,7 +70,9 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     assert dim % 2 == 0
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / (theta**scale)
-    out = torch.einsum("...n,d->...nd", pos, omega)
+    out = torch.einsum(
+        "...n,d->...nd", pos, omega
+    )  # (bs, n) x (d // 2) -> (bs, n, d // 2)
     out = torch.stack(
         [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)],
         dim=-1,
@@ -79,8 +82,12 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
 
 
 def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor):
+    # xq: (b, h, l, d)
+    # reshape: (b, h, l, d // 2, 2)
+    # --> hidden_size/n_heads//2 must equal to n_axes sum // 2 ((8 + 28 + 28) // 2=32)
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+    # (b, 1, l, c, 2, 2), 1 shared by heads
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
     xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
 
@@ -120,7 +127,7 @@ class EmbedND(nn.Module):
         emb = torch.cat(
             [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
             dim=-3,
-        )
+        )  # cat((b,n,d,2,2) * 3, dim=-3) -> (b,n,c,2,2)
 
         return emb.unsqueeze(1)
 
@@ -241,6 +248,7 @@ class DoubleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         qkv_bias: bool = False,
+        is_encoder: bool = False,
     ):
         super().__init__()
 
@@ -248,7 +256,8 @@ class DoubleStreamBlock(nn.Module):
         self.num_heads = num_heads
         self.hidden_size = hidden_size
 
-        self.img_mod = Modulation(hidden_size, double=True)
+        if not is_encoder:
+            self.img_mod = Modulation(hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_attn = SelfAttention(
             dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias
@@ -260,7 +269,8 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-        self.txt_mod = Modulation(hidden_size, double=True)
+        if not is_encoder:
+            self.txt_mod = Modulation(hidden_size, double=True)
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_attn = SelfAttention(
             dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias
@@ -285,6 +295,8 @@ class DoubleStreamBlock(nn.Module):
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
+        # if vec is None
+        # img_modulated = (p + 1 - p) * img_modulated + 0 = img_modulated
         img_modulated = (p + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
         img_q, img_k, img_v = rearrange(
@@ -309,17 +321,18 @@ class DoubleStreamBlock(nn.Module):
         attn = attention(q, k, v, pe=pe_double)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
-        # calculate the img bloks
+        # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
         img = img + img_mod2.gate * self.img_mlp(
             (p + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
         )
 
-        # calculate the txt bloks
+        # calculate the txt blocks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
         txt = txt + txt_mod2.gate * self.txt_mlp(
             (p + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
         )
+
         return img, txt
 
 
@@ -330,6 +343,7 @@ class LastLayer(nn.Module):
         patch_size: int,
         out_channels: int,
         readout_zero_init=False,
+        is_encoder=False,
     ):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -346,9 +360,10 @@ class LastLayer(nn.Module):
                 hidden_size, patch_size * patch_size * out_channels, bias=True
             )
 
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        if not is_encoder:
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+            )
 
     def forward(self, x: Tensor, vec) -> Tensor:
         if vec is None:
@@ -444,13 +459,14 @@ class Flux(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams, name="", lsg=False):
+    def __init__(self, params: FluxParams, name="", lsg=False, is_encoder=False):
         super().__init__()
 
         self.name = name
         self.lsg = lsg
         self.params = params
         self.in_channels = params.in_channels
+        self.is_encoder = is_encoder
         self.patch_size = params.patch_size
         self.out_channels = self.in_channels
         if params.hidden_size % params.num_heads != 0:
@@ -468,7 +484,11 @@ class Flux(nn.Module):
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
 
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
+        if not is_encoder:
+            self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
+
+        else:
+            self.time_in = nn.Identity()
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.txt_in = nn.Linear(params.context_dim, self.hidden_size)
 
@@ -479,17 +499,28 @@ class Flux(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    is_encoder=is_encoder,
                 )
                 for idx in range(params.depth)
             ]
         )
 
-        self.final_layer_img = LastLayer(
-            self.hidden_size, 1, self.out_channels, readout_zero_init=False
-        )
-        self.final_layer_txt = LastLayer(
-            self.hidden_size, 1, params.context_dim, readout_zero_init=False
-        )
+        if not is_encoder:
+            self.final_layer_img = LastLayer(
+                self.hidden_size,
+                1,
+                self.out_channels,
+                readout_zero_init=False,
+                is_encoder=False,
+            )
+        else:
+            self.final_layer_txt = LastLayer(
+                self.hidden_size,
+                1,
+                params.context_dim,
+                readout_zero_init=False,
+                is_encoder=True,
+            )
 
     def forward(
         self,
@@ -520,22 +551,25 @@ class Flux(nn.Module):
         txt = self.txt_in(txt)
         # share the pe embedder
         pe_single = self.pe_embedder(torch.cat((txt_ids,), dim=1))
-        pe_double = self.pe_embedder(torch.cat((txt_ids, img_ids), dim=1))
+        pe_double = self.pe_embedder(
+            torch.cat((txt_ids, img_ids), dim=1)
+        )  # (bs, 1, l, c, 2, 2)
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, pe=(pe_single, pe_double), vec=vec)
 
-        img = self.final_layer_img(img, vec=vec)
-        img = rearrange(
-            img,
-            "b (gh gw) (ph pw c) -> b c (gh ph) (gw pw)",
-            ph=self.patch_size,
-            pw=self.patch_size,
-            gh=h // self.patch_size,
-            gw=w // self.patch_size,
-        )
-
-        txt = self.final_layer_txt(txt, vec=vec)
+        if not self.is_encoder:
+            img = self.final_layer_img(img, vec=vec)
+            img = rearrange(
+                img,
+                "b (gh gw) (ph pw c) -> b c (gh ph) (gw pw)",
+                ph=self.patch_size,
+                pw=self.patch_size,
+                gh=h // self.patch_size,
+                gw=w // self.patch_size,
+            )
+        else:
+            txt = self.final_layer_txt(txt, vec=vec)
         return img, txt, {"final_txt": txt}
 
 
@@ -566,6 +600,12 @@ class FlowMo(nn.Module):
         self.encoder_context_dim = context_dim * (
             1 + (self.config.model.quantization_type == "kl")
         )
+        logger.info(
+            f"[Flowmo]: encoder_context_dim: {self.encoder_context_dim}\n"
+            f"code length: {code_length}\n"
+            f"image channels: {self.image_channels}\n"
+            f"image size: {self.image_size}\n"
+        )
 
         if config.model.quantization_type == "lfq":
             self.quantizer = lookup_free_quantize.LFQ(
@@ -581,19 +621,21 @@ class FlowMo(nn.Module):
             enc_width = width
 
         encoder_params = FluxParams(
-            in_channels=3 * patch_size**2,
+            in_channels=self.image_channels * patch_size**2,
             context_dim=self.encoder_context_dim,
             patch_size=patch_size,
             depth=enc_depth,
             **DIT_ZOO[self.dit_mode],
         )
         decoder_params = FluxParams(
-            in_channels=3 * patch_size**2,
+            in_channels=self.image_channels * patch_size**2,
             context_dim=context_dim + 1,
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],
         )
+        logger.info(f"[Flowmo]: encoder params: {encoder_params}")
+        logger.info(f"[Flowmo]: decoder params: {decoder_params}")
 
         # width=4, dit_b_4 is the usual model
         encoder_params.hidden_size = enc_width * (encoder_params.hidden_size // 4)
@@ -605,18 +647,29 @@ class FlowMo(nn.Module):
         decoder_params.axes_dim = [(d // 4) * width for d in decoder_params.axes_dim]
 
         # encoder and decoder
-        self.encoder = Flux(encoder_params, name="encoder")
-        self.decoder = Flux(decoder_params, name="decoder")
+        self.encoder = Flux(encoder_params, name="encoder", is_encoder=True)
+        self.decoder = Flux(decoder_params, name="decoder", is_encoder=False)
+
+        # clear the last layer that does not forward
+        # last_layer_idx = encoder_params.depth - 1
+        # del self.encoder.double_blocks[last_layer_idx].img_attn.proj
+        # del self.encoder.double_blocks[last_layer_idx].img_mlp
+        # del self.decoder.double_blocks[last_layer_idx].txt_attn.proj
+        # del self.decoder.double_blocks[last_layer_idx].txt_mlp
 
     def encode(self, img):
         b, c, h, w = img.shape
 
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        txt = torch.zeros(  # not learable?
+        txt = torch.zeros(  # not learnable?
             (b, self.code_length, self.encoder_context_dim), device=img.device
         )
 
-        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        img, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+
+        # Hack: Ensure gradients flow for DDP compatibility
+        # (does not affect output values)
+        code = code + img.mean() * 0.0
 
         return code, aux
 
@@ -629,9 +682,11 @@ class FlowMo(nn.Module):
             self.patch_size,
         )
 
-        pred, _, decode_aux = self.decoder(
+        pred, txt, decode_aux = self.decoder(
             img, img_idxs, code, txt_idxs, timesteps=timesteps
         )
+        pred = pred + txt.mean() * 0.0  # add in graph
+
         return pred, decode_aux
 
     @may_compiled
@@ -939,7 +994,7 @@ if __name__ == "__main__":
     from omegaconf import OmegaConf
 
     cfg_dict = {
-        "data": {"image_size": 256},
+        "data": {"image_size": 512},
         "model": {
             "code_length": 256,
             "enc_depth": 8,
@@ -985,13 +1040,21 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(2)
     model = FlowMo(4, cfg).cuda().to(dtype)
-    x = torch.randn(8, 3, 512, 512).cuda().to(dtype)
+    x = torch.randn(1, 3, 512, 512).cuda().to(dtype)
 
     # code, aux = model.encode(x)
     # print(code.shape)
 
     # * forward
-    # out = model.forward(img=x, noised_img=x, timesteps=torch.rand(x.shape[0]))
+    # with torch.autocast("cuda", dtype):
+    #     out = model.forward(
+    #         img=x, noised_img=x, timesteps=torch.rand(x.shape[0]).to(x)
+    #     )[0]
+    # out.mean().backward()
+
+    # for name, p in model.named_parameters():
+    #     if p.grad is None:
+    #         print(name, "has not grad")
 
     # from fvcore.nn import FlopCountAnalysis, flop_count_table
 
@@ -1001,25 +1064,30 @@ if __name__ == "__main__":
     # print(flop_count_table(FlopCountAnalysis(model, (x, x, torch.rand(x.shape[0])))))
 
     # * loss
-
-    # for p in model.encoder.parameters():
-    #     p.requires_grad_(False)
-    # model.encoder.eval()
-
-    # opt = torch.optim.AdamW(model.decoder.parameters(), lr=1e-4, foreach=True)
+    import time
 
     from src.utilities.optim import CAME8BitWrapper
 
-    opt = CAME8BitWrapper(model.parameters(), lr=1e-4)
+    # for p in model.encoder.parameters():
+    #     p.requires_grad_(False)
+    # model.encoder = model.encoder.eval()
 
-    for _ in range(100):
+    # opt = torch.optim.AdamW(model.parameters(), lr=1e-4, foreach=True)
+
+    opt = CAME8BitWrapper(model.parameters(), lr=1e-4)
+    # opt = CAME8BitWrapper(model.decoder.parameters(), lr=1e-4)
+
+    t1 = time.time()
+    for _ in range(10):
         with torch.autocast("cuda", dtype):
             loss, aux = rf_loss(cfg, model=model, batch={"image": x}, aux_state=None)
         print(loss)
         opt.zero_grad()
         loss.backward()
         opt.step()
+    t2 = time.time()
 
+    print(f"training time {t2 - t1:.4f}s")
     print(torch.cuda.memory_summary(device="cuda:2"))
 
     # * sample
