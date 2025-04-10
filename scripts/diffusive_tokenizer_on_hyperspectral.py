@@ -9,6 +9,7 @@ import hydra
 import numpy as np
 import PIL.Image as Image
 import torch
+import torch.distributed
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.tracking import TensorBoardTracker
@@ -175,13 +176,13 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
-            input_lst = [log_file] * self.accelerator.num_processes
-            output_lst = [None] * self.accelerator.num_processes
-            torch.distributed.scatter_object_list(
-                output_lst,
-                input_lst,
-            )
-            log_file: Path = output_lst[self.accelerator.process_index]
+            if self.accelerator.is_main_process:
+                input_lst = [log_file] * self.accelerator.num_processes
+            else:
+                input_lst = [None] * self.accelerator.num_processes
+            output_lst = [None]
+            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
+            log_file: Path = output_lst[0]
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
@@ -399,9 +400,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
             return
 
         if mode == "tokenizer":
-            self.ema_tokenizer.update()
+            self.accelerator.unwrap_model(self.ema_tokenizer).update()
         elif mode == "disc" and self.use_disc:
-            self.ema_vq_disc.update()
+            self.accelerator.unwrap_model(self.ema_vq_disc).update()
         else:
             raise ValueError(f"Unknown mode {mode}")
 
@@ -560,6 +561,10 @@ class DiffusiveHyperspectralTokenizerTrainer:
                     model.parameters(), self.train_cfg.max_grad_norm
                 )
 
+    def may_freeze(self, model, freeze=True):
+        for p in model.parameters():
+            p.requires_grad = not freeze
+
     def train_tokenizer_step(
         self,
         x: torch.Tensor,
@@ -611,6 +616,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         )
 
         if self.use_disc:
+            self.may_freeze(self.vq_loss_fn.discriminator, True)
             gen_loss, log_losses = self.forward_discriminator(
                 x,
                 recon,
@@ -643,6 +649,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
     def train_disc_step(self, x: torch.Tensor, recon: torch.Tensor):
         if not self.use_disc:
             return torch.tensor(0.0).to(self.device), {}
+
+        self.may_freeze(self.vq_loss_fn.discriminator, False)
 
         disc_loss, log_disc = self.forward_discriminator(
             x,
@@ -794,7 +802,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
             if self.use_disc:
                 _log_token_from_disc = dict_round_to_list_str(
-                    log_disc_loss,
+                    log_token_loss,
                     select=[
                         "reconstruct_loss",
                         "ssim_loss",
@@ -1145,11 +1153,15 @@ class DiffusiveHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "flowmo_t512_d16p8"
+_key = "no_diff_1d_tok_t512d16_no_q"
 _configs = {
     "cosmos_diff_2d_no_q": ["configs/2d_cosmos_diff", "2d_cosmos_no_quantizer"],
     "diff_slots_1d_t512d16": ["configs/1d_tokenizer", "1d_tokenizer_no_quantizer"],
     "flowmo_t512_d16p8": ["configs/1d_tokenizer", "flowmo_no_quant_t512d16p8"],
+    "no_diff_1d_tok_t512d16_no_q": [
+        "configs/1d_tokenizer",
+        "1d_tokenizer_no_diff_no_q_t512_d16",
+    ],
 }
 cfg = _configs.get(_key, None)
 if cfg is None:
