@@ -27,9 +27,11 @@ We are cooking the codes, stay tuned.
 4. add thera (antialias neural heat field) code into encoder (maybe decoder, both?)
 5. ~~add CAMEL optimizer from SANA~~
 6. cook discrete tokenizer (**maybe later, it is hard to cook**)
-7. IMM code or 
+7. IMM and GMFlow code
 8. add pansharpening code (in the latent space)
 9. 1d tokenizer but not use diffusion/flow matching
+10. add Conv-LoRA (MoE) adaptors for Cosmos tokenizer
+11. add Phase Consistency Model's multi-scale discriminator
 
 
 ## Checks

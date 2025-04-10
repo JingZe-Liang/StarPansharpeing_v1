@@ -10,6 +10,7 @@
 # --------------------------------------------------------
 
 import math
+from turtle import forward
 
 import numpy as np
 import torch
@@ -123,6 +124,8 @@ class DiTBlock(nn.Module):
         super().__init__()
         self.act_checkpoint = block_kwargs.pop("act_checkpoint", False)
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.use_adaln = block_kwargs.pop("use_adaln", True)
+
         self.attn = Attention(
             hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs
         )
@@ -135,14 +138,25 @@ class DiTBlock(nn.Module):
             act_layer=approx_gelu,
             drop=0,
         )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        if self.use_adaln:
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            )
 
     def forward_fn(self, x, c, mask=None):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(c).chunk(6, dim=1)
-        )
+        if self.use_adaln:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                self.adaLN_modulation(c).chunk(6, dim=1)
+            )
+        else:
+            _shape = (1, x.shape[2])
+            shift_msa = torch.zeros(_shape, device=x.device, dtype=x.dtype)
+            scale_msa = torch.zeros(_shape, device=x.device, dtype=x.dtype)
+            gate_msa = torch.ones(_shape, device=x.device, dtype=x.dtype)
+            shift_mlp = torch.zeros(_shape, device=x.device, dtype=x.dtype)
+            scale_mlp = torch.zeros(_shape, device=x.device, dtype=x.dtype)
+            gate_mlp = torch.ones(_shape, device=x.device, dtype=x.dtype)
+
         x = x + gate_msa.unsqueeze(1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa), mask
         )
@@ -182,6 +196,20 @@ class FinalLayer(nn.Module):
         return x
 
 
+class LastLayerNotCond(nn.Module):
+    def __init__(self, hidden_size, patch_size, out_channels):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(
+            hidden_size, patch_size * patch_size * out_channels, bias=True
+        )
+
+    def forward(self, x):
+        x = self.norm_final(x)
+        x = self.linear(x)
+        return x
+
+
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -200,6 +228,7 @@ class DiT(nn.Module):
         num_classes=1000,
         learn_sigma=True,
         block_checkpoint=False,
+        use_adaln=True,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -207,6 +236,7 @@ class DiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.use_adaln = use_adaln
 
         self.x_embedder = PatchEmbed(
             input_size,
@@ -235,15 +265,23 @@ class DiT(nn.Module):
                     num_heads,
                     mlp_ratio=mlp_ratio,
                     act_checkpoint=block_checkpoint,
+                    use_adaln=use_adaln,
                 )
                 for _ in range(depth)
             ]
         )
-        self.final_layer = FinalLayer(
-            hidden_size,
-            patch_size,
-            self.out_channels,
-        )
+        if use_adaln:
+            self.final_layer = FinalLayer(
+                hidden_size,
+                patch_size,
+                self.out_channels,
+            )
+        else:
+            self.final_layer = LastLayerNotCond(
+                hidden_size,
+                patch_size,
+                self.out_channels,
+            )
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -275,13 +313,14 @@ class DiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        if self.use_adaln:
+            for block in self.blocks:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
-        # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+            # Zero-out output layers:
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
@@ -336,6 +375,9 @@ class DiT(nn.Module):
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
+
+    def get_last_layer(self):
+        return self.final_layer.linear.weight
 
 
 #################################################################################

@@ -1,4 +1,5 @@
 import math
+import sys
 
 import torch
 import torch.nn as nn
@@ -7,6 +8,7 @@ from diffusers import AutoencoderKL
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
+sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.discretization.collections import (
     BinarySphericalQuantizer,
     DiagonalGaussianDistribution,
@@ -18,6 +20,112 @@ from src.stage1.one_d_tokenizer.semanticist.vision_transformer import VisionTran
 from src.utilities.transport.diffusion import create_diffusion
 from src.utilities.transport.flow_matching import create_transport
 from src.utilities.transport.flow_matching.transport import Sampler
+
+
+class DiTOnlyAttn(DiT):
+    def __init__(
+        self,
+        *args,
+        num_autoenc=32,  # n_slots
+        autoenc_dim=4,  # slot dim
+        use_repa=False,
+        z_dim=768,
+        encoder_depth=8,
+        projector_dim=2048,
+        learn_x_tokens: str = "full_size",
+        **kwargs,
+    ):
+        super().__init__(*args, use_adaln=False, **kwargs)
+        self.autoenc_dim = autoenc_dim
+        self.null_cond = nn.Parameter(torch.zeros(1, num_autoenc, autoenc_dim))
+        torch.nn.init.normal_(self.null_cond, std=0.02)
+        self.hidden_size = kwargs["hidden_size"]
+        self.autoenc_cond_embedder = nn.Linear(autoenc_dim, self.hidden_size)
+
+        # no need for class embeddings and timestep embeddings
+        self.y_embedder = nn.Identity()
+        self.t_embedder = nn.Identity()
+
+        self.cond_drop_prob = 0.1
+        self.learn_x_tokens = learn_x_tokens
+        if learn_x_tokens == "full_size":
+            self.x_tokens = nn.Parameter(
+                torch.randn(1, self.in_channels, *self.x_embedder.patch_size)
+            )
+        elif learn_x_tokens == "only_channel":
+            self.x_tokens = nn.Parameter(torch.randn(1, self.in_channels))
+        else:  # no learnt, set all zeros
+            self.register_buffer("x_tokens", torch.zeros(1, self.in_channels, 1))
+
+        self.use_repa = use_repa
+        self._repa_hook = None
+        self.encoder_depth = encoder_depth
+        if use_repa:
+            self.projector = build_mlp(self.hidden_size, projector_dim, z_dim)
+
+    def embed_cond(self, autoenc_cond, drop_mask=None):
+        # autoenc_cond: (N, K, D)
+        # drop_ids: (N)
+        # self.null_cond: (1, K, D)
+        batch_size = autoenc_cond.shape[0]
+
+        # nested sampled condition
+        if drop_mask is None:
+            # randomly drop all conditions, for classifier-free guidance
+            if self.training:
+                drop_ids = (
+                    torch.rand(batch_size, 1, 1, device=autoenc_cond.device)
+                    < self.cond_drop_prob
+                )  # [bs, 1, 1]
+                # null_cond: [n_latents, D], [bs, n_latents, D]
+                autoenc_cond_drop = torch.where(drop_ids, self.null_cond, autoenc_cond)
+            else:
+                autoenc_cond_drop = autoenc_cond
+        else:
+            # randomly drop some conditions according to the drop_mask (N, K)
+            # True means keep
+            autoenc_cond_drop = torch.where(
+                drop_mask[:, :, None], autoenc_cond, self.null_cond
+            )  # [bs, l, 1]
+        return self.autoenc_cond_embedder(autoenc_cond_drop)
+
+    def forward(self, autoenc_cond, drop_mask=None):
+        """
+        Forward pass of DiT.
+        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
+        t: (N,) tensor of diffusion timesteps
+        autoenc_cond: (N, K, D) tensor of autoencoder conditions (slots)
+        """
+        # handle the x_tokens
+        if self.learn_x_tokens in ("full_size", "zeros"):
+            # repeat batchsize
+            x = self.x_tokens.repeat(autoenc_cond.shape[0], 1, 1, 1)
+        elif self.learn_x_tokens == "only_channel":
+            # repeat bs and hw
+            x = self.x_tokens[..., None, None].repeat_interleave(autoenc_cond.shape[0])
+
+        x = (
+            self.x_embedder(x) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+        autoenc = self.embed_cond(autoenc_cond, drop_mask)
+
+        num_tokens = x.shape[1]
+        x = torch.cat((x, autoenc), dim=1)  # noise and condition
+
+        for i, block in enumerate(self.blocks):
+            x = block(
+                x, None
+            )  # (N, T, D), None means no condition, only rely on encoded tokens
+            if (i + 1) == self.encoder_depth and self.use_repa:
+                projected = self.projector(x)
+                self._repa_hook = projected[:, :num_tokens]
+
+        # slot --> eps
+        x = x[:, :num_tokens]
+        x = self.final_layer(x)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+
+        return x
 
 
 class DiT_with_autoenc_cond(DiT):
@@ -116,9 +224,6 @@ class DiT_with_autoenc_cond(DiT):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
-    def get_last_layer(self):
-        return self.final_layer.linear.weight
-
 
 # 256 x256 -> 256 / 512 = 256 / 128
 # --> vq gan: 64/128 (kl, vq)
@@ -129,92 +234,36 @@ class DiT_with_autoenc_cond(DiT):
 #################################################################################
 
 
-def DiT_with_autoenc_cond_XL_2(**kwargs) -> DiT_with_autoenc_cond:
-    return DiT_with_autoenc_cond(
-        depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_XL_4(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_XL_8(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_L_2(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_L_4(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_L_8(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_B_2(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_B_4(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_B_8(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_S_2(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_S_4(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs
-    )
-
-
-def DiT_with_autoenc_cond_S_8(**kwargs):
-    return DiT_with_autoenc_cond(
-        depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs
-    )
-
-
-DiT_with_autoenc_cond_models = {
-    "DiT-XL-2": DiT_with_autoenc_cond_XL_2,
-    "DiT-XL-4": DiT_with_autoenc_cond_XL_4,
-    "DiT-XL-8": DiT_with_autoenc_cond_XL_8,
-    "DiT-L-2": DiT_with_autoenc_cond_L_2,
-    "DiT-L-4": DiT_with_autoenc_cond_L_4,
-    "DiT-L-8": DiT_with_autoenc_cond_L_8,
-    "DiT-B-2": DiT_with_autoenc_cond_B_2,
-    "DiT-B-4": DiT_with_autoenc_cond_B_4,
-    "DiT-B-8": DiT_with_autoenc_cond_B_8,
-    "DiT-S-2": DiT_with_autoenc_cond_S_2,
-    "DiT-S-4": DiT_with_autoenc_cond_S_4,
-    "DiT-S-8": DiT_with_autoenc_cond_S_8,
+dit_configs = {
+    "DiT-XL-2": dict(depth=28, hidden_size=1152, patch_size=2, num_heads=16),
+    "DiT-XL-4": dict(depth=28, hidden_size=1152, patch_size=4, num_heads=16),
+    "DiT-XL-8": dict(depth=28, hidden_size=1152, patch_size=8, num_heads=16),
+    "DiT-L-2": dict(depth=24, hidden_size=1024, patch_size=2, num_heads=16),
+    "DiT-L-4": dict(depth=24, hidden_size=1024, patch_size=4, num_heads=16),
+    "DiT-L-8": dict(depth=24, hidden_size=1024, patch_size=8, num_heads=16),
+    "DiT-B-2": dict(depth=12, hidden_size=768, patch_size=2, num_heads=12),
+    "DiT-B-4": dict(depth=12, hidden_size=768, patch_size=4, num_heads=12),
+    "DiT-B-8": dict(depth=12, hidden_size=768, patch_size=8, num_heads=12),
+    "DiT-S-2": dict(depth=12, hidden_size=384, patch_size=2, num_heads=6),
+    "DiT-S-4": dict(depth=12, hidden_size=384, patch_size=4, num_heads=6),
+    "DiT-S-8": dict(depth=12, hidden_size=384, patch_size=8, num_heads=6),
 }
+
+
+def create_dit_model(name: str, use_diffusion: bool):
+    base_model_cls = DiT_with_autoenc_cond if use_diffusion else DiTOnlyAttn
+    base_model_cfg = dit_configs[name]
+
+    def _create_model(**kwargs):
+        base_model_cfg.update(kwargs)
+        return base_model_cls(**base_model_cfg)
+
+    return _create_model
+
+
+# *==============================================================
+# * Token nested sampler
+# *==============================================================
 
 
 class NestedSampler(nn.Module):
@@ -248,6 +297,39 @@ class NestedSampler(nn.Module):
         return slot_mask
 
 
+# *==============================================================
+# * No Diffusion Wrapper
+# *==============================================================
+
+
+class NoneDiffusionWrapper:
+    def __init__(self):
+        pass
+
+    def training_losses(
+        self,
+        decoder: nn.Module,
+        x: torch.Tensor,
+        autoenc_cond: torch.Tensor,
+        drop_mask: torch.Tensor,
+    ):
+        recon = decoder(autoenc_cond, drop_mask)
+        assert recon.shape == x.shape
+
+        # loss
+        loss_out = {"loss": F.l1_loss(recon, x), "pred_x_clean": recon}
+
+        return loss_out
+
+    def sample(
+        self,
+        decoder: nn.Module,
+        autoenc_cond: torch.Tensor,
+        drop_mask: torch.Tensor | None = None,
+    ):
+        return decoder(autoenc_cond, drop_mask)
+
+
 class DiffuseSlot(nn.Module):
     def __init__(
         self,
@@ -255,7 +337,7 @@ class DiffuseSlot(nn.Module):
         enable_nest_after: int = -1,
         vae: str | None = "stabilityai/sd-vae-ft-ema",
         # diffusion or fm kwargs
-        diffusion_type: str = "diffusion",
+        diffusion_type: str | None = "diffusion",
         num_sampling_steps: str = "ddim25",
         fm_sample_type: str | None = "ode",
         diffusion_options: dict | None = None,
@@ -340,6 +422,10 @@ class DiffuseSlot(nn.Module):
             self.diffusion = create_transport(**_options)
             self.gen_diffusion = Sampler(self.diffusion)
 
+        else:
+            self.diffusion = NoneDiffusionWrapper()
+            self.gen_diffusion = NoneDiffusionWrapper()
+
         # * dit decoder ==============
         self.distill_from_pretrained_vae = vae is not None
         if self.distill_from_pretrained_vae:
@@ -361,6 +447,8 @@ class DiffuseSlot(nn.Module):
             assert (
                 quantizer_type != "kl"
             ), "when using kl quantizer, diffusion_type should can not be any diffusion"
+
+        self.use_diffusion = True
         if self.diffusion_type == "fm":
             double_out_channel = False
             if learn_sigma:
@@ -369,9 +457,12 @@ class DiffuseSlot(nn.Module):
                 )
         elif self.diffusion_type == "diffusion":
             double_out_channel = learn_sigma
+        else:  # no diffusion
+            self.use_diffusion = False
+            double_out_channel = False
 
         z_dim = 768
-        self.decoder = DiT_with_autoenc_cond_models[dit_model](  # DiT-L-2
+        self.decoder = create_dit_model(dit_model, self.use_diffusion)(  # DiT-L-2
             input_size=self.dit_input_size,
             in_channels=self.dit_in_channels,
             # slots
@@ -385,7 +476,7 @@ class DiffuseSlot(nn.Module):
             block_checkpoint=decoder_block_checkpoint,
             learn_sigma=double_out_channel,
         )
-        self.decoder: DiT_with_autoenc_cond
+        self.decoder: DiT_with_autoenc_cond | DiTOnlyAttn
 
         # * pretrained vae ===============
         if self.distill_from_pretrained_vae:
@@ -498,7 +589,9 @@ class DiffuseSlot(nn.Module):
 
         # * summary ================
         logger.info(
-            f"[Diffusion Tokenizer]:\ndecoder_model={dit_model}, tokenizer factor={self.encoder_patch_sz} \n"
+            f"[Diffusion Tokenizer]:\n"
+            f"diffusion type={self.diffusion_type} \n"
+            f"decoder_model={dit_model}, tokenizer factor={self.encoder_patch_sz} \n"
             f"decoder image (latent) size={self.dit_input_size} \n"
             f"decoder patch size={self.decoder.patch_size}\n"
             f"tokenizer dim={self.dit_in_channels}, num latents={self.num_slots} \n"
@@ -636,12 +729,19 @@ class DiffuseSlot(nn.Module):
                 model_kwargs=model_kwargs,
                 get_pred_x_clean=get_pred_x_clean,
             )
-        else:
+        elif self.diffusion_type == "fm":
             train_losses_inp = dict(
                 model=self.decoder,
                 x1=x_vae,
                 model_kwargs=model_kwargs,
                 get_pred_x_clean=get_pred_x_clean,
+            )
+        else:
+            train_losses_inp = dict(
+                decoder=self.decoder,
+                x=x_vae,
+                autoenc_cond=slots,
+                drop_mask=drop_mask,
             )
 
         # diffusion with dit
@@ -734,75 +834,87 @@ class DiffuseSlot(nn.Module):
         batch_size = slots.shape[0]
         device = slots.device
 
-        # eps
-        if self.distill_from_pretrained_vae:
-            # works on pretrained vae latent space
-            z = torch.randn(
-                batch_size,
-                self.dit_in_channels,
-                self.dit_input_size,
-                self.dit_input_size,
-                device=device,
-            )
-        else:
-            # works on pixel space
-            z = torch.randn(
-                batch_size,
-                self.img_channels,
-                self.enc_img_size,
-                self.enc_img_size,
-                device=device,
-            )
+        # * ==========================================================
+        # * use diffusion
 
-        # sample
-        if cfg != 1.0:
-            z = torch.cat([z, z], 0)
-            null_slots = self.decoder.null_cond.expand(batch_size, -1, -1)
-            slots = torch.cat([slots, null_slots], 0)
-
-            if drop_mask is not None:
-                null_cond_mask = torch.ones_like(drop_mask)  # keep all
-                drop_mask = torch.cat([drop_mask, null_cond_mask], 0)
-
-            model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask, cfg_scale=cfg)
-            sample_fn = self.decoder.forward_with_cfg
-        else:
-            model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask)
-            sample_fn = self.decoder.forward
-
-        # * diffusion sampling
-        if self.diffusion_type == "diffusion":
-            samples = self.gen_diffusion.p_sample_loop(
-                sample_fn,
-                z.shape,
-                z,
-                clip_denoised=not self.distill_from_pretrained_vae,
-                model_kwargs=model_kwargs,
-                progress=True,
-                device=device,
-            )
-        else:
-            if self.fm_sample_type == "sde":
-                diffusion_sample_fn = self.gen_diffusion.sample_sde(
-                    sampling_method="Euler",
-                    diffusion_norm=1.0,
-                    diffusion_form="SBDM",
-                    num_steps=25,
-                    last_step="Mean",
+        if self.use_diffusion:
+            if self.distill_from_pretrained_vae:
+                # works on pretrained vae latent space
+                z = torch.randn(
+                    batch_size,
+                    self.dit_in_channels,
+                    self.dit_input_size,
+                    self.dit_input_size,
+                    device=device,
                 )
-                samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
-            elif self.fm_sample_type == "ode":
-                diffusion_sample_fn = self.gen_diffusion.sample_ode(
-                    sampling_method="dopri5",
-                    num_steps=25,
-                    atol=1e-4,
-                    rtol=1e-4,
+            else:
+                # works on pixel space
+                z = torch.randn(
+                    batch_size,
+                    self.img_channels,
+                    self.enc_img_size,
+                    self.enc_img_size,
+                    device=device,
+                )
+
+            # sample
+
+            if cfg != 1.0:
+                z = torch.cat([z, z], 0)
+                null_slots = self.decoder.null_cond.expand(batch_size, -1, -1)
+                slots = torch.cat([slots, null_slots], 0)
+
+                if drop_mask is not None:
+                    null_cond_mask = torch.ones_like(drop_mask)  # keep all
+                    drop_mask = torch.cat([drop_mask, null_cond_mask], 0)
+
+                model_kwargs = dict(
+                    autoenc_cond=slots, drop_mask=drop_mask, cfg_scale=cfg
+                )
+                sample_fn = self.decoder.forward_with_cfg
+            else:
+                model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask)
+                sample_fn = self.decoder.forward
+
+            # * diffusion sampling
+            if self.diffusion_type == "diffusion":
+                samples = self.gen_diffusion.p_sample_loop(
+                    sample_fn,
+                    z.shape,
+                    z,
+                    clip_denoised=not self.distill_from_pretrained_vae,
+                    model_kwargs=model_kwargs,
                     progress=True,
+                    device=device,
                 )
-                samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
+            else:
+                if self.fm_sample_type == "sde":
+                    diffusion_sample_fn = self.gen_diffusion.sample_sde(
+                        sampling_method="Euler",
+                        diffusion_norm=1.0,
+                        diffusion_form="SBDM",
+                        num_steps=25,
+                        last_step="Mean",
+                    )
+                    samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
+                elif self.fm_sample_type == "ode":
+                    diffusion_sample_fn = self.gen_diffusion.sample_ode(
+                        sampling_method="dopri5",
+                        num_steps=25,
+                        atol=1e-4,
+                        rtol=1e-4,
+                        progress=True,
+                    )
+                    samples = diffusion_sample_fn(z, sample_fn, **model_kwargs)[-1]
 
-        if cfg != 1.0:
-            samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+            if cfg != 1.0:
+                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+
+        # * ==========================================================
+        # * not use diffusion
+
+        else:
+            samples = self.gen_diffusion.sample(self.decoder, slots, drop_mask)
 
         # decoder
         if self.distill_from_pretrained_vae:
@@ -826,6 +938,9 @@ class DiffuseSlot(nn.Module):
         self.decoder.eval()
         if isinstance(self.quantizer, nn.Module):
             self.quantizer.eval()
+
+    def get_last_layer(self):
+        return self.decoder.get_last_layer()
 
 
 def build_mlp(hidden_size, projector_dim, z_dim):
@@ -894,7 +1009,7 @@ if __name__ == "__main__":
         vae=None,
         encoder_block_checkpoint=True,
         decoder_block_checkpoint=True,
-        diffusion_type="fm",
+        diffusion_type=None,
         fm_options={
             "path_type": "Linear",
             "prediction": "velocity",
