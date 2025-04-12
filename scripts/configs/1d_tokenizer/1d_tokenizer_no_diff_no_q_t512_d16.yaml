@@ -42,9 +42,9 @@ accelerator:
     sync_each_batch: false
 
 dataset:
-  used: DCF_2019
+  used: MMSeg_YREB
   dataset_names_to_bs:
-    MMSeg_YREB: 28
+    MMSeg_YREB: 24
     DCF_2019: 12
   transform_prob: 0.5
 
@@ -54,7 +54,7 @@ loss:
   quantizer_loss_weight: 0.1
 
 ema:
-  beta: 0.99
+  beta: 0.999
   update_after_step: 100
   update_every: 2
 
@@ -66,28 +66,25 @@ train:
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 200_000
-  save_every: 1000
+  save_every: 500
   use_disc: true
   use_lpips: false
   resume_path:
-  ema_load_path:
+  ema_load_path: "/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_1d_tok/2025-04-12_01-43-42/1d_tok_no_diff_t512_d16/ema/ema.pt"
+  gradient_check: false
 
   quantizer_type: ${tokenizer.quantizer_type}
   quantizer_kwargs: null
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 1.0e-4
-    eps: 1.0e-8
-    foreach: true
+    lr: 3.0e-4
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 1.0e-4
-    eps: 1.0e-8
-    foreach: true
+    lr: 3.0e-4
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -111,10 +108,10 @@ train:
     visualize_every: 200
     log_every: 10
 
-  debug: true
+  debug: false
 
 val:
   sample_cfg: 1.0
   sample_use_ema: false
-  val_duration: 1000
+  val_duration: 500
   max_val_iters: 4 # val only `max_val_iters` batches

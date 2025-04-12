@@ -254,8 +254,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         ):
             return
 
-        if step is None:
-            step = self.global_step
+        step = step or self.global_step
 
         assert log_type in [
             "metric",
@@ -267,7 +266,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         elif log_type == "image":
             self.tb_logger.log_images(logs, step=step)
 
-    def log_msg(self, *msgs, only_rank_one=True, level="INFO", sep=",", **kwargs):
+    def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
             "info",
             "warning",
@@ -281,7 +280,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         log_fn = getattr(self.logger, level.lower())
 
-        if only_rank_one:
+        if only_rank_zero:
             if self.accelerator.is_main_process:
                 log_fn(str_msg(*msgs), **kwargs)
         else:
@@ -366,6 +365,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 self.disc_optim,
                 self.disc_sched,
                 self.train_dataloader,
+                self.val_dataloader,
             ) = self.accelerator.prepare(
                 self.tokenizer,
                 self.ema_tokenizer.ema_model,
@@ -376,6 +376,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 self.disc_optim,
                 self.disc_sched,
                 self.train_dataloader,
+                self.val_dataloader,
             )
         else:
             (
@@ -384,12 +385,14 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 self.tokenizer_optim,
                 self.tokenizer_sched,
                 self.train_dataloader,
+                self.val_dataloader,
             ) = self.accelerator.prepare(
                 self.tokenizer,
                 self.ema_tokenizer.ema_model,
                 self.tokenizer_optim,
                 self.tokenizer_sched,
                 self.train_dataloader,
+                self.val_dataloader,
             )
 
     def step_train_state(self):
@@ -543,13 +546,13 @@ class DiffusiveHyperspectralTokenizerTrainer:
                     if param.grad is None:
                         self.log_msg(
                             f"step {self.global_step} - {name} has None gradient, shaped as {param.shape}",
-                            only_rank_one=False,
+                            only_rank_zero=False,
                             level="WARNING",
                         )
                     elif torch.isnan(param.grad).any():
                         self.log_msg(
                             f"step {self.global_step} - {name} has nan gradient, shaped as {param.shape}",
-                            only_rank_one=False,
+                            only_rank_zero=False,
                             level="WARNING",
                         )
                         torch.nan_to_num(
@@ -673,6 +676,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         return disc_loss, log_disc
 
     def train_step(self, batch: dict):
+        self.accelerator.wait_for_everyone()
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
 
         quality_track_n = self.train_cfg.track_metrics_duration
@@ -851,12 +855,12 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
     def train_loop(self):
         _stop_train_and_save = False
-        self.accelerator.wait_for_everyone()
 
-        self.log_msg("[Train]: start training", only_rank_one=False)
+        self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
             self.train_step(batch)
+            # self.log_msg(f"step={self.global_step}", only_rank_zero=False)
 
             if self.global_step % self.val_cfg.val_duration == 0:
                 self.val_loop()
@@ -869,6 +873,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
                 self.global_step % self.train_cfg.save_every == 0
                 or _stop_train_and_save
             ):
+                self.accelerator.wait_for_everyone()
                 self.save_state()
                 self.save_ema()
 
@@ -886,6 +891,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
             yield batch
 
     def val_loop(self):
+        self.log_msg(
+            f"start validation at step={self.global_step}", only_rank_zero=False
+        )
         if not hasattr(self, "_val_loader_iter"):
             # state in the loader generator
             self._val_loader_iter = iter(self.finite_val_loader())
@@ -917,21 +925,14 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # gather
         if self.accelerator.use_distributed:
-            psnr_val = torch.distributed.reduce(
-                psnr_val, op=torch.distributed.ReduceOp.AVG
-            )
-            ssim_val = torch.distributed.reduce(
-                ssim_val, op=torch.distributed.ReduceOp.AVG
-            )
-            loss_val = torch.distributed.reduce(
-                loss_val, op=torch.distributed.ReduceOp.AVG
-            )
+            # torch.distributed.reduce(psnr_val, 0, op=torch.distributed.ReduceOp.AVG)
+            # torch.distributed.reduce(ssim_val, 0, op=torch.distributed.ReduceOp.AVG)
+            # torch.distributed.reduce(loss_val, 0, op=torch.distributed.ReduceOp.AVG)
+            psnr_val = self.accelerator.gather(psnr_val).mean().item()
+            ssim_val = self.accelerator.gather(ssim_val).mean().item()
+            loss_val = self.accelerator.gather(loss_val).mean().item()
 
         if self.accelerator.is_main_process:
-            psnr_val = psnr_val.item()
-            ssim_val = ssim_val.item()
-            loss_val = loss_val.item()
-
             self.log_msg(
                 f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f} | loss: {loss_val:.4f}"
             )
@@ -950,8 +951,12 @@ class DiffusiveHyperspectralTokenizerTrainer:
         self.accelerator.save_state()
         self.log_msg("[State]: save states")
 
+        self.log_msg(
+            f"[State]: save states at done, ready to continue training ...",
+            only_rank_zero=False,
+        )
+
     def save_ema(self):
-        self.accelerator.wait_for_everyone()
         ema_path = (
             self.proj_dir / "ema" / "ema.pt"
         )  # can not load by safetensors, if is a nested dict
@@ -959,6 +964,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.log_msg("ready to save ema model ...")
 
         # * is compiled model ==============
         if hasattr(self.tokenizer, "_orig_mod"):
@@ -1002,16 +1009,18 @@ class DiffusiveHyperspectralTokenizerTrainer:
         )
         if self.use_disc:
             disc_params = self.accelerator.unwrap_model(
-                self.ema_vq_disc.ema_model, keep_torch_compile=False
-            ).state_dict()
+                self.ema_vq_disc, keep_torch_compile=False
+            ).ema_model.state_dict()
             ema_ckpt["discriminator"] = disc_params
 
         # * save
         if self.accelerator.is_main_process:
             self.accelerator.save(ema_ckpt, ema_path)
 
-        self.log_msg(f"[Ckpt]: save ema at {ema_path}")
-        self.accelerator.wait_for_everyone()
+        self.log_msg(
+            f"[Ckpt]: save ema at {ema_path}, steps={self.global_step}, continue training ...",
+            only_rank_zero=False,
+        )
 
     def load_from_ema(self, ema_path: str, strict: bool = True):
         # because safetensors does not support nested dict
@@ -1027,8 +1036,8 @@ class DiffusiveHyperspectralTokenizerTrainer:
 
         # load into models
         # if is compiled
+        tokenizer = self.accelerator.unwrap_model(self.tokenizer)
         if hasattr(self.tokenizer, "_orig_mod"):
-            tokenizer = self.accelerator.unwrap_model(self.tokenizer)
             tokenizer.encoder.load_state_dict(
                 tokenizer_params["encoder"], strict=strict
             )
@@ -1051,7 +1060,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
         if self.use_disc:
             disc = self.accelerator.unwrap_model(self.vq_loss_fn.discriminator)
             disc.load_state_dict(disc_params, strict=strict)
-        self.train_state.load_state_dict(counter_params, strict=strict)
+        self.train_state.load_state_dict(counter_params)
 
         # to prepare
         self.tokenizer = tokenizer
@@ -1142,7 +1151,6 @@ class DiffusiveHyperspectralTokenizerTrainer:
             img_to_save.save(save_path)
 
         self.log_msg("[Visualize]: save visualization at {}".format(save_path))
-        self.accelerator.wait_for_everyone()
 
     def run(self):
         if self.train_cfg.resume_path is not None:
@@ -1151,6 +1159,7 @@ class DiffusiveHyperspectralTokenizerTrainer:
             self.load_from_ema(self.train_cfg.ema_load_path)
 
         self.train_loop()
+        self.accelerator.end_training()
 
 
 _key = "no_diff_1d_tok_t512d16_no_q"

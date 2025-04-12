@@ -13,8 +13,8 @@ project_config:
   _target_: accelerate.utils.ProjectConfiguration
   # ==================
   # placeholder, changed by code
-  project_dir: runs/stage1_1dtokenizer/
-  logging_dir: runs/stage1_1dtokenizer/tensorboard
+  project_dir: runs/stage1_1d_tokenizer/
+  logging_dir: runs/stage1_1d_tokenizer/tensorboard
   # ==================
   total_limit: 5
   automatic_checkpoint_naming: true
