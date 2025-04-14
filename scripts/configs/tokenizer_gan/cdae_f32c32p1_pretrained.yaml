@@ -39,25 +39,29 @@ train:
   save_every: 500
   seperate_enc_dec: false
   grad_check: false
+  only_load_tokenizer: true
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage1_cdae/2025-04-14_18-25-36_cdae_f8c12/checkpoints/checkpoint_3
   finetune_cfg:
     refine_decoder_head_n_layers: 2
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    # _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.MARS
     _partial_: true
     lr: 3.0e-4
-    eps: 1.0e-8
-    foreach: true
+    lr_1d: 3.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 3.0e-4
-    eps: 1.0e-8
+    lr: 2.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.9, 0.95]
     foreach: true
 
   # tokenizer_optimizer:

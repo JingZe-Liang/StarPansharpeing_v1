@@ -32,6 +32,7 @@ from ...models.nn.ops import (
     ConvPixelShuffleUpSampleLayer,
     ConvPixelUnshuffleDownSampleLayer,
     EfficientViTBlock,
+    FSDPNoWrapOpSequential,
     IdentityLayer,
     InterpolateConvUpSampleLayer,
     OpSequential,
@@ -344,7 +345,8 @@ def build_decoder_project_out_block(
         raise ValueError(
             f"upsample factor {factor} is not supported for decoder project out"
         )
-    return OpSequential(layers)
+    # return OpSequential(layers)
+    return FSDPNoWrapOpSequential(layers)
 
 
 class Encoder(nn.Module):
@@ -586,7 +588,8 @@ class DCAE(nn.Module):
 
     @property
     def _no_split_modules(self):
-        return []
+        # last layer no DTenosr for FSDP2
+        return ["decoder.project_out"]
 
 
 def dc_ae_f8c16(

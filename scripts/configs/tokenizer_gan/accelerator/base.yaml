@@ -20,7 +20,7 @@ project_config:
   automatic_checkpoint_naming: true
 gradient_accumulation_plugin:
   _target_: accelerate.utils.GradientAccumulationPlugin
-  num_steps: 1
+  num_steps: 2
   adjust_scheduler: false
   sync_with_dataloader: false
   sync_each_batch: false

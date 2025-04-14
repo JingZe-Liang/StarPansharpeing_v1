@@ -42,6 +42,8 @@ ae_cfg.encoder.act_checkpoint = True
 ae_cfg.decoder.act_checkpoint = True
 print(ae_cfg)
 
+accelerator = accelerate.Accelerator(mixed_precision="bf16")
+
 img_size = 512
 bs = 8
 dtype = torch.bfloat16
@@ -166,14 +168,35 @@ optimizer = CAME8BitWrapper(
     min_8bit_size=int(64 * 64),  # Minimum parameter size to use 8-bit
 )
 
+
+# prepare the tokenizer and the optimizer
+ae.dtype = torch.bfloat16
+ae, optimzier = accelerator.prepare(ae, optimizer)
+
+last_layer = accelerator.unwrap_model(ae).get_last_layer()
+print(last_layer)
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.tensor import DTensor
+
+_is_fsdp = True
+if isinstance(last_layer, DTensor):
+    last_layer: DTensor
+    accelerator.print("last layer is DTensor")
+    accelerator.print(f"{last_layer.to_local()}")
+
 for _ in trange(20):
-    with torch.autocast("cuda", dtype):
+    with accelerator.autocast():
         # 前向传播
         # recon = ae(x)
-        z = ae.encode(x)
-        recon = ae.decode(z)
-        recon = recon.float()
+        # z = accelerator.unwrap_model(ae).encode(x)
+        # recon = accelerator.unwrap_model(ae).decode(z)
+        recon = ae(x)
         loss = recon.mean()
+
+    # compute gradient w.r.t the last layer
+    # if _is_fsdp:
+    #     with FSDP.summon_full_params(last_layer):
+    #         last_layer.grad = None
 
     # 计算损失并反向传播
     optimizer.zero_grad()

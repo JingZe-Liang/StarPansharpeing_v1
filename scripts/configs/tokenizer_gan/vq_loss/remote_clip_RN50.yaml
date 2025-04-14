@@ -1,6 +1,6 @@
 _target_: src.stage1.utilities.VQLPIPSWithDiscriminator
-disc_network_type: patchgan_v2
-disc_ndf: 128
+disc_network_type: stylegan # [patchgan, patchgan_v2, stylegan]
+disc_ndf: 64
 use_actnorm: false
 disc_input_size: ${dataset.img_size}
 disc_in_channels: ${dataset.channels}
@@ -22,8 +22,8 @@ reconstruction_loss_type: l1
 force_not_use_recon_loss: false # compute the reconstruction loss outside
 # gen and disc losses
 gen_loss_weight: null
-disc_weight: 0.1
-disc_start: 1000
+disc_weight: 0.08 # weight on g_loss
+disc_start: 0
 disc_reg_r1: 10
 disc_reg_freq: 0 # 0 means disabled
 disc_loss: hinge
