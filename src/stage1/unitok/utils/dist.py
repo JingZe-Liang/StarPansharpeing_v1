@@ -2,8 +2,7 @@ import datetime
 import functools
 import os
 import sys
-from typing import List
-from typing import Union
+from typing import List, Union
 
 import pytz
 import torch
@@ -253,7 +252,7 @@ def init_distributed_mode(local_out_path, only_sync_master=False, timeout_minute
         barrier()
     except RuntimeError as e:
         print(
-            f'{"!"*80}   dist init error (NCCL Error?), stopping training!   {"!"*80}',
+            f"{'!' * 80}   dist init error (NCCL Error?), stopping training!   {'!' * 80}",
             flush=True,
         )
         raise e

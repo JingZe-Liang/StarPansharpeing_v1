@@ -1,3 +1,4 @@
+import ast
 import os
 import sys
 import time
@@ -13,19 +14,16 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.utils import DummyOptim, DummyScheduler, FullyShardedDataParallelPlugin
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
-os.environ["HYDRA_FULL_ERROR"] = "1"
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src")
-import ast
-
+sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.cosmos_tokenizer import (
     ContinuousImageTokenizer as CosmosTokenizer,
@@ -39,7 +37,7 @@ from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
-# OmegaConf.register_new_resolver("eval", lambda x: ast.literal_eval(x))
+OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -67,6 +65,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # attributes
         self.device = self.accelerator.device
+        torch.cuda.set_device(self.device)
         self.dtype = {
             "fp16": torch.float16,
             "bf16": torch.bfloat16,
@@ -77,13 +76,20 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg("Training is configured and ready to start.")
 
         # is zero 2 or 3, not EMA
-        _dpsp_plugin = self.accelerator.state.deepspeed_plugin
-        self.is_zero_2_3 = False
-        if _dpsp_plugin is not None:
+        _dpsp_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        _fsdp_plugin = getattr(self.accelerator.state, "fsdp_plugin", None)
+        self.no_ema = False
+        self._is_ds = _dpsp_plugin is not None
+        if self._is_ds:
             self.log_msg("[Deepspeed]: using deepspeed plugin")
-            self.is_zero_2_3 = _dpsp_plugin.deepspeed_config["zero_optimization"][
+            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][
                 "stage"
             ] in [2, 3]
+
+        self._is_fsdp = _fsdp_plugin is not None
+        if self._is_fsdp:
+            self.log_msg("[FSDP]: using Fully Sharded Data Parallel plugin")
+            self.no_ema = True
 
         # pretrained tokenizer
 
@@ -110,7 +116,12 @@ class CosmosHyperspectralTokenizerTrainer:
             to_neg_1_1=True,
         )
 
-        # setup tokenizer
+        if _dpsp_plugin is not None:
+            self.accelerator.deepspeed_plugin.deepspeed_config[
+                "train_micro_batch_size_per_gpu"
+            ] = self.dataset_cfg.batch_size_train
+
+        # setup the tokenizer
         self.setup_tokenizer()
 
         # GAN loss
@@ -126,6 +137,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # traing state counter
         self.train_state = StepsCounter(["train"])
+
+        # clear GPU memory
+        torch.cuda.empty_cache()
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
@@ -210,7 +224,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
 
     def prepare_ema_models(self):
-        if self.is_zero_2_3:
+        if self.no_ema:
             return
 
         if self.sep_enc_dec:
@@ -250,13 +264,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
-            input_lst = [log_file] * self.accelerator.num_processes
-            output_lst = [None] * self.accelerator.num_processes
-            torch.distributed.scatter_object_list(
-                output_lst,
-                input_lst,
-            )
-            log_file: Path = output_lst[self.accelerator.process_index]
+            if self.accelerator.is_main_process:
+                input_lst = [log_file] * self.accelerator.num_processes
+            else:
+                input_lst = [None] * self.accelerator.num_processes
+            output_lst = [None]
+            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
+            log_file: Path = output_lst[0]
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
@@ -329,7 +343,7 @@ class CosmosHyperspectralTokenizerTrainer:
         elif log_type == "image":
             self.tb_logger.log_images(logs, step=step)
 
-    def log_msg(self, *msgs, only_rank_one=True, level="INFO", sep=",", **kwargs):
+    def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
             "info",
             "warning",
@@ -343,7 +357,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         log_fn = getattr(self.logger, level.lower())
 
-        if only_rank_one:
+        if only_rank_zero:
             if self.accelerator.is_main_process:
                 log_fn(str_msg(*msgs), **kwargs)
         else:  # not only rank zero
@@ -412,6 +426,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     # performs poor, and still consume GPU mem.
 
                     params = get_tokenizer_params_from_keys(not_pretrained_keys)
+
                 # * finetune decoder output head, or encoder output head + decoder input head =======
                 # * from DCAE training phases 2 and 3
                 elif self.train_cfg.finetune_strategy == "dcae_refine_decoder_head":
@@ -579,41 +594,66 @@ class CosmosHyperspectralTokenizerTrainer:
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
 
     def prepare_for_training(self):
-        # discriminator may have batch norm layer
-        self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
-            self.vq_loss_fn.discriminator
-        )
-        self.log_msg("[Model] convert discriminator to sync batch norm")
+        if (
+            not self._is_fsdp
+            and self.accelerator.distributed_type
+            == accelerate.utils.DistributedType.MULTI_GPU
+        ):  # seems that FSDP does not support synchronized batchnorm
+            # discriminator may have batch norm layer
+            self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
+                self.vq_loss_fn.discriminator
+            )
+            self.log_msg("[Model] convert discriminator to sync batch norm")
 
-        (
-            self.vq_loss_fn.discriminator,
-            self.tokenizer_optim,
-            self.tokenizer_sched,
-            self.disc_optim,
-            self.disc_sched,
-            self.train_dataloader,
-        ) = self.accelerator.prepare(
-            self.vq_loss_fn.discriminator,
-            self.tokenizer_optim,
-            self.tokenizer_sched,
-            self.disc_optim,
-            self.disc_sched,
-            self.train_dataloader,
-        )
+        # if use FSDP2
+        if self._is_fsdp and self.accelerator.is_fsdp2:
+            # set models with property dtype
+            _get_model_dtype = lambda model: next(model.parameters()).dtype
+            if self.sep_enc_dec:
+                self.tokenizer_encoder.dtype = self.dtype
+                self.tokenizer_decoder.dtype = self.dtype
+            else:
+                self.tokenizer.dtype = self.dtype
+            self.vq_loss_fn.discriminator.dtype = self.dtype
+            # force discriminator to dtype
+            self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+
+        # tokenizer
         if self.sep_enc_dec:
             self.tokenizer_encoder, self.tokenizer_decoder = self.accelerator.prepare(
                 self.tokenizer_encoder, self.tokenizer_decoder
             )
         else:
-            self.tokenizer = self.accelerator.prepare(self.tokenizer)
+            self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(
+                self.tokenizer, self.tokenizer_optim
+            )
+        # quantizer
         if self.quantizer is not None:
             self.quantizer = self.accelerator.prepare(self.quantizer)
+
+        # discriminator
+        (
+            self.vq_loss_fn.discriminator,
+            self.disc_optim,
+        ) = self.accelerator.prepare(self.vq_loss_fn.discriminator, self.disc_optim)
+
+        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+            self.train_dataloader, self.val_dataloader
+        )
+
+        (
+            self.tokenizer_sched,
+            self.disc_sched,
+        ) = self.accelerator.prepare(
+            self.tokenizer_sched,
+            self.disc_sched,
+        )
 
     def step_train_state(self):
         self.train_state.update("train")
 
     def ema_update(self, mode="tokenizer"):
-        if self.is_zero_2_3:
+        if self.no_ema:
             # not support ema when is deepspeed zero2 or zero3
             return
 
@@ -757,13 +797,13 @@ class CosmosHyperspectralTokenizerTrainer:
                     if param.grad is None:
                         self.log_msg(
                             f"step {self.global_step} - {name} has None gradient, shaped as {param.shape}",
-                            only_rank_one=False,
+                            only_rank_zero=False,
                             level="WARNING",
                         )
                     elif torch.isnan(param.grad).any():
                         self.log_msg(
                             f"step {self.global_step} - {name} has nan gradient, shaped as {param.shape}",
-                            only_rank_one=False,
+                            only_rank_zero=False,
                             level="WARNING",
                         )
                         torch.nan_to_num(
@@ -771,9 +811,17 @@ class CosmosHyperspectralTokenizerTrainer:
                         )
 
         # clip gradient by norm
-        if self.dtype != torch.float16:
+        if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
             self.accelerator.clip_grad_norm_(
                 model.parameters(), self.train_cfg.max_grad_norm
+            )
+        elif (
+            self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP
+            or self.accelerator.is_fsdp2
+        ) and isinstance(model, FSDP):
+            FSDP.clip_grad_norm_(
+                model.parameters(),
+                max_norm=self.train_cfg.max_grad_norm,
             )
 
     def train_tokenizer_step(self, x: torch.Tensor, tok_dict: dict):
@@ -1012,7 +1060,7 @@ class CosmosHyperspectralTokenizerTrainer:
         _stop_train_and_save = False
         self.accelerator.wait_for_everyone()
 
-        self.log_msg("[Train]: start training", only_rank_one=False)
+        self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
             self.train_step(batch)
@@ -1102,21 +1150,11 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # gather
         if self.accelerator.use_distributed:
-            psnr_val = torch.distributed.reduce(
-                psnr_val, op=torch.distributed.ReduceOp.AVG
-            )
-            ssim_val = torch.distributed.reduce(
-                ssim_val, op=torch.distributed.ReduceOp.AVG
-            )
-            loss_val = torch.distributed.reduce(
-                loss_val, op=torch.distributed.ReduceOp.AVG
-            )
+            psnr_val = self.accelerator.gather(psnr_val).mean().item()
+            ssim_val = self.accelerator.gather(ssim_val).mean().item()
+            loss_val = self.accelerator.gather(loss_val).mean().item()
 
         if self.accelerator.is_main_process:
-            psnr_val = psnr_val.item()
-            ssim_val = ssim_val.item()
-            loss_val = loss_val.item()
-
             self.log_msg(
                 f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f} | loss: {loss_val:.4f}"
             )
@@ -1138,7 +1176,10 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg("[State]: save states")
 
     def save_ema(self):
-        self.accelerator.wait_for_everyone()
+        if self.no_ema:
+            self.log_msg(f"use deepspeed or FSDP, do have EMA model to save")
+            return
+
         ema_path = self.proj_dir / "ema"
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1179,7 +1220,6 @@ class CosmosHyperspectralTokenizerTrainer:
             )
 
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
-        self.accelerator.wait_for_everyone()
 
     def load_from_ema(self, ema_path: str, strict: bool = True):
         ema_path = Path(ema_path)
@@ -1189,23 +1229,49 @@ class CosmosHyperspectralTokenizerTrainer:
             accelerate.load_checkpoint_in_model(
                 self.tokenizer_encoder, ema_path / "encoder"
             )
-
             # Load decoder to online model
             accelerate.utils.load_checkpoint_in_model(
                 self.tokenizer_decoder, ema_path / "decoder"
             )
-
         else:
-            # Load combined model
-            self.accelerator.utils.load_checkpoint_in_model(
-                self.ema_tokenizer, ema_path / "tokenizer"
-            )
+            _assume_path = ema_path / "tokenizer"
+            if not _assume_path.exists():
+                ema_path: Path
+                _assume_path = ema_path / "pytorch_model_fsdp_0"
+                # FIXME: check loading here
+                if _assume_path.exists():
+                    assert _assume_path.exists(), "FSDP checkpoint dir not found"
+                    self.log_msg(
+                        "loading FSDP checkpoint into model", only_rank_zero=False
+                    )
+                    incomp_keys = accelerate.utils.load_fsdp_model(
+                        self.accelerator.state.fsdp_plugin,
+                        self.accelerator,
+                        self.tokenizer,
+                        ema_path,
+                        model_index=0,
+                    )
+                    if incomp_keys:
+                        self.log_msg(
+                            f"[Warning]: {incomp_keys} keys are incompatible with the model",
+                            level="warning",
+                        )
+                else:
+                    raise ValueError("load FSDP model failed")
+            else:
+                # Load combined model
+                self.log_msg(f"loading bin or safetensors checkpoint into model ...")
+                accelerate.utils.load_checkpoint_in_model(self.tokenizer, _assume_path)
 
         # Load discriminator to online model
-        if self.train_cfg.finetune_strategy not in [
-            "dcae_refine_decoder_head",
-            "dcae_adapt_latent",
-        ]:
+        if (
+            self.train_cfg.finetune_strategy
+            not in [
+                "dcae_refine_decoder_head",
+                "dcae_adapt_latent",
+            ]
+            and not self.train_cfg.only_load_tokenizer
+        ):
             accelerate.utils.load_checkpoint_in_model(
                 self.vq_loss_fn.discriminator, ema_path / "discriminator"
             )
@@ -1228,6 +1294,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
+
+        # clear the accelerator model registration
+        self.log_msg(f"clear the accelerator registrations and re-prepare training")
+        self.accelerator._models = []
+        self.accelerator._optimizers = []
+        self.accelerator._schedulers = []
         self.prepare_for_training()
 
         self.log_msg(
@@ -1315,7 +1387,6 @@ class CosmosHyperspectralTokenizerTrainer:
             img_to_save.save(save_path)
 
         self.log_msg("[Visualize]: save visualization at {}".format(save_path))
-        self.accelerator.wait_for_everyone()
 
     def run(self):
         if self.train_cfg.finetune_strategy in [
@@ -1329,7 +1400,9 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
         elif self.train_cfg.ema_load_path is not None:
-            self.load_from_ema(self.train_cfg.ema_load_path, strict=False)
+            self.load_from_ema(self.train_cfg.ema_load_path)
+
+        # train !
         self.train_loop()
 
 
@@ -1344,6 +1417,7 @@ _configs = {
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
     # sana CDAE
     "sana_f8c16p1": "cdae_f8c16p1",
+    "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
 }[_key]
 
 

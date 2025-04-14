@@ -1,9 +1,11 @@
 import io
 from typing import Sequence
 
+import accelerate
 import numpy as np
 import tifffile
 import torch
+import torch.distributed
 import webdataset as wds
 from accelerate.state import PartialState
 from kornia.augmentation import (
@@ -124,6 +126,8 @@ def get_hyperspectral_dataloaders(
 
     part_state = PartialState()
     is_ddp = part_state.use_distributed
+    if is_ddp:
+        logger.info("[HyperWebdataset]: using DDP, split the datset by node")
 
     dataset = wds.WebDataset(
         wds_paths,
@@ -141,14 +145,22 @@ def get_hyperspectral_dataloaders(
     if use_transf:
         dataset = dataset.map_dict(img=transform)
 
+    dataset = dataset.batched(batch_size)
     dataloader = wds.WebLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=None,
         num_workers=num_workers,
         persistent_workers=True,
         prefetch_factor=6,
         drop_last=False,
     )
+
+    # unbatch, shuffle, and rebatch within different workers
+    dataloader = dataloader.unbatched()
+    if shuffle_size > 0:
+        dataloader = dataloader.shuffle(shuffle_size)
+    dataloader = dataloader.batched(batch_size)
+
     logger.info(f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}")
 
     return dataset, dataloader
@@ -157,11 +169,18 @@ def get_hyperspectral_dataloaders(
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
-        "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar",
+        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar",
     ]
     test_batch_size = 32
     test_num_workers = 2
     test_shuffle_size = 300
+    accelerator = accelerate.Accelerator()
 
     # Get test dataloader
     test_dataset, test_loader = get_hyperspectral_dataloaders(
@@ -177,29 +196,35 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import torchvision.utils
 
-    # Get a batch of data
-    batch = next(iter(test_loader))
-    img_tensor = batch["img"]  # shape: [N, C, H, W]
+    # * for loop the images
+    for batch in test_loader:
+        img_tensor = batch["img"]  # shape: [N, C, H, W]
+        print(f"proc={torch.distributed.get_rank()} - {img_tensor.shape}")
 
-    # Select [4,2,0] channels for RGB visualization for all images in the batch
-    rgb_imgs = img_tensor[:, [4, 2, 0], :, :]
+    # * plot the grid of images
+    # # Get a batch of data
+    # batch = next(iter(test_loader))
+    # img_tensor = batch["img"]  # shape: [N, C, H, W]
 
-    # Normalize from [-1, 1] to [0, 1]
-    rgb_imgs = (rgb_imgs + 1) / 2
+    # # Select [4,2,0] channels for RGB visualization for all images in the batch
+    # rgb_imgs = img_tensor[:, [4, 2, 0], :, :]
 
-    # Create image grid using make_grid
-    grid = torchvision.utils.make_grid(rgb_imgs, nrow=8, padding=2, normalize=False)
+    # # Normalize from [-1, 1] to [0, 1]
+    # rgb_imgs = (rgb_imgs + 1) / 2
 
-    # Convert to numpy and adjust dimension order for plotting
-    grid_img = grid.permute(1, 2, 0).numpy()
+    # # Create image grid using make_grid
+    # grid = torchvision.utils.make_grid(rgb_imgs, nrow=8, padding=2, normalize=False)
 
-    # Display and save the grid
-    plt.figure(figsize=(15, 15))
-    plt.imshow(grid_img)
-    plt.axis("off")
-    plt.savefig("multispectral_grid.png", bbox_inches="tight", pad_inches=0, dpi=300)
-    plt.close()
+    # # Convert to numpy and adjust dimension order for plotting
+    # grid_img = grid.permute(1, 2, 0).numpy()
 
-    print(f"Batch shape: {img_tensor.shape}")
-    print(f"Range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
-    print(f"Data type: {img_tensor.dtype}")
+    # # Display and save the grid
+    # plt.figure(figsize=(15, 15))
+    # plt.imshow(grid_img)
+    # plt.axis("off")
+    # plt.savefig("multispectral_grid.png", bbox_inches="tight", pad_inches=0, dpi=300)
+    # plt.close()
+
+    # print(f"Batch shape: {img_tensor.shape}")
+    # print(f"Range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
+    # print(f"Data type: {img_tensor.dtype}")

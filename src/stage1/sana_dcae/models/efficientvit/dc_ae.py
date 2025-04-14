@@ -19,7 +19,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from loguru import logger
 from omegaconf import MISSING, OmegaConf
+from omegaconf.dictconfig import DictConfig
 from torch import Tensor
 
 from ...models.nn.act import build_act
@@ -30,6 +32,7 @@ from ...models.nn.ops import (
     ConvPixelShuffleUpSampleLayer,
     ConvPixelUnshuffleDownSampleLayer,
     EfficientViTBlock,
+    FSDPNoWrapOpSequential,
     IdentityLayer,
     InterpolateConvUpSampleLayer,
     OpSequential,
@@ -37,6 +40,7 @@ from ...models.nn.ops import (
     ResBlock,
     ResidualBlock,
 )
+from ...models.utils.network import shape_not_matched_ckpt_load
 
 __all__ = ["DCAE", "dc_ae_f32c32", "dc_ae_f64c128", "dc_ae_f128c512"]
 
@@ -341,7 +345,8 @@ def build_decoder_project_out_block(
         raise ValueError(
             f"upsample factor {factor} is not supported for decoder project out"
         )
-    return OpSequential(layers)
+    # return OpSequential(layers)
+    return FSDPNoWrapOpSequential(layers)
 
 
 class Encoder(nn.Module):
@@ -533,10 +538,29 @@ class DCAE(nn.Module):
 
     def load_model(self):
         if self.cfg.pretrained_source == "dc-ae":
-            state_dict = torch.load(
-                self.cfg.pretrained_path, map_location="cpu", weights_only=True
-            )["state_dict"]
-            self.load_state_dict(state_dict)
+            logger.opt(colors=True).info(
+                f"[DCAE]: <green>Loading pretrained model from {self.cfg.pretrained_path}</>"
+            )
+            if self.cfg.pretrained_path.endswith(".pt"):
+                state_dict = torch.load(
+                    self.cfg.pretrained_path, map_location="cpu", weights_only=True
+                )["state_dict"]
+                self.load_state_dict(state_dict)
+            elif self.cfg.pretrained_path.endswith(".safetensors"):
+                import accelerate
+
+                # try to load first
+                try:
+                    accelerate.utils.load_checkpoint_in_model(
+                        self, self.cfg.pretrained_path
+                    )
+                except RuntimeError as e:
+                    logger.opt(colors=True).warning(
+                        f"[DCAE] directly load safetensors ckpt failed, error: {e}\n\n"
+                        "<green>try to load parameters one-by-one</>"
+                    )
+
+                    shape_not_matched_ckpt_load(self, self.cfg.pretrained_path)
         else:
             raise NotImplementedError
 
@@ -560,13 +584,12 @@ class DCAE(nn.Module):
         return x
 
     def get_last_layer(self):
-        return self.decoder.project_out.op_list[-1].conv.conv.weight
+        return self.decoder.project_out.op_list[-1].conv.weight
 
-
-#       return x, torch.tensor(0), {}
-
-
-from omegaconf.dictconfig import DictConfig
+    @property
+    def _no_split_modules(self):
+        # last layer no DTenosr for FSDP2
+        return ["decoder.project_out"]
 
 
 def dc_ae_f8c16(
@@ -625,7 +648,9 @@ def dc_ae_f16c16(
     return cfg
 
 
-def dc_ae_f32c32(name: str, pretrained_path: str) -> DCAEConfig:
+def dc_ae_f32c32(
+    name: str, pretrained_path: str, extra: DictConfig | None = None
+) -> DCAEConfig:
     if name in ["dc-ae-f32c32-in-1.0", "dc-ae-f32c32-mix-1.0"]:
         cfg_str = (
             "latent_channels=32 "
@@ -650,14 +675,17 @@ def dc_ae_f32c32(name: str, pretrained_path: str) -> DCAEConfig:
     else:
         raise NotImplementedError
     cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
-    cfg: DCAEConfig = OmegaConf.to_object(
-        OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
-    )
+    cfg: DCAEConfig = OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
+    if extra is not None:
+        cfg = OmegaConf.merge(cfg, extra)
+    cfg = OmegaConf.to_object(cfg)
     cfg.pretrained_path = pretrained_path
     return cfg
 
 
-def dc_ae_f64c128(name: str, pretrained_path: Optional[str] = None) -> DCAEConfig:
+def dc_ae_f64c128(
+    name: str, pretrained_path: Optional[str] = None, extra=None
+) -> DCAEConfig:
     if name in ["dc-ae-f64c128-in-1.0", "dc-ae-f64c128-mix-1.0"]:
         cfg_str = (
             "latent_channels=128 "
@@ -670,14 +698,17 @@ def dc_ae_f64c128(name: str, pretrained_path: Optional[str] = None) -> DCAEConfi
     else:
         raise NotImplementedError
     cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
-    cfg: DCAEConfig = OmegaConf.to_object(
-        OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
-    )
+    cfg: DCAEConfig = OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
+    if extra is not None:
+        cfg = OmegaConf.merge(cfg, extra)
+    cfg = OmegaConf.to_object(cfg)
     cfg.pretrained_path = pretrained_path
     return cfg
 
 
-def dc_ae_f128c512(name: str, pretrained_path: Optional[str] = None) -> DCAEConfig:
+def dc_ae_f128c512(
+    name: str, pretrained_path: Optional[str] = None, extra=None
+) -> DCAEConfig:
     if name in ["dc-ae-f128c512-in-1.0", "dc-ae-f128c512-mix-1.0"]:
         cfg_str = (
             "latent_channels=512 "
@@ -690,8 +721,9 @@ def dc_ae_f128c512(name: str, pretrained_path: Optional[str] = None) -> DCAEConf
     else:
         raise NotImplementedError
     cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
-    cfg: DCAEConfig = OmegaConf.to_object(
-        OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
-    )
+    cfg: DCAEConfig = OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
+    if extra is not None:
+        cfg = OmegaConf.merge(cfg, extra)
+    cfg = OmegaConf.to_object(cfg)
     cfg.pretrained_path = pretrained_path
     return cfg

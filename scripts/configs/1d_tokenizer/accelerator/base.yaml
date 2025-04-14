@@ -13,14 +13,14 @@ project_config:
   _target_: accelerate.utils.ProjectConfiguration
   # ==================
   # placeholder, changed by code
-  project_dir: runs/stage1_1dtokenizer/
-  logging_dir: runs/stage1_1dtokenizer/tensorboard
+  project_dir: runs/stage1_1d_tokenizer/
+  logging_dir: runs/stage1_1d_tokenizer/tensorboard
   # ==================
-  total_limit: 5
+  total_limit: 3
   automatic_checkpoint_naming: true
 gradient_accumulation_plugin:
   _target_: accelerate.utils.GradientAccumulationPlugin
-  num_steps: 2
-  adjust_scheduler: false
+  num_steps: 3
+  adjust_scheduler: true
   sync_with_dataloader: false
   sync_each_batch: false

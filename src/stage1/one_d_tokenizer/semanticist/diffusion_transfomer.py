@@ -15,6 +15,7 @@ from turtle import forward
 import numpy as np
 import torch
 import torch.nn as nn
+from loguru import logger
 from timm.models.vision_transformer import Mlp, PatchEmbed
 from torch.utils import checkpoint
 
@@ -114,6 +115,31 @@ class LabelEmbedder(nn.Module):
 #                                 Core DiT Model                                #
 #################################################################################
 
+from typing import Callable, Optional
+
+
+class SwiGLUFFN(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        act_layer: Callable[..., nn.Module] = None,
+        drop: float = 0.0,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x12 = self.w12(x)
+        x1, x2 = x12.chunk(2, dim=-1)
+        hidden = nn.functional.silu(x1) * x2
+        return self.w3(hidden)
+
 
 class DiTBlock(nn.Module):
     """
@@ -131,17 +157,31 @@ class DiTBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(
+        # approx_gelu = lambda: nn.GELU(approximate="tanh")
+        # self.mlp = Mlp(
+        #     in_features=hidden_size,
+        #     hidden_features=mlp_hidden_dim,
+        #     act_layer=approx_gelu,
+        #     drop=0,
+        # )
+        self.mlp = SwiGLUFFN(
             in_features=hidden_size,
             hidden_features=mlp_hidden_dim,
-            act_layer=approx_gelu,
-            drop=0,
+            out_features=hidden_size,
+            bias=True,
         )
         if self.use_adaln:
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
             )
+        else:
+            _shape = (1, hidden_size)
+            self.shift_msa = nn.Parameter(torch.zeros(_shape, dtype=torch.float32))
+            self.scale_msa = nn.Parameter(torch.zeros(_shape, dtype=torch.float32))
+            self.gate_msa = nn.Parameter(torch.ones(_shape, dtype=torch.float32))
+            self.shift_mlp = nn.Parameter(torch.zeros(_shape, dtype=torch.float32))
+            self.scale_mlp = nn.Parameter(torch.zeros(_shape, dtype=torch.float32))
+            self.gate_mlp = nn.Parameter(torch.ones(_shape, dtype=torch.float32))
 
     def forward_fn(self, x, c, mask=None):
         if self.use_adaln:
@@ -149,13 +189,12 @@ class DiTBlock(nn.Module):
                 self.adaLN_modulation(c).chunk(6, dim=1)
             )
         else:
-            _shape = (1, x.shape[2])
-            shift_msa = torch.zeros(_shape, device=x.device, dtype=x.dtype)
-            scale_msa = torch.zeros(_shape, device=x.device, dtype=x.dtype)
-            gate_msa = torch.ones(_shape, device=x.device, dtype=x.dtype)
-            shift_mlp = torch.zeros(_shape, device=x.device, dtype=x.dtype)
-            scale_mlp = torch.zeros(_shape, device=x.device, dtype=x.dtype)
-            gate_mlp = torch.ones(_shape, device=x.device, dtype=x.dtype)
+            shift_msa = self.shift_msa
+            scale_msa = self.scale_msa
+            gate_msa = self.gate_msa
+            shift_mlp = self.shift_mlp
+            scale_mlp = self.scale_mlp
+            gate_mlp = self.gate_mlp
 
         x = x + gate_msa.unsqueeze(1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa), mask
@@ -234,6 +273,7 @@ class DiT(nn.Module):
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.input_size = input_size
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.use_adaln = use_adaln
@@ -282,13 +322,16 @@ class DiT(nn.Module):
                 patch_size,
                 self.out_channels,
             )
+
+        logger.info(f"[Model]: DiT init weights")
         self.initialize_weights()
 
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
+                # torch.nn.init.xavier_uniform_(module.weight)
+                torch.nn.init.trunc_normal_(module.weight, std=0.02)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
@@ -321,8 +364,8 @@ class DiT(nn.Module):
             # Zero-out output layers:
             nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        # nn.init.constant_(self.final_layer.linear.weight, 0)
+        # nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
         """

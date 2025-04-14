@@ -137,3 +137,4 @@ runs/
 *.png
 *.jpg
 **.pt
+**.pth

@@ -858,3 +858,22 @@ class OpSequential(nn.Module):
             else:
                 x = op(x)
         return x
+
+
+class FSDPNoWrapOpSequential(nn.Module):
+    def __init__(self, op_list: list[Optional[nn.Module]], checkpoint: bool = False):
+        super().__init__()
+        valid_op_list = []
+        for op in op_list:
+            if op is not None:
+                valid_op_list.append(op)
+        self.op_list = nn.ModuleList(valid_op_list)
+        self.checkpoint = checkpoint
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for op in self.op_list:
+            if self.checkpoint:
+                x = checkpoint.checkpoint(op, x, use_reentrant=False)
+            else:
+                x = op(x)
+        return x

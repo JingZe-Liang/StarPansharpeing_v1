@@ -22,6 +22,9 @@ from typing import Any, Callable, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
+from safetensors import safe_open
+from safetensors.torch import load_file
 
 __all__ = [
     "is_parallel",
@@ -115,3 +118,30 @@ def get_dtype_from_str(dtype: str) -> torch.dtype:
     if dtype == "bf16":
         return torch.bfloat16
     raise NotImplementedError(f"dtype {dtype} is not supported")
+
+
+def shape_not_matched_ckpt_load(model: nn.Module, ckpt: dict | str):
+    if isinstance(ckpt, str):
+        os.path.exists(ckpt), f"ckpt {ckpt} not exists"
+        ckpt = load_file(ckpt)
+
+    _n_not_matched = 0
+    _n_params = 0
+    for name, param in model.named_parameters():
+        ckpt_p = ckpt[name]
+        # assert shape matched
+        _matched = ckpt_p.shape == param.shape
+        _n_params += 1
+
+        if _matched:
+            param.data = ckpt_p
+        else:
+            _n_not_matched += 1
+            logger.opt(colors=True).warning(
+                f"[Model load] Shape mismatch for <red>{name}</>: "
+                f"expected <red>{param.shape}</>, got <red>{ckpt_p.shape}</>"
+            )
+
+    logger.info(
+        f"[Model load] {model.__class__.__name__} loaded with {_n_not_matched}/{_n_params} params mismatched"
+    )

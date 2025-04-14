@@ -3,6 +3,7 @@ from collections import namedtuple
 from typing import Dict, NamedTuple
 
 import torch
+import torch.distributed.tensor as dtensor
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState, PartialState
@@ -10,6 +11,7 @@ from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
 from pytorch_wavelets import DWTForward
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
 from .patchgan_disc_maskbit import NLayerDiscriminatorv2
@@ -399,8 +401,28 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
     def calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
         if last_layer is not None:
-            nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
-            g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+            # TODO: add fsdp2 support
+            if torch.is_tensor(last_layer) and not isinstance(
+                last_layer, dtensor.DTensor
+            ):
+                nll_grads = torch.autograd.grad(
+                    nll_loss, last_layer, retain_graph=True
+                )[0]
+                g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+            elif isinstance(last_layer, dtensor.DTensor):
+                # is fsdp2 DTensor
+                # get the last sharded layer parametes
+                last_layer_full = last_layer.redistribute(
+                    [dtensor.Replicate()]
+                )  # FIXME: does not work with torch 2.6.0
+                nll_grads = torch.autograd.grad(
+                    nll_loss, last_layer_full, retain_graph=True
+                )[0]
+                g_grads = torch.autograd.grad(
+                    g_loss, last_layer_full, retain_graph=True
+                )[0]
+            else:
+                raise ValueError("Adaptive weighting is not supportted")
         else:
             raise ValueError("last_layer is not defined.")
 
@@ -498,7 +520,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 d_weight = self.calculate_adaptive_weight(
                     nll_loss, g_loss, last_layer=last_layer
                 )
-            except RuntimeError:
+            except RuntimeError as e:
+                logger.error(f"try to calculate adaptive weight, but met error: {e}")
                 assert not self.training
                 logger.warning("d_weight is set to 0")
                 d_weight = torch.tensor(0.0).to(nll_loss.device)
@@ -818,15 +841,16 @@ class VQLPIPSWithDiscriminator(nn.Module):
         d_weight = 1.0
         g_loss = self.zero
         if disc_factor > 0:
-            if cond is None:
-                assert not self.disc_conditional
-                logits_fake = self.discriminator(reconstructions.contiguous())
-            else:
-                assert self.disc_conditional
-                logits_fake = self.discriminator(
-                    torch.cat((reconstructions.contiguous(), cond), dim=1)
-                )
-            g_loss = self.generator_loss(logits_fake)
+            with torch.autocast(device_type="cuda", dtype=inputs.dtype):
+                if cond is None:
+                    assert not self.disc_conditional
+                    logits_fake = self.discriminator(reconstructions.contiguous())
+                else:
+                    assert self.disc_conditional
+                    logits_fake = self.discriminator(
+                        torch.cat((reconstructions.contiguous(), cond), dim=1)
+                    )
+                g_loss = self.generator_loss(logits_fake)
 
             d_weight *= self.gen_loss_weight_fn(nll_loss, g_loss, last_layer)
         d_weight *= self.discriminator_weight
@@ -882,14 +906,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # second pass for discriminator update
         inputs = inputs.contiguous().detach().requires_grad_(True)
-        if cond is None:
-            logits_real = self.discriminator(inputs)
-            logits_fake = self.discriminator(reconstructions.contiguous().detach())
-        else:
-            logits_real = self.discriminator(torch.cat((inputs, cond), dim=1))
-            logits_fake = self.discriminator(
-                torch.cat((reconstructions.contiguous().detach(), cond), dim=1)
-            )
+        with torch.autocast(device_type="cuda", dtype=inputs.dtype):
+            if cond is None:
+                logits_real = self.discriminator(inputs)
+                logits_fake = self.discriminator(reconstructions.contiguous().detach())
+            else:
+                logits_real = self.discriminator(torch.cat((inputs, cond), dim=1))
+                logits_fake = self.discriminator(
+                    torch.cat((reconstructions.contiguous().detach(), cond), dim=1)
+                )
 
         disc_factor = adopt_weight(
             self.disc_factor, global_step, threshold=self.discriminator_iter_start

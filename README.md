@@ -56,5 +56,3 @@ We are cooking the codes, stay tuned.
 - Jieyi Zhu, UESTC (Participant)
 - Yu Zhong, UESTC (Participant)
 - Liang-Jian Deng, UESTC (Supervisor)
-
-

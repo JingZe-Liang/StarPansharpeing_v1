@@ -22,7 +22,7 @@ dataset:
   used: DCF_2019
   dataset_names_to_bs:
     MMSeg_YREB: 12
-    DCF_2019: 5
+    DCF_2019: 2
 
 loss:
   repa_loss_weight: 0 # not used

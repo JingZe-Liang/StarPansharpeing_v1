@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from diffusers import AutoencoderKL
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.models.vision_transformer import PatchEmbed
 
 sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.discretization.collections import (
@@ -41,6 +42,14 @@ class DiTOnlyAttn(DiT):
         torch.nn.init.normal_(self.null_cond, std=0.02)
         self.hidden_size = kwargs["hidden_size"]
         self.autoenc_cond_embedder = nn.Linear(autoenc_dim, self.hidden_size)
+        self.x_embedder = PatchEmbed(
+            self.input_size,
+            self.patch_size,
+            autoenc_dim,
+            self.hidden_size,
+            strict_img_size=False,
+            bias=True,
+        )
 
         # no need for class embeddings and timestep embeddings
         self.y_embedder = nn.Identity()
@@ -50,12 +59,12 @@ class DiTOnlyAttn(DiT):
         self.learn_x_tokens = learn_x_tokens
         if learn_x_tokens == "full_size":
             self.x_tokens = nn.Parameter(
-                torch.randn(1, self.in_channels, *self.x_embedder.patch_size)
+                torch.randn(1, self.autoenc_dim, self.input_size, self.input_size)
             )
         elif learn_x_tokens == "only_channel":
-            self.x_tokens = nn.Parameter(torch.randn(1, self.in_channels))
+            self.x_tokens = nn.Parameter(torch.randn(1, self.autoenc_dim))
         else:  # no learnt, set all zeros
-            self.register_buffer("x_tokens", torch.zeros(1, self.in_channels, 1))
+            self.register_buffer("x_tokens", torch.zeros(1, self.autoenc_dim, 1))
 
         self.use_repa = use_repa
         self._repa_hook = None
@@ -162,18 +171,19 @@ class DiT_with_autoenc_cond(DiT):
         batch_size = autoenc_cond.shape[0]
 
         # nested sampled condition
-        if drop_mask is None:
-            # randomly drop all conditions, for classifier-free guidance
-            if self.training:
-                drop_ids = (
-                    torch.rand(batch_size, 1, 1, device=autoenc_cond.device)
-                    < self.cond_drop_prob
-                )  # [bs, 1, 1]
-                # null_cond: [n_latents, D], [bs, n_latents, D]
-                autoenc_cond_drop = torch.where(drop_ids, self.null_cond, autoenc_cond)
-            else:
-                autoenc_cond_drop = autoenc_cond
-        else:
+        # if drop_mask is None:
+        #     # randomly drop all conditions, for classifier-free guidance
+        #     if self.training:
+        #         drop_ids = (
+        #             torch.rand(batch_size, 1, 1, device=autoenc_cond.device)
+        #             < self.cond_drop_prob
+        #         )  # [bs, 1, 1]
+        #         # null_cond: [n_latents, D], [bs, n_latents, D]
+        #         autoenc_cond_drop = torch.where(drop_ids, self.null_cond, autoenc_cond)
+        #     else:
+        #         autoenc_cond_drop = autoenc_cond
+        # else:
+        if drop_mask is not None:
             # randomly drop some conditions according to the drop_mask (N, K)
             # True means keep
             autoenc_cond_drop = torch.where(
@@ -1099,5 +1109,5 @@ if __name__ == "__main__":
             )[0]
         print(y.shape)
 
-    # run_forward_backward()
-    run_sampling()
+    run_forward_backward()
+    # run_sampling()
