@@ -18,9 +18,9 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: DCF_2019
+  used: MMSeg_YREB
   dataset_names_to_bs:
-    MMSeg_YREB: 28
+    MMSeg_YREB: 42
     DCF_2019: 12
   transform_prob: 0.5
 
@@ -45,7 +45,7 @@ train:
   save_every: 500
   seperate_enc_dec: true
   resume_path:
-  ema_load_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-06_12-52-43_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  ema_load_path:
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

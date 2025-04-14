@@ -39,7 +39,7 @@ from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: ast.literal_eval(x))
+# OmegaConf.register_new_resolver("eval", lambda x: ast.literal_eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -1333,7 +1333,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "cosmos_sep_f8c32p1"
+_key = "cosmos_sep_f8c16p4"
 _configs = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

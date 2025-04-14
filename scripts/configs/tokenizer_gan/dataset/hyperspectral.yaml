@@ -10,6 +10,14 @@ dataset_names_to_n_channels:
   MMSeg_YREB: 12
   DCF_2019: 8
 
+dataset_names_to_rgb_channels:
+  MMSeg_YREB: [4, 3, 2]
+  DCF_2019: [4, 2, 0]
+
+dataset_names_to_img_size:
+  MMSeg_YREB: 256
+  DCF_2019: 512
+
 MMSeg_YREB_train:
   - data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
   - data/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
