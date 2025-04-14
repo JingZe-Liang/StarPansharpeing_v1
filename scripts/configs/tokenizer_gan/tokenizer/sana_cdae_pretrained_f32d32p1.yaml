@@ -1,0 +1,12 @@
+_target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.DCAE
+cfg:
+  _target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.dc_ae_f32c32
+  name: dc-ae-f32c32-sana-1.0 # from huggingface repo
+  pretrained_path: src/stage1/sana_dcae/pretrained/dc-ae-f32c32-sana-1.0/model.safetensors
+  extra:
+    encoder:
+      in_channels: ${dataset.channels}
+      act_checkpoint: true
+    decoder:
+      in_channels: ${dataset.channels}
+      act_checkpoint: true
