@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: cosmos_pretrained_f8c16p4
+  - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -43,9 +43,9 @@ train:
   visualize_every: 200
   max_steps: 150_000
   save_every: 500
-  seperate_enc_dec: true
+  seperate_enc_dec: false
   resume_path:
-  ema_load_path: runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
   only_load_tokenizer: true
 
   finetune_cfg:

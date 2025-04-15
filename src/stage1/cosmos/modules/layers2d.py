@@ -416,6 +416,15 @@ class Encoder(nn.Module):
         return h
 
 
+class FSDPNoWarpModule(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.wrap_mod = module
+
+    def forward(self, x):
+        return self.wrap_mod(x)
+
+
 class Decoder(nn.Module):
     def __init__(
         self,
@@ -522,9 +531,18 @@ class Decoder(nn.Module):
 
         # end
         self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(
-            block_in, out_ch, kernel_size=3, stride=1, padding=1
-        )
+
+        _wrap_fsdp_last_layer = ignore_kwargs.get("wrap_fsdp_last_layer", False)
+        self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
+        if _wrap_fsdp_last_layer:
+            self.conv_out = FSDPNoWarpModule(
+                torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
+            )
+            logging.info("[Decoder] use FSDPNoWarpModule")
+        else:
+            self.conv_out = torch.nn.Conv2d(
+                block_in, out_ch, kernel_size=3, stride=1, padding=1
+            )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         h = self.conv_in(z)
