@@ -341,7 +341,7 @@ class SanaMS(Sana):
             if self.pos_embed_type == "sincos":
                 if (
                     self.pos_embed_ms is None
-                    or self.pos_embed_ms.shape[1:] != x.shape[1:]
+                    # or self.pos_embed_ms.shape[1:] != x.shape[1:]
                 ):
                     self.pos_embed_ms = (
                         torch.from_numpy(

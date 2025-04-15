@@ -39,6 +39,7 @@ from src.utilities.train_utils.state import StepsCounter
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
+OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -66,6 +67,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # attributes
         self.device = self.accelerator.device
+        torch.cuda.set_device(self.device)
         torch.cuda.set_device(self.device)
         self.dtype = {
             "fp16": torch.float16,
@@ -276,14 +278,16 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # logger
         self.logger.remove()
-        log_format = (
-            "<green>[{time:MM-DD HH:mm:ss}]</green>"
-            " - <level>[{level}]</level> - <level>{message}</level>"
+        log_format_in_file = (
+            "<green>[{time:MM-DD HH:mm:ss}]</green> "
+            "- <level>[{level}]</level> "
+            "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
+        log_format_in_cmd = "<level>[{level}]</level> - <level>{message}</level>"
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
-                format=log_format,
+                format=log_format_in_file,
                 level="INFO",
                 rotation="10 MB",
                 enqueue=True,
@@ -292,8 +296,8 @@ class CosmosHyperspectralTokenizerTrainer:
             )
         self.logger.add(
             sys.stdout,
-            format=log_format,
-            level="INFO",
+            format=log_format_in_cmd,
+            level="DEBUG",
             backtrace=True,
             colorize=True,
         )
@@ -343,6 +347,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tb_logger.log(logs, step=step)
         elif log_type == "image":
             self.tb_logger.log_images(logs, step=step)
+        else:
+            raise NotImplementedError(f"Unknown log_type {log_type}")
 
     def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
@@ -621,8 +627,16 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # tokenizer
         if self.sep_enc_dec:
-            self.tokenizer_encoder, self.tokenizer_decoder = self.accelerator.prepare(
-                self.tokenizer_encoder, self.tokenizer_decoder
+            # hard code here with `_no_split_modules`
+            self.tokenizer_encoder._no_split_modules = ["quantizer"]
+            self.tokenizer_decoder._no_split_modules = []
+
+            # FIXME: FSDP2 missing mapping for a parameter in the optmizer
+            self.tokenizer_encoder, self.tokenizer_optim = self.accelerator.prepare(
+                self.tokenizer_encoder, self.tokenizer_optim
+            )
+            self.tokenizer_decoder, self.tokenizer_optim = self.accelerator.prepare(
+                self.tokenizer_decoder, self.tokenizer_optim
             )
         else:
             self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(
@@ -1405,13 +1419,14 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "sana_f32c32p1_pretrained"
+_key = "unicosmos_f8c16p4"
 _configs = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
     "cosmos_sep_f8c32p1": "cosmos_post_train_f8c32p1",
     "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
     # unify encoder and decoder int one model
+    "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
     # sana CDAE
