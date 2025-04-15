@@ -102,7 +102,7 @@ class Conv2dLayer(torch.nn.Module):
         x = conv2d_resample.conv2d_resample(
             x=x,
             w=w.to(x.dtype),
-            f=self.resample_filter,
+            f=self.resample_filter.float(),
             up=self.up,
             down=self.down,
             padding=self.padding,
