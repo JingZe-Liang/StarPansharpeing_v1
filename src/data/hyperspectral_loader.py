@@ -127,9 +127,7 @@ def get_hyperspectral_dataloaders(
     part_state = PartialState()
     is_ddp = part_state.use_distributed
     if is_ddp:
-        logger.info(
-            "[HyperWebdataset]: using distributed training, split the datset by node"
-        )
+        logger.info("[HyperWebdataset]: using DDP, split the datset by node")
 
     dataset = wds.WebDataset(
         wds_paths,

@@ -38,6 +38,7 @@ from src.utilities.train_utils.state import StepsCounter
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
+OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
@@ -65,6 +66,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # attributes
         self.device = self.accelerator.device
+        torch.cuda.set_device(self.device)
         torch.cuda.set_device(self.device)
         self.dtype = {
             "fp16": torch.float16,
