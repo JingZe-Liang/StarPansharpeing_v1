@@ -20,7 +20,7 @@ dataset:
   used: DCF_2019
   dataset_names_to_bs:
     MMSeg_YREB: 24
-    DCF_2019: 9
+    DCF_2019: 8
 
 ema:
   beta: 0.995
@@ -31,7 +31,7 @@ train:
   tokenizer_name: dcae
   proj_dir: runs/stage1_cdae/
   finetune_strategy: finetune_all
-  max_grad_norm: 0.03
+  max_grad_norm: null
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
@@ -52,14 +52,14 @@ train:
     _target_: src.utilities.optim.MARS
     _partial_: true
     lr: 3.0e-4
-    lr_1d: 3.0e-4
+    lr_1d: 2.0e-4
     weight_decay: 1.0e-6
     betas: [0.9, 0.95]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 2.0e-4
+    lr: 3.0e-4
     weight_decay: 1.0e-6
     betas: [0.9, 0.95]
     foreach: true

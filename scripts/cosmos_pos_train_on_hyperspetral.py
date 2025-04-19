@@ -883,18 +883,16 @@ class CosmosHyperspectralTokenizerTrainer:
                         )
 
         # clip gradient by norm
-        if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
-            self.accelerator.clip_grad_norm_(
-                model.parameters(), self.train_cfg.max_grad_norm
-            )
-        elif (
-            self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP
-            or self.accelerator.is_fsdp2
-        ) and isinstance(model, FSDP):
-            FSDP.clip_grad_norm_(
-                model.parameters(),
-                max_norm=self.train_cfg.max_grad_norm,
-            )
+        _max_grad_norm = self.train_cfg.max_grad_norm
+        if _max_grad_norm is not None and _max_grad_norm > 0:
+            if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
+                self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
+            elif (
+                self.accelerator.distributed_type
+                == accelerate.utils.DistributedType.FSDP
+                or self.accelerator.is_fsdp2
+            ) and isinstance(model, FSDP):
+                FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
     def train_tokenizer_step(self, x: torch.Tensor, tok_dict: dict):
         # freeze discriminator

@@ -352,7 +352,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 num_fp16_res=8
                 if AcceleratorState().mixed_precision == "bf16"
                 else 0,  # 8 is sufficiently large to cover all res
-                epilogue_kwargs={"mbstd_group_size": 4},
+                epilogue_kwargs={"mbstd_group_size": 3},
             )
         elif disc_network_type.lower() == "stylegan3d":
             self.discriminator = StyleGAN3DDiscriminator(
