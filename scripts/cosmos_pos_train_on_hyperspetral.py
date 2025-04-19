@@ -9,6 +9,7 @@ from typing import Literal
 import accelerate
 import hydra
 import numpy as np
+import peft
 import PIL.Image as Image
 import torch
 import torch.nn as nn
@@ -19,6 +20,16 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from peft import (
+    LoraConfig,
+    PeftConfig,
+    PeftModel,
+    get_peft_model,
+    get_peft_model_state_dict,
+    inject_adapter_in_model,
+    load_peft_weights,
+    set_peft_model_state_dict,
+)
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
@@ -37,7 +48,6 @@ from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
@@ -93,8 +103,6 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg("[FSDP]: using Fully Sharded Data Parallel plugin")
             self.no_ema = True
 
-        # pretrained tokenizer
-
         # dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
@@ -126,7 +134,15 @@ class CosmosHyperspectralTokenizerTrainer:
         # setup the tokenizer
         self.setup_tokenizer()
 
-        # GAN loss
+        # pretrained tokenizer or peft tuning
+        self._is_peft_tuning = False
+        self.tokenizer_peft_wrapped = None
+        if self.train_cfg.finetune_strategy == "peft":
+            self.log_msg("[PEFT]: using peft tuning, wrapping the tokenizer")
+            self._is_peft_tuning = True
+            self._wrap_peft_tokenizer()
+
+        # GAN, perceptual losses
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss)
 
         # optimizers and lr schedulers
@@ -373,6 +389,36 @@ class CosmosHyperspectralTokenizerTrainer:
                 msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
                 log_fn(msg_string, **kwargs)
 
+    def _wrap_peft_tokenizer(self):
+        assert "peft_cfg" in self.cfg, "peft_cfg not in the config"
+        assert not self.sep_enc_dec, "peft_cfg not supported for sep enc dec"
+
+        peft_cfg: LoraConfig = hydra.initialize(self.cfg.peft_cfg)
+        if hasattr(self.tokenizer, "peft_first_last_convs_moduel_names"):
+            peft_cfg.modules_to_save = (
+                self.tokenizer.peft_first_last_convs_moduel_names()
+            )
+            self.log_msg(
+                "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
+                "when dealing with different hyperspectral dataset\n"
+            )
+        if not peft_cfg.modules_to_save:
+            self.log_msg(
+                f"[PEFT]: additional peft modules (except lora layers) are {peft_cfg.modules_to_save}"
+            )
+
+        self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer")
+        self.tokenizer_peft_wrapped = get_peft_model(
+            peft_cfg,
+            self.tokenizer,
+            adapter_name="default",
+            low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
+        )
+        self.log_msg(self.tokenizer_peft_wrapped.print_trainable_parameters())
+
+        # base model to train
+        self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
+
     def _get_tokenizer_params(self, for_optimizer=False):
         # key to params
         def get_tokenizer_params_from_keys(keys: list[str]):
@@ -430,7 +476,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     ]
                 elif self.train_cfg.finetune_strategy == "finetune_first_conv":
                     # performs poor, and still consume GPU mem.
-
                     params = get_tokenizer_params_from_keys(not_pretrained_keys)
 
                 # * finetune decoder output head, or encoder output head + decoder input head =======
@@ -551,7 +596,20 @@ class CosmosHyperspectralTokenizerTrainer:
                     f"[Optimizer]: finetune strategy: {self.train_cfg.finetune_strategy}"
                 )
             else:
-                params = list(self.tokenizer.parameters())
+                if not self._is_peft_tuning:
+                    params = list(self.tokenizer.parameters())
+                    self.log_msg(f"[Optimizer]: finetune all params")
+                else:
+                    params = [
+                        p
+                        for n, p in self.tokenizer.named_parameters()
+                        if p.requires_grad
+                    ]
+                    _len_params_tuned = len(params)
+                    _len_all_params = len(list(self.tokenizer.parameters()))
+                    self.log_msg(
+                        f"[Optimizer]: peft tuning, {_len_params_tuned/_len_all_params * 100}% of all params to train"
+                    )
 
             # * add with quantizer params
             params += quant_params
