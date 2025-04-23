@@ -569,7 +569,10 @@ class Decoder(nn.Module):
         return h
 
     def get_last_layer(self):
-        return self.conv_out.weight
+        if not self._wrap_fsdp_last_layer:
+            return self.conv_out.weight
+        else:
+            return self.conv_out.wrap_mod.weight
 
 
 # *==============================================================

@@ -8,7 +8,7 @@ from accelerate.utils import FullyShardedDataParallelPlugin, ProjectConfiguratio
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy, wrap
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard, ones
 
 
 class Conv(nn.Module):
@@ -20,12 +20,19 @@ class Conv(nn.Module):
         return torch.relu(self.conv(x))
 
 
+class NonWrapLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
+        super().__init__(in_features, out_features, bias, device, dtype)
+
+
 class SimpleCNN(nn.Module):
+    _no_split_modules: list[str] = ["Conv"]
+
     def __init__(self):
         super().__init__()
         self.conv1 = Conv(3, 16)
         self.conv2 = Conv(16, 32)
-        self.fc = nn.Linear(32 * 6 * 6, 10)  # 假设输入图像大小为32x32
+        self.fc = NonWrapLinear(32 * 6 * 6, 10)  # 假设输入图像大小为32x32
         self.max_pool = nn.MaxPool2d(2)
 
     def forward(self, x):
@@ -44,16 +51,16 @@ def main():
     accelerator = accelerate.Accelerator(
         fsdp_plugin=FullyShardedDataParallelPlugin(
             fsdp_version=2,
-            reshard_after_forward=False,
+            reshard_after_forward=True,
+            use_orig_params=True,
             sharding_strategy=ShardingStrategy.FULL_SHARD,
-            auto_wrap_policy=partial(
-                wrap.transformer_auto_wrap_policy,
-                transformer_layer_cls={Conv},
-            ),
+            ignored_modules=[NonWrapLinear],
         )
     )
     rank = dist.get_rank()
     torch.cuda.set_device(rank)
+
+    device_mesh = init_device_mesh("cuda", (2,))
 
     # 1. 初始化模型并封装为FSDP
     model = SimpleCNN().cuda()
@@ -61,7 +68,24 @@ def main():
     print(f"rank {rank} - init model to FSDP")
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     fsdp_model, optimizer = accelerator.prepare(model, optimizer)
+
+    def set_all_local_tensor_to_rank(model):
+        _cpu_device = torch.device("cpu")
+        for name, p in model.named_parameters():
+            if isinstance(p, DTensor) and p._local_tensor.device == _cpu_device:
+                p._local_tensor = p._local_tensor.cuda()
+                print(f"set {name} on cuda")
+
+    set_all_local_tensor_to_rank(model)
+    print("set all tensor on each rank!")
+
     fsdp_model: FSDP
+
+    # * ones
+    shard_ones = ones(
+        (4, 4), dtype=torch.float, device_mesh=device_mesh, placements=(Shard(0),)
+    )
+    print(f"rank {rank} - shard_ones: {shard_ones}")
 
     # all parameters
     # for name, param in fsdp_model.named_parameters():
@@ -93,11 +117,11 @@ def main():
     # loss = nn.CrossEntropyLoss()(outputs, targets)
 
     # 4. 获取最后一层权重并计算梯度
-    last_layer_weight = accelerator.unwrap_model(fsdp_model).get_last_layer()
+    last_layer_weight: DTensor = accelerator.unwrap_model(fsdp_model).get_last_layer()
     print(
         f"rank {rank} - get last layer weight in FSDP typed as {type(last_layer_weight)}, {last_layer_weight}"
     )
-    last_layer_weight.redistribute(
+    rep_last_w = last_layer_weight.redistribute(
         placements=[Replicate()],
     )
 

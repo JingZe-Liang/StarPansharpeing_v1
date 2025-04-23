@@ -67,7 +67,25 @@ def build_mlp(hidden_size, projector_dim, z_dim):
 
 
 class REPALoss(torch.nn.Module):
-    def __init__(self, c_dim_first=False, build_proj=False, img_is_neg1_1=True):
+    def __init__(
+        self,
+        c_dim_first=False,
+        build_proj=False,
+        img_is_neg1_1=True,
+        rgb_channels: list | str = None,
+    ):
+        super().__init__()
+        self.rgb_channels = rgb_channels
+        if self.rgb_channels is not None:
+            if isinstance(self.rgb_channels, (list, tuple)):
+                assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
+            elif isinstance(self.rgb_channels, str):
+                assert self.rgb_channels in (
+                    "random",
+                ), "rgb_channels must be randomly selected"
+            else:
+                raise TypeError("rgb_channels must be list or tuple or str")
+
         self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
         self.repa_encoder.image_size = 224
         for param in self.repa_encoder.parameters():
@@ -113,6 +131,17 @@ class REPALoss(torch.nn.Module):
     @torch.no_grad()
     def _encode_img(self, img):
         _img_sz = tuple(img.shape[-2:])
+        if self.rgb_channels is not None:
+            assert img.shape[1] >= 3, "img must be hyperspectral images"
+            if self.rgb_channels == "random":
+                _rgb_chan_select = torch.randint(0, img.shape[1], (3,))
+                rgb_channels = _rgb_chan_select.tolist()
+            else:
+                rgb_channels = self.rgb_channels
+            img = img[:, rgb_channels]
+
+        assert img.shape[1] == 3, "img must be rgb images"
+
         if tuple(list(self.repa_encoder.img_size) * 2) != _img_sz:
             img = F.interpolate(
                 img,
@@ -149,7 +178,7 @@ class REPALoss(torch.nn.Module):
         return repa_loss.mean()
 
     def forward(self, img: Tensor, features: Tensor):
-        img_feat = self._encode_img(img)
+        img_feat = self._encode_img(img).detach()
         repa_loss = self._repa_loss(img_feat, features)
         return repa_loss
 
@@ -164,3 +193,12 @@ class REPALoss(torch.nn.Module):
             return self.projector.parameters()
         else:
             return []
+
+
+if __name__ == "__main__":
+    # Example usage
+    loss_fn = REPALoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True)
+    img = torch.randn(2, 3, 224, 224)
+    features = torch.randn(2, 768, 14 * 14)
+    loss = loss_fn(img, features)
+    print("Loss:", loss.item())

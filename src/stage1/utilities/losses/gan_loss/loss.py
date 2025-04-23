@@ -7,6 +7,7 @@ import torch.distributed.tensor as dtensor
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState, PartialState
+from antlr4 import InputStream
 from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
@@ -195,7 +196,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
     def __init__(
         self,
         # discriminator
-        disc_start: int = 0,
+        disc_start_for_g: int = 0,
+        disc_start_for_d: int = 0,
         disc_factor: float = 1.0,
         disc_weight: float = 1.0,
         disc_reg_freq: int = 0,
@@ -206,6 +208,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_in_channels: int = 3,
         disc_num_layers: int = 3,
         use_actnorm: bool = False,
+        disc_norm_type: str = "trms2d",
+        disc_spectral_norm: bool = False,
         disc_conditional: bool = False,
         disc_ndf: int = 64,
         disc_loss: str = "hinge",
@@ -332,14 +336,18 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 ndf=disc_ndf,
             ).apply(weights_init)
             # spectral norm
-            # for layer in self.discriminator.modules():
-            #     if isinstance(layer, (nn.Conv2d, nn.Linear)):
-            #         nn.utils.spectral_norm(layer)
+            if disc_spectral_norm:
+                for layer in self.discriminator.modules():
+                    if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                        nn.utils.spectral_norm(layer)
         elif disc_network_type.lower() == "patchgan_v2":  # from maskbit paper
             self.discriminator = NLayerDiscriminatorv2(
                 num_channels=disc_in_channels,
                 hidden_channels=disc_ndf,
                 num_stages=disc_num_layers,
+                # Zihan Note: gn underperforms than bn, and cause the adversarial
+                # training unstable
+                norm_type=disc_norm_type,
                 # as suggested in the original paper
                 blur_kernel_size=4,
                 blur_resample=True,
@@ -363,8 +371,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         else:
             raise ValueError(f"Unsupported discriminator type: {disc_network_type}")
 
-        # * disc loss
-        self.discriminator_iter_start = disc_start
+        # * disc lossdisc_start_for_g
+        self.disc_iter_start_for_g = disc_start_for_g
+        self.disc_iter_start_for_d = disc_start_for_d
         if disc_loss == "hinge":
             self.discriminator_loss = hinge_d_loss
             self.generator_loss = hinge_g_loss
@@ -405,22 +414,28 @@ class VQLPIPSWithDiscriminator(nn.Module):
             if torch.is_tensor(last_layer) and not isinstance(
                 last_layer, dtensor.DTensor
             ):
-                nll_grads = torch.autograd.grad(
-                    nll_loss, last_layer, retain_graph=True
-                )[0]
-                g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+                with torch.autocast("cuda", self.dtype):
+                    nll_grads = torch.autograd.grad(
+                        nll_loss,
+                        last_layer,
+                        retain_graph=True,
+                    )[0]
+                    g_grads = torch.autograd.grad(
+                        g_loss,  # .to(last_layer.dtype),
+                        last_layer,
+                        retain_graph=True,
+                    )[0]
             elif isinstance(last_layer, dtensor.DTensor):
                 # is fsdp2 DTensor
-                # get the last sharded layer parametes
-                last_layer_full = last_layer.redistribute(
-                    [dtensor.Replicate()]
-                )  # FIXME: does not work with torch 2.6.0
-                nll_grads = torch.autograd.grad(
-                    nll_loss, last_layer_full, retain_graph=True
-                )[0]
-                g_grads = torch.autograd.grad(
-                    g_loss, last_layer_full, retain_graph=True
-                )[0]
+                # get the last sharded layer parameters
+                last_layer_full = last_layer.full_tensor()
+                with torch.autocast("cuda", self.dtype):
+                    nll_grads = torch.autograd.grad(
+                        nll_loss, last_layer_full, retain_graph=True
+                    )[0]
+                    g_grads = torch.autograd.grad(
+                        g_loss, last_layer_full, retain_graph=True
+                    )[0]
             else:
                 raise ValueError("Adaptive weighting is not supportted")
         else:
@@ -785,7 +800,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
 
         if self.ssim_weight > 0.0 and self.use_ssim:
-            ssim_loss = self.ssim_loss(inputs, targets) * self.ssim_weight
+            ssim_loss = self.ssim_loss(inputs, targets)
         else:
             ssim_loss = self.zero
 
@@ -818,7 +833,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         else:
             recon_loss_d = self.reconstruction_loss(inputs, reconstructions)
             recon_loss = recon_loss_d["recon_loss"] * self.reconstruction_weight
-            ssim_loss = recon_loss_d["ssim_loss"]
+            ssim_loss = recon_loss_d["ssim_loss"] * self.ssim_weight
 
         # * perceptual loss
         nll_loss = recon_loss
@@ -836,7 +851,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(
-            self.disc_factor, global_step, threshold=self.discriminator_iter_start
+            self.disc_factor, global_step, threshold=self.disc_iter_start_for_g
         )
         d_weight = 1.0
         g_loss = self.zero
@@ -850,6 +865,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     logits_fake = self.discriminator(
                         torch.cat((reconstructions.contiguous(), cond), dim=1)
                     )
+
+                # g loss
                 g_loss = self.generator_loss(logits_fake)
 
             d_weight *= self.gen_loss_weight_fn(nll_loss, g_loss, last_layer)
@@ -905,19 +922,21 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
 
         # second pass for discriminator update
-        inputs = inputs.contiguous().detach().requires_grad_(True)
         with torch.autocast(device_type="cuda", dtype=inputs.dtype):
             if cond is None:
-                logits_real = self.discriminator(inputs)
+                # detach that only gradients on discriminator
+                logits_real = self.discriminator(inputs.contiguous().detach())
                 logits_fake = self.discriminator(reconstructions.contiguous().detach())
             else:
-                logits_real = self.discriminator(torch.cat((inputs, cond), dim=1))
+                logits_real = self.discriminator(
+                    torch.cat((inputs.contiguous().detach(), cond), dim=1)
+                )
                 logits_fake = self.discriminator(
                     torch.cat((reconstructions.contiguous().detach(), cond), dim=1)
                 )
 
         disc_factor = adopt_weight(
-            self.disc_factor, global_step, threshold=self.discriminator_iter_start
+            self.disc_factor, global_step, threshold=self.disc_iter_start_for_d
         )
         disc_loss_out = self.zero
         if self.lecam_loss_weight is not None:
@@ -925,12 +944,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
             lecam_loss = lecam_reg(logits_real, logits_fake, self.lecam_ema)
             lecam_loss = lecam_loss * self.lecam_loss_weight
             if disc_factor > 0.0:
-                disc_loss_out = self.discriminator_loss(
-                    logits_real, logits_fake
-                )  # hinge loss
+                disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
             d_loss = disc_factor * disc_loss_out + lecam_loss
         else:
-            lecam_loss = torch.tensor(0.0)
+            lecam_loss = self.zero
             if disc_factor > 0.0:
                 disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
             d_loss = disc_factor * disc_loss_out
@@ -942,14 +959,14 @@ class VQLPIPSWithDiscriminator(nn.Module):
         hinge loss: logits_real >> logits_fake; logits_real: (1., 2.), logits_fake: (-1., -2.)
         """
         if self.disc_reg_freq > 0 and (global_step + 1) % self.disc_reg_freq == 0:
-            inputs.requires_grad = True
+            inputs.requires_grad_(True)
             logits_real = self.discriminator(inputs.contiguous())
             r1_loss = d_r1_loss(logits_real, inputs)
             r1_loss_scale = self.disc_reg_r1 / 2 * r1_loss * self.disc_reg_freq
             d_loss = d_loss + r1_loss_scale  # changed d_loss
         else:
-            r1_loss = torch.tensor(0.0, device=self.device)
-            r1_loss_scale = torch.tensor(0.0, device=self.device)
+            r1_loss = self.zero
+            r1_loss_scale = self.zero
 
         log = self.train_disc_log_form(
             split=split,

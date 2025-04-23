@@ -5,7 +5,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torch.utils._pytree import tree_flatten, tree_map
-from utils import to_dist, to_local
+
+from .utils import to_dist, to_local
 
 
 # @torch.compile

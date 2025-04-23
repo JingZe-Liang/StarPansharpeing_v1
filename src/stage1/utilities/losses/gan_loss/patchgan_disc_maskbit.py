@@ -2,10 +2,17 @@
 
 import functools
 import math
-from typing import Tuple
+import sys
+from inspect import signature
+from typing import Any, Callable, Tuple
 
 import torch
 import torch.nn.functional as F
+from accelerate.state import PartialState
+from torch import nn
+
+sys.path.insert(0, __file__[: __file__.find("src")])
+from src.stage1.utilities.losses.triton_rms_norm import TritonRMSNorm2dFunc
 
 
 class Conv2dSame(torch.nn.Conv2d):
@@ -100,6 +107,124 @@ class BlurBlock(torch.nn.Module):
         return out
 
 
+class LayerNorm2d(nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x - torch.mean(x, dim=1, keepdim=True)
+        out = out / torch.sqrt(torch.square(out).mean(dim=1, keepdim=True) + self.eps)
+        if self.elementwise_affine:
+            out = out * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return out
+
+
+class TritonRMSNorm2d(nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
+
+
+class RMSNorm2d(nn.Module):
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = torch.nn.parameter.Parameter(torch.ones(self.num_features))
+            if bias:
+                self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_features))
+            else:
+                self.register_parameter("bias", None)
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = (
+            x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
+        ).to(x.dtype)
+        if self.elementwise_affine:
+            x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return x
+
+
+# register normalization function here
+REGISTERED_NORM_DICT: dict[str, type] = {
+    "bn2d": nn.BatchNorm2d,
+    "ln": nn.LayerNorm,
+    "ln2d": LayerNorm2d,
+    "trms2d": TritonRMSNorm2d,
+    "rms2d": RMSNorm2d,
+    "gn": lambda num_features: nn.GroupNorm(32, num_features),
+}
+
+
+def build_kwargs_from_config(config: dict, target_func: Callable) -> dict[str, Any]:
+    valid_keys = list(signature(target_func).parameters)
+    kwargs = {}
+    for key in config:
+        if key in valid_keys:
+            kwargs[key] = config[key]
+    return kwargs
+
+
+def build_norm(name="bn2d", num_features=None, **kwargs):
+    if name in ["ln", "ln2d", "trms2d"]:
+        kwargs["normalized_shape"] = num_features
+    else:  # gn, bn2d, rms2d
+        kwargs["num_features"] = num_features
+    if name in REGISTERED_NORM_DICT:
+        norm_cls = REGISTERED_NORM_DICT[name]
+        args = build_kwargs_from_config(kwargs, norm_cls)
+        return norm_cls(**args)
+    else:
+        # return None
+        raise ValueError("Normalization type not supported: {}".format(name))
+
+
+class DiscriminatorLayer(torch.nn.Sequential):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        blur_resample=False,
+        blur_kernel_size=1,
+        activation=torch.nn.SiLU,
+        norm_type: str = "gn",
+    ):
+        super().__init__()
+
+        BLUR_KERNEL_MAP = {
+            3: (1, 2, 1),
+            4: (1, 3, 3, 1),
+            5: (1, 4, 6, 4, 1),
+        }
+
+        self.extend(
+            [
+                Conv2dSame(
+                    in_channels,
+                    out_channels,
+                    kernel_size=3,
+                ),
+                torch.nn.AvgPool2d(kernel_size=2, stride=2)
+                if not blur_resample
+                else BlurBlock(BLUR_KERNEL_MAP[blur_kernel_size]),
+                build_norm(
+                    norm_type,
+                    num_features=out_channels,
+                    eps=1e-5,
+                    elementwise_affine=True,
+                ),
+                activation(),
+            ]
+        )
+
+
 class NLayerDiscriminatorv2(torch.nn.Module):
     def __init__(
         self,
@@ -107,6 +232,7 @@ class NLayerDiscriminatorv2(torch.nn.Module):
         hidden_channels: int = 64,
         num_stages: int = 3,
         activation_fn: str = "leaky_relu",
+        norm_type: str = "gn",
         blur_resample: bool = False,
         blur_kernel_size: int = 4,
     ):
@@ -138,32 +264,21 @@ class NLayerDiscriminatorv2(torch.nn.Module):
             activation(),
         )
 
-        BLUR_KERNEL_MAP = {
-            3: (1, 2, 1),
-            4: (1, 3, 3, 1),
-            5: (1, 4, 6, 4, 1),
-        }
-
         discriminator_blocks = []
         for i_level in range(num_stages):
             in_channels = hidden_channels * in_channel_mult[i_level]
             out_channels = hidden_channels * in_channel_mult[i_level + 1]
-            block = torch.nn.Sequential(
-                Conv2dSame(
-                    in_channels,
-                    out_channels,
-                    kernel_size=3,
-                ),
-                torch.nn.AvgPool2d(kernel_size=2, stride=2)
-                if not blur_resample
-                else BlurBlock(BLUR_KERNEL_MAP[blur_kernel_size]),
-                torch.nn.GroupNorm(32, out_channels),
-                activation(),
+            block = DiscriminatorLayer(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                blur_resample=blur_resample,
+                blur_kernel_size=blur_kernel_size,
+                activation=activation,
+                norm_type=norm_type,
             )
             discriminator_blocks.append(block)
 
         self.blocks = torch.nn.ModuleList(discriminator_blocks)
-
         self.pool = torch.nn.AdaptiveMaxPool2d((16, 16))
 
         self.to_logits = torch.nn.Sequential(
@@ -188,6 +303,10 @@ class NLayerDiscriminatorv2(torch.nn.Module):
         hidden_states = self.pool(hidden_states)
 
         return self.to_logits(hidden_states)
+
+    @property
+    def _no_split_modules(self):
+        return ["DiscriminatorLayer"]
 
 
 class OriginalNLayerDiscriminator(torch.nn.Module):

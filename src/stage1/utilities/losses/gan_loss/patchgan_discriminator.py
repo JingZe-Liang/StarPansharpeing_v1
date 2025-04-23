@@ -1,4 +1,5 @@
 import functools
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -99,12 +100,44 @@ def weights_init(m):
         nn.init.constant_(m.bias.data, 0)
 
 
+class DiscriminatorLayer(torch.nn.Sequential):
+    def __init__(
+        self,
+        ndf,
+        nf_mult_prev,
+        nf_mult,
+        kw,
+        padw,
+        use_bias,
+        norm_layer,
+    ):
+        super().__init__()
+        self.extend(
+            [
+                nn.Conv2d(
+                    ndf * nf_mult_prev,
+                    ndf * nf_mult,
+                    kernel_size=kw,
+                    stride=2,
+                    padding=padw,
+                    bias=use_bias,
+                ),
+                norm_layer(ndf * nf_mult),
+                nn.LeakyReLU(0.2),
+            ]
+        )
+
+
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator as in Pix2Pix
     --> see https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py
     """
 
-    def __init__(self, input_nc=3, ndf=64, n_layers=3, use_actnorm=False):
+    _no_split_modules = ["DiscriminatorLayer"]
+
+    def __init__(
+        self, input_nc=3, ndf=64, n_layers=3, use_actnorm=False, use_bn: bool = True
+    ):
         """Construct a PatchGAN discriminator
         Parameters:
             input_nc (int)  -- the number of channels in input images
@@ -114,7 +147,11 @@ class NLayerDiscriminator(nn.Module):
         """
         super(NLayerDiscriminator, self).__init__()
         if not use_actnorm:
+            # Zihan Note: GroupNorm underperforme than BatchNorm
             norm_layer = nn.BatchNorm2d
+            # lambda channels: nn.GroupNorm(
+            #     num_groups=32, num_channels=channels
+            # )
         else:
             norm_layer = ActNorm
         if isinstance(
@@ -137,16 +174,15 @@ class NLayerDiscriminator(nn.Module):
             nf_mult_prev = nf_mult
             nf_mult = min(2**n, 8)
             sequence += [
-                nn.Conv2d(
-                    ndf * nf_mult_prev,
-                    ndf * nf_mult,
-                    kernel_size=kw,
-                    stride=2,
-                    padding=padw,
-                    bias=use_bias,
-                ),
-                norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2),
+                DiscriminatorLayer(
+                    ndf,
+                    nf_mult_prev,
+                    nf_mult,
+                    kw,
+                    padw,
+                    use_bias,
+                    norm_layer,
+                )
             ]
 
         nf_mult_prev = nf_mult
@@ -183,7 +219,7 @@ if __name__ == "__main__":
     import torch
 
     accelerator = accelerate.Accelerator()
-    torch.cuda.set_device(accelerator.device)
+    torch.cuda.set_device(1)
     net = accelerator.prepare(net)
 
     x = torch.randn(1, 3, 256, 256).cuda()

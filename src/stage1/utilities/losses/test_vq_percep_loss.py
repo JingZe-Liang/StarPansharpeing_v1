@@ -26,7 +26,7 @@ if __name__ == "__main__":
     ).cuda()
     vq_loss = VQLPIPSWithDiscriminator(
         # discriminator
-        disc_start=0,
+        disc_start_for_g=0,
         disc_factor=1.0,
         disc_weight=1.0,
         disc_reg_freq=1,

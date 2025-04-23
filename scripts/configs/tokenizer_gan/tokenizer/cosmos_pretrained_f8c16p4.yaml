@@ -20,3 +20,4 @@ config:
   encoder: Default
   decoder: Default
   act_checkpoint: false
+  wrap_fsdp_last_layer: true

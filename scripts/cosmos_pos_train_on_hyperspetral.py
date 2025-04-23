@@ -1,7 +1,7 @@
-import ast
 import os
 import sys
 import time
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -14,6 +14,7 @@ import PIL.Image as Image
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
+from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler, FullyShardedDataParallelPlugin
 from ema_pytorch import EMA
@@ -31,6 +32,8 @@ from peft import (
     set_peft_model_state_dict,
 )
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp._fully_shard import FSDPModule
+from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
@@ -40,10 +43,12 @@ from src.stage1.cosmos.cosmos_tokenizer import (
     ContinuousImageTokenizer as CosmosTokenizer,
 )
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage1.cosmos.modules.layers2d import FSDPNoWarpModule
 from src.stage1.cosmos.networks.configs import continuous_image
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
+from src.utilities.network_utils import load_fsdp_model, remap_peft_model_state_dict
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -69,6 +74,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
+        self.accelerator.state.fsdp_plugin.ignored_modules = [FSDPNoWarpModule]
         accelerate.utils.set_seed(2025)
 
         # logger
@@ -89,7 +95,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # is zero 2 or 3, not EMA
         _dpsp_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
-        _fsdp_plugin = getattr(self.accelerator.state, "fsdp_plugin", None)
+        _fsdp_plugin: accelerate.utils.FullyShardedDataParallelPlugin = getattr(
+            self.accelerator.state, "fsdp_plugin", None
+        )
         self.no_ema = False
         self._is_ds = _dpsp_plugin is not None
         if self._is_ds:
@@ -144,6 +152,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # GAN, perceptual losses
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss)
+        self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
 
         # optimizers and lr schedulers
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = (
@@ -152,6 +161,10 @@ class CosmosHyperspectralTokenizerTrainer:
         # EMA models and accelerator prepare
         self.prepare_ema_models()
         self.prepare_for_training()
+
+        self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+        # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
+        # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
 
         # traing state counter
         self.train_state = StepsCounter(["train"])
@@ -187,8 +200,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     part="decoder",
                 )
             )
-            self.tokenizer_encoder.train()
-            self.tokenizer_decoder.train()
             self.tokenizer_encoder: nn.Module
             self.tokenizer_decoder: nn.Module
 
@@ -349,19 +360,62 @@ class CosmosHyperspectralTokenizerTrainer:
         return log_file
 
     def tenb_log_any(
-        self, log_type: Literal["metric", "image"], logs: dict, step: int, **kwargs
+        self,
+        log_type: Literal["metric", "image", "grad_norm_per_param", "grad_norm_sum"],
+        logs: dict,
+        step: int,
+        **kwargs,
     ):
-        if not hasattr(self, "tb_logger") or not self.accelerator.is_main_process:
-            return
         assert log_type in [
             "metric",
             "image",
-        ], "log_type must be one of [metric, image]"
+            "grad_norm_per_param",
+            "grad_norm_sum",
+        ], "log_type must be one of [metric, image, grad_norm_per_param, grad_norm_sum]"
 
         if log_type == "metric":
-            self.tb_logger.log(logs, step=step)
+            if hasattr(self, "tb_logger"):
+                self.tb_logger.log(logs, step=step)
         elif log_type == "image":
-            self.tb_logger.log_images(logs, step=step)
+            if hasattr(self, "tb_logger"):
+                self.tb_logger.log_images(logs, step=step)
+        elif log_type in ("grad_norm_per_param", "grad_norm_sum"):
+            assert "model" in logs, "model name must be in logs"
+            model = logs.pop("model")
+            # take out the grad of norms
+            model_cls_n = model.__class__.__name__
+            norms = {}
+            if log_type == "grad_norm_sum":
+                norms[f"{model_cls_n}_grad_norm"] = 0
+                _n_params_sumed = 0
+            for n, p in model.named_parameters():
+                if p.grad is not None:
+                    # must sync grad here, `is_main_process` would cause the ranks do not sync
+                    if isinstance(p.grad, DTensor):
+                        _grad = p.grad._local_tensor
+                        if p.grad._local_tensor.device == torch.device("cpu"):
+                            self.log_msg(
+                                "p.grad is on cpu, this should not happen",
+                                level="WARNING",
+                            )
+                            # ensure the corss rank does not involve cpu bankend
+                            _grad = _grad.cuda()
+                        _p_grad = _grad.full_tensor()  # across all ranks
+                    _grad_norm = (_p_grad.data**2).sum() ** 0.5
+                    if log_type == "grad_norm_per_param":
+                        norms[f"{model_cls_n}/{n}"] = _grad_norm
+                    else:
+                        norms[f"{model_cls_n}_grad_norm"] += _grad_norm
+                        _n_params_sumed += 1
+            # log
+            if log_type == "grad_norm_sum":
+                norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
+            if hasattr(self, "tb_logger"):
+                self.tb_logger.log(
+                    norms,
+                    step=step,
+                )
+
         else:
             raise NotImplementedError(f"Unknown log_type {log_type}")
 
@@ -390,17 +444,21 @@ class CosmosHyperspectralTokenizerTrainer:
                 log_fn(msg_string, **kwargs)
 
     def _wrap_peft_tokenizer(self):
-        assert "peft_cfg" in self.cfg, "peft_cfg not in the config"
+        assert "peft" in self.cfg, "peft_cfg not in the config"
         assert not self.sep_enc_dec, "peft_cfg not supported for sep enc dec"
+        assert self.accelerator.distributed_type in (
+            accelerate.DistributedType.MULTI_GPU,
+            accelerate.DistributedType.FSDP,
+        ), "Deepspeed PEFT tuning supports not implemented yet"
 
-        peft_cfg: LoraConfig = hydra.initialize(self.cfg.peft_cfg)
+        peft_cfg: LoraConfig = hydra.utils.instantiate(self.cfg.peft)
         if hasattr(self.tokenizer, "peft_first_last_convs_moduel_names"):
             peft_cfg.modules_to_save = (
                 self.tokenizer.peft_first_last_convs_moduel_names()
             )
             self.log_msg(
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
-                "when dealing with different hyperspectral dataset\n"
+                "when dealing with different hyperspectral dataset"
             )
         if not peft_cfg.modules_to_save:
             self.log_msg(
@@ -409,8 +467,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer")
         self.tokenizer_peft_wrapped = get_peft_model(
-            peft_cfg,
             self.tokenizer,
+            peft_config=peft_cfg,
             adapter_name="default",
             low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
         )
@@ -477,6 +535,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 elif self.train_cfg.finetune_strategy == "finetune_first_conv":
                     # performs poor, and still consume GPU mem.
                     params = get_tokenizer_params_from_keys(not_pretrained_keys)
+                    # gradient not required
+                    for p in self.tokenizer.parameters():
+                        if p not in not_pretrained_keys:
+                            p.requires_grad = False
 
                 # * finetune decoder output head, or encoder output head + decoder input head =======
                 # * from DCAE training phases 2 and 3
@@ -625,6 +687,7 @@ class CosmosHyperspectralTokenizerTrainer:
             return self.vq_loss_fn.discriminator.state_dict()
 
     def get_optimizer_lr_scheduler(self):
+        # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
             or "optimizer"
@@ -640,6 +703,7 @@ class CosmosHyperspectralTokenizerTrainer:
             tokenizer_optim = DummyOptim([{"params": self._get_tokenizer_params()}])
             disc_optim = DummyOptim([{"params": self._get_disc_params()}])
 
+        # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
             or "scheduler"
@@ -655,39 +719,62 @@ class CosmosHyperspectralTokenizerTrainer:
             tokenizer_sched = DummyScheduler(tokenizer_optim)
             disc_sched = DummyScheduler(disc_optim)
 
+        # set the heavyball optimizer without torch compiling
+        is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
+        if is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim):
+            import heavyball
+
+            heavyball.utils.compile_mode = None
+
+            self.log_msg(
+                f"use heavyball optimizer, it will compile the optimizer, "
+                "for efficience testing the scripts, disable the compilation."
+            )
+
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
 
+    def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module | FSDPModule):
+        if not self._is_fsdp:
+            return model
+
+        self.log_msg(
+            "FSDP module seems do not move the original parameter (_local_tensor) on the"
+            "correct rank, we need to manully move them on cuda while using `to_local` or `redistributed` methods",
+            level="WARNING",
+        )
+        _cpu_device = torch.device("cpu")
+        for name, param in model.named_parameters():
+            if isinstance(param, DTensor) and param.device == _cpu_device:
+                param._local_tensor = param._local_tensor.to(self.device)
+                self.log_msg(f"set {name} local_tensor on cuda", level="DEBUG")
+
+        return model
+
     def prepare_for_training(self):
-        if (
-            not self._is_fsdp
-            and self.accelerator.distributed_type
-            == accelerate.utils.DistributedType.MULTI_GPU
-        ):  # seems that FSDP does not support synchronized batchnorm
-            # discriminator may have batch norm layer
-            self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
-                self.vq_loss_fn.discriminator
-            )
-            self.log_msg("[Model] convert discriminator to sync batch norm")
+        # FIXME: FSDP2 seems do not support the sync_bn, find a way to fix it.
+        # if self._is_fsdp and self.accelerator.distributed_type in (
+        #     accelerate.utils.DistributedType.MULTI_GPU,
+        #     accelerate.utils.DistributedType.FSDP,
+        # ):  # seems that FSDP does not support synchronized batchnorm
+        #     # discriminator may have batch norm layer
+        #     self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
+        #         self.vq_loss_fn.discriminator
+        #     )
+        #     self.log_msg("[Model] convert discriminator to sync batch norm")
 
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
             _get_model_dtype = lambda model: next(model.parameters()).dtype
             if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = self.dtype
-                self.tokenizer_decoder.dtype = self.dtype
+                self.tokenizer_encoder.dtype = torch.float  # self.dtype
+                self.tokenizer_decoder.dtype = torch.float  # self.dtype
             else:
-                self.tokenizer.dtype = self.dtype
+                self.tokenizer.dtype = torch.float  # self.dtype
             self.vq_loss_fn.discriminator.dtype = self.dtype
-            # force discriminator to dtype
-            self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
 
         # tokenizer
         if self.sep_enc_dec:
-            # hard code here with `_no_split_modules`
-            self.tokenizer_encoder._no_split_modules = ["quantizer"]
-            self.tokenizer_decoder._no_split_modules = []
-
             # FIXME: FSDP2 missing mapping for a parameter in the optmizer
             self.tokenizer_encoder, self.tokenizer_optim = self.accelerator.prepare(
                 self.tokenizer_encoder, self.tokenizer_optim
@@ -704,21 +791,16 @@ class CosmosHyperspectralTokenizerTrainer:
             self.quantizer = self.accelerator.prepare(self.quantizer)
 
         # discriminator
-        (
-            self.vq_loss_fn.discriminator,
-            self.disc_optim,
-        ) = self.accelerator.prepare(self.vq_loss_fn.discriminator, self.disc_optim)
+        (self.vq_loss_fn.discriminator, self.disc_optim) = self.accelerator.prepare(
+            self.vq_loss_fn.discriminator, self.disc_optim
+        )
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
 
-        (
-            self.tokenizer_sched,
-            self.disc_sched,
-        ) = self.accelerator.prepare(
-            self.tokenizer_sched,
-            self.disc_sched,
+        (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
+            self.tokenizer_sched, self.disc_sched
         )
 
     def step_train_state(self):
@@ -844,20 +926,25 @@ class CosmosHyperspectralTokenizerTrainer:
     def get_last_layer(self, use_ema: bool = False):
         if use_ema:
             if self.sep_enc_dec:
-                return self.accelerator.unwrap_model(
+                w = self.accelerator.unwrap_model(
                     self.ema_decoder
                 ).ema_model.get_last_layer()
             else:
-                return self.accelerator.unwrap_model(
+                w = self.accelerator.unwrap_model(
                     self.ema_tokenizer
                 ).ema_model.get_last_layer()
         else:
             if self.sep_enc_dec:
-                return self.accelerator.unwrap_model(
+                w = self.accelerator.unwrap_model(
                     self.tokenizer_decoder
                 ).decoder.get_last_layer()
             else:
-                return self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
+                w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
+
+        if isinstance(w, DTensor):
+            w = w.cuda().full_tensor()
+
+        return w
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
@@ -1245,6 +1332,27 @@ class CosmosHyperspectralTokenizerTrainer:
         self.accelerator.save_state()
         self.log_msg("[State]: save states")
 
+        if self._is_peft_tuning and self.train_cfg.save_peft_ckpts:
+            # save peft model
+            assert self.tokenizer_peft_wrapped is not None, "peft model not wrapped"
+            if self._is_fsdp:
+                accelerate.utils.save_fsdp_model(
+                    output_dir=self.proj_dir / "peft_ckpt",
+                    fsdp_plugin=self.accelerator.state.fsdp_plugin,
+                    accelerator=self.accelerator,
+                    model=self.tokenizer_peft_wrapped,
+                    model_index=0,
+                    adapter_only=True,  # for possible loading, we save the whole model
+                )
+            else:
+                # is ddp
+                self.tokenizer_peft_wrapped.save_pretrained(
+                    self.proj_dir / "peft_ckpt",
+                    is_main_process=self.accelerator.is_main_process,
+                )
+
+            self.log_msg(f"[State]: save peft (only lora layers) model")
+
     def save_ema(self):
         if self.no_ema:
             self.log_msg(f"use deepspeed or FSDP, do have EMA model to save")
@@ -1291,10 +1399,17 @@ class CosmosHyperspectralTokenizerTrainer:
 
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
 
-    def load_from_ema(self, ema_path: str, strict: bool = True):
+    def load_from_ema_or_lora(self, ema_path: str, strict: bool = True):
+        ##! FIXME: if is loaded after FSDP2 shard, it won't work
+
         ema_path = Path(ema_path)
 
         if self.sep_enc_dec:
+            if self._is_fsdp:
+                raise NotImplementedError(
+                    "FSDP2 loading for seperated encoder and decoder is not implemented yet"
+                )
+
             # Load encoder to online model
             accelerate.load_checkpoint_in_model(
                 self.tokenizer_encoder, ema_path / "encoder"
@@ -1304,30 +1419,99 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.tokenizer_decoder, ema_path / "decoder"
             )
         else:
+            assert (
+                self.accelerator.distributed_type
+                != accelerate.utils.DistributedType.DEEPSPEED
+            ), "Deepspeed does not support PEFT yet."
+
             _assume_path = ema_path / "tokenizer"
             if not _assume_path.exists():
-                ema_path: Path
-                _assume_path = ema_path / "pytorch_model_fsdp_0"
-                # FIXME: check loading here
-                if _assume_path.exists():
-                    assert _assume_path.exists(), "FSDP checkpoint dir not found"
+                if self._is_peft_tuning:
+                    _assume_path = ema_path / "model"
+                    # we are working on loading the peft model (only lora layers)
+                    if self._is_fsdp:
+                        if not getattr(self.train_cfg, "load_weight_shard", True):
+                            _not_shard_weights = (
+                                "model" in _assume_path.as_posix()
+                            )  # depend on if there is a full state dict
+                        else:
+                            _not_shard_weights = False  # shard loaded
+                    else:
+                        _not_shard_weights = True
+
                     self.log_msg(
-                        "loading FSDP checkpoint into model", only_rank_zero=False
+                        "loading peft checkpoint into model", only_rank_zero=False
                     )
-                    incomp_keys = accelerate.utils.load_fsdp_model(
-                        self.accelerator.state.fsdp_plugin,
-                        self.accelerator,
-                        self.tokenizer,
-                        ema_path,
-                        model_index=0,
-                    )
-                    if incomp_keys:
-                        self.log_msg(
-                            f"[Warning]: {incomp_keys} keys are incompatible with the model",
-                            level="warning",
+                    if not _not_shard_weights:  # is shard weights
+                        if self._is_fsdp:
+                            loaded_res = load_fsdp_model(
+                                self.accelerator.state.fsdp_plugin,
+                                self.accelerator,
+                                self.tokenizer_peft_wrapped,
+                                ema_path.as_posix(),
+                                model_index=0,
+                                adapter_only=True,
+                            )
+                        else:  # is ddp or one gpu
+                            load_res = set_peft_model_state_dict(
+                                self.tokenizer_peft_wrapped,
+                                accelerate.utils.load_state_dict(ema_path.as_posix()),
+                                adapter_name="default",
+                                ignore_mismatched_sizes=strict,
+                                low_cpu_mem_usage=False,
+                            )
+
+                    else:  # not shard weights
+                        peft_path = _assume_path / "pytorch_model_fsdp.bin"
+                        assert peft_path.exists(), "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
+
+                        # ensure there is model/pytorch_model_fsdp.bin file
+                        from copy import deepcopy
+
+                        from torch.distributed.fsdp import StateDictType
+
+                        _fsdp_plugin_cp = deepcopy(self.accelerator.state.fsdp_plugin)
+                        _fsdp_plugin_cp.state_dict_type = StateDictType.FULL_STATE_DICT
+                        loaded_res = load_fsdp_model(
+                            _fsdp_plugin_cp,
+                            self.accelerator,
+                            self.tokenizer_peft_wrapped,
+                            ema_path.as_posix(),
+                            model_index=0,
+                            adapter_only=True,  # Warn: loading from shard only-lora-layer weights does not work.
                         )
+
+                    self.log_msg(
+                        f"[Warning]: {loaded_res} keys are incompatible with the model",
+                        level="warning",
+                    )
+
+                    # is refer
+                    # NOTE: forcing to get the base model, not sure if this is referencing the same model
+                    self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
+
+                # TODO: test it, this will not work
+                elif self._is_fsdp:
+                    _assume_path = ema_path / "pytorch_model_fsdp_0"  # model_idx=0
+                    if _assume_path.exists():
+                        assert _assume_path.exists(), "FSDP checkpoint dir not found"
+                        self.log_msg(
+                            "loading FSDP checkpoint into model", only_rank_zero=False
+                        )
+                        incomp_keys = accelerate.utils.load_fsdp_model(
+                            self.accelerator.state.fsdp_plugin,
+                            self.accelerator,
+                            self.tokenizer,
+                            ema_path.as_posix(),
+                            model_index=0,
+                        )
+                        if incomp_keys:
+                            self.log_msg(
+                                f"[Warning]: {incomp_keys} keys are incompatible with the model",
+                                level="warning",
+                            )
                 else:
-                    raise ValueError("load FSDP model failed")
+                    raise ValueError("load FSDP or LoRA weights failed")
             else:
                 # Load combined model
                 self.log_msg(f"loading bin or safetensors checkpoint into model ...")
@@ -1339,6 +1523,7 @@ class CosmosHyperspectralTokenizerTrainer:
             not in [
                 "dcae_refine_decoder_head",
                 "dcae_adapt_latent",
+                "peft",
             ]
             and not self.train_cfg.only_load_tokenizer
         ):
@@ -1366,7 +1551,9 @@ class CosmosHyperspectralTokenizerTrainer:
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(f"clear the accelerator registrations and re-prepare training")
+        self.log_msg(
+            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
+        )
         self.accelerator._models = []
         self.accelerator._optimizers = []
         self.accelerator._schedulers = []
@@ -1380,27 +1567,6 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg("[Resume]: resume training")
         self.accelerator.load_state(path)
         self.accelerator.wait_for_everyone()
-
-    def distributed_mean_dict(self, d: dict):
-        assert isinstance(d, dict), f"Input should be a dict, but {type(d)} is given"
-
-        if self.accelerator.num_processes == 1:
-            return d
-
-        dist_d_lst = [None for _ in range(self.accelerator.num_processes)]
-        self.accelerator.wait_for_everyone()
-        torch.distributed.all_gather_object(dist_d_lst, d)
-
-        mean_d = {}
-        for k in d.keys():
-            mean_d[k] = sum(
-                [
-                    di[k].item() if isinstance(di[k], torch.Tensor) else di[k]
-                    for di in dist_d_lst
-                ]
-            ) / len(dist_d_lst)
-
-        return mean_d
 
     def to_rgb(self, x):
         return ((x + 1) / 2).clamp(0, 1).float()
@@ -1446,9 +1612,9 @@ class CosmosHyperspectralTokenizerTrainer:
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
+            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.png"
         else:
-            img_name = f"{img_name}.jpg"
+            img_name = f"{img_name}.png"
 
         save_path = Path(self.proj_dir) / "vis" / img_name
         if self.accelerator.is_main_process:
@@ -1470,13 +1636,13 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
         elif self.train_cfg.ema_load_path is not None:
-            self.load_from_ema(self.train_cfg.ema_load_path)
+            self.load_from_ema_or_lora(self.train_cfg.ema_load_path)
 
         # train !
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "unicosmos_lora_f8c16p4"
 _configs = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1489,6 +1655,8 @@ _configs = {
     # sana CDAE
     "sana_f8c16p1": "cdae_f8c16p1",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
+    # lora finetuning
+    "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
 }[_key]
 
 
@@ -1498,7 +1666,9 @@ _configs = {
     version_base=None,
 )
 def main(cfg):
-    with logger.catch():
+    catcher = logger.catch if PartialState().is_main_process else nullcontext
+
+    with catcher():
         trainer = CosmosHyperspectralTokenizerTrainer(cfg)
         trainer.run()
 

@@ -33,9 +33,10 @@ def main():
 
     # 4. 尝试复制到所有rank
     try:
-        all_rank_rep_tensor = shard_dtensor.redistribute(
-            device_mesh, placements=[Replicate()]
-        )
+        # all_rank_rep_tensor = shard_dtensor.redistribute(
+        #     device_mesh, placements=[Replicate()]
+        # )
+        all_rank_rep_tensor = shard_dtensor.full_tensor()
         print(f"Rank {rank} replicated tensor:", all_rank_rep_tensor)
     except Exception as e:
         print(f"Rank {rank} redistribution failed:", str(e))

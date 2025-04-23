@@ -142,10 +142,10 @@ def get_hyperspectral_dataloaders(
     )
     dataset = dataset.decode(tiff_decoder)
     dataset = dataset.map(dict_mapper)
+    dataset = dataset.batched(batch_size)
     if use_transf:
         dataset = dataset.map_dict(img=transform)
 
-    dataset = dataset.batched(batch_size)
     dataloader = wds.WebLoader(
         dataset,
         batch_size=None,
@@ -161,9 +161,33 @@ def get_hyperspectral_dataloaders(
         dataloader = dataloader.shuffle(shuffle_size)
     dataloader = dataloader.batched(batch_size)
 
-    logger.info(f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}")
+    logger.info(
+        f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}, use transformations: {hyper_transforms_lst}"
+    )
 
     return dataset, dataloader
+
+
+def get_fast_test_hyperspectral_data(
+    data_type: str = "DCF",
+    batch_size: int = 1,
+):
+    """
+    get a test data for model/module/function testing.
+    """
+    wds_paths = {
+        "DCF": "data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar",
+    }[data_type]
+
+    _, dataloader = get_hyperspectral_dataloaders(
+        wds_paths,
+        batch_size=batch_size,
+        num_workers=1,
+        shuffle_size=100,
+        to_neg_1_1=True,
+    )
+
+    return dataloader
 
 
 if __name__ == "__main__":

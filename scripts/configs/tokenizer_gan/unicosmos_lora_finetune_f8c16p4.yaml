@@ -1,0 +1,146 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer ==========
+  - dataset: hyperspectral
+  - tokenizer: uni_cosmos_f8c16p4
+  - quantizer: quant
+  - accelerator: base
+  - vq_loss: remote_clip_RN50
+  # self ============
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+dataset:
+  used: MMSeg_YREB
+  dataset_names_to_bs:
+    MMSeg_YREB: 52
+    DCF_2019: 12
+  transform_prob: 0.5
+
+accelerator:
+  gradient_accumulation_plugin:
+    num_steps: 2
+
+tokenizer:
+  act_checkpoint: true
+  wrap_fsdp_last_layer: true
+  # pretrained on hyperspectral images encoder and decoder checkpoint
+  enc_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors
+  dec_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors
+  uni_tokenizer_path: ""
+
+vq_loss:
+  disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
+  disc_ndf: 128
+  use_actnorm: false
+  disc_norm_type: gn # gn or bn? works with patchgan_v2
+  disc_start_for_g: 1000
+  disc_start_for_d: 1000
+  disc_loss: hinge
+  ssim_weight: 0.2
+
+ema:
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+
+peft:
+  _target_: peft.LoraConfig
+  peft_type: lokr
+  r: 16
+  lora_alpha: 8
+  use_dora: false
+  use_rslora: false
+  target_modules:
+    - conv1
+    - conv2
+    - q
+    - k
+    - v
+    - proj_out
+  lora_dropout: 0
+  modules_to_save:
+    - encoder.encoder.conv_in
+    - decoder.decoder.conv_out
+
+train:
+  tokenizer_name: cosmos_uni
+  proj_dir: runs/stage1_cosmos/
+  finetune_strategy: peft
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 150_000
+  save_every: 500
+  seperate_enc_dec: false
+  resume_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-23_19-39-35_lora_fintune_f8c16p4_from_DCF2019_pretrained/checkpoints/checkpoint_1
+  ema_load_path:
+  only_load_tokenizer: true
+  save_peft_ckpts: true
+  grad_check: false
+
+  finetune_cfg:
+    refine_decoder_head_n_layers: all
+    adapt_latent_n_layers: 0
+
+  tokenizer_optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    eps: 1.0e-8
+    weight_decay: 1.0e-6
+    # betas: [0.95, 0.99]
+
+  disc_optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    eps: 1.0e-8
+    weight_decay: 1.0e-6
+    # betas: [0.8, 0.99]
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  log:
+    run_comment: lora_fintune_f8c16p4_from_DCF2019_pretrained
+    log_with_time: True
+    visualize_every: 200
+    log_every: 10
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: 4 # val only `max_val_iters` batches
+
+# _target_: src.utilities.optim.MARS
+# _partial_: true
+# lr: 5.0e-4
+# betas: [0.95, 0.99]
+# eps: 1.0e-8
+# weight_decay: 0.0
+# mars_type: mars-adamw
