@@ -1,0 +1,14 @@
+_target_: src.stage1.LeanVAE.LeanVAE.models.autoencoder.LeanVAE2D
+args:
+  _target_: src.stage1.LeanVAE.LeanVAE.models.autoencoder.LeanVAEConfig
+  embedding_dim: 512
+  latent_dim: 16
+  ista_iter_num: 2
+  ista_layer_num: 2
+  l_dim: 128
+  h_dim: 384
+  sep_num_layer: 2
+  fusion_num_layer: 4
+  in_channels: ${dataset.channels}
+  # kl
+  learn_std: false

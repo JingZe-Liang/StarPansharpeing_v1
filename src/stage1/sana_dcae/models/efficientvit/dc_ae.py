@@ -505,6 +505,8 @@ class Decoder(nn.Module):
 
 
 class DCAE(nn.Module):
+    _no_split_modules: list[str] = ["ResBlock", "EViTS5_GLU"]
+
     def __init__(self, cfg: DCAEConfig):
         super().__init__()
         self.cfg = cfg
@@ -585,11 +587,6 @@ class DCAE(nn.Module):
 
     def get_last_layer(self):
         return self.decoder.project_out.op_list[-1].conv.weight
-
-    @property
-    def _no_split_modules(self):
-        # last layer no DTenosr for FSDP2
-        return ["decoder.project_out"]
 
 
 def dc_ae_f8c16(

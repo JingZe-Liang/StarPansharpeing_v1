@@ -49,6 +49,9 @@ We are cooking the codes, stay tuned.
 > 1. hinge loss discriminator works fine for post-training Cosmos tokenizer; 
 > 2. cooking Flowmo Flux-based diffusive(FM) tokenizer.
 
+2025/4/23
+> 1. seems BN is vital to the discriminator. ln, gn will make the trianing collapse.
+> 2. FSDP2 works fine.
 
 ## Contributors
 

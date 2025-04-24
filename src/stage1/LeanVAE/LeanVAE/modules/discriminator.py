@@ -1,8 +1,10 @@
 import functools
-from functools import partial
+from typing import Any, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange
 
 
 class ActNorm(nn.Module):
@@ -36,8 +38,8 @@ class ActNorm(nn.Module):
                 .permute(1, 0, 2, 3)
             )
 
-            self.loc.data = -mean.to(input.device)
-            self.scale.data = 1 / (std + 1e-6).to(input.device)
+            self.loc.data.copy_(-mean)
+            self.scale.data.copy_(1 / (std + 1e-6))
 
     def forward(self, input, reverse=False):
         if reverse:
@@ -52,7 +54,7 @@ class ActNorm(nn.Module):
 
         if self.training and self.initialized.item() == 0:
             self.initialize(input)
-            self.initialized = torch.tensor(1, dtype=torch.uint8).to(input.device)
+            self.initialized.fill_(1)
 
         h = self.scale * (input + self.loc)
 
@@ -91,29 +93,41 @@ class ActNorm(nn.Module):
         return h
 
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find("Conv") != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find("BatchNorm") != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
-        nn.init.constant_(m.bias.data, 0)
+class NLayerDiscriminator(nn.Module):
+    """Defines a PatchGAN discriminator as in Pix2Pix."""
 
+    # https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py
+    def __init__(self, input_nc=3, ndf=64, n_layers=3, use_actnorm=False):
+        """Construct a PatchGAN discriminator
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            ndf (int)       -- the number of filters in the last conv layer
+            n_layers (int)  -- the number of conv layers in the discriminator
+        """
+        super(NLayerDiscriminator, self).__init__()
+        if not use_actnorm:
+            norm_layer = nn.BatchNorm2d
+        else:
+            norm_layer = ActNorm
+        if (
+            type(norm_layer) == functools.partial
+        ):  # no need to use bias as BatchNorm2d has affine parameters
+            use_bias = norm_layer.func != nn.BatchNorm2d
+        else:
+            use_bias = norm_layer != nn.BatchNorm2d
 
-class DiscriminatorLayer(torch.nn.Sequential):
-    def __init__(
-        self,
-        ndf,
-        nf_mult_prev,
-        nf_mult,
-        kw,
-        padw,
-        use_bias,
-        norm_layer,
-    ):
-        super().__init__()
-        self.extend(
-            [
+        kw = 4
+        padw = 1
+        sequence = [
+            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
+            nn.LeakyReLU(0.2, True),
+        ]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):  # gradually increase the number of filters
+            nf_mult_prev = nf_mult
+            nf_mult = min(2**n, 8)
+            sequence += [
                 nn.Conv2d(
                     ndf * nf_mult_prev,
                     ndf * nf_mult,
@@ -123,66 +137,7 @@ class DiscriminatorLayer(torch.nn.Sequential):
                     bias=use_bias,
                 ),
                 norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2),
-            ]
-        )
-
-
-class NLayerDiscriminator(nn.Module):
-    """Defines a PatchGAN discriminator as in Pix2Pix
-    --> see https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py
-    """
-
-    _no_split_modules = ["DiscriminatorLayer"]
-
-    def __init__(
-        self, input_nc=3, ndf=64, n_layers=3, use_actnorm=False, use_bn: bool = True
-    ):
-        """Construct a PatchGAN discriminator
-        Parameters:
-            input_nc (int)  -- the number of channels in input images
-            ndf (int)       -- the number of filters in the last conv layer
-            n_layers (int)  -- the number of conv layers in the discriminator
-            norm_layer      -- normalization layer
-        """
-        super(NLayerDiscriminator, self).__init__()
-        if not use_actnorm:
-            # Zihan Note: GroupNorm underperforme than BatchNorm
-            norm_layer = nn.BatchNorm2d
-            # lambda channels: nn.GroupNorm(
-            #     num_groups=32, num_channels=channels
-            # )
-        else:
-            norm_layer = ActNorm
-        if isinstance(
-            norm_layer, functools.partial
-        ):  # no need to use bias as BatchNorm2d has affine parameters
-            use_bias = norm_layer.func != nn.BatchNorm2d
-        else:
-            use_bias = norm_layer != nn.BatchNorm2d
-        print("patch gan discriminator - use bias: ", use_bias)
-
-        kw = 4
-        padw = 1
-        sequence = [
-            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2),
-        ]
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):  # gradually increase the number of filters
-            nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
-            sequence += [
-                DiscriminatorLayer(
-                    ndf,
-                    nf_mult_prev,
-                    nf_mult,
-                    kw,
-                    padw,
-                    use_bias,
-                    norm_layer,
-                )
+                nn.LeakyReLU(0.2, True),
             ]
 
         nf_mult_prev = nf_mult
@@ -197,7 +152,7 @@ class NLayerDiscriminator(nn.Module):
                 bias=use_bias,
             ),
             norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
         ]
 
         sequence += [
@@ -208,27 +163,3 @@ class NLayerDiscriminator(nn.Module):
     def forward(self, input):
         """Standard forward."""
         return self.main(input)
-
-
-if __name__ == "__main__":
-    ## patch gan
-    net = NLayerDiscriminator(input_nc=3, ndf=64, n_layers=3, use_actnorm=False).cuda()
-    print(net)
-
-    import accelerate
-    import torch
-
-    accelerator = accelerate.Accelerator()
-    torch.cuda.set_device(1)
-    net = accelerator.prepare(net)
-
-    x = torch.randn(1, 3, 256, 256).cuda()
-    y = net(x)
-    accelerator.backward(y.mean())
-
-    x = torch.randn(1, 3, 256, 256).cuda()
-    y = net(x)
-    accelerator.backward(y.mean())
-
-    for name, param in net.named_parameters():
-        print(name, param.grad.shape)

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import accelerate
+import colored_traceback
 import hydra
 import numpy as np
 import peft
@@ -37,6 +38,8 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
+colored_traceback.add_hook()
+
 sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.cosmos_tokenizer import (
@@ -45,6 +48,7 @@ from src.stage1.cosmos.cosmos_tokenizer import (
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import FSDPNoWarpModule
 from src.stage1.cosmos.networks.configs import continuous_image
+from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
@@ -74,7 +78,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
-        self.accelerator.state.fsdp_plugin.ignored_modules = [FSDPNoWarpModule]
+        # self.accelerator.state.fsdp_plugin.ignored_modules = [FSDPNoWarpModule]
         accelerate.utils.set_seed(2025)
 
         # logger
@@ -82,8 +86,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # attributes
         self.device = self.accelerator.device
-        torch.cuda.set_device(self.device)
-        torch.cuda.set_device(self.device)
+        torch.cuda.set_device(self.accelerator.local_process_index)
         self.dtype = {
             "fp16": torch.float16,
             "bf16": torch.bfloat16,
@@ -208,6 +211,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
                     self.device
                 )
+            elif hasattr(self.tokenizer, "quantizer"):
+                self.quantizer = self.tokenizer.quantizer
             else:
                 self.quantizer = None
 
@@ -238,11 +243,15 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
-            self.norm_z = False  # in the class, not in trainer
+            self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-            self.tokenizer: VITVQModel | VITBSQModel | CosmosTokenizer | DCAE
+            self.tokenizer: (
+                VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
+            )
             # quantizer in the tokenizer, not handled by this trainer
-            self.use_quantizer = hasattr(self, "quantizer")
+            self.use_quantizer = hasattr(
+                self.tokenizer, "quantizer"
+            )  # vq, bsq, fsq, kl
             self.quantizer = None
             self.log_msg(
                 f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
@@ -415,7 +424,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     norms,
                     step=step,
                 )
-
         else:
             raise NotImplementedError(f"Unknown log_type {log_type}")
 
@@ -803,6 +811,14 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer_sched, self.disc_sched
         )
 
+        # repa
+        # if self.vq_loss_fn.use_repa:
+        #     self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = ['NestedTensorBlock']
+        #     self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
+        #     self.vq_loss_fn.repa_loss.repa_encoder = self.accelerator.prepare_model(
+        #         self.vq_loss_fn.repa_loss.repa_encoder
+        #     )
+
     def step_train_state(self):
         self.train_state.update("train")
 
@@ -869,6 +885,12 @@ class CosmosHyperspectralTokenizerTrainer:
             _q_dict = dict(q_loss=None, q_info=None, latent_q=None)
         out_d.update(_q_dict)
 
+        # repa feature
+        _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
+        if hasattr(_unwrap_tok, "get_repa_feature"):
+            repa_feature = _unwrap_tok.get_repa_feature()
+            out_d.update(dict(repa_feature=repa_feature))
+
         return out_d
 
     def forward_discriminator(
@@ -897,6 +919,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 q_loss_total=out_d["q_loss"],
                 q_loss_breakdown=out_d["q_info"],
                 add_prefix=False,
+                tokenizer_feat=out_d["repa_feature"],
             )
             if train_tokenizer:
                 loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
@@ -1062,6 +1085,7 @@ class CosmosHyperspectralTokenizerTrainer:
         _accum_models.append(self.vq_loss_fn.discriminator)
 
         with self.accelerator.accumulate(*_accum_models):
+            # with torch.autograd.set_detect_anomaly(True):
             out_d = self.forward_tokenizer(x)
 
             # train tokenizer and discriminator
@@ -1161,6 +1185,14 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
                 strings.extend(_log_token)
 
+            if self.vq_loss_fn.use_repa:
+                _log_token = dict_round_to_list_str(
+                    log_token_loss,
+                    n_round=n_round,
+                    select=["repa_loss"],
+                )
+                strings.extend(_log_token)
+
             if self.use_quantizer:
                 _quant_logs_out_select = {
                     "bsq": [
@@ -1182,6 +1214,7 @@ class CosmosHyperspectralTokenizerTrainer:
                         "orthogonal_reg",
                         "learn_code_opt_loss",
                     ],  # none is all to be selected
+                    "kl": ["kl_loss"],
                 }
 
                 _log_q = dict_round_to_list_str(
@@ -1612,15 +1645,15 @@ class CosmosHyperspectralTokenizerTrainer:
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.png"
+            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
         else:
-            img_name = f"{img_name}.png"
+            img_name = f"{img_name}.jpg"
 
         save_path = Path(self.proj_dir) / "vis" / img_name
         if self.accelerator.is_main_process:
             save_path.parent.mkdir(parents=True, exist_ok=True)
         if self.accelerator.is_main_process:
-            img_to_save.save(save_path)
+            img_to_save.save(save_path, quality=95)
 
         self.log_msg("[Visualize]: save visualization at {}".format(save_path))
 
@@ -1642,7 +1675,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_lora_f8c16p4"
+_key = "unicosmos_f8c16p4_repa_kl"
 _configs = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1652,9 +1685,12 @@ _configs = {
     "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
+    "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # sana CDAE
     "sana_f8c16p1": "cdae_f8c16p1",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
+    # leanvae
+    "lean_vae_f8c16p4": "lean_vae_f8c16p4",
     # lora finetuning
     "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
 }[_key]

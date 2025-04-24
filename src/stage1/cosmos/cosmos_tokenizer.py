@@ -1,5 +1,6 @@
 import sys
 from collections import OrderedDict, namedtuple
+from functools import partial
 from types import SimpleNamespace
 from typing import Literal
 
@@ -14,7 +15,23 @@ from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, RMSNorm2d
 from src.utilities.network_utils import load_weights_with_shape_check
 
 
+def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
+    ln_cls = nn.Linear if is_1d else partial(nn.Conv2d, kernel_size=1)
+    return nn.Sequential(
+        ln_cls(hidden_size, projector_dim),
+        nn.SiLU(),
+        ln_cls(projector_dim, projector_dim),
+        nn.SiLU(),
+        ln_cls(projector_dim, z_dim),
+    )
+
+
 class ContinuousImageTokenizer(nn.Module):
+    _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
+    _hook_for_repa: bool = False
+    _hook_module: str = "decoder.decoder.up.1.block.2"
+    _hook_feature: torch.Tensor = None
+
     def __init__(
         self,
         z_channels: int,
@@ -24,6 +41,18 @@ class ContinuousImageTokenizer(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        self._hook_for_repa = kwargs.pop("hook_for_repa", False)
+        self._hook_module = kwargs.pop("hook_module", self._hook_module)
+        if self._hook_for_repa:
+            self._repa_proj = build_mlp(512, 768, 768)
+
+        self.use_kl = kwargs.pop("use_kl", False)
+        if self.use_kl:
+            kwargs["out_channels"] = 2 * kwargs["out_channels"]
+            self.quantizer = (
+                DiagonalGaussianDistribution  # not quantizer, compatible with trainer
+            )
+
         tokenizer_cfg = dict(
             z_channels=z_channels,
             z_factor=z_factor,
@@ -61,11 +90,15 @@ class ContinuousImageTokenizer(nn.Module):
             enc_jit, dec_jit = self.load_pretrained(enc_path, dec_path, tokenizer_cfg)
 
             # split the encoder and decoder
-            self.encoder = enc_jit[0]
-            self.quant_conv = enc_jit[1]
+            encoder = enc_jit[0]
+            quant_conv = enc_jit[1]
 
-            self.decoder = dec_jit[1]
-            self.post_quant_conv = dec_jit[0]
+            decoder = dec_jit[1]
+            post_quant_conv = dec_jit[0]
+
+            self.encoder = self.encoder_jit(encoder, quant_conv)
+            self.decoder = self.decoder_jit(decoder, post_quant_conv)
+
         else:
             # encoder and decoder
             # not combile the encoder, for FSDP wrap
@@ -94,6 +127,10 @@ class ContinuousImageTokenizer(nn.Module):
                 enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
             )
 
+        # register repa hook
+        if self._hook_for_repa:
+            self.register_feature_hook()
+
         num_parameters = sum(param.numel() for param in self.parameters())
         logging.info(f"model={self.name}, num_parameters={num_parameters:,}")
         logging.info(
@@ -121,9 +158,26 @@ class ContinuousImageTokenizer(nn.Module):
             )
         )
 
+    def register_feature_hook(self):
+        def hook(module, input, output):
+            self._hook_feature = output
+
+        self.get_submodule(self._hook_module).register_forward_hook(hook)
+        logging.info(
+            f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook"
+        )
+
+    @torch.autocast("cuda", torch.bfloat16)
+    def get_repa_feature(self):
+        # only one feature
+        if hasattr(self, "_repa_proj"):
+            return self._repa_proj(self._hook_feature)
+        else:
+            return None
+
     def get_last_layer(self):
         if not self.decoder.decoder._wrap_fsdp_last_layer:
-            return self.decoder.conv_out.weight
+            return self.decoder.decoder.conv_out.weight
         else:
             return self.decoder.decoder.conv_out.wrap_mod.weight
 
@@ -136,6 +190,15 @@ class ContinuousImageTokenizer(nn.Module):
     def decode(self, z):
         # z = self.post_quant_conv(z)
         dec = self.decoder(z)
+        if self.use_kl:
+            m_, var_ = dec.chunk(2, dim=1)
+            posterior = self.quantizer((m_, var_))
+            kl_loss = posterior.kl()
+            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            sample = posterior.sample()
+
+            return sample, kl_loss, {"posterior": posterior, "mean": m_, "var": var_}
+
         return dec
 
     # @torch.autocast("cuda", torch.bfloat16)
@@ -279,10 +342,6 @@ class ContinuousImageTokenizer(nn.Module):
                 f"decoder: missing keys {_dec_missing}, unexpected keys {_dec_unexp}"
             )
 
-    @property
-    def _no_split_modules(self):
-        return ["ResnetBlock", "AttnBlock"]
-
     def peft_first_last_convs_moduel_names(self):
         return [
             "encoder.encoder.conv_in",
@@ -292,16 +351,97 @@ class ContinuousImageTokenizer(nn.Module):
         ]
 
 
+class DiagonalGaussianDistribution(object):
+    def __init__(self, parameters, deterministic=False):
+        self.parameters = parameters
+        self.mean, self.logvar = parameters  # torch.chunk(parameters, 2, dim=1)
+        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+        if self.deterministic:
+            self.var = self.std = torch.zeros_like(self.mean).to(
+                device=self.mean.device
+            )
+
+    def sample(self):
+        x = self.mean + self.std * torch.randn(self.mean.shape).to(
+            device=self.mean.device
+        )
+        return x
+
+    def kl(self, other=None):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        else:
+            if other is None:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
+                    dim=[1, 2, 3],
+                )
+            else:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean - other.mean, 2) / other.var
+                    + self.var / other.var
+                    - 1.0
+                    - self.logvar
+                    + other.logvar,
+                    dim=[1, 2, 3],
+                )
+
+    def nll(self, sample, dims=[1, 2, 3]):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        logtwopi = np.log(2.0 * np.pi)
+        return 0.5 * torch.sum(
+            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
+            dim=dims,
+        )
+
+    def mode(self):
+        return self.mean
+
+
+def normal_kl(mean1, logvar1, mean2, logvar2):
+    """
+    source: https://github.com/openai/guided-diffusion/blob/27c20a8fab9cb472df5d6bdd6c8d11c8f430b924/guided_diffusion/losses.py#L12
+    Compute the KL divergence between two gaussians.
+    Shapes are automatically broadcasted, so batches can be compared to
+    scalars, among other use cases.
+    """
+    tensor = None
+    for obj in (mean1, logvar1, mean2, logvar2):
+        if isinstance(obj, torch.Tensor):
+            tensor = obj
+            break
+    assert tensor is not None, "at least one argument must be a Tensor"
+
+    # Force variances to be Tensors. Broadcasting helps convert scalars to
+    # Tensors, but it does not work for torch.exp().
+    logvar1, logvar2 = [
+        x if isinstance(x, torch.Tensor) else torch.tensor(x).to(tensor)
+        for x in (logvar1, logvar2)
+    ]
+
+    return 0.5 * (
+        -1.0
+        + logvar2
+        - logvar1
+        + torch.exp(logvar1 - logvar2)
+        + ((mean1 - mean2) ** 2) * torch.exp(-logvar2)
+    )
+
+
 if __name__ == "__main__":
     config = {
         "attn_resolutions": [32],
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 16,
+        "in_channels": 8,
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 16,
+        "out_channels": 8,
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -317,6 +457,7 @@ if __name__ == "__main__":
         # "dec_path": "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit",
         "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
         "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
+        "hook_for_repa": True,
     }
 
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
@@ -330,6 +471,7 @@ if __name__ == "__main__":
     x = next(iter(dl))["img"].cuda()
     with torch.autocast("cuda", torch.bfloat16):
         y = tokenizer(x)
+        feat = tokenizer.get_repa_feature()
         psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
         psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
         logging.debug(y.shape)

@@ -6,13 +6,14 @@ import sys
 from inspect import signature
 from typing import Any, Callable, Tuple
 
+import accelerate
 import torch
 import torch.nn.functional as F
-from accelerate.state import PartialState
-from torch import nn
+from torch import conv2d, nn
 
 sys.path.insert(0, __file__[: __file__.find("src")])
-from src.stage1.utilities.losses.triton_rms_norm import TritonRMSNorm2dFunc
+from scripts.tests.test_fsdp_model import Conv
+from src.stage1.utilities.losses.model.triton_rms_norm import TritonRMSNorm2dFunc
 
 
 class Conv2dSame(torch.nn.Conv2d):
@@ -55,7 +56,7 @@ class Conv2dSame(torch.nn.Conv2d):
 
 
 class BlurBlock(torch.nn.Module):
-    def __init__(self, kernel: Tuple[int] = (1, 3, 3, 1)):
+    def __init__(self, channels, kernel: Tuple[int] = (1, 3, 3, 1)):
         """Initializes the blur block.
 
         Args:
@@ -101,7 +102,7 @@ class BlurBlock(torch.nn.Module):
                 x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
             )
 
-        weight = self.kernel.expand(ic, -1, -1, -1)
+        weight = self.kernel.repeat_interleave(ic, dim=0)
 
         out = F.conv2d(input=x, weight=weight, stride=2, groups=x.shape[1])
         return out
@@ -213,7 +214,7 @@ class DiscriminatorLayer(torch.nn.Sequential):
                 ),
                 torch.nn.AvgPool2d(kernel_size=2, stride=2)
                 if not blur_resample
-                else BlurBlock(BLUR_KERNEL_MAP[blur_kernel_size]),
+                else BlurBlock(out_channels, BLUR_KERNEL_MAP[blur_kernel_size]),
                 build_norm(
                     norm_type,
                     num_features=out_channels,
@@ -255,12 +256,15 @@ class NLayerDiscriminatorv2(torch.nn.Module):
         in_channel_mult = (1,) + tuple(map(lambda t: 2**t, range(num_stages)))
         init_kernel_size = 5
         if activation_fn == "leaky_relu":
-            activation = functools.partial(torch.nn.LeakyReLU, negative_slope=0.1)
+            activation = functools.partial(
+                torch.nn.LeakyReLU, negative_slope=0.1, inplace=False
+            )
         else:
             activation = torch.nn.SiLU
 
         self.block_in = torch.nn.Sequential(
             Conv2dSame(num_channels, hidden_channels, kernel_size=init_kernel_size),
+            # nn.Conv2d(num_channels, hidden_channels, kernel_size=init_kernel_size),
             activation(),
         )
 
@@ -283,8 +287,10 @@ class NLayerDiscriminatorv2(torch.nn.Module):
 
         self.to_logits = torch.nn.Sequential(
             Conv2dSame(out_channels, out_channels, 1),
+            # nn.Conv2d(out_channels, out_channels, 1),
             activation(),
             Conv2dSame(out_channels, 1, kernel_size=5),
+            # nn.Conv2d(out_channels, 1, kernel_size=5),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -389,68 +395,31 @@ class OriginalNLayerDiscriminator(torch.nn.Module):
 
 
 if __name__ == "__main__":
+    # from torch.nn.parallel import DistributedDataParallel as DDP
+    accelerator = accelerate.Accelerator()
+
+    # 1. 先初始化分布式环境
+    # torch.distributed.init_process_group("nccl")
+    rank = torch.distributed.get_rank()
+    torch.cuda.set_device(rank)  # 关键！设置当前进程使用的GPU
+
+    # 2. 创建模型并立即放到对应GPU
     patch_discriminator_v2 = NLayerDiscriminatorv2(
-        num_channels=3, hidden_channels=128, num_stages=3
-    )
-    patch_discriminator_v2_blur = NLayerDiscriminatorv2(
-        num_channels=3, hidden_channels=128, num_stages=3, blur_resample=True
-    )
-    original_discriminiator = OriginalNLayerDiscriminator(
-        num_channels=3, hidden_channels=128, num_stages=3
-    )
+        num_channels=3, hidden_channels=128, num_stages=3, activation_fn="leakyrelu"
+    ).to(f"cuda:{rank}")  # 注意这里用to而不是cuda()
 
-    from torchinfo import summary
+    # 3. 用DDP包装
+    # patch_discriminator_v2 = DDP(patch_discriminator_v2, device_ids=[rank])
+    patch_discriminator_v2 = accelerator.prepare(patch_discriminator_v2)
 
-    print("Original Discriminator")
-    summary(
-        original_discriminiator,
-        input_size=(1, 3, 256, 256),
-        depth=3,
-        col_names=(
-            "input_size",
-            "output_size",
-            "num_params",
-            "params_percent",
-            "kernel_size",
-            "mult_adds",
-        ),
-    )
-    print("Patch Discriminator v2")
-    summary(
-        patch_discriminator_v2,
-        input_size=(1, 3, 256, 256),
-        depth=3,
-        col_names=(
-            "input_size",
-            "output_size",
-            "num_params",
-            "params_percent",
-            "kernel_size",
-            "mult_adds",
-        ),
-    )
-    print("Patch Discriminator v2 (blur)")
-    summary(
-        patch_discriminator_v2_blur,
-        input_size=(1, 3, 256, 256),
-        depth=3,
-        col_names=(
-            "input_size",
-            "output_size",
-            "num_params",
-            "params_percent",
-            "kernel_size",
-            "mult_adds",
-        ),
-    )
+    # 4. 创建输入数据（确保和模型在同一设备）
+    x = torch.randn((1, 3, 256, 256)).to(f"cuda:{rank}")
 
-    x = torch.randn((1, 3, 256, 256)).to(next(original_discriminiator.parameters()))
-
-    out_original = original_discriminiator(x)
+    # 5. 前向计算
     out_patch_v2 = patch_discriminator_v2(x)
-    out_patch_v2_blur = patch_discriminator_v2_blur(x)
-
     print(f"Input shape: {x.shape}")
-    print(f"Patch Discriminator v2 output shape: {out_patch_v2.shape}")
-    print(f"Patch Discriminator v2 (blur) output shape: {out_patch_v2_blur.shape}")
-    print(f"Original Discriminator output shape: {out_original.shape}")
+    print(f"Output shape: {out_patch_v2.shape}")
+
+    # 6. 反向传播
+    loss = out_patch_v2.mean()
+    loss.backward()
