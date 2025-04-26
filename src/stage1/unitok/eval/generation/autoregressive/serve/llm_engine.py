@@ -239,9 +239,7 @@ class LLMEngine:
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
-            logger.info(
-                f"Overriding {num_gpu_blocks=} with " f"{num_gpu_blocks_override=}"
-            )
+            logger.info(f"Overriding {num_gpu_blocks=} with {num_gpu_blocks_override=}")
             num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -397,14 +395,14 @@ class LLMEngine:
         """
         if lora_request is not None and not self.lora_config:
             raise ValueError(
-                f"Got lora_request {lora_request} but LoRA is " "not enabled!"
+                f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
         max_logprobs = self.get_model_config().max_logprobs
         if (sampling_params.logprobs and sampling_params.logprobs > max_logprobs) or (
             sampling_params.prompt_logprobs
             and sampling_params.prompt_logprobs > max_logprobs
         ):
-            raise ValueError(f"Cannot request more than " f"{max_logprobs} logprobs.")
+            raise ValueError(f"Cannot request more than {max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.time()
         prompt_token_ids = self.encode_request(
@@ -422,7 +420,7 @@ class LLMEngine:
             eos_token_id = self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
         else:
             logger.warning(
-                "Use None for EOS token id because tokenizer is " "not initialized"
+                "Use None for EOS token id because tokenizer is not initialized"
             )
         seq = Sequence(
             seq_id, prompt, prompt_token_ids, block_size, eos_token_id, lora_request

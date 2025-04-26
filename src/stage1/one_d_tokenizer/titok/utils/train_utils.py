@@ -833,7 +833,7 @@ def train_one_epoch(
                         clip_encoder=clip_encoder,
                         pretrained_tokenizer=pretrained_tokenizer,
                     )
-                    logger.info(f"EMA EVALUATION " f"Step: {global_step + 1} ")
+                    logger.info(f"EMA EVALUATION Step: {global_step + 1} ")
                     logger.info(pprint.pformat(eval_scores))
                     if accelerator.is_main_process:
                         eval_log = {f"ema_eval/" + k: v for k, v in eval_scores.items()}
@@ -854,7 +854,7 @@ def train_one_epoch(
                         pretrained_tokenizer=pretrained_tokenizer,
                     )
 
-                    logger.info(f"Non-EMA EVALUATION " f"Step: {global_step + 1} ")
+                    logger.info(f"Non-EMA EVALUATION Step: {global_step + 1} ")
                     logger.info(pprint.pformat(eval_scores))
                     if accelerator.is_main_process:
                         eval_log = {f"eval/" + k: v for k, v in eval_scores.items()}

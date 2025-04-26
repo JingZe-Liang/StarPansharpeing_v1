@@ -1169,7 +1169,7 @@ def main(args):
         lora_state_dict = SanaPipeline.lora_state_dict(input_dir)
 
         transformer_state_dict = {
-            f'{k.replace("transformer.", "")}': v
+            f"{k.replace('transformer.', '')}": v
             for k, v in lora_state_dict.items()
             if k.startswith("transformer.")
         }

@@ -65,7 +65,7 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
         3,
         4,
     ), "Input feature tensor must be 3D ([bs, l, c]) or 4D ([bs, c, h, w])"
-    assert img_feat.is_cuda, "Input feature tensor must be on CUDA"
+    # assert img_feat.is_cuda, "Input feature tensor must be on CUDA"
     # SVD usually works best with float types
     assert img_feat.dtype in (
         torch.float32,
@@ -115,9 +115,15 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     # If m < n, Vh is (m x n). The principal components are rows of Vh.
     # For PCA to work on the features (columns of A), we need enough samples (rows of A).
     # At least c samples are needed to find c components.
-    assert (
-        N_samples >= c
-    ), f"Number of samples ({N_samples}) is less than feature dimension ({c}). PCA may not be meaningful or stable. Consider increasing batch size or input size."
+
+    # assert N_samples >= c, (
+    #     f"Number of samples ({N_samples}) is less than feature dimension ({c}). PCA may not be meaningful or stable. Consider increasing batch size or input size."
+    # )
+
+    if N_samples > c:
+        logger.warning(
+            f"Number of samples ({N_samples}) is greater than feature dimension ({c}). PCA may be more stable with fewer samples."
+        )
 
     # --- PyTorch Manual PCA Steps (on CUDA) ---
 

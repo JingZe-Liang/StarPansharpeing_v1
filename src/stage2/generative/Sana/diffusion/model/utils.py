@@ -405,8 +405,8 @@ def init_processes(fn, args):
     """Initialize the distributed environment."""
     os.environ["MASTER_ADDR"] = args.master_address
     os.environ["MASTER_PORT"] = str(random.randint(2000, 6000))
-    print(f'MASTER_ADDR = {os.environ["MASTER_ADDR"]}')
-    print(f'MASTER_PORT = {os.environ["MASTER_PORT"]}')
+    print(f"MASTER_ADDR = {os.environ['MASTER_ADDR']}")
+    print(f"MASTER_PORT = {os.environ['MASTER_PORT']}")
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group(
         backend="nccl",

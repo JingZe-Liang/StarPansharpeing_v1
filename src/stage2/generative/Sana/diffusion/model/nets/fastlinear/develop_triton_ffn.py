@@ -280,7 +280,7 @@ def main():
             f"each step takes {(end_time - start_time) * 1000 / cfg.iterations:.2f} ms"
         )
         print(
-            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 3:.4f} GB\n{'-' * 80}"
+            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.4f} GB\n{'-' * 80}"
         )
     else:
         x = torch.randn(
@@ -317,7 +317,7 @@ def main():
         )
         # ipdb.set_trace()
         print(
-            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 3:.4f} GB\n{'-' * 80}"
+            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.4f} GB\n{'-' * 80}"
         )
 
 

@@ -19,8 +19,8 @@ encoder: Default
 decoder: Default
 act_checkpoint: true
 norm_in_quant_conv: false
-enc_path: /Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit
-dec_path: /Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit
+enc_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit
+dec_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit
 wrap_fsdp_last_layer: false
 use_kl: true
 loading_type: nvidia

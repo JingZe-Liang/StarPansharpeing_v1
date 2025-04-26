@@ -54,7 +54,7 @@ parser.add_argument(
     "--num-workers",
     type=int,
     help=(
-        "Number of processes to use for data loading. " "Defaults to `min(8, num_cpus)`"
+        "Number of processes to use for data loading. Defaults to `min(8, num_cpus)`"
     ),
 )
 parser.add_argument(
@@ -64,23 +64,23 @@ parser.add_argument(
     "--real_flag",
     type=str,
     default="img",
-    help=("The modality of real path. " "Default to img"),
+    help=("The modality of real path. Default to img"),
 )
 parser.add_argument(
     "--fake_flag",
     type=str,
     default="txt",
-    help=("The modality of real path. " "Default to txt"),
+    help=("The modality of real path. Default to txt"),
 )
 parser.add_argument(
     "real_path",
     type=str,
-    help=("Paths to the generated images or " "to .npz statistic files"),
+    help=("Paths to the generated images or to .npz statistic files"),
 )
 parser.add_argument(
     "fake_path",
     type=str,
-    help=("Paths to the generated images or " "to .npz statistic files"),
+    help=("Paths to the generated images or to .npz statistic files"),
 )
 
 IMAGE_EXTENSIONS = {"bmp", "jpg", "jpeg", "pgm", "png", "ppm", "tif", "tiff", "webp"}

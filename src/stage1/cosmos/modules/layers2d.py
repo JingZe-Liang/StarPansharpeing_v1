@@ -307,8 +307,8 @@ class Encoder(nn.Module):
         )
         in_channels = in_channels * patch_size * patch_size
         logging.info(
-            f'[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, '
-            f'patch_method: {ignore_kwargs.get("patch_method", "rearrange")}'
+            f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, "
+            f"patch_method: {ignore_kwargs.get('patch_method', 'rearrange')}"
         )
 
         # calculate the number of downsample operations

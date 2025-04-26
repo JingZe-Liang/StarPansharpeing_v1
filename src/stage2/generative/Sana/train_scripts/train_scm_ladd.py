@@ -1847,7 +1847,7 @@ def main(cfg: SanaConfig) -> None:
         + int(os.environ["LOCAL_RANK"])
     )
     logger.info(
-        f'Set seed: {(start_step + 1) // config.train.save_model_steps + int(os.environ["LOCAL_RANK"])}'
+        f"Set seed: {(start_step + 1) // config.train.save_model_steps + int(os.environ['LOCAL_RANK'])}"
     )
 
     # Prepare everything

@@ -28,7 +28,7 @@ vq_loss:
   repa_loss_weight: 1.5
   quantizer_type: kl
   quantizer_options:
-    kl_weight: 1.0e-6
+    kl_weight: 1.0e-5
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -38,12 +38,13 @@ vq_loss:
   disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
   use_actnorm: false
-  disc_norm_type: gn # gn or bn? works with patchgan_v2
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.2
+  disc_weight: 0.5
+  reconstruction_loss_type: dwt
 
 tokenizer:
   hook_for_repa: true
@@ -66,28 +67,40 @@ train:
   max_steps: 150_000
   save_every: 500
   seperate_enc_dec: false
-  resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  resume_path: #/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-25_18-47-11_cosmos_pretrained_f8c16p4_repa_kl/checkpoints/checkpoint_34
+  ema_load_path: /Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-25_18-47-11_cosmos_pretrained_f8c16p4_repa_kl/ema
   only_load_tokenizer: true
-  grad_check: true
+  grad_check: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # eps: 1.0e-8
+    # foreach: true
+    _target_: src.utilities.optim.LAMB
     _partial_: true
-    lr: 1.0e-4
+    lr: 8.0e-4
+    betas: [0.8, 0.999]
     eps: 1.0e-8
-    foreach: true
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # eps: 1.0e-8
+    # foreach: true
+    # betas: [0.8, 0.99]
+
+    _target_: src.utilities.optim.LAMB
     _partial_: true
-    lr: 1.0e-4
+    lr: 8.0e-4
+    betas: [0.6, 0.999]
     eps: 1.0e-8
-    foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

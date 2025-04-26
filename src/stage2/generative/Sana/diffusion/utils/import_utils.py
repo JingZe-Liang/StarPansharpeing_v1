@@ -90,7 +90,7 @@ def deprecate(
         function = call_frame.function
         key, value = next(iter(deprecated_kwargs.items()))
         raise TypeError(
-            f"{function} in {filename} line {line_number-1} got an unexpected keyword argument `{key}`"
+            f"{function} in {filename} line {line_number - 1} got an unexpected keyword argument `{key}`"
         )
 
     if len(values) == 0:

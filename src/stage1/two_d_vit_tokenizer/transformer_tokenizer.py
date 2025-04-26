@@ -658,7 +658,7 @@ if __name__ == "__main__":
         loss.backward()
         optimizer.step()
 
-        print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+        print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
 
     # Print final memory usage
     print("\nFinal memory usage:")

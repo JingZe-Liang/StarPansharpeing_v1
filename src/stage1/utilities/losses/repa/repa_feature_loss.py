@@ -6,10 +6,13 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from accelerate.state import AcceleratorState, PartialState
 from einops import rearrange
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.device_mesh import DeviceMesh, init_device_mesh
 
 warnings.filterwarnings(
     "once", message="[Repa Resize]: image not resize into dino pretrained size"
@@ -122,6 +125,7 @@ class REPALoss(torch.nn.Module):
         self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
         self.repa_encoder.image_size = dino_img_size
         self.repa_encoder = self.repa_encoder.to(dtype)
+
         for param in self.repa_encoder.parameters():
             param.requires_grad = False
         self.repa_encoder.eval()
@@ -202,7 +206,7 @@ class REPALoss(torch.nn.Module):
                 assert (
                     _rgt_idx < img.shape[1]
                 ), "rgb_channels must be in the range of [lft, rgt)"
-                _rgb_chan_select = torch.randint(_lft_idx, _rgt_idx, (3,))
+                _rgb_chan_select = torch.randperm(_rgt_idx - _lft_idx)[:3] + _lft_idx
                 rgb_channels = torch.tensor(
                     [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
                 )
@@ -236,6 +240,7 @@ class REPALoss(torch.nn.Module):
         def _forward_featurs(img):
             # from torch.distributed.tensor.device_mesh import init_device_mesh, DeviceMesh
             # from torch.distributed.tensor import DTensor
+            img = self._to_dtensor(img)
 
             if not self.c_dim_first:  # distill for vit 1d features
                 img_feats = self.repa_encoder.forward_features(img)[
@@ -245,6 +250,9 @@ class REPALoss(torch.nn.Module):
                 img_feats = self.repa_encoder.get_intermediate_layers(
                     img, 1, reshape=True, norm=True
                 )[0]  # last layer feature
+
+            if isinstance(img_feats, DTensor):
+                img_feats = img_feats.full_tensor()
 
             return img_feats
 
@@ -286,6 +294,13 @@ class REPALoss(torch.nn.Module):
         repa_loss = -torch.sum(img_feat * model_feat, dim=dim)
         # repa_loss = torch.cosine_similarity(img_feat, model_feat, dim=dim)
         return repa_loss.mean()
+
+    def _to_dtensor(self, img: Tensor):
+        if AcceleratorState().is_fsdp2:
+            dm = self.repa_encoder.patch_embed.proj.weight.device_mesh
+            img = DTensor.from_local(img, dm, placements=(Shard(0),))
+
+        return img
 
     def forward(self, img: Tensor, features: Tensor):
         img_feat = self._encode_img(img).detach()

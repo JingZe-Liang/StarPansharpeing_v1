@@ -148,12 +148,17 @@ def main():
         f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}"
     )
     logger.info(
-        f"  Instantaneous batch size per gpu = { config.training.per_gpu_batch_size}"
+        f"  Instantaneous batch size per gpu = {config.training.per_gpu_batch_size}"
     )
-    logger.info(f"""  Total train batch size (w. parallel, distributed & accumulation) = {(
-        config.training.per_gpu_batch_size *
-        accelerator.num_processes *
-        config.training.gradient_accumulation_steps)}""")
+    logger.info(
+        f"""  Total train batch size (w. parallel, distributed & accumulation) = {
+            (
+                config.training.per_gpu_batch_size
+                * accelerator.num_processes
+                * config.training.gradient_accumulation_steps
+            )
+        }"""
+    )
     global_step = 0
     first_epoch = 0
 
@@ -162,7 +167,7 @@ def main():
     )
 
     for current_epoch in range(first_epoch, num_train_epochs):
-        accelerator.print(f"Epoch {current_epoch}/{num_train_epochs-1} started.")
+        accelerator.print(f"Epoch {current_epoch}/{num_train_epochs - 1} started.")
         global_step = train_one_epoch_t2i_generator(
             config,
             logger,

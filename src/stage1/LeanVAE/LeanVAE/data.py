@@ -145,7 +145,7 @@ class MultiFilesBatchVideoSampler(BatchSampler):
     ) -> None:
         if not isinstance(sampler, Sampler):
             raise TypeError(
-                "sampler should be an instance of ``Sampler``, " f"but got {sampler}"
+                f"sampler should be an instance of ``Sampler``, but got {sampler}"
             )
         if not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError(

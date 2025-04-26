@@ -374,19 +374,32 @@ class DiagonalGaussianDistribution(object):
         if self.deterministic:
             return torch.Tensor([0.0])
         else:
+            # f8c16: (512/8) ** 2 * 16=665636 approx 0.6e6
+            # 1e-8 = 1/(0.6e6) * x
+            # x= 1e-8 * 0.6e6 = 6e-3
             if other is None:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                    dim=[1, 2, 3],
+                return (
+                    0.5
+                    * torch.sum(
+                        torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
+                        dim=[1, 2, 3],
+                    )
+                    / torch.prod(
+                        torch.as_tensor(self.mean.shape[1:])
+                    )  # zihan: add mean over channel, pixel dims
                 )
             else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var
-                    + self.var / other.var
-                    - 1.0
-                    - self.logvar
-                    + other.logvar,
-                    dim=[1, 2, 3],
+                return (
+                    0.5
+                    * torch.sum(
+                        torch.pow(self.mean - other.mean, 2) / other.var
+                        + self.var / other.var
+                        - 1.0
+                        - self.logvar
+                        + other.logvar,
+                        dim=[1, 2, 3],
+                    )
+                    / torch.prod(torch.as_tensor(self.mean.shape[1:]))
                 )
 
     def nll(self, sample, dims=[1, 2, 3]):

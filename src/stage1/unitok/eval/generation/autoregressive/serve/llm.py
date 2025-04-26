@@ -169,9 +169,9 @@ class LLM:
             completions in the same order as the input prompts.
         """
         if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be " "provided.")
+            raise ValueError("Either prompts or prompt_token_ids must be provided.")
         if self.llm_engine.model_config.skip_tokenizer_init and prompts is not None:
-            raise ValueError("prompts must be None if skip_tokenizer_init " "is True")
+            raise ValueError("prompts must be None if skip_tokenizer_init is True")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
@@ -181,7 +181,7 @@ class LLM:
             and len(prompts) != len(prompt_token_ids)
         ):
             raise ValueError(
-                "The lengths of prompts and prompt_token_ids " "must be the same."
+                "The lengths of prompts and prompt_token_ids must be the same."
             )
 
         if prompts is not None:
@@ -196,7 +196,7 @@ class LLM:
 
         elif isinstance(sampling_params, list) and len(sampling_params) != num_requests:
             raise ValueError(
-                "The lengths of prompts and sampling_params " "must be the same."
+                "The lengths of prompts and sampling_params must be the same."
             )
         if multi_modal_data:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)

@@ -48,7 +48,8 @@ from src.stage1.cosmos.cosmos_tokenizer import (
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import FSDPNoWarpModule
 from src.stage1.cosmos.networks.configs import continuous_image
-from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
+
+# from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
@@ -162,8 +163,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.get_optimizer_lr_scheduler()
         )
         # EMA models and accelerator prepare
-        self.prepare_ema_models()
         self.prepare_for_training()
+        self.prepare_ema_models()
 
         self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
@@ -245,9 +246,9 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-            self.tokenizer: (
-                VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
-            )
+            # self.tokenizer: (
+            #     VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
+            # )
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = hasattr(
                 self.tokenizer, "quantizer"
@@ -678,7 +679,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     _len_params_tuned = len(params)
                     _len_all_params = len(list(self.tokenizer.parameters()))
                     self.log_msg(
-                        f"[Optimizer]: peft tuning, {_len_params_tuned/_len_all_params * 100}% of all params to train"
+                        f"[Optimizer]: peft tuning, {_len_params_tuned / _len_all_params * 100}% of all params to train"
                     )
 
             # * add with quantizer params
@@ -760,15 +761,15 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def prepare_for_training(self):
         # FIXME: FSDP2 seems do not support the sync_bn, find a way to fix it.
-        # if self._is_fsdp and self.accelerator.distributed_type in (
-        #     accelerate.utils.DistributedType.MULTI_GPU,
-        #     accelerate.utils.DistributedType.FSDP,
-        # ):  # seems that FSDP does not support synchronized batchnorm
-        #     # discriminator may have batch norm layer
-        #     self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
-        #         self.vq_loss_fn.discriminator
-        #     )
-        #     self.log_msg("[Model] convert discriminator to sync batch norm")
+        if self._is_fsdp or self.accelerator.distributed_type in (
+            accelerate.utils.DistributedType.MULTI_GPU,
+            accelerate.utils.DistributedType.FSDP,
+        ):  # seems that FSDP does not support synchronized batchnorm
+            # discriminator may have batch norm layer
+            self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(
+                self.vq_loss_fn.discriminator
+            )
+            self.log_msg("[Model] convert discriminator to sync batch norm")
 
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
@@ -794,6 +795,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(
                 self.tokenizer, self.tokenizer_optim
             )
+
         # quantizer
         if self.quantizer is not None:
             self.quantizer = self.accelerator.prepare(self.quantizer)
@@ -812,12 +814,25 @@ class CosmosHyperspectralTokenizerTrainer:
         )
 
         # repa
-        # if self.vq_loss_fn.use_repa:
-        #     self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = ['NestedTensorBlock']
-        #     self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
-        #     self.vq_loss_fn.repa_loss.repa_encoder = self.accelerator.prepare_model(
-        #         self.vq_loss_fn.repa_loss.repa_encoder
-        #     )
+        if self.vq_loss_fn.use_repa and self.accelerator.is_fsdp2:
+            self.log_msg("prepare repa encoder for FSDP2", level="WARNING")
+
+            self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = [
+                "NestedTensorBlock"
+            ]
+            self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
+            self.vq_loss_fn.repa_loss.repa_encoder, _ = self.accelerator.prepare(
+                self.vq_loss_fn.repa_loss.repa_encoder,
+                torch.optim.AdamW(
+                    self.vq_loss_fn.repa_loss.repa_encoder.parameters()
+                ),  # dummy optimizer
+            )
+            for p in self.vq_loss_fn.repa_loss.repa_encoder.parameters():
+                if isinstance(p, DTensor):
+                    p._local_tensor = p._local_tensor.to(self.device)
+
+            self.accelerator._models.pop(-1)
+            self.accelerator._optimizers.pop(-1)
 
     def step_train_state(self):
         self.train_state.update("train")
@@ -1548,7 +1563,11 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 # Load combined model
                 self.log_msg(f"loading bin or safetensors checkpoint into model ...")
-                accelerate.utils.load_checkpoint_in_model(self.tokenizer, _assume_path)
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.tokenizer),
+                    _assume_path,
+                    strict=strict,
+                )
 
         # Load discriminator to online model
         if (
@@ -1561,7 +1580,9 @@ class CosmosHyperspectralTokenizerTrainer:
             and not self.train_cfg.only_load_tokenizer
         ):
             accelerate.utils.load_checkpoint_in_model(
-                self.vq_loss_fn.discriminator, ema_path / "discriminator"
+                self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                ema_path / "discriminator",
+                strict=strict,
             )
             # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
 
@@ -1573,7 +1594,9 @@ class CosmosHyperspectralTokenizerTrainer:
         ):
             if (ema_path / "quantizer").exists():
                 accelerate.utils.load_checkpoint_in_model(
-                    self.quantizer, ema_path / "quantizer"
+                    self.accelerator.unwrap_model(self.quantizer),
+                    ema_path / "quantizer",
+                    strict=strict,
                 )
             else:
                 raise RuntimeError(
@@ -1587,14 +1610,17 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg(
             f"[Load EMA]: clear the accelerator registrations and re-prepare training"
         )
-        self.accelerator._models = []
-        self.accelerator._optimizers = []
-        self.accelerator._schedulers = []
-        self.prepare_for_training()
 
-        self.log_msg(
-            f"[EMA]: load ema weights to online models from {ema_path}, {strict=}"
-        )
+        # Remove this
+
+        # self.accelerator._models = []
+        # self.accelerator._optimizers = []
+        # self.accelerator._schedulers = []
+        # self.prepare_for_training()
+
+        # self.log_msg(
+        #     f"[EMA]: load ema weights to online models from {ema_path}, {strict=}"
+        # )
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1665,6 +1691,18 @@ class CosmosHyperspectralTokenizerTrainer:
             assert (
                 self.train_cfg.ema_load_path is not None
             ), f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+
+        # test
+
+        # save_path = self.accelerator.save_state()
+        # self.log_msg(f"save state into {save_path}", only_rank_zero=False)
+        # self.accelerator.wait_for_everyone()
+
+        # # try to load
+        # self.accelerator.load_state(input_dir=save_path)
+        # self.log_msg(f"loaded state from {save_path}", only_rank_zero=False)
+
+        # exit(0)
 
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)

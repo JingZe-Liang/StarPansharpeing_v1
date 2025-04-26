@@ -129,6 +129,7 @@ dmypy.json
 .pyre/
 
 # dev
+src/stage1/cosmos/pretrained/
 data
 data/
 runs/

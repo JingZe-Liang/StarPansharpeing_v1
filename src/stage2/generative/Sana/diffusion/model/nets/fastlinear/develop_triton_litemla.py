@@ -290,9 +290,11 @@ def main():
         torch.cuda.synchronize()
         end_time = time.time()
         print(f"using cuda graph:")
-        print(f"each step takes {(end_time-start_time)*1000/cfg.iterations:.2f} ms")
         print(
-            f"max memory allocated: {torch.cuda.max_memory_allocated()/1024**3:.4f} GB"
+            f"each step takes {(end_time - start_time) * 1000 / cfg.iterations:.2f} ms"
+        )
+        print(
+            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.4f} GB"
         )
     else:
         x = torch.randn(
@@ -329,7 +331,7 @@ def main():
         )
         # ipdb.set_trace()
         print(
-            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 3:.4f} GB"
+            f"max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.4f} GB"
         )
 
     # x = torch.randn(cfg.batch_size*2, (cfg.input_size*2)**2, cfg.num_channels, device=device, dtype=dtype, requires_grad=cfg.backward)

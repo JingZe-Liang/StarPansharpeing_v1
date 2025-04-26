@@ -321,7 +321,7 @@ class ModelRunner:
                 and not (computed_block_nums is None or computed_block_nums == [])
             ):
                 raise RuntimeError(
-                    "chunked prefill cannot be used with prefix caching " "now."
+                    "chunked prefill cannot be used with prefix caching now."
                 )
 
             token_chunk_size = seq_group_metadata.token_chunk_size
@@ -424,9 +424,9 @@ class ModelRunner:
         )
 
         if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by " "vision language models."
-            )
+            assert (
+                self.vision_language_config
+            ), "Multi-modal inputs are only supported by vision language models."
             multi_modal_input = torch.cat(multi_modal_input_list, dim=0).to(self.device)
         else:
             multi_modal_input = None

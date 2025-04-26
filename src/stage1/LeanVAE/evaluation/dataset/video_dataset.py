@@ -31,9 +31,7 @@ class DecordInit(object):
 
     def __repr__(self):
         repr_str = (
-            f"{self.__class__.__name__}("
-            f"sr={self.sr},"
-            f"num_threads={self.num_threads})"
+            f"{self.__class__.__name__}(sr={self.sr},num_threads={self.num_threads})"
         )
         return repr_str
 

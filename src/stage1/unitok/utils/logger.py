@@ -275,7 +275,7 @@ def create_tb_log(args: config.Args):
         tb_log = misc.DistLogger(
             misc.TensorboardLogger(
                 log_dir=args.tb_log_dir_online,
-                filename_suffix=f'_{args.trial_id}_{misc.time_str("%m%d_%H%M")}',
+                filename_suffix=f"_{args.trial_id}_{misc.time_str('%m%d_%H%M')}",
             )
         )
         tb_log.flush()

@@ -321,9 +321,9 @@ class Trainer(object):
 
     def __repr__(self):
         return (
-            f'\n'
-            f'[{type(self).__name__}.config]: {pformat(self.get_config(), indent=2, width=250)}\n'
-            f'[{type(self).__name__}.structure]: {super(Trainer, self).__repr__().replace(Trainer.__name__, "")}'
+            f"\n"
+            f"[{type(self).__name__}.config]: {pformat(self.get_config(), indent=2, width=250)}\n"
+            f"[{type(self).__name__}.structure]: {super(Trainer, self).__repr__().replace(Trainer.__name__, '')}"
         )
 
     def get_config(self):

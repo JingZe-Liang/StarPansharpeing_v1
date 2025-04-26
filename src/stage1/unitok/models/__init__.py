@@ -41,7 +41,7 @@ def build_unitok(args: Args):
 
 def init_weights(model, conv_std_or_gain):
     print(
-        f'[init_weights] {type(model).__name__} with {"std" if conv_std_or_gain > 0 else "gain"}={abs(conv_std_or_gain):g}'
+        f"[init_weights] {type(model).__name__} with {'std' if conv_std_or_gain > 0 else 'gain'}={abs(conv_std_or_gain):g}"
     )
     for m in model.modules():
         if isinstance(m, nn.Linear):

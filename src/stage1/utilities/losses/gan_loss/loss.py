@@ -7,7 +7,6 @@ import torch.distributed.tensor as dtensor
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState, PartialState
-from antlr4 import InputStream
 from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
@@ -211,7 +210,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_in_channels: int = 3,
         disc_num_layers: int = 3,
         use_actnorm: bool = False,
-        disc_norm_type: str = "trms2d",
+        disc_norm_type: str = "bn2d",
         disc_spectral_norm: bool = False,
         disc_conditional: bool = False,
         disc_ndf: int = 64,
