@@ -1714,7 +1714,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
 
 _key = "unicosmos_f8c16p4_repa_kl"
-_configs = {
+_configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
     "cosmos_sep_f8c32p1": "cosmos_post_train_f8c32p1",
@@ -1731,21 +1731,40 @@ _configs = {
     "lean_vae_f8c16p4": "lean_vae_f8c16p4",
     # lora finetuning
     "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
-}[_key]
-
-
-@hydra.main(
-    config_path="configs/tokenizer_gan",
-    config_name=_configs,
-    version_base=None,
-)
-def main(cfg):
-    catcher = logger.catch if PartialState().is_main_process else nullcontext
-
-    with catcher():
-        trainer = CosmosHyperspectralTokenizerTrainer(cfg)
-        trainer.run()
+}
 
 
 if __name__ == "__main__":
+    from src.utilities.train_utils.cli import get_cli_cfg_isolate_with_hydra_cfg
+
+    # change the config name in cli
+    _configs, cli_args = get_cli_cfg_isolate_with_hydra_cfg(
+        _configs_dict,
+        cli_default_dict={
+            "config_name": _key,
+            "only_rank_zero_catch": True,
+        },
+    )
+
+    logger.info(
+        f"[Config]: {_configs}\n" + "-" * 50 + "\n\n" + "Start Running , Good Luck!"
+    )
+
+    # Main function
+
+    @hydra.main(
+        config_path="configs/tokenizer_gan",
+        config_name=_configs,
+        version_base=None,
+    )
+    def main(cfg):
+        if cli_args.only_rank_zero_catch:
+            catcher = logger.catch if PartialState().is_main_process else nullcontext
+        else:
+            catcher = logger.catch
+
+        with catcher():
+            trainer = CosmosHyperspectralTokenizerTrainer(cfg)
+            trainer.run()
+
     main()

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "your_project"
+version = "0.1.0"
+requires-python = ">=3.10, <3.13"
+dependencies = [
+    "numpy>=1.21.0",
+    "accelerate>=1.16.0",
+    "torch>=2.6.0",
+    "transformers>=4.30.0",
+    "torchvision>=0.25.0",
+    "timm>=0.9.6",
+    "cuml",
+    "cupy",
+    "matplotlib",
+    "loguru",
+    "typer",
+    "omegaconf",
+    "bitsandbytes",
+    "heavyball",
+    "wandb",
+    "fvcore",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=6.0", "ruff>=0.11"]

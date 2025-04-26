@@ -151,6 +151,29 @@ def load_jit_model_shape_matched(
     device: str = "cuda",
     part: str = "encoder",
 ):
+    """Loads a JIT-compiled PyTorch model with shape matching checks.
+
+    This function loads a TorchScript model and attempts to match its state dictionary
+    with the checkpoint weights, handling shape mismatches and reporting discrepancies.
+
+    Args:
+        jit_model_path: Path to the .pt/.pth file containing JIT-compiled model
+        tokenizer_config: Dictionary containing tokenizer configuration
+        device: Target device for model (default: "cuda")
+        part: Model component to load ("encoder" or "decoder")
+
+    Returns:
+        Tuple containing:
+            - Loaded model (moved to target device)
+            - Dictionary with keys:
+                * "pretrained_keys": List of successfully loaded parameter names
+                * "not_pretrained_keys": List of parameters that failed to load
+
+    Raises:
+        ValueError: If invalid `part` argument is provided
+        RuntimeError: If critical shape mismatches are found
+    """
+
     model, ckpts = _load_pytorch_model(jit_model_path, tokenizer_config, device)
 
     state_dict = ckpts.state_dict()
