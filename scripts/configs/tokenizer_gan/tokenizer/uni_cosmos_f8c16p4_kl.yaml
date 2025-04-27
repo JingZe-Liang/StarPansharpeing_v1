@@ -22,7 +22,7 @@ norm_in_quant_conv: false
 enc_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit
 dec_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit
 wrap_fsdp_last_layer: false
-use_kl: true
+quantizer_type: null
 loading_type: nvidia
 hook_for_repa: false
 hook_module: decoder.decoder.up.1.block.2

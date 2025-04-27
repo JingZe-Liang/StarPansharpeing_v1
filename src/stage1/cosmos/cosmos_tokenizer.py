@@ -4,6 +4,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Literal
 
+import numpy as np
 import torch
 from loguru import logger as logging
 from torch import nn
@@ -12,7 +13,10 @@ from torch.nn.modules.module import _IncompatibleKeys
 sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, RMSNorm2d
+from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.utilities.network_utils import load_weights_with_shape_check
+
+KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
 def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
@@ -26,10 +30,94 @@ def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
     )
 
 
+def _to_two_tuple(x):
+    if isinstance(x, int):
+        return (x, x)
+    elif isinstance(x, tuple):
+        assert len(x) == 2, "x should be a tuple of length 2"
+        return x
+    else:
+        raise ValueError("x should be an int or a tuple of length 2")
+
+
+class NestChannelDrop(nn.Module):
+    def __init__(
+        self,
+        learnable: bool = False,
+        drop_type: str = "exp_1",
+        max_channels: int = 12,  # MMSeg dataset
+        img_size: tuple[int] | int = 256,
+    ):
+        super().__init__()
+        self.learnable = learnable
+        self.max_channels = max_channels
+        self.img_size = _to_two_tuple(img_size)
+
+        drop_type, args = drop_type.lower().split("_")
+        self.drop_type = drop_type
+        if drop_type == "exp":
+            self.sample_kwargs = {"lambda": float(args)}
+        elif drop_type == "uniform":
+            assert args.isdigit(), "args should be an int"
+            self.sample_kwargs = {"low": int(args)}
+        else:
+            raise ValueError(
+                f"drop_type {drop_type} not supported, only exp and uniform are supported"
+            )
+
+        if self.learnable:
+            self.dropped_x = nn.Parameter(torch.zeros(1, 1, *self.img_size))
+            self.dropped_x.data.normal_(0, 0.2)
+        else:
+            self.register_buffer("dropped_x", torch.zeros(1, 1, *self.img_size))
+
+        self.register_buffer("channel_arange", torch.arange(self.max_channels))
+
+    def exponential_sampling(self, lambda_val, size=1):
+        u = np.random.uniform(size=size)
+        k = -np.log(1 - u) / lambda_val
+        return (
+            torch.as_tensor(np.floor(k).astype(int))
+            .clip_(0, self.max_channels)
+            .unsqueeze(-1)
+        )
+
+    def uniform_sampling(self, low: int, size=1):
+        # (bs, 1)
+        k = torch.randint(low=low, high=self.max_channels, size=(size, 1))
+
+        return k
+
+    def forward(self, z, inference_channels: int | None = None):
+        if inference_channels is not None:
+            assert not self.training
+            assert inference_channels <= self.max_channels
+            return z[:, :inference_channels]
+
+        assert self.max_channels == z.shape[1]
+
+        bs = z.shape[0]
+        if self.drop_type == "exp":
+            leave_channels = self.exponential_sampling(size=bs, **self.sample_kwargs)
+        elif self.drop_type == "uniform":
+            leave_channels = self.uniform_sampling(size=bs, **self.sample_kwargs)
+
+        # drop channels
+
+        # 1. expand the cached empty z
+        z_empty = self.dropped_x.expand(bs, -1, -1, -1)
+
+        _channels = self.channel_arange[None].expand(bs, -1)
+        _cond = _channels < leave_channels.to(_channels)
+        z = torch.where(_cond.unsqueeze(-1).unsqueeze(-1).expand_as(z), z, z_empty)
+
+        return z
+
+
 class ContinuousImageTokenizer(nn.Module):
     _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
     _hook_for_repa: bool = False
-    _hook_module: str = "decoder.decoder.up.1.block.2"
+    _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _hook_feature: torch.Tensor = None
 
     def __init__(
@@ -37,7 +125,7 @@ class ContinuousImageTokenizer(nn.Module):
         z_channels: int,
         z_factor: int = 1,
         latent_channels: int = 8,
-        loading_type: Literal["pretrained", "nvidia"] | None = "pretrained",
+        loading_type: Literal["pretrained", "nvidia"] | None = "nvidia",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -46,12 +134,32 @@ class ContinuousImageTokenizer(nn.Module):
         if self._hook_for_repa:
             self._repa_proj = build_mlp(512, 768, 768)
 
-        self.use_kl = kwargs.pop("use_kl", False)
-        if self.use_kl:
+        self.quantizer_type = kwargs.pop("quantizer_type", None)
+        assert self.quantizer_type in ["kl", "discrete", None]
+        if self.quantizer_type == "kl":
             kwargs["out_channels"] = 2 * kwargs["out_channels"]
             self.quantizer = (
                 DiagonalGaussianDistribution  # not quantizer, compatible with trainer
             )
+        elif self.quantizer_type == "bsq":
+            assert (
+                kwargs["out_channels"] % 2 == 0
+            ), "quantizer out channels should be even"
+            self.quantizer = BSQ(
+                embed_dim=kwargs["out_channels"],  # 18
+                beta=0.5,
+                gamma0=1.0,
+                gamma=1.0,
+                zeta=1.0,
+                inv_temperature=1.0,
+                cb_entropy_compute="group",
+                input_format="bchw",
+                group_size=kwargs["out_channels"] // 2,
+            )
+        if self.quantizer_type is not None:
+            logging.info(f"Using quantizer: {self.quantizer.__class__.__name__}")
+        else:
+            logging.info(f"use no quantizer or kl, just AE to reconstruct")
 
         tokenizer_cfg = dict(
             z_channels=z_channels,
@@ -116,16 +224,25 @@ class ContinuousImageTokenizer(nn.Module):
                     z_factor * z_channels, z_factor * latent_channels, 1
                 )
             post_quant_conv = torch.nn.Conv2d(latent_channels, z_channels, 1)
+
             self.encoder = self.encoder_jit(encoder, quant_conv)
             self.decoder = self.decoder_jit(decoder, post_quant_conv)
 
-            if kwargs.get("norm_in_quant_conv", False):
-                assert (
-                    enc_path == "" and dec_path == ""
-                ), "norm_in_quant_conv is not supported for pretrained settings, trian it from scratch"
-            self.load_pretrained(
-                enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
-            )
+            # Load weights
+            if loading_type is not None:
+                if kwargs.get("norm_in_quant_conv", False):
+                    assert (
+                        enc_path == "" and dec_path == ""
+                    ), "norm_in_quant_conv is not supported for pretrained settings, trian it from scratch"
+                self.load_pretrained(
+                    enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
+                )
+
+        # token channel drop
+        self.use_channel_drop = kwargs.get("use_channel_drop", False)
+        if self.use_channel_drop:
+            self.channel_drop = NestChannelDrop(**kwargs["channel_drop_config"])
+            logging.info(f'use channel drop: {kwargs['channel_drop_config']}')
 
         # register repa hook
         if self._hook_for_repa:
@@ -183,27 +300,44 @@ class ContinuousImageTokenizer(nn.Module):
 
     def encode(self, x):
         h = self.encoder(x)
-        # moments = self.quant_conv(h)
+
+        # NOTE: quantizer first? or channel drop first?
+
+        if self.quantizer_type == "bsq":
+            dec, bsq_loss, loss_breakdown = self.quantizer(dec)
+
+            return dec, bsq_loss, loss_breakdown
+
+        if self.channel_drop:
+            h = self.channel_drop(h)
 
         return h
 
     def decode(self, z):
         # z = self.post_quant_conv(z)
         dec = self.decoder(z)
-        if self.use_kl:
-            m_, var_ = dec.chunk(2, dim=1)
-            posterior = self.quantizer((m_, var_))
+
+        # kl on the decoder
+        if self.quantizer_type == "kl":
+            m_, logvar_ = dec.chunk(2, dim=1)
+            posterior = self.quantizer((m_, logvar_))
             kl_loss = posterior.kl()
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
             sample = posterior.sample()
 
-            return sample, kl_loss, {"posterior": posterior, "mean": m_, "var": var_}
+            return (
+                sample,
+                kl_loss,
+                KLLossBreakDown(
+                    posterior=posterior,
+                    mean=m_,
+                    logvar=logvar_,
+                ),
+            )
 
         return dec
 
-    # @torch.autocast("cuda", torch.bfloat16)
     def forward(self, input):
-        # latent, posteriors = self.encode(input)
         latent = self.encode(input)
         dec = self.decode(latent)
 
@@ -336,11 +470,11 @@ class ContinuousImageTokenizer(nn.Module):
                         "conv_out is missing, use the mean of the conv_out weight"
                     )
 
-            logging.warning(
-                f"load pretrained model done. \n"
-                f"encoder: missing keys {_enc_missing}, unexpected keys {_enc_unexp}\n"
-                f"decoder: missing keys {_dec_missing}, unexpected keys {_dec_unexp}"
-            )
+                logging.warning(
+                    f"load pretrained model done. \n"
+                    f"encoder: missing keys {_enc_missing}, unexpected keys {_enc_unexp}\n"
+                    f"decoder: missing keys {_dec_missing}, unexpected keys {_dec_unexp}"
+                )
 
     def peft_first_last_convs_moduel_names(self):
         return [
@@ -466,11 +600,11 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        # "enc_path": "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit",
-        # "dec_path": "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit",
-        "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
-        "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
+        # "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
+        # "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
+        # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-26_17-11-51_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors",
         "hook_for_repa": True,
+        "quantizer_type": None,
     }
 
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
