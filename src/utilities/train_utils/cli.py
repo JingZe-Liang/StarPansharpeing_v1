@@ -9,7 +9,7 @@ CLI_DEFAUTL_DICT = {
 
 
 def get_cli_cfg_isolate_with_hydra_cfg(
-    exp_config_dict: dict, cli_default_dict: dict = CLI_DEFAUTL_DICT
+    exp_config_dict: dict[str, str], cli_default_dict: dict = CLI_DEFAUTL_DICT
 ):
     """Parse and isolate CLI arguments from Hydra configuration, providing help information.
 

@@ -30,8 +30,9 @@ We are cooking the codes, stay tuned.
 7. IMM and GMFlow code
 8. add pansharpening code (in the latent space)
 9. 1d tokenizer but not use diffusion/flow matching
-10. add Conv-LoRA (MoE) adaptors for Cosmos tokenizer
+10. ~~add Conv-LoRA (MoE) adaptors for Cosmos tokenizer~~
 11. add Phase Consistency Model's multi-scale discriminator
+12. add nested channel drop
 
 
 ## Checks
@@ -45,13 +46,22 @@ We are cooking the codes, stay tuned.
 3. [Conv-LoRA](https://github.com/autogluon/autogluon/blob/081e3c6e4134beb84637863624d8b68a5c15bac1/multimodal/src/autogluon/multimodal/models/adaptation_layers.py#L703) (MoE) adaptors may suit Cosmos tokenizer.
 
 ## Logs
-2025/4/10
-> 1. hinge loss discriminator works fine for post-training Cosmos tokenizer; 
-> 2. cooking Flowmo Flux-based diffusive(FM) tokenizer.
+
+2025/04/27
+
+> 1. The MMSeg dataset (with 12 channels) is reconsted blur (~37dB PSNR best, mostly, about 40dB can be visually clean). maybe the latent channel number, 16, is not large enaught. **Try 18 channel (f8z18p4)?**
+> 2. The DCF2019 (with 8 channels) on f8z16p4 configuration works fine (~40dB PSNR), if training longer will reach 42dB? In the RGB channels, the NVIDIA orignial tokenizer can reach 46dB (creazy!).
+> 3. Try **if enlarging the decoder will make the reconstruction better?**
+
 
 2025/4/23
 > 1. seems BN is vital to the discriminator. ln, gn will make the trianing collapse.
 > 2. FSDP2 works fine.
+
+2025/4/10
+> 1. hinge loss discriminator works fine for post-training Cosmos tokenizer; 
+> 2. cooking Flowmo Flux-based diffusive(FM) tokenizer.
+
 
 ## Contributors
 
