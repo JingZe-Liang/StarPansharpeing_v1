@@ -6,33 +6,35 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: sana_cdae_f8c16p1
+  - tokenizer: uni_cosmos_f8c16p4_kl
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
+  # self ============
   - _self_
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+accelerator:
+  gradient_accumulation_plugin:
+    num_steps: 2
+
 dataset:
+  used: MMSeg_YREB
   dataset_names_to_bs:
     MMSeg_YREB: 16
-    DCF_2019: 32
-
-ema:
-  beta: 0.995
-  update_after_step: 1000
-  update_every: 2
+    DCF_2019: 12
+  transform_prob: 0.5
 
 vq_loss:
   repa_loss_weight: 1.5
-  quantizer_type: null
+  quantizer_type: bsq
   quantizer_options:
-    # quantizer_loss_weight: 0.1
-    # codebook_enlarge_ratio: 3
-    # codebook_enlarge_steps: 2000
+    quantizer_loss_weight: 0.1
+    codebook_enlarge_ratio: 3
+    codebook_enlarge_steps: 2000
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -45,40 +47,66 @@ vq_loss:
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
-  disc_loss: non_saturate
+  disc_loss: hinge
   ssim_weight: 0.2
   disc_weight: 0.5
   reconstruction_loss_type: dwt
 
+tokenizer:
+  hook_for_repa: true
+  quantizer_type: bsq
+  hook_module: decoder.decoder.mid.block_2
+  latent_channels: 36
+  z_channels: 36
+  act_checkpoint: false
+  channels_mult: [2, 4, 4]
+  num_res_blocks: 4
+  enc_path:
+  dec_path:
+  loading_type:
+  downsample_type: ConvPixelUnshuffle
+  downsample_shortcut: averaging
+  upsample_type: ConvPixelShuffle
+  upsample_shortcut: duplicating
+  force_not_attn: true
+
+ema:
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+
 train:
-  tokenizer_name: dcae
-  proj_dir: runs/stage1_cdae/
-  finetune_strategy: finetune_all
+  tokenizer_name: cosmos_sep
+  proj_dir: runs/stage1_cosmos/
+  finetune_strategy: finetune_all # dcae_refine_decoder_head
   max_grad_norm: 0.03
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 200_000
+  max_steps: 400_000
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path:
+  ema_load_path: #/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-27_23-27-08_cosmos_pretrained_f8c16p4_repa_kl/ema
+  only_load_tokenizer: false
+  grad_check: false
+
   finetune_cfg:
-    refine_decoder_head_n_layers: 2
-    adapt_latent_n_layers: 2
+    refine_decoder_head_n_layers: all
+    adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
     _target_: src.utilities.optim.LAMB
     _partial_: true
     lr: 8.0e-4
-    betas: [0.8, 0.999]
+    betas: [0.8, 0.95]
     eps: 1.0e-8
 
   disc_optimizer:
     _target_: src.utilities.optim.LAMB
     _partial_: true
     lr: 8.0e-4
-    betas: [0.5, 0.999]
+    betas: [0.5, 0.95]
     eps: 1.0e-8
 
   tokenizer_sched:
@@ -86,21 +114,21 @@ train:
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
-    min_lr: 2.0e-5
+    min_lr: 1.0e-5
 
   disc_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
-    min_lr: 2.0e-5
+    min_lr: 1.0e-5
 
   log:
-    run_comment: cdae_f8c16_repa
+    run_comment: cosmos_L_f8z36p4_bsq_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10

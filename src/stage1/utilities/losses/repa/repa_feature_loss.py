@@ -15,7 +15,9 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.device_mesh import DeviceMesh, init_device_mesh
 
 warnings.filterwarnings(
-    "once", message="[Repa Resize]: image not resize into dino pretrained size"
+    "once",
+    message="[Repa Resize]: image not resize into dino pretrained size",
+    append=True,
 )
 
 
@@ -292,7 +294,10 @@ class REPALoss(torch.nn.Module):
             img_feat.shape == model_feat.shape
         ), "img_feat and model_feat must have the same shape to compute the repa loss"
         repa_loss = -torch.sum(img_feat * model_feat, dim=dim)
-        # repa_loss = torch.cosine_similarity(img_feat, model_feat, dim=dim)
+        # repa_loss = (
+        #     torch.cosine_similarity(img_feat.flatten(1), model_feat.flatten(1), dim=1)
+        #     / img_feat.shape[0]
+        # )
         return repa_loss.mean()
 
     def _to_dtensor(self, img: Tensor):

@@ -7,6 +7,15 @@ from typing import Iterable
 
 import torch
 
+try:
+    from flash_muon_cuda import matmul_transpose_assign
+
+    _flash_moun_cuda_available = True
+except ImportError:
+    __url = "https://github.com/nil0x9/flash-muon"
+    _flash_moun_cuda_available = False
+    print(f"Flash-Muon-CUDA not installed, please install it from {__url}")
+
 
 # This code snippet is a modified version adapted from the following GitHub repository:
 # https://github.com/KellerJordan/Muon/blob/master/muon.py
@@ -38,6 +47,36 @@ def zeropower_via_newtonschulz5(G, steps):
 
     if G.size(0) > G.size(1):
         X = X.T
+    return X
+
+
+def fast_newtonschulz(G: torch.Tensor, steps: int) -> torch.Tensor:
+    """
+    adapted from https://github.com/KellerJordan/Muon/blob/master/muon.py
+    Arguments:
+        G: The gradient or momentum matrix to be orthogonalized.
+        steps: Number of Newton-Schulz iterations.
+    """
+    assert G.ndim >= 2
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.bfloat16()
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    buf1 = torch.empty(X.size(0), X.size(0), dtype=X.dtype, device=X.device)
+    buf2 = torch.empty(X.size(0), X.size(0), dtype=X.dtype, device=X.device)
+
+    # Ensure spectral norm is at most 1
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    # Perform the NS iterations
+    for _ in range(steps):
+        matmul_transpose_assign(X, buf1)
+        matmul_transpose_assign(buf1, buf2)
+        B = b * buf1 + c * buf2
+        X = a * X + B @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
     return X
 
 
@@ -79,6 +118,7 @@ class Muon(torch.optim.Optimizer):
         adamw_params=None,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
+        use_cuda_kernel: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -88,6 +128,7 @@ class Muon(torch.optim.Optimizer):
             ns_steps=ns_steps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
+            use_cuda_kernel=use_cuda_kernel and _flash_moun_cuda_available,
         )
 
         params = list(muon_params)
@@ -154,7 +195,11 @@ class Muon(torch.optim.Optimizer):
                     g = g.add(buf, alpha=momentum)
                 else:
                     g = buf
-                u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+
+                if self.defaults["use_cuda_kernel"]:
+                    u = fast_newtonschulz(g, steps=group["ns_steps"])
+                else:
+                    u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
@@ -223,13 +268,13 @@ class Muon(torch.optim.Optimizer):
 
 
 if __name__ == "__main__":
-    net = torch.nn.Linear(10, 10, bias=False).cuda()
-    optimizer = Muon(muon_params=list(net.parameters()), lr=0.01)
+    net = torch.nn.Linear(32, 32, bias=False).cuda()
+    optimizer = Muon(muon_params=list(net.parameters()), lr=0.01, use_cuda_kernel=True)
 
     from tqdm import trange
 
     for _ in trange(100):
         optimizer.zero_grad()
-        loss = net(torch.randn(10, 10).cuda()).sum()
+        loss = net(torch.randn(32, 32).cuda()).sum()
         loss.backward()
         optimizer.step()

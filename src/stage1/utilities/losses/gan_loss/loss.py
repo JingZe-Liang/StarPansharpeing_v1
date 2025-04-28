@@ -238,7 +238,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
         repa_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
-        loss_ssim: bool = False,
         ssim_weight: float = 0.1,
         # if is video
         num_frames: int = 1,
@@ -273,7 +272,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.discriminator_weight = disc_weight
         self.disc_network_type = disc_network_type
         self.disc_conditional = disc_conditional
-        self.use_ssim = loss_ssim
+        self.use_ssim = ssim_weight > 0.0
         self.num_frames = num_frames
         self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
@@ -307,6 +306,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
         elif quantizer_type == "kl":
             default_quant_opts = dict(kl_weight=1e-6)
+        else:
+            default_quant_opts = None
         logger.info(f"[VQ fn loss]: use quantizer type={quantizer_type}")
         self.quantizer_options = quantizer_options or default_quant_opts
         self.vq_options_check()
@@ -407,7 +408,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * SSIM loss
         self.ssim_weight = ssim_weight
-        if loss_ssim:
+        if ssim_weight > 0:
             self.ssim_loss = SSIMLoss(window_size=11)
             logger.info("SSIM Loss is used in VAE losses")
 
@@ -630,9 +631,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
             q_loss = q_loss_total * self.quantizer_options["quantizer_loss_weight"]
             cb_enlarge_r = self.quantizer_options["codebook_enlarge_ratio"]
             codebook_enlarge_steps = self.quantizer_options["codebook_enlarge_steps"]
-            cb_enlarge_on_loss = cb_enlarge_r * (
-                max(0, 1 - global_step / codebook_enlarge_steps)
-            )
+            if codebook_enlarge_steps > 0:
+                cb_enlarge_on_loss = cb_enlarge_r * (
+                    max(0, 1 - global_step / codebook_enlarge_steps)
+                )
+            else:
+                cb_enlarge_on_loss = 0.0
+
             if cb_enlarge_r > 0:
                 q_loss = cb_enlarge_on_loss * q_loss + q_loss
 

@@ -21,7 +21,7 @@ Let us see which is better.
 We are cooking the codes, stay tuned.
 
 ## TODO
-1. add dino v2 discriminator from UniTok
+1. ~~add dino v2 discriminator from UniTok~~
 2. add SANA triton kernels (~~triton rms~~, triton attention)
 3. cook diffusion tokenizer (maybe diffusion timestep $t$ cost the model capacity ??)
 4. add thera (antialias neural heat field) code into encoder (maybe decoder, both?)
@@ -32,7 +32,11 @@ We are cooking the codes, stay tuned.
 9. 1d tokenizer but not use diffusion/flow matching
 10. ~~add Conv-LoRA (MoE) adaptors for Cosmos tokenizer~~
 11. add Phase Consistency Model's multi-scale discriminator
-12. add nested channel drop
+12. ~~add nested channel drop~~
+13. add maskbit training generator code
+14. use maskbit autoencoder
+15. use bsq-vit autoencoder
+16. test vgg-lpips loss in the hyperspectral dataset (if there is a linlayer in the checkpoint?)
 
 
 ## Checks

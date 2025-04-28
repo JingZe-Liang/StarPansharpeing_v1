@@ -128,7 +128,11 @@ def shape_not_matched_ckpt_load(model: nn.Module, ckpt: dict | str):
     _n_not_matched = 0
     _n_params = 0
     for name, param in model.named_parameters():
-        ckpt_p = ckpt[name]
+        ckpt_p = ckpt.get(name, None)
+        if ckpt_p is None:
+            _n_not_matched += 1
+            continue
+
         # assert shape matched
         _matched = ckpt_p.shape == param.shape
         _n_params += 1

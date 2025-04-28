@@ -26,7 +26,8 @@ https://github.com/CompVis/stable-diffusion/blob/
 import math
 import sys
 from functools import partial
-from typing import Literal
+from inspect import signature
+from typing import Callable, Literal, Optional, Union
 
 import numpy as np
 
@@ -34,12 +35,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from chex import block_until_chexify_assertions_complete
 from loguru import logger as logging
 from torch.utils.checkpoint import checkpoint
 
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
+
+# * ==========================================================
+# * Norm
 
 
 class RMSNorm2d(torch.nn.Module):
@@ -56,7 +61,11 @@ class RMSNorm2d(torch.nn.Module):
         return output * self.weight
 
 
-class Upsample(nn.Module):
+# * ==========================================================
+# * Upsample and downsamples
+
+
+class UpsampleRepeatConv(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.conv = nn.Conv2d(
@@ -68,7 +77,17 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 
-class Downsample(nn.Module):
+def get_same_padding(
+    kernel_size: Union[int, tuple[int, ...]],
+) -> Union[int, tuple[int, ...]]:
+    if isinstance(kernel_size, tuple):
+        return tuple([get_same_padding(ks) for ks in kernel_size])
+    else:
+        assert kernel_size % 2 > 0, "kernel size should be odd number"
+        return kernel_size // 2
+
+
+class DownsamplePadConv(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.conv = nn.Conv2d(
@@ -79,6 +98,252 @@ class Downsample(nn.Module):
         pad = (0, 1, 0, 1)
         x = F.pad(x, pad, mode="constant", value=0)
         return self.conv(x)
+
+
+class ConvPixelUnshuffleDownSampleLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        factor: int,
+    ):
+        super().__init__()
+        self.factor = factor
+        out_ratio = factor**2
+        assert out_channels % out_ratio == 0
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels // out_ratio,
+            kernel_size,
+            padding=get_same_padding(kernel_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = F.pixel_unshuffle(x, self.factor)
+        return x
+
+
+class PixelUnshuffleChannelAveragingDownSampleLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        factor: int,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.factor = factor
+        assert in_channels * factor**2 % out_channels == 0
+        self.group_size = in_channels * factor**2 // out_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.pixel_unshuffle(x, self.factor)
+        B, C, H, W = x.shape
+        x = x.view(B, self.out_channels, self.group_size, H, W)
+        x = x.mean(dim=2)
+        return x
+
+
+class ConvPixelShuffleUpSampleLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        factor: int,
+    ):
+        super().__init__()
+        self.factor = factor
+        out_ratio = factor**2
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels * out_ratio,
+            kernel_size,
+            padding=get_same_padding(kernel_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = F.pixel_shuffle(x, self.factor)
+        return x
+
+
+class InterpolateConvUpSampleLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        factor: int,
+        mode: str = "nearest",
+    ) -> None:
+        super().__init__()
+        self.factor = factor
+        self.mode = mode
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            1,
+            padding=get_same_padding(kernel_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.nn.functional.interpolate(x, scale_factor=self.factor, mode=self.mode)
+        x = self.conv(x)
+        return x
+
+
+class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        factor: int,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.factor = factor
+        assert out_channels * factor**2 % in_channels == 0
+        self.repeats = out_channels * factor**2 // in_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.repeat_interleave(self.repeats, dim=1)
+        x = F.pixel_shuffle(x, self.factor)
+        return x
+
+
+# register activation function here
+REGISTERED_ACT_DICT: dict[str, type] = {
+    "relu": nn.ReLU,
+    "relu6": nn.ReLU6,
+    "hswish": nn.Hardswish,
+    "silu": nn.SiLU,
+    "gelu": partial(nn.GELU, approximate="tanh"),
+}
+
+
+def build_kwargs_from_config(config: dict, target_func: Callable):
+    valid_keys = list(signature(target_func).parameters)
+    kwargs = {}
+    for key in config:
+        if key in valid_keys:
+            kwargs[key] = config[key]
+    return kwargs
+
+
+def build_act(name: str, **kwargs) -> Optional[nn.Module]:
+    if name in REGISTERED_ACT_DICT:
+        act_cls = REGISTERED_ACT_DICT[name]
+        args = build_kwargs_from_config(kwargs, act_cls)
+        return act_cls(**args)
+    else:
+        return None
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        main: Optional[nn.Module],
+        shortcut: Optional[nn.Module],
+        post_act=None,
+        pre_norm: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+
+        self.pre_norm = pre_norm
+        self.main = main
+        self.shortcut = shortcut
+        self.post_act = build_act(post_act)
+
+    def forward_main(self, x: torch.Tensor) -> torch.Tensor:
+        if self.pre_norm is None:
+            return self.main(x)
+        else:
+            return self.main(self.pre_norm(x))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.main is None:
+            res = x
+        elif self.shortcut is None:
+            res = self.forward_main(x)
+        else:
+            res = self.forward_main(x) + self.shortcut(x)
+            if self.post_act:
+                res = self.post_act(res)
+        return res
+
+
+# * ==========================================================
+# * Upsample and downsample entries
+
+
+def build_upsample_block(
+    block_type: str, in_channels: int, out_channels: int, shortcut: Optional[str]
+) -> nn.Module:
+    if block_type == "ConvPixelShuffle":
+        block = ConvPixelShuffleUpSampleLayer(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
+        )
+    elif block_type == "RepeatConv":
+        block = UpsampleRepeatConv(in_channels)
+    elif block_type == "InterpolateConv":
+        block = InterpolateConvUpSampleLayer(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
+        )
+    else:
+        raise ValueError(f"block_type {block_type} is not supported for upsampling")
+
+    if shortcut is None:
+        pass
+    elif shortcut == "duplicating":
+        shortcut_block = ChannelDuplicatingPixelUnshuffleUpSampleLayer(
+            in_channels=in_channels, out_channels=out_channels, factor=2
+        )
+        block = ResidualBlock(block, shortcut_block)
+    else:
+        raise ValueError(f"shortcut {shortcut} is not supported for upsample")
+    return block
+
+
+def build_downsample_block(
+    block_type: str, in_channels: int, out_channels: int, shortcut: Optional[str]
+) -> nn.Module:
+    if block_type == "Conv":
+        block = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
+    elif block_type == "PadConv":
+        block = DownsamplePadConv(in_channels=in_channels)
+    elif block_type == "ConvPixelUnshuffle":
+        block = ConvPixelUnshuffleDownSampleLayer(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
+        )
+    else:
+        raise ValueError(f"block_type {block_type} is not supported for downsampling")
+
+    if shortcut is None:
+        pass
+    elif shortcut == "averaging":
+        shortcut_block = PixelUnshuffleChannelAveragingDownSampleLayer(
+            in_channels=in_channels, out_channels=out_channels, factor=2
+        )
+        block = ResidualBlock(block, shortcut_block)
+    else:
+        raise ValueError(f"shortcut {shortcut} is not supported for downsample")
+    return block
+
+
+# * ==========================================================
+# * Blocks
 
 
 class ResnetBlock(nn.Module):
@@ -277,6 +542,19 @@ class AttnBlock(nn.Module):
         return self.forward_fn(x)
 
 
+class FSDPNoWarpModule(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.wrap_mod = module
+
+    def forward(self, x):
+        return self.wrap_mod(x)
+
+
+# * ==========================================================
+# * Encoder and decoder
+
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -291,6 +569,9 @@ class Encoder(nn.Module):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
+        downsample_type: str = "PadConv",
+        downsample_shortcut: str | None = None,
+        force_not_attn: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -344,7 +625,7 @@ class Encoder(nn.Module):
                     )
                 )
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                if curr_res in attn_resolutions and not force_not_attn:
                     logging.info(f"[Encoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
@@ -357,7 +638,9 @@ class Encoder(nn.Module):
             down.block = block
             down.attn = attn
             if i_level < self.num_downsamples:
-                down.downsample = Downsample(block_in)
+                down.downsample = build_downsample_block(
+                    downsample_type, block_in, block_in, shortcut=downsample_shortcut
+                )
                 curr_res = curr_res // 2
             self.down.append(down)
 
@@ -416,15 +699,6 @@ class Encoder(nn.Module):
         return h
 
 
-class FSDPNoWarpModule(nn.Module):
-    def __init__(self, module):
-        super().__init__()
-        self.wrap_mod = module
-
-    def forward(self, x):
-        return self.wrap_mod(x)
-
-
 class Decoder(nn.Module):
     def __init__(
         self,
@@ -439,6 +713,9 @@ class Decoder(nn.Module):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
+        upsample_type: str = "RepeatConv",
+        upsample_shortcut: str | None = None,
+        force_not_attn: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -512,7 +789,7 @@ class Decoder(nn.Module):
                     )
                 )
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                if curr_res in attn_resolutions and not force_not_attn:
                     logging.info(f"[Decoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
@@ -525,7 +802,12 @@ class Decoder(nn.Module):
             up.block = block
             up.attn = attn
             if i_level >= (self.num_resolutions - self.num_upsamples):
-                up.upsample = Upsample(block_in)
+                up.upsample = build_upsample_block(
+                    upsample_type,
+                    block_in,
+                    block_out,
+                    shortcut=upsample_shortcut,
+                )
                 curr_res = curr_res * 2
             self.up.insert(0, up)
 
@@ -847,7 +1129,7 @@ class DecoderDiff(nn.Module):
                 self.num_resolutions - self.num_upsamples
             ):  # [2,1] upsample, 1
                 # last layers upsample
-                up.upsample = Upsample(block_in)
+                up.upsample = UpsampleRepeatConv(block_in)
                 logging.info(f"upsample {i_level}")
                 curr_res = curr_res * 2
 
@@ -1096,7 +1378,9 @@ if __name__ == "__main__":
             16,
             8,
             True,
-            patch_size=1,
+            patch_size=4,
+            downsample_type="ConvPixelUnshuffle",
+            downsample_shortcut="averaging",
         )
         decoder = Decoder(
             8,
@@ -1109,7 +1393,9 @@ if __name__ == "__main__":
             16,
             8,
             act_checkpoint=True,
-            patch_size=1,
+            patch_size=4,
+            upsample_type="ConvPixelShuffle",
+            upsample_shortcut="duplicating",
         )
         dtype = torch.bfloat16
         device = torch.device("cuda:1")

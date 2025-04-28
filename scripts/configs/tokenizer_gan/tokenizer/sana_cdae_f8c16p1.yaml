@@ -5,8 +5,12 @@ cfg:
   pretrained_path: null
   extra:
     encoder:
-      act_checkpoint: true
+      act_checkpoint: false
       in_channels: ${dataset.channels}
     decoder:
-      act_checkpoint: true
+      act_checkpoint: false
       in_channels: ${dataset.channels}
+    repa_hidden_size: 512
+    use_quant_conv: false
+    quant_type: null
+    hook_for_repa: true

@@ -12,7 +12,6 @@ perceptual_loss_on_logits: false
 gram_model: null
 gram_loss_weight: 50000.0
 # ssim loss
-loss_ssim: true
 ssim_weight: 0.1
 # lecam
 lecam_loss_weight: 0.001

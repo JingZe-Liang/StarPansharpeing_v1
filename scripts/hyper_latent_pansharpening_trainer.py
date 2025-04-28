@@ -36,7 +36,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 colored_traceback.add_hook()
 
@@ -45,13 +44,13 @@ from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.cosmos_tokenizer import (
     ContinuousImageTokenizer as CosmosTokenizer,
 )
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.networks.configs import continuous_image
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
+from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
 from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
+from src.stage2.pansharpening.metrics import AnalysisPanAcc
 from src.utilities.network_utils import load_fsdp_model, remap_peft_model_state_dict
 from src.utilities.train_utils.state import StepsCounter
 
@@ -148,7 +147,7 @@ class PansharpeningTrainer:
             self.setup_tokenizer()
 
         # optimizers and lr schedulers
-        self.tokenizer_optim, self.pansp_sched = self.get_optimizer_lr_scheduler()
+        self.pansp_optim, self.pansp_sched = self.get_optimizer_lr_scheduler()
         # EMA models and accelerator prepare
         self.prepare_for_training()
         self.prepare_ema_models()
@@ -216,20 +215,6 @@ class PansharpeningTrainer:
                 self.quantizer = None
 
             self.use_quantizer = self.quantizer is not None
-            self.norm_z = self.cfg.quantizer.norm_z
-            if not self.sep_enc_dec:
-                assert (
-                    not self.norm_z
-                ), "norm_z is not supported when sep_enc_dec is False"
-            if not self.use_quantizer:
-                assert (
-                    not self.norm_z
-                ), "norm_z can not be set when quantizer is not used"
-            if self.norm_z:
-                self.log_msg(
-                    "norm_z is set to True in the trainer, which is not recommanded",
-                    level="WARNING",
-                )
 
             if (
                 self.use_quantizer
@@ -568,44 +553,38 @@ class PansharpeningTrainer:
         self.ema_pansp_model.update()
 
     @torch.no_grad()
-    def forward_tokenizer(self, x):
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode"):
         if not self.online_tokenize:
             return None
 
+        latent_q, recon = None
         with self.accelerator.autocast():
             if self.sep_enc_dec:
                 to_enc = lambda x: self.tokenizer_encoder(x)[0]
                 to_dec = lambda x: self.tokenizer_decoder(x)
 
-                latent = to_enc(x)
-
-                # TODO: move the total seperated encoder and decoder into a unified class
-                if self.norm_z:  # only norm for seperated encoder and decoder
-                    latent = torch.nn.functional.normalize(latent, dim=1)
-
-                if self.quantizer is not None:
-                    latent_q, q_loss, q_info = self.quantizer(latent)
-                else:
-                    latent_q = latent
-                recon = to_dec(latent_q)
+                if mode == "encode":
+                    latent = to_enc(x)  # x is the image
+                    if self.quantizer is not None:
+                        latent_q, q_loss, q_info = self.quantizer(latent)
+                    else:
+                        latent_q = latent
+                elif mode == "decode":
+                    recon = to_dec(x)  # x is the latent
             else:
-                latent = None
-                if self.use_quantizer:
-                    recon, q_loss, q_info = self.tokenizer(x)
-                else:
-                    recon = self.tokenizer(x)
+                to_enc = lambda img: self.tokenizer.encode(img)
+                to_dec = lambda latent: self.tokenizer.decode(latent)
 
-        # basic out
-        out_d = dict(latent=latent, recon=recon)
+                if mode == "encode":
+                    latent = to_enc(x)
+                    if self.use_quantizer:
+                        recon, q_loss, q_info = self.tokenizer(x)
+                elif mode == "decode":
+                    recon = to_dec(x)
+                    if isinstance(recon, tuple):
+                        recon = recon[0]
 
-        # quantizer output dict
-        if self.use_quantizer:
-            _q_dict = dict(q_loss=q_loss, q_info=q_info, latent_q=latent)
-        else:
-            _q_dict = dict(q_loss=None, q_info=None, latent_q=None)
-        out_d.update(_q_dict)
-
-        return out_d
+        return dict(latent=latent_q, recon=recon)
 
     def get_global_step(self, mode="train"):
         # TODO: add val state
@@ -684,7 +663,9 @@ class PansharpeningTrainer:
             # ema update
             self.ema_update(mode="pansharpening")
 
-        return sr_loss, sr_log_losses
+        return dict(
+            pred_latent=pred_latent, sr_loss=sr_loss, sr_log_losses=sr_log_losses
+        )
 
     def train_step(
         self,
@@ -711,22 +692,25 @@ class PansharpeningTrainer:
         quality_track_n = self.train_cfg.track_metrics_duration
         quality_track_after = self.train_cfg.track_metrics_after
         if quality_track_n >= 0:
-            self._psnr_fn = PeakSignalNoiseRatio(data_range=1.0).to(
-                self.device, self.dtype
-            )
-            self._ssim_fn = StructuralSimilarityIndexMeasure(data_range=1.0).to(
-                self.device, self.dtype
+            self.pan_acc_reduced = AnalysisPanAcc(ratio=4, ref=True, ergas_ratio=4)
+            self.pan_acc_reduced_latent = AnalysisPanAcc(
+                ratio=4, ref=True, ergas_ratio=4
             )
 
-            def check_quality(x, recon):
-                x_q = self.to_rgb(x)
-                recon_q = self.to_rgb(recon)
-                self._psnr_fn.update(x_q, recon_q)
-                self._ssim_fn.update(x_q, recon_q)
+            def check_quality(check_fn, pred_sr, lms=None, pan=None, gt=None):
+                pred_sr = self.to_rgb(pred_sr)
+                if lms is not None:
+                    lms = self.to_rgb(lms)
+                if pan is not None:
+                    pan = self.to_rgb(pan)
+                if gt is not None:
+                    gt = self.to_rgb(gt)
+
+                check_fn(pred_sr, gt)
 
         with self.accelerator.accumulate(self.pansp_model):
             # train pansharpening model
-            self.train_pansp_step(
+            train_out = self.train_pansp_step(
                 lrms_tok_out=lrms_tok_out,
                 pan_tok_out=pan_tok_out,
                 sr_toke_out=sr_tok_out,
@@ -734,6 +718,9 @@ class PansharpeningTrainer:
                 pan_latent=pan_latent,
                 sr_latent=hrms_latent,
             )
+            pred_img = self.forward_tokenizer(train_out["pred_latent"], mode="decode")[
+                "recon"
+            ]
 
             # track reconstruction quality
             if (
@@ -741,48 +728,37 @@ class PansharpeningTrainer:
                 and self.global_step % quality_track_n != 0
                 and self.global_step >= quality_track_after
             ):
-                check_quality(x, out_d["recon"])
+                check_quality(self.pan_acc_reduced, pred_sr=pred_img, gt_sr=batch["gt"])
+                check_quality(
+                    self.pan_acc_reduced_latent,
+                    pred_sr=pred_img,
+                    gt_sr=self.forward_tokenizer(sr_tok_out, mode="decode"),
+                )
 
         self.step_train_state()
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_tok_losses = self.format_log(log_token_loss=log_token_loss)
-            _log_disc_losses = self.format_log(log_disc_loss=log_disc_loss)
+            _log_tok_losses = self.format_log(log_token_loss=train_out["sr_log_losses"])
 
             self.log_msg(
                 f"[Train State]: lr {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
-            self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", log_token_loss, self.global_step)
-            self.tenb_log_any("metric", log_disc_loss, self.global_step)
+            self.tenb_log_any("metric", train_out["sr_log_losses"], self.global_step)
 
         if (
             quality_track_n >= 0
             and self.global_step % quality_track_n == 0
             and self.global_step >= quality_track_after
         ):
-            self.log_msg(
-                f"[Train Metrics]: PSNR: {self._psnr_fn.compute():.3f}, "
-                f"SSIM: {self._ssim_fn.compute():.3f}"
-            )
+            self.log_msg(f"[Real GT Metrics]: {self.pan_acc_reduced.print_str()}")
+            self.log_msg(f"[Latent Metrics]: {self.pan_acc_reduced_latent.print_str()}")
 
-        if self.global_step % self.train_cfg.log.visualize_every == 0:
-            self.visualize_reconstruction(
-                x, out_d["recon"], add_step=True, img_name="recon/train_recon"
-            )
-
-    def format_log(
-        self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
-    ) -> str:
-        assert (
-            log_token_loss is not None or log_disc_loss is not None
-        ), "At least one of the logs should be provided"
-
+    def format_log(self, log_sr_loss: dict) -> str:
         def dict_round_to_list_str(
             d: dict, n_round: int = 3, select: list[str] | None = None
         ):
@@ -806,81 +782,7 @@ class PansharpeningTrainer:
             return strings
 
         n_round = 4
-
-        strings = []
-        if log_token_loss is not None:
-            _log_token = dict_round_to_list_str(
-                log_token_loss,
-                n_round=n_round,
-                select=[
-                    "reconstruct_loss",
-                    "ssim_loss",
-                    "g_loss",
-                ],
-            )
-            strings.extend(_log_token)
-
-            if self.vq_loss_fn.use_perceptual_loss:
-                _log_token = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round=n_round,
-                    select=["perceptual_loss", "gram_loss"],
-                )
-                strings.extend(_log_token)
-
-            if self.vq_loss_fn.use_repa:
-                _log_token = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round=n_round,
-                    select=["repa_loss"],
-                )
-                strings.extend(_log_token)
-
-            if self.use_quantizer:
-                _quant_logs_out_select = {
-                    "bsq": [
-                        "q_loss",
-                        "entropy",
-                        "avg_prob",
-                        "commit_loss",
-                    ],
-                    "lfq": [
-                        "q_loss",
-                        "commit_loss",
-                        "batch_entropy",
-                        "per_sample_entropy",
-                    ],
-                    "vq_advance": [
-                        "q_loss",
-                        "commitment",
-                        "code_diversity",
-                        "orthogonal_reg",
-                        "learn_code_opt_loss",
-                    ],  # none is all to be selected
-                    "kl": ["kl_loss"],
-                }
-
-                _log_q = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round,
-                    select=_quant_logs_out_select.get(self.quantizer_type, None),
-                )
-                strings.extend(_log_q)
-
-        else:
-            _log_disc = dict_round_to_list_str(
-                log_disc_loss,
-                n_round,
-                select=["disc_loss", "logits_real", "logits_fake", "lecam_loss"],
-            )
-            strings.extend(_log_disc)
-            if log_disc_loss.get("r1_scale", 0) != 0:
-                _disc_reg_logs = dict_round_to_list_str(
-                    log_disc_loss,
-                    n_round,
-                    ["r1_loss", "r1_scale"],
-                )
-                strings.extend(_disc_reg_logs)
+        strings = dict_round_to_list_str(log_sr_loss, select=list(log_sr_loss.keys()))
 
         return " - ".join(strings)
 
@@ -925,84 +827,74 @@ class PansharpeningTrainer:
             yield batch
 
     def val_step(self, batch: dict):
-        img = batch["img"].to(self.device, self.dtype)
-        with torch.no_grad():
-            recon = self.forward_tokenizer(img, ema=True, is_testing=True)["recon"]
+        if not self.online_tokenize:
+            lrms_tok_out = self.forward_tokenizer(batch["lms"])["latent"]
+            pan_tok_out = self.forward_tokenizer(batch["pan"])["latent"]
+            sr_tok_out = self.forward_tokenizer(batch["gt"])["latent"]
+        else:
+            lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
+            pan_latent = batch["pan_latent"].to(self.device, self.dtype)
+            hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
 
-        return recon
+        # forward the fusion network
+        pred_latent = self.pansp_model(lrms_latent, pan_latent)
+        pred_img = self.forward_tokenizer(pred_latent, mode="decode")
+
+        return {"pred_img": pred_img, "pred_latent": pred_latent}
 
     def val_loop(self):
+        self.pansp_model.eval()
+
         if not hasattr(self, "_val_loader_iter"):
             # state in the loader generator
             self._val_loader_iter = iter(self.finite_val_loader())
 
-        # set all mode
-        def _set_all_model_modes(train=False):
-            if not train:  # eval
-                if self.sep_enc_dec:
-                    self.ema_encoder.eval()
-                    self.ema_decoder.eval()
-                    self.tokenizer_encoder.eval()
-                    self.tokenizer_decoder.eval()
-                else:
-                    self.tokenizer.eval()
-
-            else:  # train
-                if self.sep_enc_dec:
-                    self.tokenizer_encoder.train()
-                    self.tokenizer_decoder.train()
-                else:
-                    self.tokenizer.train()
-
         # track psnr and ssim
-        psnr_fn = PeakSignalNoiseRatio().to(device=self.device, dtype=self.dtype)
-        ssim_fn = StructuralSimilarityIndexMeasure().to(
-            device=self.device, dtype=self.dtype
-        )
+        pan_acc_fn = AnalysisPanAcc(ratio=4, ref=True)
         loss_metrics = MeanMetric().to(device=self.device)
-
-        _set_all_model_modes(train=False)
 
         for val_iter in range(self.val_cfg.max_val_iters):
             batch = next(self._val_loader_iter)
-            recon = self.val_step(batch)
+            gt = batch["gt"].to(self.device)
+            val_out = self.val_step(batch)
 
-            recon_for_metrics = self.to_rgb(recon)
-            batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
+            pred_img_rgb = self.to_rgb(val_out["pred_img"])
+            batch_img_rgb = self.to_rgb(gt)
 
-            psnr_fn.update(batch_img_rgb, recon_for_metrics)
-            ssim_fn.update(batch_img_rgb, recon_for_metrics)
-
-            # recon loss
-            loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
+            # l1 loss
+            loss = nn.functional.l1_loss(pred_img_rgb, gt.to(pred_img_rgb))
             loss_metrics.update(loss)
 
-        psnr_val = psnr_fn.compute()
-        ssim_val = ssim_fn.compute()
+            # metrics
+            pan_acc_fn(batch_img_rgb, pred_img_rgb)
+
+        pan_acc = pan_acc_fn.acc_ave
         loss_val = loss_metrics.compute()
 
         # gather
         if self.accelerator.use_distributed:
-            psnr_val = self.accelerator.gather(psnr_val).mean().item()
-            ssim_val = self.accelerator.gather(ssim_val).mean().item()
-            loss_val = self.accelerator.gather(loss_val).mean().item()
+            pan_accs = self.accelerator.gather_for_metrics(pan_acc)
+            pan_acc_mean = {}
+            for k in pan_accs[0].keys():
+                for i in range(len(pan_accs)):
+                    pan_acc_mean[k] = pan_acc_mean.get(k, 0) + pan_accs[i][k]
+                pan_acc_mean[k] /= len(pan_accs)
 
         if self.accelerator.is_main_process:
-            self.log_msg(
-                f"[Val]: PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f} | loss: {loss_val:.4f}"
-            )
+            _metric_str = ""
+            for k, v in pan_acc_mean.items():
+                _metric_str += f"{k}: {v:.4f} - "
+            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.4f}")
             self.tenb_log_any(
                 "metric",
-                {"psnr": psnr_val, "ssim": ssim_val, "loss_val": loss_val},
+                pan_acc_mean,
                 step=self.global_step,
             )
 
             # visualize the last val batch
-            self.visualize_reconstruction(
-                batch["img"], recon, add_step=True, img_name="val_sampled/sampled"
-            )
-
-        _set_all_model_modes(train=True)
+            # self.visualize_reconstruction(
+            #     batch["img"], recon, add_step=True, img_name="val_sampled/sampled"
+            # )
 
     def save_state(self):
         self.accelerator.save_state()
@@ -1371,7 +1263,7 @@ def main(cfg):
     catcher = logger.catch if PartialState().is_main_process else nullcontext
 
     with catcher():
-        trainer = CosmosHyperspectralTokenizerTrainer(cfg)
+        trainer = PansharpeningTrainer(cfg)
         trainer.run()
 
 

@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import warnings
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -69,6 +70,8 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
 class CosmosHyperspectralTokenizerTrainer:
+    __warn_once_msg = set()
+
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.tokenizer_cfg = cfg.tokenizer
@@ -250,8 +253,8 @@ class CosmosHyperspectralTokenizerTrainer:
             #     VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
             # )
             # quantizer in the tokenizer, not handled by this trainer
-            self.use_quantizer = hasattr(
-                self.tokenizer, "quantizer"
+            self.use_quantizer = (
+                getattr(self.tokenizer, "quantizer", None) is not None
             )  # vq, bsq, fsq, kl
             self.quantizer = None
             self.log_msg(
@@ -428,7 +431,18 @@ class CosmosHyperspectralTokenizerTrainer:
         else:
             raise NotImplementedError(f"Unknown log_type {log_type}")
 
-    def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
+    def log_msg(
+        self,
+        *msgs,
+        only_rank_zero=True,
+        level="INFO",
+        sep=",",
+        warn_once=False,
+        **kwargs,
+    ):
+        if warn_once:
+            level = "warning"
+
         assert level.lower() in [
             "info",
             "warning",
@@ -440,17 +454,27 @@ class CosmosHyperspectralTokenizerTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
-        log_fn = getattr(self.logger, level.lower())
+        _log_fn = getattr(self.logger, level.lower())
+
+        def log_it(*msg, **kwargs):
+            msg_string = str_msg(*msg)
+            if warn_once:
+                if msg_string in self.__warn_once_msg:
+                    return
+                else:
+                    self.__warn_once_msg.add(msg_string)
+
+            _log_fn(msg_string, **kwargs)
 
         if only_rank_zero:
             if self.accelerator.is_main_process:
-                log_fn(str_msg(*msgs), **kwargs)
+                log_it(*msgs, **kwargs)
         else:  # not only rank zero
             with self.accelerator.main_process_first():
                 msg_string = str_msg(*msgs)
                 # prefix rank info
                 msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
-                log_fn(msg_string, **kwargs)
+                log_it(msg_string, **kwargs)
 
     def _wrap_peft_tokenizer(self):
         assert "peft" in self.cfg, "peft_cfg not in the config"
@@ -904,7 +928,7 @@ class CosmosHyperspectralTokenizerTrainer:
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
         if hasattr(_unwrap_tok, "get_repa_feature"):
             repa_feature = _unwrap_tok.get_repa_feature()
-            out_d.update(dict(repa_feature=repa_feature))
+            out_d["repa_feature"] = repa_feature
 
         return out_d
 
@@ -1167,8 +1191,8 @@ class CosmosHyperspectralTokenizerTrainer:
                     if torch.is_tensor(v):
                         if v.numel() > 1:
                             self.log_msg(
-                                f'logs has non-scalar tensor "{k}", skip it',
-                                level="WARNING",
+                                'logs has non-scalar tensor "{k}", skip it'.format(k=k),
+                                warn_once=True,
                             )
                             continue
                         v = v.item()
@@ -1713,7 +1737,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4_repa_kl"
+_key = "unicosmos_bsq_f8c36p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1724,8 +1748,12 @@ _configs_dict = {
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
+    # bsq quantized
+    "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f16c36p4",
     # sana CDAE
     "sana_f8c16p1": "cdae_f8c16p1",
+    "sana_f8c16p1_bsq": "cdae_f8c16p1_bsq",
+    "sana_f16c16p1": "cdae_f16c16p1",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
     # leanvae
     "lean_vae_f8c16p4": "lean_vae_f8c16p4",
@@ -1747,7 +1775,12 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        f"[Config]: {_configs}\n" + "-" * 50 + "\n\n" + "Start Running , Good Luck!"
+        "=" * 60
+        + "\n"
+        + f"[Config]: {_configs}\n"
+        + "-" * 40
+        + "\n\n"
+        + "Start Running , Good Luck!"
     )
 
     # Main function

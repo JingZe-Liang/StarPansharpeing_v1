@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -96,7 +97,11 @@ class DCAEConfig:
             in_channels="${..in_channels}", latent_channels="${..latent_channels}"
         )
     )
+    quant_type: str | None = None
     use_quant_conv: bool = False
+    quant_cfg: dict = field(default_factory=dict)
+    hook_for_repa: bool = False
+    repa_hidden_size: int = 768
 
     pretrained_path: Optional[str] = None
     pretrained_source: str = "dc-ae"
@@ -345,8 +350,8 @@ def build_decoder_project_out_block(
         raise ValueError(
             f"upsample factor {factor} is not supported for decoder project out"
         )
-    # return OpSequential(layers)
-    return FSDPNoWrapOpSequential(layers)
+    return OpSequential(layers)
+    # return FSDPNoWrapOpSequential(layers)
 
 
 class Encoder(nn.Module):
@@ -504,19 +509,79 @@ class Decoder(nn.Module):
         return x
 
 
+def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
+    ln_cls = nn.Linear if is_1d else partial(nn.Conv2d, kernel_size=1)
+    return nn.Sequential(
+        ln_cls(hidden_size, projector_dim),
+        nn.SiLU(),
+        ln_cls(projector_dim, projector_dim),
+        nn.SiLU(),
+        ln_cls(projector_dim, z_dim),
+    )
+
+
 class DCAE(nn.Module):
     _no_split_modules: list[str] = ["ResBlock", "EViTS5_GLU"]
+    _hook_for_repa: bool = False
+    _hook_module: str = "decoder.project_in"
+    _hook_feature: torch.Tensor = None
 
     def __init__(self, cfg: DCAEConfig):
         super().__init__()
         self.cfg = cfg
+
+        # encoder and decoder
         self.encoder = Encoder(cfg.encoder)
         self.decoder = Decoder(cfg.decoder)
 
+        # quantizer
+        self.quantizer = None
+        if cfg.quant_type == "bsq":
+            from src.stage1.discretization.collections import (
+                BinarySphericalQuantizer as BSQ,
+            )
+
+            self.quantizer = BSQ(**cfg.quant_cfg)
+            logger.info(f"[DCAE]: use BSQ quantizer")
+
+        # quantizer conv
+        if cfg.use_quant_conv:
+            quant_convs = [
+                ConvLayer(
+                    in_channels=cfg.encoder.latent_channels,
+                    out_channels=cfg.encoder.latent_channels,
+                    kernel_size=1,
+                    use_bias=True,
+                    norm=None,
+                    act_func=None,
+                )
+            ] * 2
+            self.quant_convs = nn.ModuleDict(
+                {
+                    "enc_quant_conv": quant_convs[0],
+                    "dec_quant_conv": quant_convs[1],
+                }
+            )
+
+        # hook the model
+        self._hook_for_repa = cfg.hook_for_repa
+        if self._hook_for_repa:
+
+            def hook(module, input, output):
+                self._hook_feature = output
+
+            self.get_submodule(self._hook_module).register_forward_hook(hook)
+            logger.info(
+                f"[DCAE]: register hook for dino feature alignment for {self._hook_module}"
+            )
+
+            self._repa_proj = build_mlp(cfg.repa_hidden_size, 768, 768)
+
+        # load pretrained checkpoint
         if self.cfg.pretrained_path is not None:
             self.load_model()
         else:
-            print(f"[DCAE]: Initializing weights from scratch.")
+            logger.info(f"[DCAE]: <green>Initializing weights from scratch.</>")
             self.apply(self.init_weights)
 
     def init_weights(self, m):
@@ -572,21 +637,44 @@ class DCAE(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = self.encoder(x)
-        return x
+        x = self.quant_convs["enc_quant_conv"](x) if self.cfg.use_quant_conv else x
 
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
+        if self.quantizer is not None:
+            x = nn.functional.normalize(x, dim=1)
+            x, q_loss, q_info = self.quantizer(x)
+            return x, q_loss, q_info
+        else:
+            return x
+
+    def decode(self, x: torch.Tensor | tuple) -> torch.Tensor:
+        if isinstance(x, tuple):
+            x, *q_ret = x
+
+        x = self.quant_convs["dec_quant_conv"](x) if self.cfg.use_quant_conv else x
         x = self.decoder(x)
-        return x
+
+        if self.quantizer is None:
+            return x
+        else:
+            return x, *q_ret
 
     def forward(
         self, x: torch.Tensor, global_step: int | None = None
     ) -> tuple[Any, Tensor, dict[Any, Any]]:
-        h = self.encoder(x)
-        x = self.decoder(h)
+        h = self.encode(x)
+        x = self.decode(h)
         return x
 
     def get_last_layer(self):
-        return self.decoder.project_out.op_list[-1].conv.weight
+        return self.decoder.project_out.op_list[-1].conv.conv.weight
+
+    @torch.autocast("cuda", torch.bfloat16)
+    def get_repa_feature(self):
+        # only one feature
+        if hasattr(self, "_repa_proj"):
+            return self._repa_proj(self._hook_feature)
+        else:
+            return None
 
 
 def dc_ae_f8c16(

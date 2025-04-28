@@ -2,12 +2,12 @@ import sys
 from collections import OrderedDict, namedtuple
 from functools import partial
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, Sequence
 
 import numpy as np
 import torch
 from loguru import logger as logging
-from torch import nn
+from torch import is_tensor, nn
 from torch.nn.modules.module import _IncompatibleKeys
 
 sys.path.insert(0, __file__[: __file__.find("src")])
@@ -135,26 +135,26 @@ class ContinuousImageTokenizer(nn.Module):
             self._repa_proj = build_mlp(512, 768, 768)
 
         self.quantizer_type = kwargs.pop("quantizer_type", None)
-        assert self.quantizer_type in ["kl", "discrete", None]
+        assert self.quantizer_type in ["kl", "bsq", None]
         if self.quantizer_type == "kl":
             kwargs["out_channels"] = 2 * kwargs["out_channels"]
             self.quantizer = (
                 DiagonalGaussianDistribution  # not quantizer, compatible with trainer
             )
         elif self.quantizer_type == "bsq":
-            assert (
-                kwargs["out_channels"] % 2 == 0
-            ), "quantizer out channels should be even"
+            assert latent_channels % 2 == 0, "quantizer out channels should be even"
             self.quantizer = BSQ(
-                embed_dim=kwargs["out_channels"],  # 18
-                beta=0.5,
+                embed_dim=latent_channels,  # 18 or 36
+                beta=0.0,  # commitment loss
                 gamma0=1.0,
                 gamma=1.0,
                 zeta=1.0,
                 inv_temperature=1.0,
                 cb_entropy_compute="group",
+                l2_norm=True,
                 input_format="bchw",
-                group_size=kwargs["out_channels"] // 2,
+                persample_entropy_compute="analytical",
+                group_size=1,  # group_size must affect the GPU mem (compared with LFQ), f8z36g36
             )
         if self.quantizer_type is not None:
             logging.info(f"Using quantizer: {self.quantizer.__class__.__name__}")
@@ -304,17 +304,24 @@ class ContinuousImageTokenizer(nn.Module):
         # NOTE: quantizer first? or channel drop first?
 
         if self.quantizer_type == "bsq":
-            dec, bsq_loss, loss_breakdown = self.quantizer(dec)
+            # here muse be l2-normed
+            h = nn.functional.normalize(h, dim=1)
+            dec, bsq_loss, loss_breakdown = self.quantizer(h)
 
             return dec, bsq_loss, loss_breakdown
 
-        if self.channel_drop:
+        if self.use_channel_drop:
             h = self.channel_drop(h)
 
         return h
 
     def decode(self, z):
-        # z = self.post_quant_conv(z)
+        q_loss = loss_breakdown = None
+        if self.quantizer_type == "bsq" and isinstance(z, Sequence):
+            z, q_loss, loss_breakdown = z
+        else:
+            assert torch.is_tensor(z), "z should be the (quantized) latent"
+
         dec = self.decoder(z)
 
         # kl on the decoder
@@ -323,19 +330,14 @@ class ContinuousImageTokenizer(nn.Module):
             posterior = self.quantizer((m_, logvar_))
             kl_loss = posterior.kl()
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-            sample = posterior.sample()
-
-            return (
-                sample,
-                kl_loss,
-                KLLossBreakDown(
-                    posterior=posterior,
-                    mean=m_,
-                    logvar=logvar_,
-                ),
+            dec = posterior.sample()
+            loss_breakdown = KLLossBreakDown(
+                posterior=posterior,
+                mean=m_,
+                logvar=logvar_,
             )
 
-        return dec
+        return dec, q_loss, loss_breakdown
 
     def forward(self, input):
         latent = self.encode(input)
@@ -583,11 +585,11 @@ if __name__ == "__main__":
     config = {
         "attn_resolutions": [32],
         "channels": 128,
-        "channels_mult": [2, 4, 4],
+        "channels_mult": [2, 2, 4, 4],
         "dropout": 0.0,
         "in_channels": 8,
         "spatial_compression": 8,
-        "num_res_blocks": 2,
+        "num_res_blocks": 3,
         "out_channels": 8,
         "resolution": 1024,
         "patch_size": 4,
@@ -605,11 +607,20 @@ if __name__ == "__main__":
         # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-26_17-11-51_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors",
         "hook_for_repa": True,
         "quantizer_type": None,
+        "loading_type": None,
+        "downsample_type": "ConvPixelUnshuffle",
+        "downsample_shortcut": "averaging",
+        "upsample_type": "ConvPixelShuffle",
+        "upsample_shortcut": "duplicating",
     }
-
+    torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
 
-    # x = torch.randn(1, 8, 256, 256).to("cuda", torch.bfloat16)
+    from fvcore.nn import parameter_count_table
+
+    print(parameter_count_table(tokenizer))
+
+    x = torch.randn(1, 8, 256, 256).to("cuda", torch.bfloat16)
     from torchmetrics.image import PeakSignalNoiseRatio
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
@@ -617,7 +628,7 @@ if __name__ == "__main__":
     dl = get_fast_test_hyperspectral_data(batch_size=1)
     x = next(iter(dl))["img"].cuda()
     with torch.autocast("cuda", torch.bfloat16):
-        y = tokenizer(x)
+        y, *_ = tokenizer(x)
         feat = tokenizer.get_repa_feature()
         psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
         psnr_val = psnr((x + 1) / 2, (y + 1) / 2)

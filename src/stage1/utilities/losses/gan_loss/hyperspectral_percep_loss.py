@@ -395,8 +395,9 @@ class LIPIPSHyperpspectral(nn.Module):
         """
         assert self.padding_mode in ["zero", "repeat"]
         if self.use_lpips_vgg:
-            assert (
-                self.model_type == "vgg"
+            assert self.model_type in (
+                "vgg",
+                "lpips-vgg",
             ), "LPIPS VGG is only supported for VGG model type"
 
         if isinstance(self.num_groups_to_select, float):

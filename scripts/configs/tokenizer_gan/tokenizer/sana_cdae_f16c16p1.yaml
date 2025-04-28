@@ -1,4 +1,16 @@
 _target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.DCAE
 cfg:
-  _target_: src.stage1.sana_dcae.ae_model_zoo.create_dc_ae_model_cfg
+  _target_: src.stage1.sana_dcae.models.efficientvit.dc_ae.dc_ae_f16c16
   name: dc-ae-f16c16
+  pretrained_path: null
+  extra:
+    encoder:
+      act_checkpoint: false
+      in_channels: ${dataset.channels}
+    decoder:
+      act_checkpoint: false
+      in_channels: ${dataset.channels}
+    repa_hidden_size: 512
+    use_quant_conv: false
+    quant_type: null
+    hook_for_repa: true
