@@ -336,8 +336,10 @@ class ContinuousImageTokenizer(nn.Module):
                 mean=m_,
                 logvar=logvar_,
             )
-
-        return dec, q_loss, loss_breakdown
+        if self.quantizer_type is not None:
+            return dec, q_loss, loss_breakdown
+        else:
+            return dec
 
     def forward(self, input):
         latent = self.encode(input)
@@ -351,6 +353,8 @@ class ContinuousImageTokenizer(nn.Module):
         if (enc_path == "" or dec_path == "") and uni_tokenizer_path == "":
             return
 
+        # * ==========================================================
+        # * load nvidia pretrained encoder and decoder
         if self.loading_type == "nvidia":
             assert (
                 tokenizer_cfg is not None
@@ -380,6 +384,9 @@ class ContinuousImageTokenizer(nn.Module):
                 f"decoder: {_dec_model_mody_keys}\n",
             )
             return encoder, decoder
+        # * ==========================================================
+        # * load pretrained uni-tokenizer or seperate encoder and decoder
+
         else:
             import accelerate
 
@@ -423,7 +430,7 @@ class ContinuousImageTokenizer(nn.Module):
                     self.decoder, dec_sd
                 )
 
-                # * handle the input and output conv manually
+                # * handle the input and output conv manually ===============
                 _conv_in_is_missing = (
                     "encoder.conv_in.weight" in _enc_missing
                 )  # only weight in conv_in
@@ -589,7 +596,7 @@ if __name__ == "__main__":
         "dropout": 0.0,
         "in_channels": 8,
         "spatial_compression": 8,
-        "num_res_blocks": 3,
+        "num_res_blocks": 4,
         "out_channels": 8,
         "resolution": 1024,
         "patch_size": 4,
@@ -602,16 +609,16 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        # "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
-        # "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
+        "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
+        "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
         # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-26_17-11-51_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors",
         "hook_for_repa": True,
         "quantizer_type": None,
-        "loading_type": None,
-        "downsample_type": "ConvPixelUnshuffle",
-        "downsample_shortcut": "averaging",
-        "upsample_type": "ConvPixelShuffle",
-        "upsample_shortcut": "duplicating",
+        "loading_type": "pretrained",
+        # "downsample_type": "ConvPixelUnshuffle",
+        # "downsample_shortcut": "averaging",
+        # "upsample_type": "ConvPixelShuffle",
+        # "upsample_shortcut": "duplicating",
     }
     torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)

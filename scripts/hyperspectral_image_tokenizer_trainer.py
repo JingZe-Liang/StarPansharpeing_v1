@@ -928,6 +928,7 @@ class CosmosHyperspectralTokenizerTrainer:
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
         if hasattr(_unwrap_tok, "get_repa_feature"):
             repa_feature = _unwrap_tok.get_repa_feature()
+            assert repa_feature is not None, "repa_feature is None"
             out_d["repa_feature"] = repa_feature
 
         return out_d
@@ -1745,6 +1746,7 @@ _configs_dict = {
     "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
     # unify encoder and decoder int one model
     "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
+    "unicosmos_large_f8c16p4": "unicosmos_tokenizer_large_f8c16p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
@@ -1775,7 +1777,8 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        "=" * 60
+        "\n"
+        + "=" * 60
         + "\n"
         + f"[Config]: {_configs}\n"
         + "-" * 40

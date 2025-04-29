@@ -101,7 +101,7 @@ def get_hyperspectral_dataloaders(
     num_workers: int,
     shuffle_size: int = 100,
     to_neg_1_1: bool = True,
-    hyper_transforms_lst: tuple[str] = (
+    hyper_transforms_lst: tuple[str] | None = (
         "grayscale",
         "channel_shuffle",
         "rotation",
@@ -111,6 +111,7 @@ def get_hyperspectral_dataloaders(
     ),
     transform_prob: tuple[float] | float = 0.2,
     random_apply: int | tuple[int] = 1,
+    resample: bool = True,
 ):
     dict_mapper = get_dict_tensor_mapper(to_neg_1_1)
     use_transf = (
@@ -131,7 +132,7 @@ def get_hyperspectral_dataloaders(
 
     dataset = wds.WebDataset(
         wds_paths,
-        resampled=True,  # no need `iter(dataloader)` for `next` function
+        resampled=resample,  # no need `iter(dataloader)` for `next` function
         shardshuffle=shuffle_size if is_ddp else False,
         nodesplitter=wds.shardlists.split_by_node
         if is_ddp

@@ -5,7 +5,7 @@ channels_mult: [2, 4, 4, 4]
 dropout: 0.1
 in_channels: ${dataset.channels}
 spatial_compression: 8
-num_res_blocks: 4
+num_res_blocks: 3
 out_channels: ${dataset.channels}
 resolution: 1024
 patch_size: 4

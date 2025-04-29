@@ -82,25 +82,24 @@ train:
   seperate_enc_dec: false
   resume_path:
   ema_load_path:
+  grad_check: false
   finetune_cfg:
     refine_decoder_head_n_layers: 2
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1.0e-08
+    lr: 5.0e-4
     betas: [0.8, 0.95]
+    eps: 1.0e-8
 
   disc_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1.0e-08
+    lr: 5.0e-4
     betas: [0.5, 0.95]
+    eps: 1.0e-8
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

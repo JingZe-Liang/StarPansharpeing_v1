@@ -13,6 +13,8 @@ def is_rank_zero() -> bool:
     # Assuming rank 0 is the main process
     if dist.is_initialized():
         return dist.get_rank() == 0
+    else:
+        return True
 
 
 def log_print(msg: str, level: str = "info", only_rank_zero: bool = True):

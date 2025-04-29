@@ -31,6 +31,8 @@ def load_weights_with_shape_check(
     missing_keys = []
     unexpected_keys = list(weights.keys())  # Start with all keys, remove matched ones
 
+    # faster but need paire checkpoints, suitable for the model weights are with most same keys
+    # but only few keys are different
     if load_strategy == "pair":
         param_items = list(module.named_parameters())
         weight_items = list(weights.items())
@@ -63,10 +65,15 @@ def load_weights_with_shape_check(
                 )
                 missing_keys.append(name)
                 unexpected_keys.remove(weight_name)
+
     elif load_strategy == "search":
         for name, param in module.named_parameters():
-            if name in unexpected_keys:
-                unexpected_keys.remove(name)  # This key was expected
+            if (
+                name in unexpected_keys
+            ):  # search in the whole weight keys, O(n) complexity
+                unexpected_keys.remove(
+                    name
+                )  # This key was expected, and remove from the total key set
                 if param.shape == weights[name].shape:
                     param.data.copy_(weights[name].data)
                     log_print(
@@ -90,6 +97,26 @@ def load_weights_with_shape_check(
 def load_fsdp_model(
     fsdp_plugin, accelerator, model, input_dir, model_index=0, adapter_only=False
 ):
+    """
+    Load a Fully Sharded Data Parallel (FSDP) model's state dictionary from disk.
+
+    This function supports loading models saved in different formats including full,
+    local, and sharded state dictionaries. Handles special cases for distributed
+    environments and adapter-only loading modes.
+
+    Parameters:
+        fsdp_plugin: FSDPPlugin object containing configuration parameters
+        accelerator: Accelerator instance for distributed environment management
+        model: The target model to load weights into (may be FSDP-wrapped)
+        input_dir: Directory containing the model checkpoint files
+        model_index: Index of the model to load when multiple models exist (default: 0)
+        adapter_only: Whether to load only adapter weights (LoRA/PEFT) (default: False)
+
+    Returns:
+        Any: Result from the underlying state dict loading operation, typically
+             an object containing information about missing/unexpected keys
+    """
+
     # Note: We import here to reduce import time from general modules, and isolate outside dependencies
     import torch.distributed.checkpoint as dist_cp
     from accelerate.utils.constants import (

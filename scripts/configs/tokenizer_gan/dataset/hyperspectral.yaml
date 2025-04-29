@@ -22,7 +22,6 @@ MMSeg_YREB_train:
   - data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
   - data/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
   - data/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
 
 MMSeg_YREB_val:
   - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
@@ -45,7 +44,6 @@ DCF_2019_train:
   - data/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
   - data/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
   - data/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
 
 DCF_2019_val:
   - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
