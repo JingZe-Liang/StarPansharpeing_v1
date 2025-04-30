@@ -11,17 +11,14 @@ sys.path.insert(
     "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer",
 )
 
-from src.utilities.optim import KronMars
-
 
 @hydra.main(
-    config_path="../configs/tokenizer_gan",
-    config_name="unicosmos_lora_finetune_f8c16p4",
+    config_path="../configs/pansharpening_simulation",
+    config_name="pan_wv3_simulation",
     version_base=None,
 )
 def main(args):
-    accelerator = hydra.utils.instantiate(args.accelerator)
-    print(accelerator.state.fsdp_plugin)
+    print(OmegaConf.to_yaml(args, resolve=True))
     # hydra.utils.instantiate(args.train.tokenizer_optimizer)
 
     # print(args.dataset.batch_size_val)

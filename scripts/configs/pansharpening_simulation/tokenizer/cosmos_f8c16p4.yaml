@@ -1,0 +1,27 @@
+_target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer
+attn_resolutions: [32]
+channels: 128
+channels_mult: [2, 4, 4]
+dropout: 0.0
+in_channels: ${consts.bands}
+spatial_compression: 8
+num_res_blocks: 2
+out_channels: ${consts.bands}
+resolution: 1024
+patch_size: 4
+patch_method: haar
+latent_channels: 16
+z_channels: 16
+z_factor: 1
+name: CI
+formulation: AE
+encoder: Default
+decoder: Default
+act_checkpoint: true
+norm_in_quant_conv: false
+enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
+dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+wrap_fsdp_last_layer: false
+quantizer_type: null
+loading_type: nvidia
+hook_for_repa: false

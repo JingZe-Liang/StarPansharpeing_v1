@@ -1,0 +1,68 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer ==========
+  - dataset: pansharpening_data
+  - tokenizer: cosmos_f8c16p4
+  - accelerator: base
+  # self ============
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+    
+
+dataset:
+  cfgs:
+    used: wv3
+
+train:
+  tokenizer_name: cosmos_f8c16p4
+  proj_dir: runs/stage1_cosmos/
+  finetune_strategy: finetune_all
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 400_000
+  save_every: 500
+  seperate_enc_dec: false
+  resume_path:
+  ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+
+  pansharpeing_loss: 
+    _target_: torch.nn.L1Loss()
+
+  pansharp_optim:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 4.0e-4
+    eps: 1.0e-8
+    foreach: true
+    betas: [0.8, 0.95]
+
+  pansharp_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  
+  log:
+    run_comment: cosmos_large_f8c16p4
+    log_with_time: True
+    visualize_every: 200
+    log_every: 10
+
+  debug: false
+
+val:
+  val_duration: 1000
+  max_val_iters: 20 # val only `max_val_iters` batches

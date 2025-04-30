@@ -1,0 +1,37 @@
+cfgs:
+  used: wv3
+  batch_size_train: 32
+  batch_size_val: 32
+  num_workers: 2
+
+dataset_paths:
+  wv3_train: 
+  wv3_val:
+    
+  qb_train:
+  qb_val:
+    
+  gf2_train:
+  gf2_val:
+
+train:
+  _target_: src.data.pansharp_loader.get_panshap_dataloaders
+  wds_paths: ${dataset.dataset_paths.${dataset.cfgs.used}_train}
+  batch_size: ${dataset.cfgs.batch_size_train}
+  num_workers: ${dataset.cfgs.num_workers}
+  shuffle_size: 100
+  to_neg_1_1: true
+  resample: true
+  latent_ext: safetensors
+
+val:
+  _target_: src.data.pansharp_loader.get_panshap_dataloaders
+  wds_paths: ${dataset.dataset_paths.${dataset.cfgs.used}_val}
+  batch_size: ${dataset.cfgs.batch_size_val}
+  num_workers: ${dataset.cfgs.num_workers}
+  shuffle_size: 100
+  to_neg_1_1: true
+  resample: true
+  latent_ext: safetensors
+
+

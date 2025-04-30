@@ -135,6 +135,7 @@ data/
 runs/
 .ruff_cache/
 .vscode/
+.continue/
 *.png
 *.jpg
 **.pt

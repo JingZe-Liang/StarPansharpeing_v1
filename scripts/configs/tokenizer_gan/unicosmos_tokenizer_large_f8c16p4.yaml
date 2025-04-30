@@ -79,9 +79,7 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: 
-    betas: [0.5, 0.95]
-torch.optim.AdamW
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 4.0e-4
     eps: 1.0e-8
@@ -94,6 +92,8 @@ torch.optim.AdamW
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
+    betas: [0.5, 0.95]
+
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true

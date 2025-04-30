@@ -10,7 +10,6 @@ import accelerate
 import colored_traceback
 import hydra
 import numpy as np
-import peft
 import PIL.Image as Image
 import torch
 import torch.nn as nn
@@ -21,17 +20,8 @@ from accelerate.utils import DummyOptim, DummyScheduler, FullyShardedDataParalle
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
+from tqdm import trange
 from omegaconf import DictConfig, OmegaConf
-from peft import (
-    LoraConfig,
-    PeftConfig,
-    PeftModel,
-    get_peft_model,
-    get_peft_model_state_dict,
-    inject_adapter_in_model,
-    load_peft_weights,
-    set_peft_model_state_dict,
-)
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
@@ -58,12 +48,6 @@ to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
-
-
-## TODO:
-# 1. add diffusion, rectify flow, or inductive moumentumn matching to the decoder
-# 2. add BSQ or LFQ to discretize
-# 3. add rectify flow for continuous latents; maskbit or maskgit for discrete latents
 
 
 class PansharpeningTrainer:
@@ -116,26 +100,12 @@ class PansharpeningTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = get_hyperspectral_dataloaders(
-            wds_paths=self.dataset_cfg.wds_path_train,
-            batch_size=self.dataset_cfg.batch_size_train,
-            num_workers=self.dataset_cfg.num_workers,
-            shuffle_size=self.dataset_cfg.shuffle_size,
-            hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
-            transform_prob=self.dataset_cfg.transform_prob,
-            random_apply=to_cont(self.dataset_cfg.random_apply),
-            to_neg_1_1=True,
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
+            self.dataset_cfg.train
         )
-        self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
-            wds_paths=self.dataset_cfg.wds_path_val,
-            batch_size=self.dataset_cfg.batch_size_val,
-            num_workers=self.dataset_cfg.num_workers,
-            shuffle_size=self.dataset_cfg.shuffle_size,
-            hyper_transforms_lst=None,
-            transform_prob=0.0,
-            to_neg_1_1=True,
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
+            self.dataset_cfg.val
         )
-
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
@@ -229,9 +199,7 @@ class PansharpeningTrainer:
             )
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-            # self.tokenizer: (
-            #     VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
-            # )
+
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = hasattr(
                 self.tokenizer, "quantizer"
@@ -437,7 +405,7 @@ class PansharpeningTrainer:
             or "optimizer"
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            pansp_opt = hydra.utils.instantiate(self.train_cfg.tokenizer_optimizer)(
+            pansp_opt = hydra.utils.instantiate(self.train_cfg.pansharp_optim)(
                 self._get_tokenizer_params()
             )
         else:
@@ -449,11 +417,11 @@ class PansharpeningTrainer:
             or "scheduler"
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            pansp_sched = hydra.utils.instantiate(self.train_cfg.pansp_scheduler)(
+            pansp_sched = hydra.utils.instantiate(self.train_cfg.pansharp_sched)(
                 optimizer=pansp_opt
             )
         else:
-            tokenizer_sched = DummyScheduler(pansp_opt)
+            pansp_sched = DummyScheduler(pansp_opt)
 
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
@@ -650,7 +618,10 @@ class PansharpeningTrainer:
             sr_latent = sr_toke_out["latent"].detach()
 
         with self.accelerator.autocast():
-            pred_latent = self.pansp_model(lrms_latent, pan_latent)
+            pred_latent = self.pansp_model(
+                lrms_latent,
+                pan_latent,
+            )
             sr_loss, sr_log_losses = self.pansp_loss(pred_latent, sr_latent)
 
         if self.accelerator.sync_gradients:
@@ -687,7 +658,7 @@ class PansharpeningTrainer:
             ), "tokenizer not found for online tokenize"
             lrms_tok_out = self.forward_tokenizer(batch["lms"])
             pan_tok_out = self.forward_tokenizer(batch["pan"])
-            sr_tok_out = self.forward_tokenizer(batch["gt"])
+            sr_tok_out = self.forward_tokenizer(batch["hrms"])
 
         quality_track_n = self.train_cfg.track_metrics_duration
         quality_track_after = self.train_cfg.track_metrics_after
@@ -828,8 +799,8 @@ class PansharpeningTrainer:
 
     def val_step(self, batch: dict):
         if not self.online_tokenize:
-            lrms_tok_out = self.forward_tokenizer(batch["lms"])["latent"]
-            pan_tok_out = self.forward_tokenizer(batch["pan"])["latent"]
+            lrms_latent = self.forward_tokenizer(batch["lms"])["latent"]
+            lrms_latent = self.forward_tokenizer(batch["pan"])["latent"]
             sr_tok_out = self.forward_tokenizer(batch["gt"])["latent"]
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
@@ -837,7 +808,9 @@ class PansharpeningTrainer:
             hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
-        pred_latent = self.pansp_model(lrms_latent, pan_latent)
+        pred_latent = self.pansp_model(
+            lrms_latent, pan_latent
+        )  # works in the latent space
         pred_img = self.forward_tokenizer(pred_latent, mode="decode")
 
         return {"pred_img": pred_img, "pred_latent": pred_latent}
@@ -845,25 +818,51 @@ class PansharpeningTrainer:
     def val_loop(self):
         self.pansp_model.eval()
 
-        if not hasattr(self, "_val_loader_iter"):
+        if not hasattr(self, "_val_loader_iter") and self.val_cfg.max_val_iters > 0:
+            # create a new iterator for the validation loader
             # state in the loader generator
             self._val_loader_iter = iter(self.finite_val_loader())
+            tbar = trange(
+                self.val_cfg.max_val_iters,
+                desc="validating ...",
+                leave=False,
+                disable=not self.accelerator.is_main_process,
+            )
+            self.log_msg(
+                f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
+                only_rank_zero=False,
+            )
+        elif self.val_cfg.max_val_iters <= 0:
+            tbar = self.finite_val_loader()
+            self.log_msg(
+                f"[Val]: start validating with the whole val set", only_rank_zero=False
+            )
+        else:
+            raise RuntimeError(
+                "val_cfg.max_val_iters should be > 0, or <= 0 to use the whole val set"
+            )
 
         # track psnr and ssim
         pan_acc_fn = AnalysisPanAcc(ratio=4, ref=True)
         loss_metrics = MeanMetric().to(device=self.device)
 
-        for val_iter in range(self.val_cfg.max_val_iters):
-            batch = next(self._val_loader_iter)
-            gt = batch["gt"].to(self.device)
+        for batch_or_idx in tbar:
+            if self.val_cfg.max_val_iters <= 0:
+                batch = batch_or_idx
+            else:
+                batch = next(self._val_loader_iter)
+
+            gt = batch["hrms"].to(self.device)
             val_out = self.val_step(batch)
 
             pred_img_rgb = self.to_rgb(val_out["pred_img"])
             batch_img_rgb = self.to_rgb(gt)
 
             # l1 loss
-            loss = nn.functional.l1_loss(pred_img_rgb, gt.to(pred_img_rgb))
-            loss_metrics.update(loss)
+            loss_of_latent = nn.functional.l1_loss(
+                pred_img_rgb, gt.to(pred_img_rgb)
+            )  # latent to img and then loss
+            loss_metrics.update(loss_of_latent)
 
             # metrics
             pan_acc_fn(batch_img_rgb, pred_img_rgb)
@@ -879,6 +878,8 @@ class PansharpeningTrainer:
                 for i in range(len(pan_accs)):
                     pan_acc_mean[k] = pan_acc_mean.get(k, 0) + pan_accs[i][k]
                 pan_acc_mean[k] /= len(pan_accs)
+        else:
+            pan_acc_mean = pan_acc
 
         if self.accelerator.is_main_process:
             _metric_str = ""
@@ -892,34 +893,17 @@ class PansharpeningTrainer:
             )
 
             # visualize the last val batch
-            # self.visualize_reconstruction(
-            #     batch["img"], recon, add_step=True, img_name="val_sampled/sampled"
-            # )
+            self.visualize_reconstruction(
+                pred_img_rgb,
+                batch_img_rgb,
+                add_step=True,
+                img_name="val/pansharpened",
+                no_to_rgb=True,
+            )
 
     def save_state(self):
         self.accelerator.save_state()
         self.log_msg("[State]: save states")
-
-        if self._is_peft_tuning and self.train_cfg.save_peft_ckpts:
-            # save peft model
-            assert self.tokenizer_peft_wrapped is not None, "peft model not wrapped"
-            if self._is_fsdp:
-                accelerate.utils.save_fsdp_model(
-                    output_dir=self.proj_dir / "peft_ckpt",
-                    fsdp_plugin=self.accelerator.state.fsdp_plugin,
-                    accelerator=self.accelerator,
-                    model=self.tokenizer_peft_wrapped,
-                    model_index=0,
-                    adapter_only=True,  # for possible loading, we save the whole model
-                )
-            else:
-                # is ddp
-                self.tokenizer_peft_wrapped.save_pretrained(
-                    self.proj_dir / "peft_ckpt",
-                    is_main_process=self.accelerator.is_main_process,
-                )
-
-            self.log_msg(f"[State]: save peft (only lora layers) model")
 
     def save_ema(self):
         if self.no_ema:
@@ -930,198 +914,21 @@ class PansharpeningTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.sep_enc_dec:
-            self.accelerator.save_model(
-                self.ema_encoder.ema_model,
-                ema_path / "encoder",
-            )
-            self.accelerator.save_model(
-                self.ema_decoder.ema_model,
-                ema_path / "decoder",
-            )
-        else:
-            self.accelerator.save_model(
-                self.ema_tokenizer.ema_model,
-                ema_path / "tokenizer",
-            )
-
         self.accelerator.save_model(
-            self.ema_vq_disc.ema_model,
-            ema_path / "discriminator",
+            self.ema_pansp_model.ema_model, ema_path / "pansharp_model"
         )
-
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
         accelerate.utils.save(self.train_state.state_dict(), _ema_path_state_train)
-
-        if (
-            self.use_quantizer
-            and self.quantizer is not None
-            and isinstance(self.quantizer, nn.Module)
-        ):
-            self.accelerator.save_model(
-                self.quantizer,
-                ema_path / "quantizer",
-            )
-
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
 
-    def load_from_ema_or_lora(self, ema_path: str, strict: bool = True):
-        ##! FIXME: if is loaded after FSDP2 shard, it won't work
-
+    def load_from_ema(self, ema_path: str, strict: bool = True):
         ema_path = Path(ema_path)
 
-        if self.sep_enc_dec:
-            if self._is_fsdp:
-                raise NotImplementedError(
-                    "FSDP2 loading for seperated encoder and decoder is not implemented yet"
-                )
-
-            # Load encoder to online model
-            accelerate.load_checkpoint_in_model(
-                self.tokenizer_encoder, ema_path / "encoder"
-            )
-            # Load decoder to online model
-            accelerate.utils.load_checkpoint_in_model(
-                self.tokenizer_decoder, ema_path / "decoder"
-            )
-        else:
-            assert (
-                self.accelerator.distributed_type
-                != accelerate.utils.DistributedType.DEEPSPEED
-            ), "Deepspeed does not support PEFT yet."
-
-            _assume_path = ema_path / "tokenizer"
-            if not _assume_path.exists():
-                if self._is_peft_tuning:
-                    _assume_path = ema_path / "model"
-                    # we are working on loading the peft model (only lora layers)
-                    if self._is_fsdp:
-                        if not getattr(self.train_cfg, "load_weight_shard", True):
-                            _not_shard_weights = (
-                                "model" in _assume_path.as_posix()
-                            )  # depend on if there is a full state dict
-                        else:
-                            _not_shard_weights = False  # shard loaded
-                    else:
-                        _not_shard_weights = True
-
-                    self.log_msg(
-                        "loading peft checkpoint into model", only_rank_zero=False
-                    )
-                    if not _not_shard_weights:  # is shard weights
-                        if self._is_fsdp:
-                            loaded_res = load_fsdp_model(
-                                self.accelerator.state.fsdp_plugin,
-                                self.accelerator,
-                                self.tokenizer_peft_wrapped,
-                                ema_path.as_posix(),
-                                model_index=0,
-                                adapter_only=True,
-                            )
-                        else:  # is ddp or one gpu
-                            load_res = set_peft_model_state_dict(
-                                self.tokenizer_peft_wrapped,
-                                accelerate.utils.load_state_dict(ema_path.as_posix()),
-                                adapter_name="default",
-                                ignore_mismatched_sizes=strict,
-                                low_cpu_mem_usage=False,
-                            )
-
-                    else:  # not shard weights
-                        peft_path = _assume_path / "pytorch_model_fsdp.bin"
-                        assert peft_path.exists(), "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
-
-                        # ensure there is model/pytorch_model_fsdp.bin file
-                        from copy import deepcopy
-
-                        from torch.distributed.fsdp import StateDictType
-
-                        _fsdp_plugin_cp = deepcopy(self.accelerator.state.fsdp_plugin)
-                        _fsdp_plugin_cp.state_dict_type = StateDictType.FULL_STATE_DICT
-                        loaded_res = load_fsdp_model(
-                            _fsdp_plugin_cp,
-                            self.accelerator,
-                            self.tokenizer_peft_wrapped,
-                            ema_path.as_posix(),
-                            model_index=0,
-                            adapter_only=True,  # Warn: loading from shard only-lora-layer weights does not work.
-                        )
-
-                    self.log_msg(
-                        f"[Warning]: {loaded_res} keys are incompatible with the model",
-                        level="warning",
-                    )
-
-                    # is refer
-                    # NOTE: forcing to get the base model, not sure if this is referencing the same model
-                    self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
-
-                # TODO: test it, this will not work
-                elif self._is_fsdp:
-                    _assume_path = ema_path / "pytorch_model_fsdp_0"  # model_idx=0
-                    if _assume_path.exists():
-                        assert _assume_path.exists(), "FSDP checkpoint dir not found"
-                        self.log_msg(
-                            "loading FSDP checkpoint into model", only_rank_zero=False
-                        )
-                        incomp_keys = accelerate.utils.load_fsdp_model(
-                            self.accelerator.state.fsdp_plugin,
-                            self.accelerator,
-                            self.tokenizer,
-                            ema_path.as_posix(),
-                            model_index=0,
-                        )
-                        if incomp_keys:
-                            self.log_msg(
-                                f"[Warning]: {incomp_keys} keys are incompatible with the model",
-                                level="warning",
-                            )
-                else:
-                    raise ValueError("load FSDP or LoRA weights failed")
-            else:
-                # Load combined model
-                self.log_msg(f"loading bin or safetensors checkpoint into model ...")
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.tokenizer),
-                    _assume_path,
-                    strict=strict,
-                )
-
-        # Load discriminator to online model
-        if (
-            self.train_cfg.finetune_strategy
-            not in [
-                "dcae_refine_decoder_head",
-                "dcae_adapt_latent",
-                "peft",
-            ]
-            and not self.train_cfg.only_load_tokenizer
-        ):
-            accelerate.utils.load_checkpoint_in_model(
-                self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
-                ema_path / "discriminator",
-                strict=strict,
-            )
-            # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
-
-        # Load quantizer if exists
-        if (
-            self.use_quantizer
-            and self.quantizer is not None
-            and isinstance(self.quantizer, nn.Module)
-        ):
-            if (ema_path / "quantizer").exists():
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.quantizer),
-                    ema_path / "quantizer",
-                    strict=strict,
-                )
-            else:
-                raise RuntimeError(
-                    "Quantizer not found in the checkpoint, please check your checkpoint."
-                )
+        accelerate.load_checkpoint_in_model(
+            self.pansharp_model, ema_path / "pansharp_model", strict=strict
+        )
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
@@ -1130,17 +937,6 @@ class PansharpeningTrainer:
         self.log_msg(
             f"[Load EMA]: clear the accelerator registrations and re-prepare training"
         )
-
-        # Remove this
-
-        # self.accelerator._models = []
-        # self.accelerator._optimizers = []
-        # self.accelerator._schedulers = []
-        # self.prepare_for_training()
-
-        # self.log_msg(
-        #     f"[EMA]: load ema weights to online models from {ema_path}, {strict=}"
-        # )
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1157,9 +953,11 @@ class PansharpeningTrainer:
         img_name: str = "train_original_recon",
         add_step: bool = False,
         only_vis_n: int | None = None,
+        no_to_rgb: bool = False,
     ):
-        x = self.to_rgb(x)
-        if recon is not None:
+        if not no_to_rgb:
+            x = self.to_rgb(x)
+        if recon is not None and not no_to_rgb:
             recon = self.to_rgb(recon)
 
         _only_n = only_vis_n or 16
@@ -1204,53 +1002,19 @@ class PansharpeningTrainer:
         self.log_msg("[Visualize]: save visualization at {}".format(save_path))
 
     def run(self):
-        if self.train_cfg.finetune_strategy in [
-            "dcae_refine_decoder_head",
-            "dcae_adapt_latent",
-        ]:
-            assert (
-                self.train_cfg.ema_load_path is not None
-            ), f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
-
-        # test
-
-        # save_path = self.accelerator.save_state()
-        # self.log_msg(f"save state into {save_path}", only_rank_zero=False)
-        # self.accelerator.wait_for_everyone()
-
-        # # try to load
-        # self.accelerator.load_state(input_dir=save_path)
-        # self.log_msg(f"loaded state from {save_path}", only_rank_zero=False)
-
-        # exit(0)
-
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
         elif self.train_cfg.ema_load_path is not None:
-            self.load_from_ema_or_lora(self.train_cfg.ema_load_path)
+            self.load_from_ema(self.train_cfg.ema_load_path)
 
         # train !
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4_repa_kl"
+_key = "cosmos_f8c16p4_fusionnet"
 _configs = {
-    # use pretrained cosmos world tokenizer (continous image configuration)
-    "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
-    "cosmos_sep_f8c32p1": "cosmos_post_train_f8c32p1",
-    "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
-    # unify encoder and decoder int one model
-    "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
-    "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
-    "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
-    "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
-    # sana CDAE
-    "sana_f8c16p1": "cdae_f8c16p1",
-    "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
-    # leanvae
-    "lean_vae_f8c16p4": "lean_vae_f8c16p4",
-    # lora finetuning
-    "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
+    # cosmos tokenizer, fusionet pansharpening
+    "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",
 }[_key]
 
 

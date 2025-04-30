@@ -1,0 +1,44 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - data: hyper_wds
+  - tokenizer: cosmos_f8c16p4
+  # self ============
+  - _self_
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+total_bands_of_sensors:
+  WV3: 8
+  GF2: 4
+  IKONOS: 4
+  MMSeg_YREB: 12
+  DCF_2019: 8
+
+rgb_indices:
+  WV3: [4, 2, 0]
+  GF2: [3, 2, 1]
+  IKONOS: [3, 2, 1]
+  MMSeg_YREB: [4, 3, 2]
+  DCF_2019: [4, 2, 0]
+
+processor:
+  ratio: 4
+  sensor: "WV3"
+  pan_weights: "mean" # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
+  downsample_type: "avgpool"
+  bands: ${total_bands_of_sensors.${processor.sensor}}
+
+consts:
+  sensor: ${processor.sensor}
+  rgb_indices: ${rgb_indices.${processor.sensor}}
+  total_bands_of_sensors: ${total_bands_of_sensors.${processor.sensor}}
+  ratio: ${processor.ratio}
+  bands: ${total_bands_of_sensors.${processor.sensor}}
+
+output:
+  output_wds_path: "/path/to/your/output_latents.tar"

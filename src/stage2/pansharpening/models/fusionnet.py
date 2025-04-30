@@ -90,11 +90,10 @@ class Resblock(nn.Module):
 
 
 class FusionNet(nn.Module):
-    def __init__(self, spectral_num, criterion, channel=32):
+    def __init__(self, spectral_num, channel=32):
         super(FusionNet, self).__init__()
         # ConvTranspose2d: output = (input - 1)*stride + outpading - 2*padding + kernelsize
         self.spectral_num = spectral_num
-        self.criterion = criterion
 
         self.conv1 = nn.Conv2d(
             in_channels=spectral_num,
@@ -135,34 +134,4 @@ class FusionNet(nn.Module):
         rs = self.backbone(rs)  # ResNet's backbone!
         output = self.conv3(rs)  # Bsx8x64x64
 
-        return output  # lms + outs
-
-    def train_step(self, data, *args, **kwargs):
-        log_vars = {}
-        gt, lms, ms, pan = (
-            data["gt"].cuda(),
-            data["lms"].cuda(),
-            data["ms"].cuda(),
-            data["pan"].cuda(),
-        )
-        res = self(lms, pan)
-        sr = lms + res  # output:= lms + hp_sr
-        loss = self.criterion(sr, gt, *args, **kwargs)["loss"]
-        # outputs = loss
-        # return loss
-        log_vars.update(pan2ms=loss.item(), loss=loss.item())
-        metrics = {"loss": loss, "log_vars": log_vars}
-        return metrics
-
-    def val_step(self, data, *args, **kwargs):
-        # gt, lms, ms, pan = data
-        gt, lms, ms, pan = (
-            data["gt"].cuda(),
-            data["lms"].cuda(),
-            data["ms"].cuda(),
-            data["pan"].cuda(),
-        )
-        res = self(lms, pan)
-        sr = lms + res  # output:= lms + hp_sr
-
-        return sr, gt
+        return output + x

@@ -1,8 +1,9 @@
 import io
+from pathlib import Path
 from typing import Sequence
 
 import accelerate
-import numpy as np
+import scipy.io
 import tifffile
 import torch
 import torch.distributed
@@ -20,6 +21,8 @@ from kornia.augmentation import (
 )
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from loguru import logger
+from natsort import natsorted
+from torch.utils.data import DataLoader, Dataset
 
 
 def tiff_decoder(key, x):
@@ -112,7 +115,23 @@ def get_hyperspectral_dataloaders(
     transform_prob: tuple[float] | float = 0.2,
     random_apply: int | tuple[int] = 1,
     resample: bool = True,
-):
+) -> tuple[wds.WebDataset, wds.WebLoader]:
+    """Get dataloaders for hyperspectral image data
+
+    Args:
+        wds_paths (str | list[str]): Path or list of paths to WebDataset tar files
+        batch_size (int): Number of samples per batch
+        num_workers (int): Number of worker processes for data loading
+        shuffle_size (int, optional): Buffer size for shuffling data. Defaults to 100.
+        to_neg_1_1 (bool, optional): Whether to normalize data to [-1,1] range. Defaults to True.
+        hyper_transforms_lst (tuple[str] | None, optional): List of data augmentation operations. Defaults to ("grayscale","channel_shuffle","rotation","cutmix","horizontal_flip","vertical_flip").
+        transform_prob (tuple[float] | float, optional): Probability for each augmentation operation. Defaults to 0.2.
+        random_apply (int | tuple[int], optional): Number of random augmentations to apply. Defaults to 1.
+        resample (bool, optional): Whether to allow data resampling. Defaults to True.
+
+    Returns:
+        tuple[wds.WebDataset, wds.WebLoader]: Returns a tuple containing the WebDataset object and its corresponding dataloader
+    """
     dict_mapper = get_dict_tensor_mapper(to_neg_1_1)
     use_transf = (
         hyper_transforms_lst is not None
@@ -141,7 +160,7 @@ def get_hyperspectral_dataloaders(
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
     )
-    dataset = dataset.decode(tiff_decoder)
+    dataset = dataset.decode(wds.handle_extension("tif tiff", tiff_decoder))
     dataset = dataset.map(dict_mapper)
     dataset = dataset.batched(batch_size)
     if use_transf:
@@ -189,6 +208,118 @@ def get_fast_test_hyperspectral_data(
     )
 
     return dataloader
+
+
+def ms_pan_dir_paired_loader(
+    path: str,
+    ms_dir_name: str = "ms",
+    pan_dir_name: str = "pan",
+    batch_size: int = 1,
+    num_workers: int = 1,
+    to_neg_1_1: bool = True,
+):
+    """
+    Read MS (Multispectral) and PAN (Panchromatic) images from a directory, and return a dataloader.
+
+    Args:
+        path (str): Root directory path containing MS and PAN image folders
+        ms_dir_name (str, optional): Name of the multispectral images directory. Defaults to "ms".
+        pan_dir_name (str, optional): Name of the panchromatic images directory. Defaults to "pan".
+        batch_size (int, optional): Batch size for the dataloader. Defaults to 1.
+        num_workers (int, optional): Number of workers for data loading. Defaults to 1.
+        to_neg_1_1 (bool, optional): Whether to normalize images to [-1,1] range. Defaults to True.
+
+    Returns:
+        tuple: A tuple containing:
+            - dataset (MSPANPairedDataset): The dataset object
+            - dataloader (DataLoader): PyTorch DataLoader for the dataset
+
+    The loader supports both .tiff and .mat file formats. Images are automatically paired
+    based on filename order using natural sorting. The images are normalized to [0,1] range
+    and optionally to [-1,1] range if to_neg_1_1 is True.
+    """
+
+    class MSPANPairedDataset(Dataset):
+        def __init__(
+            self,
+            path: str,
+            ms_dir_name: str = "ms",
+            pan_dir_name: str = "pan",
+            to_neg_1_1: bool = True,
+        ):
+            self.path = Path(path)
+            self.ms_dir_name = ms_dir_name
+            self.pan_dir_name = pan_dir_name
+            self.to_neg_1_1 = to_neg_1_1
+
+            self.ms_paths = natsorted(
+                list((self.path / self.ms_dir_name).glob("*.tiff"))
+                + list((self.path) / self.ms_dir_name.glob("*.mat"))
+            )
+            self.pan_paths = natsorted(
+                list((self.path / self.pan_dir_name).glob("*.tiff"))
+                + list((self.path) / self.pan_dir_name.glob("*.mat"))
+            )
+            assert (
+                len(self.ms_paths) == len(self.pan_paths)
+            ), f"MS and PAN images are not paired, MS is {len(self.ms_paths)}, PAN is {len(self.pan_paths)}"
+
+        def __len__(self):
+            return len(self.ms_paths)
+
+        @staticmethod
+        def read_file(path: Path):
+            if path.suffix == ".tiff":
+                return tifffile.imread(path)
+            elif path.suffix == ".mat":
+                # default to read the last key
+                mat_file = scipy.io.loadmat(path)
+                _key = list(mat_file.keys())[-1]
+                return mat_file[_key]
+            else:
+                raise ValueError(f"Unsupported file type: {path.suffix}")
+
+        def get_item(self, idx):
+            ms_path = self.ms_paths[idx]
+            pan_path = self.pan_paths[idx]
+
+            key = ms_path.stem
+
+            ms_img = self.read_file(ms_path)
+            pan_img = self.read_file(pan_path)
+
+            # to 0 to 1
+            ms_img = ms_img / ms_img.max()
+            pan_img = pan_img / pan_img.max()
+            if self.to_neg_1_1:
+                ms_img = ms_img * 2 - 1
+                pan_img = pan_img * 2 - 1
+
+            return key, ms_img, pan_img
+
+        def __getitem__(self, idx):
+            key, ms_img, pan_img = self.get_item(idx)
+            return {
+                "__key__": key,  # same as key in webdataset
+                "MS": ms_img,
+                "PAN": pan_img,
+            }
+
+    dataset = MSPANPairedDataset(
+        path,
+        ms_dir_name=ms_dir_name,
+        pan_dir_name=pan_dir_name,
+        to_neg_1_1=to_neg_1_1,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        drop_last=False,
+    )
+
+    return dataset, dataloader
 
 
 if __name__ == "__main__":
