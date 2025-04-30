@@ -6,10 +6,13 @@
 
 import math
 
+import einops
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.init as int
+
+from src.utilities.logging import log_print
 
 
 class loss_with_l2_regularization(nn.Module):
@@ -90,7 +93,7 @@ class Resblock(nn.Module):
 
 
 class FusionNet(nn.Module):
-    def __init__(self, spectral_num, channel=32):
+    def __init__(self, spectral_num, channel=32, is_classifier: bool = False):
         super(FusionNet, self).__init__()
         # ConvTranspose2d: output = (input - 1)*stride + outpading - 2*padding + kernelsize
         self.spectral_num = spectral_num
@@ -108,15 +111,6 @@ class FusionNet(nn.Module):
         self.res3 = Resblock()
         self.res4 = Resblock()
 
-        self.conv3 = nn.Conv2d(
-            in_channels=channel,
-            out_channels=spectral_num,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=True,
-        )
-
         self.relu = nn.ReLU(inplace=True)
 
         self.backbone = nn.Sequential(  # method 2: 4 resnet repeated blocks
@@ -126,12 +120,41 @@ class FusionNet(nn.Module):
         # init_weights(self.backbone, self.conv1, self.conv3)   # state initialization, important!
         # self.apply(init_weights)
 
+        self.is_classifier = is_classifier
+        # (bs, latent_c, h, w) --> backbone --- if_is_classifier --> classifier_head --> (bs, h, w, latent_c, 2) for bsq
+        if is_classifier:
+            self.classifier = nn.Conv2d(
+                channel, spectral_num * 2, kernel_size=3, stride=1, padding=1, bias=True
+            )
+
+            log_print("[Fusionet]: construct the classifier head")
+
+        else:
+            self.head = nn.Conv2d(
+                in_channels=channel,
+                out_channels=spectral_num,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=True,
+            )
+
+            log_print("[Fusionet]: construct the regression head")
+
     def forward(self, x, y):  # x= lms; y = pan
-        pan_concat = y.repeat(1, self.spectral_num, 1, 1)  # Bsx8x64x64
-        input = torch.sub(pan_concat, x)  # Bsx8x64x64
-        rs = self.relu(self.conv1(input))  # Bsx32x64x64
+        pan_concat = y.repeat(1, self.spectral_num, 1, 1)
+        input = torch.sub(pan_concat, x)
+        rs = self.relu(self.conv1(input))
 
         rs = self.backbone(rs)  # ResNet's backbone!
-        output = self.conv3(rs)  # Bsx8x64x64
 
-        return output + x
+        output = self.head(rs)
+
+        if self.is_classifier:  # (bs, 2, c, h, w)
+            # output = einops.rearrange(
+            #     output, "b c h w -> b (k c) h w", k=2
+            # )  # must be bsq
+            return output  # cross_entropy(output, label)
+        else:  # (bs, c, h, w)
+            # regression head, add the input
+            return output + x

@@ -4,7 +4,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 import accelerate
 import colored_traceback
@@ -622,7 +622,15 @@ class PansharpeningTrainer:
                 lrms_latent,
                 pan_latent,
             )
-            sr_loss, sr_log_losses = self.pansp_loss(pred_latent, sr_latent)
+            sr_loss = self.pansp_loss(pred_latent, sr_latent)
+
+            # loss
+            if isinstance(sr_loss, torch.Tensor):
+                sr_log_losses = {"pansharp_loss": sr_loss.detach()}
+            elif isinstance(sr_loss, Sequence):
+                sr_loss, sr_log_losses = sr_loss
+            else:
+                raise NotImplementedError(f"Unknown type {type(sr_loss)}")
 
         if self.accelerator.sync_gradients:
             # backward
