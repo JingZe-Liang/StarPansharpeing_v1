@@ -592,12 +592,12 @@ if __name__ == "__main__":
     config = {
         "attn_resolutions": [32],
         "channels": 128,
-        "channels_mult": [2, 2, 4, 4],
+        "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 8,
-        "spatial_compression": 8,
-        "num_res_blocks": 4,
-        "out_channels": 8,
+        "in_channels": 3,
+        "spatial_compression": 16,
+        "num_res_blocks": 2,
+        "out_channels": 3,
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -609,12 +609,12 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "enc_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors",
-        "dec_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors",
+        "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
+        "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
         # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-26_17-11-51_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors",
-        "hook_for_repa": True,
+        "hook_for_repa": False,
         "quantizer_type": None,
-        "loading_type": "pretrained",
+        "loading_type": "nvidia",
         # "downsample_type": "ConvPixelUnshuffle",
         # "downsample_shortcut": "averaging",
         # "upsample_type": "ConvPixelShuffle",
@@ -627,7 +627,7 @@ if __name__ == "__main__":
 
     print(parameter_count_table(tokenizer))
 
-    x = torch.randn(1, 8, 256, 256).to("cuda", torch.bfloat16)
+    x = torch.randn(1, 3, 256, 256).to("cuda", torch.bfloat16)
     from torchmetrics.image import PeakSignalNoiseRatio
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data

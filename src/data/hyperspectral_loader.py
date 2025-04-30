@@ -25,11 +25,8 @@ from natsort import natsorted
 from torch.utils.data import DataLoader, Dataset
 
 
-def tiff_decoder(key, x):
-    if key.endswith(".tiff"):
-        return tifffile.imread(io.BytesIO(x))
-    else:
-        return x
+def tiff_decoder(x):
+    return tifffile.imread(io.BytesIO(x))
 
 
 def get_dict_tensor_mapper(to_neg_1_1=True):

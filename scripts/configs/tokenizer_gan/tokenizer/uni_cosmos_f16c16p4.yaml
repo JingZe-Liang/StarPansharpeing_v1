@@ -7,8 +7,8 @@ in_channels: ${dataset.channels}
 spatial_compression: 16
 num_res_blocks: 2
 out_channels: ${dataset.channels}
-resolution: 512
-patch_size: 2
+resolution: 1024
+patch_size: 4
 patch_method: haar
 latent_channels: 16
 z_channels: 16
@@ -17,5 +17,8 @@ name: CI
 formulation: AE
 encoder: Default
 decoder: Default
-act_checkpoint: true
-norm_in_quant_conv: false
+act_checkpoint: false
+enc_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit
+dec_path: src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit
+wrap_fsdp_last_layer: false
+force_not_attn: true

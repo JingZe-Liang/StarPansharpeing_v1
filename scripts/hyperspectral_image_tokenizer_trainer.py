@@ -1748,7 +1748,7 @@ _configs_dict = {
     "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
     "unicosmos_large_f8c16p4": "unicosmos_tokenizer_large_f8c16p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
-    "unicosmos_f16c16p2": "unicosmos_tokenizer_f16c16p2",
+    "unicosmos_f16c16p4": "unicosmos_tokenizer_f16c16p4",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # bsq quantized
     "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f16c36p4",
