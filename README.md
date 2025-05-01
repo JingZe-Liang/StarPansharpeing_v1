@@ -38,6 +38,8 @@ We are cooking the codes, stay tuned.
 15. use bsq-vit autoencoder
 16. ~~test vgg-lpips loss in the hyperspectral dataset (if there is a linlayer in the checkpoint?)~~ (not working)
 17. cooking the cosmos_f16 tokenizer (continuous latents)
+18. add shortcut model code
+19. may use the Sana diffusion model as the diffusion generator
 
 
 
@@ -52,6 +54,11 @@ We are cooking the codes, stay tuned.
 3. [Conv-LoRA](https://github.com/autogluon/autogluon/blob/081e3c6e4134beb84637863624d8b68a5c15bac1/multimodal/src/autogluon/multimodal/models/adaptation_layers.py#L703) (MoE) adaptors may suit Cosmos tokenizer.
 
 ## Logs
+
+2025/05/01
+
+seems that channel drop does not work well (slow convergence and low quality).
+
 
 2025/04/30
 
@@ -84,5 +91,4 @@ We are cooking the codes, stay tuned.
 
 - Zihan Cao, UESTC (Core contributor)
 - Jieyi Zhu, UESTC (Participant)
-- Yu Zhong, UESTC (Participant)
 - Liang-Jian Deng, UESTC (Supervisor)

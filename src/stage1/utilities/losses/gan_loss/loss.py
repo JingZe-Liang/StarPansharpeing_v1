@@ -13,6 +13,7 @@ from loguru import logger
 from pytorch_wavelets import DWTForward
 
 from ..model import (
+    DinoDiscV2,
     NLayerDiscriminator,
     NLayerDiscriminatorv2,
     StyleGAN3DDiscriminator,

@@ -35,17 +35,18 @@ tokenizer:
   enc_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors
   dec_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors
   uni_tokenizer_path: ""
+  loading_type: pretrained
 
 vq_loss:
-  disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
   use_actnorm: false
-  disc_norm_type: gn # gn or bn? works with patchgan_v2
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.2
+  disc_weight: 0.5
 
 ema:
   beta: 0.995
@@ -98,6 +99,7 @@ train:
     lr: 3.0e-4
     eps: 1.0e-8
     weight_decay: 1.0e-6
+    betas: [0.9, 0.999]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -105,6 +107,7 @@ train:
     lr: 3.0e-4
     eps: 1.0e-8
     weight_decay: 1.0e-6
+    betas: [0.5, 0.999]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

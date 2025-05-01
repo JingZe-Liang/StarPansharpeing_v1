@@ -40,28 +40,26 @@ vq_loss:
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
-  disc_loss: non_saturate
+  disc_loss: hinge
   ssim_weight: 0.2
   disc_weight: 0.5
   reconstruction_loss_type: dwt
-
 
 tokenizer:
   hook_for_repa: true
   hook_module: decoder.decoder.mid.block_2
   act_checkpoint: false
   force_not_attn: true
-  # enc_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/encoder/model.safetensors
-  # dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
-  uni_tokenizer_path: /Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-27_23-52-47_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors
+  enc_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/encoder/model.safetensors
+  dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
   loading_type: pretrained
-  use_channel_drop: true
-  channel_drop_config:
-    learnable: false
-    drop_type: uniform_4
-    max_channels: 16
-    img_size: 32
-    drop_prob: 0.3
+  use_channel_drop: false
+  # channel_drop_config:
+  #   learnable: false
+  #   drop_type: uniform_4
+  #   max_channels: 16
+  #   img_size: 32
+  #   drop_prob: 1.0
 
 ema:
   beta: 0.995
@@ -80,7 +78,7 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: #/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-30_23-54-53_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  ema_load_path:
   only_load_tokenizer: true
 
   finetune_cfg:
@@ -93,6 +91,7 @@ train:
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
+    betas: [0.8, 0.999]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -100,6 +99,7 @@ train:
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
+    betas: [0.5, 0.999]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -120,7 +120,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_pretrained_f8c16p4_percep_remote_clip_RN50
+    run_comment: cosmos_pretrained_f8c16p4_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10
