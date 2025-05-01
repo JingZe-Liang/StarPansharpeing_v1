@@ -36,4 +36,3 @@ python scripts/convert_seed_for_submission.py \
     --annotation-file ./playground/data/eval/seed_bench/SEED-Bench.json \
     --result-file $output_file \
     --result-upload-file ./playground/data/eval/seed_bench/answers_upload/llava-v1.5-13b.jsonl
-

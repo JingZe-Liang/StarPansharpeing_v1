@@ -22,7 +22,6 @@ from termcolor import colored
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     T5EncoderModel,
     T5Tokenizer,
 )

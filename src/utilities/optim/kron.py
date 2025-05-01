@@ -1,7 +1,7 @@
 import numpy as np
 import string
 import torch
-from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor
 from .utils import to_local, to_dist
 
 # adapted from https://github.com/ClashLuke/kron_torch/tree/main

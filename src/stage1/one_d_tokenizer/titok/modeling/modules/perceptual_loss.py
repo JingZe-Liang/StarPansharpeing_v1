@@ -16,7 +16,6 @@ limitations under the License.
 """
 
 import torch
-import torch.nn.functional as F
 
 from torchvision import models
 from .lpips import LPIPS

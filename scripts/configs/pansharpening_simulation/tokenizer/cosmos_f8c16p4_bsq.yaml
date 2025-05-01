@@ -25,4 +25,3 @@ wrap_fsdp_last_layer: false
 hook_for_repa: false
 quantizer_type: bsq
 hook_module: decoder.decoder.mid.block_2
-

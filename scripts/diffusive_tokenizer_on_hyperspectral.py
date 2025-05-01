@@ -126,9 +126,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
             self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(
                 cfg.vq_loss
             )
-            assert hasattr(
-                self.tokenizer, "get_last_layer"
-            ), "Tokenizer should have get_last_layer method when using adversarial loss"
+            assert hasattr(self.tokenizer, "get_last_layer"), (
+                "Tokenizer should have get_last_layer method when using adversarial loss"
+            )
 
         # lpips loss
         if self.use_lpips:
@@ -768,9 +768,9 @@ class DiffusiveHyperspectralTokenizerTrainer:
     def format_log(
         self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
     ) -> str:
-        assert (
-            log_token_loss is not None or log_disc_loss is not None
-        ), "At least one of the logs should be provided"
+        assert log_token_loss is not None or log_disc_loss is not None, (
+            "At least one of the logs should be provided"
+        )
 
         def dict_round_to_list_str(
             d: dict, n_round: int = 3, select: list[str] | None = None

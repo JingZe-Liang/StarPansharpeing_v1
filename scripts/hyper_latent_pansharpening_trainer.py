@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 from contextlib import nullcontext
@@ -16,7 +15,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler, FullyShardedDataParallelPlugin
+from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
@@ -30,18 +29,10 @@ from torchmetrics.aggregation import MeanMetric
 colored_traceback.add_hook()
 
 sys.path.insert(0, __file__[: __file__.find("scripts")])
-from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
-from src.stage1.cosmos.cosmos_tokenizer import (
-    ContinuousImageTokenizer as CosmosTokenizer,
-)
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
-from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
-from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
-from src.utilities.network_utils import load_fsdp_model, remap_peft_model_state_dict
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -760,7 +751,6 @@ class PansharpeningTrainer:
                     strings.append(f"{k}: {v}")
             return strings
 
-        n_round = 4
         strings = dict_round_to_list_str(log_sr_loss, select=list(log_sr_loss.keys()))
 
         return " - ".join(strings)
@@ -809,11 +799,11 @@ class PansharpeningTrainer:
         if not self.online_tokenize:
             lrms_latent = self.forward_tokenizer(batch["lms"])["latent"]
             lrms_latent = self.forward_tokenizer(batch["pan"])["latent"]
-            sr_tok_out = self.forward_tokenizer(batch["gt"])["latent"]
+            self.forward_tokenizer(batch["gt"])["latent"]
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
-            hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
+            batch["hrms_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
         pred_latent = self.pansp_model(

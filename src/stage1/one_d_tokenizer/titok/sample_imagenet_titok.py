@@ -24,7 +24,6 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 import os
-import math
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
@@ -101,9 +100,9 @@ def main():
         print(f"Total number of images that will be sampled: {num_fid_samples}")
 
     samples_needed_this_gpu = int(num_fid_samples // dist.get_world_size())
-    assert (
-        samples_needed_this_gpu % n == 0
-    ), "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    assert samples_needed_this_gpu % n == 0, (
+        "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    )
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar

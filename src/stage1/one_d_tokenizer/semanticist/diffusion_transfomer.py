@@ -10,13 +10,12 @@
 # --------------------------------------------------------
 
 import math
-from turtle import forward
 
 import numpy as np
 import torch
 import torch.nn as nn
 from loguru import logger
-from timm.models.vision_transformer import Mlp, PatchEmbed
+from timm.models.vision_transformer import PatchEmbed
 from torch.utils import checkpoint
 
 from .fused_attention import Attention

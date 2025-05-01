@@ -282,7 +282,7 @@ class SanaUMS(Sana):
         t: (N,) tensor of diffusion timesteps
         y: (N, 1, 120, C) tensor of class labels
         """
-        bs = x.shape[0]
+        x.shape[0]
         x = x.to(self.dtype)
         timestep = timestep.to(self.dtype)
         y = y.to(self.dtype)

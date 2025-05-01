@@ -51,7 +51,7 @@ dataset:
 
 
 optimizer:
-    name: adamw 
+    name: adamw
     params:
         learning_rate: 1e-4
         discriminator_learning_rate: 1e-4

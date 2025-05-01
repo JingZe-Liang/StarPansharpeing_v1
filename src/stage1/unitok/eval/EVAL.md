@@ -50,7 +50,7 @@ in LLaVA to evaluate the model on various VQA benchmarks.
 cd eval/generation
 ```
 
-Download [Imagenet](https://image-net.org/download.php) for class-conditional image generation training. 
+Download [Imagenet](https://image-net.org/download.php) for class-conditional image generation training.
 Then extract the VQ codes:
 ```
 bash scripts/autoregressive/extract_codes_c2i.sh \
@@ -64,11 +64,11 @@ bash scripts/autoregressive/extract_codes_c2i.sh \
 
 Before running, please configure  `nnodes, nproc_per_node, node_rank, master_addr, master_port` in `train_c2i.sh`.
 ```bash
-bash scripts/autoregressive/train_c2i.sh 
+bash scripts/autoregressive/train_c2i.sh
     --cloud-save-path /path/to/cloud_disk \
     --code-path /path/to/imagenet_code_c2i_flip_ten_crop \
     --num-output-layer 4 --gpt-model GPT-XL \
-    --num-codebooks 8 --vocab-size 32768 --image-size 256 
+    --num-codebooks 8 --vocab-size 32768 --image-size 256
 ```
 **Note:** To fulfill the potential of UniTok, we suggest using GPT-L or larger generators for LlamaGen Training.
 

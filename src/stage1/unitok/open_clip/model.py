@@ -12,7 +12,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 
 from .hf_model import HFTextEncoder
 from .modified_resnet import ModifiedResNet
@@ -26,9 +25,6 @@ from .transformer import (
 )
 from .utils import to_2tuple
 from .timm_model import TimmModel
-
-
-import time
 
 
 @dataclass
@@ -597,7 +593,6 @@ def resize_pos_embed_timm(
 
     pos_emb_img = old_pos_embed
     old_grid_size = to_2tuple(int(math.sqrt(len(pos_emb_img[0]))))
-    old_pos_emb_img = pos_emb_img
     logging.info(
         "Resizing position embedding grid-size from %s to %s", old_grid_size, grid_size
     )  # Resizing position embedding grid-size from (1, 1) to (21, 21)
@@ -660,7 +655,6 @@ def resize_pos_embed(
     else:
         pos_emb_tok, pos_emb_img = None, old_pos_embed
     old_grid_size = to_2tuple(int(math.sqrt(len(pos_emb_img))))
-    old_pos_emb_img = pos_emb_img
     logging.info(
         "Resizing position embedding grid-size from %s to %s", old_grid_size, grid_size
     )  # Resizing position embedding grid-size from (1, 1) to (21, 21)

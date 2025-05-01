@@ -56,7 +56,7 @@ dataset:
         res_ratio_filtering: True
 
 optimizer:
-    name: adamw 
+    name: adamw
     params:
         learning_rate: 1e-4
         beta1: 0.9

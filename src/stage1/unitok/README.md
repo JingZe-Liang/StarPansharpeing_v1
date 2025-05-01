@@ -16,14 +16,14 @@
 [//]: # (<a href='https://huggingface.co/datasets/depth-anything/DA-2K'><img src='https://img.shields.io/badge/Benchmark-DA--2K-yellow' alt='Benchmark'></a>)
 </div>
 
-This repo implements UniTok, a unified visual tokenizer well-suited for both generation and understanding tasks. 
-It is compatiable with autoregressive generative models (e.g. LlamaGen), 
+This repo implements UniTok, a unified visual tokenizer well-suited for both generation and understanding tasks.
+It is compatiable with autoregressive generative models (e.g. LlamaGen),
 multimodal understanding models (e.g. LLaVA), and unified MLLMs (e.g. Chameleon and Liquid).
 
 ![teaser](assets/teaser.png)
 
 Built upon UniTok, we construct an MLLM capable of both multimodal generation and understanding,
-which sets a new state-of-the-art among unified autoregressive MLLMs. 
+which sets a new state-of-the-art among unified autoregressive MLLMs.
 The weights of our MLLM will be released soon.
 
 ![teaser](assets/samples.png)
@@ -291,7 +291,7 @@ python inference.py \
 
 ### Training
 
-- We train UniTok on [DataComp-1B](https://github.com/mlfoundations/datacomp). 
+- We train UniTok on [DataComp-1B](https://github.com/mlfoundations/datacomp).
 Please follow the [instructions](https://github.com/mlfoundations/datacomp?tab=readme-ov-file#downloading-datacomp-1b) to download and prepare the data.
 
 - Download the [models](https://huggingface.co/FoundationVision/unitok_external) used for loss calculation and put them under `./external`.
@@ -314,14 +314,14 @@ bash launch.sh \
 
 ### Evaluation
 
-We benchmark UniTok in terms of both understanding performance using the [LLaVA](https://github.com/haotian-liu/LLaVA) framework 
+We benchmark UniTok in terms of both understanding performance using the [LLaVA](https://github.com/haotian-liu/LLaVA) framework
 and generation performance using the [LLamaGen](https://github.com/FoundationVision/LlamaGen) framework.
 Please refer to [EVAL.md](eval/EVAL.md) for more details.
 
 
 
 ## Acknowledgement
-UniTok is built upon the awesome works 
+UniTok is built upon the awesome works
 [VAR](https://github.com/FoundationVision/VAR),
 [DataComp](https://github.com/mlfoundations/datacomp),
 [LLaVA](https://github.com/haotian-liu/LLaVA/),

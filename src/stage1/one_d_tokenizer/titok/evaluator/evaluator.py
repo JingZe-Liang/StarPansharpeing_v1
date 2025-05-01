@@ -17,7 +17,7 @@ limitations under the License.
 
 import warnings
 
-from typing import Sequence, Optional, Mapping, Text
+from typing import Optional, Mapping, Text
 import numpy as np
 from scipy import linalg
 import torch
@@ -141,7 +141,7 @@ class VQGANEvaluator:
         """
 
         batch_size = real_images.shape[0]
-        dim = tuple(range(1, real_images.ndim))
+        tuple(range(1, real_images.ndim))
         self._num_examples += batch_size
         self._num_updates += 1
 

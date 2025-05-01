@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from tokenizer.vqgan.layer import Decoder, Encoder
 from tokenizer.vqgan.quantize import VectorQuantizer2 as VectorQuantizer

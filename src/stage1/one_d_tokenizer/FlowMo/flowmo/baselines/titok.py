@@ -427,9 +427,9 @@ class TiTokDecoder(nn.Module):
 
     def forward(self, z_quantized):
         N, C, H, W = z_quantized.shape
-        assert (
-            H == 1 and W == self.num_latent_tokens
-        ), f"{H}, {W}, {self.num_latent_tokens}"
+        assert H == 1 and W == self.num_latent_tokens, (
+            f"{H}, {W}, {self.num_latent_tokens}"
+        )
         x = z_quantized.reshape(N, C * H, W).permute(0, 2, 1)  # NLD
         x = self.decoder_embed(x)
 
@@ -496,7 +496,6 @@ class VectorQuantizer(torch.nn.Module):
         z = z.float()
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = rearrange(z, "b h w c -> (b h w) c")
-        unnormed_z_flattened = z_flattened
 
         if self.use_l2_norm:
             z_flattened = torch.nn.functional.normalize(z_flattened, dim=-1)

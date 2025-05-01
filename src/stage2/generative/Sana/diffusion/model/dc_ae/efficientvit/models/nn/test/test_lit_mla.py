@@ -1,6 +1,5 @@
 import sys
 
-import torch
 
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import (

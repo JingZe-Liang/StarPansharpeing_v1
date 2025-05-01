@@ -23,9 +23,3 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python leanvae_train.py \
     --h_dim 384 \
     --sep_num_layer 2 \
     --fusion_num_layer 4 \
-
-
-
-
-
-

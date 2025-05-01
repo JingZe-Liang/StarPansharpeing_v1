@@ -1,14 +1,12 @@
 import sys
 from collections import OrderedDict, namedtuple
 from functools import partial
-from types import SimpleNamespace
 from typing import Literal, Sequence
 
 import numpy as np
 import torch
 from loguru import logger as logging
-from torch import is_tensor, nn
-from torch.nn.modules.module import _IncompatibleKeys
+from torch import nn
 
 sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
@@ -188,9 +186,9 @@ class ContinuousImageTokenizer(nn.Module):
         if loading_type == "nvidia":
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
             # pretrained model from NVIDIA cosmos tokenizer
-            assert not kwargs.get(
-                "norm_in_quant_conv", False
-            ), "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
+            assert not kwargs.get("norm_in_quant_conv", False), (
+                "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
+            )
 
             logging.debug(
                 f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}"
@@ -231,9 +229,9 @@ class ContinuousImageTokenizer(nn.Module):
             # Load weights
             if loading_type is not None:
                 if kwargs.get("norm_in_quant_conv", False):
-                    assert (
-                        enc_path == "" and dec_path == ""
-                    ), "norm_in_quant_conv is not supported for pretrained settings, trian it from scratch"
+                    assert enc_path == "" and dec_path == "", (
+                        "norm_in_quant_conv is not supported for pretrained settings, trian it from scratch"
+                    )
                 self.load_pretrained(
                     enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
                 )
@@ -242,7 +240,7 @@ class ContinuousImageTokenizer(nn.Module):
         self.use_channel_drop = kwargs.get("use_channel_drop", False)
         if self.use_channel_drop:
             self.channel_drop = NestChannelDrop(**kwargs["channel_drop_config"])
-            logging.info(f'use channel drop: {kwargs['channel_drop_config']}')
+            logging.info(f"use channel drop: {kwargs['channel_drop_config']}")
 
         # register repa hook
         if self._hook_for_repa:
@@ -356,9 +354,9 @@ class ContinuousImageTokenizer(nn.Module):
         # * ==========================================================
         # * load nvidia pretrained encoder and decoder
         if self.loading_type == "nvidia":
-            assert (
-                tokenizer_cfg is not None
-            ), "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
+            assert tokenizer_cfg is not None, (
+                "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
+            )
             logging.info(
                 f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model"
             )

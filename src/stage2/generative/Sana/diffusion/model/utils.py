@@ -14,7 +14,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 import os
 import random
 import re
@@ -28,7 +27,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
-from torchvision import transforms as T
 
 
 def _ntuple(n):

@@ -1,7 +1,6 @@
 import torch
 import random
 import numbers
-from torchvision.transforms import RandomCrop, RandomResizedCrop
 
 
 def _is_tensor_video_clip(clip):
@@ -134,10 +133,8 @@ def random_shift_crop(clip):
     h, w = clip.size(-2), clip.size(-1)
 
     if h <= w:
-        long_edge = w
         short_edge = h
     else:
-        long_edge = h
         short_edge = w
 
     th, tw = short_edge, short_edge

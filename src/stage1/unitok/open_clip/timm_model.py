@@ -7,7 +7,6 @@ import logging
 from collections import OrderedDict
 
 import torch
-import sys
 import torch.nn as nn
 import timm
 
@@ -27,10 +26,7 @@ try:
         from timm.layers import AttentionPool2d as AbsAttentionPool2d
 except ImportError:
     timm = None
-from timm.models import create_model
 from .utils import freeze_batch_norm_2d
-
-import models
 
 
 class TimmModel(nn.Module):
@@ -156,7 +152,7 @@ class TimmModel(nn.Module):
     def set_grad_checkpointing(self, enable=True):
         try:
             self.trunk.set_grad_checkpointing(enable)
-        except Exception as e:
+        except Exception:
             logging.warning(
                 "grad checkpointing not supported for this timm image tower, continuing without..."
             )

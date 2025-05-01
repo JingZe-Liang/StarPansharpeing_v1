@@ -7,8 +7,6 @@ code from https://github.com/yangluo7/CAME/blob/master/came_pytorch/CAME.py
 
 """
 
-import math
-
 import torch
 import torch.optim
 

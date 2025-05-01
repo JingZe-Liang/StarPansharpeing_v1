@@ -8,9 +8,8 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from torchvision import transforms
 
 import os
@@ -44,9 +43,9 @@ def main(args):
 
     # Setup DDP:
     init_distributed_mode(args)
-    assert (
-        args.global_batch_size % dist.get_world_size() == 0
-    ), f"Batch size must be divisible by world size."
+    assert args.global_batch_size % dist.get_world_size() == 0, (
+        f"Batch size must be divisible by world size."
+    )
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
     seed = args.global_seed * dist.get_world_size() + rank

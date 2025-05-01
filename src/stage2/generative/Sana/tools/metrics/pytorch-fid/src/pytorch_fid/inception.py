@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import torchvision
 
 try:
-    from torchvision.models.utils import load_state_dict_from_url
+    pass
 except ImportError:
-    from torch.utils.model_zoo import load_url as load_state_dict_from_url
+    pass
 
 # Inception weights ported to Pytorch from
 # http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz

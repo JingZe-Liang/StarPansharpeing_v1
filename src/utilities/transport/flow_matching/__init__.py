@@ -1,7 +1,6 @@
 from src.utilities.transport.flow_matching.transport import (
     ModelType,
     PathType,
-    Sampler,
     Transport,
     WeightType,
 )

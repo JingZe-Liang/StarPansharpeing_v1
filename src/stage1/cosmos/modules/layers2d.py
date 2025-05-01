@@ -35,7 +35,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from chex import block_until_chexify_assertions_complete
 from loguru import logger as logging
 from torch.utils.checkpoint import checkpoint
 
@@ -596,9 +595,9 @@ class Encoder(nn.Module):
         self.num_downsamples = int(math.log2(spatial_compression)) - int(
             math.log2(patch_size)
         )
-        assert (
-            self.num_downsamples <= self.num_resolutions
-        ), f"we can only downsample {self.num_resolutions} times at most"
+        assert self.num_downsamples <= self.num_resolutions, (
+            f"we can only downsample {self.num_resolutions} times at most"
+        )
 
         # downsampling
         self.conv_in = torch.nn.Conv2d(
@@ -736,9 +735,9 @@ class Decoder(nn.Module):
         self.num_upsamples = int(math.log2(spatial_compression)) - int(
             math.log2(patch_size)
         )
-        assert (
-            self.num_upsamples <= self.num_resolutions
-        ), f"we can only upsample {self.num_resolutions} times at most"
+        assert self.num_upsamples <= self.num_resolutions, (
+            f"we can only upsample {self.num_resolutions} times at most"
+        )
 
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
@@ -1015,7 +1014,7 @@ class DecoderDiff(nn.Module):
                 decoder_patch_size,
                 patch_method,
             )
-            out_ch = out_channels * decoder_patch_size * decoder_patch_size
+            out_channels * decoder_patch_size * decoder_patch_size
             self.num_upsamples = 0
         elif self.unpatch_type == "upsample":
             logging.warning(
@@ -1027,13 +1026,13 @@ class DecoderDiff(nn.Module):
                 unpatcher_sz,
                 patch_method,
             )
-            out_ch = out_channels * unpatcher_sz * unpatcher_sz
+            out_channels * unpatcher_sz * unpatcher_sz
 
             # calculate the number of upsample operations
             self.num_upsamples = int(math.log2(decoder_patch_size))
-            assert (
-                self.num_upsamples <= self.num_resolutions
-            ), f"we can only upsample {self.num_resolutions} times at most"
+            assert self.num_upsamples <= self.num_resolutions, (
+                f"we can only upsample {self.num_resolutions} times at most"
+            )
         else:
             raise NotImplementedError("unpatcher_type must be 'upsample' or 'unpatch'")
 

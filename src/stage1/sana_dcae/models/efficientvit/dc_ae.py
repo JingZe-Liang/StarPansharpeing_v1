@@ -16,7 +16,7 @@
 
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -33,7 +33,6 @@ from ...models.nn.ops import (
     ConvPixelShuffleUpSampleLayer,
     ConvPixelUnshuffleDownSampleLayer,
     EfficientViTBlock,
-    FSDPNoWrapOpSequential,
     IdentityLayer,
     InterpolateConvUpSampleLayer,
     OpSequential,

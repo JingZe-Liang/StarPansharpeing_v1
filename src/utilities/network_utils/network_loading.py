@@ -1,6 +1,5 @@
 import os
 from contextlib import nullcontext
-from copy import deepcopy
 from typing import Literal
 
 import torch
@@ -121,9 +120,6 @@ def load_fsdp_model(
     import torch.distributed.checkpoint as dist_cp
     from accelerate.utils.constants import (
         FSDP_MODEL_NAME,
-        OPTIMIZER_NAME,
-        SAFE_WEIGHTS_NAME,
-        WEIGHTS_NAME,
     )
     from accelerate.utils.fsdp_utils import _get_model_state_dict, _set_model_state_dict
     from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
@@ -246,7 +242,7 @@ def remap_peft_model_state_dict(
     """
     import warnings
 
-    from peft import PeftModel, PeftType
+    from peft import PeftType
     from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
     from peft.utils.other import AuxiliaryTrainingWrapper
     from peft.utils.save_and_load import (

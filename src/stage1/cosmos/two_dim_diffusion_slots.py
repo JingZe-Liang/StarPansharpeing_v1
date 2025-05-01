@@ -120,9 +120,9 @@ class TwoDimDiffusionSlots(nn.Module):
 
         # double channels
         if self.diffusion_type in ("diffusion", "fm"):
-            assert (
-                quantizer_type != "kl"
-            ), "when using kl quantizer, diffusion_type should can not be any diffusion"
+            assert quantizer_type != "kl", (
+                "when using kl quantizer, diffusion_type should can not be any diffusion"
+            )
         if self.diffusion_type == "fm":
             double_out_channel = False
             if self.learn_sigma:
@@ -352,7 +352,7 @@ class TwoDimDiffusionSlots(nn.Module):
         get_pred_x_clean: bool = False,
     ):
         losses = {}
-        batch_size = x.shape[0]
+        x.shape[0]
         device = x.device
 
         # if (

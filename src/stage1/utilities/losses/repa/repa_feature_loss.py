@@ -6,13 +6,11 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from accelerate.state import AcceleratorState, PartialState
-from einops import rearrange
+from accelerate.state import AcceleratorState
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
-from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import DTensor, Shard
 
 warnings.filterwarnings(
     "once",
@@ -109,17 +107,17 @@ class REPALoss(torch.nn.Module):
         self.rgb_channels = rgb_channels
         self.img_resize = img_resize
         if isinstance(img_resize, (tuple, list)):
-            assert (
-                img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0
-            ), "img_size[0] must be divisible by patch size"
+            assert img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0, (
+                "img_size[0] must be divisible by patch size"
+            )
         self.dino_fixed_bs = dino_fixed_bs
         if self.rgb_channels is not None:
             if isinstance(self.rgb_channels, (list, tuple)):
                 assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
             elif isinstance(self.rgb_channels, str):
-                assert self.rgb_channels in (
-                    "random",
-                ), "rgb_channels must be randomly selected"
+                assert self.rgb_channels in ("random",), (
+                    "rgb_channels must be randomly selected"
+                )
             else:
                 raise TypeError("rgb_channels must be list or tuple or str")
 
@@ -175,9 +173,9 @@ class REPALoss(torch.nn.Module):
             img = (img + 1) / 2
 
         # norm, image dim must be 4d
-        assert (
-            img.ndim == 4 and img.shape[1] == 3
-        ), "img dim must be 4d and have 3 channels"
+        assert img.ndim == 4 and img.shape[1] == 3, (
+            "img dim must be 4d and have 3 channels"
+        )
         img = (img - self.dino_mean[None, :, None, None]) / self.dino_std[
             None, :, None, None
         ]
@@ -202,12 +200,12 @@ class REPALoss(torch.nn.Module):
                 _lft_idx = int(_lft_idx)
                 _rgt_idx = int(_rgt_idx)
 
-                assert (
-                    _lft_idx < _rgt_idx
-                ), "rgb_channels must be in the range of [lft, rgt)"
-                assert (
-                    _rgt_idx < img.shape[1]
-                ), "rgb_channels must be in the range of [lft, rgt)"
+                assert _lft_idx < _rgt_idx, (
+                    "rgb_channels must be in the range of [lft, rgt)"
+                )
+                assert _rgt_idx < img.shape[1], (
+                    "rgb_channels must be in the range of [lft, rgt)"
+                )
                 _rgb_chan_select = torch.randperm(_rgt_idx - _lft_idx)[:3] + _lft_idx
                 rgb_channels = torch.tensor(
                     [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
@@ -290,9 +288,9 @@ class REPALoss(torch.nn.Module):
         img_feat = norm_feature(img_feat, dim=dim)
         model_feat = norm_feature(model_feat, dim=dim)
 
-        assert (
-            img_feat.shape == model_feat.shape
-        ), "img_feat and model_feat must have the same shape to compute the repa loss"
+        assert img_feat.shape == model_feat.shape, (
+            "img_feat and model_feat must have the same shape to compute the repa loss"
+        )
         repa_loss = -torch.sum(img_feat * model_feat, dim=dim)
         # repa_loss = (
         #     torch.cosine_similarity(img_feat.flatten(1), model_feat.flatten(1), dim=1)

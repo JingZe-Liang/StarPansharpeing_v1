@@ -1,12 +1,10 @@
 import argparse
 
-import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 from timm.models.layers import trunc_normal_
 from timm.scheduler.cosine_lr import CosineLRScheduler
 

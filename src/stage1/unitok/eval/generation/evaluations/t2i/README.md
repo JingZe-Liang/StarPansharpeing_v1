@@ -8,7 +8,7 @@ pip install clean_fid
 
 ```
 python3 evaluations/t2i/evaluation.py \
---eval_res 256 \ 
+--eval_res 256 \
 --batch_size 256 \
 --how_many 30000 \
 --ref_data "coco2014" \

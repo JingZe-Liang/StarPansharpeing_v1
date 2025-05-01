@@ -23,7 +23,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
-from safetensors import safe_open
 from safetensors.torch import load_file
 
 __all__ = [

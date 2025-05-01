@@ -33,10 +33,7 @@ from diffusion.utils.import_utils import (
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from diffusion.model.nets.fastlinear.modules import (
-        TritonLiteMLA,
-        TritonMBConvPreGLU,
-    )
+    pass
 
     _triton_modules_available = True
 

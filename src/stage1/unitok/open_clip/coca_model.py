@@ -32,7 +32,7 @@ try:
         "beam_search": "beam_search",
     }
     _has_transformers = True
-except ImportError as e:
+except ImportError:
     GENERATION_TYPES = {"top_k": None, "top_p": None, "beam_search": "beam_search"}
     _has_transformers = False
 
@@ -194,7 +194,9 @@ class CoCa(nn.Module):
     ):
         # taking many ideas and components from HuggingFace GenerationMixin
         # https://huggingface.co/docs/transformers/main/en/main_classes/text_generation
-        assert _has_transformers, "Please install transformers for generate functionality. `pip install transformers`."
+        assert _has_transformers, (
+            "Please install transformers for generate functionality. `pip install transformers`."
+        )
         assert seq_len > min_seq_len, "seq_len must be larger than min_seq_len"
 
         with torch.no_grad():

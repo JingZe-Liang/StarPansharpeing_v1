@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import random
 import torch

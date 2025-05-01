@@ -26,10 +26,10 @@ from pathlib import Path
 
 import open_clip
 import torch
-from demo_util import get_tatitok_tokenizer, get_titok_tokenizer, sample_fn
+from demo_util import sample_fn
 from evaluator import VQGANEvaluator
 from imagenet_classes import imagenet_idx2classname
-from modeling.maskgen import MaskGen_KL, MaskGen_VQ, open_clip_text_encoding
+from modeling.maskgen import MaskGen_KL, MaskGen_VQ
 from modeling.maskgit import ImageBert, UViTBert
 from modeling.modules import (
     ARLoss,

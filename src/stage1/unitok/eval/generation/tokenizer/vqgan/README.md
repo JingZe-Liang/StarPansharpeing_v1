@@ -18,4 +18,3 @@ python3 tokenizer/vqgan/taming_vqgan_demo.py
 
 ### acknowledge
 Codes in this folder are modified from from https://github.com/CompVis/taming-transformers
-

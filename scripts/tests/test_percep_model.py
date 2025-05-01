@@ -11,7 +11,6 @@ import src.stage1.perception_models.core.vision_encoder.pe as pe
 import src.stage1.perception_models.core.vision_encoder.transforms as transforms
 from src.stage1.utilities.losses.repa.feature_pca import (
     feature_pca_cuml,
-    feature_pca_torch,
 )
 
 model_name = "PE-Spatial-G14-448"

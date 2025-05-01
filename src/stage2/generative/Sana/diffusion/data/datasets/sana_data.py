@@ -26,9 +26,8 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 from termcolor import colored
-from torch.utils.data import Dataset
 
-from diffusion.data.builder import DATASETS, get_data_path
+from diffusion.data.builder import DATASETS
 from diffusion.data.wids import ShardListDataset, ShardListDatasetMulti, lru_json_load
 from diffusion.utils.logger import get_root_logger
 

@@ -2,12 +2,10 @@ import os
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import sys
 from glob import glob
-import glob as gl
-import pandas as pd
 
 sys.path.append(".")
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))

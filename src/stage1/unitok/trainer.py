@@ -1,8 +1,7 @@
 import math
 import sys
-from copy import deepcopy
 from pprint import pformat
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F

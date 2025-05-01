@@ -1,13 +1,10 @@
 import os
 import numpy as np
-from PIL import Image
 
 import torch
-import torchvision
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.utilities.distributed import rank_zero_only
 
-import random
 from .utils import save_video_grid
 
 
@@ -44,7 +41,7 @@ class VideoLogger(Callback):
             and self.max_videos > 0
         ):
             # print(batch_idx, self.batch_freq,  self.check_frequency(batch_idx))
-            logger = type(pl_module.logger)
+            type(pl_module.logger)
 
             is_train = pl_module.training
             if is_train:

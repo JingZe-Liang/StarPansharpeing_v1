@@ -269,9 +269,9 @@ class ResidualVQ(Module):
         # and the network should be able to reconstruct
 
         if quantize_dim < self.num_quantizers:
-            assert (
-                self.quantize_dropout > 0.0
-            ), "quantize dropout must be greater than 0 if you wish to reconstruct from a signal with less fine quantizations"
+            assert self.quantize_dropout > 0.0, (
+                "quantize dropout must be greater than 0 if you wish to reconstruct from a signal with less fine quantizations"
+            )
             indices = F.pad(indices, (0, self.num_quantizers - quantize_dim), value=-1)
 
         # take care of quantizer dropout
@@ -352,9 +352,9 @@ class ResidualVQ(Module):
             indices = torch.stack(indices)
 
         if return_loss:
-            assert not torch.any(
-                indices == -1
-            ), "some of the residual vq indices were dropped out. please use indices derived when the module is in eval mode to derive cross entropy loss"
+            assert not torch.any(indices == -1), (
+                "some of the residual vq indices were dropped out. please use indices derived when the module is in eval mode to derive cross entropy loss"
+            )
             ce_losses = []
 
         should_quantize_dropout = (

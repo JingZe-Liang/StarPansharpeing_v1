@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional, Tuple, Union
@@ -11,7 +10,6 @@ try:
     from huggingface_hub import (
         create_repo,
         get_hf_file_metadata,
-        hf_hub_download,
         hf_hub_url,
         repo_type_and_id_from_hf_id,
         upload_folder,
@@ -107,11 +105,8 @@ def push_to_hf_hub(
     repo_id = f"{repo_owner}/{repo_name}"
 
     # Check if repo already exists and determine what needs updating
-    repo_exists = False
-    repo_files = {}
     try:
-        repo_files = set(list_repo_files(repo_id))
-        repo_exists = True
+        set(list_repo_files(repo_id))
     except Exception as e:
         print("Repo does not exist", e)
 

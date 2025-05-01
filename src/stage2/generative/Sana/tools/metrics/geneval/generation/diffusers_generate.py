@@ -12,7 +12,7 @@ from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.transforms import ToTensor
 from torchvision.utils import make_grid
-from tqdm import tqdm, trange
+from tqdm import trange
 
 torch.set_grad_enabled(False)
 

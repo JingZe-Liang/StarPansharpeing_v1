@@ -3,11 +3,9 @@
 Code is from https://github.com/TencentARC/SEED-Voken. Thanks!
 """
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy import linalg
 from torchvision import models
 
 try:

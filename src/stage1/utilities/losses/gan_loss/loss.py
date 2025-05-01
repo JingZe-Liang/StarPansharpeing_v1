@@ -13,7 +13,6 @@ from loguru import logger
 from pytorch_wavelets import DWTForward
 
 from ..model import (
-    DinoDiscV2,
     NLayerDiscriminator,
     NLayerDiscriminatorv2,
     StyleGAN3DDiscriminator,
@@ -503,9 +502,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # input shapes
         if inputs.ndim == 5:
-            assert (
-                self.num_frames == inputs.shape[2]
-            ), f"Number of frames does not match input "
+            assert self.num_frames == inputs.shape[2], (
+                f"Number of frames does not match input "
+            )
             inputs = rearrange(inputs, "n c t h w -> (n t) c h w")
             reconstructions = rearrange(reconstructions, "n c t h w -> (n t) c h w")
 

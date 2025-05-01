@@ -1,11 +1,8 @@
-from typing import Tuple
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from beartype import beartype
-from einops import rearrange, repeat
+from einops import rearrange
 from einops.layers.torch import Rearrange
 
 

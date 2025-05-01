@@ -1,18 +1,13 @@
 import os
-import os.path as osp
-import math
 import random
 import argparse
 import numpy as np
-from PIL import Image
 from torch.utils.data import BatchSampler, Dataset, Sampler
 import torch
 import torch.utils.data as data
-import torch.nn.functional as F
 import torch.distributed as dist
-from torchvision.datasets.video_utils import VideoClips
 import pytorch_lightning as pl
-from typing import TypeVar, Optional, Iterator, List
+from typing import Optional, List
 from collections import Counter, defaultdict
 from decord import VideoReader
 from .utils.video_utils import VideoNorm
@@ -302,7 +297,7 @@ def get_length_grouped_indices(
         indices[i : i + megabatch_size] for i in range(0, len(lengths), megabatch_size)
     ]
 
-    megabatches_len = [[lengths[i] for i in megabatch] for megabatch in megabatches]
+    [[lengths[i] for i in megabatch] for megabatch in megabatches]
 
     megabatches = [
         split_to_even_chunks(megabatch, lengths, world_size, batch_size)

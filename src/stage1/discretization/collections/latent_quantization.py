@@ -239,9 +239,9 @@ class LatentQuantize(Module):
         z = rearrange(z, "b d ... -> b ... d")
         z, ps = pack_one(z, "b * d")
 
-        assert (
-            z.shape[-1] == self.dim
-        ), f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
+        assert z.shape[-1] == self.dim, (
+            f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
+        )
 
         # project in
         z = self.project_in(z)

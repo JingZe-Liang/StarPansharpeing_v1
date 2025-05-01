@@ -10,7 +10,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 import numpy as np
 from PIL import Image
-import glob
 import argparse
 import os
 import json

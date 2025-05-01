@@ -6,7 +6,7 @@ Copyright (c) 2020 Alex
 
 from __future__ import print_function
 import numpy as np
-from math import ceil, floor
+from math import ceil
 
 
 def deriveSizeFromScale(img_shape, scale):

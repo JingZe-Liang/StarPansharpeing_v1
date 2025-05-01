@@ -15,9 +15,9 @@ class MaxPool3dSamePadding(nn.MaxPool3d):
     def forward(self, x):
         # compute 'same' padding
         (batch, channel, t, h, w) = x.size()
-        out_t = np.ceil(float(t) / float(self.stride[0]))
-        out_h = np.ceil(float(h) / float(self.stride[1]))
-        out_w = np.ceil(float(w) / float(self.stride[2]))
+        np.ceil(float(t) / float(self.stride[0]))
+        np.ceil(float(h) / float(self.stride[1]))
+        np.ceil(float(w) / float(self.stride[2]))
         pad_t = self.compute_pad(0, t)
         pad_h = self.compute_pad(1, h)
         pad_w = self.compute_pad(2, w)
@@ -80,9 +80,9 @@ class Unit3D(nn.Module):
     def forward(self, x):
         # compute 'same' padding
         (batch, channel, t, h, w) = x.size()
-        out_t = np.ceil(float(t) / float(self._stride[0]))
-        out_h = np.ceil(float(h) / float(self._stride[1]))
-        out_w = np.ceil(float(w) / float(self._stride[2]))
+        np.ceil(float(t) / float(self._stride[0]))
+        np.ceil(float(h) / float(self._stride[1]))
+        np.ceil(float(w) / float(self._stride[2]))
         pad_t = self.compute_pad(0, t)
         pad_h = self.compute_pad(1, h)
         pad_w = self.compute_pad(2, w)

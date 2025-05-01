@@ -7,10 +7,8 @@ import torch
 import os
 from einops import rearrange
 from torchvision.io import write_video
-from torchvision import transforms
 import tqdm
 import numpy as np
-import torch.nn.functional as F
 
 
 def main(args, model, video_path, save_path, video_name):
@@ -25,7 +23,7 @@ def main(args, model, video_path, save_path, video_name):
 
     decord_vr = VideoReader(video_path, ctx=cpu(0))
     fps = decord_vr.get_avg_fps()
-    total_frames = len(decord_vr)
+    len(decord_vr)
     s = 0
     e = s + num_frames
     frame_id_list = np.linspace(s, e - 1, num_frames, dtype=int)

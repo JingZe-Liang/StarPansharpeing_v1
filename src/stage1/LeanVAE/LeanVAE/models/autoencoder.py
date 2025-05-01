@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import torch
 import torch.distributed
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 
 from ..modules import (
@@ -173,9 +172,9 @@ class LeanVAE(nn.Module):
             is_image = True
         else:
             is_image = False
-            assert (
-                x.shape[2] % 4 == 1
-            ), f"Expected frame_num % 4 == 1, but got {x.shape[2] % 4}"
+            assert x.shape[2] % 4 == 1, (
+                f"Expected frame_num % 4 == 1, but got {x.shape[2] % 4}"
+            )
 
         z = self.encode(x)
         x_recon = self.decode(z, is_image=is_image)

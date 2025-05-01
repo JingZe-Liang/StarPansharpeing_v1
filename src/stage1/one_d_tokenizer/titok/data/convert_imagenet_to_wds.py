@@ -43,7 +43,7 @@ def convert_imagenet_to_wds(
         output.write({"__key__": "%08d" % i, "jpg": img.convert("RGB"), "cls": label})
     output.close()
     time_taken = time.time() - now
-    print(f"Wrote {i+1} train examples in {time_taken // 3600} hours.")
+    print(f"Wrote {i + 1} train examples in {time_taken // 3600} hours.")
 
     opat = os.path.join(output_dir, "imagenet-val-%06d.tar")
     output = wds.ShardWriter(opat, maxcount=max_val_samples_per_shard)
@@ -58,7 +58,7 @@ def convert_imagenet_to_wds(
         output.write({"__key__": "%08d" % i, "jpg": img.convert("RGB"), "cls": label})
     output.close()
     time_taken = time.time() - now
-    print(f"Wrote {i+1} val examples in {time_taken // 60} min.")
+    print(f"Wrote {i + 1} val examples in {time_taken // 60} min.")
 
 
 if __name__ == "__main__":

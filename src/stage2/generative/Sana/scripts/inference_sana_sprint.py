@@ -34,7 +34,6 @@ warnings.filterwarnings("ignore")  # ignore warning
 os.environ["DISABLE_XFORMERS"] = "1"
 
 from diffusion import SCMScheduler
-from diffusion.data.datasets.utils import ASPECT_RATIO_512_TEST, ASPECT_RATIO_1024_TEST
 from diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,

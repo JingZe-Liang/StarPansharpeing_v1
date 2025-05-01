@@ -23,7 +23,7 @@ import torch.nn as nn
 from timm.models.layers import DropPath
 
 from diffusion.model.builder import MODELS
-from diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, MBConvPreGLU, Mlp
+from diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, Mlp
 from diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
@@ -46,7 +46,6 @@ _triton_modules_available = False
 if is_triton_module_available():
     from diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
-        TritonMBConvPreGLU,
     )
 
     _triton_modules_available = True

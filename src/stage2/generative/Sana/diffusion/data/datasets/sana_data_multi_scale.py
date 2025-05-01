@@ -283,7 +283,6 @@ class DummyDatasetMS(SanaWebDatasetMS):
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
 
-    from diffusion.data.datasets.utils import ASPECT_RATIO_1024
     from diffusion.data.transforms import get_transform
 
     image_size = 256

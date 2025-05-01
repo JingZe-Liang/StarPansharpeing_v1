@@ -9,7 +9,7 @@ import torch
 import torch.distributed as distributed
 import torch.nn.functional as F
 from einops import pack, rearrange, reduce, repeat, unpack
-from torch import Tensor, einsum, nn
+from torch import einsum, nn
 from torch.amp import autocast
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -376,9 +376,9 @@ class EuclideanCodebook(Module):
         self.gumbel_sample = gumbel_sample
         self.sample_codebook_temp = sample_codebook_temp
 
-        assert not (
-            use_ddp and num_codebooks > 1 and kmeans_init
-        ), "kmeans init is not compatible with multiple codebooks in distributed environment for now"
+        assert not (use_ddp and num_codebooks > 1 and kmeans_init), (
+            "kmeans init is not compatible with multiple codebooks in distributed environment for now"
+        )
 
         self.sample_fn = (
             sample_vectors_distributed
@@ -585,7 +585,7 @@ class EuclideanCodebook(Module):
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
 
-        dtype = x.dtype
+        x.dtype
         flatten, unpack_one = pack_one(x, "h * d")
 
         if exists(mask):
@@ -838,7 +838,7 @@ class CosineSimCodebook(Module):
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
 
-        dtype = x.dtype
+        x.dtype
 
         flatten, unpack_one = pack_one(x, "h * d")
 
@@ -1013,9 +1013,9 @@ class VectorQuantize(Module):
         self.commitment_weight = commitment_weight
         self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss  # whether to use cross entropy loss to codebook as commitment loss
 
-        assert not (
-            use_cosine_sim and learnable_codebook
-        ), "cosine sim distance codebook not compatible with learnable codebook yet"
+        assert not (use_cosine_sim and learnable_codebook), (
+            "cosine sim distance codebook not compatible with learnable codebook yet"
+        )
         self.learnable_codebook = learnable_codebook
 
         has_codebook_orthogonal_loss = orthogonal_reg_weight > 0.0
@@ -1032,14 +1032,14 @@ class VectorQuantize(Module):
         assert not (straight_through and rotation_trick)
         self.rotation_trick = rotation_trick
 
-        assert not (
-            ema_update and learnable_codebook
-        ), "learnable codebook not compatible with EMA update"
+        assert not (ema_update and learnable_codebook), (
+            "learnable codebook not compatible with EMA update"
+        )
 
         assert 0 <= sync_update_v <= 1.0
-        assert not (
-            sync_update_v > 0.0 and not learnable_codebook
-        ), "learnable codebook must be turned on"
+        assert not (sync_update_v > 0.0 and not learnable_codebook), (
+            "learnable codebook must be turned on"
+        )
 
         self.sync_update_v = sync_update_v
 
@@ -1073,9 +1073,9 @@ class VectorQuantize(Module):
         )
 
         if affine_param:
-            assert (
-                not use_cosine_sim
-            ), "affine param is only compatible with euclidean codebook"
+            assert not use_cosine_sim, (
+                "affine param is only compatible with euclidean codebook"
+            )
             codebook_kwargs = dict(
                 **codebook_kwargs,
                 affine_param=True,
@@ -1398,9 +1398,9 @@ class VectorQuantize(Module):
                 # only calculate orthogonal loss for the activated codes for this batch
 
                 if self.orthogonal_reg_active_codes_only:
-                    assert not (
-                        is_multiheaded and self.separate_codebook_per_head
-                    ), "orthogonal regularization for only active codes not compatible with multi-headed with separate codebooks yet"
+                    assert not (is_multiheaded and self.separate_codebook_per_head), (
+                        "orthogonal regularization for only active codes not compatible with multi-headed with separate codebooks yet"
+                    )
                     unique_code_ids = torch.unique(embed_ind)
                     codebook = codebook[:, unique_code_ids]
 

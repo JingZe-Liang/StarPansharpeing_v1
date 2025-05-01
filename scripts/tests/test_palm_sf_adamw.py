@@ -1,6 +1,6 @@
 import heavyball
 import torch
-from heavyball import ForeachSOLP, PaLMForeachSOAP, PaLMSFAdamW
+from heavyball import PaLMSFAdamW
 from timm.models.resnet import resnet101
 
 heavyball.utils.compile_mode = None

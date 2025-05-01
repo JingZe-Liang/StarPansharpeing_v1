@@ -18,9 +18,7 @@ import collections
 import datetime
 import os
 import random
-import subprocess
 import time
-from multiprocessing import JoinableQueue, Process
 
 import numpy as np
 import torch
@@ -29,7 +27,6 @@ import yaml
 from mmcv import Config
 from mmcv.runner import get_dist_info
 
-from diffusion.utils.dist_utils import get_rank
 from diffusion.utils.logger import get_root_logger
 
 os.environ["MOX_SILENT_MODE"] = "1"  # mute moxing log

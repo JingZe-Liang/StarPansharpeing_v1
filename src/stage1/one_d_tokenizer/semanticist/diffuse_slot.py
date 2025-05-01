@@ -168,7 +168,7 @@ class DiT_with_autoenc_cond(DiT):
         # autoenc_cond: (N, K, D)
         # drop_ids: (N)
         # self.null_cond: (1, K, D)
-        batch_size = autoenc_cond.shape[0]
+        autoenc_cond.shape[0]
 
         # nested sampled condition
         # if drop_mask is None:
@@ -454,9 +454,9 @@ class DiffuseSlot(nn.Module):
 
         # double channel
         if self.diffusion_type in ("diffusion", "fm"):
-            assert (
-                quantizer_type != "kl"
-            ), "when using kl quantizer, diffusion_type should can not be any diffusion"
+            assert quantizer_type != "kl", (
+                "when using kl quantizer, diffusion_type should can not be any diffusion"
+            )
 
         self.use_diffusion = True
         if self.diffusion_type == "fm":

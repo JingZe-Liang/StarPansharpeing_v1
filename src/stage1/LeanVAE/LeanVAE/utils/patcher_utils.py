@@ -1,16 +1,5 @@
-import math
-import os
-import random
-import shutil
-import sys
-from datetime import datetime
-
-import numpy as np
-import pywt
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import Module
 
 _PERSISTENT = False
 
@@ -226,7 +215,7 @@ class UnPatcher(torch.nn.Module):
     def _3didwt(self, x, mode="reflect", rescale=False):
         dtype = x.dtype
         h = self.wavelets
-        n = h.shape[0]
+        h.shape[0]
 
         g = x.shape[1] // 8  # split into 8 spatio-temporal filtered tesnors.
         hl = h.flip([0]).reshape(1, 1, -1).repeat([g, 1, 1])

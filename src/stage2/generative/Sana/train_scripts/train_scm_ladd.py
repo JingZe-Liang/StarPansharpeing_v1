@@ -1335,7 +1335,7 @@ def main(cfg: SanaConfig) -> None:
     image_size = config.model.image_size
     latent_size = int(image_size) // config.vae.vae_downsample_rate
     pred_sigma = getattr(config.scheduler, "pred_sigma", True)
-    learn_sigma = getattr(config.scheduler, "learn_sigma", True) and pred_sigma
+    getattr(config.scheduler, "learn_sigma", True) and pred_sigma
     max_length = config.text_encoder.model_max_length
     model_weight_dtype = get_weight_dtype(config.model.mixed_precision)
     vae = None

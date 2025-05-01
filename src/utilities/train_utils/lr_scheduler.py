@@ -102,7 +102,6 @@ def get_cosine_schedule_reduced_with_warmup(
 
 
 import matplotlib.pyplot as plt
-import numpy as np
 
 
 def __plot_lr_schedule():

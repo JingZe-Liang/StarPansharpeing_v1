@@ -13,9 +13,9 @@ All rights reserved. This work should only be used for nonprofit purposes.
 """
 
 """
- Description: 
+ Description:
            Spatial distortion index.
- 
+
  Interface:
            D_s_index = D_s(I_F,I_MS,I_MS_LR,I_PAN,ratio,S,q)
 
@@ -27,27 +27,25 @@ All rights reserved. This work should only be used for nonprofit purposes.
            ratio:              Scale ratio between MS and PAN. Pre-condition: Integer value;
            S:                  Block size;
            q:                  Exponent value (optional); Default value: q = 1.
- 
+
  Outputs:
            D_s_index:          Spatial distortion index.
-          
+
  Notes:
      Results very close to the MATLAB toolbox's ones. In particular, the results are more accurate than the MATLAB toolbox's ones
      because the Q-index is applied in a sliding window way. Instead, for computational reasons, the MATLAB toolbox uses a distinct block implementation
      of the Q-index.
- 
+
  References:
          G. Vivone, M. Dalla Mura, A. Garzelli, and F. Pacifici, "A Benchmarking Protocol for Pansharpening: Dataset, Pre-processing, and Quality Assessment", IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, vol. 14, pp. 6102-6118, 2021.
          G. Vivone, M. Dalla Mura, A. Garzelli, R. Restaino, G. Scarpa, M. O. Ulfarsson, L. Alparone, and J. Chanussot, "A New Benchmark Based on Recent Advances in Multispectral Pansharpening: Revisiting Pansharpening With Classical and Emerging Pansharpening Methods", IEEE Geoscience and Remote Sensing Magazine, vol. 9, no. 1, pp. 53 - 81, March 2021.
 """
 
 import numpy as np
-from skimage.metrics import structural_similarity as ssim
 from .interp23 import interp23
 from .imresize import imresize
 import torch
 from torch.nn import functional as F
-import math
 
 
 def create_window(window_size, channel):
@@ -66,8 +64,8 @@ def D_s(I_F, I_MS, I_MS_LR, I_PAN, ratio, S, q):
         print("The two images must have the same dimensions")
         return -1
 
-    N = I_F.shape[0]
-    M = I_F.shape[1]
+    I_F.shape[0]
+    I_F.shape[1]
     Nb = I_F.shape[2]
     max_val = 1
 

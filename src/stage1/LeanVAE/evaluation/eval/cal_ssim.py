@@ -113,7 +113,7 @@ def main():
     videos2 = torch.zeros(
         NUMBER_OF_VIDEOS, VIDEO_LENGTH, CHANNEL, SIZE, SIZE, requires_grad=False
     )
-    device = torch.device("cuda")
+    torch.device("cuda")
 
     import json
 

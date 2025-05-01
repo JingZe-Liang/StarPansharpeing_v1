@@ -438,9 +438,9 @@ class TiTokDecoder(nn.Module):
 
     def forward(self, z_quantized):
         N, C, H, W = z_quantized.shape
-        assert (
-            H == 1 and W == self.num_latent_tokens
-        ), f"{H}, {W}, {self.num_latent_tokens}"
+        assert H == 1 and W == self.num_latent_tokens, (
+            f"{H}, {W}, {self.num_latent_tokens}"
+        )
         x = z_quantized.reshape(N, C * H, W).permute(0, 2, 1)  # NLD
         x = self.decoder_embed(x)
 
@@ -499,9 +499,9 @@ class TATiTokDecoder(TiTokDecoder):
 
     def forward(self, z_quantized, text_guidance):
         N, C, H, W = z_quantized.shape
-        assert (
-            H == 1 and W == self.num_latent_tokens
-        ), f"{H}, {W}, {self.num_latent_tokens}"
+        assert H == 1 and W == self.num_latent_tokens, (
+            f"{H}, {W}, {self.num_latent_tokens}"
+        )
         x = z_quantized.reshape(N, C * H, W).permute(0, 2, 1)  # NLD
         x = self.decoder_embed(x)
 

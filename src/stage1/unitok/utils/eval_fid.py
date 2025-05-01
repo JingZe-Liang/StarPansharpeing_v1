@@ -1,16 +1,12 @@
 import os
-import glob
 import torch
 from tqdm import tqdm
 from PIL import Image
 from typing import List, Tuple
 from torch.utils.data import DataLoader, SequentialSampler
 from torchvision.transforms import transforms
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 
-from utils import dist, misc
-from models.vqvae import VQVAE
+from utils import misc
 from models.unitok import UniTok
 from utils.data import PlainDataset, normalize_01_into_pm1
 from utils.config import Args

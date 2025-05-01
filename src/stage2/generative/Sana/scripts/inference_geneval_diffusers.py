@@ -17,11 +17,7 @@
 import argparse
 import json
 import os
-import random
-import re
-import sys
 import time
-from pathlib import Path
 
 import datasets
 import numpy as np
@@ -31,7 +27,7 @@ from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.transforms import ToTensor
 from torchvision.utils import make_grid
-from tqdm import tqdm, trange
+from tqdm import tqdm
 
 from diffusion.utils.logger import get_root_logger
 
@@ -201,7 +197,7 @@ if __name__ == "__main__":
         f"{batch_size} > 1 is not available in GenEval"
     )
 
-    from diffusers import DiffusionPipeline, StableDiffusionPipeline
+    from diffusers import DiffusionPipeline
 
     model = DiffusionPipeline.from_pretrained(
         args.model_path, torch_dtype=torch.float16, use_safetensors=True, variant="fp16"

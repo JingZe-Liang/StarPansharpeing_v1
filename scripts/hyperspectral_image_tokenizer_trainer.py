@@ -1,7 +1,5 @@
-import os
 import sys
 import time
-import warnings
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -11,26 +9,20 @@ import accelerate
 import colored_traceback
 import hydra
 import numpy as np
-import peft
 import PIL.Image as Image
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler, FullyShardedDataParallelPlugin
+from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import (
     LoraConfig,
-    PeftConfig,
-    PeftModel,
     get_peft_model,
-    get_peft_model_state_dict,
-    inject_adapter_in_model,
-    load_peft_weights,
     set_peft_model_state_dict,
 )
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -43,18 +35,11 @@ colored_traceback.add_hook()
 
 sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
-from src.stage1.cosmos.cosmos_tokenizer import (
-    ContinuousImageTokenizer as CosmosTokenizer,
-)
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.modules.layers2d import FSDPNoWarpModule
-from src.stage1.cosmos.networks.configs import continuous_image
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
-from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE
-from src.stage1.two_d_vit_tokenizer.tokenizer import VITBSQModel, VITVQModel
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
-from src.utilities.network_utils import load_fsdp_model, remap_peft_model_state_dict
+from src.utilities.network_utils import load_fsdp_model
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -223,13 +208,13 @@ class CosmosHyperspectralTokenizerTrainer:
             self.use_quantizer = self.quantizer is not None
             self.norm_z = self.cfg.quantizer.norm_z
             if not self.sep_enc_dec:
-                assert (
-                    not self.norm_z
-                ), "norm_z is not supported when sep_enc_dec is False"
+                assert not self.norm_z, (
+                    "norm_z is not supported when sep_enc_dec is False"
+                )
             if not self.use_quantizer:
-                assert (
-                    not self.norm_z
-                ), "norm_z can not be set when quantizer is not used"
+                assert not self.norm_z, (
+                    "norm_z can not be set when quantizer is not used"
+                )
             if self.norm_z:
                 self.log_msg(
                     "norm_z is set to True in the trainer, which is not recommanded",
@@ -589,9 +574,9 @@ class CosmosHyperspectralTokenizerTrainer:
                             "refine the whole decoder"
                         )
                     else:
-                        assert (
-                            n_layer_ft >= 0
-                        ), "n_layer_ft must be equal or bigger than 0"
+                        assert n_layer_ft >= 0, (
+                            "n_layer_ft must be equal or bigger than 0"
+                        )
                         self.log_msg(
                             f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, "
                             "use DCAE refine decoder head (phase 3) stragety for low-resolution images. "
@@ -1176,9 +1161,9 @@ class CosmosHyperspectralTokenizerTrainer:
     def format_log(
         self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None
     ) -> str:
-        assert (
-            log_token_loss is not None or log_disc_loss is not None
-        ), "At least one of the logs should be provided"
+        assert log_token_loss is not None or log_disc_loss is not None, (
+            "At least one of the logs should be provided"
+        )
 
         def dict_round_to_list_str(
             d: dict, n_round: int = 3, select: list[str] | None = None
@@ -1536,7 +1521,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
                     else:  # not shard weights
                         peft_path = _assume_path / "pytorch_model_fsdp.bin"
-                        assert peft_path.exists(), "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
+                        assert peft_path.exists(), (
+                            "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
+                        )
 
                         # ensure there is model/pytorch_model_fsdp.bin file
                         from copy import deepcopy
@@ -1713,9 +1700,9 @@ class CosmosHyperspectralTokenizerTrainer:
             "dcae_refine_decoder_head",
             "dcae_adapt_latent",
         ]:
-            assert (
-                self.train_cfg.ema_load_path is not None
-            ), f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+            assert self.train_cfg.ema_load_path is not None, (
+                f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
+            )
 
         # test
 

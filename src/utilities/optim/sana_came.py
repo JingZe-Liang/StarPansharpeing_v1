@@ -723,7 +723,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
 
 if __use_mmcv_build_optimizer:
     from mmcv import Config
-    from mmcv.runner import OPTIMIZER_BUILDERS, OPTIMIZERS, DefaultOptimizerConstructor
+    from mmcv.runner import OPTIMIZER_BUILDERS, DefaultOptimizerConstructor
     from mmcv.runner import build_optimizer as mm_build_optimizer
     from mmcv.utils import _BatchNorm, _InstanceNorm
     from termcolor import colored

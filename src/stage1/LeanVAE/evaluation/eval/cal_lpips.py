@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from tqdm import tqdm
-import math
 
 import torch
 import lpips

@@ -104,9 +104,9 @@ class BinarySphericalQuantizer(nn.Module):
         self.gamma = gamma  # loss weight for entropy penalty
         self.zeta = zeta  # loss weight for entire entropy penalty
         self.input_format = input_format
-        assert (
-            self.embed_dim % group_size == 0
-        ), f"embed_dim {self.embed_dim} must be divisible by group_size {group_size}"
+        assert self.embed_dim % group_size == 0, (
+            f"embed_dim {self.embed_dim} must be divisible by group_size {group_size}"
+        )
         self.num_groups = self.embed_dim // group_size
         self.group_size = group_size
         assert persample_entropy_compute in [
@@ -137,9 +137,9 @@ class BinarySphericalQuantizer(nn.Module):
         self.soft_entropy = soft_entropy  # soft_entropy: Sec 3.2 of https://arxiv.org/pdf/1911.05894.pdf
 
     def quantize(self, z):
-        assert (
-            z.shape[-1] == self.embed_dim
-        ), f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
+        assert z.shape[-1] == self.embed_dim, (
+            f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
+        )
 
         zhat = torch.where(
             z > 0,
@@ -245,9 +245,9 @@ class BinarySphericalQuantizer(nn.Module):
         Args:
             zhat: A tensor of shape (B, ..., C) containing the codes. must be in {-1, 1}
         """
-        assert (
-            zhat.shape[-1] == self.embed_dim
-        ), f"Expected {self.embed_dim} dimensions, got {zhat.shape[-1]}"
+        assert zhat.shape[-1] == self.embed_dim, (
+            f"Expected {self.embed_dim} dimensions, got {zhat.shape[-1]}"
+        )
         return ((zhat + 1) / 2 * self.basis).sum(axis=-1).to(torch.int64)
 
     def codes_to_group_indexes(self, zhat):

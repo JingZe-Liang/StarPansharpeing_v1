@@ -56,7 +56,7 @@ torchrun --nproc-per-node=8 -m flowmo.train \
     trainer.checkpoint_every=5000 \
     trainer.keep_every=5000 \
 ```
-The training commands for FlowMo-Hi are below. It is recommended to pre-train FlowMo-Hi for ~80 epochs minimum to match the paper result, but you may increase `trainer.max_steps` for better performance. 
+The training commands for FlowMo-Hi are below. It is recommended to pre-train FlowMo-Hi for ~80 epochs minimum to match the paper result, but you may increase `trainer.max_steps` for better performance.
 ```
 torchrun --nproc-per-node=8 -m flowmo.train \
     --experiment-name "flowmo_hi_pretrain" \
@@ -133,12 +133,12 @@ If you find FlowMo useful, please cite us.
 
 ```
 @misc{sargent2025flowmodemodeseekingdiffusion,
-      title={Flow to the Mode: Mode-Seeking Diffusion Autoencoders for State-of-the-Art Image Tokenization}, 
+      title={Flow to the Mode: Mode-Seeking Diffusion Autoencoders for State-of-the-Art Image Tokenization},
       author={Kyle Sargent and Kyle Hsu and Justin Johnson and Li Fei-Fei and Jiajun Wu},
       year={2025},
       eprint={2503.11056},
       archivePrefix={arXiv},
       primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2503.11056}, 
+      url={https://arxiv.org/abs/2503.11056},
 }
 ```

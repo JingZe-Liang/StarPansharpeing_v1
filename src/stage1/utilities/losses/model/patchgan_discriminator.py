@@ -1,5 +1,4 @@
 import functools
-from functools import partial
 
 import torch
 import torch.nn as nn

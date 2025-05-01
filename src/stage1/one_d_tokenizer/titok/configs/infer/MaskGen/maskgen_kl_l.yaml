@@ -1,7 +1,7 @@
 experiment:
   tokenizer_checkpoint: "tatitok_bl32_vae.bin"
   generator_checkpoint: "maskgen_kl_l.bin"
-  
+
 model:
   vq_model:
     quantize_mode: vae

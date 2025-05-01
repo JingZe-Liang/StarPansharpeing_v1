@@ -1,9 +1,4 @@
 import math
-from pprint import pformat
-from typing import Tuple, List, Dict, Union
-import torch.nn
-
-from utils import dist
 
 
 class LRScheduler:

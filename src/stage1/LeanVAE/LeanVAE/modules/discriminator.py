@@ -1,10 +1,7 @@
 import functools
-from typing import Any, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange
 
 
 class ActNorm(nn.Module):

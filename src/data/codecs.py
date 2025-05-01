@@ -1,5 +1,5 @@
 import io
-from typing import Dict, List, Sequence, Tuple, Any
+from typing import Dict, Any
 import numpy as np
 import scipy.io
 import torch
@@ -8,7 +8,6 @@ from safetensors.torch import (
     save as save_safetensors,
     load as load_safetensors,
 )  # Ensure safetensors is installed
-from torch import Tensor
 
 
 # --- Encoding Functions ---

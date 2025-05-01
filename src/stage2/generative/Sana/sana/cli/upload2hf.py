@@ -15,7 +15,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import os
 import os.path as osp
 import re
 import time
@@ -159,11 +158,9 @@ def main():
                     )[0]
 
                     if hf_meta.lfs is not None:
-                        hash_type = "lfs-sha256"
                         hf_hash = hf_meta.lfs["sha256"]
                         git_hash = compute_lfs_hash(fpath)
                     else:
-                        hash_type = "git-sha1"
                         hf_hash = hf_meta.blob_id
                         git_hash = compute_git_hash(fpath)
 

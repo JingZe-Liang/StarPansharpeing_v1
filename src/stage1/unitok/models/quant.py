@@ -1,5 +1,4 @@
 import torch
-from typing import List, Tuple
 from torch.nn import functional as F
 from torch import distributed as tdist, nn as nn
 

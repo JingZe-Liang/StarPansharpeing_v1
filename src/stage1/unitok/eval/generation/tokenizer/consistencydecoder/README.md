@@ -11,4 +11,3 @@ pip install accelerate
 cd ${THIS_REPO_ROOT}
 python3 tokenizer/consistencydecoder/cd_demo.py
 ```
-

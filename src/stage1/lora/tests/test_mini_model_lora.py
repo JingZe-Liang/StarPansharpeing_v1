@@ -4,12 +4,8 @@ import accelerate
 import torch
 from peft import (
     LoraConfig,
-    PeftModel,
     get_peft_model,
     get_peft_model_state_dict,
-    inject_adapter_in_model,
-    load_peft_weights,
-    set_peft_model_state_dict,
 )
 from torch.distributed.tensor import DTensor
 

@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import pathlib
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -18,14 +17,12 @@ from .model import (
     convert_to_custom_text_state_dict,
     resize_pos_embed,
     get_cast_dtype,
-    resize_text_pos_embed,
     resize_pos_embed_timm,
 )
 from .coca_model import CoCa
 from .loss import ClipLoss, DistillClipLoss, CoCaLoss
 from .openai import load_openai_model
 from .pretrained import (
-    is_pretrained_cfg,
     get_pretrained_cfg,
     download_pretrained,
     list_pretrained_tags_by_model,
@@ -98,9 +95,9 @@ def get_tokenizer(model_name):
         if "hf_tokenizer_name" in config["text_cfg"]:
             tokenizer = HFTokenizer(config["text_cfg"]["hf_tokenizer_name"])
         elif "text_mask" in config["text_cfg"] and config["text_cfg"]["text_mask"]:
-            assert (
-                config["text_cfg"]["text_mask"] == "syntax"
-            ), "for now, only support syntax masking!"
+            assert config["text_cfg"]["text_mask"] == "syntax", (
+                "for now, only support syntax masking!"
+            )
             tokenizer = syntax_mask_tokenize
         else:
             tokenizer = tokenize
@@ -260,9 +257,9 @@ def create_model(
                 # pretrained weight loading for timm models set via vision_cfg
                 model_cfg["vision_cfg"]["timm_model_pretrained"] = True
             else:
-                assert (
-                    False
-                ), "pretrained image towers currently only supported for timm models"
+                assert False, (
+                    "pretrained image towers currently only supported for timm models"
+                )
 
         # cast_dtype set for fp16 and bf16 (manual mixed-precision), not set for 'amp' or 'pure' modes
         cast_dtype = get_cast_dtype(precision)

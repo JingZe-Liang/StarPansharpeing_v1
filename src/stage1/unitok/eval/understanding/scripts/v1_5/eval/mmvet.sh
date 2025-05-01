@@ -13,4 +13,3 @@ mkdir -p ./playground/data/eval/mm-vet/results
 python scripts/convert_mmvet_for_eval.py \
     --src ./playground/data/eval/mm-vet/answers/llava-v1.5-13b.jsonl \
     --dst ./playground/data/eval/mm-vet/results/llava-v1.5-13b.json
-

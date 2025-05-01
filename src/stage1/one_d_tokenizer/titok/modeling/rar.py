@@ -25,8 +25,6 @@ import torch.nn.functional as F
 from modeling.modules import BaseModel
 from functools import partial
 from timm.layers import Mlp
-from typing import Optional
-import numpy as np
 import random
 
 

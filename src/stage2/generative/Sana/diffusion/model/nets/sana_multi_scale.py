@@ -46,7 +46,6 @@ _triton_modules_available = False
 if is_triton_module_available():
     from diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
-        TritonMBConvPreGLU,
     )
 
     _triton_modules_available = True
@@ -55,7 +54,7 @@ _xformers_available = (
     False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()
 )
 if _xformers_available:
-    import xformers.ops
+    pass
 
 
 class SanaMSBlock(nn.Module):

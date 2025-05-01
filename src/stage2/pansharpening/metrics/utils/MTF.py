@@ -7,9 +7,9 @@ All rights reserved. This work should only be used for nonprofit purposes.
 """
 
 """
- Description: 
-           MTF filters the image I_MS using a Gaussin filter matched with the Modulation Transfer Function (MTF) of the MultiSpectral (MS) sensor. 
- 
+ Description:
+           MTF filters the image I_MS using a Gaussin filter matched with the Modulation Transfer Function (MTF) of the MultiSpectral (MS) sensor.
+
  Interface:
            I_Filtered = MTF(I_MS,sensor,ratio)
 
@@ -20,14 +20,14 @@ All rights reserved. This work should only be used for nonprofit purposes.
 
  Outputs:
            I_Filtered:     Output filtered MS image.
- 
+
  Notes:
      The bottleneck of this function is the function scipy.filters.correlate that gets the same results as in the MATLAB toolbox
      but it is very slow with respect to fftconvolve that instead gets slightly different results
 
  References:
          G. Vivone, M. Dalla Mura, A. Garzelli, and F. Pacifici, "A Benchmarking Protocol for Pansharpening: Dataset, Pre-processing, and Quality Assessment", IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, vol. 14, pp. 6102-6118, 2021.
-         G. Vivone, M. Dalla Mura, A. Garzelli, R. Restaino, G. Scarpa, M. O. Ulfarsson, L. Alparone, and J. Chanussot, "A New Benchmark Based on Recent Advances in Multispectral Pansharpening: Revisiting Pansharpening With Classical and Emerging Pansharpening Methods", IEEE Geoscience and Remote Sensing Magazine, vol. 9, no. 1, pp. 53 - 81, March 2021.           
+         G. Vivone, M. Dalla Mura, A. Garzelli, R. Restaino, G. Scarpa, M. O. Ulfarsson, L. Alparone, and J. Chanussot, "A New Benchmark Based on Recent Advances in Multispectral Pansharpening: Revisiting Pansharpening With Classical and Emerging Pansharpening Methods", IEEE Geoscience and Remote Sensing Magazine, vol. 9, no. 1, pp. 53 - 81, March 2021.
 """
 from scipy import ndimage
 import numpy as np

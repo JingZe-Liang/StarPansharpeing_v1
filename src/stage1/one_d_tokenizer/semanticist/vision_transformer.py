@@ -21,7 +21,6 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .fused_attention import Attention

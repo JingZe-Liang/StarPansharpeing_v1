@@ -30,7 +30,7 @@ import numpy as np
 import spaces
 import torch
 from PIL import Image
-from torchvision.utils import make_grid, save_image
+from torchvision.utils import save_image
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from app import safety_check

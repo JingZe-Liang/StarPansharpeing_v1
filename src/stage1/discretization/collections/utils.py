@@ -1,5 +1,3 @@
-import torch
-from torch import nn
 from torch.nn import Module, ModuleList
 
 # quantization
@@ -37,9 +35,9 @@ QUANTIZE_KLASSES = (
 class Sequential(Module):
     def __init__(self, *fns: Module):
         super().__init__()
-        assert (
-            sum([int(isinstance(fn, QUANTIZE_KLASSES)) for fn in fns]) == 1
-        ), "this special Sequential must contain exactly one quantizer"
+        assert sum([int(isinstance(fn, QUANTIZE_KLASSES)) for fn in fns]) == 1, (
+            "this special Sequential must contain exactly one quantizer"
+        )
 
         self.fns = ModuleList(fns)
 

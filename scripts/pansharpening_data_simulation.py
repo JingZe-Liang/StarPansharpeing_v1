@@ -1,5 +1,5 @@
 import sys
-from typing import Any, Callable, Dict, Optional, override
+from typing import Any, Callable, Dict
 
 import hydra
 import numpy as np
@@ -11,7 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from scipy.signal import windows
 from tqdm import tqdm
 
-from src.data.codecs import mat_codec_io, safetensors_codec_io, tiff_codec_io
+from src.data.codecs import safetensors_codec_io, tiff_codec_io
 
 sys.path.insert(0, __file__[: __file__.find("src")])
 from src.utilities.logging import log_print

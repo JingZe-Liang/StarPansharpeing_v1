@@ -1,5 +1,3 @@
-from email.policy import default
-
 import numbers
 import random
 import re
@@ -10,7 +8,6 @@ from PIL import Image
 import torch
 import torchvision as tv
 import torchvision.transforms as transforms
-import torch.nn.functional as F
 from decord import VideoReader
 
 from torch.nn.functional import interpolate as img_tensor_resize
@@ -99,10 +96,10 @@ class VideoResizeSquare(object):
         if isinstance(video, torch.Tensor):
             if len(video.shape) == 4:
                 t, h, w, c = video.shape
-                assert (
-                    c == 3
-                ), "Expecting 3-channel color video, got video of shape {}".format(
-                    video.shape
+                assert c == 3, (
+                    "Expecting 3-channel color video, got video of shape {}".format(
+                        video.shape
+                    )
                 )
             else:
                 raise RuntimeError(
@@ -113,7 +110,7 @@ class VideoResizeSquare(object):
 
             # t, h, w, c -> t, c, h, w
             video = video.permute(0, 3, 1, 2)
-            short_side = h if h < w else w
+            h if h < w else w
             resized_video = img_tensor_resize(
                 video,
                 size=((self.out_size, self.out_size)),

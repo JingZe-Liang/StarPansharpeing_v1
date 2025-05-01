@@ -276,8 +276,8 @@ def onion_mult(onion1, onion2):
 
 
 def compute_index(img_base, img_out, ratio):
-    h = img_out.shape[0]
-    w = img_out.shape[1]
+    img_out.shape[0]
+    img_out.shape[1]
     chanel = img_out.shape[2]
     # 计算SAM
     sum1 = torch.sum(img_base * img_out, 2)
@@ -437,7 +437,7 @@ def _ssim(img1, img2):
     V1 = 2.0 * sigma12 + C2
     V2 = sigma1_sq + sigma2_sq + C2
     ssim_map = ((2 * mu1_mu2 + C1) * V1) / ((mu1_sq + mu2_sq + C1) * V2)
-    t = ssim_map.shape
+    ssim_map.shape
     return ssim_map.mean(2).mean(2)
 
 
@@ -463,7 +463,7 @@ def create_window(window_size, sigma, channel):
 def compare_index(A):
     A_size = A.shape
     ite_n = A_size[2]
-    band_n = A_size[1]
+    A_size[1]
     C_better = A[:, 0, 0]
     ind = 0
     for i in range(ite_n):
@@ -506,8 +506,6 @@ def compare_index(A):
 # Author: Xiao Wu, Zihan Cao
 # Date: 2024/02/04
 ########################################
-
-from .hqnr2 import indexes_evaluation_FS
 
 
 if __name__ == "__main__":

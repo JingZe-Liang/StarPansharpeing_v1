@@ -7,7 +7,6 @@ from collections import namedtuple
 import requests
 import torch
 import torch.nn as nn
-import torchvision
 from torchvision import models
 from tqdm import tqdm
 
@@ -230,7 +229,6 @@ class MeanShift(nn.Conv2d):
 class VGGPerceptualLoss(torch.nn.Module):
     def __init__(self, rank):
         super(VGGPerceptualLoss, self).__init__()
-        blocks = []
         pretrained = True
         self.vgg_pretrained_features = models.vgg19(pretrained=pretrained).features
         self.normalize = MeanShift(

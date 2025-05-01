@@ -3,4 +3,3 @@ python evaluation/eval_recon_videos.py --batch_size '1' \
                              --generated_video_dir 'RECONSTRUCTED VIDEO PATH' \
                              --device 'cuda:0' \
                              --metric 'psnr'
-

@@ -16,7 +16,7 @@ model:
         num_latent_tokens: 256
         finetune_decoder: False
         pretrained_tokenizer_weight: "maskgit-vqgan-imagenet-f16-256.bin"
-    
+
     generator:
         hidden_size: 768
         num_hidden_layers: 24
@@ -51,7 +51,7 @@ dataset:
         random_flip: True
 
 optimizer:
-    name: adamw 
+    name: adamw
     params:
         learning_rate: 4e-4
         beta1: 0.9

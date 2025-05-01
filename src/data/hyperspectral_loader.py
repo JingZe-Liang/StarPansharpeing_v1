@@ -257,9 +257,9 @@ def ms_pan_dir_paired_loader(
                 list((self.path / self.pan_dir_name).glob("*.tiff"))
                 + list((self.path) / self.pan_dir_name.glob("*.mat"))
             )
-            assert (
-                len(self.ms_paths) == len(self.pan_paths)
-            ), f"MS and PAN images are not paired, MS is {len(self.ms_paths)}, PAN is {len(self.pan_paths)}"
+            assert len(self.ms_paths) == len(self.pan_paths), (
+                f"MS and PAN images are not paired, MS is {len(self.ms_paths)}, PAN is {len(self.pan_paths)}"
+            )
 
         def __len__(self):
             return len(self.ms_paths)
@@ -345,9 +345,6 @@ if __name__ == "__main__":
         transform_prob=1.0,
         random_apply=(1, 2),
     )
-
-    import matplotlib.pyplot as plt
-    import torchvision.utils
 
     # * for loop the images
     for batch in test_loader:

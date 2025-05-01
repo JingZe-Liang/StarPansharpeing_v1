@@ -150,4 +150,4 @@ if __name__ == "__main__":
     for _ in range(20):
         N(lms, pan)
 
-    print(f"test time {(time.time()-t1)/20}")
+    print(f"test time {(time.time() - t1) / 20}")

@@ -127,9 +127,9 @@ class LIPIPSHyperpspectral(nn.Module):
         **kwargs,
     ):
         if model_type in ("vgg", "lpips-vgg"):
-            assert (
-                not compute_on_logits
-            ), "LPIPS-VGG does not support computing on logits"
+            assert not compute_on_logits, (
+                "LPIPS-VGG does not support computing on logits"
+            )
             if self.use_lpips_vgg:
                 model = LPIPS(net="vgg").eval()
             else:
@@ -154,9 +154,9 @@ class LIPIPSHyperpspectral(nn.Module):
                 "classifier": "logits",
             }
         elif model_type == "remote_clip_RN50":
-            assert (
-                "clip_model_ckpt_path" in kwargs
-            ), "clip_model_ckpt_path must be specified for remote_clip_RN50"
+            assert "clip_model_ckpt_path" in kwargs, (
+                "clip_model_ckpt_path must be specified for remote_clip_RN50"
+            )
 
             # Zihan note: this is a bit nasty, because it load the
             # whole clip model (with ununsed text model) but anyway, it is simple and works fine
@@ -401,17 +401,17 @@ class LIPIPSHyperpspectral(nn.Module):
             ), "LPIPS VGG is only supported for VGG model type"
 
         if isinstance(self.num_groups_to_select, float):
-            assert (
-                0 < self.num_groups_to_select <= 1.0
-            ), "num_groups_to_select must be between 0 and 1"
+            assert 0 < self.num_groups_to_select <= 1.0, (
+                "num_groups_to_select must be between 0 and 1"
+            )
         elif isinstance(self.num_groups_to_select, int):
-            assert (
-                self.num_groups_to_select > 0
-            ), "num_groups_to_select must be greater than 0"
+            assert self.num_groups_to_select > 0, (
+                "num_groups_to_select must be greater than 0"
+            )
         else:
-            assert (
-                self.num_groups_to_select is None
-            ), f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
+            assert self.num_groups_to_select is None, (
+                f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
+            )
 
     def __repr__(self):
         return (

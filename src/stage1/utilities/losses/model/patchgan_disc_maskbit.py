@@ -9,10 +9,9 @@ from typing import Any, Callable, Tuple
 import accelerate
 import torch
 import torch.nn.functional as F
-from torch import conv2d, nn
+from torch import nn
 
 sys.path.insert(0, __file__[: __file__.find("src")])
-from scripts.tests.test_fsdp_model import Conv
 from src.stage1.utilities.losses.model.triton_rms_norm import TritonRMSNorm2dFunc
 
 

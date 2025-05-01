@@ -15,7 +15,7 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
         data = einops.rearrange(img_feat, "bs l c -> (bs l) c")
         _back_kwargs = dict(pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0])
     else:
-        c = _shape[1]
+        _shape[1]
         data = einops.rearrange(img_feat, "bs c h w -> (bs h w) c")
         _back_kwargs = dict(
             pattern="(bs h w) k -> bs k h w",
@@ -73,8 +73,8 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     ), "Input feature tensor dtype must be float32 or float64 for SVD"
 
     _shape = img_feat.shape
-    device = img_feat.device
-    dtype = img_feat.dtype
+    img_feat.device
+    img_feat.dtype
 
     # Determine original feature dimension and reshape for PCA
     # PCA expects input in [N_samples, N_features] format.
@@ -106,9 +106,9 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
         )
 
     # Assert that the target dimension is achievable
-    assert (
-        pca_k <= c
-    ), f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
+    assert pca_k <= c, (
+        f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
+    )
     # Also assert that the number of samples is sufficient for SVD
     N_samples = data.shape[0]
     # SVD of A (m x n) where m >= n with full_matrices=False gives Vh (n x n).
@@ -239,9 +239,9 @@ if __name__ == "__main__":
                         h=_shape[2],
                         w=_shape[3],
                     )
-                assert (
-                    pca_k <= c
-                ), f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
+                assert pca_k <= c, (
+                    f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
+                )
 
                 pca = cuML_PCA(n_components=pca_k)
                 projected_data = pca.fit_transform(data)

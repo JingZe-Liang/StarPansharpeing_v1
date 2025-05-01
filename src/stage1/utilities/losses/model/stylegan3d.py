@@ -1,6 +1,6 @@
 import functools
 import math
-from typing import Callable, Optional, Union
+from typing import Callable, Union
 
 import torch
 import torch.nn as nn
@@ -156,9 +156,9 @@ class StyleGAN3DDiscriminator(nn.Module):
         current_duration = self.num_frames
         current_res = input_res
         for out_channel, t_ds in zip(channel_list[1:], temporal_downsample_list):
-            assert (
-                current_duration // t_ds > 0
-            ), "Inssufficient duration for temporal downsampling."
+            assert current_duration // t_ds > 0, (
+                "Inssufficient duration for temporal downsampling."
+            )
             ds_kernel = (t_ds, spatial_downsample_factor, spatial_downsample_factor)
             self.conv_blocks.append(
                 ResBlock(

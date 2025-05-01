@@ -13,7 +13,7 @@ Copyright (c) ZihanCao, University of Electronic Science and Technology of China
 """
 
 import math
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
@@ -657,7 +657,7 @@ class DeepseekV1MoE(nn.Module):
 
 
 if __name__ == "__main__":
-    import os
+    pass
 
     # 获取当前进程的rank
     # rank = int(os.getenv('RANK', 0))

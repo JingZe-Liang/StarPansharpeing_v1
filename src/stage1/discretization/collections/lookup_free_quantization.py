@@ -134,12 +134,12 @@ class LFQ(Module):
 
         # some assert validations
 
-        assert exists(dim) or exists(
-            codebook_size
-        ), "either dim or codebook_size must be specified for LFQ"
-        assert (
-            not exists(codebook_size) or log2(codebook_size).is_integer()
-        ), f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
+        assert exists(dim) or exists(codebook_size), (
+            "either dim or codebook_size must be specified for LFQ"
+        )
+        assert not exists(codebook_size) or log2(codebook_size).is_integer(), (
+            f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
+        )
 
         codebook_size = default(codebook_size, lambda: 2**dim)
         self.codebook_size = codebook_size
@@ -296,9 +296,9 @@ class LFQ(Module):
             x = rearrange(x, "b d ... -> b ... d")
             x, ps = pack_one(x, "b * d")
 
-        assert (
-            x.shape[-1] == self.dim
-        ), f"expected dimension of {self.dim} but received {x.shape[-1]}"
+        assert x.shape[-1] == self.dim, (
+            f"expected dimension of {self.dim} but received {x.shape[-1]}"
+        )
 
         x = self.project_in(x)
 

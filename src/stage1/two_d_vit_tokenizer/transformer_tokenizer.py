@@ -23,9 +23,9 @@ def _block_caulsal_mask_impl(sequence_length, device, block_size=16, **kwargs):
     """
     Create a block-causal mask
     """
-    assert (
-        sequence_length % block_size == 0
-    ), "for block causal masks sequence length must be divisible by block size"
+    assert sequence_length % block_size == 0, (
+        "for block causal masks sequence length must be divisible by block size"
+    )
     blocks = torch.ones(
         sequence_length // block_size, block_size, block_size, device=device
     )
@@ -365,9 +365,9 @@ class TransformerEncoder(nn.Module):
             x = x + self.positional_embedding.to(x.dtype)
         elif self.cross_frames:
             num_frames = x.shape[2]
-            assert (
-                num_frames <= self.num_frames
-            ), "Number of frames should be less or equal to the model setting"
+            assert num_frames <= self.num_frames, (
+                "Number of frames should be less or equal to the model setting"
+            )
             x = rearrange(
                 x,
                 "b c t (hh sh) (ww sw) -> b (t hh ww) (c sh sw)",
@@ -537,9 +537,9 @@ class TransformerDecoder(nn.Module):
             x = x + self.positional_embedding.to(x.dtype)
         else:
             num_frames = x.shape[1] // self.patches_per_frame
-            assert (
-                num_frames <= self.num_frames
-            ), "Number of frames should be less or equal to the model setting"
+            assert num_frames <= self.num_frames, (
+                "Number of frames should be less or equal to the model setting"
+            )
             tile_pos_embed = self.positional_embedding.repeat(num_frames, 1)
             tile_tem_embed = self.temporal_positional_embedding[
                 :num_frames

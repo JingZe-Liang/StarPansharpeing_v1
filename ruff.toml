@@ -45,5 +45,3 @@ convention = "numpy"
 
 [lint.mccabe]
 max-complexity = 10
-
-

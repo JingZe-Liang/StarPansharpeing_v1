@@ -2,7 +2,7 @@ import math
 import torch
 from functools import partial
 from torch.optim.optimizer import Optimizer
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from utils import misc

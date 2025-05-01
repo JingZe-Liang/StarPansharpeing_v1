@@ -1,5 +1,3 @@
-from .hyperspectral_percep_loss import LIPIPSHyperpspectral
-from .logit_laplace_loss import LogitLaplaceLoss
 from .loss import (
     DinoDiscV2,
     NLayerDiscriminator,

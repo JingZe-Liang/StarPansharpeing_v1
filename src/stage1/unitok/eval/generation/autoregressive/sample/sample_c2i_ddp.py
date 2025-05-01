@@ -44,9 +44,9 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
 
 def main(args):
     # Setup PyTorch:
-    assert (
-        torch.cuda.is_available()
-    ), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    assert torch.cuda.is_available(), (
+        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    )
     torch.set_grad_enabled(False)
 
     # Setup DDP:
@@ -146,13 +146,13 @@ def main(args):
     )
     if rank == 0:
         print(f"Total number of images that will be sampled: {total_samples}")
-    assert (
-        total_samples % dist.get_world_size() == 0
-    ), "total_samples must be divisible by world_size"
+    assert total_samples % dist.get_world_size() == 0, (
+        "total_samples must be divisible by world_size"
+    )
     samples_needed_this_gpu = int(total_samples // dist.get_world_size())
-    assert (
-        samples_needed_this_gpu % n == 0
-    ), "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    assert samples_needed_this_gpu % n == 0, (
+        "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    )
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar

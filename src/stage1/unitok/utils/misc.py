@@ -73,7 +73,7 @@ class DistLogger(object):
 class TensorboardLogger(object):
     def __init__(self, log_dir, filename_suffix):
         try:
-            import tensorflow_io as tfio
+            pass
         except:
             pass
         from torch.utils.tensorboard import SummaryWriter
@@ -213,9 +213,9 @@ def create_npz_from_sample_folder(sample_folder: str):
     pngs = glob.glob(os.path.join(sample_folder, "*.png")) + glob.glob(
         os.path.join(sample_folder, "*.PNG")
     )
-    assert (
-        len(pngs) == 50_000
-    ), f"{len(pngs)} png files found in {sample_folder}, but expected 50,000"
+    assert len(pngs) == 50_000, (
+        f"{len(pngs)} png files found in {sample_folder}, but expected 50,000"
+    )
     for png in tqdm(pngs, desc="Building .npz file from samples (png only)"):
         with Image.open(png) as sample_pil:
             sample_np = np.asarray(sample_pil).astype(np.uint8)

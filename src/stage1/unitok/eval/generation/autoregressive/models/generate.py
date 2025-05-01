@@ -2,11 +2,9 @@
 #   gpt-fast: https://github.com/pytorch-labs/gpt-fast/blob/main/generate.py
 #   DiT:      https://github.com/facebookresearch/DiT/blob/main/models.py
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
 import torch._dynamo.config
 import torch._inductor.config
-import copy
 
 
 # torch._inductor.config.coordinate_descent_tuning = True

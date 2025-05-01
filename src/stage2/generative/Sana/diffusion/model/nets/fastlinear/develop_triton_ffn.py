@@ -18,7 +18,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import ipdb
 import torch
 from modules.mb_conv_pre_glu import MBConvPreGLU
 from modules.triton_mb_conv_pre_glu import TritonMBConvPreGLU
@@ -27,7 +26,6 @@ from modules.utils.dtype import get_dtype_from_str
 from modules.utils.export_onnx import export_onnx
 from omegaconf import OmegaConf
 from torch import nn
-from torch.nn import functional as F
 from torchprofile import profile_macs
 
 

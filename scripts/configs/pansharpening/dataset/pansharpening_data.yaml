@@ -5,12 +5,12 @@ cfgs:
   num_workers: 2
 
 dataset_paths:
-  wv3_train: 
+  wv3_train:
   wv3_val:
-    
+
   qb_train:
   qb_val:
-    
+
   gf2_train:
   gf2_val:
 
@@ -33,5 +33,3 @@ val:
   to_neg_1_1: true
   resample: true
   latent_ext: safetensors
-
-

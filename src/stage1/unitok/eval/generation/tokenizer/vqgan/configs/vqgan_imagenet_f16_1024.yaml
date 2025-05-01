@@ -29,4 +29,3 @@ model:
         disc_start: 0
         disc_weight: 0.8
         codebook_weight: 1.0
-        

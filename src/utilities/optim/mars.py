@@ -233,8 +233,6 @@ class MARS(Optimizer):
         if exists(closure):
             with torch.enable_grad():
                 loss = closure()
-        real_update = 0
-        real_update_wo_lr = 0
         gamma = self.gamma
         # import pdb
         # pdb.set_trace()

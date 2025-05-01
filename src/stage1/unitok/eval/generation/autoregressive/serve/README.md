@@ -7,7 +7,7 @@ pip install vllm==0.4.1
 
 ### Comparison (A100)
 
-Method | params | baseline(s) | vllm(s) | speed-up ratio 
+Method | params | baseline(s) | vllm(s) | speed-up ratio
 --- |:---:|:---:|:---:|:---:
 [GPT-B](fake_json/GPT-B.json)    | 111M | 7.80    | 2.39      |  326 %
 [GPT-L](fake_json/GPT-L.json)    | 343M | 13.72   | 3.48      |  380 %

@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
-from src.stage1.lora.moe_deepseek import AddAuxiliaryLoss, DeepseekV2MLP
+from src.stage1.lora.moe_deepseek import AddAuxiliaryLoss
 from src.stage1.lora.moe_deepseek import MoEGate as MoEGateDPSK
 
 
@@ -469,9 +469,9 @@ class LoRAMergedLinear(nn.Linear, LoRALayer):
             lora_dropout=lora_dropout,
             merge_weights=merge_weights,
         )
-        assert (
-            out_features % len(enable_lora) == 0
-        ), "The length of enable_lora must divide out_features"
+        assert out_features % len(enable_lora) == 0, (
+            "The length of enable_lora must divide out_features"
+        )
         self.enable_lora = enable_lora
         self.fan_in_fan_out = fan_in_fan_out
         # Actual trainable parameters

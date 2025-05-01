@@ -11,7 +11,6 @@ License: GPL v3
 Copyright (c) ZihanCao, University of Electronic Science and Technology of China (UESTC), Mathematical School
 """
 
-import sys
 from functools import partial
 from warnings import warn
 
@@ -57,7 +56,6 @@ def dict_to_str(d, decimals=4):
 class NonAnalysis(object):
     def __init__(self):
         self.acc_ave = {}  # only used as attribution
-        pass
 
     def __call__(self, *args, **kwargs):
         pass
@@ -192,7 +190,7 @@ class AnalysisPanAcc(object):
         return d_ave
 
     def sam_ergas_psnr_cc_batch(self, b_gt, b_pred):
-        n = b_gt.shape[0]
+        b_gt.shape[0]
         # input shape should be [B, C, H, W]
         acc_ds = {"SAM": 0.0, "ERGAS": 0.0, "PSNR": 0.0, "CC": 0.0}
         for i, (img1, img2) in enumerate(zip(b_gt, b_pred)):
@@ -336,9 +334,9 @@ def psnr_one_img(img_gt, img_test):
     :param img_test: test or inference image, numpy array, shape [H, W, C]
     :return: PSNR, float type
     """
-    assert (
-        img_gt.shape == img_test.shape
-    ), "image 1 and image 2 should have the same size"
+    assert img_gt.shape == img_test.shape, (
+        "image 1 and image 2 should have the same size"
+    )
     return peak_signal_noise_ratio(img_gt, img_test)
 
 
@@ -358,9 +356,9 @@ def psnr_batch_tensor_metric(b_gt, b_pred):
 
 
 def ssim_one_image(img_gt, img_test, channel_axis=0):
-    assert (
-        img_gt.shape == img_test.shape
-    ), "image 1 and image 2 should have the same size"
+    assert img_gt.shape == img_test.shape, (
+        "image 1 and image 2 should have the same size"
+    )
     return structural_similarity(
         img_gt, img_test, channel_axis=channel_axis, data_range=1.0
     )

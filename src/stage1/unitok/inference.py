@@ -1,10 +1,9 @@
 import argparse
-import os
 
 import torch
 from models.unitok import UniTok
 from PIL import Image
-from torchvision.transforms import InterpolationMode, transforms
+from torchvision.transforms import transforms
 from utils.config import Args
 from utils.data import normalize_01_into_pm1
 

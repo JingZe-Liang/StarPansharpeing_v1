@@ -7,10 +7,10 @@ All rights reserved. This work should only be used for nonprofit purposes.
 """
 
 """
- Description: 
+ Description:
            Generate a bank of filters shaped on the MTF of the sensor. Each filter
-           corresponds to a band acquired by the sensor. 
- 
+           corresponds to a band acquired by the sensor.
+
  Interface:
            h = genMTF(ratio, sensor, nbands)
 
@@ -21,10 +21,10 @@ All rights reserved. This work should only be used for nonprofit purposes.
 
  Outputs:
            h:                  Gaussian filter mimicking the MTF of the MS sensor.
- 
+
  References:
          G. Vivone, M. Dalla Mura, A. Garzelli, and F. Pacifici, "A Benchmarking Protocol for Pansharpening: Dataset, Pre-processing, and Quality Assessment", IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, vol. 14, pp. 6102-6118, 2021.
-         G. Vivone, M. Dalla Mura, A. Garzelli, R. Restaino, G. Scarpa, M. O. Ulfarsson, L. Alparone, and J. Chanussot, "A New Benchmark Based on Recent Advances in Multispectral Pansharpening: Revisiting Pansharpening With Classical and Emerging Pansharpening Methods", IEEE Geoscience and Remote Sensing Magazine, vol. 9, no. 1, pp. 53 - 81, March 2021.         
+         G. Vivone, M. Dalla Mura, A. Garzelli, R. Restaino, G. Scarpa, M. O. Ulfarsson, L. Alparone, and J. Chanussot, "A New Benchmark Based on Recent Advances in Multispectral Pansharpening: Revisiting Pansharpening With Classical and Emerging Pansharpening Methods", IEEE Geoscience and Remote Sensing Magazine, vol. 9, no. 1, pp. 53 - 81, March 2021.
 """
 
 import numpy as np

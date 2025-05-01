@@ -179,9 +179,9 @@ class ModifiedResNet(nn.Module):
                     nn.init.zeros_(param)
 
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
-        assert (
-            unlocked_groups == 0
-        ), "partial locking not currently supported for this model"
+        assert unlocked_groups == 0, (
+            "partial locking not currently supported for this model"
+        )
         for param in self.parameters():
             param.requires_grad = False
         if freeze_bn_stats:

@@ -34,7 +34,6 @@ import cv2
 from termcolor import colored
 
 from diffusion import DPMS
-from diffusion.data.datasets.utils import ASPECT_RATIO_512_TEST, ASPECT_RATIO_1024_TEST
 from diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
@@ -486,7 +485,6 @@ if __name__ == "__main__":
 
     if args.debug:
         print(f"debug mode, use fixed items")
-        pass
 
     for idx, item in enumerate(items):
         # args.seed = idx

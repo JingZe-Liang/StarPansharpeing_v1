@@ -3,7 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 import torch.distributed.tensor as dtensor
-from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, Shard
+from torch.distributed.tensor import DeviceMesh, Shard
 
 
 def main():

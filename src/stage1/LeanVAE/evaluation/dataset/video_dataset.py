@@ -10,9 +10,6 @@ import pickle
 import decord
 from torch.nn import functional as F
 from .transform import ToTensorVideo, CenterCropVideo
-from torchvision.transforms._transforms_video import (
-    CenterCropVideo as TVCenterCropVideo,
-)
 from torchvision.transforms import Lambda, Compose, Resize
 import torch
 import os

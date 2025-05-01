@@ -215,17 +215,17 @@ def D_s(img_fake, img_lm, pan, satellite="QuickBird", scale=4, block_size=32, q=
     assert img_fake.ndim == img_lm.ndim == 3, "MS images must be 3D!"
     H_f, W_f, C_f = img_fake.shape
     H_r, W_r, C_r = img_lm.shape
-    assert (
-        H_f // H_r == W_f // W_r == scale
-    ), "Spatial resolution should be compatible with scale"
+    assert H_f // H_r == W_f // W_r == scale, (
+        "Spatial resolution should be compatible with scale"
+    )
     assert C_f == C_r, "Fake and lm should have the same number of bands!"
     # fake and pan
     assert pan.ndim == 3, "Panchromatic image must be 3D!"
     H_p, W_p, C_p = pan.shape
     assert C_p == 1, "size of 3rd dim of Panchromatic image must be 1"
-    assert (
-        H_f == H_p and W_f == W_p
-    ), "Pan's and fake's spatial resolution should be the same"
+    assert H_f == H_p and W_f == W_p, (
+        "Pan's and fake's spatial resolution should be the same"
+    )
 
     # get LRPan, 2D
     pan_lr = mtf_resize(pan, satellite=satellite, scale=scale)  # PAN downsampled

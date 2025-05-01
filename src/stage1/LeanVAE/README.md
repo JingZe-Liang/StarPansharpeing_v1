@@ -4,11 +4,11 @@ https://github.com/user-attachments/assets/a2a4814a-192b-4cc4-b1a3-d612caa1d872
 
 We present **LeanVAE**, a lightweight Video VAE designed for ultra-efficient video compression and scalable generation in Latent Video Diffusion Models (LVDMs).
 
-- **Lightweight & Efficient**: Only **40M parameters**, significantly reducing computational overhead 📉  
-- **Optimized for High-Resolution Videos**: Encodes and decodes a **17-frame 1080p video** in **3 seconds** using only **15GB of GPU memory** *(without tiling inference)* 🎯  
-- **State-of-the-Art Video Reconstruction**: Competes with leading Video VAEs 🏆  
-- **Versatile**: Supports both **images and videos**, preserving **causality in latent space** 📽️  
-- **Evidenced by Diffusion Model**: Enhances visual quality in video generation ✨  
+- **Lightweight & Efficient**: Only **40M parameters**, significantly reducing computational overhead 📉
+- **Optimized for High-Resolution Videos**: Encodes and decodes a **17-frame 1080p video** in **3 seconds** using only **15GB of GPU memory** *(without tiling inference)* 🎯
+- **State-of-the-Art Video Reconstruction**: Competes with leading Video VAEs 🏆
+- **Versatile**: Supports both **images and videos**, preserving **causality in latent space** 📽️
+- **Evidenced by Diffusion Model**: Enhances visual quality in video generation ✨
 
 ---
 ## 🛠️ **Installation**
@@ -19,7 +19,7 @@ cd LeanVAE
 pip install -r requirements.txt
 ```
 ---
-## 🎯 **Quick Start** 
+## 🎯 **Quick Start**
 **Train LeanVAE**
 ```bash
 bash scripts/train.sh
@@ -48,7 +48,7 @@ bash scripts/eval.sh
 The code for video generation will be released soon. Stay tuned!
 | Model                    | Dataset      | FVD ⬇️  | Checkpoint 📥                        |
 | ---------- | ---------- | ---------- | ----------- |
-| Latte + LeanVAE-chn4 | SkyTimelapse |49.59 | [sky-chn4.ckpt](https://huggingface.co/Yumic/LeanVAE/resolve/main/sky-dim4.pt?download=true) | 
+| Latte + LeanVAE-chn4 | SkyTimelapse |49.59 | [sky-chn4.ckpt](https://huggingface.co/Yumic/LeanVAE/resolve/main/sky-dim4.pt?download=true) |
 | Latte + LeanVAE-chn4 | UCF101 |164.45 | [ucf-chn4.ckpt](https://huggingface.co/Yumic/LeanVAE/resolve/main/ucf-dim4.pt?download=true) |
 | Latte + LeanVAE-chn16 | SkyTimelapse |95.15 | [sky-chn16.ckpt](https://huggingface.co/Yumic/LeanVAE/resolve/main/sky-dim16.pt?download=true) |
 | Latte + LeanVAE-chn16 | UCF101 |175.33 | [ucf-chn16.ckpt](https://huggingface.co/Yumic/LeanVAE/resolve/main/ucf-dim16.pt?download=true) |
@@ -65,21 +65,21 @@ model = LeanVAE.load_from_checkpoint("path/to/ckpt", strict=False)
 # 🔄 Encode & Decode an Image
 image, image_rec = model.inference(image)
 
-# 🖼️ Encode an image → Get latent :  
+# 🖼️ Encode an image → Get latent :
 latent = model.encode(image) # (B, C, H, W) → (B, d, 1, H/8, W/8), where d=4 or 16
 
-# 🖼️ Decode latent representation → Reconstruct image 
-image = model.decode(latent, is_image=True) # (B, d, 1, H/8, W/8) → (B, C, H, W)  
+# 🖼️ Decode latent representation → Reconstruct image
+image = model.decode(latent, is_image=True) # (B, d, 1, H/8, W/8) → (B, C, H, W)
 
 
 # 🔄 Encode & Decode a Video
 video, video_rec = model.inference(video) ## Frame count must be 4n+1 (e.g., 5, 9, 13, 17...)
 
 # 🎞️ Encode Video → Get Latent Space
-latent = model.encode(video)  # (B, C, T+1, H, W) → (B, d, T/4+1, H/8, W/8), where d=4 or 16 
+latent = model.encode(video)  # (B, C, T+1, H, W) → (B, d, T/4+1, H/8, W/8), where d=4 or 16
 
 # 🎞️ Decode Latent → Reconstruct Video
-video = model.decode(latent) # (B, d, T/4+1, H/8, W/8) → (B, C, T+1, H, W)  
+video = model.decode(latent) # (B, d, T/4+1, H/8, W/8) → (B, C, T+1, H, W)
 
 # ⚡ Enable **Temporal Tiling Inference** for Long Videos
 model.set_tile_inference(True)
@@ -114,23 +114,23 @@ To train LeanVAE, you need to create metadata files listing the video paths, gro
 This project is released under the **MIT License**. See the `LICENSE` file for details.
 
 
-## 🔥 **Why Choose LeanVAE?**  
-LeanVAE is **fast, lightweight and powerful**, enabling high-quality video compression and generation with minimal computational cost.  
+## 🔥 **Why Choose LeanVAE?**
+LeanVAE is **fast, lightweight and powerful**, enabling high-quality video compression and generation with minimal computational cost.
 
-If you find this work useful, consider **starring ⭐ the repository** and citing our paper!  
+If you find this work useful, consider **starring ⭐ the repository** and citing our paper!
 
 ---
 
-## 📝 **Cite Us**  
+## 📝 **Cite Us**
 ```bibtex
 @misc{cheng2025leanvaeultraefficientreconstructionvae,
-      title={LeanVAE: An Ultra-Efficient Reconstruction VAE for Video Diffusion Models}, 
+      title={LeanVAE: An Ultra-Efficient Reconstruction VAE for Video Diffusion Models},
       author={Yu Cheng and Fajie Yuan},
       year={2025},
       eprint={2503.14325},
       archivePrefix={arXiv},
       primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2503.14325}, 
+      url={https://arxiv.org/abs/2503.14325},
 }
 ```
 ---

@@ -4,7 +4,6 @@ import torch
 
 sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.LeanVAE.LeanVAE.models.autoencoder import (
-    LeanVAE,
     LeanVAE2D,
     LeanVAEConfig,
 )
@@ -32,7 +31,7 @@ def main():
     enc = model_2d.encode(x)
     print(enc.shape)
 
-    y = model_2d(x)
+    model_2d(x)
 
     # x, recon = y
     # print(recon.shape)

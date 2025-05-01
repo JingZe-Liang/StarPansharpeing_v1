@@ -97,12 +97,12 @@ class FIDStatistics:
         sigma1 = np.atleast_2d(sigma1)
         sigma2 = np.atleast_2d(sigma2)
 
-        assert (
-            mu1.shape == mu2.shape
-        ), f"Training and test mean vectors have different lengths: {mu1.shape}, {mu2.shape}"
-        assert (
-            sigma1.shape == sigma2.shape
-        ), f"Training and test covariances have different dimensions: {sigma1.shape}, {sigma2.shape}"
+        assert mu1.shape == mu2.shape, (
+            f"Training and test mean vectors have different lengths: {mu1.shape}, {mu2.shape}"
+        )
+        assert sigma1.shape == sigma2.shape, (
+            f"Training and test covariances have different dimensions: {sigma1.shape}, {sigma2.shape}"
+        )
 
         diff = mu1 - mu2
 

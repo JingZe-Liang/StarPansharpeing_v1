@@ -133,9 +133,9 @@ class ResidualFSQ(Module):
         # and the network should be able to reconstruct
 
         if quantize_dim < self.num_quantizers:
-            assert (
-                self.quantize_dropout > 0.0
-            ), "quantize dropout must be greater than 0 if you wish to reconstruct from a signal with less fine quantizations"
+            assert self.quantize_dropout > 0.0, (
+                "quantize dropout must be greater than 0 if you wish to reconstruct from a signal with less fine quantizations"
+            )
             indices = F.pad(indices, (0, self.num_quantizers - quantize_dim), value=-1)
 
         # take care of quantizer dropout

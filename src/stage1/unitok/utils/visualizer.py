@@ -10,7 +10,6 @@ from typing import Tuple
 import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 import PIL.Image as PImage
-import PIL.ImageDraw as PImageDraw
 
 from utils import misc
 from utils.data import pil_load

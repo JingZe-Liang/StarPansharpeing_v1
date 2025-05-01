@@ -1,7 +1,7 @@
 """Pretokenization script for TiTok and RAR.
 
 This file may have been modified by Bytedance Ltd. and/or its affiliates (“Bytedance's Modifications”).
-All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates. 
+All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates.
 
 Reference:
     https://github.com/LTH14/mar/blob/main/main_cache.py
@@ -16,16 +16,13 @@ torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --rdzv-endpoint=localhost:9
     --data_path ${PATH_TO_IMAGENET} --cached_path ${PATH_TO_SAVE_JSONL}
 """
 
-import builtins
 import argparse
 import datetime
 import numpy as np
 from PIL import Image
-import torch.distributed as dist
 
 import os
 import time
-from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn

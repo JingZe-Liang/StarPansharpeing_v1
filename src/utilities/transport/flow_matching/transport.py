@@ -221,9 +221,9 @@ class Transport:
 
         def body_fn(x, t, model, **model_kwargs):
             model_output = drift_fn(x, t, model, **model_kwargs)
-            assert (
-                model_output.shape == x.shape
-            ), "Output shape from ODE solver must match input shape"
+            assert model_output.shape == x.shape, (
+                "Output shape from ODE solver must match input shape"
+            )
             return model_output
 
         return body_fn

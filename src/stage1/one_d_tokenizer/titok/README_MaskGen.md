@@ -133,10 +133,10 @@ from huggingface_hub import hf_hub_download
 from modeling.tatitok import TATiTok
 from modeling.maskgen import MaskGen_VQ, MaskGen_KL
 
-torch.manual_seed(42)                 
-torch.cuda.manual_seed(42)            
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False   
+torch.backends.cudnn.benchmark = False
 
 # VQ Tokenizer: load tokenizer tatitok_bl128_vq
 tatitok_vq_tokenizer = TATiTok.from_pretrained("turkeyju/tokenizer_tatitok_bl128_vq")

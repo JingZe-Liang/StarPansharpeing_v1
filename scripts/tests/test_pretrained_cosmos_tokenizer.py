@@ -1,8 +1,6 @@
 import sys
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torchmetrics.image import PeakSignalNoiseRatio
 
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")

@@ -3,7 +3,6 @@ import imageio
 
 import math
 import numpy as np
-import skvideo.io
 
 import sys
 import pdb as pdb_original

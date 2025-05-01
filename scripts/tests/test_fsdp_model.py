@@ -1,13 +1,11 @@
-from functools import partial
-
 import accelerate
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.utils import FullyShardedDataParallelPlugin, ProjectConfiguration
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from accelerate.utils import FullyShardedDataParallelPlugin
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy, wrap
+from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed.tensor import DTensor, Replicate, Shard, ones
 
 
@@ -148,6 +146,6 @@ def main():
 
 
 if __name__ == "__main__":
-    import os
+    pass
 
     main()

@@ -90,7 +90,7 @@ class SimVQ(Module):
         return self.code_transform(self.frozen_codebook)
 
     def indices_to_codes(self, indices):
-        implicit_codebook = self.codebook
+        self.codebook
 
         frozen_codes = get_at("[c] d, b ... -> b ... d", self.frozen_codebook, indices)
         quantized = self.code_transform(frozen_codes)

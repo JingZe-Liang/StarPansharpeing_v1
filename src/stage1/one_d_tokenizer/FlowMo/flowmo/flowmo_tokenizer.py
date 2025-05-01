@@ -1,6 +1,5 @@
 import ast
 import sys
-from pathlib import Path
 
 import torch
 from accelerate.state import AcceleratorState, is_initialized

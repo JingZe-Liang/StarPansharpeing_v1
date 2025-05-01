@@ -81,9 +81,9 @@ def center_crop_arr(pil_image, image_size):
 
 def main(args):
     # Setup PyTorch:
-    assert (
-        torch.cuda.is_available()
-    ), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    assert torch.cuda.is_available(), (
+        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    )
     torch.set_grad_enabled(False)
 
     # Setup env

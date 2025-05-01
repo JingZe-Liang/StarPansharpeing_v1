@@ -1,10 +1,7 @@
-import os
 from typing import Generator
 
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-from torch.utils._pytree import tree_flatten, tree_map
 
 from .utils import to_dist, to_local
 
@@ -138,10 +135,9 @@ class Muon(torch.optim.Optimizer):
             closure (Callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        loss = None
         if closure is not None:
             with torch.enable_grad():
-                loss = closure()
+                closure()
 
         for group in self.param_groups:
             lr = group["lr"]

@@ -195,9 +195,9 @@ class FSQuantizer(nn.Module):
             z = rearrange(z, "b d ... -> b ... d")
             z, ps = pack_one(z, "b * d")
 
-        assert (
-            z.shape[-1] == self.dim
-        ), f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
+        assert z.shape[-1] == self.dim, (
+            f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
+        )
 
         z = self.project_in(z)
 
@@ -444,9 +444,9 @@ class LFQuantizer(nn.Module):
         self.dtype = ignore_kwargs.get("dtype", torch.float32)
 
         if entropy_loss:
-            assert (
-                2**codebook_dim == codebook_size
-            ), "codebook size must be 2 ** codebook_dim"
+            assert 2**codebook_dim == codebook_size, (
+                "codebook size must be 2 ** codebook_dim"
+            )
             self.codebook_size = codebook_size
 
             self.register_buffer(

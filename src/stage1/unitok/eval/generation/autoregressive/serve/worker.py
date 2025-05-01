@@ -78,9 +78,9 @@ class Worker(WorkerBase):
             init_cached_hf_modules()
         self.vision_language_config = vision_language_config
         if self.vision_language_config:
-            assert (
-                not self.lora_config
-            ), "To be tested: vision language model with LoRA settings."
+            assert not self.lora_config, (
+                "To be tested: vision language model with LoRA settings."
+            )
 
         self.model_runner = ModelRunner(
             model_config,

@@ -1,9 +1,26 @@
 repos:
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: "v0.3.4"
+    rev: "v0.11.7"
     hooks:
       - id: ruff
         args: [--fix]
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok)
       - id: ruff-format
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0 # Use a specific tag or commit hash, check for latest version
+    hooks:
+      - id: check-added-large-files # Checks for files larger than 5MB by default
+        args: ["--maxkb=10240"] # Optional: Set max size to 10MB (10240 KB)
+      - id: check-merge-conflict # Checks for files that contain merge conflict strings
+      - id: trailing-whitespace # Optional: Removes trailing whitespace
+      - id: end-of-file-fixer # Optional: Ensures files end with a newline
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1 # Check for the latest version
+    hooks:
+      - id: autoflake
+        args:
+          - --in-place
+          - --remove-all-unused-imports
+          - --remove-unused-variables
+        # Add other autoflake arguments if needed

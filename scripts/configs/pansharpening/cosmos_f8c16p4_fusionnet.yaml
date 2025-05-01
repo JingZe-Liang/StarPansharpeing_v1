@@ -14,7 +14,7 @@ defaults:
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
-    
+
 
 dataset:
   cfgs:
@@ -34,7 +34,7 @@ train:
   resume_path:
   ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
 
-  pansharpeing_loss: 
+  pansharpeing_loss:
     _target_: torch.nn.L1Loss()
 
   pansharp_optim:
@@ -54,7 +54,7 @@ train:
     reduced_factor: 2
     min_lr: 1.0e-5
 
-  
+
   log:
     run_comment: cosmos_large_f8c16p4
     log_with_time: True

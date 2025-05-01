@@ -14,9 +14,9 @@ device = "cuda" if torch.cuda_is_available() else "cpu"
 
 def main(args):
     # Setup PyTorch:
-    assert (
-        torch.cuda.is_available()
-    ), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    assert torch.cuda.is_available(), (
+        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    )
     torch.set_grad_enabled(False)
 
     # create and load gpt model
@@ -55,7 +55,7 @@ def main(args):
     gpt_model.push_to_hub(repo_id)
 
     # reload
-    model = TransformerHF.from_pretrained(repo_id)
+    TransformerHF.from_pretrained(repo_id)
 
 
 if __name__ == "__main__":

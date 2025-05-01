@@ -1,9 +1,8 @@
 from itertools import chain
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from .utils import to_dist, to_local
 

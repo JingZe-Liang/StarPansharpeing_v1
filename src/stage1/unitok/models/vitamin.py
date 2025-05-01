@@ -53,7 +53,6 @@ from timm.models.layers import (
 from timm.models.vision_transformer import VisionTransformer, checkpoint_filter_fn
 from timm.models.vision_transformer_hybrid import HybridEmbed
 from torch.utils.checkpoint import checkpoint
-from utils.config import Args
 
 DropPath.__repr__ = lambda self: f"{type(self).__name__}(...)"
 
@@ -374,7 +373,7 @@ class HybridEmbed(nn.Module):
             if isinstance(o, (list, tuple)):
                 o = o[-1]  # last feature if backbone outputs list/tuple of features
             feature_size = o.shape[-2:]
-            feature_dim = o.shape[1]
+            o.shape[1]
             backbone.train(training)
 
         assert (

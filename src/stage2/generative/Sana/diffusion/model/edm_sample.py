@@ -19,7 +19,6 @@
 #     ADM:   https://github.com/openai/guided-diffusion/blob/main/guided_diffusion
 #     IDDPM: https://github.com/openai/improved-diffusion/blob/main/improved_diffusion/gaussian_diffusion.py
 
-import random
 
 import numpy as np
 from tqdm import tqdm

@@ -15,7 +15,7 @@ model:
         vit_dec_patch_size: 16
         num_latent_tokens: 32
         finetune_decoder: True
-    
+
     generator:
         model_type: "ViT"
         hidden_size: 768
@@ -33,7 +33,7 @@ model:
         randomize_temperature: 9.5
         guidance_scale: 4.5
         guidance_decay: "linear"
-        
+
 
 dataset:
     preprocessing:

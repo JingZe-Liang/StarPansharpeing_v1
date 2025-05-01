@@ -5,7 +5,6 @@
 #   llama:    https://github.com/facebookresearch/llama/blob/main/llama/model.py
 #   gpt-fast: https://github.com/pytorch-labs/gpt-fast/blob/main/model.py
 #   PixArt:   https://github.com/PixArt-alpha/PixArt-alpha/blob/master/diffusion/model/nets/PixArt_blocks.py
-import math
 from dataclasses import dataclass
 from typing import List, Optional
 

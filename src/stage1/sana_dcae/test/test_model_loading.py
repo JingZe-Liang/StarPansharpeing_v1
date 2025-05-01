@@ -1,22 +1,16 @@
 import sys
 
 import accelerate
-import ipdb
 import PIL.Image
 import torch
-from fvcore.nn import FlopCountAnalysis, flop_count_table, parameter_count_table
 from tqdm import trange
 
 sys.path.insert(0, __file__[: __file__.find("src")])
-from src.stage1.sana_dcae.ae_model_zoo import (
-    create_dc_ae_model_cfg,
-)
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
     DCAE,
-    dc_ae_f8c16,
     dc_ae_f32c32,
 )
-from src.utilities.optim.sana_came import CAME8BitWrapper, CAMEWrapper
+from src.utilities.optim.sana_came import CAME8BitWrapper
 
 # ae_cfg = create_dc_ae_model_cfg("dc-ae-f8c16")
 # ae_cfg = dc_ae_f8c16("dc-ae-f8c16", None)
@@ -175,7 +169,6 @@ ae, optimzier = accelerator.prepare(ae, optimizer)
 
 last_layer = accelerator.unwrap_model(ae).get_last_layer()
 print(last_layer)
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 
 _is_fsdp = True
