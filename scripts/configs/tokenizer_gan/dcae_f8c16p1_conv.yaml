@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: sana_cdae_f8c16p1
+  - tokenizer: sana_dcae_f8c16p1_conv
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -18,7 +18,7 @@ defaults:
 
 dataset:
   dataset_names_to_bs:
-    MMSeg_YREB: 16
+    MMSeg_YREB: 18
     DCF_2019: 32
 
 ema:
@@ -30,9 +30,6 @@ vq_loss:
   repa_loss_weight: 1.5
   quantizer_type: null
   quantizer_options:
-    # quantizer_loss_weight: 0.1
-    # codebook_enlarge_ratio: 3
-    # codebook_enlarge_steps: 2000
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -45,10 +42,10 @@ vq_loss:
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
-  disc_loss: non_saturate
+  disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
-  reconstruction_loss_type: dwt
+  disc_weight: 0.8
+  reconstruction_loss_type: l1
 
 train:
   tokenizer_name: dcae
@@ -58,7 +55,7 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 200_000
+  max_steps: 500_000
   save_every: 500
   seperate_enc_dec: false
   resume_path:
@@ -68,18 +65,18 @@ train:
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.LAMB
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 8.0e-4
-    betas: [0.8, 0.999]
+    lr: 6.0e-4
     eps: 1.0e-8
+    betas: [0.9, 0.999]
 
   disc_optimizer:
-    _target_: src.utilities.optim.LAMB
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 8.0e-4
-    betas: [0.5, 0.999]
+    lr: 6.0e-4
     eps: 1.0e-8
+    betas: [0.5, 0.999]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -100,7 +97,7 @@ train:
     min_lr: 2.0e-5
 
   log:
-    run_comment: cdae_f8c16_repa
+    run_comment: dcae_f8c16_conv_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10

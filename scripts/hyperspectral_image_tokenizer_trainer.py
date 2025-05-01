@@ -1725,7 +1725,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "sana_f8c16p1_conv"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1740,9 +1740,11 @@ _configs_dict = {
     # bsq quantized
     "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f16c36p4",
     # sana CDAE
-    "sana_f8c16p1": "cdae_f8c16p1",
-    "sana_f8c16p1_bsq": "cdae_f8c16p1_bsq",
-    "sana_f16c16p1": "cdae_f16c16p1",
+    "sana_f8c16p1": "dcae_f8c16p1",
+    "sana_f8c16p1_conv": "dcae_f8c16p1_conv",
+    "sana_f8c16p1_bsq": "dcae_f8c16p1_bsq",
+    "sana_f16c16p1": "dcae_f16c16p1",
+    "sana_f16c16p1_conv": "dcae_f16c16p1_conv",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
     # leanvae
     "lean_vae_f8c16p4": "lean_vae_f8c16p4",

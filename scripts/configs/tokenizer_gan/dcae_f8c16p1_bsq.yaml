@@ -120,7 +120,7 @@ train:
     min_lr: 2.0e-5
 
   log:
-    run_comment: cdae_f8c32g32_bsq_repa
+    run_comment: dcae_f8c32g32_bsq_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10

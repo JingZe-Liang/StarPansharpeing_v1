@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   - dataset: hyperspectral
-  - tokenizer: sana_cdae_f16c16p1
+  - tokenizer: sana_dcae_f16c16p1_conv
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -17,7 +17,7 @@ defaults:
 
 dataset:
   dataset_names_to_bs:
-    MMSeg_YREB: 16
+    MMSeg_YREB: 24
     DCF_2019: 32
 
 ema:
@@ -46,7 +46,7 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
+  disc_weight: 0.8
   reconstruction_loss_type: l1
 
 train:
@@ -61,7 +61,7 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_dcae/2025-04-29_03-18-23_cdae_f16c16_repa/ema
+  ema_load_path:
   only_load_tokenizer: true
   grad_check: false
   finetune_cfg:
@@ -69,18 +69,18 @@ train:
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 5.0e-4
-    betas: [0.8, 0.95]
+    lr: 6.0e-4
     eps: 1.0e-8
+    betas: [0.9, 0.999]
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.MARS
     _partial_: true
-    lr: 5.0e-4
-    betas: [0.5, 0.95]
+    lr: 6.0e-4
     eps: 1.0e-8
+    betas: [0.5, 0.999]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -101,7 +101,7 @@ train:
     min_lr: 2.0e-5
 
   log:
-    run_comment: cdae_f16c16_repa
+    run_comment: dcae_f16c16_pure_conv_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10

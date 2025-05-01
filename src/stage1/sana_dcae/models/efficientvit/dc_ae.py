@@ -676,6 +676,34 @@ class DCAE(nn.Module):
             return None
 
 
+def dc_ae_f8c16_pure_conv(
+    name: str, pretrained_path: str, extra: DictConfig | None = None
+) -> DCAEConfig:
+    if name in ["dc-ae-f8c16"]:
+        cfg_str = (
+            "latent_channels=16 "
+            "encoder.block_type=[ResBlock,ResBlock,ResBlock,ResBlock] "
+            "encoder.width_list=[128,256,512,512] encoder.depth_list=[0,4,2,2] "
+            "decoder.block_type=[ResBlock,ResBlock,ResBlock,ResBlock] "
+            "decoder.width_list=[128,256,512,512] decoder.depth_list=[0,6,4,2] "
+            "decoder.norm=rms2d decoder.act=silu "
+            "encoder.act_checkpoint=false "
+            "decoder.act_checkpoint=false "
+            "scaling_factor=0.41407"
+        )
+    else:
+        raise NotImplementedError
+
+    cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
+    cfg = OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
+    if extra is not None:
+        cfg = OmegaConf.merge(cfg, extra)
+    cfg: DCAEConfig = OmegaConf.to_object(cfg)
+    cfg.pretrained_path = pretrained_path
+
+    return cfg
+
+
 def dc_ae_f8c16(
     name: str, pretrained_path: str, extra: DictConfig | None = None
 ) -> DCAEConfig:
@@ -686,6 +714,34 @@ def dc_ae_f8c16(
             "encoder.width_list=[128,256,512,512] encoder.depth_list=[0,4,2,2] "
             "decoder.block_type=[ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "decoder.width_list=[128,256,512,512] decoder.depth_list=[0,6,4,2] "
+            "decoder.norm=rms2d decoder.act=silu "
+            "encoder.act_checkpoint=false "
+            "decoder.act_checkpoint=false "
+            "scaling_factor=0.41407"
+        )
+    else:
+        raise NotImplementedError
+
+    cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
+    cfg = OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg)
+    if extra is not None:
+        cfg = OmegaConf.merge(cfg, extra)
+    cfg: DCAEConfig = OmegaConf.to_object(cfg)
+    cfg.pretrained_path = pretrained_path
+
+    return cfg
+
+
+def dc_ae_f16c16_pure_conv(
+    name: str, pretrained_path: str, extra: DictConfig | None = None
+) -> DCAEConfig:
+    if name in ["dc-ae-f16c16"]:
+        cfg_str = (
+            "latent_channels=16 "
+            "encoder.block_type=[ResBlock,ResBlock,ResBlock,ResBlock,ResBlock] "
+            "encoder.width_list=[128,256,256,512,512] encoder.depth_list=[0,4,4,2,2] "
+            "decoder.block_type=[ResBlock,ResBlock,ResBlock,ResBlock,ResBlock] "
+            "decoder.width_list=[128,256,256,512,512] decoder.depth_list=[0,4,6,2,2] "
             "decoder.norm=rms2d decoder.act=silu "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "

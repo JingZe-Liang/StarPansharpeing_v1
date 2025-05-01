@@ -4,7 +4,12 @@ import torch
 from omegaconf import OmegaConf
 
 sys.path.append(__file__[: __file__.find("scripts")])
-from src.stage1.sana_dcae.models.efficientvit.dc_ae import DCAE, dc_ae_f16c16
+from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
+    DCAE,
+    dc_ae_f16c16,
+    dc_ae_f8c16_pure_conv,
+    dc_ae_f16c16_pure_conv,
+)
 
 # model
 extra_cfg = OmegaConf.create(
@@ -30,9 +35,13 @@ extra_cfg = OmegaConf.create(
         "repa_hidden_size": 512,
     }
 )
-cfg = dc_ae_f16c16(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
+cfg = dc_ae_f16c16_pure_conv(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
 model = DCAE(cfg).cuda(1)
 
-x = torch.randn(1, 3, 512, 512).cuda(1)
-y = model(x)
-print(y)
+# x = torch.randn(1, 3, 512, 512).cuda(1)
+# y = model(x)
+# print(y)
+
+from fvcore.nn import parameter_count_table
+
+print(parameter_count_table(model))

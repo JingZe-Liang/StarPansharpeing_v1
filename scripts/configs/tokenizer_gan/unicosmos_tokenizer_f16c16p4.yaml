@@ -79,7 +79,7 @@ train:
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
-    betas: [0.8, 0.95]
+    betas: [0.8, 0.999]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -87,7 +87,7 @@ train:
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
-    betas: [0.5, 0.95]
+    betas: [0.5, 0.999]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
