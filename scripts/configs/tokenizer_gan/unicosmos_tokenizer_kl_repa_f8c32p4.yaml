@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: uni_cosmos_f8c16p4
+  - tokenizer: uni_cosmos_f8c16p4_kl
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -20,48 +20,38 @@ defaults:
 dataset:
   used: MMSeg_YREB
   dataset_names_to_bs:
-    MMSeg_YREB: 22
+    MMSeg_YREB: 32
     DCF_2019: 12
   transform_prob: 0.5
 
 vq_loss:
   repa_loss_weight: 1.5
-  quantizer_type:
+  quantizer_type: null
   quantizer_options:
+    # kl_weight: 1.0e-5
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: random
     img_resize:
     dino_img_size: 224
-  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
+  disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
   use_actnorm: false
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
-  disc_loss: non_saturate
+  disc_loss: hinge
   ssim_weight: 0.2
   disc_weight: 0.5
-  reconstruction_loss_type: dwt
-
+  reconstruction_loss_type: l1
 
 tokenizer:
   hook_for_repa: true
-  hook_module: decoder.decoder.mid.block_2
-  act_checkpoint: false
-  force_not_attn: true
-  # enc_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/encoder/model.safetensors
-  # dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
-  uni_tokenizer_path: /Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-27_23-52-47_cosmos_pretrained_f8c16p4_repa_kl/ema/tokenizer/model.safetensors
-  loading_type: pretrained
-  use_channel_drop: true
-  channel_drop_config:
-    learnable: false
-    drop_type: uniform_4
-    max_channels: 16
-    img_size: 32
-    drop_prob: 0.3
+  use_kl: false
+  uni_tokenizer_path: /Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-26_04-23-16_cosmos_pretrained_f8c16p4_repa_kl/ema/discriminator/model.safetensors
+  latent_channels: 32
+  z_channels: 32
 
 ema:
   beta: 0.995
@@ -76,30 +66,31 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 500_000
-  save_every: 1000
+  max_steps: 5000_000
+  save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: #/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer/runs/stage1_cosmos/2025-04-30_23-54-53_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  ema_load_path:
   only_load_tokenizer: true
+  grad_check: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.LAMB
     _partial_: true
-    lr: 4.0e-4
+    lr: 8.0e-4
+    betas: [0.8, 0.99]
     eps: 1.0e-8
-    foreach: true
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.LAMB
     _partial_: true
-    lr: 4.0e-4
+    lr: 8.0e-4
+    betas: [0.6, 0.99]
     eps: 1.0e-8
-    foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -120,7 +111,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_pretrained_f8c16p4_percep_remote_clip_RN50
+    run_comment: cosmos_pretrained_f8c16p4_repa_kl
     log_with_time: True
     visualize_every: 200
     log_every: 10

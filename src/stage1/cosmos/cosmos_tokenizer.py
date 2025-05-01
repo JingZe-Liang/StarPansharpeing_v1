@@ -42,14 +42,16 @@ class NestChannelDrop(nn.Module):
     def __init__(
         self,
         learnable: bool = False,
-        drop_type: str = "exp_1",
+        drop_type: str = "uniform_4",
         max_channels: int = 12,  # MMSeg dataset
         img_size: tuple[int] | int = 256,
+        drop_prob: float = 0.5,
     ):
         super().__init__()
         self.learnable = learnable
         self.max_channels = max_channels
         self.img_size = _to_two_tuple(img_size)
+        self.drop_prob = drop_prob
 
         drop_type, args = drop_type.lower().split("_")
         self.drop_type = drop_type
@@ -67,9 +69,13 @@ class NestChannelDrop(nn.Module):
             self.dropped_x = nn.Parameter(torch.zeros(1, 1, *self.img_size))
             self.dropped_x.data.normal_(0, 0.2)
         else:
-            self.register_buffer("dropped_x", torch.zeros(1, 1, *self.img_size))
+            self.register_buffer(
+                "dropped_x", torch.zeros(1, 1, *self.img_size), persistent=False
+            )
 
-        self.register_buffer("channel_arange", torch.arange(self.max_channels))
+        self.register_buffer(
+            "channel_arange", torch.arange(self.max_channels), persistent=False
+        )
 
     def exponential_sampling(self, lambda_val, size=1):
         u = np.random.uniform(size=size)
@@ -87,6 +93,11 @@ class NestChannelDrop(nn.Module):
         return k
 
     def forward(self, z, inference_channels: int | None = None):
+        if (self.training and np.random.random() > self.drop_prob) or (
+            not self.training and inference_channels is None
+        ):
+            return z
+
         if inference_channels is not None:
             assert not self.training
             assert inference_channels <= self.max_channels
