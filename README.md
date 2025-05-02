@@ -55,6 +55,12 @@ We are cooking the codes, stay tuned.
 
 ## Logs
 
+2025/05/02
+
+> 1. MARS optimzier will collapse when starting with a pretrained checkpointed tokenizer. But using AdamW will not collapose.
+> 2. The DCAE with only convolution layers underperforms than Cosmos tokenizer (pure conv version).
+> 3. DCAE with linear attention seems work? (but convergence is slow).
+
 2025/05/01
 
 seems that channel drop does not work well (slow convergence and low quality).

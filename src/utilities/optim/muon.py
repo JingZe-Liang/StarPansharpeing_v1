@@ -4,8 +4,10 @@ Copied from https://github.com/MoonshotAI/Moonlight/blob/master/examples/toy_tra
 
 import math
 from typing import Iterable
+from .utils import to_local, to_dist
 
 import torch
+from torch.distributed.tensor import DTensor
 
 try:
     from flash_muon_cuda import matmul_transpose_assign
@@ -196,10 +198,19 @@ class Muon(torch.optim.Optimizer):
                 else:
                     g = buf
 
+                # to local
+                meta = None
+                if isinstance(g, DTensor):
+                    g, meta = to_local(g, keep_sharded=False)
+
                 if self.defaults["use_cuda_kernel"]:
                     u = fast_newtonschulz(g, steps=group["ns_steps"])
                 else:
                     u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+
+                # back to shard
+                if meta is not None:
+                    g = to_dist(g, **meta)
 
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
@@ -247,22 +258,30 @@ class Muon(torch.optim.Optimizer):
         return loss
 
     @classmethod
-    def clear_muon_adamw_params(cls, named_params: Iterable):
-        # ndim <= 2 in muon optimization
-        muon_params = [
-            p
-            for name, p in named_params
-            if p.ndim == 2 and "embed_tokens" not in name and "lm_head" not in name
-        ]
+    def clear_muon_adamw_params(
+        cls,
+        named_params: Iterable,
+        ignored_keys_for_muon: tuple | list = ("embed_tokens", "lm_head"),
+    ):
+        # # ndim <= 2 in muon optimization
+        # muon_params = [
+        #     p
+        #     for name, p in named_params
+        #     if p.ndim >= 2 and name not in ignored_keys_for_muon
+        # ]
 
-        # ndim > 2 or embed_tokens or lm_head in adamw optimization
-        adamw_params = [
-            p
-            for name, p in named_params
-            if not (
-                p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-            )
-        ]
+        # # ndim > 2 or embed_tokens or lm_head in adamw optimization
+        # adamw_params = [
+        #     p
+        #     for name, p in named_params
+        #     if not (p.ndim < 2 and "embed_tokens" not in name and "lm_head" not in name)
+        # ]
+
+        for name, p in named_params:
+            if p.ndim >= 2 and name not in ignored_keys_for_muon:
+                muon_params.append(p)
+            else:
+                adamw_params.append(p)
 
         return muon_params, adamw_params
 

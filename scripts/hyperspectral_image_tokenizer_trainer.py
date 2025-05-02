@@ -495,7 +495,7 @@ class CosmosHyperspectralTokenizerTrainer:
         # base model to train
         self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
 
-    def _get_tokenizer_params(self, for_optimizer=False):
+    def _get_tokenizer_params(self, for_optimizer=False, with_name: bool = False):
         # key to params
         def get_tokenizer_params_from_keys(keys: list[str]):
             return [
@@ -522,6 +522,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if not for_optimizer:
             if self.sep_enc_dec:
+                assert not with_name, "with_name is not supported for sep enc dec"
+
                 not_pretrained_keys = [
                     *self._enc_model_mody_keys["not_pretrained_keys"],
                     *self._dec_model_mody_keys["not_pretrained_keys"],
@@ -677,14 +679,25 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
             else:
                 if not self._is_peft_tuning:
-                    params = list(self.tokenizer.parameters())
+                    if with_name:
+                        params = dict(self.tokenizer.named_parameters())
+                    else:
+                        params = list(self.tokenizer.parameters())
                     self.log_msg(f"[Optimizer]: finetune all params")
                 else:
-                    params = [
-                        p
-                        for n, p in self.tokenizer.named_parameters()
-                        if p.requires_grad
-                    ]
+                    if with_name:
+                        params = dict()
+                        for n, p in self.tokenizer.named_parameters():
+                            if p.requires_grad:
+                                params[n] = p
+                    else:
+                        params = [
+                            p
+                            for n, p in self.tokenizer.named_parameters()
+                            if p.requires_grad
+                        ]
+
+                    # TODO: buggy to compute the perceptage of the learnabel params
                     _len_params_tuned = len(params)
                     _len_all_params = len(list(self.tokenizer.parameters()))
                     self.log_msg(
@@ -698,9 +711,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return params
 
-    def _get_disc_params(self, for_optimizer=False):
+    def _get_disc_params(self, for_optimizer=False, with_name: bool = False):
         if not for_optimizer:
-            return list(self.vq_loss_fn.discriminator.parameters())
+            if with_name:
+                return dict(self.vq_loss_fn.discriminator.named_parameters())
+            else:
+                return list(self.vq_loss_fn.discriminator.parameters())
         else:
             return self.vq_loss_fn.discriminator.state_dict()
 
@@ -711,11 +727,27 @@ class CosmosHyperspectralTokenizerTrainer:
             or "optimizer"
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            tokenizer_optim = hydra.utils.instantiate(
-                self.train_cfg.tokenizer_optimizer
-            )(self._get_tokenizer_params())
-            disc_optim = hydra.utils.instantiate(self.train_cfg.disc_optimizer)(
-                self._get_disc_params()
+
+            def _optimizer_creater(optimizer_cfg, params_getter):
+                if "get_moun_optimizer" in optimizer_cfg._target_:
+                    self.log_msg("[Optimizer]: using muon optimizer")
+                    # is muon optimizer function
+                    named_params = params_getter(with_name=True)
+                    return hydra.utils.instantiate(optimizer_cfg)(
+                        named_parameters=named_params
+                    )
+                else:
+                    self.log_msg(
+                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
+                    )
+                    params = params_getter(with_name=False)
+                    return hydra.utils.instantiate(optimizer_cfg)(params)
+
+            tokenizer_optim = _optimizer_creater(
+                self.train_cfg.tokenizer_optimizer, self._get_tokenizer_params
+            )
+            disc_optim = _optimizer_creater(
+                self.train_cfg.disc_optimizer, self._get_disc_params
             )
         else:
             tokenizer_optim = DummyOptim([{"params": self._get_tokenizer_params()}])

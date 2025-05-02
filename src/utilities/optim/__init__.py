@@ -20,7 +20,8 @@ from .kron_mars import KronMars
 from .mars import MARS
 
 # from https://github.com/samsja/muon_fsdp_2/blob/main/src/zeroband/muon.py
-from .moun_fsdp_v2 import Muon as MounFSDP_v2
+from .muon import Muon
+from .muon_fsdp_v2 import Muon as MounFSDP_v2
 from .muon_fsdp import Muon as MounFSDP_v1
 from .sana_came import CAME8BitWrapper, CAMEWrapper, Lion
 
@@ -37,6 +38,7 @@ torch.serialization.add_safe_globals(
         Kron,
         KronMars,
         MARS,
+        Muon,
         MounFSDP_v2,
         MounFSDP_v1,
         CAME,
@@ -45,3 +47,15 @@ torch.serialization.add_safe_globals(
         Lion,
     ]
 )
+
+
+from typing import Iterable
+from loguru import logger
+
+
+def get_moun_optimizer(named_parameters: Iterable, **other_muon_kwargs):
+    muon_p, adamw_p = Muon.clear_muon_adamw_params(named_parameters)
+    logger.debug(f"muon params have: {muon_p}")
+    logger.debug(f"adamw params have: {adamw_p}")
+
+    return Muon(muon_params=muon_p, adamw_params=adamw_p, **other_muon_kwargs)
