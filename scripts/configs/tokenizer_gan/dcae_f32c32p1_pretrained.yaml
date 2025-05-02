@@ -48,20 +48,19 @@ train:
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    # _target_: torch.optim.AdamW
-    _target_: src.utilities.optim.MARS
+    _target_: torch.optim.AdamW
     _partial_: true
-    lr: 3.0e-4
-    lr_1d: 2.0e-4
-    weight_decay: 1.0e-6
-    betas: [0.9, 0.95]
+    lr: 5.0e-4
+    betas: [0.8, 0.95]
+    eps: 1.0e-8
+    foreach: true
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 1.0e-6
-    betas: [0.9, 0.95]
+    lr: 5.0e-4
+    betas: [0.5, 0.95]
+    eps: 1.0e-8
     foreach: true
 
   # tokenizer_optimizer:

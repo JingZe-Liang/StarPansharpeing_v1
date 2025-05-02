@@ -4,8 +4,9 @@ hydra:
     dir: .
 
 defaults:
+  # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: sana_cdae_f8c16p1
+  - tokenizer: sana_dcae_f8c16p1
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -25,33 +26,10 @@ ema:
   update_after_step: 1000
   update_every: 2
 
-tokenizer:
-  cfg:
-    extra:
-      latent_channels: 32
-      repa_hidden_size: 512
-      use_quant_conv: true
-      quant_type: bsq
-      quant_cfg:
-        embed_dim: 32
-        beta: 0.0
-        gamma0: 1.0
-        gamma: 1.0
-        zeta: 1.0
-        inv_temperature: 1.0
-        cb_entropy_compute: "group"
-        l2_norm: true
-        input_format: "bchw"
-        persample_entropy_compute: "analytical"
-        group_size: 1
-
 vq_loss:
   repa_loss_weight: 1.5
-  quantizer_type: bsq
+  quantizer_type: null
   quantizer_options:
-    quantizer_loss_weight: 0.1
-    codebook_enlarge_ratio: 3
-    codebook_enlarge_steps: 2000
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -66,7 +44,7 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
+  disc_weight: 0.8
   reconstruction_loss_type: l1
 
 train:
@@ -77,12 +55,11 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 400_000
+  max_steps: 500_000
   save_every: 500
   seperate_enc_dec: false
   resume_path:
   ema_load_path:
-  grad_check: false
   finetune_cfg:
     refine_decoder_head_n_layers: 2
     adapt_latent_n_layers: 2
@@ -90,25 +67,25 @@ train:
   tokenizer_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 5.0e-4
-    betas: [0.8, 0.95]
+    lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
+    betas: [0.8, 0.95]
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 5.0e-4
-    betas: [0.5, 0.95]
+    lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
+    betas: [0.5, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 1
+    num_cycles: 2
     reduced_factor: 2
     min_lr: 2.0e-5
 
@@ -117,17 +94,17 @@ train:
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 1
+    num_cycles: 2
     reduced_factor: 2
     min_lr: 2.0e-5
 
   log:
-    run_comment: dcae_f8c32g32_bsq_repa
+    run_comment: dcae_f8c16_lita_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 1000

@@ -1740,10 +1740,10 @@ _configs_dict = {
     # bsq quantized
     "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f16c36p4",
     # sana CDAE
-    "sana_f8c16p1": "dcae_f8c16p1",
+    "sana_f8c16p1_lita": "dcae_f8c16p1_attn",
     "sana_f8c16p1_conv": "dcae_f8c16p1_conv",
     "sana_f8c16p1_bsq": "dcae_f8c16p1_bsq",
-    "sana_f16c16p1": "dcae_f16c16p1",
+    "sana_f16c16p1_lita": "dcae_f16c16p1_attn",
     "sana_f16c16p1_conv": "dcae_f16c16p1_conv",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",
     # leanvae

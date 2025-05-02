@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   - dataset: hyperspectral
-  - tokenizer: sana_cdae_f8c16p1
+  - tokenizer: sana_dcae_f16c16p1
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -17,7 +17,7 @@ defaults:
 
 dataset:
   dataset_names_to_bs:
-    MMSeg_YREB: 8
+    MMSeg_YREB: 16
     DCF_2019: 32
 
 ema:
@@ -25,33 +25,13 @@ ema:
   update_after_step: 1000
   update_every: 2
 
-tokenizer:
-  cfg:
-    extra:
-      latent_channels: 32
-      repa_hidden_size: 512
-      use_quant_conv: true
-      quant_type: bsq
-      quant_cfg:
-        embed_dim: 32
-        beta: 0.0
-        gamma0: 1.0
-        gamma: 1.0
-        zeta: 1.0
-        inv_temperature: 1.0
-        cb_entropy_compute: "group"
-        l2_norm: true
-        input_format: "bchw"
-        persample_entropy_compute: "analytical"
-        group_size: 1
-
 vq_loss:
   repa_loss_weight: 1.5
-  quantizer_type: bsq
+  quantizer_type: null
   quantizer_options:
-    quantizer_loss_weight: 0.1
-    codebook_enlarge_ratio: 3
-    codebook_enlarge_steps: 2000
+    # quantizer_loss_weight: 0.1
+    # codebook_enlarge_ratio: 3
+    # codebook_enlarge_steps: 2000
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -66,7 +46,7 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
+  disc_weight: 0.8
   reconstruction_loss_type: l1
 
 train:
@@ -81,7 +61,8 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path:
+  ema_load_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_dcae/2025-04-29_14-30-21_cdae_f16c16_repa/ema
+  only_load_tokenizer: true
   grad_check: false
   finetune_cfg:
     refine_decoder_head_n_layers: 2
@@ -122,12 +103,12 @@ train:
     min_lr: 2.0e-5
 
   log:
-    run_comment: dcae_f8c32g32_bsq_repa
+    run_comment: dcae_f16c16_lita_repa
     log_with_time: True
     visualize_every: 200
     log_every: 10
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 1000
