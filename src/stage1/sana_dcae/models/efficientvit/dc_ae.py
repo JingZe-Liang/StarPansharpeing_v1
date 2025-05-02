@@ -32,8 +32,10 @@ from ...models.nn.ops import (
     ConvLayer,
     ConvPixelShuffleUpSampleLayer,
     ConvPixelUnshuffleDownSampleLayer,
+    DownsamplePadConv,
     EfficientViTBlock,
     IdentityLayer,
+    UpsampleRepeatConv,
     InterpolateConvUpSampleLayer,
     OpSequential,
     PixelUnshuffleChannelAveragingDownSampleLayer,
@@ -52,8 +54,8 @@ class EncoderConfig:
     width_list: tuple[int, ...] = (128, 256, 512, 512, 1024, 1024)
     depth_list: tuple[int, ...] = (2, 2, 2, 2, 2, 2)
     block_type: Any = "ResBlock"
-    norm: str = "rms2d"
-    act: str = "silu"
+    norm: Any = "rms2d"
+    act: Any = "silu"
     downsample_block_type: str = "ConvPixelUnshuffle"
     downsample_match_channel: bool = True
     downsample_shortcut: Optional[str] = "averaging"
@@ -182,6 +184,8 @@ def build_downsample_block(
             norm=None,
             act_func=None,
         )
+    elif block_type == "PadConv":
+        block = DownsamplePadConv(in_channels=in_channels)
     elif block_type == "ConvPixelUnshuffle":
         block = ConvPixelUnshuffleDownSampleLayer(
             in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
@@ -207,6 +211,8 @@ def build_upsample_block(
         block = ConvPixelShuffleUpSampleLayer(
             in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
         )
+    elif block_type == "RepeatConv":
+        block = UpsampleRepeatConv(in_channels)
     elif block_type == "InterpolateConv":
         block = InterpolateConvUpSampleLayer(
             in_channels=in_channels, out_channels=out_channels, kernel_size=3, factor=2
@@ -385,8 +391,8 @@ class Encoder(nn.Module):
                 width=width,
                 depth=depth,
                 block_type=block_type,
-                norm=cfg.norm,
-                act=cfg.act,
+                norm=cfg.norm[stage_id] if isinstance(cfg.norm, list) else cfg.norm,
+                act=cfg.act[stage_id] if isinstance(cfg.act, list) else cfg.act,
                 input_width=width,
             )
 
@@ -712,9 +718,12 @@ def dc_ae_f8c16(
             "latent_channels=16 "
             "encoder.block_type=[ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "encoder.width_list=[128,256,512,512] encoder.depth_list=[0,4,2,2] "
+            "encoder.downsample_block_type=Conv "
+            "encoder.norm=[gn,gn,rms2d,rms2d] encoder.act=[relu,relu,silu,silu] "
             "decoder.block_type=[ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "decoder.width_list=[128,256,512,512] decoder.depth_list=[0,6,4,2] "
-            "decoder.norm=rms2d decoder.act=silu "
+            "decoder.upsample_block_type=InterpolateConv "
+            "decoder.norm=[gn,gn,rms2d,rms2d] decoder.act=[relu,relu,silu,silu] "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "
             "scaling_factor=0.41407"
@@ -768,9 +777,12 @@ def dc_ae_f16c16(
             "latent_channels=16 "
             "encoder.block_type=[ResBlock,ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "encoder.width_list=[128,256,256,512,512] encoder.depth_list=[0,4,4,2,2] "
+            "encoder.downsample_block_type=Conv "
+            "encoder.norm=[gn,gn,gn,rms2d,rms2d] encoder.act=[relu,relu,relu,silu,silu] "
             "decoder.block_type=[ResBlock,ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "decoder.width_list=[128,256,256,512,512] decoder.depth_list=[0,4,6,2,2] "
-            "decoder.norm=rms2d decoder.act=silu "
+            "decoder.upsample_block_type=InterpolateConv "
+            "decoder.norm=[gn,gn,gn,rms2d,rms2d] decoder.act=[relu,relu,relu,silu,silu] "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "
             "scaling_factor=0.41407"

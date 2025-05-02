@@ -59,26 +59,26 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage1_dcae/2025-05-02_19-13-05_dcae_f8c16_lita_repa/ema
+  only_load_tokenizer: false
   finetune_cfg:
     refine_decoder_head_n_layers: 2
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 4.0e-4
-    eps: 1.0e-8
-    foreach: true
-    betas: [0.8, 0.95]
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
+    lr: 2.0e-4
+    weight_decay: 1.0e-3
     eps: 1.0e-8
     foreach: true
-    betas: [0.5, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

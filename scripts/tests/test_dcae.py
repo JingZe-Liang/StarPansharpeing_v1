@@ -6,9 +6,12 @@ from omegaconf import OmegaConf
 sys.path.append(__file__[: __file__.find("scripts")])
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
     DCAE,
+    dc_ae_f8c16,
     dc_ae_f16c16,
     dc_ae_f8c16_pure_conv,
     dc_ae_f16c16_pure_conv,
+    dc_ae_f32c32,
+    dc_ae_f64c128,
 )
 from src.utilities.optim import get_moun_optimizer
 
@@ -36,14 +39,15 @@ extra_cfg = OmegaConf.create(
         "repa_hidden_size": 512,
     }
 )
-cfg = dc_ae_f16c16_pure_conv(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
+# cfg = dc_ae_f32c32(name="dc-ae-f32c32-in-1.0", extra=extra_cfg, pretrained_path=None)
+# cfg = dc_ae_f64c128(name="dc-ae-f64c128-in-1.0", extra=extra_cfg, pretrained_path=None)
+cfg = dc_ae_f16c16(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
 model = DCAE(cfg).cuda(1)
 
 opt = get_moun_optimizer(
     model.named_parameters(),
     lr=1e-3,
-    weight_decay=1e-2,
-    adamw_betas=(0.95, 0.99),
+    weight_decay=0.1,
     use_cuda_kernel=False,
 )
 # opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-2, foreach=True)

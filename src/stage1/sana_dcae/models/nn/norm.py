@@ -78,6 +78,7 @@ REGISTERED_NORM_DICT: dict[str, type] = {
     "ln2d": LayerNorm2d,
     "trms2d": TritonRMSNorm2d,
     "rms2d": RMSNorm2d,
+    "gn": lambda num_features: nn.GroupNorm(32, num_features, eps=1e-6, affine=True),
 }
 
 

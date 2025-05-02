@@ -705,7 +705,8 @@ class CosmosHyperspectralTokenizerTrainer:
                     )
 
             # * add with quantizer params
-            params += quant_params
+            if self.sep_enc_dec:
+                params += quant_params
         else:
             raise NotImplementedError(f"not implemented")
 
@@ -1489,7 +1490,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
 
-    def load_from_ema_or_lora(self, ema_path: str, strict: bool = True):
+    def load_from_ema_or_lora(self, ema_path: str, strict: bool = False):
         ##! FIXME: if is loaded after FSDP2 shard, it won't work
 
         ema_path = Path(ema_path)
@@ -1757,7 +1758,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "sana_f8c16p1_conv"
+_key = "sana_f8c32p1_bsq"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1774,7 +1775,7 @@ _configs_dict = {
     # sana CDAE
     "sana_f8c16p1_lita": "dcae_f8c16p1_attn",
     "sana_f8c16p1_conv": "dcae_f8c16p1_conv",
-    "sana_f8c16p1_bsq": "dcae_f8c16p1_bsq",
+    "sana_f8c32p1_bsq": "dcae_f8c32p1_bsq",
     "sana_f16c16p1_lita": "dcae_f16c16p1_attn",
     "sana_f16c16p1_conv": "dcae_f16c16p1_conv",
     "sana_f32c32p1_pretrained": "cdae_f32c32p1_pretrained",

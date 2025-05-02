@@ -1,5 +1,8 @@
 """
 Copied from https://github.com/MoonshotAI/Moonlight/blob/master/examples/toy_train.py
+
+distributed version from MagtronLLM:
+https://github.com/NVIDIA/Megatron-LM/pull/1428/files/f432fbe45c169aeb5a0805ff6f41e13f989c6730#diff-8fe91f4096ff232fc6f97b17e60e619eda92b6dffc80b4573a23e06aa56d2559
 """
 
 import math
@@ -17,7 +20,12 @@ try:
 except ImportError:
     __url = "https://github.com/nil0x9/flash-muon"
     _flash_moun_cuda_available = False
-    print(f"Flash-Muon-CUDA not installed, please install it from {__url}")
+    print(
+        "Flash-Muon-CUDA not installed, "
+        f"please install it from {__url} if you want to use the cuda kernel ns optimization"
+    )
+
+_cuda_dim_in_min = 8
 
 
 # This code snippet is a modified version adapted from the following GitHub repository:
@@ -182,6 +190,9 @@ class Muon(torch.optim.Optimizer):
             #           Muon           #
             ############################
 
+            # TODO: add DDP support !!
+            # check the original implementation: https://github.com/KellerJordan/Muon/blob/master/muon.py
+
             params = [p for p in group["params"] if self.state[p]["use_muon"]]
             # import pdb; pdb.set_trace()
             lr = group["lr"]
@@ -215,7 +226,10 @@ class Muon(torch.optim.Optimizer):
                 if isinstance(g, DTensor):
                     g, meta = to_local(g, keep_sharded=False)
 
-                if self.defaults["use_cuda_kernel"]:
+                if (
+                    self.defaults["use_cuda_kernel"]
+                    and min(list(g.shape)) % _cuda_dim_in_min == 0
+                ):  # cuda cuda constraint
                     u = fast_newtonschulz(g, steps=group["ns_steps"])
                 else:
                     u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
@@ -231,8 +245,6 @@ class Muon(torch.optim.Optimizer):
                 p.data.mul_(1 - lr * wd)
 
                 # apply update
-                # print(f"change {u.norm()}")
-                # p.data.add_(u, alpha=-adjusted_lr)
                 p.data.add_(u.view(_orig_g_shape), alpha=-adjusted_lr)
 
             ############################
@@ -274,7 +286,7 @@ class Muon(torch.optim.Optimizer):
     @classmethod
     def clear_muon_adamw_params(
         cls,
-        named_params: Iterable,
+        named_params: Iterable | dict,
         ignored_keys_for_muon: tuple | list = ("embed_tokens", "lm_head"),
     ):
         # # ndim <= 2 in muon optimization
@@ -293,6 +305,9 @@ class Muon(torch.optim.Optimizer):
 
         muon_params = []
         adamw_params = []
+
+        if isinstance(named_params, dict):
+            named_params = named_params.items()
 
         for name, p in named_params:
             if p.requires_grad:

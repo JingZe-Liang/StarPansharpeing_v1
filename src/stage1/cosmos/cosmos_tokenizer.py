@@ -157,9 +157,11 @@ class ContinuousImageTokenizer(nn.Module):
             self._repa_proj = build_mlp(512, 768, 768)
 
         self.quantizer_type = kwargs.pop("quantizer_type", None)
-        assert self.quantizer_type in ["kl", "bsq", None], (
-            "quantizer_type should be bsq or kl"
-        )
+        assert self.quantizer_type in [
+            "kl",
+            "bsq",
+            None,
+        ], "quantizer_type should be bsq or kl"
         if self.quantizer_type == "kl":
             if z_factor != 2:
                 logging.warning(
@@ -527,6 +529,49 @@ class ContinuousImageTokenizer(nn.Module):
             if not self.decoder.decoder._wrap_fsdp_last_layer
             else "decoder.decoder.conv_out.wrap_mod",
         ]
+
+    def register_layer_output_hooks(self):
+        self._per_layer_norms = {}
+        self._next_call_norm_flag = False
+
+        def _output_norm_hook(module, input, output):
+            if not self._next_call_norm_flag:
+                return output
+            else:
+                self._next_call_norm_flag = False
+
+                _per_layer_dict_name = module._norm_hook_name
+                _norm = output.norm()
+                self._per_layer_norms[_per_layer_dict_name] = _norm
+                return output
+
+        from itertools import chain
+
+        for _m_name, _m in chain(
+            self.encoder.encoder.down.block.named_children(),
+            self.encoder.encoder.down.attn.named_children(),
+            self.encoder.encoder.mid.named_children(),
+            [
+                ("encoder.conv_in", self.encoder.encoder.conv_in),
+                ("encoder.conv_out", self.encoder.encoder.conv_out),
+            ],
+            self.decoder.decoder.up.block.named_children(),
+            self.decoder.decoder.up.attn.named_children(),
+            self.decoder.decoder.mid.named_children(),
+            [
+                ("decoder.conv_in", self.decoder.decoder.conv_in),
+            ],
+        ):
+            logging.info(f"register norm hook for {_m_name}")
+            setattr(_m, "_norm_hook_name", _m_name)
+            _m.register_forward_hook(_output_norm_hook)
+
+    def get_layer_output_norms(self):
+        norms = getattr(self, "_per_layer_norms", None)
+        if norms is not None:
+            self._per_layer_norms = {}
+
+        return norms
 
 
 class DiagonalGaussianDistribution(object):
