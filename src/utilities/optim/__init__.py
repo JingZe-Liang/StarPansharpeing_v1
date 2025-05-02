@@ -50,12 +50,9 @@ torch.serialization.add_safe_globals(
 
 
 from typing import Iterable
-from loguru import logger
 
 
 def get_moun_optimizer(named_parameters: Iterable, **other_muon_kwargs):
     muon_p, adamw_p = Muon.clear_muon_adamw_params(named_parameters)
-    logger.debug(f"muon params have: {muon_p}")
-    logger.debug(f"adamw params have: {adamw_p}")
 
     return Muon(muon_params=muon_p, adamw_params=adamw_p, **other_muon_kwargs)

@@ -8,6 +8,7 @@ from .utils import to_local, to_dist
 
 import torch
 from torch.distributed.tensor import DTensor
+from loguru import logger
 
 try:
     from flash_muon_cuda import matmul_transpose_assign
@@ -22,7 +23,7 @@ except ImportError:
 # This code snippet is a modified version adapted from the following GitHub repository:
 # https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.compile
-def zeropower_via_newtonschulz5(G, steps):
+def zeropower_via_newtonschulz5(G, steps: int):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -32,23 +33,26 @@ def zeropower_via_newtonschulz5(G, steps):
     where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
-    assert len(G.shape) == 2
+    assert (
+        G.ndim >= 2
+    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
-    if G.size(0) > G.size(1):
-        X = X.T
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
     # Ensure spectral norm is at most 1
-    X = X / (X.norm() + 1e-7)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations
     for _ in range(steps):
-        A = X @ X.T
+        A = X @ X.mT
         B = (
             b * A + c * A @ A
-        )  # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
-    if G.size(0) > G.size(1):
-        X = X.T
+    if G.size(-2) > G.size(-1):
+        X = X.mT
     return X
 
 
@@ -147,7 +151,14 @@ class Muon(torch.optim.Optimizer):
             self.state[p]["use_muon"] = False
 
     def adjust_lr_for_muon(self, lr, param_shape):
-        A, B = param_shape[:2]
+        if len(param_shape) >= 2:
+            A = param_shape[0]
+            B = math.prod(list(param_shape[1:]))
+        else:
+            raise ValueError(
+                f"Muon only supports 2D+ parameters, but got param shaped as {param_shape}"
+            )
+
         # We adjust the learning rate and weight decay based on the size of the parameter matrix
         # as describted in the paper
         adjusted_ratio = 0.2 * math.sqrt(max(A, B))
@@ -181,6 +192,7 @@ class Muon(torch.optim.Optimizer):
             for p in params:
                 # sanity check
                 g = p.grad
+                _orig_g_shape = g.shape
                 if g is None:
                     continue
                 if g.ndim > 2:
@@ -219,7 +231,9 @@ class Muon(torch.optim.Optimizer):
                 p.data.mul_(1 - lr * wd)
 
                 # apply update
-                p.data.add_(u, alpha=-adjusted_lr)
+                # print(f"change {u.norm()}")
+                # p.data.add_(u, alpha=-adjusted_lr)
+                p.data.add_(u.view(_orig_g_shape), alpha=-adjusted_lr)
 
             ############################
             #       AdamW backup       #
@@ -277,11 +291,19 @@ class Muon(torch.optim.Optimizer):
         #     if not (p.ndim < 2 and "embed_tokens" not in name and "lm_head" not in name)
         # ]
 
+        muon_params = []
+        adamw_params = []
+
         for name, p in named_params:
-            if p.ndim >= 2 and name not in ignored_keys_for_muon:
-                muon_params.append(p)
+            if p.requires_grad:
+                if p.ndim >= 2 and name not in ignored_keys_for_muon:
+                    muon_params.append(p)
+                    logger.debug(f"Muon params: {name} - shaped: {p.shape}")
+                else:
+                    adamw_params.append(p)
+                    logger.debug(f"AdamW params: {name} - shaped: {p.shape}")
             else:
-                adamw_params.append(p)
+                logger.debug(f"{name} is not requires_grad")
 
         return muon_params, adamw_params
 

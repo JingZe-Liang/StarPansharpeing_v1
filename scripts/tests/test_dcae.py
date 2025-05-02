@@ -10,6 +10,7 @@ from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
     dc_ae_f8c16_pure_conv,
     dc_ae_f16c16_pure_conv,
 )
+from src.utilities.optim import get_moun_optimizer
 
 # model
 extra_cfg = OmegaConf.create(
@@ -38,10 +39,33 @@ extra_cfg = OmegaConf.create(
 cfg = dc_ae_f16c16_pure_conv(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
 model = DCAE(cfg).cuda(1)
 
-# x = torch.randn(1, 3, 512, 512).cuda(1)
-# y = model(x)
-# print(y)
+opt = get_moun_optimizer(
+    model.named_parameters(),
+    lr=1e-3,
+    weight_decay=1e-2,
+    adamw_betas=(0.95, 0.99),
+    use_cuda_kernel=False,
+)
+# opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-2, foreach=True)
 
-from fvcore.nn import parameter_count_table
+print(opt)
 
-print(parameter_count_table(model))
+x = torch.randn(1, 3, 256, 256).cuda(1)
+
+import time
+
+t1 = time.time()
+for _ in range(10):
+    y = model(x)[0]
+    opt.zero_grad
+    # print(y)
+    y.sum().backward()
+    opt.step()
+    print("optimizer step")
+
+t2 = time.time()
+print("time for optimizer: ", t2 - t1)
+
+# from fvcore.nn import parameter_count_table
+
+# print(parameter_count_table(model))
