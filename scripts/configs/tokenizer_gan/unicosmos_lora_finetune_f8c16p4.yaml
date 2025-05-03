@@ -18,10 +18,10 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: MMSeg_YREB
+  used: DCF_2019
   dataset_names_to_bs:
     MMSeg_YREB: 42
-    DCF_2019: 12
+    DCF_2019: 6
   transform_prob: 0.5
 
 accelerator:
@@ -29,13 +29,15 @@ accelerator:
     num_steps: 2
 
 tokenizer:
-  act_checkpoint: true
-  wrap_fsdp_last_layer: true
+  act_checkpoint: false
+  wrap_fsdp_last_layer: false
   # pretrained on hyperspectral images encoder and decoder checkpoint
-  enc_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors
-  dec_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors
-  uni_tokenizer_path: ""
+  # enc_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors
+  # dec_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors
+  uni_tokenizer_path: "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors"
   loading_type: pretrained
+  force_not_attn: true
+  hook_for_repa: false
 
 vq_loss:
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
@@ -47,6 +49,8 @@ vq_loss:
   disc_loss: hinge
   ssim_weight: 0.2
   disc_weight: 0.5
+  repa_loss_options: {}
+  repa_loss_weight: 0.0
 
 ema:
   beta: 0.995
@@ -74,7 +78,7 @@ peft:
 
 train:
   tokenizer_name: cosmos_uni
-  proj_dir: runs/stage1_cosmos/
+  proj_dir: runs/stage1_cosmos_lora/
   finetune_strategy: peft
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -83,7 +87,7 @@ train:
   max_steps: 150_000
   save_every: 500
   seperate_enc_dec: false
-  resume_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-23_21-47-25_lora_fintune_f8c16p4_from_DCF2019_pretrained/checkpoints/checkpoint_18
+  resume_path:
   ema_load_path:
   only_load_tokenizer: true
   save_peft_ckpts: true
@@ -94,20 +98,18 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
     lr: 3.0e-4
-    eps: 1.0e-8
-    weight_decay: 1.0e-6
-    betas: [0.9, 0.999]
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
     lr: 3.0e-4
-    eps: 1.0e-8
-    weight_decay: 1.0e-6
-    betas: [0.5, 0.999]
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -128,7 +130,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: lora_fintune_f8c16p4_from_DCF2019_pretrained
+    run_comment: lora_fintune_f8c16p4_${dataset.used}
     log_with_time: True
     visualize_every: 200
     log_every: 10

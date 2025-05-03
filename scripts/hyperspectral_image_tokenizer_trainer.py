@@ -464,12 +464,15 @@ class CosmosHyperspectralTokenizerTrainer:
     def _wrap_peft_tokenizer(self):
         assert "peft" in self.cfg, "peft_cfg not in the config"
         assert not self.sep_enc_dec, "peft_cfg not supported for sep enc dec"
-        assert self.accelerator.distributed_type in (
-            accelerate.DistributedType.MULTI_GPU,
-            accelerate.DistributedType.FSDP,
+        assert (
+            self.accelerator.distributed_type
+            != accelerate.utils.DistributedType.DEEPSPEED
         ), "Deepspeed PEFT tuning supports not implemented yet"
 
         peft_cfg: LoraConfig = hydra.utils.instantiate(self.cfg.peft)
+        peft_cfg.target_modules = list(peft_cfg.target_modules)
+        peft_cfg.modules_to_save = list(peft_cfg.modules_to_save)
+
         if hasattr(self.tokenizer, "peft_first_last_convs_moduel_names"):
             peft_cfg.modules_to_save = (
                 self.tokenizer.peft_first_last_convs_moduel_names()
@@ -944,7 +947,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # repa feature
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
-        if hasattr(_unwrap_tok, "get_repa_feature"):
+        if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
+            _unwrap_tok, "_hook_for_repa", False
+        ):
             repa_feature = _unwrap_tok.get_repa_feature()
             assert repa_feature is not None, "repa_feature is None"
             out_d["repa_feature"] = repa_feature
@@ -970,14 +975,14 @@ class CosmosHyperspectralTokenizerTrainer:
             disc_train_loss_d, log_disc = self.vq_loss_fn.forward(
                 inputs=x,
                 reconstructions=out_d["recon"],
-                optimizer_idx=optim_idx,
-                global_step=self.global_step,
+                q_loss_total=out_d.get("q_loss", None),
+                q_loss_breakdown=out_d.get("q_info", None),
+                tokenizer_feat=out_d.get("repa_feature", None),
                 last_layer=self.get_last_layer(),
-                split=split,
-                q_loss_total=out_d["q_loss"],
-                q_loss_breakdown=out_d["q_info"],
+                global_step=self.global_step,
+                optimizer_idx=optim_idx,
                 add_prefix=False,
-                tokenizer_feat=out_d["repa_feature"],
+                split=split,
             )
             if train_tokenizer:
                 loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
@@ -1438,7 +1443,7 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 # is ddp
                 self.tokenizer_peft_wrapped.save_pretrained(
-                    self.proj_dir / "peft_ckpt",
+                    (self.proj_dir / "peft_ckpt").as_posix(),
                     is_main_process=self.accelerator.is_main_process,
                 )
 

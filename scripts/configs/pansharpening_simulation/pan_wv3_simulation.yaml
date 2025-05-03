@@ -28,17 +28,19 @@ rgb_indices:
 
 processor:
   ratio: 4
-  sensor: "WV3"
-  pan_weights: "mean" # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
-  downsample_type: "avgpool"
-  bands: ${total_bands_of_sensors.${processor.sensor}}
+  sensor: MMSeg_YREB
+  pan_weights: mean # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
+  downsample_type: avgpool
+  nbands: ${total_bands_of_sensors.${processor.sensor}}
 
 consts:
   sensor: ${processor.sensor}
   rgb_indices: ${rgb_indices.${processor.sensor}}
   total_bands_of_sensors: ${total_bands_of_sensors.${processor.sensor}}
   ratio: ${processor.ratio}
-  bands: ${total_bands_of_sensors.${processor.sensor}}
+  nbands: ${total_bands_of_sensors.${processor.sensor}}
+  tokenizer_checkpoint_path:
 
 output:
-  output_wds_path: "/path/to/your/output_latents.tar"
+  output_wds_path: data/pansharpening/${processor.sensor}/dataset_%04d.wds
+  maxsize: 1.0e9

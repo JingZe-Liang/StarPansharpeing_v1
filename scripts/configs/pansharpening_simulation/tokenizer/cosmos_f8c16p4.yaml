@@ -3,10 +3,10 @@ attn_resolutions: [32]
 channels: 128
 channels_mult: [2, 4, 4]
 dropout: 0.0
-in_channels: ${consts.bands}
+in_channels: ${consts.nbands}
 spatial_compression: 8
 num_res_blocks: 2
-out_channels: ${consts.bands}
+out_channels: ${consts.nbands}
 resolution: 1024
 patch_size: 4
 patch_method: haar
@@ -19,9 +19,11 @@ encoder: Default
 decoder: Default
 act_checkpoint: true
 norm_in_quant_conv: false
-enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
-dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+# enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
+# dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+uni_tokenizer_path: "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors"
 wrap_fsdp_last_layer: false
 quantizer_type: null
-loading_type: nvidia
+loading_type: pretrained
 hook_for_repa: false
+force_not_attn: True

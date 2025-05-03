@@ -32,12 +32,13 @@ def tiff_decoder(x):
 def get_dict_tensor_mapper(to_neg_1_1=True):
     def wds_to_dict_tensor_mapper(sample):
         img = torch.as_tensor(sample["img.tiff"]).float()
-        img = img / img.max()
+        img_max = img.max()
+        img = img / img_max
         if to_neg_1_1:
             img = img * 2 - 1
         img = img.permute(-1, 0, 1)
 
-        return {"img": img}
+        return {"img": img, "img_max": img_max}
 
     return wds_to_dict_tensor_mapper
 
@@ -194,6 +195,7 @@ def get_fast_test_hyperspectral_data(
     """
     wds_paths = {
         "DCF": "data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar",
+        "MMSeg": "data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
     }[data_type]
 
     _, dataloader = get_hyperspectral_dataloaders(

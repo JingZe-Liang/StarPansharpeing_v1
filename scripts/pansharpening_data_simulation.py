@@ -10,10 +10,13 @@ import webdataset as wds
 from omegaconf import DictConfig, OmegaConf
 from scipy.signal import windows
 from tqdm import tqdm
+import math
+import os
 
+import sys
+
+sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.codecs import safetensors_codec_io, tiff_codec_io
-
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.utilities.logging import log_print
 
 
@@ -197,40 +200,121 @@ class MTFConv(nn.Module):
 
 
 class Interp23Tap(nn.Module):
-    """Upsamples by a factor of `scale` using 23-tap filters.
+    """
+    PyTorch implementation of the interp23tap MATLAB function.
+
+    Interpolates the input tensor using a 23-coefficient polynomial interpolator,
+    upsampling by the given ratio. The ratio must be a power of 2.
 
     Args:
-        channels (int): Number of channels.
-        scale (int): Upsampling scale factor.
+        ratio (int): Scale ratio for upsampling. Must be a power of 2.
     """
 
-    def __init__(self, channels: int, scale: int):
+    def __init__(self, ratio: int):
         super().__init__()
-        self.scale = scale
-        self.channels = channels
-        # Simplified implementation using bilinear interpolation for now
-        # A true 23-tap filter implementation would be more complex
-        log_print(
-            "Warning: Using simplified bilinear interpolation for Interp23Tap.",
-            level="warning",
+
+        if not (ratio > 0 and (ratio & (ratio - 1) == 0)):
+            raise ValueError("Error: Only resize factors power of 2 are supported.")
+        self.ratio = ratio
+        self.num_upsamples = int(math.log2(ratio))
+
+        # Define the 23-tap filter coefficients (CDF23 from MATLAB code)
+        cdf23_coeffs = 2.0 * np.array(
+            [
+                0.5,
+                0.305334091185,
+                0.0,
+                -0.072698593239,
+                0.0,
+                0.021809577942,
+                0.0,
+                -0.005192756653,
+                0.0,
+                0.000807762146,
+                0.0,
+                -0.000060081482,
+            ]
         )
+        # Make symmetric
+        base_coeffs = np.concatenate([np.flip(cdf23_coeffs[1:]), cdf23_coeffs])
+        base_coeffs_t = torch.tensor(base_coeffs, dtype=torch.float32)
+
+        # Reshape kernel for 2D convolution (separable filter)
+        # Kernel for filtering along height (columns in MATLAB)
+        kernel_h = base_coeffs_t.view(1, 1, -1, 1)  # Shape (1, 1, 23, 1)
+        # Kernel for filtering along width (rows in MATLAB)
+        kernel_w = base_coeffs_t.view(1, 1, 1, -1)  # Shape (1, 1, 1, 23)
+
+        # Register kernels as buffers
+        self.register_buffer("kernel_h", kernel_h)
+        self.register_buffer("kernel_w", kernel_w)
+
+        # Calculate padding size (kernel_size=23)
+        self.padding = (base_coeffs_t.shape[0] - 1) // 2  # Should be 11
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Upsamples the input tensor.
+        """
+        Forward pass for interpolation.
 
         Args:
-            x (torch.Tensor): Input tensor (bs, c, h, w).
+            x (torch.Tensor): Input tensor of shape (bs, c, h, w).
 
         Returns:
-            torch.Tensor: Upsampled tensor (bs, c, h*scale, w*scale).
+            torch.Tensor: Interpolated tensor of shape (bs, c, h * ratio, w * ratio).
         """
-        if x.shape[1] != self.channels:
-            raise ValueError(
-                f"Input channels ({x.shape[1]}) must match Interp23Tap channels ({self.channels})"
+        if self.ratio == 1:
+            return x
+
+        current_img = x
+        bs, c, h_curr, w_curr = current_img.shape
+
+        for k in range(self.num_upsamples):
+            h_curr *= 2
+            w_curr *= 2
+
+            # Upsample by inserting zeros
+            upsampled = torch.zeros(
+                bs, c, h_curr, w_curr, device=x.device, dtype=x.dtype
             )
-        return F.interpolate(
-            x, scale_factor=self.scale, mode="bilinear", align_corners=False
-        )
+
+            # Place original pixels according to MATLAB logic
+            if k == 0:
+                # I1LRU(2:2:end,2:2:end,:) = I_Interpolated;
+                upsampled[..., 1::2, 1::2] = current_img
+            else:
+                # I1LRU(1:2:end,1:2:end,:) = I_Interpolated;
+                upsampled[..., ::2, ::2] = current_img
+
+            # Apply separable convolution with circular padding
+            # Grouped convolution: apply filter independently per channel
+            # Reshape for grouped conv: (1, bs*c, H, W) or apply channel-wise
+            # Using conv2d with groups=c is efficient
+
+            # Pad for horizontal filter (width)
+            # Pad width dimension (dim 3) by self.padding on both sides
+            padded_w = F.pad(
+                upsampled, (self.padding, self.padding, 0, 0), mode="circular"
+            )
+            # Apply horizontal filter
+            # Input: (bs, c, H, W_padded), Kernel: (1, 1, 1, K) -> Output: (bs, c, H, W)
+            # We need kernel shape (c, 1, 1, K) for grouped convolution
+            kernel_w_grouped = self.kernel_w.repeat(c, 1, 1, 1)
+            filtered_w = F.conv2d(padded_w, kernel_w_grouped, groups=c)
+
+            # Pad for vertical filter (height)
+            # Pad height dimension (dim 2) by self.padding on both sides
+            padded_h = F.pad(
+                filtered_w, (0, 0, self.padding, self.padding), mode="circular"
+            )
+            # Apply vertical filter
+            # Input: (bs, c, H_padded, W), Kernel: (1, 1, K, 1) -> Output: (bs, c, H, W)
+            # We need kernel shape (c, 1, K, 1) for grouped convolution
+            kernel_h_grouped = self.kernel_h.repeat(c, 1, 1, 1)
+            filtered_h = F.conv2d(padded_h, kernel_h_grouped, groups=c)
+
+            current_img = filtered_h  # Update image for next iteration
+
+        return current_img
 
 
 class PansharpSimulator(nn.Module):
@@ -292,12 +376,12 @@ class PansharpSimulator(nn.Module):
                 antialias=True,
             )
         else:
-            self.upsample = Interp23Tap(channels=nbands, scale=ratio)
+            self.upsample = Interp23Tap(ratio=ratio)
 
         pan_weights = torch.tensor(actual_pan_weight_lst, dtype=torch.float32).view(
             1, -1, 1, 1
         )
-        self.register_buffer("pan_weights", pan_weights)
+        self.register_buffer("pan_weights", pan_weights, persistent=False)
 
     def forward(self, hrms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -460,9 +544,10 @@ class PansharpTokenizeProcessor(nn.Module):
                 "The provided tokenizer object does not have an 'encode' method."
             )
 
-        hrms_latent = self.tokenizer.encode(hrms)
-        lrms_latent = self.tokenizer.encode(lrms)
-        pan_latent = self.tokenizer.encode(pan_repeated)
+        with torch.no_grad():
+            hrms_latent = self.tokenizer.encode(hrms)
+            lrms_latent = self.tokenizer.encode(lrms)
+            pan_latent = self.tokenizer.encode(pan_repeated)
 
         # --- 4. Prepare output dictionary for webdataset ---
         # Output structure needs careful handling with webdataset when processing batches.
@@ -519,7 +604,7 @@ class PansharpTokenizeProcessor(nn.Module):
 
 
 @hydra.main(
-    config_path="src/stage2/data/config",
+    config_path="configs/pansharpening_simulation",
     config_name="pan_wv3_simulation",
     version_base=None,
 )
@@ -528,7 +613,7 @@ def process_dataset(cfg: DictConfig) -> None:
     Main processing function driven by Hydra configuration.
     """
     log_print("Starting dataset processing with configuration:")
-    log_print(OmegaConf.to_yaml(cfg))
+    log_print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Determine device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -540,23 +625,30 @@ def process_dataset(cfg: DictConfig) -> None:
         ratio=cfg.processor.ratio,
         sensor=cfg.processor.sensor,
         nbands=cfg.processor.nbands,  # Get nbands from data config
-        pan_weight_lst=OmegaConf.to_container(
-            cfg.processor.pan_weights
-        ),  # Convert to list
+        pan_weight_lst=OmegaConf.to_container(cfg.processor.pan_weights)
+        if not isinstance(cfg.processor.pan_weights, str)
+        else cfg.processor.pan_weights,  # Convert to list
         downsample_type=cfg.processor.downsample_type,
     )
     pansharp_sim = pansharp_sim.to(device)
 
-    tokenizer = hydra.utils.instantiate(cfg.model.tokenizer)
+    tokenizer = hydra.utils.instantiate(cfg.tokenizer)
     tokenizer = tokenizer.to(device)
     # load state dict
-    _imcompact_keys = tokenizer.load_state_dict(
-        torch.load(cfg.model.tokenizer_checkpoint_path, map_location=device),
-        strict=False,
-    )
+    if cfg.consts.tokenizer_checkpoint_path is not None:
+        _imcompact_keys = tokenizer.load_state_dict(
+            torch.load(cfg.consts.tokenizer_checkpoint_path, map_location=device),
+            strict=False,
+        )
+        log_print(f"Imcompact keys: {_imcompact_keys}")
+    else:
+        log_print(
+            f"No checkpoint path provided for {tokenizer.__class__.__name__}\n"
+            "make sure you load checkpoint in the tokenizer"
+        )
+
     tokenizer.eval()
     log_print(f"Loaded tokenizer from {tokenizer.__class__.__name__}")
-    log_print(f"Imcompact keys: {_imcompact_keys}")
 
     def before_save_fn(img: np.ndarray, const: float, dtype: np.dtype) -> np.ndarray:
         # Convert to float32 and scale to [0, 1]
@@ -571,7 +663,9 @@ def process_dataset(cfg: DictConfig) -> None:
     processor = PansharpTokenizeProcessor(
         pansharp_simulator=pansharp_sim,
         tokenizer=tokenizer,
-        before_save_fn=before_save_fn,
+        before_save_fn=partial(
+            before_save_fn,
+        ),  # const=, dtype=np.uint32),
     )
     # Note: Processor itself doesn't need .to(device) unless it has its own parameters/buffers
     # The submodules (pansharp_sim, tokenizer) are already moved.
@@ -586,7 +680,12 @@ def process_dataset(cfg: DictConfig) -> None:
     _, input_dataloader = hydra.utils.instantiate(cfg.data)
 
     # 3. Run the pipeline and write output
-    output_sink = wds.ShardWriter(cfg.output.output_wds_path)
+    output_dir = os.path.dirname(cfg.output.output_wds_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_sink = wds.ShardWriter(
+        cfg.output.output_wds_path, maxsize=cfg.output.maxsize
+    )
     log_print("Starting processing...")
     count = 0
     total_samples = 0  # Keep track of total samples written
@@ -645,4 +744,7 @@ def process_dataset(cfg: DictConfig) -> None:
 
 # Entry point for Hydra
 if __name__ == "__main__":
-    process_dataset()
+    from loguru import logger
+
+    with logger.catch():
+        process_dataset()
