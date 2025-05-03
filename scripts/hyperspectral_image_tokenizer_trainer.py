@@ -782,7 +782,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
             self.log_msg(
                 f"use heavyball optimizer, it will compile the optimizer, "
-                "for efficience testing the scripts, disable the compilation."
+                "for efficience testing the scripts, disable the compilation.",
+                level="WARNING",
             )
 
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
@@ -1770,6 +1771,7 @@ _configs_dict = {
     "cosmos_sep_f8c32p1": "cosmos_post_train_f8c32p1",
     "cosmos_sep_f16c16p4": "cosmos_post_train_f16c16p4",
     # unify encoder and decoder int one model
+    "unicosmos_f8c16p2": "unicosmos_tokenizer_f8c16p2",
     "unicosmos_f8c16p4": "unicosmos_tokenizer_f8c16p4",
     "unicosmos_large_f8c16p4": "unicosmos_tokenizer_large_f8c16p4",
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",

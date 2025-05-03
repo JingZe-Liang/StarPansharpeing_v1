@@ -35,12 +35,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loguru import logger as logging
 from torch.utils.checkpoint import checkpoint
 
 sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
+from src.utilities.logging import log_print
 
 # * ==========================================================
 # * Norm
@@ -130,6 +130,7 @@ class PixelUnshuffleChannelAveragingDownSampleLayer(nn.Module):
         in_channels: int,
         out_channels: int,
         factor: int,
+        # group_size: int,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -137,9 +138,12 @@ class PixelUnshuffleChannelAveragingDownSampleLayer(nn.Module):
         self.factor = factor
         assert in_channels * factor**2 % out_channels == 0
         self.group_size = in_channels * factor**2 // out_channels
+        # hidden = out_channels * group_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.pixel_unshuffle(x, self.factor)
+        x = F.pixel_unshuffle(
+            x, self.factor
+        )  # c * factor ** 2 -> hidden = out_c * group_size
         B, C, H, W = x.shape
         x = x.view(B, self.out_channels, self.group_size, H, W)
         x = x.mean(dim=2)
@@ -571,24 +575,23 @@ class Encoder(nn.Module):
         downsample_type: str = "PadConv",
         downsample_shortcut: str | None = None,
         force_not_attn: bool = False,
+        patch_size: int = 4,
+        patch_method: str = "haar",
         **ignore_kwargs,
     ):
         super().__init__()
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
 
-        logging.info(f"[Encoder]: use activation checkpoint: {act_checkpoint}")
-        logging.info(f"[Encoder]: z_channels: {z_channels}")
+        log_print(f"[Encoder]: use activation checkpoint: {act_checkpoint}")
+        log_print(f"[Encoder]: z_channels: {z_channels}, patch size: {patch_size}")
 
         # Patcher.
-        patch_size = ignore_kwargs.get("patch_size", 1)
-        self.patcher = Patcher(
-            patch_size, ignore_kwargs.get("patch_method", "rearrange")
-        )
+        self.patcher = Patcher(patch_size, patch_method)
         in_channels = in_channels * patch_size * patch_size
-        logging.info(
+        log_print(
             f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, "
-            f"patch_method: {ignore_kwargs.get('patch_method', 'rearrange')}"
+            f"patch_method: {patch_method}"
         )
 
         # calculate the number of downsample operations
@@ -625,7 +628,7 @@ class Encoder(nn.Module):
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions and not force_not_attn:
-                    logging.info(f"[Encoder]: use attn at {curr_res}")
+                    log_print(f"[Encoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
                             block_in,
@@ -721,8 +724,8 @@ class Decoder(nn.Module):
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
 
-        logging.info(f"[Decoder]: use activation checkpoint: {act_checkpoint}")
-        logging.info(f"[Decoder]: z_channels: {z_channels}")
+        log_print(f"[Decoder]: use activation checkpoint: {act_checkpoint}")
+        log_print(f"[Decoder]: z_channels: {z_channels}")
 
         # UnPatcher.
         patch_size = ignore_kwargs.get("patch_size", 1)
@@ -742,7 +745,7 @@ class Decoder(nn.Module):
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        logging.info(
+        log_print(
             "Working with z of shape {} = {} dimensions.".format(
                 self.z_shape, np.prod(self.z_shape)
             )
@@ -789,7 +792,7 @@ class Decoder(nn.Module):
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions and not force_not_attn:
-                    logging.info(f"[Decoder]: use attn at {curr_res}")
+                    log_print(f"[Decoder]: use attn at {curr_res}")
                     attn.append(
                         AttnBlock(
                             block_in,
@@ -819,7 +822,7 @@ class Decoder(nn.Module):
             self.conv_out = FSDPNoWarpModule(
                 torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
             )
-            logging.info("[Decoder] use FSDPNoWarpModule")
+            log_print("[Decoder] use FSDPNoWarpModule")
         else:
             self.conv_out = torch.nn.Conv2d(
                 block_in, out_ch, kernel_size=3, stride=1, padding=1
@@ -983,7 +986,7 @@ class DecoderDiff(nn.Module):
         self.z_cfg_drop = z_cfg_drop
         self.out_channels = out_channels
 
-        logging.info(
+        log_print(
             f"[Decoder]: use activation checkpoint: {act_checkpoint}\n"
             f"diffusion conditioning inject strategy: {diff_cond_inject_strategy}\n"
             f"use_residual_factor: {use_residual_factor}",
@@ -1002,7 +1005,7 @@ class DecoderDiff(nn.Module):
         z_res = resolution // spatial_compression
         self.z_shape = (1, z_channels, z_res, z_res)
         curr_res = resolution // decoder_patch_size
-        logging.info(
+        log_print(
             "Working with z of shape {} = {} dimensions.".format(
                 self.z_shape, np.prod(self.z_shape)
             )
@@ -1017,8 +1020,9 @@ class DecoderDiff(nn.Module):
             out_channels * decoder_patch_size * decoder_patch_size
             self.num_upsamples = 0
         elif self.unpatch_type == "upsample":
-            logging.warning(
-                f"[Decoder Unpatcher]: unpatcher is set to use upsample, may cause GPU OOM"
+            log_print(
+                f"[Decoder Unpatcher]: unpatcher is set to use upsample, may cause GPU OOM",
+                "warning",
             )
             unpatcher_sz = 1
             # use upsample to unpatch
@@ -1079,9 +1083,10 @@ class DecoderDiff(nn.Module):
             mid_blk_2_cls = ResnetBlock
         elif diff_cond_inject_strategy == "inject_full":
             mid_blk_2_cls = block_class
-            logging.warning(
+            log_print(
                 f"[Decoder Block]: diffusion condition injection strategy is {diff_cond_inject_strategy}, "
-                "it will inject condition in every residual block, may cause GPU usage high"
+                "it will inject condition in every residual block, may cause GPU usage high",
+                "warning",
             )
         else:
             mid_blk_2_cls = block_class
@@ -1129,7 +1134,7 @@ class DecoderDiff(nn.Module):
             ):  # [2,1] upsample, 1
                 # last layers upsample
                 up.upsample = UpsampleRepeatConv(block_in)
-                logging.info(f"upsample {i_level}")
+                log_print(f"upsample {i_level}")
                 curr_res = curr_res * 2
 
             # [128*4*4*2, 128*4, 128*2]

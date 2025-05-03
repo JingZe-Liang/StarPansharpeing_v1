@@ -18,10 +18,13 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: DCF_2019
+  used: DryadHyper
   dataset_names_to_bs:
     MMSeg_YREB: 22
     DCF_2019: 7
+    GID_GF2: 7
+    DryadHyper: 16
+
   transform_prob: 0.5
 
 vq_loss:
@@ -80,8 +83,8 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path:
-  ema_load_path:
-  only_load_tokenizer: true
+  ema_load_path: runs/stage1_cosmos/2025-05-03_03-46-06_cosmos_pretrained_f8c16p4_repa/ema
+  only_load_tokenizer: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -90,14 +93,14 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
 
   disc_optimizer:
     _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
 
