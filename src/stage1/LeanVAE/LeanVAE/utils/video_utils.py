@@ -96,10 +96,10 @@ class VideoResizeSquare(object):
         if isinstance(video, torch.Tensor):
             if len(video.shape) == 4:
                 t, h, w, c = video.shape
-                assert c == 3, (
-                    "Expecting 3-channel color video, got video of shape {}".format(
-                        video.shape
-                    )
+                assert (
+                    c == 3
+                ), "Expecting 3-channel color video, got video of shape {}".format(
+                    video.shape
                 )
             else:
                 raise RuntimeError(

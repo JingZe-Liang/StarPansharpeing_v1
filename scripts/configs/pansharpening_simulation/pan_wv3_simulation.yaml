@@ -42,5 +42,5 @@ consts:
   tokenizer_checkpoint_path:
 
 output:
-  output_wds_path: data/pansharpening/${processor.sensor}/dataset_%04d.wds
-  maxsize: 1.0e9
+  output_dir: data/MMSeg_YREB/latent
+  maxsize: 4.0e9

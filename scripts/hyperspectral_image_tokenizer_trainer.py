@@ -114,6 +114,7 @@ class CosmosHyperspectralTokenizerTrainer:
             hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
             transform_prob=self.dataset_cfg.transform_prob,
             random_apply=to_cont(self.dataset_cfg.random_apply),
+            prefetch_factor=self.dataset_cfg.prefetch_factor,
             to_neg_1_1=True,
         )
         self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
@@ -121,6 +122,7 @@ class CosmosHyperspectralTokenizerTrainer:
             batch_size=self.dataset_cfg.batch_size_val,
             num_workers=self.dataset_cfg.num_workers,
             shuffle_size=self.dataset_cfg.shuffle_size,
+            prefetch_factor=self.dataset_cfg.prefetch_factor,
             hyper_transforms_lst=None,
             transform_prob=0.0,
             to_neg_1_1=True,
@@ -1778,7 +1780,7 @@ _configs_dict = {
     "unicosmos_f16c16p4": "unicosmos_tokenizer_f16c16p4",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # bsq quantized
-    "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f16c36p4",
+    "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f8c36p4",
     # sana CDAE
     "sana_f8c16p1_lita": "dcae_f8c16p1_attn",
     "sana_f8c16p1_conv": "dcae_f8c16p1_conv",

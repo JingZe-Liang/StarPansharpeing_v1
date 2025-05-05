@@ -273,9 +273,9 @@ class LLMEngine:
 
             executor_class = RayGPUExecutor
         else:
-            assert engine_config.parallel_config.world_size == 1, (
-                "Ray is required if parallel_config.world_size > 1."
-            )
+            assert (
+                engine_config.parallel_config.world_size == 1
+            ), "Ray is required if parallel_config.world_size > 1."
             # from vllm.executor.gpu_executor import GPUExecutor
             from autoregressive.serve.gpu_executor import GPUExecutor
 

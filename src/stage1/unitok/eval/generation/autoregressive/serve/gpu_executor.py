@@ -65,9 +65,9 @@ class GPUExecutor(ExecutorBase):
         # from vllm.worker.worker import Worker
         from autoregressive.serve.worker import Worker
 
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU."
-        )
+        assert (
+            self.parallel_config.world_size == 1
+        ), "GPUExecutor only supports single GPU."
 
         distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         self.driver_worker = Worker(
@@ -131,9 +131,9 @@ class GPUExecutor(ExecutorBase):
             proposer_worker=draft_worker, scorer_worker=target_worker
         )
 
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU."
-        )
+        assert (
+            self.parallel_config.world_size == 1
+        ), "GPUExecutor only supports single GPU."
 
         self.driver_worker = spec_decode_worker
 

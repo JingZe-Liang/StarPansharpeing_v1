@@ -20,13 +20,19 @@ from kornia.augmentation import (
     RandomVerticalFlip,
 )
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
-from loguru import logger
 from natsort import natsorted
 from torch.utils.data import DataLoader, Dataset
 
-
-def tiff_decoder(x):
-    return tifffile.imread(io.BytesIO(x))
+from src.data.codecs import tiff_decode_io
+from src.data.utils import (
+    extract_modality_names,
+    flatten_sub_dict,
+    remove_extension,
+    merge_modalities,
+    norm_img,
+    remove_meta_data,
+)
+from src.utilities.logging import log_print
 
 
 def get_dict_tensor_mapper(to_neg_1_1=True):
@@ -82,9 +88,9 @@ def hyper_transform(
     op_seq = AugmentationSequential(
         *ops,
         data_keys=["input"],
-        random_apply=tuple(random_apply)
-        if isinstance(random_apply, Sequence)
-        else random_apply,
+        random_apply=(
+            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply
+        ),
         same_on_batch=False,
         keepdim=True,
     )
@@ -113,6 +119,10 @@ def get_hyperspectral_dataloaders(
     transform_prob: tuple[float] | float = 0.2,
     random_apply: int | tuple[int] = 1,
     resample: bool = True,
+    prefetch_factor: int = 6,
+    pin_memory: bool = False,
+    shuffle_within_workers: bool = True,
+    remove_meta_data: bool = False,
 ) -> tuple[wds.WebDataset, wds.WebLoader]:
     """Get dataloaders for hyperspectral image data
 
@@ -130,7 +140,6 @@ def get_hyperspectral_dataloaders(
     Returns:
         tuple[wds.WebDataset, wds.WebLoader]: Returns a tuple containing the WebDataset object and its corresponding dataloader
     """
-    dict_mapper = get_dict_tensor_mapper(to_neg_1_1)
     use_transf = (
         hyper_transforms_lst is not None
         and len(hyper_transforms_lst) > 0
@@ -138,28 +147,25 @@ def get_hyperspectral_dataloaders(
     )
     if use_transf:
         transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)
-        logger.info(
+        log_print(
             f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
         )
-
-    part_state = PartialState()
-    is_ddp = part_state.use_distributed
-    if is_ddp:
-        logger.info("[HyperWebdataset]: using DDP, split the datset by node")
 
     dataset = wds.WebDataset(
         wds_paths,
         resampled=resample,  # no need `iter(dataloader)` for `next` function
-        shardshuffle=shuffle_size if is_ddp else False,
-        nodesplitter=wds.shardlists.split_by_node
-        if is_ddp
-        else wds.shardlists.single_node_only,
+        shardshuffle=False,
+        nodesplitter=wds.shardlists.split_by_node,  # split_by_node if is multi-node training
+        workersplitter=wds.split_by_worker,
         seed=2025,
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
     )
-    dataset = dataset.decode(wds.handle_extension("tif tiff", tiff_decoder))
-    dataset = dataset.map(dict_mapper)
+    dataset = dataset.decode(wds.handle_extension("tif tiff", tiff_decode_io))
+    dataset = dataset.map(remove_extension)
+    if remove_meta_data:
+        dataset = dataset.map(remove_meta_data)
+    dataset = dataset.map(norm_img(to_neg_1_1))
     dataset = dataset.batched(batch_size)
     if use_transf:
         dataset = dataset.map_dict(img=transform)
@@ -168,18 +174,21 @@ def get_hyperspectral_dataloaders(
         dataset,
         batch_size=None,
         num_workers=num_workers,
-        persistent_workers=True,
-        prefetch_factor=6,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=pin_memory,
         drop_last=False,
+        timeout=30,
     )
 
     # unbatch, shuffle, and rebatch within different workers
-    dataloader = dataloader.unbatched()
-    if shuffle_size > 0:
-        dataloader = dataloader.shuffle(shuffle_size)
-    dataloader = dataloader.batched(batch_size)
+    if shuffle_within_workers:
+        dataloader = dataloader.unbatched()
+        if shuffle_size > 0:
+            dataloader = dataloader.shuffle(shuffle_size)
+        dataloader = dataloader.batched(batch_size)
 
-    logger.info(
+    log_print(
         f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}, use transformations: {hyper_transforms_lst}"
     )
 
@@ -324,17 +333,14 @@ def ms_pan_dir_paired_loader(
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar",
-        "data/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar",
+        "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
+        "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0001.tar",
+        "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0002.tar",
+        "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
     ]
-    test_batch_size = 32
+    test_batch_size = 16
     test_num_workers = 2
-    test_shuffle_size = 300
+    test_shuffle_size = 10
     accelerator = accelerate.Accelerator()
 
     # Get test dataloader
@@ -346,12 +352,26 @@ if __name__ == "__main__":
         to_neg_1_1=True,
         transform_prob=1.0,
         random_apply=(1, 2),
+        pin_memory=False,
+        prefetch_factor=None,
+        shuffle_within_workers=False,
+        remove_meta_data=False,
+        resample=False,
     )
 
     # * for loop the images
     for batch in test_loader:
-        img_tensor = batch["img"]  # shape: [N, C, H, W]
-        print(f"proc={torch.distributed.get_rank()} - {img_tensor.shape}")
+        # print(batch['img'].shape, batch.keys())
+        tar_paths = batch["__url__"]
+
+        # assert all tar paths are the same
+        print(tar_paths)
+        assert all(tar_paths[0] == tar_path for tar_path in tar_paths), (
+            "tar paths are not the same"
+        )
+
+        # img_tensor = batch["img"]  # shape: [N, C, H, W]
+        # print(f"{img_tensor.shape}")
 
     # * plot the grid of images
     # # Get a batch of data

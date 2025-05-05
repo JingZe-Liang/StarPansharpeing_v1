@@ -41,9 +41,9 @@ def create_npz_from_sample_folder(sample_dir, num=50000):
 
 def main(args):
     # Setup PyTorch:
-    assert torch.cuda.is_available(), (
-        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
-    )
+    assert (
+        torch.cuda.is_available()
+    ), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
     # Setup DDP:

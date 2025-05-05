@@ -114,9 +114,9 @@ class ResampledShards2(IterableDataset):
         self.urls = urls
         self.weights = weights
         if self.weights is not None:
-            assert len(self.urls) == len(self.weights), (
-                f"Number of urls {len(self.urls)} and weights {len(self.weights)} should match."
-            )
+            assert (
+                len(self.urls) == len(self.weights)
+            ), f"Number of urls {len(self.urls)} and weights {len(self.weights)} should match."
         assert isinstance(self.urls[0], str)
         self.nshards = nshards
         self.rng = random.Random()
@@ -381,9 +381,9 @@ def expand_urls(urls, weights=None):
     if isinstance(urls, str):
         urllist = urls.split("::")
         weights = weights.split("::")
-        assert len(weights) == len(urllist), (
-            f"Expected the number of data components ({len(urllist)}) and weights({len(weights)}) to match."
-        )
+        assert (
+            len(weights) == len(urllist)
+        ), f"Expected the number of data components ({len(urllist)}) and weights({len(weights)}) to match."
         weights = [float(weight) for weight in weights]
         all_urls, all_weights = [], []
         for url, weight in zip(urllist, weights):
@@ -602,9 +602,9 @@ def get_wds_dataset(
             )
         ]
     else:
-        assert args.train_data_upsampling_factors is None, (
-            "--train_data_upsampling_factors is only supported when sampling with replacement (with --dataset-resampled)."
-        )
+        assert (
+            args.train_data_upsampling_factors is None
+        ), "--train_data_upsampling_factors is only supported when sampling with replacement (with --dataset-resampled)."
         pipeline = [wds.SimpleShardList(input_shards)]  # HERE
 
     # at this point we have an iterator over all the shards
@@ -663,9 +663,9 @@ def get_wds_dataset(
     if is_train:
         if not resampled:
             num_shards = num_shards or len(expand_urls(input_shards)[0])
-            assert num_shards >= args.workers * dist.get_world_size(), (
-                "number of shards must be >= total workers"
-            )
+            assert (
+                num_shards >= args.workers * dist.get_world_size()
+            ), "number of shards must be >= total workers"
         # roll over and repeat a few samples to get same number of full batches on each node
         round_fn = math.floor if floor else math.ceil
         global_batch_size = args.local_bs * dist.get_world_size()

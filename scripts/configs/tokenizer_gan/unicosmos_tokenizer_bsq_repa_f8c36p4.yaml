@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: uni_cosmos_f8c16p4_kl
+  - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -22,10 +22,10 @@ accelerator:
     num_steps: 2
 
 dataset:
-  used: MMSeg_YREB
+  used: DCF_2019
   dataset_names_to_bs:
     MMSeg_YREB: 16
-    DCF_2019: 12
+    DCF_2019: 7
   transform_prob: 0.5
 
 vq_loss:
@@ -49,8 +49,8 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
-  reconstruction_loss_type: dwt
+  disc_weight: 0.8
+  reconstruction_loss_type: l1
 
 tokenizer:
   hook_for_repa: true
@@ -59,15 +59,10 @@ tokenizer:
   latent_channels: 36
   z_channels: 36
   act_checkpoint: false
-  channels_mult: [2, 4, 4]
-  num_res_blocks: 4
-  enc_path:
-  dec_path:
-  loading_type:
-  # downsample_type: ConvPixelUnshuffle
-  # downsample_shortcut: averaging
-  # upsample_type: ConvPixelShuffle
-  # upsample_shortcut: duplicating
+  # enc_path:
+  # dec_path:
+  uni_tokenizer_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-05-03_19-05-11_cosmos_pretrained_f8c16p4_repa/ema/tokenizer/model.safetensors
+  loading_type: pretrained
   force_not_attn: true
 
 ema:
@@ -87,7 +82,7 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: #/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-27_23-27-08_cosmos_pretrained_f8c16p4_repa_kl/ema
+  ema_load_path:
   only_load_tokenizer: false
   grad_check: false
 
@@ -96,18 +91,18 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.LAMB
+    _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 8.0e-4
-    betas: [0.8, 0.95]
-    eps: 1.0e-8
+    lr: 3.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
 
   disc_optimizer:
-    _target_: src.utilities.optim.LAMB
+    _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 8.0e-4
-    betas: [0.5, 0.95]
-    eps: 1.0e-8
+    lr: 3.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -128,7 +123,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_L_f8z36p4_bsq_repa
+    run_comment: unicosmos_f8c36p4_bsq_repa_${dataset.used}
     log_with_time: True
     visualize_every: 200
     log_every: 10

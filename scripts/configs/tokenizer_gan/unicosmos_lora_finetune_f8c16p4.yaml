@@ -18,12 +18,15 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: DryadHyper
+  used: MUSLI
+  prefetch_factor: null
+  num_workers: 1
   dataset_names_to_bs:
     MMSeg_YREB: 22
     DCF_2019: 7
     GID_GF2: 7
-    DryadHyper: 32
+    DryadHyper: 16
+    MUSLI: 7
 
   transform_prob: 0.5
 
@@ -68,7 +71,7 @@ ema:
 peft:
   _target_: peft.LoraConfig
   peft_type: lokr
-  r: 16
+  r: 8
   lora_alpha: 8
   use_dora: false
   use_rslora: false

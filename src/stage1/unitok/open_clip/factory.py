@@ -95,9 +95,9 @@ def get_tokenizer(model_name):
         if "hf_tokenizer_name" in config["text_cfg"]:
             tokenizer = HFTokenizer(config["text_cfg"]["hf_tokenizer_name"])
         elif "text_mask" in config["text_cfg"] and config["text_cfg"]["text_mask"]:
-            assert config["text_cfg"]["text_mask"] == "syntax", (
-                "for now, only support syntax masking!"
-            )
+            assert (
+                config["text_cfg"]["text_mask"] == "syntax"
+            ), "for now, only support syntax masking!"
             tokenizer = syntax_mask_tokenize
         else:
             tokenizer = tokenize
@@ -257,9 +257,9 @@ def create_model(
                 # pretrained weight loading for timm models set via vision_cfg
                 model_cfg["vision_cfg"]["timm_model_pretrained"] = True
             else:
-                assert False, (
-                    "pretrained image towers currently only supported for timm models"
-                )
+                assert (
+                    False
+                ), "pretrained image towers currently only supported for timm models"
 
         # cast_dtype set for fp16 and bf16 (manual mixed-precision), not set for 'amp' or 'pure' modes
         cast_dtype = get_cast_dtype(precision)

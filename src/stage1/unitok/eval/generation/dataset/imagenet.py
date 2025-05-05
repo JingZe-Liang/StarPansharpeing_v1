@@ -27,9 +27,9 @@ class CustomDataset(Dataset):
         self.label_files = [f"{i}.npy" for i in range(1281167)]
 
     def __len__(self):
-        assert len(self.feature_files) == len(self.label_files), (
-            "Number of feature files and label files should be same"
-        )
+        assert len(self.feature_files) == len(
+            self.label_files
+        ), "Number of feature files and label files should be same"
         return len(self.feature_files)
 
     def __getitem__(self, idx):
@@ -58,7 +58,7 @@ def build_imagenet(args, transform):
 def build_imagenet_code(args):
     feature_dir = f"{args.code_path}/imagenet{args.image_size}_codes"
     label_dir = f"{args.code_path}/imagenet{args.image_size}_labels"
-    assert os.path.exists(feature_dir) and os.path.exists(label_dir), (
-        f"please first run: bash scripts/autoregressive/extract_codes_c2i.sh ..."
-    )
+    assert os.path.exists(feature_dir) and os.path.exists(
+        label_dir
+    ), f"please first run: bash scripts/autoregressive/extract_codes_c2i.sh ..."
     return CustomDataset(feature_dir, label_dir)

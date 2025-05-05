@@ -151,9 +151,9 @@ def main(args):
     # =======================================
     dist.init_process_group("nccl")
     # init_distributed_mode(args)
-    assert args.global_batch_size % dist.get_world_size() == 0, (
-        f"Batch size must be divisible by world size."
-    )
+    assert (
+        args.global_batch_size % dist.get_world_size() == 0
+    ), f"Batch size must be divisible by world size."
     global_rank = dist.get_rank()
     device = global_rank % torch.cuda.device_count()
     seed = args.global_seed * dist.get_world_size() + global_rank

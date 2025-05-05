@@ -1,7 +1,24 @@
+import sys
+from typing import Literal
+
+import numpy as np
 import torch
 import webdataset as wds
 
-from src.data.codecs import mat_decode_io, safetensors_decode_io, tiff_decode_io
+sys.path.insert(0, __file__[: __file__.find("src")])
+from src.data.codecs import (
+    mat_decode_io,
+    npz_decode_io,
+    safetensors_decode_io,
+    tiff_decode_io,
+)
+from src.data.utils import (
+    flatten_sub_dict,
+    merge_modalities,
+    norm_img,
+    remove_extension,
+    remove_meta_data,
+)
 from src.utilities.logging import log_print
 
 
@@ -12,21 +29,19 @@ def get_panshap_dataloaders(
     shuffle_size: int = 100,
     to_neg_1_1: bool = True,
     resample: bool = True,
-    latent_ext: str = "safetensors",
+    latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
+    shardshuffle: bool = True,
 ):
     if isinstance(wds_paths, str):
         wds_paths = [wds_paths]
-    is_ddp = (
-        torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
-    )
+
     dataset = wds.WebDataset(
         wds_paths,
         resampled=resample,
-        shardshuffle=shuffle_size if is_ddp else False,
+        shardshuffle=shardshuffle,
         handler=wds.warn_and_continue,
-        nodesplitter=wds.shardlists.split_by_node
-        if is_ddp
-        else wds.shardlists.single_node_only,
+        nodesplitter=wds.shardlists.split_by_node,
+        workersplitter=wds.split_by_worker,
         seed=2025,
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
@@ -36,6 +51,7 @@ def get_panshap_dataloaders(
         wds.handle_extension("tif tiff", tiff_decode_io),
         wds.handle_extension("mat", mat_decode_io),
         wds.handle_extension("safetensors", safetensors_decode_io),
+        wds.handle_extension("npz", npz_decode_io),
         "torch",
     )
 
@@ -43,9 +59,9 @@ def get_panshap_dataloaders(
 
     def img_dict_mapper_with_ext(sample: dict):
         # keys: ['hrms', 'lrms', 'pan', 'ms', 'hrms_latent', 'lrms_latent', 'pan_latent', 'ms_latent']
-        hrms = sample["hrms.tiff"].float()
-        lrms = sample["lrms.tiff"].float()
-        pan = sample["pan.tiff"].float()
+        hrms = torch.as_tensor(sample["hrms.tiff"]).float()
+        lrms = torch.as_tensor(sample["lrms.tiff"]).float()
+        pan = torch.as_tensor(sample["pan.tiff"]).float()
 
         # normalize
         hrms = hrms / hrms.max()
@@ -58,10 +74,33 @@ def get_panshap_dataloaders(
             pan = pan * 2 - 1
 
         # if has latents
-        if "hrms_latent" in sample:
-            hrms_latent = sample[f"hrms_latent.{latent_ext}"].float()
-            lrms_latent = sample[f"lrms_latent.{latent_ext}"].float()
-            pan_latent = sample[f"pan_latent.{latent_ext}"].float()
+        if f"hrms_latents.{latent_ext}" in sample or f"hrms_latent.npy" in sample:
+            if latent_ext == "npz":
+                sample_dict = sample["latenets.npz"]
+                hrms_latent = torch.as_tensor(
+                    sample_dict["hrms_latent"], dtype=torch.float32
+                )
+                lrms_latent = torch.as_tensor(
+                    sample_dict["lrms_latent"], dtype=torch.float32
+                )
+                pan_latent = torch.as_tensor(
+                    sample_dict["pan_latent"], dtype=torch.float32
+                )
+            elif latent_ext == "safetensors":
+                sample_dict = sample["latents.safetensors"]
+                hrms_latent = sample_dict["hrms_latent"].float()
+                lrms_latent = sample_dict["lrms_latent"].float()
+                pan_latent = sample_dict["pan_latent"].float()
+            else:
+                sample_dict = sample["latents.npz"]
+                hrms_latent = torch.as_tensor(
+                    sample["hrms_latent"], dtype=torch.float32
+                )
+                lrms_latent = torch.as_tensor(
+                    sample["lrms_latent"], dtype=torch.float32
+                )
+                pan_latent = torch.as_tensor(sample["pan_latent"], dtype=torch.float32)
+
             sample = {
                 "hrms": hrms,
                 "lrms": lrms,
@@ -80,6 +119,7 @@ def get_panshap_dataloaders(
         return sample
 
     dataset = dataset.map(img_dict_mapper_with_ext)
+    dataset: wds.WebDataset
 
     # since we do not use any transforms, the batch and unbatch is useless.
 
@@ -87,9 +127,9 @@ def get_panshap_dataloaders(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        persistent_workers=True,
-        prefetch_factor=6,
-        droplast=False,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=None if num_workers == 0 else 6,
+        drop_last=False,
     )
 
     dataloader = dataloader.with_length(10_000)  # 10k pairs of the dataloader
@@ -97,3 +137,71 @@ def get_panshap_dataloaders(
     log_print(f"[Pansharpening Dataset]: constructed the dataloader")
 
     return dataset, dataloader
+
+
+def get_sperate_pansharp_dataloaders(
+    wds_paths: str | list[str],
+    batch_size: int,
+    num_workers: int,
+    shuffle_size: int = 100,
+    to_neg_1_1: bool = True,
+    resample: bool = True,
+    prefetch_factor: int = 6,
+    latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
+    pin_memory: bool = True,
+    remove_meta_data: bool = False,
+    normed_keys: list[str] = ["img", "hrms", "lrms", "pan"],
+) -> tuple[wds.WebDataset, wds.WebLoader]:
+    dataset = wds.DataPipeline(
+        wds.ResampledShards(wds_paths),
+        merge_modalities,
+        wds.decode(
+            wds.handle_extension("tif tiff", tiff_decode_io),
+            wds.handle_extension("npz", npz_decode_io),
+            wds.handle_extension("safetensors", safetensors_decode_io),
+            "torch",
+        ),
+        wds.map(remove_extension),
+        wds.map(flatten_sub_dict(regardless_of_any_collisions=True)),
+        wds.map(norm_img(to_neg_1_1, normed_keys, permute=True)),
+        wds.shuffle(shuffle_size),
+        wds.batched(batch_size, partial=True),
+    )
+    if remove_meta_data:
+        dataset = dataset.append(wds.map(remove_meta_data))
+
+    dataloader = wds.WebLoader(
+        dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor,
+        drop_last=False,
+        pin_memory=pin_memory,
+    )
+    dataloader = dataloader.with_length(10_000)  # 10k pairs of the dataloader
+    dataloader = dataloader.unbatched()
+
+    if shuffle_size > 0:
+        dataloader = dataloader.shuffle(shuffle_size)
+    dataloader = dataloader.batched(batch_size)
+
+    log_print(f"[Pansharpening Dataset]: constructed the dataloader")
+
+    return dataset, dataloader
+
+
+if __name__ == "__main__":
+    _, loader = get_panshap_dataloaders(
+        wds_paths=[
+            "data/pansharpening/MMSeg_YREB/dataset_0000.tar",
+            # "data/pansharpening/MMSeg_YREB/dataset_0001.tar",
+        ],
+        batch_size=4,
+        num_workers=1,
+        latent_ext="npz",
+    )
+    for i, sample in enumerate(loader):
+        # print(sample)
+        # break
+        print(i)

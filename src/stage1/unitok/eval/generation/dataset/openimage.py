@@ -13,9 +13,9 @@ class DatasetJson(Dataset):
         self.data_path = data_path
         self.transform = transform
         json_path = os.path.join(data_path, "image_paths.json")
-        assert os.path.exists(json_path), (
-            f"please first run: python3 tools/openimage_json.py"
-        )
+        assert os.path.exists(
+            json_path
+        ), f"please first run: python3 tools/openimage_json.py"
         with open(json_path, "r") as f:
             self.image_paths = json.load(f)
 

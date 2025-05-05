@@ -14,7 +14,10 @@ from safetensors.torch import (
 
 
 def tiff_codec_io(
-    img: np.ndarray, planarconfig: str = None, photometric: str = None
+    img: np.ndarray,
+    planarconfig: str = None,
+    photometric: str = None,
+    compression: str = "zlib",
 ) -> bytes:
     """Encodes a NumPy array into TIFF formatted bytes.
 
@@ -30,10 +33,28 @@ def tiff_codec_io(
     """
     with io.BytesIO() as buffer:
         tifffile.imwrite(
-            buffer, img, planarconfig=planarconfig, photometric=photometric
+            buffer,
+            img,
+            planarconfig=planarconfig,
+            photometric=photometric,
+            compression=compression,
         )
 
-    return buffer.getvalue()
+        return buffer.getvalue()
+
+
+def npz_codec_io(
+    data_dict: Dict[str, np.ndarray], do_compression: bool = True
+) -> bytes:
+    """Encodes a dictionary of NumPy arrays into NPZ file formatted bytes."""
+    with io.BytesIO() as buffer:
+        # Saves the dictionary. Keys become variable names in the NPZ file.
+        if do_compression:
+            np.savez_compressed(buffer, **data_dict, allow_pickle=True)
+        else:
+            np.savez(buffer, **data_dict, allow_pickle=True)
+
+        return buffer.getvalue()
 
 
 def mat_codec_io(
@@ -43,7 +64,7 @@ def mat_codec_io(
     with io.BytesIO() as buffer:
         # Saves the dictionary. Keys become variable names in the MAT file.
         scipy.io.savemat(buffer, data_dict, do_compression=do_compression)
-    return buffer.getvalue()
+        return buffer.getvalue()
 
 
 def safetensors_codec_io(data_dict: Dict[str, torch.Tensor]) -> bytes:
@@ -86,4 +107,14 @@ def safetensors_decode_io(safetensors_bytes: bytes) -> Dict[str, torch.Tensor]:
     # or potentially CPU depending on safetensors implementation details.
     # Usually, it's best practice to move tensors to the desired device after loading.
     data_dict: Dict[str, torch.Tensor] = load_safetensors(safetensors_bytes)
+    return data_dict
+
+
+def npz_decode_io(npz_bytes: bytes) -> Dict[str, np.ndarray]:
+    """Decodes NPZ file formatted bytes into a dictionary of NumPy arrays."""
+    with io.BytesIO(npz_bytes) as buffer:
+        # load returns a dictionary, potentially including header info
+        npz_dict: Dict[str, Any] = np.load(buffer, allow_pickle=True)
+
+        data_dict = {k: v.copy() for k, v in npz_dict.items() if not k.startswith("__")}
     return data_dict

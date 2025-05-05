@@ -1,8 +1,13 @@
+import math
+import os
 import sys
-from typing import Any, Callable, Dict
+import warnings
+from functools import partial
+from typing import Any, Callable, Dict, Literal
 
 import hydra
 import numpy as np
+import tifffile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,14 +15,20 @@ import webdataset as wds
 from omegaconf import DictConfig, OmegaConf
 from scipy.signal import windows
 from tqdm import tqdm
-import math
-import os
-
-import sys
 
 sys.path.insert(0, __file__[: __file__.find("scripts")])
-from src.data.codecs import safetensors_codec_io, tiff_codec_io
+from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
 from src.utilities.logging import log_print
+
+warnings.filterwarnings(
+    "once",
+    "[save fn]: const and dtype, one of them is not provided, save the img using float32",
+    append=True,
+)
+warnings.filterwarnings(
+    "ignore",
+    module="torch.utils.checkpoint",
+)
 
 
 def genMTF(ratio, sensor, nbands):
@@ -468,18 +479,13 @@ class PansharpTokenizeProcessor(nn.Module):
         pansharp_simulator: PansharpSimulator,
         tokenizer: nn.Module,
         before_save_fn: Callable | None = None,
-        latent_save_backend: str = "numpy",
+        latent_save_backend: Literal["npy", "safetensors", "npz"] = "safetensors",
     ):
         super().__init__()
         self.pansharp_simulator = pansharp_simulator
         self.tokenizer = tokenizer
         self.before_save_fn = before_save_fn
         self.latent_save_backend = latent_save_backend
-
-        assert self.latent_save_backend in [
-            "numpy",
-            "safetensors",
-        ], 'latent_save_backend must be "numpy" or "safetensors"'
         assert hasattr(self.tokenizer, "encode"), "Tokenizer must have an encode method"
 
     def forward(self, batch: Dict[str, Any]) -> Dict[str, Any]:
@@ -564,26 +570,46 @@ class PansharpTokenizeProcessor(nn.Module):
         # Let's modify this to return a list of dictionaries, one per sample.
         output_list = []
         for i in range(bs):
+            # * --- will save the original images or not --- #
             sample_data = {
                 "__key__": keys[i],
-                "hrms.tiff": tiff_codec_io(hrms[i], "seperate"),
-                "lrms.tiff": tiff_codec_io(lrms[i], "seperate"),
-                "pan.tiff": tiff_codec_io(pan[i], photometric="minisblack"),
+                # "hrms.tiff": tiff_codec_io(hrms[i], tifffile.PLANARCONFIG.SEPARATE),
+                # "lrms.tiff": tiff_codec_io(lrms[i], tifffile.PLANARCONFIG.SEPARATE),
+                # "pan.tiff": tiff_codec_io(
+                #     pan[i], photometric=tifffile.PHOTOMETRIC.MINISBLACK
+                # ),
             }
             # Assuming latent tensors also have a batch dimension
             if self.latent_save_backend == "safetensors":
-                codec_fn = lambda x: safetensors_codec_io(
-                    {"latent": x.cpu()}
-                )  # leave the dtype same as it
                 _ext = "safetensors"
-            else:
+                sample_data[f"latents.{_ext}"] = safetensors_codec_io(
+                    {
+                        "hrms_latent": hrms_latent[i],
+                        "lrms_latent": lrms_latent[i],
+                        "pan_latent": pan_latent[i],
+                    }
+                )
+            elif self.latent_save_backend == "npy":
                 # numpy fn
                 codec_fn = lambda x: x.detach().cpu().numpy()
                 _ext = "npy"
-
-            sample_data[f"hrms_latent.{_ext}"] = codec_fn(hrms_latent[i])
-            sample_data[f"lrms_latent.{_ext}"] = codec_fn(lrms_latent[i])
-            sample_data[f"pan_latent.{_ext}"] = codec_fn(pan_latent[i])
+                sample_data[f"hrms_latent.{_ext}"] = codec_fn(hrms_latent[i])
+                sample_data[f"lrms_latent.{_ext}"] = codec_fn(lrms_latent[i])
+                sample_data[f"pan_latent.{_ext}"] = codec_fn(pan_latent[i])
+            elif self.latent_save_backend == "npz":
+                _ext = "npz"
+                sample_data[f"latents.{_ext}"] = npz_codec_io(
+                    {
+                        "hrms_latent": hrms_latent[i].cpu().numpy(),
+                        "lrms_latent": lrms_latent[i].cpu().numpy(),
+                        "pan_latent": pan_latent[i].cpu().numpy(),
+                    },
+                    do_compression=True,  # small enough data, no need for compression
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported latent_save_backend: {self.latent_save_backend}"
+                )
 
             # Add any other metadata from the input batch if needed (assuming it's per-sample)
             # for k, v in batch.items():
@@ -625,9 +651,11 @@ def process_dataset(cfg: DictConfig) -> None:
         ratio=cfg.processor.ratio,
         sensor=cfg.processor.sensor,
         nbands=cfg.processor.nbands,  # Get nbands from data config
-        pan_weight_lst=OmegaConf.to_container(cfg.processor.pan_weights)
-        if not isinstance(cfg.processor.pan_weights, str)
-        else cfg.processor.pan_weights,  # Convert to list
+        pan_weight_lst=(
+            OmegaConf.to_container(cfg.processor.pan_weights)
+            if not isinstance(cfg.processor.pan_weights, str)
+            else cfg.processor.pan_weights
+        ),  # Convert to list
         downsample_type=cfg.processor.downsample_type,
     )
     pansharp_sim = pansharp_sim.to(device)
@@ -648,31 +676,40 @@ def process_dataset(cfg: DictConfig) -> None:
         )
 
     tokenizer.eval()
+    for p in tokenizer.parameters():
+        p.requires_grad = False  # Freeze parameters for inference
     log_print(f"Loaded tokenizer from {tokenizer.__class__.__name__}")
 
-    def before_save_fn(img: np.ndarray, const: float, dtype: np.dtype) -> np.ndarray:
+    def before_save_fn(
+        img: np.ndarray, const: float | None = None, dtype: np.dtype | None = None
+    ) -> np.ndarray:
         # Convert to float32 and scale to [0, 1]
         if cfg.data.to_neg_1_1:
             img = (img + 1) / 2
 
         img = np.clip(img, 0, 1)
-        img = (img * const).astype(dtype)
+        if const is not None and dtype is not None:
+            img = (img * const).astype(dtype)
+        else:
+            warnings.warn(
+                "[save fn]: const and dtype, one of them is not provided, save the img using float32"
+            )
+            img = img.astype(np.float32)
 
         return img
 
     processor = PansharpTokenizeProcessor(
         pansharp_simulator=pansharp_sim,
         tokenizer=tokenizer,
-        before_save_fn=partial(
-            before_save_fn,
-        ),  # const=, dtype=np.uint32),
+        before_save_fn=before_save_fn,
+        latent_save_backend="safetensors",
     )
     # Note: Processor itself doesn't need .to(device) unless it has its own parameters/buffers
     # The submodules (pansharp_sim, tokenizer) are already moved.
 
     # 2. Setup WebDataset pipeline using get_hyperspectral_dataloaders
     log_print(
-        f"Setting up WebDataset pipeline: {cfg.data.wds_paths} -> {cfg.output.output_wds_path}"
+        f"Setting up WebDataset pipeline: {cfg.data.wds_paths} -> {cfg.output.output_dir} TAR files"
     )
 
     # We need the dataloader, not the dataset object returned by the function
@@ -680,12 +717,10 @@ def process_dataset(cfg: DictConfig) -> None:
     _, input_dataloader = hydra.utils.instantiate(cfg.data)
 
     # 3. Run the pipeline and write output
-    output_dir = os.path.dirname(cfg.output.output_wds_path)
+    output_dir = cfg.output.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    log_print(f"Output directory created: {output_dir}")
 
-    output_sink = wds.ShardWriter(
-        cfg.output.output_wds_path, maxsize=cfg.output.maxsize
-    )
     log_print("Starting processing...")
     count = 0
     total_samples = 0  # Keep track of total samples written
@@ -702,6 +737,7 @@ def process_dataset(cfg: DictConfig) -> None:
         # If len() is not supported
         progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
 
+    sinks: dict[str, wds.TarWriter] = {}
     for batch in progress_bar:
         # Move input batch data to the correct device
         batch_on_device = {
@@ -714,7 +750,16 @@ def process_dataset(cfg: DictConfig) -> None:
 
         # Handle the output (list of sample dicts or empty dict on error)
         if isinstance(processed_output, list):
-            for sample_data in processed_output:
+            for sample_data, tar_path in zip(
+                processed_output, batch_on_device["__url__"]
+            ):
+                name = os.path.basename(tar_path).replace(" ", "_")
+                tar_path = os.path.join(output_dir, name)
+                output_sink = sinks.get(name, None)
+                if output_sink is None:
+                    output_sink = sinks[name] = wds.TarWriter(tar_path)
+                    log_print(f"Writing to {tar_path}")
+
                 if sample_data:  # Check if the dictionary is not empty
                     output_sink.write(sample_data)
                     total_samples += 1
@@ -736,9 +781,13 @@ def process_dataset(cfg: DictConfig) -> None:
                 level="warning",
             )
 
-    output_sink.close()
+    # close all sinks
+    for sink in sinks.values():
+        sink.close()
+        print("Closed all TAR writters")
+
     log_print(
-        f"Finished processing. {total_samples} samples written to {cfg.output.output_wds_path}"
+        f"Finished processing. {total_samples} samples written to {cfg.output.output_dir}"
     )
 
 

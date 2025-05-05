@@ -1,6 +1,7 @@
 used: MMSeg_YREB
 shuffle_size: 100
 num_workers: 3
+prefetch_factor: 6
 
 dataset_names_to_bs:
   MMSeg_YREB: 32
@@ -8,6 +9,7 @@ dataset_names_to_bs:
   GID_GF2: 32
   DryadHyper: 32
   DFC_2020: 32
+  MUSLI: 32
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -15,6 +17,7 @@ dataset_names_to_n_channels:
   GID_GF2: 4
   DryadHyper: 224
   DFC_2020: 13
+  MUSLI: 438
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: [4, 3, 2]
@@ -22,6 +25,7 @@ dataset_names_to_rgb_channels:
   GID_GF2: [4, 2, 0]
   DryadHyper: [90, 60, 40]
   DFC_2020: [9, 6, 4]
+  MUSLI: [120, 80, 30]
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -29,6 +33,7 @@ dataset_names_to_img_size:
   GID_GF2: 512
   DryadHyper: 128
   DFC_2020: 256
+  MUSLI: 438
 
 MMSeg_YREB_train:
   - data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
@@ -78,8 +83,23 @@ GID_GF2_train:
   - data/GID-GF2-test-4_bands-px_512-MSI-0000.tar
   - data/GID-GF2-test-4_bands-px_512-MSI-0001.tar
 
+MUSLI_train:
+  - data/MUSLI-438_bands-px_512-MSI-0000.tar
+  - data/MUSLI-438_bands-px_512-MSI-0001.tar
+  - data/MUSLI-438_bands-px_512-MSI-0002.tar
+  - data/MUSLI-438_bands-px_512-MSI-0003.tar
+  - data/MUSLI-438_bands-px_512-MSI-0004.tar
+  - data/MUSLI-438_bands-px_512-MSI-0005.tar
+  - data/MUSLI-438_bands-px_512-MSI-0006.tar
+  - data/MUSLI-438_bands-px_512-MSI-0007.tar
+  - data/MUSLI-438_bands-px_512-MSI-0008.tar
+  - data/MUSLI-438_bands-px_512-MSI-0009.tar
+
 DFC_2020_val:
   - data/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+
+MUSLI_val:
+  - data/MUSLI-438_bands-px_512-MSI-0009.tar
 
 DryadHyper_val:
   - data/DryadHyper-224_bands-px_128-MSI-0002.tar
