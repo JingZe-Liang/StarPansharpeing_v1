@@ -31,7 +31,7 @@ All rights reserved. This work should only be used for nonprofit purposes.
 """
 from scipy import ndimage
 import numpy as np
-from utils.sharpening_index.genMTF import genMTF, genMTF_torch
+from .genMTF import genMTF, genMTF_torch
 
 
 def MTF(I_MS, sensor, ratio):

@@ -28,7 +28,7 @@ All rights reserved. This work should only be used for nonprofit purposes.
 """
 
 import numpy as np
-from utils.sharpening_index.tools import (
+from .tools import (
     fir_filter_wind,
     fir_filter_wind_torch,
     gaussian2d,

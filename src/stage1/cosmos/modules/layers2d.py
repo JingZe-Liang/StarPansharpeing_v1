@@ -554,6 +554,54 @@ class FSDPNoWarpModule(nn.Module):
         return self.wrap_mod(x)
 
 
+class DiffBandsInputConvIn(nn.Module):
+    def __init__(
+        self,
+        band_lst: list[int],
+        hidden_dim: int,
+    ):
+        super().__init__()
+
+        self.band_lst = band_lst
+        self.hidden_dim = hidden_dim
+
+        self.in_modules = nn.ModuleDict()
+        for c in band_lst:
+            self.in_modules["conv_in_{}".format(c)] = nn.Conv2d(
+                c,
+                hidden_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
+
+            # keep the modules has grad in FSDP, DDP training
+            self.register_buffer(
+                f"buf_{c}",
+                torch.zeros(1, c, 3, 3),
+                persistent=False,
+            )
+            log_print(
+                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        c_ = x.shape[1]
+        module = self.in_modules["conv_in_{}".format(c_)]
+        h = module(x)
+
+        if self.training:
+            for c in self.band_lst:
+                if c != c_:
+                    buf = getattr(self, f"buf_{c}")
+                    m = self.in_modules["conv_in_{}".format(c)]
+                    no_use_h = m(buf)
+
+                    h = h + no_use_h.mean() * 0.0
+
+        return h
+
+
 # * ==========================================================
 # * Encoder and decoder
 

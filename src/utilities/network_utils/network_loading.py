@@ -1,10 +1,14 @@
 import os
+import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Literal
 
+import accelerate
 import torch
 import torch.nn as nn
 from loguru import logger as logging
+from peft import PeftConfig, PeftModel
 from torch.nn.modules.module import _IncompatibleKeys
 
 from ..logging.print import log_print
@@ -362,3 +366,45 @@ def remap_peft_model_state_dict(
     )
 
     return peft_model_state_dict, mismatched_keys
+
+
+def load_peft_model_checkpoint(
+    base_model: nn.Module,
+    peft_pretrained_path: str,
+    merge_and_unload: bool = True,
+    base_model_pretrained_path: str | None = None,
+) -> tuple[PeftConfig, PeftModel | nn.Module]:
+    """
+    Load a PEFT model checkpoint and merge it with the base model.
+
+    Args:
+        base_model (nn.Module): The base model to merge with.
+        base_model_pretrained_path (str | None): Path to the base model checkpoint.
+        peft_pretrained_path (str): Path to the PEFT model checkpoint.
+        merge_and_unload (bool): Whether to merge and unload the PEFT model.
+
+    Returns:
+        tuple: A tuple containing the PeftConfig and the merged PeftModel or nn.Module.
+    """
+    if base_model_pretrained_path:
+        base_sd = accelerate.utils.load_state_dict(base_model_pretrained_path)
+        # Load the base model
+        _incompact_keys = base_model.load_state_dict(base_sd, strict=False)
+        log_print(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
+    else:
+        warnings.warn(
+            "No base model checkpoint provided. Please make sure the base model is initialized correctly."
+        )
+
+    # Load the PEFT model
+    peft_config = PeftConfig.from_pretrained(peft_pretrained_path)
+    peft_model = PeftModel.from_pretrained(
+        base_model, peft_pretrained_path, adapter_name="default"
+    )
+
+    if merge_and_unload:
+        peft_model = peft_model.merge_and_unload(
+            progressbar=True, adapter_names=["default"]
+        )
+
+    return peft_config, peft_model

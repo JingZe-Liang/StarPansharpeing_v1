@@ -1,4 +1,5 @@
 import sys
+from functools import partial
 from typing import Literal
 
 import numpy as np
@@ -139,7 +140,7 @@ def get_panshap_dataloaders(
     return dataset, dataloader
 
 
-def get_sperate_pansharp_dataloaders(
+def get_multimodal_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
     num_workers: int,
@@ -149,11 +150,11 @@ def get_sperate_pansharp_dataloaders(
     prefetch_factor: int = 6,
     latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
     pin_memory: bool = True,
-    remove_meta_data: bool = False,
+    remove_meta: bool = False,
     normed_keys: list[str] = ["img", "hrms", "lrms", "pan"],
 ) -> tuple[wds.WebDataset, wds.WebLoader]:
     dataset = wds.DataPipeline(
-        wds.ResampledShards(wds_paths),
+        wds.ResampledShards(wds_paths) if resample else wds.SimpleShardList(wds_paths),
         merge_modalities,
         wds.decode(
             wds.handle_extension("tif tiff", tiff_decode_io),
@@ -163,11 +164,18 @@ def get_sperate_pansharp_dataloaders(
         ),
         wds.map(remove_extension),
         wds.map(flatten_sub_dict(regardless_of_any_collisions=True)),
-        wds.map(norm_img(to_neg_1_1, normed_keys, permute=True)),
+        wds.map(
+            partial(
+                norm_img,
+                to_neg_1_1=to_neg_1_1,
+                norm_keys=normed_keys,
+                permute=False,
+            )
+        ),
         wds.shuffle(shuffle_size),
         wds.batched(batch_size, partial=True),
     )
-    if remove_meta_data:
+    if remove_meta:
         dataset = dataset.append(wds.map(remove_meta_data))
 
     dataloader = wds.WebLoader(
@@ -175,7 +183,7 @@ def get_sperate_pansharp_dataloaders(
         batch_size=None,
         num_workers=num_workers,
         persistent_workers=True if num_workers > 0 else False,
-        prefetch_factor=prefetch_factor,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         drop_last=False,
         pin_memory=pin_memory,
     )
@@ -192,16 +200,31 @@ def get_sperate_pansharp_dataloaders(
 
 
 if __name__ == "__main__":
-    _, loader = get_panshap_dataloaders(
+    # _, loader = get_panshap_dataloaders(
+    #     wds_paths=[
+    #         "data/pansharpening/MMSeg_YREB/dataset_0000.tar",
+    #         # "data/pansharpening/MMSeg_YREB/dataset_0001.tar",
+    #     ],
+    #     batch_size=4,
+    #     num_workers=1,
+    #     latent_ext="npz",
+    # )
+    # for i, sample in enumerate(loader):
+    #     # print(sample)
+    #     # break
+    #     print(i)
+
+    _, loader = get_multimodal_dataloaders(
         wds_paths=[
-            "data/pansharpening/MMSeg_YREB/dataset_0000.tar",
-            # "data/pansharpening/MMSeg_YREB/dataset_0001.tar",
+            "data/MMSeg_YREB/[pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
         ],
         batch_size=4,
-        num_workers=1,
-        latent_ext="npz",
+        num_workers=0,
+        resample=True,
     )
-    for i, sample in enumerate(loader):
-        # print(sample)
-        # break
-        print(i)
+
+    from tqdm import tqdm
+
+    for sample in tqdm(loader):
+        print(sample.keys())
+        # pass

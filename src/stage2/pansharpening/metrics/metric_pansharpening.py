@@ -16,13 +16,12 @@ from warnings import warn
 
 import numpy as np
 import torch
-from loguru import logger
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-from .utils._metric_legacy import (
-    analysis_accu,
-    indexes_evaluation_FS,
-)
+from src.utilities.logging import log_print
+
+from .utils._metric_legacy import analysis_accu
+from .utils.indexes_evaluation_FS import indexes_evaluation_FS
 
 
 def to_numpy(*args):
@@ -134,10 +133,11 @@ class AnalysisPanAcc(object):
                     "GF2-GF5": 1,
                 }
                 self.default_max_value = _default_max_value.get(sensor)
-                logger.warning(
+                log_print(
                     f">>> `default_max_value` is not specified, set it according to `sensor`:"
-                    f"{sensor, self.default_max_value}\n",
+                    f"{sensor, self.default_max_value}\n"
                     "-" * 20,
+                    level="warning",
                 )
 
             self.FS_metric_fn = partial(
@@ -292,7 +292,7 @@ class AnalysisPanAcc(object):
 
     def clear_history(self, verbose=False):
         if verbose:
-            logger.info(">> AccAnalysis: clear history")
+            log_print(">> AccAnalysis: clear history")
         self._acc_d = {}
         self._call_n = 0
         self.acc_ave = (

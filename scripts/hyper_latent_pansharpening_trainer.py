@@ -19,12 +19,12 @@ from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
-from tqdm import trange
 from omegaconf import DictConfig, OmegaConf
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
+from tqdm import trange
 
 colored_traceback.add_hook()
 
@@ -33,6 +33,7 @@ sys.path.insert(0, __file__[: __file__.find("scripts")])
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
+from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.train_utils.state import StepsCounter
 
 to_cont = partial(OmegaConf.to_container, resolve=True)
@@ -45,7 +46,6 @@ class PansharpeningTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.tokenizer_cfg = cfg.tokenizer
-        self.pansp_cfg = cfg.pansharpening
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -72,14 +72,14 @@ class PansharpeningTrainer:
 
         # is zero 2 or 3, not EMA
         _dpsp_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
-        _fsdp_plugin: accelerate.utils.FullyShardedDataParallelPlugin = getattr(
+        _fsdp_plugin: accelerate.utils.FullyShardedDataParallelPlugin = getattr(  # type: ignore
             self.accelerator.state, "fsdp_plugin", None
         )
         self.no_ema = False
         self._is_ds = _dpsp_plugin is not None
         if self._is_ds:
             self.log_msg("[Deepspeed]: using deepspeed plugin")
-            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][
+            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][  # type: ignore
                 "stage"
             ] in [2, 3]
 
@@ -89,7 +89,7 @@ class PansharpeningTrainer:
             self.no_ema = True
 
         # dataloader
-        used_dataset = self.dataset_cfg.used
+        used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
             self.dataset_cfg.train
@@ -98,24 +98,25 @@ class PansharpeningTrainer:
             self.dataset_cfg.val
         )
         if _dpsp_plugin is not None:
-            self.accelerator.deepspeed_plugin.deepspeed_config[
+            self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
         # setup the tokenizer
         self.online_tokenize = self.train_cfg.online_tokenize
-        if self.train_cfg.online_tokenize:
-            self.setup_tokenizer()
+        self.setup_tokenizer()  # must setup the tokenizer to decode the image
+        self.setup_pansharpening_model()  # setup the pansharpening model
 
         # optimizers and lr schedulers
         self.pansp_optim, self.pansp_sched = self.get_optimizer_lr_scheduler()
+
         # EMA models and accelerator prepare
         self.prepare_for_training()
         self.prepare_ema_models()
 
         # loss
-        if hasattr(self.train_cfg, "pansharpeing_loss"):
-            self.pansp_loss = hydra.utils.instantiate(self.train_cfg.pansharpeing_loss)
+        if hasattr(self.train_cfg, "pansharpening_loss"):
+            self.pansp_loss = hydra.utils.instantiate(self.train_cfg.pansharpening_loss)
         else:
             self.pansp_loss = nn.L1Loss()
         self.log_msg(f"use pansharpening loss: {self.pansp_loss.__class__.__name__}")
@@ -127,9 +128,9 @@ class PansharpeningTrainer:
         torch.cuda.empty_cache()
 
     def setup_pansharpening_model(self):
-        self.pansp_model = hydra.utils.instantiate(self.train_cfg.pansharpeing_model)
+        self.pansp_model = hydra.utils.instantiate(self.cfg.pansharp_model)
         pansp_name = (
-            getattr(self.train_cfg, "pansharpeing_name", None)
+            getattr(self.train_cfg, "pansharpening_name", None)
             or self.pansp_model.__class__.__name__
         )
         self.log_msg(f"use pansharpening model: {pansp_name}")
@@ -137,7 +138,7 @@ class PansharpeningTrainer:
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.cfg.vq_loss.quantizer_type
+        self.quantizer_type: str | None = self.train_cfg.quantizer_type
         self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
@@ -190,6 +191,19 @@ class PansharpeningTrainer:
             )
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
+
+            if self.train_cfg.peft_pretrained_path is not None:
+                self.log_msg(
+                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
+                )
+                self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
+                    base_model=self.tokenizer,
+                    base_model_pretrained_path=getattr(
+                        self.train_cfg, "base_model_pretrained_path", None
+                    ),
+                    peft_pretrained_path=self.train_cfg.peft_pretrained_path,
+                    merge_and_unload=True,
+                )
 
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = hasattr(
@@ -291,7 +305,7 @@ class PansharpeningTrainer:
 
         # accelerate project configuration
         self.proj_dir = log_dir
-        self.accelerator.project_configuration.project_dir = self.proj_dir
+        self.accelerator.project_configuration.project_dir = str(self.proj_dir)
 
         # tensorboard logger
         if not self.train_cfg.debug:
@@ -339,7 +353,7 @@ class PansharpeningTrainer:
                 if p.grad is not None:
                     # must sync grad here, `is_main_process` would cause the ranks do not sync
                     if isinstance(p.grad, DTensor):
-                        _grad = p.grad._local_tensor
+                        _grad: torch.Tensor = p.grad._local_tensor
                         if p.grad._local_tensor.device == torch.device("cpu"):
                             self.log_msg(
                                 "p.grad is on cpu, this should not happen",
@@ -347,7 +361,7 @@ class PansharpeningTrainer:
                             )
                             # ensure the corss rank does not involve cpu bankend
                             _grad = _grad.cuda()
-                        _p_grad = _grad.full_tensor()  # across all ranks
+                        _p_grad = p.grad.full_tensor()  # across all ranks
                     _grad_norm = (_p_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
@@ -389,15 +403,38 @@ class PansharpeningTrainer:
                 msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
                 log_fn(msg_string, **kwargs)
 
-    def get_optimizer_lr_scheduler(self):
+    def get_optimizer_lr_scheduler(
+        self,
+    ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
             or "optimizer"
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            pansp_opt = hydra.utils.instantiate(self.train_cfg.pansharp_optim)(
-                self._get_tokenizer_params()
+
+            def _optimizer_creater(optimizer_cfg, params_getter):
+                if "get_moun_optimizer" in optimizer_cfg._target_:
+                    self.log_msg("[Optimizer]: using muon optimizer")
+                    # is muon optimizer function
+                    named_params = params_getter(with_name=True)
+                    return hydra.utils.instantiate(optimizer_cfg)(
+                        named_parameters=named_params
+                    )
+                else:
+                    self.log_msg(
+                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
+                    )
+                    params = params_getter(with_name=False)
+                    return hydra.utils.instantiate(optimizer_cfg)(params)
+
+            _get_panshap_model_params = (
+                lambda with_name: self.pansp_model.named_parameters()
+                if with_name
+                else self.pansp_model.parameters()
+            )
+            pansp_opt = _optimizer_creater(
+                self.train_cfg.pansharp_optim, _get_panshap_model_params
             )
         else:
             pansp_opt = DummyOptim([{"params": list(self.pansp_model.parameters())}])
@@ -428,13 +465,13 @@ class PansharpeningTrainer:
 
         return pansp_opt, pansp_sched
 
-    def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module | FSDPModule):
+    def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module):
         if not self._is_fsdp:
             return model
 
         self.log_msg(
             "FSDP module seems do not move the original parameter (_local_tensor) on the"
-            "correct rank, we need to manully move them on cuda while using `to_local` or `redistributed` methods",
+            "correct rank, we need to manually move them on cuda while using `to_local` or `redistributed` methods",
             level="WARNING",
         )
         _cpu_device = torch.device("cpu")
@@ -470,22 +507,17 @@ class PansharpeningTrainer:
         if self.train_cfg.prepare_tokenizer_in_accelerator:
             if self.sep_enc_dec:
                 # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder, self.tokenizer_optim = self.accelerator.prepare(
-                    self.tokenizer_encoder, self.tokenizer_optim
+                self.tokenizer_encoder = self.accelerator.prepare(
+                    self.tokenizer_encoder
                 )
                 self.accelerator._models.pop(-1)
-                self.accelerator._optimizers.pop(-1)
-                self.tokenizer_decoder, self.tokenizer_optim = self.accelerator.prepare(
-                    self.tokenizer_decoder, self.tokenizer_optim
+                self.tokenizer_decoder = self.accelerator.prepare(
+                    self.tokenizer_decoder
                 )
                 self.accelerator._models.pop(-1)
-                self.accelerator._optimizers.pop(-1)
             else:
-                self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(
-                    self.tokenizer, self.tokenizer_optim
-                )
+                self.tokenizer = self.accelerator.prepare(self.tokenizer)
                 self.accelerator._models.pop(-1)
-                self.accelerator._optimizers.pop(-1)
 
         # quantizer
         if self.quantizer is not None and self.use_quantizer:
@@ -494,10 +526,6 @@ class PansharpeningTrainer:
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
-        )
-
-        self.tokenizer_sched, self.disc_sched = self.accelerator.prepare(
-            self.tokenizer_sched, self.disc_sched
         )
 
     def step_train_state(self):
@@ -512,11 +540,10 @@ class PansharpeningTrainer:
         self.ema_pansp_model.update()
 
     @torch.no_grad()
-    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode"):
-        if not self.online_tokenize:
-            return None
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode") -> dict | None:
+        assert hasattr(self, "tokenizer"), "Tokenizer not found"
 
-        latent_q, recon = None
+        latent_q, recon = None, None
         with self.accelerator.autocast():
             if self.sep_enc_dec:
                 to_enc = lambda x: self.tokenizer_encoder(x)[0]
@@ -536,8 +563,6 @@ class PansharpeningTrainer:
 
                 if mode == "encode":
                     latent = to_enc(x)
-                    if self.use_quantizer:
-                        recon, q_loss, q_info = self.tokenizer(x)
                 elif mode == "decode":
                     recon = to_dec(x)
                     if isinstance(recon, tuple):
@@ -598,15 +623,19 @@ class PansharpeningTrainer:
         self,
         lrms_tok_out: dict | None = None,
         pan_tok_out: dict | None = None,
-        sr_toke_out: dict | None = None,
+        sr_tok_out: dict | None = None,
         lrms_latent: torch.Tensor | None = None,
         pan_latent: torch.Tensor | None = None,
         sr_latent: torch.Tensor | None = None,
     ):
-        if lrms_tok_out is not None and pan_tok_out is not None:
+        if (
+            lrms_tok_out is not None
+            and pan_tok_out is not None
+            and sr_tok_out is not None
+        ):
             lrms_latent = lrms_tok_out["latent"].detach()
             pan_latent = pan_tok_out["latent"].detach()
-            sr_latent = sr_toke_out["latent"].detach()
+            sr_latent = sr_tok_out["latent"].detach()
 
         with self.accelerator.autocast():
             pred_latent = self.pansp_model(
@@ -637,15 +666,16 @@ class PansharpeningTrainer:
             pred_latent=pred_latent, sr_loss=sr_loss, sr_log_losses=sr_log_losses
         )
 
-    def train_step(
-        self,
-        batch: dict,
-    ):
+    def train_step(self, batch: dict):
         lrms_latent = pan_latent = hrms_latent = None
+        lrms_tok_out = pan_tok_out = sr_tok_out = None
+
+        # offline latents
         if "lrms_latent" in batch:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
             hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
+
         # tokenizer online
         else:
             assert self.online_tokenize and (
@@ -683,7 +713,7 @@ class PansharpeningTrainer:
             train_out = self.train_pansp_step(
                 lrms_tok_out=lrms_tok_out,
                 pan_tok_out=pan_tok_out,
-                sr_toke_out=sr_tok_out,
+                sr_tok_out=sr_tok_out,
                 lrms_latent=lrms_latent,
                 pan_latent=pan_latent,
                 sr_latent=hrms_latent,
@@ -698,18 +728,18 @@ class PansharpeningTrainer:
                 and self.global_step % quality_track_n != 0
                 and self.global_step >= quality_track_after
             ):
-                check_quality(self.pan_acc_reduced, pred_sr=pred_img, gt_sr=batch["gt"])
+                check_quality(self.pan_acc_reduced, pred_sr=pred_img, gt=batch["gt"])
                 check_quality(
                     self.pan_acc_reduced_latent,
                     pred_sr=pred_img,
-                    gt_sr=self.forward_tokenizer(sr_tok_out, mode="decode"),
+                    gt=self.forward_tokenizer(sr_tok_out["latent"], mode="decode"),
                 )
 
         self.step_train_state()
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_tok_losses = self.format_log(log_token_loss=train_out["sr_log_losses"])
+            _log_tok_losses = self.format_log(train_out["sr_log_losses"])
 
             self.log_msg(
                 f"[Train State]: lr {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
@@ -797,13 +827,13 @@ class PansharpeningTrainer:
 
     def val_step(self, batch: dict):
         if not self.online_tokenize:
-            lrms_latent = self.forward_tokenizer(batch["lms"])["latent"]
+            lrms_latent = self.forward_tokenizer(batch["lrms"])["latent"]
             lrms_latent = self.forward_tokenizer(batch["pan"])["latent"]
-            self.forward_tokenizer(batch["gt"])["latent"]
+            gt_latent = self.forward_tokenizer(batch["gt"])["latent"]
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
-            batch["hrms_latent"].to(self.device, self.dtype)
+            hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
         pred_latent = self.pansp_model(
@@ -1017,7 +1047,7 @@ _configs = {
 
 
 @hydra.main(
-    config_path="configs/tokenizer_gan",
+    config_path="configs/pansharpening",
     config_name=_configs,
     version_base=None,
 )

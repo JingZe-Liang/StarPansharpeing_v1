@@ -3,10 +3,10 @@ attn_resolutions: [32]
 channels: 128
 channels_mult: [2, 4, 4]
 dropout: 0.0
-in_channels: ${consts.bands}
+in_channels: ${dataset.consts.bands}
 spatial_compression: 8
 num_res_blocks: 2
-out_channels: ${consts.bands}
+out_channels: ${dataset.consts.bands}
 resolution: 1024
 patch_size: 4
 patch_method: haar

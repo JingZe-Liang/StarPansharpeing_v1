@@ -34,15 +34,18 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 colored_traceback.add_hook()
 
 sys.path.insert(0, __file__[: __file__.find("scripts")])
-from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
+from src.data.hyperspectral_loader import (
+    get_hyerpspectral_img_loaders_with_different_backends,
+    get_hyperspectral_dataloaders,
+)
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
+from src.utilities.config_utils import to_object as to_cont
 from src.utilities.network_utils import load_fsdp_model
 from src.utilities.train_utils.state import StepsCounter
 
-to_cont = partial(OmegaConf.to_container, resolve=True)
 # omegaconf resolver
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
@@ -106,26 +109,53 @@ class CosmosHyperspectralTokenizerTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = get_hyperspectral_dataloaders(
-            wds_paths=self.dataset_cfg.wds_path_train,
-            batch_size=self.dataset_cfg.batch_size_train,
-            num_workers=self.dataset_cfg.num_workers,
-            shuffle_size=self.dataset_cfg.shuffle_size,
-            hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
-            transform_prob=self.dataset_cfg.transform_prob,
-            random_apply=to_cont(self.dataset_cfg.random_apply),
-            prefetch_factor=self.dataset_cfg.prefetch_factor,
-            to_neg_1_1=True,
+        # self.train_dataset, self.train_dataloader = get_hyperspectral_dataloaders(
+        #     wds_paths=self.dataset_cfg.wds_path_train,
+        #     batch_size=self.dataset_cfg.batch_size_train,
+        #     num_workers=self.dataset_cfg.num_workers,
+        #     shuffle_size=self.dataset_cfg.shuffle_size,
+        #     hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
+        #     transform_prob=self.dataset_cfg.transform_prob,
+        #     random_apply=to_cont(self.dataset_cfg.random_apply),
+        #     prefetch_factor=self.dataset_cfg.prefetch_factor,
+        #     to_neg_1_1=True,
+        # )
+        # self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
+        #     wds_paths=self.dataset_cfg.wds_path_val,
+        #     batch_size=self.dataset_cfg.batch_size_val,
+        #     num_workers=self.dataset_cfg.num_workers,
+        #     shuffle_size=self.dataset_cfg.shuffle_size,
+        #     prefetch_factor=self.dataset_cfg.prefetch_factor,
+        #     hyper_transforms_lst=None,
+        #     transform_prob=0.0,
+        #     to_neg_1_1=True,
+        # )
+
+        self.train_dataset, self.train_dataloader = (
+            get_hyerpspectral_img_loaders_with_different_backends(
+                paths=self.dataset_cfg.wds_path_train,
+                batch_size=self.dataset_cfg.batch_size_train,
+                num_workers=self.dataset_cfg.num_workers,
+                shuffle_size=self.dataset_cfg.shuffle_size,
+                hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
+                transform_prob=self.dataset_cfg.transform_prob,
+                random_apply=to_cont(self.dataset_cfg.random_apply),
+                prefetch_factor=self.dataset_cfg.prefetch_factor,
+                to_neg_1_1=True,
+                loader_type=self.dataset_cfg.loader_type,
+            )
         )
-        self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
-            wds_paths=self.dataset_cfg.wds_path_val,
-            batch_size=self.dataset_cfg.batch_size_val,
-            num_workers=self.dataset_cfg.num_workers,
-            shuffle_size=self.dataset_cfg.shuffle_size,
-            prefetch_factor=self.dataset_cfg.prefetch_factor,
-            hyper_transforms_lst=None,
-            transform_prob=0.0,
-            to_neg_1_1=True,
+        self.val_dataset, self.val_dataloader = (
+            get_hyerpspectral_img_loaders_with_different_backends(
+                paths=self.dataset_cfg.wds_path_val,
+                batch_size=self.dataset_cfg.batch_size_val,
+                num_workers=self.dataset_cfg.num_workers,
+                shuffle_size=self.dataset_cfg.shuffle_size,
+                prefetch_factor=self.dataset_cfg.prefetch_factor,
+                hyper_transforms_lst=None,
+                transform_prob=0.0,
+                to_neg_1_1=True,
+            )
         )
 
         if _dpsp_plugin is not None:
@@ -299,6 +329,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 input_lst = [None] * self.accelerator.num_processes
             output_lst = [None]
             torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
+            output_lst: list[Path]
             log_file: Path = output_lst[0]
             assert isinstance(log_file, Path), "log_file type should be Path"
 
@@ -344,12 +375,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerate project configuration
         self.proj_dir = log_dir
-        self.accelerator.project_configuration.project_dir = self.proj_dir
+        self.accelerator.project_configuration.project_dir = str(self.proj_dir)
 
         # tensorboard logger
         if not self.train_cfg.debug:
             tenb_dir = log_dir / "tensorboard"
-            self.accelerator.project_configuration.logging_dir = tenb_dir
+            self.accelerator.project_configuration.logging_dir = str(tenb_dir)
             if self.accelerator.is_main_process:
                 self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
                 self.accelerator.init_trackers("train")
@@ -381,7 +412,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.tb_logger.log_images(logs, step=step)
         elif log_type in ("grad_norm_per_param", "grad_norm_sum"):
             assert "model" in logs, "model name must be in logs"
-            model = logs.pop("model")
+            model: torch.nn.Module = logs.pop("model")
             # take out the grad of norms
             model_cls_n = model.__class__.__name__
             norms = {}
@@ -400,7 +431,7 @@ class CosmosHyperspectralTokenizerTrainer:
                             )
                             # ensure the corss rank does not involve cpu bankend
                             _grad = _grad.cuda()
-                        _p_grad = _grad.full_tensor()  # across all ranks
+                        _p_grad = p.grad.full_tensor()  # across all ranks
                     _grad_norm = (_p_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
@@ -475,9 +506,9 @@ class CosmosHyperspectralTokenizerTrainer:
         peft_cfg.target_modules = list(peft_cfg.target_modules)
         peft_cfg.modules_to_save = list(peft_cfg.modules_to_save)
 
-        if hasattr(self.tokenizer, "peft_first_last_convs_moduel_names"):
+        if hasattr(self.tokenizer, "peft_first_last_convs_module_names"):
             peft_cfg.modules_to_save = (
-                self.tokenizer.peft_first_last_convs_moduel_names()
+                self.tokenizer.peft_first_last_convs_module_names()
             )
             self.log_msg(
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
@@ -1031,7 +1062,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
 
         if isinstance(w, DTensor):
-            w = w.cuda().full_tensor()
+            w = w.full_tensor().cuda()
 
         return w
 
@@ -1149,6 +1180,7 @@ class CosmosHyperspectralTokenizerTrainer:
             ]
         )
         _accum_models.append(self.vq_loss_fn.discriminator)
+        # import ipdb; ipdb.set_trace()
 
         with self.accelerator.accumulate(*_accum_models):
             # with torch.autograd.set_detect_anomaly(True):
@@ -1501,7 +1533,7 @@ class CosmosHyperspectralTokenizerTrainer:
     def load_from_ema_or_lora(self, ema_path: str, strict: bool = False):
         ##! FIXME: if is loaded after FSDP2 shard, it won't work
 
-        ema_path = Path(ema_path)
+        ema_path: Path = Path(ema_path)  # type: ignore
 
         if self.sep_enc_dec:
             if self._is_fsdp:
@@ -1766,7 +1798,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "sana_f8c32p1_bsq"
+_key = "unicosmos_lora_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

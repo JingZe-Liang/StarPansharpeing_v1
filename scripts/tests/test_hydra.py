@@ -13,13 +13,17 @@ sys.path.insert(
 
 
 @hydra.main(
-    config_path="../configs/pansharpening_simulation",
-    config_name="pan_wv3_simulation",
+    config_path="../configs/pansharpening",
+    config_name="cosmos_f8c16p4_fusionnet",
     version_base=None,
 )
 def main(args):
-    print(OmegaConf.to_yaml(args, resolve=True))
+    # print(OmegaConf.to_yaml(args, resolve=True))
     # hydra.utils.instantiate(args.train.tokenizer_optimizer)
+
+    # print(OmegaConf.to_yaml(args.dataset, resolve=True))
+    # print(OmegaConf.to_container(args.dataset.train.wds_paths, resolve=True))
+    print(args.dataset.consts.bands)
 
     # print(args.dataset.batch_size_val)
     # print(args.vq_loss)

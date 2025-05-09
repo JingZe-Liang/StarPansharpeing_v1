@@ -1,10 +1,13 @@
 import re
+from itertools import chain
+from typing import Dict
 
 import braceexpand
+import numpy as np
 import torch
 import webdataset as wds
 
-from utilities.logging.print import log_print
+from ..utilities.logging.print import log_print
 
 
 def extract_modality_names(s):
@@ -27,11 +30,29 @@ def remove_extension(sample):
 
 
 def remove_meta_data(sample):
-    for k, v in sample.items():
+    for k in sample.keys():
         if k.startswith("__"):
             del sample[k]
 
     return sample
+
+
+def may_repeat_channels(img: torch.Tensor, rep_channels: int = 3) -> torch.Tensor:
+    # img: (1, H, W), (H, W), (C, H, W)
+    if img.ndim == 2:
+        img = img[None].repeat(rep_channels, 1, 1)
+    elif img.ndim == 3:
+        if img.shape[0] == 1:
+            img = img.repeat(rep_channels, 1, 1)
+        elif img.shape[0] != rep_channels:
+            raise ValueError(
+                f"Expected img to have {rep_channels} channels, but got {img.shape[0]} channels."
+            )
+    else:
+        raise ValueError(
+            f"Unsupported number of dimensions for img: {img.ndim}. Expected 2 or 3."
+        )
+    return img
 
 
 def _check_dots(s):
@@ -40,8 +61,13 @@ def _check_dots(s):
     return s.count(".") == 1
 
 
+# @torch.compile
 def norm_img(
-    to_neg_1_1: bool = True, norm_keys: list[str] = ["img"], permute: bool = True
+    sample: Dict[str, dict | torch.Tensor | np.ndarray],
+    norm_keys: list[str] = ["img"],
+    to_neg_1_1: bool = True,
+    permute: bool = True,
+    on_device: bool = False,
 ):
     """
     Normalize the image to [0, 1] and optionally to [-1, 1].
@@ -54,28 +80,44 @@ def norm_img(
         function: A function that takes a sample and normalizes the image.
     """
 
-    def _inner(sample):
-        for key in norm_keys:
-            if key not in sample:
-                log_print(f"{key} not in sample", level="warning", warn_once=True)
-                continue
+    for key in norm_keys:
+        if key not in sample:
+            log_print(f"{key} not in sample", level="warning", warn_once=True)
+            continue
 
-            img = torch.as_tensor(sample[key], dtype=torch.float32)
-            img = img / img.max()
-            if to_neg_1_1:
-                img = img * 2 - 1
-            if permute:
+        if isinstance(sample[key], dict):
+            _img = sample[key].get("img")
+        elif isinstance(sample[key], (np.ndarray, torch.Tensor)):
+            _img = sample[key]
+        else:
+            raise ValueError(
+                f"Unsupported type for {key}: {type(sample[key])}. Expected dict, np.ndarray, or torch.Tensor."
+            )
+        img = torch.as_tensor(
+            _img,
+            dtype=torch.float32,
+            device=torch.device("cpu") if not on_device else torch.device("cuda"),
+        )
+        img = img / img.max()
+        if to_neg_1_1:
+            img = img * 2 - 1
+        if permute:
+            if img.ndim == 3:
                 img = img.permute(-1, 0, 1)
+            elif img.ndim == 4:
+                img = img.permute(0, -1, 1, 2)
+            else:
+                raise ValueError(
+                    f"Unsupported number of dimensions for {key}: {img.ndim}. Expected 3 or 4."
+                )
 
-            sample[key] = img
+        sample[key] = img
 
-        return sample
-
-    return _inner
+    return sample
 
 
 def merge_modalities(
-    source, modality_name_map: dict | None = None, handler=wds.warn_and_continue
+    source, modality_name_map: dict | None = None, handler=wds.warn_and_stop
 ):
     for src in source:
         multi_tar_urls = src["url"].translate(str.maketrans("[]", "{}"))
@@ -92,14 +134,37 @@ def merge_modalities(
             # Remaining cases where multiple modalities are specified, e.g. shard_dir/[foo,bar]/shard00000.tar
             multi_tar_urls = list(braceexpand.braceexpand(multi_tar_urls))
 
-        # Create tar iterators for shards of all modalities
-        tar_iters = [
-            wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
-        ]
+        if len(multi_tar_urls) != len(modality_names):
+            # shard_dir/[foo,bar]/shard{0000..0002}.tar, list of tars
+            assert len(multi_tar_urls) % len(modality_names) == 0, (
+                "Number of shards is not divisible by number of modalities"
+                f"but got {len(multi_tar_urls)} shards and {len(modality_names)} modalities"
+                f"multi_tar_files: {multi_tar_urls}, modality_names: {modality_names}"
+            )
+            tar_files = [
+                wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
+            ]
+            chained_per_modality = [
+                chain.from_iterable(
+                    tar_files[i : i + len(multi_tar_urls) // len(modality_names)]
+                )
+                for i in range(
+                    0, len(multi_tar_urls), len(multi_tar_urls) // len(modality_names)
+                )
+            ]
+            multi_tar_loop = zip(*chained_per_modality)
+        else:
+            # Create tar iterators for shards of all modalities
+            tar_iters = [
+                wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
+            ]
+            multi_tar_loop = zip(*tar_iters)
+
+        # * --- Try to loop the multi-modality tar sources --- #
 
         try:
             # Loop over these iterators in parallel and combine the tar files from different modalities
-            for multi_tar_files in zip(*tar_iters):
+            for multi_tar_files in multi_tar_loop:
                 merged_dict = {}
                 merged_dict["__key__"] = multi_tar_files[0]["__key__"]
                 merged_dict["__url__"] = src["url"]
@@ -148,6 +213,7 @@ def flatten_sub_dict(regardless_of_any_collisions=True):
     _has_checked = False
 
     def key_is_in(key, sample):
+        nonlocal _has_checked
         if _has_checked:
             return
 
@@ -168,6 +234,7 @@ def flatten_sub_dict(regardless_of_any_collisions=True):
                 key_is_in(k, sample_flatten)
                 sample_flatten[k] = v
 
+        nonlocal _has_checked
         _has_checked = True
 
         return sample_flatten

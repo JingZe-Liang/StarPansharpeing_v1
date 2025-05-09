@@ -119,7 +119,9 @@ class REPALoss(torch.nn.Module):
                     "rgb_channels must be randomly selected"
                 )
             else:
-                raise TypeError("rgb_channels must be list or tuple or str")
+                raise TypeError(
+                    f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}"
+                )
 
         # encoder
         self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
@@ -191,7 +193,9 @@ class REPALoss(torch.nn.Module):
                 _rgb_chan_select = torch.randperm(img.shape[1])[:3]
                 rgb_channels = _rgb_chan_select.tolist()
             elif (
-                self.rgb_channels.startswith("random") and self.rgb_channels != "random"
+                not isinstance(self.rgb_channels, (list, tuple))
+                and self.rgb_channels.startswith("random")
+                and self.rgb_channels != "random"
             ):
                 # e.g., random_5_12, means select 3 of channels from 5 to 12 channel index
                 _lft_idx = self.rgb_channels.split("_")[1]

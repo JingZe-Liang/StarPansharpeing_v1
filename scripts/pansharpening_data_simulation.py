@@ -2,6 +2,7 @@ import math
 import os
 import sys
 import warnings
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Callable, Dict, Literal
 
@@ -29,6 +30,8 @@ warnings.filterwarnings(
     "ignore",
     module="torch.utils.checkpoint",
 )
+
+# * --- Pansharpening simulators --- #
 
 
 def genMTF(ratio, sensor, nbands):
@@ -221,13 +224,14 @@ class Interp23Tap(nn.Module):
         ratio (int): Scale ratio for upsampling. Must be a power of 2.
     """
 
-    def __init__(self, ratio: int):
+    def __init__(self, ratio: int, pad_mode: str = "replicate"):
         super().__init__()
 
         if not (ratio > 0 and (ratio & (ratio - 1) == 0)):
             raise ValueError("Error: Only resize factors power of 2 are supported.")
         self.ratio = ratio
         self.num_upsamples = int(math.log2(ratio))
+        self.pad_mode = pad_mode
 
         # Define the 23-tap filter coefficients (CDF23 from MATLAB code)
         cdf23_coeffs = 2.0 * np.array(
@@ -304,7 +308,7 @@ class Interp23Tap(nn.Module):
             # Pad for horizontal filter (width)
             # Pad width dimension (dim 3) by self.padding on both sides
             padded_w = F.pad(
-                upsampled, (self.padding, self.padding, 0, 0), mode="circular"
+                upsampled, (self.padding, self.padding, 0, 0), mode=self.pad_mode
             )
             # Apply horizontal filter
             # Input: (bs, c, H, W_padded), Kernel: (1, 1, 1, K) -> Output: (bs, c, H, W)
@@ -468,6 +472,9 @@ class PansharpSimulator(nn.Module):
         return lrms_upsampled, pan
 
 
+# * --- Tokenizer processor --- #
+
+
 class PansharpTokenizeProcessor(nn.Module):
     """
     Processes a batch of HRMS images to generate HRMS, LRMS, PAN, and their latent representations.
@@ -573,11 +580,11 @@ class PansharpTokenizeProcessor(nn.Module):
             # * --- will save the original images or not --- #
             sample_data = {
                 "__key__": keys[i],
-                # "hrms.tiff": tiff_codec_io(hrms[i], tifffile.PLANARCONFIG.SEPARATE),
-                # "lrms.tiff": tiff_codec_io(lrms[i], tifffile.PLANARCONFIG.SEPARATE),
-                # "pan.tiff": tiff_codec_io(
-                #     pan[i], photometric=tifffile.PHOTOMETRIC.MINISBLACK
-                # ),
+                "hrms.tiff": tiff_codec_io(hrms[i], tifffile.PLANARCONFIG.SEPARATE),
+                "lrms.tiff": tiff_codec_io(lrms[i], tifffile.PLANARCONFIG.SEPARATE),
+                "pan.tiff": tiff_codec_io(
+                    pan[i], photometric=tifffile.PHOTOMETRIC.MINISBLACK
+                ),
             }
             # Assuming latent tensors also have a batch dimension
             if self.latent_save_backend == "safetensors":
@@ -627,6 +634,92 @@ class PansharpTokenizeProcessor(nn.Module):
         # For now, returning the list, assuming the main loop will handle it.
         # *** IMPORTANT: The main loop below needs adjustment to handle this list ***
         return output_list  # Return list of dicts
+
+
+@contextmanager
+def tar_sink_manager():
+    """
+    Context manager for writing to a tar file.
+    """
+
+    total_sinks = {}
+
+    def get_sink(name, tar_path):
+        if name not in total_sinks:
+            total_sinks[name] = wds.TarWriter(tar_path)
+            log_print(f"Created new tar sink for {tar_path}")
+        return total_sinks[tar_path]
+
+    try:
+        yield get_sink
+
+    finally:
+        for sink in total_sinks.values():
+            sink.close()
+            log_print(f"Closed tar sink for {sink.name}")
+
+
+class TarSinkManager:
+    total_sinks = {}
+
+    def __init__(self, base_dir: str):
+        self.base_dir = base_dir
+
+    def get_sink(self, name: str, tar_rel_path: str):
+        tar_path = os.path.join(self.base_dir, tar_rel_path)
+        os.makedirs(os.path.dirname(tar_path), exist_ok=True)
+
+        if name not in self.total_sinks:
+            self.total_sinks[name] = wds.TarWriter(tar_path)
+            log_print(f"Created new tar sink for {tar_path}")
+        return self.total_sinks[name]
+
+    def close_all(self):
+        for name, sink in self.total_sinks.items():
+            sink.close()
+            log_print(f"Closed tar sink for {name}")
+        self.total_sinks.clear()
+        log_print("Closed all tar sinks.")
+
+
+def seperate_pansharpening_latent_pairs(
+    sample: dict[str, Any], latent_ext: str = "safetensors"
+):
+    """
+    Separate the latent pairs from the sample dictionary.
+
+    Args:
+        sample (dict): Input sample dictionary containing latent pairs.
+
+    Returns:
+        dict: Dictionary with separated latent pairs.
+    """
+
+    pansharp_sample = {
+        "__key__": sample["__key__"],
+        "hrms.tiff": sample["hrms.tiff"],
+        "lrms.tiff": sample["lrms.tiff"],
+        "pan.tiff": sample["pan.tiff"],
+    }
+
+    latent_sample = {
+        "__key__": sample["__key__"],
+    }
+    if latent_ext == "safetensors":
+        latent_sample["latents.safetensors"] = sample["latents.safetensors"]
+    elif latent_ext == "npy":
+        latent_sample["hrms_latent.npy"] = sample["hrms_latent.npy"]
+        latent_sample["lrms_latent.npy"] = sample["lrms_latent.npy"]
+        latent_sample["pan_latent.npy"] = sample["pan_latent.npy"]
+    elif latent_ext == "npz":
+        latent_sample["latents.npz"] = sample["latents.npz"]
+    else:
+        raise ValueError(f"Unsupported latent_save_backend: {latent_ext}")
+
+    return pansharp_sample, latent_sample
+
+
+# * --- Main entry --- #
 
 
 @hydra.main(
@@ -702,7 +795,7 @@ def process_dataset(cfg: DictConfig) -> None:
         pansharp_simulator=pansharp_sim,
         tokenizer=tokenizer,
         before_save_fn=before_save_fn,
-        latent_save_backend="safetensors",
+        latent_save_backend="npz",
     )
     # Note: Processor itself doesn't need .to(device) unless it has its own parameters/buffers
     # The submodules (pansharp_sim, tokenizer) are already moved.
@@ -737,7 +830,8 @@ def process_dataset(cfg: DictConfig) -> None:
         # If len() is not supported
         progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
 
-    sinks: dict[str, wds.TarWriter] = {}
+    # sinks: dict[str, wds.TarWriter] = {}
+    sink_manager = TarSinkManager(output_dir)
     for batch in progress_bar:
         # Move input batch data to the correct device
         batch_on_device = {
@@ -754,14 +848,30 @@ def process_dataset(cfg: DictConfig) -> None:
                 processed_output, batch_on_device["__url__"]
             ):
                 name = os.path.basename(tar_path).replace(" ", "_")
-                tar_path = os.path.join(output_dir, name)
-                output_sink = sinks.get(name, None)
-                if output_sink is None:
-                    output_sink = sinks[name] = wds.TarWriter(tar_path)
-                    log_print(f"Writing to {tar_path}")
+                # tar_path = os.path.join(output_dir, name)
+                # output_sink = sinks.get(name, None)
+                pansharp_sink = sink_manager.get_sink(
+                    f"pansharpening_{name}", f"pansharpening_pairs/{name}"
+                )
+                latent_sink = sink_manager.get_sink(f"latent_{name}", f"latents/{name}")
+
+                # Seperate Pansharpening pairs and latents
+                pansharp_sample, latent_sample = seperate_pansharpening_latent_pairs(
+                    sample_data, processor.latent_save_backend
+                )
+
+                # if output_sink is None:
+                #     output_sink = sinks[name] = wds.TarWriter(tar_path)
+                #     log_print(f"Writing to {tar_path}")
+
+                assert pansharp_sample is not None, "Pansharpening sample is None"
+                assert latent_sample is not None, "Latent sample is None"
 
                 if sample_data:  # Check if the dictionary is not empty
-                    output_sink.write(sample_data)
+                    # output_sink.write(sample_data)
+                    pansharp_sink.write(pansharp_sample)
+                    latent_sink.write(latent_sample)
+
                     total_samples += 1
                     count += 1  # Count samples processed in this batch run
             # Update progress bar description periodically
@@ -782,9 +892,10 @@ def process_dataset(cfg: DictConfig) -> None:
             )
 
     # close all sinks
-    for sink in sinks.values():
-        sink.close()
-        print("Closed all TAR writters")
+    # for sink in sinks.values():
+    #     sink.close()
+    #     print("Closed all TAR writters")
+    sink_manager.close_all()
 
     log_print(
         f"Finished processing. {total_samples} samples written to {cfg.output.output_dir}"

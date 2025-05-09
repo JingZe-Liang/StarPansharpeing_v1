@@ -18,15 +18,18 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: MUSLI
-  prefetch_factor: null
-  num_workers: 1
+  used: DFC_2020
+  prefetch_factor: 6
+  num_workers: 3
+  shuffle_size: 100
   dataset_names_to_bs:
     MMSeg_YREB: 22
     DCF_2019: 7
+    DFC_2020: 18
     GID_GF2: 7
+    Houston: 7
     DryadHyper: 16
-    MUSLI: 7
+    MUSLI: 1
 
   transform_prob: 0.5
 
@@ -37,13 +40,13 @@ accelerator:
 tokenizer:
   act_checkpoint: false
   wrap_fsdp_last_layer: false
-  # pretrained on hyperspectral images encoder and decoder checkpoint
-  # enc_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/encoder/model.safetensors
-  # dec_path: runs/stage1_cosmos/2025-04-08_03-14-32_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema/decoder/model.safetensors
-  uni_tokenizer_path: "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors"
-  loading_type: pretrained
+  # uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
+  # loading_type: pretrained
+  enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
+  dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+  loading_type: nvidia
   force_not_attn: true
-  hook_for_repa: false
+  hook_for_repa: true
 
 vq_loss:
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]

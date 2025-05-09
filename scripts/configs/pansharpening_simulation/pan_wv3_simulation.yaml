@@ -42,5 +42,5 @@ consts:
   tokenizer_checkpoint_path:
 
 output:
-  output_dir: data/MMSeg_YREB/latent
+  output_dir: data/MMSeg_YREB
   maxsize: 4.0e9

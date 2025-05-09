@@ -39,7 +39,9 @@ def _check_dots(s):
 
 
 def _merge_latent(
-    source, modality_name_map: dict | None = None, handler=wds.warn_and_continue
+    source,
+    modality_name_map: dict | None = None,
+    handler=wds.warn_and_stop,
 ):
     for src in source:
         multi_tar_urls = src["url"].translate(str.maketrans("[]", "{}"))

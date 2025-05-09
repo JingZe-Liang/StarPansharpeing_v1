@@ -8,6 +8,7 @@ defaults:
   - dataset: pansharpening_data
   - tokenizer: cosmos_f8c16p4
   - accelerator: base
+  - pansharp_model: fusionnet
   # self ============
   - _self_
 
@@ -15,22 +16,34 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-
 dataset:
   cfgs:
-    used: wv3
+    used: MMSeg_YREB
+
+ema:
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
 
 train:
   tokenizer_name: cosmos_f8c16p4
+  base_model_pretrained_path: # tokenizer base model loading
+  peft_pretrained_path: # tokenizer peft model loading
+  seperate_enc_dec: false
+  online_tokenize: false
+  quantizer_type:
+  prepare_tokenizer_in_accelerator: true
+
   proj_dir: runs/stage1_cosmos/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
+
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 400_000
   save_every: 500
-  seperate_enc_dec: false
+
   resume_path:
   ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
 
@@ -54,14 +67,13 @@ train:
     reduced_factor: 2
     min_lr: 1.0e-5
 
-
   log:
     run_comment: cosmos_large_f8c16p4
     log_with_time: True
     visualize_every: 200
     log_every: 10
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 1000

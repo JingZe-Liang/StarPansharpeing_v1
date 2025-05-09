@@ -6,109 +6,110 @@ prefetch_factor: 6
 dataset_names_to_bs:
   MMSeg_YREB: 32
   DCF_2019: 32
+  DFC_2020: 32
   GID_GF2: 32
   DryadHyper: 32
-  DFC_2020: 32
   MUSLI: 32
+  Houston: 7
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
   DCF_2019: 8
+  DFC_2020: 13
   GID_GF2: 4
   DryadHyper: 224
-  DFC_2020: 13
   MUSLI: 438
+  Houston: 50
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: [4, 3, 2]
   DCF_2019: [4, 2, 0]
+  DCF_2020: [9, 6, 3]
   GID_GF2: [4, 2, 0]
   DryadHyper: [90, 60, 40]
+  Houston: [40, 20, 10]
   DFC_2020: [9, 6, 4]
-  MUSLI: [120, 80, 30]
+  MUSLI: [66, 38, 16]
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
   DCF_2019: 512
+  DCF_2020: 256
   GID_GF2: 512
   DryadHyper: 128
   DFC_2020: 256
-  MUSLI: 438
+  Houston: 512
+  MUSLI: 512
 
 MMSeg_YREB_train:
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
 
 MMSeg_YREB_val:
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
 
 DCF_2019_train:
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0007.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0008.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0009.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0011.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0012.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0013.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0007.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0008.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0009.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0011.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0012.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0013.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
 
 DFC_2020_train:
-  - data/DFC_2020_public-13_bands-px_256-MSI-0000.tar
-  - data/DFC_2020_public-13_bands-px_256-MSI-0001.tar
-  - data/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+  - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0000.tar
+  - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0001.tar
+  - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+
+Houston_train:
+  - data/Houston-50_bands-px_512-MSI-0000.tar
+
+Houston_val:
+  - data/Houston-50_bands-px_512-MSI-0000.tar
 
 DryadHyper_train:
-  - data/DryadHyper-224_bands-px_128-MSI-0000.tar
-  - data/DryadHyper-224_bands-px_128-MSI-0001.tar
-  - data/DryadHyper-224_bands-px_128-MSI-0002.tar
+  - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0000.tar
+  - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0001.tar
+  - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
 
 GID_GF2_train:
-  - data/GID-GF2-train-4_bands-px_512-MSI-0000.tar
-  - data/GID-GF2-train-4_bands-px_512-MSI-0001.tar
-  - data/GID-GF2-train-4_bands-px_512-MSI-0002.tar
-  - data/GID-GF2-train-4_bands-px_512-MSI-0003.tar
-  - data/GID-GF2-val-4_bands-px_512-MSI-0000.tar
-  - data/GID-GF2-test-4_bands-px_512-MSI-0000.tar
-  - data/GID-GF2-test-4_bands-px_512-MSI-0001.tar
+  - data/GID-GF2/hyper_images/GID-GF2-train-4_bands-px_512-MSI-0000.tar
+  - data/GID-GF2/hyper_images/GID-GF2-train-4_bands-px_512-MSI-0001.tar
+  - data/GID-GF2/hyper_images/GID-GF2-train-4_bands-px_512-MSI-0002.tar
+  - data/GID-GF2/hyper_images/GID-GF2-train-4_bands-px_512-MSI-0003.tar
+  - data/GID-GF2/hyper_images/GID-GF2-val-4_bands-px_512-MSI-0000.tar
+  - data/GID-GF2/hyper_images/GID-GF2-test-4_bands-px_512-MSI-0000.tar
+  - data/GID-GF2/hyper_images/GID-GF2-test-4_bands-px_512-MSI-0001.tar
 
-MUSLI_train:
-  - data/MUSLI-438_bands-px_512-MSI-0000.tar
-  - data/MUSLI-438_bands-px_512-MSI-0001.tar
-  - data/MUSLI-438_bands-px_512-MSI-0002.tar
-  - data/MUSLI-438_bands-px_512-MSI-0003.tar
-  - data/MUSLI-438_bands-px_512-MSI-0004.tar
-  - data/MUSLI-438_bands-px_512-MSI-0005.tar
-  - data/MUSLI-438_bands-px_512-MSI-0006.tar
-  - data/MUSLI-438_bands-px_512-MSI-0007.tar
-  - data/MUSLI-438_bands-px_512-MSI-0008.tar
-  - data/MUSLI-438_bands-px_512-MSI-0009.tar
+MUSLI_train: data/hyper_images/MUSLI_safetensors/safetensors
 
 DFC_2020_val:
-  - data/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+  - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
 
-MUSLI_val:
-  - data/MUSLI-438_bands-px_512-MSI-0009.tar
+MUSLI_val: data/hyper_images/MUSLI_safetensors/safetensors
 
 DryadHyper_val:
-  - data/DryadHyper-224_bands-px_128-MSI-0002.tar
+  - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
 
 GID_GF2_val:
-  - data/GID-GF2-val-4_bands-px_512-MSI-0000.tar
+  - data/GID-GF2/hyper_images/GID-GF2-val-4_bands-px_512-MSI-0000.tar
 
 DCF_2019_val:
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
 
 train_name: ${dataset.used}_train
 val_name: ${dataset.used}_val
@@ -127,3 +128,4 @@ hyper_transforms_lst:
   - vertical_flip
 transform_prob: 0.5
 random_apply: [1, 2]
+loader_type: webdataset

@@ -522,7 +522,7 @@ class ContinuousImageTokenizer(nn.Module):
                     f"decoder: missing keys {_dec_missing}, unexpected keys {_dec_unexp}"
                 )
 
-    def peft_first_last_convs_moduel_names(self):
+    def peft_first_last_convs_module_names(self):
         return [
             "encoder.encoder.conv_in",
             "decoder.decoder.conv_out"
@@ -674,10 +674,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 12,
+        "in_channels": 438,
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 12,
+        "out_channels": 438,
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -691,10 +691,10 @@ if __name__ == "__main__":
         "act_checkpoint": False,
         # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
         # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
-        "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors",
+        # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "quantizer_type": None,
-        "loading_type": "pretrained",
+        "loading_type": None,
         "force_not_attn": True,
         # "downsample_type": "ConvPixelUnshuffle",
         # "downsample_shortcut": "averaging",
@@ -704,23 +704,35 @@ if __name__ == "__main__":
     # torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
 
-    from fvcore.nn import parameter_count_table
+    # from fvcore.nn import parameter_count_table
 
-    print(parameter_count_table(tokenizer))
+    # print(parameter_count_table(tokenizer))
 
     # x = torch.randn(1, 12, 256, 256).to("cuda", torch.bfloat16)
     from torchmetrics.image import PeakSignalNoiseRatio
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
-    x = next(iter(dl))["img"].cuda()
-    tokenizer = tokenizer.eval()
+    # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
+    # x = next(iter(dl))["img"].cuda()
+    # tokenizer = tokenizer.eval()
+
+    x = torch.randn(2, 438, 512, 512, dtype=torch.bfloat16).cuda()
+    opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4)
 
     with torch.autocast("cuda", torch.bfloat16):
         y, *_ = tokenizer(x)
+        y.mean().backward()
+        opt.zero_grad()
+        opt.step()
+        print(y.shape)
+
+        import time
+
+        time.sleep(10)
+
         # feat = tokenizer.get_repa_feature()
-        psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-        psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-        logging.debug(y.shape)
-        logging.debug(psnr_val)
+        # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+        # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+        # logging.debug(y.shape)
+        # logging.debug(psnr_val)

@@ -2,6 +2,7 @@ import warnings
 from collections import namedtuple
 from typing import Dict, NamedTuple
 
+import omegaconf
 import torch
 import torch.distributed.tensor as dtensor
 import torch.nn as nn
@@ -22,6 +23,7 @@ from ..model import (
 )
 from ..repa import REPALoss
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
+from src.utilities.config_utils import to_object
 
 
 class DummyLoss(nn.Module):
@@ -334,7 +336,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.use_repa = False
         if repa_loss_weight is not None and repa_loss_weight > 0:
             self.use_repa = True
-            self.repa_loss = REPALoss(**repa_loss_options).cuda()
+            self.repa_loss = REPALoss(**to_object(repa_loss_options)).cuda()
             logger.info(f"[repa loss]: {self.repa_loss}")
             logger.info(f"[vq loss]: repa loss used, weighted {self.repa_loss_weight}")
 
