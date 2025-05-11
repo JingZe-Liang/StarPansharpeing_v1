@@ -2,6 +2,7 @@ used: MMSeg_YREB
 shuffle_size: 100
 num_workers: 3
 prefetch_factor: 6
+shuffle_within_workers: false
 
 dataset_names_to_bs:
   MMSeg_YREB: 32
@@ -11,6 +12,7 @@ dataset_names_to_bs:
   DryadHyper: 32
   MUSLI: 32
   Houston: 7
+  WV3: 32
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -20,6 +22,7 @@ dataset_names_to_n_channels:
   DryadHyper: 224
   MUSLI: 438
   Houston: 50
+  WV3: 8
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: [4, 3, 2]
@@ -30,6 +33,7 @@ dataset_names_to_rgb_channels:
   Houston: [40, 20, 10]
   DFC_2020: [9, 6, 4]
   MUSLI: [66, 38, 16]
+  WV3: [4, 2, 0]
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -40,6 +44,7 @@ dataset_names_to_img_size:
   DFC_2020: 256
   Houston: 512
   MUSLI: 512
+  WV3: 512
 
 MMSeg_YREB_train:
   - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
@@ -96,6 +101,14 @@ GID_GF2_train:
   - data/GID-GF2/hyper_images/GID-GF2-test-4_bands-px_512-MSI-0001.tar
 
 MUSLI_train: data/hyper_images/MUSLI_safetensors/safetensors
+
+WV3_train:
+  - [data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar]
+  - [data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar]
+
+WV3_val:
+  - [data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar]
+  - [data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar]
 
 DFC_2020_val:
   - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar

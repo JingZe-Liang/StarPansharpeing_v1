@@ -18,10 +18,12 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: DFC_2020
-  prefetch_factor: 6
-  num_workers: 3
+  used: WV3
+  prefetch_factor:
+  num_workers: 0
   shuffle_size: 100
+  loader_type: webdataset
+  shuffle_within_workers: false
   dataset_names_to_bs:
     MMSeg_YREB: 22
     DCF_2019: 7
@@ -30,6 +32,7 @@ dataset:
     Houston: 7
     DryadHyper: 16
     MUSLI: 1
+    WV3: 7
 
   transform_prob: 0.5
 
@@ -40,11 +43,11 @@ accelerator:
 tokenizer:
   act_checkpoint: false
   wrap_fsdp_last_layer: false
-  # uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
-  # loading_type: pretrained
-  enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
-  dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
-  loading_type: nvidia
+  uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
+  loading_type: pretrained
+  # enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
+  # dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
+  # loading_type: nvidia
   force_not_attn: true
   hook_for_repa: true
 
@@ -154,11 +157,3 @@ train:
 val:
   val_duration: 1000
   max_val_iters: 4 # val only `max_val_iters` batches
-
-# _target_: src.utilities.optim.MARS
-# _partial_: true
-# lr: 5.0e-4
-# betas: [0.95, 0.99]
-# eps: 1.0e-8
-# weight_decay: 0.0
-# mars_type: mars-adamw

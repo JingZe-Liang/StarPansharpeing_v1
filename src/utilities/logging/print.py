@@ -1,7 +1,8 @@
-import torch.distributed as dist
-from loguru import logger
 from typing import Literal
+
+import torch.distributed as dist
 from beartype import beartype
+from loguru import logger
 
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
@@ -52,7 +53,7 @@ def log_print(
         __warn_once_set.add(msg)
         level = "warning"
 
-    logger_with_correct_depth = logger.opt(depth=2)
+    logger_with_correct_depth = logger.opt(depth=2, colors=True)
     log_fn = getattr(logger_with_correct_depth, level)
 
     if only_rank_zero:

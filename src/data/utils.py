@@ -9,6 +9,9 @@ import webdataset as wds
 
 from ..utilities.logging.print import log_print
 
+type LoadedData = torch.Tensor | np.ndarray | str
+type SampleType = dict[str, dict[str, LoadedData] | LoadedData]
+
 
 def extract_modality_names(s):
     # Regular expression pattern to match anything enclosed in '{' and '}', and comma separated
@@ -17,7 +20,7 @@ def extract_modality_names(s):
     return match.group(1).split(",") if match else []
 
 
-def remove_extension(sample):
+def remove_extension(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     sample_dict = {}
     for k, v in sample.items():
         k_wo_ext = k
@@ -29,7 +32,7 @@ def remove_extension(sample):
     return sample_dict
 
 
-def remove_meta_data(sample):
+def remove_meta_data(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     for k in sample.keys():
         if k.startswith("__"):
             del sample[k]
@@ -55,7 +58,7 @@ def may_repeat_channels(img: torch.Tensor, rep_channels: int = 3) -> torch.Tenso
     return img
 
 
-def _check_dots(s):
+def _check_dots(s: str):
     if ".gz" in s:
         return s.count(".") == 2
     return s.count(".") == 1
@@ -63,7 +66,7 @@ def _check_dots(s):
 
 # @torch.compile
 def norm_img(
-    sample: Dict[str, dict | torch.Tensor | np.ndarray],
+    sample: SampleType,
     norm_keys: list[str] = ["img"],
     to_neg_1_1: bool = True,
     permute: bool = True,
@@ -86,18 +89,21 @@ def norm_img(
             continue
 
         if isinstance(sample[key], dict):
-            _img = sample[key].get("img")
+            _sample_dict: dict = sample[key]
+            _img = _sample_dict.get("img")
         elif isinstance(sample[key], (np.ndarray, torch.Tensor)):
             _img = sample[key]
         else:
             raise ValueError(
                 f"Unsupported type for {key}: {type(sample[key])}. Expected dict, np.ndarray, or torch.Tensor."
             )
+
         img = torch.as_tensor(
             _img,
             dtype=torch.float32,
-            device=torch.device("cpu") if not on_device else torch.device("cuda"),
         )
+        if on_device:
+            img = img.to(torch.device("cuda"), non_blocking=True)
         img = img / img.max()
         if to_neg_1_1:
             img = img * 2 - 1

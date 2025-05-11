@@ -35,8 +35,8 @@ colored_traceback.add_hook()
 
 sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import (
-    get_hyerpspectral_img_loaders_with_different_backends,
     get_hyperspectral_dataloaders,
+    get_hyperspectral_img_loaders_with_different_backends,
 )
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 
@@ -109,31 +109,10 @@ class CosmosHyperspectralTokenizerTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        # self.train_dataset, self.train_dataloader = get_hyperspectral_dataloaders(
-        #     wds_paths=self.dataset_cfg.wds_path_train,
-        #     batch_size=self.dataset_cfg.batch_size_train,
-        #     num_workers=self.dataset_cfg.num_workers,
-        #     shuffle_size=self.dataset_cfg.shuffle_size,
-        #     hyper_transforms_lst=self.dataset_cfg.hyper_transforms_lst,
-        #     transform_prob=self.dataset_cfg.transform_prob,
-        #     random_apply=to_cont(self.dataset_cfg.random_apply),
-        #     prefetch_factor=self.dataset_cfg.prefetch_factor,
-        #     to_neg_1_1=True,
-        # )
-        # self.val_dataset, self.val_dataloader = get_hyperspectral_dataloaders(
-        #     wds_paths=self.dataset_cfg.wds_path_val,
-        #     batch_size=self.dataset_cfg.batch_size_val,
-        #     num_workers=self.dataset_cfg.num_workers,
-        #     shuffle_size=self.dataset_cfg.shuffle_size,
-        #     prefetch_factor=self.dataset_cfg.prefetch_factor,
-        #     hyper_transforms_lst=None,
-        #     transform_prob=0.0,
-        #     to_neg_1_1=True,
-        # )
 
         self.train_dataset, self.train_dataloader = (
-            get_hyerpspectral_img_loaders_with_different_backends(
-                paths=self.dataset_cfg.wds_path_train,
+            get_hyperspectral_img_loaders_with_different_backends(
+                paths=to_cont(self.dataset_cfg.wds_path_train),
                 batch_size=self.dataset_cfg.batch_size_train,
                 num_workers=self.dataset_cfg.num_workers,
                 shuffle_size=self.dataset_cfg.shuffle_size,
@@ -143,11 +122,14 @@ class CosmosHyperspectralTokenizerTrainer:
                 prefetch_factor=self.dataset_cfg.prefetch_factor,
                 to_neg_1_1=True,
                 loader_type=self.dataset_cfg.loader_type,
+                channels=self.dataset_cfg.channels,
+                check_channels=True,
+                shuffle_within_workers=self.dataset_cfg.shuffle_within_workers,
             )
         )
         self.val_dataset, self.val_dataloader = (
-            get_hyerpspectral_img_loaders_with_different_backends(
-                paths=self.dataset_cfg.wds_path_val,
+            get_hyperspectral_img_loaders_with_different_backends(
+                paths=to_cont(self.dataset_cfg.wds_path_val),
                 batch_size=self.dataset_cfg.batch_size_val,
                 num_workers=self.dataset_cfg.num_workers,
                 shuffle_size=self.dataset_cfg.shuffle_size,
@@ -155,6 +137,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 hyper_transforms_lst=None,
                 transform_prob=0.0,
                 to_neg_1_1=True,
+                channels=self.dataset_cfg.channels,
+                check_channels=True,
+                shuffle_within_workers=self.dataset_cfg.shuffle_within_workers,
             )
         )
 

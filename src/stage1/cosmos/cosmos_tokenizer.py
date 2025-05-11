@@ -129,7 +129,7 @@ class NestChannelDrop(nn.Module):
             z_empty = self.dropped_x.expand(bs, -1, -1, -1)
 
         # 2. drop channels
-        _channels = self.channel_arange[None].expand(bs, -1)
+        _channels = self.channel_arange[None].expand(bs, -1)  # type: ignore
         _cond = _channels < leave_channels.to(_channels)
         z = torch.where(_cond.unsqueeze(-1).unsqueeze(-1).expand_as(z), z, z_empty)
 
@@ -140,7 +140,7 @@ class ContinuousImageTokenizer(nn.Module):
     _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
     _hook_for_repa: bool = False
     _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
-    _hook_feature: torch.Tensor = None
+    _hook_feature: torch.Tensor | None = None
 
     def __init__(
         self,

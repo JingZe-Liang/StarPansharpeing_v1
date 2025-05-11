@@ -47,6 +47,8 @@ __compile_collate_fn = False
 if __compile_collate_fn:
     torch._dynamo.config.recompile_limit = 20
 
+type WebdatasetPath = str | list[str] | list[list[str]]
+
 
 @deprecated(
     "get_dict_tensor_mapper is deprecated",
@@ -194,7 +196,9 @@ def get_hyperspectral_dataloaders(
     check_channels: bool = False,
     channels: int | None = None,
     remove_meta_data: bool = False,
+    repeat_n: int = 1,
     timeout: int = 300,
+    epoch_len: int = 0,
 ) -> tuple[wds.WebDataset, wds.WebLoader]:
     """Get dataloaders for hyperspectral image data
 
@@ -266,11 +270,14 @@ def get_hyperspectral_dataloaders(
         shuffle=False,
     )
 
-    _world_size = (
-        torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
-    )
-    _predefined_epoch_len = 1_000
-    dataloader = dataloader.with_epoch(_predefined_epoch_len // _world_size)
+    if epoch_len > 0:
+        _world_size = (
+            torch.distributed.get_world_size()
+            if torch.distributed.is_initialized()
+            else 1
+        )
+        dataloader = dataloader.with_epoch(epoch_len // _world_size)
+        log_print(f"dataloader with epoch length: {epoch_len // _world_size}")
 
     # unbatch, shuffle, and rebatch within different workers
     if shuffle_within_workers:
@@ -278,6 +285,10 @@ def get_hyperspectral_dataloaders(
         if shuffle_size > 0:
             dataloader = dataloader.shuffle(shuffle_size)
         dataloader = dataloader.batched(batch_size, collation_fn=collate_fn_for_dict)
+
+    if repeat_n != 1:
+        log_print(f"repeat dataloader <red>{repeat_n}</> times")
+        dataloader = dataloader.repeat(nepochs=repeat_n)
 
     log_print(
         f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}, use transformations: {hyper_transforms_lst}"
@@ -440,7 +451,6 @@ class HyperImageDataset(Dataset):
 
     def __init__(self, dir: str, return_key: bool = False):
         self.path = Path(dir)
-        self.to_neg_1_1 = to_neg_1_1
         self.return_key = return_key
         self.img_paths = natsorted(list(self.path.glob("*.safetensors")))
 
@@ -546,28 +556,134 @@ def only_hyperspectral_img_folder_dataloader(
     return dataset, dataloader
 
 
-def get_hyerpspectral_img_loaders_with_different_backends(
-    paths: str | list[str],
+def chained_dataloaders(dataloaders: list[wds.WebLoader], infinit: bool = True):
+    """
+    Chain multiple dataloaders together.
+
+    Args:
+        dataloaders (list[wds.WebLoader]): List of dataloaders to chain.
+
+    Return:
+        generator: A generator that yields samples from the chained dataloaders.
+    """
+
+    def _chain_dataloaders(dataloaders, infinit=True):
+        if infinit:
+            while True:
+                for loader_idx, dataloader in enumerate(dataloaders):
+                    for sample in dataloader:
+                        sample["__loader_idx__"] = loader_idx
+                        yield sample
+        else:
+            for loader_idx, dataloader in enumerate(dataloaders):
+                for sample in dataloader:
+                    sample["__loader_idx__"] = loader_idx
+                    yield sample
+
+    return _chain_dataloaders(dataloaders, infinit)
+
+
+def get_hyperspectral_img_loaders_with_different_backends(
+    paths: WebdatasetPath,
     loader_type: str = "webdataset",
+    rep_loader_kwargs: list[dict] | None = None,
+    chain_loader_infinit: bool = True,
     **loader_kwargs,
 ):
     """
-    Get dataloaders for hyperspectral image data
+    Get dataloaders for hyperspectral image data using different backends.
 
     Args:
-        paths (str | list[str]): Path or list of paths to WebDataset tar files
-        loader_type (str, optional): Type of loader to use. Defaults to "webdataset".
-        **loader_kwargs: Additional arguments for the loader
+        paths (WebdatasetPath): Path(s) to WebDataset tar files or image folders. Can be a string, list of strings, or list of list of strings.
+        loader_type (str, optional): Type of loader to use. "webdataset" for WebDataset tar files, "folder" for directory of images. Defaults to "webdataset".
+        rep_loader_kwargs (list[dict] | None, optional): List of loader kwargs for each path group (used when paths is a list of lists). Defaults to None.
+        **loader_kwargs: Additional arguments for the loader functions.
 
     Returns:
-        tuple: A tuple containing the dataset and dataloader
+        tuple:
+            - If loader_type is "webdataset" and paths is a list of lists, returns (list of datasets, chained dataloader).
+            - If loader_type is "webdataset" and paths is a string or list of strings, returns (dataset, dataloader).
+            - If loader_type is "folder", returns (dataset, dataloader) for images in a directory.
+
+    Raises:
+        ValueError: If an unsupported loader_type is provided or input types are invalid.
     """
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
-        return get_hyperspectral_dataloaders(paths, **loader_kwargs)
+
+        def ensure_non_empty_worker_shard(paths, loader_kwargs):
+            # Ensure that the number of workers is not greater than the number of shards
+            _len = 1 if isinstance(paths, str) else len(paths)
+            n_workers = loader_kwargs.get("num_workers", 0)
+            if _len < n_workers and n_workers > 0:
+                # set n_workers to the number of shards
+                loader_kwargs["num_workers"] = _len
+                log_print(
+                    f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
+                    level="warning",
+                )
+
+            return loader_kwargs
+
+        if isinstance(paths, list) and isinstance(paths[0], list):
+            log_print(
+                "input paths contains list of lists, we will chain the dataloader with each loader"
+            )
+            if rep_loader_kwargs is not None:
+                log_print("rep_loader_kwargs is provided", "debug")
+                assert isinstance(rep_loader_kwargs, list), (
+                    f"rep_loader_kwargs should be a list, but got {type(rep_loader_kwargs)}"
+                )
+                assert len(rep_loader_kwargs) == len(paths), (
+                    f"rep_loader_kwargs should be the same length as paths, "
+                    f"but got {len(rep_loader_kwargs)} and {len(paths)}"
+                )
+            else:
+                log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
+                rep_loader_kwargs = [loader_kwargs] * len(paths)
+
+            datasets = []
+            dataloaders = []
+            for p_lst, loader_kwargs in zip(paths, rep_loader_kwargs):
+                assert isinstance(p_lst, list), (
+                    f"paths should be a list of lists, but got {type(p_lst)}"
+                )
+                assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
+                assert isinstance(p_lst[0], str), (
+                    f"paths should be a list of strings, but got {type(p_lst[0])}"
+                )
+
+                # resample must be false
+                loader_kwargs["resample"] = False
+                loader_kwargs["epoch_len"] = -1
+
+                loader_kwargs = ensure_non_empty_worker_shard(p_lst, loader_kwargs)
+
+                dataset, dataloader = get_hyperspectral_dataloaders(
+                    p_lst, **loader_kwargs
+                )
+
+                datasets.append(dataset)
+                dataloaders.append(dataloader)
+
+            # make the chainable dataloader
+            if not chain_loader_infinit:
+                log_print(
+                    "chain loader generator is finite, the loader can not be iter and next. "
+                    "Please set <cyan>chain_loader_infinit=True</> if you are know what you are doing.",
+                    "warning",
+                )
+            dataloader = chained_dataloaders(dataloaders, chain_loader_infinit)
+            return datasets, dataloader
+        else:
+            loader_kwargs = ensure_non_empty_worker_shard(paths, loader_kwargs)
+            return get_hyperspectral_dataloaders(paths, **loader_kwargs)
     elif loader_type == "folder":
         log_print("Using folder loader")
 
+        assert rep_loader_kwargs is None, (
+            "rep_loader_kwargs is not supported for folder loader"
+        )
         assert isinstance(paths, str), (
             f"paths should be a string, but got {type(paths)}"
         )
@@ -586,29 +702,58 @@ if __name__ == "__main__":
     #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
     # # ]
     test_wds_path = [
-        "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/WorldView3-PAN-1_bands-px_512-MSI-0000.tar",
-        "data/WorldView4-4_bands-px_256-MSI-0000.tar",
+        # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
+        ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
     ]
-    test_batch_size = 8
-    test_num_workers = 0
-    test_shuffle_size = 200
+    test_batch_size = 16
+    test_num_workers = 3
+    test_shuffle_size = -1
 
     # Get test dataloader
-    test_dataset, test_loader = get_hyperspectral_dataloaders(
-        wds_paths=test_wds_path,
+    # test_dataset, test_loader = get_hyperspectral_dataloaders(
+    #     wds_paths=test_wds_path,
+    #     batch_size=test_batch_size,
+    #     num_workers=test_num_workers,
+    #     shuffle_size=test_shuffle_size,
+    #     to_neg_1_1=True,
+    #     transform_prob=0.0,
+    #     random_apply=(1, 2),
+    #     pin_memory=False,
+    #     prefetch_factor=None,
+    #     shuffle_within_workers=False,
+    #     remove_meta_data=False,
+    #     resample=False,
+    #     check_channels=True,
+    #     channels=8,
+    # )
+
+    loader_kwargs = dict(
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
         to_neg_1_1=True,
-        transform_prob=0.0,
+        transform_prob=0.5,
         random_apply=(1, 2),
         pin_memory=False,
-        prefetch_factor=None,
+        prefetch_factor=2,
         shuffle_within_workers=False,
         remove_meta_data=False,
-        resample=True,
+        resample=False,
         check_channels=True,
-        channels=4,
+        channels=8,
+        repeat_n=10,
+    )
+    loader_kwgs2 = loader_kwargs.copy()
+    del loader_kwgs2["repeat_n"]
+
+    # import ipdb
+
+    # ipdb.set_trace()
+    _, test_loader = get_hyperspectral_img_loaders_with_different_backends(
+        test_wds_path,
+        loader_type="webdataset",
+        rep_loader_kwargs=[loader_kwgs2],
+        chain_loader_infinit=False,
     )
 
     # # for sample in iter(test_dataset):
@@ -616,9 +761,31 @@ if __name__ == "__main__":
 
     from tqdm import tqdm
 
+    total_samples_256 = 0
+    total_samples_512 = 0
     for sample in tqdm(test_loader):
+        # pass
         print(sample.keys())
-        print(sample["img"].shape)
+        img = sample["img"]
+        # print(
+        #     img.shape,
+        #     "min: ",
+        #     img.min(),
+        #     "max: ",
+        #     img.max(),
+        #     "loader idx: ",
+        #     sample["__loader_idx__"],
+        # )
+
+        if img.shape[-1] == 256:
+            total_samples_256 += img.shape[0]
+        elif img.shape[-1] == 512:
+            total_samples_512 += img.shape[0]
+        else:
+            raise ValueError(f"Unknown image size: {img.shape[-1]}")
+
+    print("pixel 256 size total samples: ", total_samples_256)
+    print("pixel 512 size total samples: ", total_samples_512)
 
     # * for loop the images
     # for batch in test_loader:
