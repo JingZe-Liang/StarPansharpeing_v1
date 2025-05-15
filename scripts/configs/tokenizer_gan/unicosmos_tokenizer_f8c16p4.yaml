@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: hyperspectral
+  - dataset: unified_hyperspectral
   - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
@@ -17,19 +17,19 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-dataset:
-  used: MUSLI
-  shuffle_size: -1
-  num_workers: 3
-  prefetch_factor: 0
-  dataset_names_to_bs:
-    MMSeg_YREB: 22
-    DCF_2019: 7
-    GID_GF2: 7
-    DryadHyper: 16
-    MUSLI: 7
+# dataset:
+# used: MUSLI
+# shuffle_size: -1
+# num_workers: 3
+# prefetch_factor: 0
+# dataset_names_to_bs:
+#   MMSeg_YREB: 22
+#   DCF_2019: 7
+#   GID_GF2: 7
+#   DryadHyper: 16
+#   MUSLI: 7
 
-  transform_prob: 0.5
+# transform_prob: 0.5
 
 vq_loss:
   repa_loss_weight: 1.5
@@ -39,7 +39,7 @@ vq_loss:
     c_dim_first: true
     build_proj: false
     rgb_channels: random
-    img_resize:
+    img_resize: 224 # null for no resize
     dino_img_size: 224
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
@@ -49,7 +49,7 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.8
+  disc_weight: 0.5
   reconstruction_loss_type: l1
 
 tokenizer:
@@ -61,7 +61,7 @@ tokenizer:
   # dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
   # enc_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/encoder/model.safetensors
   # dec_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/decoder/model.safetensors
-  uni_tokenizer_path: runs/stage1_cosmos/2025-05-03_19-05-11_cosmos_pretrained_f8c16p4_repa/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
   loading_type: pretrained
   use_channel_drop: false
   # channel_drop_config:
@@ -140,7 +140,7 @@ train:
   log:
     run_comment: cosmos_pretrained_f8c16p4_repa
     log_with_time: True
-    visualize_every: 200
+    visualize_every: 500
     log_every: 10
 
   debug: true

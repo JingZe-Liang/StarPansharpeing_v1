@@ -1,7 +1,10 @@
 import functools
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
+
+from src.utilities.logging import log_print
 
 
 class ActNorm(nn.Module):
@@ -118,6 +121,59 @@ class DiscriminatorLayer(torch.nn.Sequential):
         )
 
 
+class DiffBandsInputConvIn(nn.Module):
+    def __init__(
+        self,
+        band_lst: list[int],
+        hidden_dim: int,
+        basic_module: nn.Module = nn.Conv2d,
+    ):
+        super().__init__()
+
+        self.band_lst = band_lst
+        self.hidden_dim = hidden_dim
+
+        self.in_modules = nn.ModuleDict()
+        for c in band_lst:
+            self.in_modules["conv_in_{}".format(c)] = basic_module(
+                in_channels=c,
+                out_channels=hidden_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
+
+            # keep the modules has grad in FSDP, DDP training
+            self.register_buffer(
+                f"buf_{c}",
+                torch.zeros(1, c, 3, 3),
+                persistent=False,
+            )
+            log_print(
+                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        c_ = x.shape[1]
+        module = getattr(self.in_modules, "conv_in_{}".format(c_))
+        if module is None:
+            raise ValueError(
+                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
+            )
+        h = module(x)
+
+        if self.training:
+            for c in self.band_lst:
+                if c != c_:
+                    buf = getattr(self, f"buf_{c}")
+                    m = self.in_modules["conv_in_{}".format(c)]
+                    no_use_h = m(buf)
+
+                    h = h + no_use_h.mean() * 0.0
+
+        return h
+
+
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator as in Pix2Pix
     --> see https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py
@@ -126,7 +182,12 @@ class NLayerDiscriminator(nn.Module):
     _no_split_modules = ["DiscriminatorLayer"]
 
     def __init__(
-        self, input_nc=3, ndf=64, n_layers=3, use_actnorm=False, use_bn: bool = True
+        self,
+        input_nc: int | list[int] = 3,
+        ndf=64,
+        n_layers=3,
+        use_actnorm=False,
+        use_bn: bool = True,
     ):
         """Construct a PatchGAN discriminator
         Parameters:
@@ -154,8 +215,17 @@ class NLayerDiscriminator(nn.Module):
 
         kw = 4
         padw = 1
+
+        conv_in = (
+            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw)
+            if isinstance(input_nc, int)
+            else DiffBandsInputConvIn(
+                band_lst=input_nc,
+                hidden_dim=ndf,
+            )
+        )
         sequence = [
-            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
+            conv_in,
             nn.LeakyReLU(0.2),
         ]
         nf_mult = 1
@@ -195,15 +265,15 @@ class NLayerDiscriminator(nn.Module):
         ]  # output 1 channel prediction map
         self.main = nn.Sequential(*sequence)
 
-        self.apply(self.weight_init)
+    #     self.apply(self.weight_init)
 
-    def weight_init(self, m):
-        classname = m.__class__.__name__
-        if classname.find("Conv") != -1:
-            nn.init.normal_(m.weight.data, 0.0, 0.02)
-        elif classname.find("BatchNorm") != -1:
-            nn.init.normal_(m.weight.data, 1.0, 0.02)
-            nn.init.constant_(m.bias.data, 0)
+    # def weight_init(self, m):
+    #     classname = m.__class__.__name__
+    #     if classname.find("Conv") != -1:
+    #         nn.init.normal_(m.weight.data, 0.0, 0.02)
+    #     elif classname.find("BatchNorm") != -1:
+    #         nn.init.normal_(m.weight.data, 1.0, 0.02)
+    #         nn.init.constant_(m.bias.data, 0)
 
     def forward(self, input):
         """Standard forward."""
@@ -212,7 +282,9 @@ class NLayerDiscriminator(nn.Module):
 
 if __name__ == "__main__":
     ## patch gan
-    net = NLayerDiscriminator(input_nc=3, ndf=64, n_layers=3, use_actnorm=False).cuda()
+    net = NLayerDiscriminator(
+        input_nc=[3, 4, 8], ndf=64, n_layers=3, use_actnorm=False
+    ).cuda()
     print(net)
 
     import accelerate

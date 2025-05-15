@@ -1,11 +1,8 @@
-import sys
-
 import accelerate
 import PIL.Image
 import torch
 from tqdm import trange
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
     DCAE,
     dc_ae_f32c32,

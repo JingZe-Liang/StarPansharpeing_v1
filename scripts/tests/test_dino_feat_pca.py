@@ -1,12 +1,9 @@
-import sys
-
 import matplotlib.pyplot as plt
 import numpy as np
 import PIL.Image as Image
 import torch
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 from stage1.utilities.losses.repa.feature_pca import feature_pca_cuml
 
 # read image

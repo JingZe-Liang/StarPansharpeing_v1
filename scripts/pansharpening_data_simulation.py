@@ -1,6 +1,5 @@
 import math
 import os
-import sys
 import warnings
 from contextlib import contextmanager
 from functools import partial
@@ -17,7 +16,6 @@ from omegaconf import DictConfig, OmegaConf
 from scipy.signal import windows
 from tqdm import tqdm
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
 from src.utilities.logging import log_print
 

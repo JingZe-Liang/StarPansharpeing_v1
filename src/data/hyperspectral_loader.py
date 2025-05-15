@@ -1,17 +1,15 @@
-import io
 import os
-import sys
 from functools import partial
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 
+import braceexpand
 import numpy as np
 import scipy.io
 import tifffile
 import torch
 import torch.distributed
 import webdataset as wds
-from accelerate.state import PartialState
 from kornia.augmentation import (
     AugmentationSequential,
     RandomBoxBlur,
@@ -27,8 +25,6 @@ from natsort import natsorted
 from safetensors import safe_open
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Dataset
-
-sys.path.insert(0, __file__[: __file__.find("src")])
 from typing_extensions import deprecated
 
 from src.data.codecs import safetensors_decode_io, tiff_decode_io
@@ -41,6 +37,7 @@ from src.data.utils import (
     remove_extension,
     remove_meta_data,
 )
+from src.utilities.config_utils import kwargs_to_basic_types
 from src.utilities.logging import log_print
 
 __compile_collate_fn = False
@@ -142,6 +139,9 @@ def collate_fn_for_dict(
     """
     results = {}
     keys = sample[0].keys()
+    _stack = False
+    assert len(sample) > 0, "sample is empty"
+
     for k in keys:
         sample_lst = []
         for s in sample:
@@ -571,11 +571,17 @@ def chained_dataloaders(dataloaders: list[wds.WebLoader], infinit: bool = True):
         if infinit:
             while True:
                 for loader_idx, dataloader in enumerate(dataloaders):
+                    log_print(
+                        "switch to loader idx: <red>{}</>".format(loader_idx), "debug"
+                    )
                     for sample in dataloader:
                         sample["__loader_idx__"] = loader_idx
                         yield sample
         else:
             for loader_idx, dataloader in enumerate(dataloaders):
+                log_print(
+                    "switch to loader idx: <red>{}</>".format(loader_idx), "debug"
+                )
                 for sample in dataloader:
                     sample["__loader_idx__"] = loader_idx
                     yield sample
@@ -585,35 +591,90 @@ def chained_dataloaders(dataloaders: list[wds.WebLoader], infinit: bool = True):
 
 def get_hyperspectral_img_loaders_with_different_backends(
     paths: WebdatasetPath,
-    loader_type: str = "webdataset",
+    loader_type: Literal["webdataset", "folder"] = "webdataset",
+    # * there are three choices to provide the loaders' configuration:
+    # 1. provide a basic config and change some of cfg by different loaders
+    basic_kwargs: dict | None = None,
+    changed_kwargs_by_loader: list[dict] | None = None,
+    # 2. every loader has its own kwargs
     rep_loader_kwargs: list[dict] | None = None,
     chain_loader_infinit: bool = True,
+    # 3. simple for all loaders
     **loader_kwargs,
 ):
     """
-    Get dataloaders for hyperspectral image data using different backends.
+    Get hyperspectral image dataloaders with flexible configuration options.
+
+    This function supports loading hyperspectral image data using different backends
+    (WebDataset for tar files or folder-based loaders) with configurable options
+    for each data source.
 
     Args:
-        paths (WebdatasetPath): Path(s) to WebDataset tar files or image folders. Can be a string, list of strings, or list of list of strings.
-        loader_type (str, optional): Type of loader to use. "webdataset" for WebDataset tar files, "folder" for directory of images. Defaults to "webdataset".
-        rep_loader_kwargs (list[dict] | None, optional): List of loader kwargs for each path group (used when paths is a list of lists). Defaults to None.
-        **loader_kwargs: Additional arguments for the loader functions.
+        paths (WebdatasetPath): Path(s) to data sources. Can be:
+            - A single string path to a tar file or directory
+            - A list of string paths for multiple tar files
+            - A list of lists of strings for grouped data sources
+        loader_type (str, optional): The data loading backend to use:
+            - "webdataset": For WebDataset tar files (default)
+            - "folder": For directory of safetensors image files
+        basic_kwargs (dict, optional): Base configuration applied to all loaders.
+        changed_kwargs_by_loader (list[dict], optional): List of dicts with parameters
+            to override in basic_kwargs for each data source group.
+        rep_loader_kwargs (list[dict], optional): Complete configuration for each data
+            source group. If provided, each dict configures a separate loader.
+        chain_loader_infinit (bool, optional): If True, the chained loader will repeat
+            infinitely. If False, it will stop after one complete cycle. Defaults to True.
+        **loader_kwargs: Default configuration parameters applied to all loaders if neither
+            basic_kwargs/changed_kwargs_by_loader nor rep_loader_kwargs are provided.
 
     Returns:
         tuple:
-            - If loader_type is "webdataset" and paths is a list of lists, returns (list of datasets, chained dataloader).
-            - If loader_type is "webdataset" and paths is a string or list of strings, returns (dataset, dataloader).
-            - If loader_type is "folder", returns (dataset, dataloader) for images in a directory.
+            - For "webdataset" with multiple groups: (list of datasets, chained dataloader)
+            - For "webdataset" with single group: (dataset, dataloader)
+            - For "folder": (dataset, dataloader) for directory images
 
     Raises:
-        ValueError: If an unsupported loader_type is provided or input types are invalid.
+        ValueError: If an unsupported loader_type is provided or input paths are invalid
+        AssertionError: If configuration parameters don't match expected formats
     """
+
+    # clear the kwargs
+    (
+        paths,
+        loader_kwargs,
+        rep_loader_kwargs,
+        basic_kwargs,
+        changed_kwargs_by_loader,
+    ) = map(
+        kwargs_to_basic_types,
+        (
+            paths,
+            loader_kwargs,
+            rep_loader_kwargs,
+            basic_kwargs,
+            changed_kwargs_by_loader,
+        ),
+    )  # type: ignore
+
+    # import ipdb
+
+    # ipdb.set_trace()
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
 
-        def ensure_non_empty_worker_shard(paths, loader_kwargs):
+        def ensure_non_empty_worker_shard(paths: str | list[str], loader_kwargs: dict):
             # Ensure that the number of workers is not greater than the number of shards
-            _len = 1 if isinstance(paths, str) else len(paths)
+            if isinstance(paths, str):
+                _len = len(list(braceexpand.braceexpand(paths)))
+            else:
+                assert isinstance(paths, (list, tuple)), (
+                    f"paths should be a list or string, but got {type(paths)}"
+                )
+
+                _len = len(paths)
+            assert _len > 0, f"paths should not be empty, but got {paths}"
+
+            # n_worker should less than the number of shards
             n_workers = loader_kwargs.get("num_workers", 0)
             if _len < n_workers and n_workers > 0:
                 # set n_workers to the number of shards
@@ -625,6 +686,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
 
             return loader_kwargs
 
+        # Groups of dataloaders
         if isinstance(paths, list) and isinstance(paths[0], list):
             log_print(
                 "input paths contains list of lists, we will chain the dataloader with each loader"
@@ -638,6 +700,26 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     f"rep_loader_kwargs should be the same length as paths, "
                     f"but got {len(rep_loader_kwargs)} and {len(paths)}"
                 )
+            elif basic_kwargs is not None:
+                log_print("basic_kwargs is provided", "debug")
+                if changed_kwargs_by_loader is None:
+                    changed_kwargs_by_loader = [{}] * len(paths)
+
+                # assertions
+                assert isinstance(basic_kwargs, dict), (
+                    f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
+                )
+                assert isinstance(changed_kwargs_by_loader, list), (
+                    f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
+                )
+                assert len(changed_kwargs_by_loader) == len(paths), (
+                    f"changed_kwargs_by_loader should be the same length as paths, "
+                    f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
+                )
+
+                rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
+                    basic_kwargs, changed_kwargs_by_loader
+                )
             else:
                 log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
                 rep_loader_kwargs = [loader_kwargs] * len(paths)
@@ -645,13 +727,22 @@ def get_hyperspectral_img_loaders_with_different_backends(
             datasets = []
             dataloaders = []
             for p_lst, loader_kwargs in zip(paths, rep_loader_kwargs):
-                assert isinstance(p_lst, list), (
+                # assertions
+                assert isinstance(p_lst, (list, tuple)), (
                     f"paths should be a list of lists, but got {type(p_lst)}"
                 )
                 assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
-                assert isinstance(p_lst[0], str), (
-                    f"paths should be a list of strings, but got {type(p_lst[0])}"
-                )
+
+                if len(p_lst) == 1:
+                    p_lst = p_lst[0]
+                    assert isinstance(p_lst, str), (
+                        f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
+                    )
+                else:
+                    for p in p_lst:
+                        assert isinstance(p, str), (
+                            f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
+                        )
 
                 # resample must be false
                 loader_kwargs["resample"] = False
@@ -678,6 +769,8 @@ def get_hyperspectral_img_loaders_with_different_backends(
         else:
             loader_kwargs = ensure_non_empty_worker_shard(paths, loader_kwargs)
             return get_hyperspectral_dataloaders(paths, **loader_kwargs)
+
+    # torch dataset
     elif loader_type == "folder":
         log_print("Using folder loader")
 
@@ -693,6 +786,35 @@ def get_hyperspectral_img_loaders_with_different_backends(
         raise ValueError(f"Unsupported loader type: {loader_type}")
 
 
+def generate_wds_config_modify_only_some_kwgs(
+    basic_cfg: dict, changed_kwargs: list[dict[str, Any]]
+) -> list[dict]:
+    """
+    Generate a list of modified configurations based on a basic configuration and a list of changed keyword arguments.
+
+    Args:
+        basic_cfg (dict): The basic configuration dictionary.
+        changed_kwargs (list[dict[str, Any]]): A list of dictionaries containing the changed keyword arguments.
+
+    Returns:
+        list[dict]: A list of modified configurations.
+    """
+    assert isinstance(basic_cfg, dict), (
+        f"basic_cfg should be a dict, but got {type(basic_cfg)}"
+    )
+    assert isinstance(changed_kwargs, list), (
+        f"changed_kwargs should be a list, but got {type(changed_kwargs)}"
+    )
+
+    cfgs = []
+    for kwg in changed_kwargs:
+        cfg = basic_cfg.copy()  # or deepcopy
+        cfg.update(kwg)
+        cfgs.append(cfg)
+
+    return cfgs
+
+
 if __name__ == "__main__":
     # Test config
     # test_wds_path = [
@@ -702,8 +824,20 @@ if __name__ == "__main__":
     #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
     # # ]
     test_wds_path = [
-        # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
+        ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
+        # ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
+        [
+            "data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0001}.tar"
+        ],
+        [
+            "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0001}.tar"
+        ],
+        [
+            "data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0001}.tar"
+        ],
+        [
+            "data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0001}.tar"
+        ],
     ]
     test_batch_size = 16
     test_num_workers = 3
@@ -732,27 +866,28 @@ if __name__ == "__main__":
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
         to_neg_1_1=True,
-        transform_prob=0.5,
+        transform_prob=0.0,
         random_apply=(1, 2),
         pin_memory=False,
         prefetch_factor=2,
         shuffle_within_workers=False,
         remove_meta_data=False,
         resample=False,
-        check_channels=True,
-        channels=8,
-        repeat_n=10,
+        check_channels=False,
     )
-    loader_kwgs2 = loader_kwargs.copy()
-    del loader_kwgs2["repeat_n"]
+    changed_kwargs = [
+        dict(channels=8),
+        dict(channels=13),
+        dict(channels=12),
+        dict(channels=8),
+        dict(channels=13),
+    ]
 
-    # import ipdb
-
-    # ipdb.set_trace()
     _, test_loader = get_hyperspectral_img_loaders_with_different_backends(
         test_wds_path,
         loader_type="webdataset",
-        rep_loader_kwargs=[loader_kwgs2],
+        basic_kwargs=loader_kwargs,
+        changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=False,
     )
 

@@ -36,8 +36,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+from typing_extensions import deprecated
 
-sys.path.insert(0, "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer")
+sys.path.append(__file__[: __file__.rfind("src")])
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
 from src.utilities.logging import log_print
@@ -413,7 +414,7 @@ class ResnetBlock(nn.Module):
         # slots, t not used, compacted with ResnetBlockSlotsInjected
 
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, use_reentrant=True)
+            return checkpoint(self.forward_fn, x, use_reentrant=True)  # type: ignore
         return self.forward_fn(x)
 
 
@@ -545,6 +546,10 @@ class AttnBlock(nn.Module):
         return self.forward_fn(x)
 
 
+@deprecated(
+    "this class does not work with FSDP, please specify the FSDP wrapped module directly"
+    "and the accelerator will handle the wrapping automatically"
+)
 class FSDPNoWarpModule(nn.Module):
     def __init__(self, module):
         super().__init__()
@@ -559,6 +564,7 @@ class DiffBandsInputConvIn(nn.Module):
         self,
         band_lst: list[int],
         hidden_dim: int,
+        basic_module: nn.Module = nn.Conv2d,
     ):
         super().__init__()
 
@@ -567,9 +573,9 @@ class DiffBandsInputConvIn(nn.Module):
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
-            self.in_modules["conv_in_{}".format(c)] = nn.Conv2d(
-                c,
-                hidden_dim,
+            self.in_modules["conv_in_{}".format(c)] = basic_module(
+                in_channels=c,
+                out_channels=hidden_dim,
                 kernel_size=3,
                 stride=1,
                 padding=1,
@@ -587,7 +593,11 @@ class DiffBandsInputConvIn(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
-        module = self.in_modules["conv_in_{}".format(c_)]
+        module = getattr(self.in_modules, "conv_in_{}".format(c_))
+        if module is None:
+            raise ValueError(
+                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
+            )
         h = module(x)
 
         if self.training:
@@ -602,6 +612,77 @@ class DiffBandsInputConvIn(nn.Module):
         return h
 
 
+class DiffBandsInputConvOut(nn.Module):
+    def __init__(
+        self,
+        band_lst: list[int],
+        hidden_dim: int,
+        basic_module: nn.Module = nn.Conv2d,
+    ):
+        super().__init__()
+
+        self.band_lst = band_lst
+        self.hidden_dim = hidden_dim
+
+        self.in_modules = nn.ModuleDict()
+        for c in band_lst:
+            self.in_modules["conv_out_{}".format(c)] = basic_module(
+                in_channels=hidden_dim,
+                out_channels=c,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
+
+            # keep the modules has grad in FSDP, DDP training
+            log_print(
+                f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}"
+            )
+
+        self.register_buffer(
+            f"buf_out",
+            torch.zeros(1, 256, 3, 3),
+            persistent=False,
+        )
+
+        self.out_channel = None
+
+    def forward(self, x: torch.Tensor, out_channel: int) -> torch.Tensor:
+        self.out_channel = out_channel
+
+        module = getattr(self.in_modules, f"conv_out_{out_channel}", None)
+        if module is None:
+            raise ValueError(
+                f"[DiffBandsInputConvOut] No module for out_channel={out_channel}. Available: {list(self.in_modules.keys())}",
+            )
+        h = module(x)
+
+        if self.training:
+            for c in self.band_lst:
+                if c != out_channel:
+                    buf = self.buf_out
+                    m = self.in_modules["conv_out_{}".format(c)]
+                    no_use_h = m(buf)
+
+                    h = h + no_use_h.mean() * 0.0
+
+        return h
+
+    @property
+    def weight(self):
+        # used to get the weight of the conv_out module for GAN loss
+        assert self.out_channel is not None, (
+            "out_channel is not set, please call forward first"
+        )
+        module = getattr(self.in_modules, f"conv_out_{self.out_channel}", None)
+        if module is None:
+            raise ValueError(
+                f"[DiffBandsInputConvOut] No module for out_channel={self.out_channel}. Available: {list(self.in_modules.keys())}",
+            )
+
+        return module.weight
+
+
 # * ==========================================================
 # * Encoder and decoder
 
@@ -609,7 +690,7 @@ class DiffBandsInputConvIn(nn.Module):
 class Encoder(nn.Module):
     def __init__(
         self,
-        in_channels: int,
+        in_channels: int | list[int],
         channels: int,
         channels_mult: list[int],
         num_res_blocks: int,
@@ -636,7 +717,6 @@ class Encoder(nn.Module):
 
         # Patcher.
         self.patcher = Patcher(patch_size, patch_method)
-        in_channels = in_channels * patch_size * patch_size
         log_print(
             f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, "
             f"patch_method: {patch_method}"
@@ -650,10 +730,23 @@ class Encoder(nn.Module):
             f"we can only downsample {self.num_resolutions} times at most"
         )
 
+        # input conv
+        self.use_diffbands_input = isinstance(in_channels, list)
+        if self.use_diffbands_input:
+            assert isinstance(in_channels, list)
+            in_channels = [c * patch_size * patch_size for c in in_channels]
+            self.conv_in = DiffBandsInputConvIn(
+                band_lst=in_channels,
+                hidden_dim=channels,
+                basic_module=torch.nn.Conv2d,
+            )
+        else:
+            in_channels = in_channels * patch_size * patch_size
+            self.conv_in = torch.nn.Conv2d(
+                in_channels, channels, kernel_size=3, stride=1, padding=1
+            )
+
         # downsampling
-        self.conv_in = torch.nn.Conv2d(
-            in_channels, channels, kernel_size=3, stride=1, padding=1
-        )
 
         curr_res = resolution // patch_size
         in_ch_mult = (1,) + tuple(channels_mult)
@@ -752,11 +845,11 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(
         self,
-        out_channels: int,
+        out_channels: int | list[int],
         channels: int,
         channels_mult: list[int],
         num_res_blocks: int,
-        attn_resolutions: int,
+        attn_resolutions: list[int],
         dropout: float,
         resolution: int,
         z_channels: int,
@@ -776,11 +869,10 @@ class Decoder(nn.Module):
         log_print(f"[Decoder]: z_channels: {z_channels}")
 
         # UnPatcher.
-        patch_size = ignore_kwargs.get("patch_size", 1)
+        self.patch_size = patch_size = ignore_kwargs.get("patch_size", 1)
         self.unpatcher = UnPatcher(
             patch_size, ignore_kwargs.get("patch_method", "rearrange")
         )
-        out_ch = out_channels * patch_size * patch_size
 
         # calculate the number of upsample operations
         self.num_upsamples = int(math.log2(spatial_compression)) - int(
@@ -864,19 +956,31 @@ class Decoder(nn.Module):
         # end
         self.norm_out = Normalize(block_in)
 
-        _wrap_fsdp_last_layer = ignore_kwargs.get("wrap_fsdp_last_layer", False)
-        self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
-        if _wrap_fsdp_last_layer:
-            self.conv_out = FSDPNoWarpModule(
-                torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
+        self.use_diffbands_input = isinstance(out_channels, list)
+        if self.use_diffbands_input:
+            log_print("[Decoder]: use diffbands input")
+            out_ch = [c * patch_size * patch_size for c in out_channels]
+            conv_out = DiffBandsInputConvOut(
+                band_lst=out_ch,
+                hidden_dim=block_in,
+                basic_module=torch.nn.Conv2d,
             )
-            log_print("[Decoder] use FSDPNoWarpModule")
         else:
-            self.conv_out = torch.nn.Conv2d(
+            out_ch = out_channels * patch_size * patch_size
+            conv_out = torch.nn.Conv2d(
                 block_in, out_ch, kernel_size=3, stride=1, padding=1
             )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # fsdp warpper, but not used
+        _wrap_fsdp_last_layer = ignore_kwargs.get("wrap_fsdp_last_layer", False)
+        self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
+        if _wrap_fsdp_last_layer:
+            self.conv_out = FSDPNoWarpModule(conv_out)
+            log_print("[Decoder] use FSDPNoWarpModule")
+        else:
+            self.conv_out = conv_out
+
+    def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         h = self.conv_in(z)
 
         # middle
@@ -896,7 +1000,12 @@ class Decoder(nn.Module):
 
         h = self.norm_out(h)
         h = nonlinearity(h)
-        h = self.conv_out(h)
+        if not self.use_diffbands_input:
+            conv_out_h = (h,)
+        else:
+            assert out_channels is not None, "out_channels should be provided"
+            conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
+        h = self.conv_out(*conv_out_h)
         h = self.unpatcher(h)
         return h
 
@@ -1482,5 +1591,70 @@ if __name__ == "__main__":
 
         time.sleep(10)
 
-    test_auto_enc_dec()
+    @func_mem_wrapper
+    def test_multi_bands_enc_dec():
+        img_size = 512
+        # 1024/4=256
+        # 256/2=128
+        encoder = Encoder(
+            [4, 8, 16, 24],
+            128,
+            [2, 2, 2, 4],
+            2,
+            [32],
+            0.1,
+            img_size,
+            16,
+            8,
+            True,
+            patch_size=4,
+        )
+        decoder = Decoder(
+            [4, 8, 16, 24],
+            128,
+            [2, 2, 2, 4],
+            2,
+            [32],
+            0.1,
+            img_size,
+            16,
+            8,
+            act_checkpoint=True,
+            patch_size=4,
+        )
+        dtype = torch.bfloat16
+        device = torch.device("cuda:1")
+        encoder = encoder.to(device, dtype)
+        decoder = decoder.to(device, dtype)
+
+        bs = 4
+        img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
+
+        slots = encoder(img)
+        recon = decoder(slots, img.shape[1])
+
+        print(recon.shape)
+
+        recon.mean().backward()
+
+        enc_n = 0
+        dec_n = 0
+
+        for n, p in encoder.named_parameters():
+            if p.grad is None:
+                print(f"{n} has no grad")
+            enc_n += p.numel()
+
+        for n, p in decoder.named_parameters():
+            if p.grad is None:
+                print(f"{n} has no grad")
+            dec_n += p.numel()
+
+        print(f"encoder params: {enc_n / 1e6}, dec params: {dec_n / 1e6}")
+        import time
+
+        time.sleep(10)
+
+    # test_auto_enc_dec()
     # test_diff_enc_dec()
+    test_multi_bands_enc_dec()

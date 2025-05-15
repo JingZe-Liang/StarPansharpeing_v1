@@ -1,5 +1,4 @@
 import math
-import sys
 
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.vision_transformer import PatchEmbed
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.discretization.collections import (
     BinarySphericalQuantizer,
     DiagonalGaussianDistribution,

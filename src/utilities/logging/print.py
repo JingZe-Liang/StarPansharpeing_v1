@@ -1,3 +1,5 @@
+from contextlib import ContextDecorator
+from functools import wraps
 from typing import Literal
 
 import torch.distributed as dist
@@ -61,3 +63,39 @@ def log_print(
     else:
         rank: int = dist.get_rank() if dist.is_initialized() else 0
         log_fn(f"[Rank {rank}] | {msg}")
+
+
+class catch_any(ContextDecorator):
+    """
+    A context manager and decorator that catches any exception raised within its scope or the decorated function,
+    logs the exception using the configured logger, and suppresses the exception to prevent it from propagating.
+
+    Usage as a context manager:
+        with catch_any():
+            # code that may raise exceptions
+
+    Usage as a decorator:
+        @catch_any()
+        def my_function():
+            # code that may raise exceptions
+
+    Exceptions are logged with traceback details, and execution continues after the block or function.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            logger.opt(exception=(exc_type, exc_val, exc_tb)).error(
+                "Exception occurred"
+            )
+        return True  # Suppress the exception
+
+    def __call__(self, func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            with self:
+                return logger.catch(func)(*args, **kwargs)
+
+        return wrapped

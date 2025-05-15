@@ -4,7 +4,6 @@ import numpy as np
 import sys
 from tqdm import tqdm
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.utilities.saver.zarr_saver import zarr_saver
 
 

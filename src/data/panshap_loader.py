@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import webdataset as wds
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.data.codecs import (
     mat_decode_io,
     npz_decode_io,

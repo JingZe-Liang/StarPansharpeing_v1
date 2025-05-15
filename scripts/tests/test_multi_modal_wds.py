@@ -1,10 +1,7 @@
-import sys
-
 import torch
 import webdataset as wds
 import wids
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 import re
 from functools import partial
 

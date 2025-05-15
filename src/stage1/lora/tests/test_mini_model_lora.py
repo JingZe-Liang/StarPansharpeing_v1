@@ -1,5 +1,3 @@
-import sys
-
 import accelerate
 import torch
 from peft import (
@@ -9,7 +7,6 @@ from peft import (
 )
 from torch.distributed.tensor import DTensor
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
 
 

@@ -1,5 +1,4 @@
 import random
-import sys
 
 import numpy as np
 import torch
@@ -9,7 +8,6 @@ from loguru import logger
 from torch.nn.utils.spectral_norm import SpectralNorm
 from torchvision.transforms import RandomCrop
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.utilities.losses.dinov2 import dinov2
 
 

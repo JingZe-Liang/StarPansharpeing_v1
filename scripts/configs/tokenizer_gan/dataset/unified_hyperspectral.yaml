@@ -1,0 +1,83 @@
+used: unified_hyperspectral
+dataset_names_to_img_size:
+  unified_hyperspectral: 512
+
+channels: [12, 8, 13, 50, 4, 8, 224]
+img_size: 512
+rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+
+train_paths:
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
+  - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
+  - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-train-4_bands-px_512-MSI-{0000..0003}.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-val-4_bands-px_512-MSI-0000.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-test-4_bands-px_512-MSI-{0000..0001}.tar
+  - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
+  - - data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+  - - data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
+  - - data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
+  - - data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar
+
+val_paths:
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+  - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-val-4_bands-px_512-MSI-0000.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-test-4_bands-px_512-MSI-0001.tar
+  - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
+  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
+
+train_changed_kwargs_by_loader:
+  - batch_size: 5
+  - batch_size: 22
+  - batch_size: 18
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 16
+  - batch_size: 3
+  - batch_size: 22
+  - batch_size: 22
+  - batch_size: 22
+  - batch_size: 22
+  - batch_size: 5
+
+val_changed_kwargs_by_loader:
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+  - batch_size: 8
+
+train_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  loader_type: webdataset
+  paths: ${dataset.train_paths}
+  basic_kwargs:
+    shuffle_size: 100
+    num_workers: 3
+    prefetch_factor: 6
+    shuffle_within_workers: false
+  changed_kwargs_by_loader: ${dataset.train_changed_kwargs_by_loader}
+
+val_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  loader_type: webdataset
+  paths: ${dataset.val_paths}
+  basic_kwargs:
+    shuffle_size: -1
+    num_workers: 1
+    prefetch_factor: 1
+    shuffle_within_workers: false
+  changed_kwargs_by_loader: ${dataset.val_changed_kwargs_by_loader}

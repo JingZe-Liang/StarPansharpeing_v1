@@ -1,12 +1,5 @@
-import sys
-
 import hydra
 from omegaconf import OmegaConf
-
-sys.path.insert(
-    0,
-    "/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer",
-)
 
 
 def _get_cli_cfg_isolate_with_hydra_cfg(exp_config_dict: dict):

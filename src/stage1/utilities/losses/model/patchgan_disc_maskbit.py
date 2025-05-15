@@ -2,7 +2,6 @@
 
 import functools
 import math
-import sys
 from inspect import signature
 from typing import Any, Callable, Tuple
 
@@ -11,7 +10,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.stage1.utilities.losses.model.triton_rms_norm import TritonRMSNorm2dFunc
 
 

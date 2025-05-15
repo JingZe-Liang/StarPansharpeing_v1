@@ -104,7 +104,7 @@ MUSLI_train: data/hyper_images/MUSLI_safetensors/safetensors
 
 WV3_train:
   - [data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar]
-  - [data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar]
+  # - [data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar]
 
 WV3_val:
   - [data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar]
@@ -142,3 +142,69 @@ hyper_transforms_lst:
 transform_prob: 0.5
 random_apply: [1, 2]
 loader_type: webdataset
+to_neg_1_1: true
+
+# function entry
+train_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  paths: ${dataset.wds_path_train}
+  loader_type: ${dataset.loader_type}
+  rep_loader_kwargs:
+    # wv3 hyper
+    - batch_size: ${dataset.batch_size_train}
+      num_workers: ${dataset.num_workers}
+      prefetch_factor: ${dataset.prefetch_factor}
+      shuffle_size: ${dataset.shuffle_size}
+      shuffle_within_workers: ${dataset.shuffle_within_workers}
+      channels: ${dataset.channels}
+      hyper_transforms_lst: ${dataset.hyper_transforms_lst}
+      transform_prob: ${dataset.transform_prob}
+      random_apply: ${dataset.random_apply}
+      check_channels: true
+      to_neg_1_1: ${dataset.to_neg_1_1}
+      repeat_n: 10
+    # wv3 pan
+    # - batch_size: ${dataset.batch_size_train}
+    #   num_workers: ${dataset.num_workers}
+    #   prefetch_factor: ${dataset.prefetch_factor}
+    #   shuffle_size: ${dataset.shuffle_size}
+    #   shuffle_within_workers: ${dataset.shuffle_within_workers}
+    #   channels: ${dataset.channels}
+    #   hyper_transforms_lst: ${dataset.hyper_transforms_lst}
+    #   transform_prob: ${dataset.transform_prob}
+    #   random_apply: ${dataset.random_apply}
+    #   check_channels: true
+    #   to_neg_1_1: ${dataset.to_neg_1_1}
+    #   repeat_n: 1
+
+val_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  paths: ${dataset.wds_path_val}
+  loader_type: ${dataset.loader_type}
+  rep_loader_kwargs:
+    # wv3 hyper
+    - batch_size: ${dataset.batch_size_val}
+      num_workers: ${dataset.num_workers}
+      prefetch_factor: ${dataset.prefetch_factor}
+      shuffle_size: ${dataset.shuffle_size}
+      shuffle_within_workers: ${dataset.shuffle_within_workers}
+      channels: ${dataset.channels}
+      hyper_transforms_lst: null
+      transform_prob: 0.0
+      random_apply: null
+      check_channels: true
+      to_neg_1_1: ${dataset.to_neg_1_1}
+      repeat_n: 1
+    # wv3 pan
+    - batch_size: ${dataset.batch_size_train}
+      num_workers: ${dataset.num_workers}
+      prefetch_factor: ${dataset.prefetch_factor}
+      shuffle_size: ${dataset.shuffle_size}
+      shuffle_within_workers: ${dataset.shuffle_within_workers}
+      channels: ${dataset.channels}
+      hyper_transforms_lst: null
+      transform_prob: 0.0
+      random_apply: null
+      check_channels: true
+      to_neg_1_1: ${dataset.to_neg_1_1}
+      repeat_n: 1

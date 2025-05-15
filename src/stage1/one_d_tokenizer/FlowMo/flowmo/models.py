@@ -20,7 +20,6 @@ from loguru import logger
 from mup import MuReadout
 from torch import Tensor, dtype, nn
 
-sys.path.insert(0, "/Data2/ZiHanCao/exps/hyperspectral-1d-tokenizer")
 from src.stage1.one_d_tokenizer.FlowMo.flowmo import lookup_free_quantize
 
 MUP_ENABLED = False or (os.getenv("MUP_ENABLED", "False") in ("True", "1", "true"))

@@ -1,4 +1,3 @@
-import sys
 import time
 from functools import partial
 from pathlib import Path
@@ -21,7 +20,6 @@ from omegaconf import DictConfig, OmegaConf
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage1.cosmos.two_dim_diffusion_slots import TwoDimDiffusionSlots
 from src.stage1.one_d_tokenizer.FlowMo.flowmo.flowmo_tokenizer import FlowMoTokenizer

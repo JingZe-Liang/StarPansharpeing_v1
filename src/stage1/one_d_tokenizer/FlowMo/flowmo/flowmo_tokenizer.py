@@ -1,10 +1,8 @@
 import ast
-import sys
 
 import torch
 from accelerate.state import AcceleratorState, is_initialized
 
-sys.path.insert(0, __file__[: __file__.find("src") + 3])
 from src.stage1.one_d_tokenizer.FlowMo.flowmo.models import (
     FlowMo,
     _edm_to_flow_convention,

@@ -1,4 +1,3 @@
-import sys
 import time
 from contextlib import nullcontext
 from functools import partial
@@ -28,7 +27,6 @@ from tqdm import trange
 
 colored_traceback.add_hook()
 
-sys.path.insert(0, __file__[: __file__.find("scripts")])
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched

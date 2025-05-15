@@ -1,12 +1,10 @@
-import torch
 import json
-import tempfile
 import os
+import tempfile
+
+import torch
 from typing_extensions import Generator
 
-import sys
-
-sys.path.insert(0, __file__[: __file__.find("src")])
 from src.utilities.logging import log_print
 
 # Safetensors DType mapping (simplified from safetensors.torch)

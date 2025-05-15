@@ -1,5 +1,4 @@
 import json
-import sys
 
 import torch
 from peft import (
@@ -9,7 +8,6 @@ from peft import (
     set_peft_model_state_dict,
 )
 
-sys.path.insert(0, __file__[: __file__.rfind("scripts")])
 from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
 from src.utilities.network_utils.network_loading import load_peft_model_checkpoint
 
