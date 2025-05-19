@@ -20,6 +20,8 @@ from typing import Any
 import torch
 from einops import pack, rearrange, unpack
 
+from .rmsnorm_triton import TritonRMSNorm2dFunc
+
 
 def time2batch(x: torch.Tensor) -> tuple[torch.Tensor, int]:
     batch_size = x.shape[0]
@@ -59,10 +61,75 @@ def nonlinearity(x):
     return x * torch.sigmoid(x)
 
 
-def Normalize(in_channels, num_groups=32):
-    return torch.nn.GroupNorm(
-        num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True
-    )
+# * --- Norm --- #
+
+
+class RMSNorm2d(torch.nn.Module):
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = torch.nn.parameter.Parameter(torch.ones(self.num_features))
+            if bias:
+                self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_features))
+            else:
+                self.register_parameter("bias", None)
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = (
+            x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
+        ).to(x.dtype)
+        if self.elementwise_affine:
+            x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return x
+
+
+class LayerNorm2d(torch.nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x - torch.mean(x, dim=1, keepdim=True)
+        out = out / torch.sqrt(torch.square(out).mean(dim=1, keepdim=True) + self.eps)
+        if self.elementwise_affine:
+            out = out * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return out
+
+
+class TritonRMSNorm2d(torch.nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
+
+
+def Normalize(in_channels, norm_type="gn", **norm_kwargs):
+    if norm_type == "gn":
+        return torch.nn.GroupNorm(
+            num_channels=in_channels,
+            eps=1e-6,
+            affine=True,
+            num_groups=norm_kwargs.get("num_groups", 32),
+        )
+    elif norm_type == "ln":
+        norm_kwargs.pop("num_groups", None)
+        return LayerNorm2d(in_channels)
+    elif norm_type == "rms_native":
+        norm_kwargs.pop("num_groups", None)
+        return RMSNorm2d(in_channels, **norm_kwargs)
+    elif norm_type == "rms_triton":
+        norm_kwargs.pop("num_groups", None)
+        return TritonRMSNorm2d(in_channels, **norm_kwargs)
+    else:
+        raise ValueError(
+            f"Unknown normalization type: {norm_type}. Supported types are: 'gn', 'ln', 'rms'."
+        )
 
 
 class CausalNormalize(torch.nn.Module):

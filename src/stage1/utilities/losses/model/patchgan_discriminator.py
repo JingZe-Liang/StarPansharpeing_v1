@@ -133,39 +133,43 @@ class DiffBandsInputConvIn(nn.Module):
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
 
+        kw = 4
+        padw = 1
+
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
             self.in_modules["conv_in_{}".format(c)] = basic_module(
                 in_channels=c,
                 out_channels=hidden_dim,
-                kernel_size=3,
-                stride=1,
-                padding=1,
+                kernel_size=kw,
+                stride=2,
+                padding=padw,
+                # padding_mode="replicate",
             )
 
             # keep the modules has grad in FSDP, DDP training
-            self.register_buffer(
-                f"buf_{c}",
-                torch.zeros(1, c, 3, 3),
-                persistent=False,
-            )
-            log_print(
-                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
-            )
+            # self.register_buffer(
+            #     f"buf_{c}",
+            #     torch.zeros(1, c, 3, 3),
+            #     persistent=False,
+            # )
+            log_print(f"[Disc] set conv to hidden module and buffer for channel {c}")
+        log_print(f"[Disc] diffbands input convs: {self.in_modules}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
             raise ValueError(
-                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
+                f"[Disc] no module for channel {c_}, please check the channel list"
             )
         h = module(x)
 
         if self.training:
             for c in self.band_lst:
                 if c != c_:
-                    buf = getattr(self, f"buf_{c}")
+                    # buf = getattr(self, f"buf_{c}")
+                    buf = torch.zeros(1, c, 3, 3, device=x.device, dtype=x.dtype)
                     m = self.in_modules["conv_in_{}".format(c)]
                     no_use_h = m(buf)
 
@@ -198,7 +202,7 @@ class NLayerDiscriminator(nn.Module):
         """
         super(NLayerDiscriminator, self).__init__()
         if not use_actnorm:
-            # Zihan Note: GroupNorm underperforme than BatchNorm
+            # Zihan Note: GroupNorm underperforms than BatchNorm
             norm_layer = nn.BatchNorm2d
             # lambda channels: nn.GroupNorm(
             #     num_groups=32, num_channels=channels
@@ -211,7 +215,7 @@ class NLayerDiscriminator(nn.Module):
             use_bias = norm_layer.func != nn.BatchNorm2d
         else:
             use_bias = norm_layer != nn.BatchNorm2d
-        print("patch gan discriminator - use bias: ", use_bias)
+        log_print("patch gan discriminator - use bias: {}".format(use_bias))
 
         kw = 4
         padw = 1
@@ -265,15 +269,14 @@ class NLayerDiscriminator(nn.Module):
         ]  # output 1 channel prediction map
         self.main = nn.Sequential(*sequence)
 
-    #     self.apply(self.weight_init)
+        self.apply(self.weight_init)
 
-    # def weight_init(self, m):
-    #     classname = m.__class__.__name__
-    #     if classname.find("Conv") != -1:
-    #         nn.init.normal_(m.weight.data, 0.0, 0.02)
-    #     elif classname.find("BatchNorm") != -1:
-    #         nn.init.normal_(m.weight.data, 1.0, 0.02)
-    #         nn.init.constant_(m.bias.data, 0)
+    def weight_init(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.normal_(m.weight.data, 0.0, 0.02)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.normal_(m.weight.data, 1.0, 0.02)
+            nn.init.constant_(m.bias.data, 0)
 
     def forward(self, input):
         """Standard forward."""

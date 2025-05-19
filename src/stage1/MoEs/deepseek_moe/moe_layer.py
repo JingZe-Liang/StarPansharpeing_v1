@@ -351,6 +351,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=activation,
             )
 
+    @torch.compile
     def _forward_implm(self, hidden_states: torch.Tensor):
         identity = hidden_states
         orig_shape = hidden_states.shape
@@ -822,6 +823,7 @@ class DeepseekECMoE(nn.Module):
                 hidden_act=activation,
             )
 
+    @torch.compile
     def forward(self, hidden_states):
         identity = hidden_states
         bsz, seq_len, h = hidden_states.shape
@@ -849,7 +851,6 @@ class DeepseekECMoE(nn.Module):
         # 对每个专家处理选定的令牌
         outputs = torch.zeros_like(hidden_states)
         expert_outputs = []
-
         for expert_idx in range(self.n_routed_experts):
             # 提取此专家要处理的令牌
             # [bsz, capacity, seq_len] * [bsz, seq_len, h] -> [bsz, capacity, h]
@@ -861,9 +862,7 @@ class DeepseekECMoE(nn.Module):
             flat_tokens = tokens_for_expert.reshape(-1, h)
             expert = self.experts[expert_idx]
             flat_expert_output = expert(flat_tokens)
-            expert_output = flat_expert_output.reshape(
-                bsz, self.gate.expert_capacity, h
-            )
+            expert_output = flat_expert_output.reshape(bsz, -1, h)
             expert_outputs.append(expert_output)
 
         # 组合所有专家的输出
@@ -874,10 +873,10 @@ class DeepseekECMoE(nn.Module):
             ].unsqueeze(-1)
 
             # 将输出分发回原始位置
-            # [bsz, capacity, h] * [bsz, capacity, seq_len] -> [bsz, seq_len, h]
+            # [bsz, capacity, h].T * [bsz, capacity, seq_len] -> [bsz, seq_len, h]
             outputs += torch.bmm(
                 weighted_output.transpose(1, 2), dispatch_mask[:, expert_idx]
-            )
+            ).transpose(1, 2)  # [bsz, seq_len, h]
 
         # 应用共享专家 (如果有)
         if self.n_shared_experts is not None:
@@ -985,18 +984,18 @@ def __test_expert_routing():
 
 def __test_token_routing():
     ec_moe = DeepseekECMoE(
-        expert_capacity_per_batch=32,  # 每个专家处理的最大令牌数
+        expert_capacity_per_batch=129,  # 每个专家处理的最大令牌数
         n_routed_experts=4,
-        moe_intermediate_size=512,
+        moe_intermediate_size=64,
         n_shared_experts=1,
-        hidden_size=128,
+        hidden_size=32,
         activation="gelu",
         compute_moe_info=True,
     ).cuda()
 
     batch_size = 2
     seq_len = 128
-    hidden_size = 128
+    hidden_size = 32
     test_input = torch.randn(batch_size, seq_len, hidden_size).cuda()
 
     out = ec_moe(test_input)

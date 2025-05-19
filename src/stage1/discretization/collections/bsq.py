@@ -95,7 +95,7 @@ class BinarySphericalQuantizer(nn.Module):
         persample_entropy_compute="group",
         cb_entropy_compute="group",
         l2_norm=False,
-        inv_temperature=1,
+        inv_temperature=1.0,
     ):
         super().__init__()
         self.embed_dim = embed_dim

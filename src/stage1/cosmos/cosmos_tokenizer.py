@@ -236,6 +236,8 @@ class ContinuousImageTokenizer(nn.Module):
         z_factor: int = 1,
         latent_channels: int = 8,
         loading_type: Literal["pretrained", "nvidia"] | None = "nvidia",
+        enc_moe: bool = False,
+        dec_moe: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -332,8 +334,10 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             # encoder and decoder
             # not combine the encoder, for FSDP wrap
-            encoder = Encoder(z_channels=z_factor * z_channels, **kwargs)
-            decoder = Decoder(z_channels=z_channels, **kwargs)
+            encoder = Encoder(
+                z_channels=z_factor * z_channels, use_moe_resnet=enc_moe, **kwargs
+            )
+            decoder = Decoder(z_channels=z_channels, use_moe_resnet=dec_moe, **kwargs)
 
             # quant_conv and post_quant_conv
             if kwargs.get("norm_in_quant_conv", False):
@@ -788,12 +792,12 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": [3, 4, 8, 12],
+        "in_channels": [3, 12, 32, 8, 13, 50, 4, 224],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 438,
+        "out_channels": [3, 12, 32, 8, 13, 50, 4, 224],
         "resolution": 1024,
-        "patch_size": 4,
+        "patch_size": 2,
         "patch_method": "haar",
         "latent_channels": 16,
         "z_channels": 16,
@@ -805,18 +809,22 @@ if __name__ == "__main__":
         "act_checkpoint": False,
         # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
         # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
-        # "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-18_17-15-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "quantizer_type": None,
-        "loading_type": None,
+        "loading_type": "pretrained",
         "force_not_attn": True,
-        # "downsample_type": "ConvPixelUnshuffle",
-        # "downsample_shortcut": "averaging",
-        # "upsample_type": "ConvPixelShuffle",
-        # "upsample_shortcut": "duplicating",
+        "enc_moe": False,
+        "dec_moe": False,
+        "downsample_type": "Conv",
+        "downsample_shortcut": "averaging",
+        "upsample_type": "RepeatConv",
+        "upsample_shortcut": "duplicating",
+        "padding_mode": "replicate",
     }
     # torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
+    # tokenizer = torch.compile(tokenizer)
 
     # from fvcore.nn import parameter_count_table
 
@@ -827,28 +835,41 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
-    # x = next(iter(dl))["img"].cuda()
-    # tokenizer = tokenizer.eval()
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="IKONOS")
+    x = next(iter(dl))["img"].cuda().to(torch.bfloat16)
+    tokenizer = tokenizer.eval()
 
-    x = torch.randn(2, 12, 512, 512, dtype=torch.bfloat16).cuda()
-    opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4)
+    # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
+    # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
+
+    # from src.utilities.optim import get_moun_optimizer
+
+    # opt = get_moun_optimizer(
+    #     tokenizer.named_parameters(),
+    #     lr=1e-4,
+    #     weight_decay=0.1,
+    # )
 
     from src.utilities.logging.print import catch_any
 
-    with torch.autocast("cuda", torch.bfloat16) and catch_any():
-        y, *_ = tokenizer(x)
+    with torch.autocast("cuda", torch.bfloat16) and catch_any() and torch.no_grad():
+        for _ in range(100):
+            y, *_ = tokenizer(x)
+            yy = ((y[[2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
 
-        y.mean().backward()
+            # grads
+            # for n, p in tokenizer.named_parameters():
+            #     if p.grad is None:
+            #         print(f"{n} grad is None")
 
-        # grads
-        for n, p in tokenizer.named_parameters():
-            if p.grad is None:
-                print(f"{n} grad is None")
+            # opt.zero_grad()
+            # y.mean().backward()
+            # opt.step()
+            print(y.shape)
 
-        opt.zero_grad()
-        opt.step()
-        print(y.shape)
+        import time
+
+        time.sleep(20)
 
         # feat = tokenizer.get_repa_feature()
         # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()

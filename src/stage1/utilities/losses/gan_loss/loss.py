@@ -13,6 +13,8 @@ from kornia.losses import SSIMLoss
 from loguru import logger
 from pytorch_wavelets import DWTForward
 
+from src.utilities.config_utils import to_object
+
 from ..model import (
     DinoDiscV2,
     NLayerDiscriminator,
@@ -23,7 +25,6 @@ from ..model import (
 )
 from ..repa import REPALoss
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
-from src.utilities.config_utils import to_object
 
 
 class DummyLoss(nn.Module):
@@ -552,15 +553,19 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
     def gen_loss_weight_fn(self, nll_loss, g_loss, last_layer):
         if self.gen_loss_weight is None:
-            try:
-                d_weight = self.calculate_adaptive_weight(
-                    nll_loss, g_loss, last_layer=last_layer
-                )
-            except RuntimeError as e:
-                logger.error(f"try to calculate adaptive weight, but met error: {e}")
-                assert not self.training
-                logger.warning("d_weight is set to 0")
-                d_weight = self.zero.to(nll_loss.device)
+            # try:
+            #     d_weight = self.calculate_adaptive_weight(
+            #         nll_loss, g_loss, last_layer=last_layer
+            #     )
+            # except RuntimeError as e:
+            #     logger.error(f"try to calculate adaptive weight, but met error: {e}")
+            #     assert not self.training
+            #     logger.warning("d_weight is set to 0")
+            #     d_weight = self.zero.to(nll_loss.device)
+
+            d_weight = self.calculate_adaptive_weight(
+                nll_loss, g_loss, last_layer=last_layer
+            )
         else:
             d_weight = torch.tensor(self.gen_loss_weight).to(nll_loss.device)
 

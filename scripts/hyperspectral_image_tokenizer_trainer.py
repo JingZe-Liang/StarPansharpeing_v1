@@ -12,6 +12,7 @@ import hydra
 import numpy as np
 import PIL.Image as Image
 import torch
+import torch._functorch.config
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
@@ -43,6 +44,7 @@ from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.utilities.config_utils import to_object as to_cont
+from src.utilities.logging import log_print
 from src.utilities.network_utils import load_fsdp_model
 from src.utilities.train_utils.state import StepsCounter
 
@@ -58,8 +60,6 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
 class CosmosHyperspectralTokenizerTrainer:
-    __warn_once_msg = set()
-
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.tokenizer_cfg = cfg.tokenizer
@@ -183,6 +183,24 @@ class CosmosHyperspectralTokenizerTrainer:
         # EMA models and accelerator prepare
         self.prepare_for_training()
         self.prepare_ema_models()
+
+        # if compile the model
+        if self.train_cfg.compile_model:
+            self.tokenizer = torch.compile(self.tokenizer)
+            self.log_msg(f"Compiled tokenizer {self.tokenizer.__class__.__name__}")
+            self.vq_loss_fn.discriminator = torch.compile(self.vq_loss_fn.discriminator)
+            self.log_msg(
+                f"Compiled discriminator {self.vq_loss_fn.discriminator.__class__.__name__}"
+            )
+
+            # no donated buffers
+            if self.cfg.vq_loss.gen_loss_weight is None:
+                torch._functorch.config.donated_buffer = False
+                self.log_msg(
+                    "donated_buffer is set to False, since the model is compiled, and use adaptive gen/disc loss,"
+                    "this will somehow affect the total running efficiency",
+                    level="WARNING",
+                )
 
         self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
@@ -338,7 +356,7 @@ class CosmosHyperspectralTokenizerTrainer:
             "- <level>[{level}]</level> "
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
-        log_format_in_cmd = "<level>[{level}]</level> - <level>{message}</level>"
+        log_format_in_cmd = "{time:HH:mm:ss} - {level.icon}  <level>[{level}]</level> - <level>{message}</level>"
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
@@ -470,27 +488,29 @@ class CosmosHyperspectralTokenizerTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
-        _log_fn = getattr(self.logger, level.lower())
+        _log_fn = partial(
+            log_print,
+            level=level.lower(),
+            warn_once=warn_once,
+            only_rank_zero=only_rank_zero,
+            **kwargs,
+        )
 
         def log_it(*msg, **kwargs):
             msg_string = str_msg(*msg)
-            if warn_once:
-                if msg_string in self.__warn_once_msg:
-                    return
-                else:
-                    self.__warn_once_msg.add(msg_string)
-
             _log_fn(msg_string, **kwargs)
 
-        if only_rank_zero:
-            if self.accelerator.is_main_process:
-                log_it(*msgs, **kwargs)
-        else:  # not only rank zero
-            with self.accelerator.main_process_first():
-                msg_string = str_msg(*msgs)
-                # prefix rank info
-                msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
-                log_it(msg_string, **kwargs)
+        log_it(*msgs, **kwargs)
+
+        # if only_rank_zero:
+        #     if self.accelerator.is_main_process:
+        #         log_it(*msgs, **kwargs)
+        # else:  # not only rank zero
+        #     with self.accelerator.main_process_first():
+        #         msg_string = str_msg(*msgs)
+        #         # prefix rank info
+        #         msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
+        #         log_it(msg_string, **kwargs)
 
     def _wrap_peft_tokenizer(self):
         assert "peft" in self.cfg, "peft_cfg not in the config"
@@ -506,7 +526,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if hasattr(self.tokenizer, "peft_first_last_convs_module_names"):
             peft_cfg.modules_to_save = (
-                self.tokenizer.peft_first_last_convs_module_names()
+                self.tokenizer.peft_first_last_convs_module_names()  # type: ignore
             )
             self.log_msg(
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
@@ -1152,6 +1172,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self,
         batch: dict,
     ):
+        torch.autograd.set_detect_anomaly(True)
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
 
         quality_track_n = self.train_cfg.track_metrics_duration
@@ -1581,7 +1602,7 @@ class CosmosHyperspectralTokenizerTrainer:
                                 adapter_only=True,
                             )
                         else:  # is ddp or one gpu
-                            load_res = set_peft_model_state_dict(
+                            loaded_res = set_peft_model_state_dict(
                                 self.tokenizer_peft_wrapped,
                                 accelerate.utils.load_state_dict(ema_path.as_posix()),
                                 adapter_name="default",
@@ -1641,7 +1662,7 @@ class CosmosHyperspectralTokenizerTrainer:
                                 level="warning",
                             )
                 else:
-                    raise ValueError("load FSDP or LoRA weights failed")
+                    raise RuntimeError("load FSDP or LoRA weights failed")
             else:
                 # Load combined model
                 self.log_msg(f"loading bin or safetensors checkpoint into model ...")

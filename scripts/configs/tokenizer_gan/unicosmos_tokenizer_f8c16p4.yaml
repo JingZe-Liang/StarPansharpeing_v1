@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral
+  - dataset: unified_hyperspectral # unified_hyperspectral
   - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
@@ -32,7 +32,7 @@ defaults:
 # transform_prob: 0.5
 
 vq_loss:
-  repa_loss_weight: 1.5
+  repa_loss_weight: 0.5
   quantizer_type:
   quantizer_options:
   repa_loss_options:
@@ -64,12 +64,23 @@ tokenizer:
   uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
   loading_type: pretrained
   use_channel_drop: false
+  enc_moe: false
+  dec_moe: false
+  padding_mode: replicate # for boundary?
+  norm_type: rms_triton
+
   # channel_drop_config:
   #   learnable: false
   #   drop_type: uniform_4
   #   max_channels: 16
   #   img_size: 32
   #   drop_prob: 1.0
+
+  ## downsample and upsample
+  downsample_type: Conv
+  downsample_shortcut: averaging
+  upsample_type: RepeatConv
+  upsample_shortcut: duplicating
 
 ema:
   beta: 0.995
@@ -78,7 +89,7 @@ ema:
 
 train:
   tokenizer_name: uni_cosmos_f8c16p4
-  proj_dir: runs/stage1_cosmos/
+  proj_dir: runs/stage1_cosmos
   finetune_strategy: finetune_all # dcae_refine_decoder_head
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -87,9 +98,10 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-05-03_19-05-11_cosmos_pretrained_f8c16p4_repa/ema
-  only_load_tokenizer: false
+  resume_path: #runs/stage1_cosmos/2025-05-17_21-56-25_cosmos_pretrained_f8c16p4_repa/checkpoints/checkpoint_5
+  ema_load_path: runs/stage1_cosmos/2025-05-19_14-04-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema
+  only_load_tokenizer: true
+  compile_model: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -101,11 +113,6 @@ train:
     lr: 3.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.0e-4
-    # betas: [0.9, 0.999]
-    # weight_decay: 1.0e-3
 
   disc_optimizer:
     _target_: src.utilities.optim.get_moun_optimizer
@@ -113,11 +120,6 @@ train:
     lr: 3.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.0e-4
-    # betas: [0.9, 0.999]
-    # weight_decay: 1.0e-3
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

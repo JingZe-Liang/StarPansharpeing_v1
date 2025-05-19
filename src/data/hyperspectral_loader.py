@@ -1,8 +1,10 @@
 import os
+import random
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
+import accelerate
 import braceexpand
 import numpy as np
 import scipy.io
@@ -52,6 +54,22 @@ type WebdatasetPath = str | list[str] | list[list[str]]
     category=UserWarning,
 )
 def get_dict_tensor_mapper(to_neg_1_1=True):
+    """
+    Returns a mapper function that converts a raw sample into a dictionary of tensors.
+
+    This is typically used in data pipelines to map raw data (e.g., from WebDataset)
+    into processed PyTorch tensors. The image is normalized and optionally scaled
+    to the range [-1, 1].
+
+    Args:
+        to_neg_1_1 (bool): If True, scales the image from [0, 1] to [-1, 1]. Default is True.
+
+    Returns:
+        function: A function that takes a sample and returns a dictionary containing:
+            - 'img' (Tensor): The processed image tensor of shape (C, H, W).
+            - 'img_max' (float): The maximum pixel value used for normalization.
+    """
+
     def wds_to_dict_tensor_mapper(sample):
         img = torch.as_tensor(sample["img.tiff"]).float()
         img_max = img.max()
@@ -199,6 +217,7 @@ def get_hyperspectral_dataloaders(
     repeat_n: int = 1,
     timeout: int = 300,
     epoch_len: int = 0,
+    persistent_workers: bool = False,
 ) -> tuple[wds.WebDataset, wds.WebLoader]:
     """Get dataloaders for hyperspectral image data
 
@@ -231,11 +250,14 @@ def get_hyperspectral_dataloaders(
         wds_paths,
         resampled=resample,  # no need `iter(dataloader)` for `next` function
         shardshuffle=False,
-        nodesplitter=wds.shardlists.single_node_only,  # split_by_node if is multi-node training
+        nodesplitter=wds.shardlists.single_node_only
+        if not accelerate.state.PartialState().use_distributed
+        else wds.shardlists.split_by_node,  # split_by_node if is multi-node training
         workersplitter=wds.split_by_worker,
         seed=2025,
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
+        empty_check=False,
     )
     dataset = dataset.decode(
         wds.handle_extension("tif tiff", tiff_decode_io),
@@ -261,7 +283,7 @@ def get_hyperspectral_dataloaders(
         dataset,
         batch_size=None,
         num_workers=num_workers,
-        persistent_workers=True if num_workers > 0 else False,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=pin_memory,
         drop_last=False,
@@ -298,7 +320,17 @@ def get_hyperspectral_dataloaders(
 
 
 def get_fast_test_hyperspectral_data(
-    data_type: str = "DCF",
+    data_type: Literal[
+        "DCF",
+        "MMSeg",
+        "Houston",
+        "OHS",
+        "WV3",
+        "QB",
+        "WV2",
+        "WV4",
+        "IKONOS",
+    ] = "DCF",
     batch_size: int = 1,
 ):
     """
@@ -308,6 +340,12 @@ def get_fast_test_hyperspectral_data(
         "DCF": "data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar",
         "MMSeg": "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
         "Houston": "data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar",
+        "OHS": "data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0000.tar",
+        "WV3": "data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar",
+        "QB": "data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar",
+        "WV2": "data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar",
+        "WV4": "data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar",
+        "IKONOS": "data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar",
     }[data_type]
 
     _, dataloader = get_hyperspectral_dataloaders(
@@ -556,37 +594,136 @@ def only_hyperspectral_img_folder_dataloader(
     return dataset, dataloader
 
 
-def chained_dataloaders(dataloaders: list[wds.WebLoader], infinit: bool = True):
+def chained_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
     """
-    Chain multiple dataloaders together.
+    Chains multiple dataloaders into a single generator that yields samples from
+    the provided dataloaders. Supports both finite and infinite iteration modes.
 
     Args:
-        dataloaders (list[wds.WebLoader]): List of dataloaders to chain.
+        dataloaders (list): A list of dataloaders to chain together. Each dataloader
+            should be an iterable that yields data samples.
+        infinit (bool, optional): If True, the chained dataloader will reset and
+            continue iterating indefinitely. If False, the iteration will stop
+            once all dataloaders are exhausted. Defaults to True.
+        shuffle_loaders (bool, optional): If True, the order of dataloaders will
+            be shuffled when selecting which dataloader to sample from. Defaults to True.
 
-    Return:
-        generator: A generator that yields samples from the chained dataloaders.
+    Yields:
+        dict: A sample from one of the dataloaders, with an additional key
+            "__loader_idx__" indicating the index of the dataloader from which
+            the sample was drawn.
+
+    Notes:
+        - In infinite mode (`infinit=True`), the dataloaders will reset once
+          exhausted, allowing continuous iteration.
+        - In finite mode (`infinit=False`), the iteration stops when all dataloaders
+          are exhausted.
+        - If all dataloaders fail to yield data unexpectedly in infinite mode,
+          a warning will be logged.
+        - The function logs critical and debug messages when all dataloaders
+          are exhausted or fail to yield data.
+
+    Example:
+        >>> dataloader1 = (
+        ...     DataLoader(
+        ...         dataset1
+        ...     )
+        ... )
+        >>> dataloader2 = (
+        ...     DataLoader(
+        ...         dataset2
+        ...     )
+        ... )
+        >>> chained_loader = chained_dataloaders(
+        ...     [
+        ...         dataloader1,
+        ...         dataloader2,
+        ...     ],
+        ...     infinit=False,
+        ... )
+        >>> for sample in chained_loader:
+        >>>     process(sample)
     """
 
-    def _chain_dataloaders(dataloaders, infinit=True):
-        if infinit:
-            while True:
-                for loader_idx, dataloader in enumerate(dataloaders):
-                    log_print(
-                        "switch to loader idx: <red>{}</>".format(loader_idx), "debug"
-                    )
-                    for sample in dataloader:
-                        sample["__loader_idx__"] = loader_idx
-                        yield sample
-        else:
-            for loader_idx, dataloader in enumerate(dataloaders):
-                log_print(
-                    "switch to loader idx: <red>{}</>".format(loader_idx), "debug"
-                )
-                for sample in dataloader:
-                    sample["__loader_idx__"] = loader_idx
-                    yield sample
+    def _chain_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
+        n = len(dataloaders)
+        iters = [iter(dl) for dl in dataloaders]
+        is_exhausted = [False] * n
 
-    return _chain_dataloaders(dataloaders, infinit)
+        def get_active_idx():
+            active_indices = [i for i in range(n) if not is_exhausted[i]]
+            if shuffle_loaders:
+                random.shuffle(active_indices)
+            return active_indices
+
+        active_indices = get_active_idx()
+
+        while True:
+            if all(is_exhausted):
+                if infinit:
+                    log_print(
+                        "All loaders are exhausted, this should not happen in infinite mode",
+                        "critical",
+                    )
+                log_print("All loaders exhausted, stop iteration", "debug")
+                break
+
+            # Reinitialize active indices if empty
+            if not active_indices:
+                active_indices = get_active_idx()
+                if not active_indices:  # No active loaders left
+                    break
+
+            # Attempt to get next sample with retry logic
+            max_attempts = len(active_indices) * 2  # Reasonable upper bound
+            attempt = 0
+            sample = None
+
+            while attempt < max_attempts and active_indices:
+                idx = active_indices.pop()
+                attempt += 1
+
+                try:
+                    sample = next(iters[idx])
+                    sample["__loader_idx__"] = idx
+                    break  # Successfully got sample
+                except StopIteration:
+                    if infinit:
+                        iters[idx] = iter(dataloaders[idx])  # Reset iterator
+                    else:
+                        is_exhausted[idx] = True
+
+                    # Refresh active indices if needed
+                    if not active_indices:
+                        active_indices = get_active_idx()
+                        if not active_indices:
+                            break  # No more loaders to try
+
+            if sample is not None:
+                yield sample
+            else:
+                # All attempts failed
+                if infinit:
+                    log_print(
+                        "All loaders failed to yield data unexpectedly", "warning"
+                    )
+                else:
+                    break  # In finite mode, exit when we can't get any samples
+
+            if not infinit and all(is_exhausted):
+                break
+
+    if not infinit:
+        log_print(
+            "Chained dataloader is finite and will stop once all data is exhausted. "
+            "Set it to True if you want infinite iterations.",
+            "warning",
+        )
+
+    log_print(f"Chaining {len(dataloaders)} dataloaders, {shuffle_loaders=}...")
+    chained_loader = _chain_dataloaders(dataloaders, infinit, shuffle_loaders)
+
+    return chained_loader
 
 
 def get_hyperspectral_img_loaders_with_different_backends(
@@ -599,6 +736,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
     # 2. every loader has its own kwargs
     rep_loader_kwargs: list[dict] | None = None,
     chain_loader_infinit: bool = True,
+    shuffle_loaders: bool = True,
     # 3. simple for all loaders
     **loader_kwargs,
 ):
@@ -656,23 +794,25 @@ def get_hyperspectral_img_loaders_with_different_backends(
         ),
     )  # type: ignore
 
-    # import ipdb
-
-    # ipdb.set_trace()
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
 
         def ensure_non_empty_worker_shard(paths: str | list[str], loader_kwargs: dict):
             # Ensure that the number of workers is not greater than the number of shards
             if isinstance(paths, str):
-                _len = len(list(braceexpand.braceexpand(paths)))
-            else:
-                assert isinstance(paths, (list, tuple)), (
-                    f"paths should be a list or string, but got {type(paths)}"
-                )
-
+                paths = list(braceexpand.braceexpand(paths))
                 _len = len(paths)
+
+            assert isinstance(paths, (list, tuple)), (
+                f"paths should be a list or string, but got {type(paths)}"
+            )
+
+            _len = len(paths)
             assert _len > 0, f"paths should not be empty, but got {paths}"
+
+            for p in paths:
+                # assert tar file exists
+                assert os.path.exists(p), f"tar file {p} does not exist"
 
             # n_worker should less than the number of shards
             n_workers = loader_kwargs.get("num_workers", 0)
@@ -687,7 +827,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
             return loader_kwargs
 
         # Groups of dataloaders
-        if isinstance(paths, list) and isinstance(paths[0], list):
+        if isinstance(paths, list) and isinstance(paths[0], Sequence):
             log_print(
                 "input paths contains list of lists, we will chain the dataloader with each loader"
             )
@@ -745,7 +885,8 @@ def get_hyperspectral_img_loaders_with_different_backends(
                         )
 
                 # resample must be false
-                loader_kwargs["resample"] = False
+                if not shuffle_loaders:
+                    loader_kwargs["resample"] = False
                 loader_kwargs["epoch_len"] = -1
 
                 loader_kwargs = ensure_non_empty_worker_shard(p_lst, loader_kwargs)
@@ -753,7 +894,6 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 dataset, dataloader = get_hyperspectral_dataloaders(
                     p_lst, **loader_kwargs
                 )
-
                 datasets.append(dataset)
                 dataloaders.append(dataloader)
 
@@ -764,7 +904,9 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     "Please set <cyan>chain_loader_infinit=True</> if you are know what you are doing.",
                     "warning",
                 )
-            dataloader = chained_dataloaders(dataloaders, chain_loader_infinit)
+            dataloader = chained_dataloaders(
+                dataloaders, chain_loader_infinit, shuffle_loaders
+            )
             return datasets, dataloader
         else:
             loader_kwargs = ensure_non_empty_worker_shard(paths, loader_kwargs)
@@ -824,42 +966,18 @@ if __name__ == "__main__":
     #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
     # # ]
     test_wds_path = [
+        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
+        ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
+        ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
+        ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
         ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        # ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
-        [
-            "data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0001}.tar"
-        ],
-        [
-            "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0001}.tar"
-        ],
-        [
-            "data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0001}.tar"
-        ],
-        [
-            "data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0001}.tar"
-        ],
+        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
     ]
     test_batch_size = 16
     test_num_workers = 3
     test_shuffle_size = -1
-
-    # Get test dataloader
-    # test_dataset, test_loader = get_hyperspectral_dataloaders(
-    #     wds_paths=test_wds_path,
-    #     batch_size=test_batch_size,
-    #     num_workers=test_num_workers,
-    #     shuffle_size=test_shuffle_size,
-    #     to_neg_1_1=True,
-    #     transform_prob=0.0,
-    #     random_apply=(1, 2),
-    #     pin_memory=False,
-    #     prefetch_factor=None,
-    #     shuffle_within_workers=False,
-    #     remove_meta_data=False,
-    #     resample=False,
-    #     check_channels=True,
-    #     channels=8,
-    # )
 
     loader_kwargs = dict(
         batch_size=test_batch_size,
@@ -869,26 +987,26 @@ if __name__ == "__main__":
         transform_prob=0.0,
         random_apply=(1, 2),
         pin_memory=False,
-        prefetch_factor=2,
+        prefetch_factor=1,
         shuffle_within_workers=False,
         remove_meta_data=False,
-        resample=False,
+        resample=True,
         check_channels=False,
     )
     changed_kwargs = [
-        dict(channels=8),
-        dict(channels=13),
-        dict(channels=12),
-        dict(channels=8),
-        dict(channels=13),
-    ]
+        {
+            "batch_size": 8,
+        }
+    ] * len(test_wds_path)
+    channels = [12, 8, 13, 50, 4, 8, 224]
+    accelerator = accelerate.Accelerator()
 
     _, test_loader = get_hyperspectral_img_loaders_with_different_backends(
         test_wds_path,
         loader_type="webdataset",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
-        chain_loader_infinit=False,
+        chain_loader_infinit=True,
     )
 
     # # for sample in iter(test_dataset):
@@ -898,29 +1016,31 @@ if __name__ == "__main__":
 
     total_samples_256 = 0
     total_samples_512 = 0
-    for sample in tqdm(test_loader):
-        # pass
-        print(sample.keys())
+
+    for sample in (tbar := tqdm(test_loader)):
         img = sample["img"]
-        # print(
-        #     img.shape,
-        #     "min: ",
-        #     img.min(),
-        #     "max: ",
-        #     img.max(),
-        #     "loader idx: ",
-        #     sample["__loader_idx__"],
-        # )
 
-        if img.shape[-1] == 256:
-            total_samples_256 += img.shape[0]
-        elif img.shape[-1] == 512:
-            total_samples_512 += img.shape[0]
-        else:
-            raise ValueError(f"Unknown image size: {img.shape[-1]}")
+        tbar.set_description_str(
+            "rank: {}, img shape: {}, loader idx: {}".format(
+                accelerator.process_index, img.shape, sample["__loader_idx__"]
+            )
+        )
+        # if img.shape[1] == 3:
+        #     print(sample["__url__"])
+        #     break
+        # if img.shape[1] not in channels:
+        #     print(sample["__url__"])
+        #     raise ValueError(f"Unknown image channel: {img.shape[1]}")
 
-    print("pixel 256 size total samples: ", total_samples_256)
-    print("pixel 512 size total samples: ", total_samples_512)
+    #     if img.shape[-1] == 256:
+    #         total_samples_256 += img.shape[0]
+    #     elif img.shape[-1] == 512:
+    #         total_samples_512 += img.shape[0]
+    #     else:
+    #         raise ValueError(f"Unknown image size: {img.shape[-1]}")
+
+    # print("pixel 256 size total samples: ", total_samples_256)
+    # print("pixel 512 size total samples: ", total_samples_512)
 
     # * for loop the images
     # for batch in test_loader:

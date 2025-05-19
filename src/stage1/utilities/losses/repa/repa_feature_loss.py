@@ -15,7 +15,6 @@ from torch.distributed.tensor import DTensor, Shard
 warnings.filterwarnings(
     "once",
     message="[Repa Resize]: image not resize into dino pretrained size",
-    append=True,
 )
 
 

@@ -1,3 +1,4 @@
+import sys
 from contextlib import ContextDecorator
 from functools import wraps
 from typing import Literal
@@ -9,6 +10,27 @@ from loguru import logger
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 __warn_once_set = set()
+
+# Set the level
+logger.level("DEBUG", icon="🔍", color="<blue>")
+logger.level("INFO", icon="💬", color="<white>")
+logger.level("WARNING", icon="⚠️", color="<yellow>")
+logger.level("ERROR", icon="❌", color="<red>")
+logger.level("CRITICAL", icon="💥", color="<red>")
+
+
+# Configure logger
+__re_config_logger = True
+if __re_config_logger:
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG",
+        colorize=True,
+        format="{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level> - <level>{message}</level>",
+    )
+    logger.info("Logger reconfigured", level="info")
+    __re_config_logger = False
 
 
 def is_rank_zero() -> bool:
@@ -32,6 +54,7 @@ def log_print(
     level: LogLevel = "info",
     only_rank_zero: bool = True,
     warn_once: bool = False,
+    **kwargs,
 ) -> None:
     """
     Logs a message using loguru, optionally only on rank 0,
@@ -59,10 +82,10 @@ def log_print(
     log_fn = getattr(logger_with_correct_depth, level)
 
     if only_rank_zero:
-        log_fn(msg)
+        log_fn(msg, **kwargs)
     else:
         rank: int = dist.get_rank() if dist.is_initialized() else 0
-        log_fn(f"[Rank {rank}] | {msg}")
+        log_fn(f"[Rank {rank}] | {msg}", **kwargs)
 
 
 class catch_any(ContextDecorator):
@@ -99,3 +122,7 @@ class catch_any(ContextDecorator):
                 return logger.catch(func)(*args, **kwargs)
 
         return wrapped
+
+
+if __name__ == "__main__":
+    logger.info("this is a log")
