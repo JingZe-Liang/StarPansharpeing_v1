@@ -351,7 +351,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=activation,
             )
 
-    @torch.compile
+    # @torch.compile
     def _forward_implm(self, hidden_states: torch.Tensor):
         identity = hidden_states
         orig_shape = hidden_states.shape
@@ -793,6 +793,11 @@ class DeepseekECMoE(nn.Module):
         self.get_moe_info = moe_balance_info(n_routed_experts)
         self.compute_moe_info = compute_moe_info
         self.hidden_size = hidden_size
+        log_print(
+            f"[EC MoE]: rank: {dist.get_rank() if dist.is_initialized() else 0} "
+            f"n_routed_experts: {n_routed_experts}",
+            "debug",
+        )
 
         # 初始化专家
         self.experts = nn.ModuleList(
@@ -823,7 +828,7 @@ class DeepseekECMoE(nn.Module):
                 hidden_act=activation,
             )
 
-    @torch.compile
+    # @torch.compile
     def forward(self, hidden_states):
         identity = hidden_states
         bsz, seq_len, h = hidden_states.shape

@@ -27,7 +27,7 @@ import math
 import sys
 from functools import partial
 from inspect import signature
-from typing import Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 import numpy as np
 
@@ -37,11 +37,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint
-from triton import next_power_of_2
+from transformers.activations import ACT2FN
 from typing_extensions import deprecated
 
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
-from src.stage1.cosmos.modules.utils import Normalize, nonlinearity
+from src.stage1.cosmos.modules.utils import (
+    Normalize,
+    gelu_nonlinear,
+    nonlinearity,
+    val2tuple,
+)
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
@@ -217,6 +222,115 @@ class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.repeat_interleave(self.repeats, dim=1)
         x = F.pixel_shuffle(x, self.factor)
+        return x
+
+
+class ConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        use_bias: bool = False,
+        dropout: float = 0,
+        norm: str = "bn2d",
+        act_func: str = "relu",
+        padding_mode: str = "zeros",
+    ) -> None:
+        super().__init__()
+
+        padding = get_same_padding(kernel_size)
+        padding *= dilation
+
+        self.dropout = nn.Dropout2d(dropout, inplace=False) if dropout > 0 else None
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            stride=(stride, stride),
+            padding=padding,
+            dilation=(dilation, dilation),
+            groups=groups,
+            bias=use_bias,
+            padding_mode=padding_mode,
+        )
+        self.norm = Normalize(in_channels=out_channels, norm_type=norm)
+        self.act = build_act(act_func)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dropout is not None:
+            x = self.dropout(x)
+        x = self.conv(x)
+        if self.norm:
+            x = self.norm(x)
+        if self.act:
+            x = self.act(x)
+        return x
+
+
+# TODO: this version causes the norm is high
+class GLUMBConv(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size=3,
+        stride=1,
+        mid_channels=None,
+        expand_ratio=6,
+        use_bias=False,
+        norm=(None, None, "ln2d"),
+        act_func=("silu", "silu", None),
+    ):
+        super().__init__()
+        use_bias = val2tuple(use_bias, 3)
+        norm = val2tuple(norm, 3)
+        act_func = val2tuple(act_func, 3)
+
+        mid_channels = (
+            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
+        )
+
+        self.glu_act = build_act(act_func[1], inplace=False)
+        self.inverted_conv = ConvLayer(
+            in_channels,
+            mid_channels * 2,
+            1,
+            use_bias=use_bias[0],
+            norm=norm[0],
+            act_func=act_func[0],
+        )
+        self.depth_conv = ConvLayer(
+            mid_channels * 2,
+            mid_channels * 2,
+            kernel_size,
+            stride=stride,
+            groups=mid_channels * 2,
+            use_bias=use_bias[1],
+            norm=norm[1],
+            act_func=None,
+        )
+        self.point_conv = ConvLayer(
+            mid_channels,
+            out_channels,
+            1,
+            use_bias=use_bias[2],
+            norm=norm[2],
+            act_func=act_func[2],
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.inverted_conv(x)
+        x = self.depth_conv(x)
+
+        x, gate = torch.chunk(x, 2, dim=1)
+        gate = self.glu_act(gate)
+        x = x * gate
+
+        x = self.point_conv(x)
         return x
 
 
@@ -544,10 +658,11 @@ class AttnBlock(nn.Module):
         act_checkpoint: bool,
         use_residual_factor: bool = False,
         norm_type: str = "gn",
+        norm_groups: int = 32,
     ):
         super().__init__()
 
-        self.norm = Normalize(in_channels, norm_type=norm_type)
+        self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
         self.q = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.k = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.v = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
@@ -681,6 +796,167 @@ class MoE2DBlock(nn.Module):
         return self._forward_fn(x)
 
 
+class DiCoCompactChannelAttention(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.global_avg = nn.AdaptiveAvgPool2d(1)
+        self.body = nn.Conv2d(in_channels, in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.global_avg(x)
+        h = self.body(h)
+        h = self.sigmoid(h) * x
+        return h
+
+
+class FeedForward(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, hidden_act="gelu"):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+
+        self.gate_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.up_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.down_proj = nn.Conv2d(self.intermediate_size, self.hidden_size, 1, 1, 0)
+        self.act_fn = ACT2FN[hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
+class LlamaFFN(nn.Module):
+    def __init__(self, hidden_size, intermediate_size):
+        super().__init__()
+        self.w1 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
+        self.w2 = nn.Conv2d(intermediate_size, hidden_size, 1, 1, 0)
+        self.w3 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x) * self.w3(x)))
+
+
+class DiCoBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int | None = None,
+        dropout: float = 0.0,
+        norm_type: str = "gn",
+        norm_groups: int = 32,
+        use_residual: bool = False,
+        padding_mode: str = "zeros",
+        act_checkpoint: bool = False,
+        use_ffn: bool = True,
+    ):
+        super().__init__()
+        self.use_residual = use_residual
+        self.act_checkpoint = act_checkpoint
+        self.use_ffn = use_ffn
+        if out_channels is None:
+            out_channels = in_channels
+
+        log_print(
+            f"[Dico block]: in: {in_channels}"
+            f"out: {out_channels}"
+            f"hidden: {hidden_channels}",
+            "debug",
+        )
+
+        self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
+
+        self.dropout = nn.Dropout(dropout)
+
+        # conv module
+        self.body = nn.Sequential(
+            # point conv
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            # depth conv
+            nn.Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode=padding_mode,
+                groups=out_channels,
+            ),
+            # nn.Conv2d(
+            #     in_channels,
+            #     out_channels,
+            #     kernel_size=3,
+            #     stride=1,
+            #     padding=1,
+            #     padding_mode=padding_mode,
+            # ),
+            nn.GELU(approximate="tanh"),
+        )
+
+        # cca
+        self.cca = DiCoCompactChannelAttention(out_channels)
+        self.body_out = nn.Conv2d(
+            out_channels, out_channels, kernel_size=1, stride=1, padding=0
+        )
+
+        # ffn
+        if self.use_ffn:
+            self.ffn = FeedForward(out_channels, hidden_channels)
+            # self.ffn = LlamaFFN(hidden_size=out_channels, intermediate_size=hidden_channels)
+            # self.ffn = nn.Conv2d(
+            #     out_channels,
+            #     hidden_channels,
+            #     kernel_size=3,
+            #     stride=1,
+            #     padding=1,
+            #     padding_mode=padding_mode,
+            # )
+            self.norm_ffn = Normalize(
+                out_channels, norm_type=norm_type, num_groups=norm_groups
+            )
+
+        self.nin_shortcut = (
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    @torch.compile
+    def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
+        h = x
+
+        # token mixer
+        h = self.norm(h)
+        h = self.body(h)
+        h = self.cca(h)
+        h = self.body_out(h) + self.nin_shortcut(x)
+
+        # ffn
+        if self.use_ffn:
+            h1 = h
+            h = self.norm_ffn(h)
+            h = self.dropout(h)
+            h = self.ffn(h) + h1
+
+        return h
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.act_checkpoint and self.training:
+            return checkpoint(self.forward_fn, x, use_reentrant=True)
+        return self.forward_fn(x)
+
+
 class ResnetBlockMoE2D(nn.Module):
     # variant for ResnetBlock
     def __init__(
@@ -692,28 +968,50 @@ class ResnetBlockMoE2D(nn.Module):
         n_selected: int = 1,
         n_shared_experts: int = 1,
         n_token_ec: int = 64 * 64,  # 2d image, 64x64
-        moe_factor: int = 4,
+        hidden_factor: int = 4,
         moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
         act_checkpoint: bool = False,
         padding_mode: str = "zeros",
         norm_type: str = "gn",
+        norm_groups: int = 32,
+        token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+        **resnet_kwargs,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
-        self.resnet_block = ResnetBlock(
-            in_channels=in_channels,
-            out_channels=self.out_channels,
-            dropout=drop_out,
-            act_checkpoint=act_checkpoint,
-            use_residual_factor=False,
-            padding_mode=padding_mode,
-            norm_type=norm_type,
+
+        log_print(f"[ResnetBlockMoE2D] using token mixer: {token_mixer_type}", "debug")
+        if token_mixer_type == "resblock":
+            self.token_mixer = ResnetBlock(
+                in_channels=in_channels,
+                out_channels=self.out_channels,
+                dropout=drop_out,
+                act_checkpoint=act_checkpoint,
+                use_residual_factor=False,
+                padding_mode=padding_mode,
+                norm_type=norm_type,
+                **resnet_kwargs,
+            )
+        elif token_mixer_type == "dico_block":
+            self.token_mixer = DiCoBlock(
+                in_channels=in_channels,
+                out_channels=self.out_channels,
+                hidden_channels=int(hidden_factor * self.out_channels),
+                dropout=drop_out,
+                act_checkpoint=act_checkpoint,
+                use_residual=False,
+                padding_mode=padding_mode,
+                norm_type=norm_type,
+                use_ffn=False,  # moe serves as ffn
+                norm_groups=resnet_kwargs.get("num_groups", 32),
+            )
+        self.moe_prenorm = Normalize(
+            self.out_channels, norm_type=norm_type, num_groups=norm_groups
         )
-        self.moe_prenorm = Normalize(self.out_channels, norm_type=norm_type)
         self.moe = MoE2DBlock(
             in_channels=self.out_channels,
-            hidden_channels=int(moe_factor * self.out_channels),
+            hidden_channels=int(hidden_factor * self.out_channels),
             act_checkpoint=act_checkpoint,
             n_experts=n_experts,
             n_selected=n_selected,
@@ -723,7 +1021,9 @@ class ResnetBlockMoE2D(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.resnet_block(x)  # shortcut in the block
+        # token mixer
+        h = self.token_mixer(x)  # shortcut in the block
+        # ffn
         h = self.moe(self.moe_prenorm(h)) + h
         return h
 
@@ -736,7 +1036,7 @@ class DiffBandsInputConvIn(nn.Module):
         self,
         band_lst: list[int],
         hidden_dim: int,
-        basic_module: Literal["conv", "resnet", "moe"] = "conv",
+        basic_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         padding_mode: str = "zeros",
     ):
         super().__init__()
@@ -754,6 +1054,33 @@ class DiffBandsInputConvIn(nn.Module):
                     stride=1,
                     padding=1,
                     padding_mode="replicate",
+                )
+            elif basic_module == "mobile":
+                module = nn.Sequential(
+                    nn.Conv2d(c, hidden_dim, 1, 1, 0),
+                    nn.Conv2d(
+                        hidden_dim,
+                        hidden_dim,
+                        3,
+                        1,
+                        1,
+                        padding_mode="replicate",
+                        groups=hidden_dim,
+                    ),
+                )
+            elif basic_module == "inv_bottleneck":
+                module = ResidualBlock(
+                    GLUMBConv(
+                        in_channels=c,
+                        out_channels=hidden_dim,
+                        kernel_size=3,
+                        stride=1,
+                        expand_ratio=4,
+                        use_bias=True,
+                        norm=(None, None, "rms_triton"),
+                        act_func=("silu", "silu", None),
+                    ),
+                    nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1, padding=0),
                 )
             elif basic_module == "resnet":
                 module = ResnetBlock(
@@ -848,6 +1175,33 @@ class DiffBandsInputConvOut(nn.Module):
                     padding=1,
                     padding_mode="replicate",
                 )
+            elif basic_module == "mobile":
+                module = nn.Sequential(
+                    nn.Conv2d(
+                        hidden_dim,
+                        hidden_dim,
+                        3,
+                        1,
+                        1,
+                        padding_mode="replicate",
+                        groups=hidden_dim,
+                    ),
+                    nn.Conv2d(hidden_dim, c, 1, 1, 0),
+                )
+            elif basic_module == "inv_bottleneck":
+                module = ResidualBlock(
+                    GLUMBConv(
+                        in_channels=hidden_dim,
+                        out_channels=c,
+                        kernel_size=3,
+                        stride=1,
+                        expand_ratio=4,
+                        use_bias=True,
+                        norm=(None, None, "rms_triton"),
+                        act_func=("silu", "silu", None),
+                    ),
+                    nn.Conv2d(hidden_dim, c, kernel_size=1, stride=1, padding=0),
+                )
             elif basic_module == "resnet":
                 module = ResnetBlock(
                     in_channels=hidden_dim,
@@ -938,30 +1292,35 @@ class DiffBandsInputConvOut(nn.Module):
             case "resnet":
                 return module.conv2.weight
             case "moe":
-                # return module.moe[
-                #     "moe_tc"
-                # ].shared_experts.down_proj.weight  # should have a shared expert
+                return module[-1].weight
+            case "inv_bottleneck":
+                return module.main.depth_conv.conv.weight
+            case "mobile":
                 return module[-1].weight
             case _:
                 raise ValueError(
-                    f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}"
+                    f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}. Available: conv, resnet, moe, inv_bottleneck"
                 )
 
 
 # * --- Encoder and decoder --- #
+
+
 def make_block_fn(
-    use_moe=False,
+    block_name: str = "resblock",
     moe_n_experts=4,
     act_checkpoint=False,
     use_residual_factor=False,
     moe_n_selected=1,
     moe_n_shared_experts=1,
-    moe_factor=4,
+    hidden_factor=2,
     moe_type="tc",
     padding_mode: str = "zeros",
     norm_type: str = "gn",
+    token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+    **kwargs,
 ):
-    if use_moe:
+    if block_name == "res_moe":
 
         def block_fn(block_in, block_out, dropout, curr_res):
             return ResnetBlockMoE2D(
@@ -972,14 +1331,32 @@ def make_block_fn(
                 n_selected=moe_n_selected,
                 n_shared_experts=moe_n_shared_experts,
                 n_token_ec=int(curr_res * curr_res / 2),
-                moe_factor=moe_factor,
+                hidden_factor=hidden_factor,
                 moe_type=moe_type,
                 act_checkpoint=act_checkpoint,
                 padding_mode=padding_mode,
                 norm_type=norm_type,
+                token_mixer_type=token_mixer_type,
+                **kwargs,
             )
-    else:
-        # use normal resnet block
+
+    elif block_name == "dico_block":
+
+        def block_fn(block_in, block_out, dropout, curr_res):
+            return DiCoBlock(
+                in_channels=block_in,
+                hidden_channels=block_out * hidden_factor,
+                out_channels=block_out,
+                dropout=dropout,
+                norm_type=norm_type,
+                norm_groups=kwargs.get("num_groups", 32),
+                use_residual=True,
+                padding_mode=padding_mode,
+                act_checkpoint=act_checkpoint,
+            )
+
+    elif block_name == "res_block":
+
         def block_fn(block_in, block_out, dropout, curr_res):
             return ResnetBlock(
                 in_channels=block_in,
@@ -989,7 +1366,13 @@ def make_block_fn(
                 use_residual_factor=use_residual_factor,
                 padding_mode=padding_mode,
                 norm_type=norm_type,
+                **kwargs,
             )
+
+    else:
+        raise ValueError(
+            f"block_name {block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block'"
+        )
 
     return block_fn
 
@@ -1013,35 +1396,36 @@ class Encoder(nn.Module):
         force_not_attn: bool = False,
         patch_size: int = 4,
         patch_method: str = "haar",
-        conv_in_module: str = "conv",
-        use_moe_resnet: bool = False,
+        conv_in_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
+        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        # if block_name != 'moe', does not use
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
         moe_n_shared_experts: int = 1,
-        moe_factor: int = 4,
+        hidden_factor: int = 2,
         moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
+        moe_token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+        # padding and norm
         padding_mode: str = "zeros",
         norm_type: str = "gn",
+        norm_groups: int = 32,
         **ignore_kwargs,
     ):
         super().__init__()
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
-        self.use_moe_resnet = use_moe_resnet
         self.moe_n_experts = moe_n_experts
         self.moe_n_selected = moe_n_selected
         self.moe_n_shared_experts = moe_n_shared_experts
-        self.moe_factor = moe_factor
+        self.hidden_factor = hidden_factor
         self.moe_type = moe_type
 
         log_print(
-            f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, use activation checkpoint: {act_checkpoint}"
+            f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, "
+            f"use activation checkpoint: {act_checkpoint}"
         )
         log_print(f"[Encoder]: z_channels: {z_channels}, patch size: {patch_size}")
-        if self.use_moe_resnet:
-            log_print(
-                f"[Encoder]: Using ResnetBlockMoE2D with moe_type={self.moe_type}"
-            )
+        log_print(f"[Encoder]: Using block name: {block_name}")
 
         # Patcher.
         self.patcher = Patcher(patch_size, patch_method)
@@ -1059,7 +1443,7 @@ class Encoder(nn.Module):
         )
 
         # input conv
-        self.use_diffbands_input = isinstance(in_channels, list)
+        self.use_diffbands_input = isinstance(in_channels, Sequence)
         if self.use_diffbands_input:
             assert isinstance(in_channels, list)
             in_channels = [c * patch_size * patch_size for c in in_channels]
@@ -1086,16 +1470,18 @@ class Encoder(nn.Module):
         self.in_ch_mult = in_ch_mult
 
         block_fn = make_block_fn(
-            use_moe=self.use_moe_resnet,
+            block_name=block_name,
             moe_n_experts=self.moe_n_experts,
             moe_n_selected=self.moe_n_selected,
             moe_n_shared_experts=self.moe_n_shared_experts,
-            moe_factor=self.moe_factor,
+            hidden_factor=self.hidden_factor,
             moe_type=self.moe_type,
             act_checkpoint=act_checkpoint,
             use_residual_factor=use_residual_factor,
             padding_mode=padding_mode,
             norm_type=norm_type,
+            num_groups=norm_groups,
+            token_mixer_type=moe_token_mixer_type,
         )
         self.down = nn.ModuleList()
         for i_level in range(self.num_resolutions):
@@ -1114,6 +1500,7 @@ class Encoder(nn.Module):
                             block_in,
                             act_checkpoint=act_checkpoint,
                             use_residual_factor=use_residual_factor,
+                            norm_groups=norm_groups,
                         )
                     )
             down = nn.Module()
@@ -1135,13 +1522,14 @@ class Encoder(nn.Module):
                 act_checkpoint=act_checkpoint,
                 use_residual_factor=use_residual_factor,
                 norm_type=norm_type,
+                norm_groups=norm_groups,
             )
             if not force_not_attn
             else nn.Identity()
         )
         self.mid.block_2 = block_fn(block_in, block_out, dropout, curr_res)
         # end
-        self.norm_out = Normalize(block_in, norm_type=norm_type)
+        self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
         self.conv_out = torch.nn.Conv2d(
             block_in,
             z_channels,
@@ -1194,36 +1582,35 @@ class Decoder(nn.Module):
         use_residual_factor: bool = False,
         upsample_type: str = "RepeatConv",
         upsample_shortcut: str | None = None,
-        conv_out_module: str = "conv",
+        conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         force_not_attn: bool = False,
-        use_moe_resnet: bool = False,
+        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
         moe_n_shared_experts: int = 1,
-        moe_factor: int = 4,
+        hidden_factor: int = 2,
         moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
+        moe_token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
         padding_mode: str = "zeros",
         norm_type: str = "gn",
+        norm_groups: int = 32,
         **ignore_kwargs,
     ):
         super().__init__()
         self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
-        self.use_moe_resnet = use_moe_resnet
         self.moe_n_experts = moe_n_experts
         self.moe_n_selected = moe_n_selected
         self.moe_n_shared_experts = moe_n_shared_experts
-        self.moe_factor = moe_factor
+        self.hidden_factor = hidden_factor
         self.moe_type = moe_type
 
         log_print(
-            f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, use activation checkpoint: {act_checkpoint}"
+            f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, "
+            f"use activation checkpoint: {act_checkpoint}"
         )
         log_print(f"[Decoder]: z_channels: {z_channels}")
-        if self.use_moe_resnet:
-            log_print(
-                f"[Decoder]: Using ResnetBlockMoE2D with moe_type={self.moe_type}"
-            )
+        log_print(f"[Decoder]: Using block type: {block_name} ")
 
         # UnPatcher.
         self.patch_size = patch_size = ignore_kwargs.get("patch_size", 1)
@@ -1260,23 +1647,25 @@ class Decoder(nn.Module):
 
         # block fn
         block_fn = make_block_fn(
-            use_moe=self.use_moe_resnet,
+            block_name=block_name,
             moe_n_experts=self.moe_n_experts,
             moe_n_selected=self.moe_n_selected,
             moe_n_shared_experts=self.moe_n_shared_experts,
-            moe_factor=self.moe_factor,
+            hidden_factor=self.hidden_factor,
             moe_type=self.moe_type,
             act_checkpoint=act_checkpoint,
             use_residual_factor=use_residual_factor,
             padding_mode=padding_mode,
             norm_type=norm_type,
+            num_groups=norm_groups,
+            token_mixer_type=moe_token_mixer_type,
         )
 
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = block_fn(block_in, block_in, dropout, curr_res)
         self.mid.attn_1 = (
-            AttnBlock(block_in, act_checkpoint=act_checkpoint)
+            AttnBlock(block_in, act_checkpoint=act_checkpoint, norm_groups=norm_groups)
             if not force_not_attn
             else nn.Identity()
         )
@@ -1299,6 +1688,7 @@ class Decoder(nn.Module):
                             act_checkpoint=act_checkpoint,
                             use_residual_factor=use_residual_factor,
                             norm_type=norm_type,
+                            norm_groups=norm_groups,
                         )
                     )
             up = nn.Module()
@@ -1316,7 +1706,7 @@ class Decoder(nn.Module):
             self.up.insert(0, up)
 
         # end
-        self.norm_out = Normalize(block_in, norm_type=norm_type)
+        self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
 
         self.use_diffbands_input = isinstance(out_channels, list)
         if self.use_diffbands_input:
@@ -1904,46 +2294,58 @@ if __name__ == "__main__":
 
     @func_mem_wrapper
     def test_auto_enc_dec():
-        img_size = 512
+        img_size = 256
         # 1024/4=256
         # 256/2=128
         encoder = Encoder(
             8,
             128,
-            [2, 2, 2, 4],
+            [2, 2, 4],
             2,
             [32],
             0.1,
             img_size,
             16,
             8,
-            True,
+            act_checkpoint=False,
             patch_size=4,
-            downsample_type="ConvPixelUnshuffle",
-            downsample_shortcut="averaging",
+            # downsample_type="ConvPixelUnshuffle",
+            # downsample_shortcut="averaging",
+            block_name="dico_block",
+            moe_token_mixer_type="dico_block",
+            force_not_attn=True,
+            norm_type="gn",
+            hidden_factor=3,
         )
         decoder = Decoder(
             8,
             128,
-            [2, 2, 2, 4],
+            [2, 2, 4],
             2,
             [32],
             0.1,
             img_size,
             16,
             8,
-            act_checkpoint=True,
+            act_checkpoint=False,
             patch_size=4,
-            upsample_type="ConvPixelShuffle",
-            upsample_shortcut="duplicating",
+            # upsample_type="ConvPixelShuffle",
+            # upsample_shortcut="duplicating",
+            block_name="res_moe",
+            force_not_attn=True,
+            norm_type="gn",
+            moe_token_mixer_type="dico_block",
+            hidden_factor=3,
         )
         dtype = torch.bfloat16
         device = torch.device("cuda:1")
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        bs = 4
+        bs = 16
         img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
+        opt = torch.optim.Adam([*encoder.parameters(), *decoder.parameters()], lr=1e-3)
+        opt.zero_grad()
 
         slots = encoder(img)
         recon = decoder(slots)
@@ -1951,6 +2353,7 @@ if __name__ == "__main__":
         print(recon.shape)
 
         recon.mean().backward()
+        opt.step()
 
         enc_n = 0
         dec_n = 0
@@ -1971,7 +2374,7 @@ if __name__ == "__main__":
         time.sleep(10)
 
     @func_mem_wrapper
-    def test_multi_bands_enc_dec():
+    def test_multi_bands_enc_dec(optimize=False):
         import accelerate
 
         accelerator = accelerate.Accelerator(mixed_precision="bf16")
@@ -1992,9 +2395,10 @@ if __name__ == "__main__":
             8,
             patch_size=4,
             act_checkpoint=True,
-            use_moe_resnet=False,
             force_not_attn=True,
-            norm_type="rms_triton",
+            norm_type="gn",
+            block_name="dico_block",
+            hidden_factor=2,
         )
         decoder = Decoder(
             [4, 8, 16, 24],
@@ -2008,59 +2412,93 @@ if __name__ == "__main__":
             8,
             act_checkpoint=True,
             patch_size=4,
-            use_moe_resnet=False,
+            moe_type="tc+ec",
             force_not_attn=True,
-            norm_type="rms_triton",
+            norm_type="gn",
+            block_name="dico_block",
+            hidden_factor=2,
         )
         dtype = torch.bfloat16
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        bs = 4
+        from fvcore.nn import parameter_count_table
+
+        log_print(parameter_count_table(encoder))
+        log_print(parameter_count_table(decoder))
+
+        bs = 8
         img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
-        optimizer = torch.optim.AdamW(
-            [*encoder.parameters(), *decoder.parameters()],
-            lr=1e-3,
-        )
-        optimizer.zero_grad()
+
+        from contextlib import nullcontext
+
+        if optimize:
+            optimizer = torch.optim.AdamW(
+                [*encoder.parameters(), *decoder.parameters()],
+                lr=1e-3,
+            )
+            optimizer.zero_grad()
+            context = nullcontext
+        else:
+            context = nullcontext  # torch.no_grad
 
         with accelerator.autocast():
-            slots = encoder(img)
-            recon = decoder(slots, img.shape[1])
+            with context():
+                slots = encoder(img)
+                recon = decoder(slots, img.shape[1])
 
         print(recon.shape)
 
-        loss = recon.mean()
-        accelerator.backward(loss)
+        if optimize:
+            loss = recon.mean()
+            accelerator.backward(loss)
+            optimizer.step()
 
-        enc_n = 0
-        dec_n = 0
-
+        accelerator.backward(recon.mean())
+        p_norms = {}
         for n, p in encoder.named_parameters():
-            if p.grad is None:
-                print(f"{n} has no grad")
-            enc_n += p.numel()
+            p_norms[n] = p.norm().item()
 
-        for n, p in decoder.named_parameters():
-            if p.grad is None:
-                print(f"{n} has no grad")
-            dec_n += p.numel()
+        # sort norms
+        p_norms = {
+            k: v
+            for k, v in sorted(p_norms.items(), key=lambda item: item[1], reverse=True)
+        }
+        largest_n = 300
+        # print the largest n norms
+        for k, v in p_norms.items():
+            print(f"{k}: {v:.4f}")
+            if largest_n > 0:
+                largest_n -= 1
+            else:
+                break
 
-        optimizer.step()
+        # enc_n = 0
+        # dec_n = 0
 
-        print(f"encoder params: {enc_n / 1e6}, dec params: {dec_n / 1e6}")
+        # for n, p in encoder.named_parameters():
+        #     if p.grad is None:
+        #         print(f"{n} has no grad")
+        #     enc_n += p.numel()
+
+        # for n, p in decoder.named_parameters():
+        #     if p.grad is None:
+        #         print(f"{n} has no grad")
+        #     dec_n += p.numel()
+        # print(f"encoder params: {enc_n / 1e6}, dec params: {dec_n / 1e6}")
+
         import time
 
         time.sleep(10)
 
     def test_moe_layer():
-        moe_block = MoE2DBlockTC(32, 64, 4, 1, 1, 32 * 32, "tc+ec").cuda()
+        moe_block = MoE2DBlock(32, 64, 4, 1, 1, 32 * 32, "tc+ec").cuda()
         x = torch.randn(1, 32, 128, 128).cuda()
         print("input shape: ", x.shape)
         out = moe_block(x)
         print("output shape: ", out.shape)
 
-    # test_auto_enc_dec()
+    test_auto_enc_dec()
     # test_diff_enc_dec()
-    test_multi_bands_enc_dec()
+    # test_multi_bands_enc_dec()
     # test_moe_layer()

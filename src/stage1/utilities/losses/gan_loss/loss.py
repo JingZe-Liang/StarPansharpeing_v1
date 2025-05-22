@@ -457,7 +457,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                         g_loss, last_layer_full, retain_graph=True
                     )[0]
             else:
-                raise ValueError("Adaptive weighting is not supportted")
+                raise ValueError(
+                    f"Adaptive weighting can not be calculated for the last layer {last_layer}"
+                )
         else:
             raise ValueError("last_layer is not defined.")
 

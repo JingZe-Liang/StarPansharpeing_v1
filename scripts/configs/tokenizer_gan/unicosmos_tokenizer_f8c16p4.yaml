@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # unified_hyperspectral
+  - dataset: hyperspectral # unified_hyperspectral
   - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
@@ -17,22 +17,28 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-# dataset:
-# used: MUSLI
-# shuffle_size: -1
-# num_workers: 3
-# prefetch_factor: 0
-# dataset_names_to_bs:
-#   MMSeg_YREB: 22
-#   DCF_2019: 7
-#   GID_GF2: 7
-#   DryadHyper: 16
-#   MUSLI: 7
+# accelerator:
+#   gradient_accumulation_plugin:
+#     _target_: accelerate.utils.GradientAccumulationPlugin
+#     num_steps: 3
+
+dataset:
+  used: OHS
+  shuffle_size: 100
+  num_workers: 3
+  prefetch_factor: 6
+  dataset_names_to_bs:
+    MMSeg_YREB: 26
+    DCF_2019: 7
+    GID_GF2: 7
+    DryadHyper: 16
+    MUSLI: 7
+    OHS: 7
 
 # transform_prob: 0.5
 
 vq_loss:
-  repa_loss_weight: 0.5
+  repa_loss_weight: 1.5
   quantizer_type:
   quantizer_options:
   repa_loss_options:
@@ -49,7 +55,7 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
+  disc_weight: 0.8
   reconstruction_loss_type: l1
 
 tokenizer:
@@ -61,13 +67,19 @@ tokenizer:
   # dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
   # enc_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/encoder/model.safetensors
   # dec_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/decoder/model.safetensors
-  uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors
-  loading_type: pretrained
+  uni_tokenizer_path: #runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
   use_channel_drop: false
   enc_moe: false
   dec_moe: false
-  padding_mode: replicate # for boundary?
-  norm_type: rms_triton
+  norm_type: gn
+  norm_groups: 32
+  padding_mode: zeros # for boundary?
+  conv_in_module: conv
+  conv_out_module: conv
+  block_name: dico_block
+  hidden_factor: 2
+  patch_size: 4
 
   # channel_drop_config:
   #   learnable: false
@@ -77,10 +89,10 @@ tokenizer:
   #   drop_prob: 1.0
 
   ## downsample and upsample
-  downsample_type: Conv
-  downsample_shortcut: averaging
-  upsample_type: RepeatConv
-  upsample_shortcut: duplicating
+  # downsample_type: Conv
+  # downsample_shortcut: averaging
+  # upsample_type: RepeatConv
+  # upsample_shortcut: duplicating
 
 ema:
   beta: 0.995
@@ -99,7 +111,7 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path: #runs/stage1_cosmos/2025-05-17_21-56-25_cosmos_pretrained_f8c16p4_repa/checkpoints/checkpoint_5
-  ema_load_path: runs/stage1_cosmos/2025-05-19_14-04-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema
+  ema_load_path: #runs/stage1_cosmos/2025-05-19_14-04-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema
   only_load_tokenizer: true
   compile_model: false
 
@@ -140,7 +152,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_pretrained_f8c16p4_repa
+    run_comment: cosmos_pretrained_f8c16p4_${dataset.used}
     log_with_time: True
     visualize_every: 500
     log_every: 10

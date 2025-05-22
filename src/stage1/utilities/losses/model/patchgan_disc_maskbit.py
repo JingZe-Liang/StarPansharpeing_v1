@@ -284,10 +284,8 @@ class NLayerDiscriminatorv2(torch.nn.Module):
 
         self.to_logits = torch.nn.Sequential(
             Conv2dSame(out_channels, out_channels, 1),
-            # nn.Conv2d(out_channels, out_channels, 1),
             activation(),
             Conv2dSame(out_channels, 1, kernel_size=5),
-            # nn.Conv2d(out_channels, 1, kernel_size=5),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -306,10 +304,6 @@ class NLayerDiscriminatorv2(torch.nn.Module):
         hidden_states = self.pool(hidden_states)
 
         return self.to_logits(hidden_states)
-
-    @property
-    def _no_split_modules(self):
-        return ["DiscriminatorLayer"]
 
 
 class OriginalNLayerDiscriminator(torch.nn.Module):

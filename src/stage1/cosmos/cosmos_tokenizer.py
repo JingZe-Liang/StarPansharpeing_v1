@@ -11,8 +11,12 @@ import torch
 from torch import Tensor, nn
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, RMSNorm2d
+from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
+from src.stage1.cosmos.modules.utils import Normalize
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
+from src.stage1.discretization.collections.kl_continuous import (
+    DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
+)
 from src.utilities.config_utils import kwargs_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
@@ -334,10 +338,8 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             # encoder and decoder
             # not combine the encoder, for FSDP wrap
-            encoder = Encoder(
-                z_channels=z_factor * z_channels, use_moe_resnet=enc_moe, **kwargs
-            )
-            decoder = Decoder(z_channels=z_channels, use_moe_resnet=dec_moe, **kwargs)
+            encoder = Encoder(z_channels=z_factor * z_channels, **kwargs)
+            decoder = Decoder(z_channels=z_channels, **kwargs)
 
             # quant_conv and post_quant_conv
             if kwargs.get("norm_in_quant_conv", False):
@@ -345,7 +347,7 @@ class ContinuousImageTokenizer(nn.Module):
                     '"norm_in_quant_conv" is not supported for pretrained settings and not recommended to use'
                 )
                 quant_conv = nn.Sequential(
-                    RMSNorm2d(z_factor * z_channels),
+                    Normalize(z_factor * z_channels, norm_type="rms_triton"),
                     torch.nn.Conv2d(
                         z_factor * z_channels, z_factor * latent_channels, 1
                     ),
@@ -382,6 +384,20 @@ class ContinuousImageTokenizer(nn.Module):
         num_parameters = sum(param.numel() for param in self.parameters())
         log_print(f"model={self.name}, num_parameters={num_parameters:,}")
         log_print(f"z_channels={z_channels}, latent_channels={self.latent_channels}.")
+
+    #     if loading_type is None:
+    #         self.apply(self.init_weights)
+    #         log_print('<red>initialize</> weights done.')
+
+    # def init_weights(self,m):
+    #     if isinstance(m, nn.Conv2d):
+    #         nn.init.kaiming_normal_(m.weight, mode='fan_out')
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
+    #     elif isinstance(m, nn.Linear):
+    #         nn.init.trunc_normal_(m.weight, std=0.02)
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
 
     def encoder_jit(self, encoder, quant_conv):
         return nn.Sequential(
@@ -542,14 +558,47 @@ class ContinuousImageTokenizer(nn.Module):
                 _missing_keys, _unexp_keys = load_weights_with_shape_check(
                     self, weights
                 )
-
-                # TODO: add manually ckpt handling for `conv_in` and `conv_out`
-
-                log_print("load pretrained model done.")
                 log_print(
                     f"tokenizer: missing keys {_missing_keys}, unexpected keys {_unexp_keys}",
                     "warning",
                 )
+
+                # if conv_in is nn.Conv2d for only one channel
+                # and if the pretrained conv_in's basic module is also conv
+                _tgt_conv_w = f"encoder.encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.weight"
+                _tgt_conv_b = f"encoder.encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.bias"
+                if (
+                    isinstance(self.encoder.encoder.conv_in, nn.Conv2d)
+                    and weights.get(_tgt_conv_w, None) is not None
+                ):
+                    self.encoder.encoder.conv_in.weight.data.copy_(weights[_tgt_conv_w])
+                    self.encoder.encoder.conv_in.bias.data.copy_(
+                        weights.get(_tgt_conv_b, None)
+                    )
+                    log_print(
+                        f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}"
+                    )
+
+                # if conv_out is nn.Conv2d for only one channel
+                # and if the pretrained model conv_out is diff bands module
+                _tgt_conv_w = f"decoder.decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.weight"
+                _tgt_conv_b = f"decoder.decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.bias"
+                if (
+                    isinstance(self.decoder.decoder.conv_out, nn.Conv2d)
+                    and weights.get(_tgt_conv_w, None) is not None
+                ):
+                    self.decoder.decoder.conv_out.weight.data.copy_(
+                        weights[_tgt_conv_w]
+                    )
+                    self.decoder.decoder.conv_out.bias.data.copy_(
+                        weights.get(_tgt_conv_b, None)
+                    )
+                    log_print(
+                        f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}"
+                    )
+
+                log_print("load pretrained model done.")
+
             else:
                 assert enc_path.endswith("safetensors") and dec_path.endswith(
                     "safetensors"
@@ -575,65 +624,103 @@ class ContinuousImageTokenizer(nn.Module):
                 )
 
                 # * handle the input and output conv manually ===============
-                _conv_in_is_missing = (
-                    "encoder.conv_in.weight" in _enc_missing
+                _conv_in_is_missing = any(
+                    ["encoder.conv_in" in _key for _key in _enc_missing]
                 )  # only weight in conv_in
                 if self.decoder.decoder._wrap_fsdp_last_layer:
                     _decoder_conv_out_name = "decoder.conv_out.wrap_mod"
                 else:
                     _decoder_conv_out_name = "decoder.conv_out"
-                _conv_out_is_missing = (
-                    "decoder.conv_out.weight" in _dec_missing
-                    or "decoder.conv_out.wrap_mod.weight" in _dec_missing
+                _conv_out_is_missing = any(
+                    ["decoder.conv_out" in _key for _key in _dec_missing]
                 )
 
-                if _conv_in_is_missing and mean_init_conv_in_out:
-                    assert isinstance(
-                        self.in_channels_after_patcher, int
-                    ) and isinstance(self.out_channels_after_patcher, int), (
-                        "in_channels_after_patcher and out_channels_after_patcher should be int"
-                    )
+                if _conv_in_is_missing:
+                    if mean_init_conv_in_out:
+                        assert isinstance(
+                            self.in_channels_after_patcher, int
+                        ) and isinstance(self.out_channels_after_patcher, int), (
+                            "in_channels_after_patcher and out_channels_after_patcher should be int"
+                        )
 
-                    _mean_conv_in: Tensor = enc_sd["encoder.conv_in.weight"].mean(
-                        keepdim=True, dim=1
-                    )  # (d, inp_c, k, k)
-                    _mean_conv_in = _mean_conv_in.repeat_interleave(
-                        self.in_channels_after_patcher,
-                        dim=1,  # after patcher
-                    )
-                    self.encoder.encoder.conv_in.weight.data.copy_(_mean_conv_in)  # type: ignore
-                    log_print("conv_in is missing, use the mean of the conv_in weight")
+                        _mean_conv_in: Tensor = enc_sd["encoder.conv_in.weight"].mean(
+                            keepdim=True, dim=1
+                        )  # (d, inp_c, k, k)
+                        _mean_conv_in = _mean_conv_in.repeat_interleave(
+                            self.in_channels_after_patcher,
+                            dim=1,  # after patcher
+                        )
+                        self.encoder.encoder.conv_in.weight.data.copy_(_mean_conv_in)  # type: ignore
+                        log_print(
+                            "conv_in is missing, use the mean of the conv_in weight"
+                        )
 
-                if _conv_out_is_missing and mean_init_conv_in_out:
-                    assert isinstance(
-                        self.in_channels_after_patcher, int
-                    ) and isinstance(self.out_channels_after_patcher, int), (
-                        "in_channels_after_patcher and out_channels_after_patcher should be int"
-                    )
+                    # if conv_in is nn.Conv2d for only one channel
+                    # and if the pretrained conv_in's basic module is also conv
+                    _tgt_conv_w = f"encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.weight"
+                    _tgt_conv_b = f"encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.bias"
+                    if (
+                        isinstance(self.encoder.encoder.conv_in, nn.Conv2d)
+                        and enc_sd.get(_tgt_conv_w, None) is not None
+                    ):
+                        self.encoder.encoder.conv_in.weight.data.copy_(
+                            enc_sd[_tgt_conv_w]
+                        )
+                        self.encoder.encoder.conv_in.bias.data.copy_(
+                            enc_sd.get(_tgt_conv_b, None)
+                        )
+                        log_print(
+                            f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}"
+                        )
 
-                    _mean_conv_out_w = dec_sd["decoder.conv_out.weight"].mean(
-                        keepdim=True, dim=0
-                    )  # (out_c, d, k, k)
-                    _mean_conv_out_w = _mean_conv_out_w.repeat_interleave(
-                        self.out_channels_after_patcher, dim=0
-                    )
-                    _mean_conv_out_bias = (
-                        dec_sd["decoder.conv_out.bias"]
-                        .mean(keepdim=True, dim=0)
-                        .repeat_interleave(self.out_channels_after_patcher)
-                    )  # (out_c,)
+                if _conv_out_is_missing:
+                    if mean_init_conv_in_out:
+                        assert isinstance(
+                            self.in_channels_after_patcher, int
+                        ) and isinstance(self.out_channels_after_patcher, int), (
+                            "in_channels_after_patcher and out_channels_after_patcher should be int"
+                        )
 
-                    # copy in
-                    conv_out_w = self.decoder.get_submodule(
-                        _decoder_conv_out_name
-                    ).weight
-                    conv_out_b = self.decoder.get_submodule(_decoder_conv_out_name).bias
-                    conv_out_w.data.copy_(_mean_conv_out_w)  # type: ignore
-                    conv_out_b.data.copy_(_mean_conv_out_bias)  # type: ignore
+                        _mean_conv_out_w = dec_sd["decoder.conv_out.weight"].mean(
+                            keepdim=True, dim=0
+                        )  # (out_c, d, k, k)
+                        _mean_conv_out_w = _mean_conv_out_w.repeat_interleave(
+                            self.out_channels_after_patcher, dim=0
+                        )
+                        _mean_conv_out_bias = (
+                            dec_sd["decoder.conv_out.bias"]
+                            .mean(keepdim=True, dim=0)
+                            .repeat_interleave(self.out_channels_after_patcher)
+                        )  # (out_c,)
 
-                    log_print(
-                        "conv_out is missing, use the mean of the conv_out weight"
-                    )
+                        # copy in
+                        conv_out_w = self.decoder.get_submodule(
+                            _decoder_conv_out_name
+                        ).weight
+                        conv_out_b = self.decoder.get_submodule(
+                            _decoder_conv_out_name
+                        ).bias
+                        conv_out_w.data.copy_(_mean_conv_out_w)  # type: ignore
+                        conv_out_b.data.copy_(_mean_conv_out_bias)  # type: ignore
+
+                        log_print(
+                            "conv_out is missing, use the mean of the conv_out weight"
+                        )
+
+                    # if conv_out is nn.Conv2d for only one channel
+                    # and if the pretrained model conv_out is diff bands module
+                    _tgt_conv_w = f"decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.weight"
+                    _tgt_conv_b = f"decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.bias"
+                    if (
+                        isinstance(self.decoder.decoder.conv_out, nn.Conv2d)
+                        and dec_sd.get(_tgt_conv_w, None) is not None
+                    ):
+                        self.decoder.decoder.conv_out.weight.data.copy_(
+                            enc_sd[_tgt_conv_w]
+                        )
+                        self.decoder.decoder.conv_out.bias.data.copy_(
+                            enc_sd.get(_tgt_conv_b, None)
+                        )
 
                 log_print(
                     f"load pretrained model done. \n"
@@ -692,112 +779,18 @@ class ContinuousImageTokenizer(nn.Module):
         return norms
 
 
-class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters, deterministic=False):
-        self.parameters = parameters
-        self.mean, self.logvar = parameters  # torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.mean.device
-            )
-
-    def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(
-            device=self.mean.device
-        )
-        return x
-
-    def kl(self, other=None):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        else:
-            # f8c16: (512/8) ** 2 * 16=665636 approx 0.6e6
-            # 1e-8 = 1/(0.6e6) * x
-            # x= 1e-8 * 0.6e6 = 6e-3
-            if other is None:
-                return (
-                    0.5
-                    * torch.sum(
-                        torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                        dim=[1, 2, 3],
-                    )
-                    / torch.prod(
-                        torch.as_tensor(self.mean.shape[1:])
-                    )  # zihan: add mean over channel, pixel dims
-                )
-            else:
-                return (
-                    0.5
-                    * torch.sum(
-                        torch.pow(self.mean - other.mean, 2) / other.var
-                        + self.var / other.var
-                        - 1.0
-                        - self.logvar
-                        + other.logvar,
-                        dim=[1, 2, 3],
-                    )
-                    / torch.prod(torch.as_tensor(self.mean.shape[1:]))
-                )
-
-    def nll(self, sample, dims=[1, 2, 3]):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
-
-    def mode(self):
-        return self.mean
-
-
-def normal_kl(mean1, logvar1, mean2, logvar2):
-    """
-    source: https://github.com/openai/guided-diffusion/blob/27c20a8fab9cb472df5d6bdd6c8d11c8f430b924/guided_diffusion/losses.py#L12
-    Compute the KL divergence between two gaussians.
-    Shapes are automatically broadcasted, so batches can be compared to
-    scalars, among other use cases.
-    """
-    tensor = None
-    for obj in (mean1, logvar1, mean2, logvar2):
-        if isinstance(obj, torch.Tensor):
-            tensor = obj
-            break
-    assert tensor is not None, "at least one argument must be a Tensor"
-
-    # Force variances to be Tensors. Broadcasting helps convert scalars to
-    # Tensors, but it does not work for torch.exp().
-    logvar1, logvar2 = [
-        x if isinstance(x, torch.Tensor) else torch.tensor(x).to(tensor)
-        for x in (logvar1, logvar2)
-    ]
-
-    return 0.5 * (
-        -1.0
-        + logvar2
-        - logvar1
-        + torch.exp(logvar1 - logvar2)
-        + ((mean1 - mean2) ** 2) * torch.exp(-logvar2)
-    )
-
-
 if __name__ == "__main__":
     config = {
         "attn_resolutions": [32],
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": [3, 12, 32, 8, 13, 50, 4, 224],
+        "in_channels": 12,  # [3, 12, 32, 8, 13, 50, 4, 224],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": [3, 12, 32, 8, 13, 50, 4, 224],
+        "out_channels": 12,  # [3, 12, 32, 8, 13, 50, 4, 224],
         "resolution": 1024,
-        "patch_size": 2,
+        "patch_size": 4,
         "patch_method": "haar",
         "latent_channels": 16,
         "z_channels": 16,
@@ -809,7 +802,10 @@ if __name__ == "__main__":
         "act_checkpoint": False,
         # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
         # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-18_17-15-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors",
+        ## diffbands type
+        "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors",
+        ## dense type
+        # "uni_tokenizer_path": "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
         "hook_for_repa": False,
         "quantizer_type": None,
         "loading_type": "pretrained",
@@ -821,8 +817,9 @@ if __name__ == "__main__":
         "upsample_type": "RepeatConv",
         "upsample_shortcut": "duplicating",
         "padding_mode": "replicate",
+        "norm_type": "rms_triton",
     }
-    # torch.cuda.set_device(1)
+    torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
 
@@ -835,8 +832,8 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="IKONOS")
-    x = next(iter(dl))["img"].cuda().to(torch.bfloat16)
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
+    dl_iter = iter(dl)
     tokenizer = tokenizer.eval()
 
     # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
@@ -850,12 +847,23 @@ if __name__ == "__main__":
     #     weight_decay=0.1,
     # )
 
+    from torchmetrics.aggregation import MeanMetric
+
     from src.utilities.logging.print import catch_any
 
+    metric = MeanMetric().cuda()
     with torch.autocast("cuda", torch.bfloat16) and catch_any() and torch.no_grad():
-        for _ in range(100):
+        for i in range(20):
+            x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
             y, *_ = tokenizer(x)
             yy = ((y[[2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+            xx = (((x[0, [2, 1, 0]]).permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+
+            # psnr
+            psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+            psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+            print(f"PSNR: {psnr_val}")
+            print(y.shape)
 
             # grads
             # for n, p in tokenizer.named_parameters():
@@ -865,7 +873,9 @@ if __name__ == "__main__":
             # opt.zero_grad()
             # y.mean().backward()
             # opt.step()
-            print(y.shape)
+            metric.update(psnr_val)
+
+        print(metric.compute())
 
         import time
 

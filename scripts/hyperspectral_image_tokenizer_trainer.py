@@ -19,14 +19,11 @@ from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
+from fvcore.nn import parameter_count_table
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from peft import (
-    LoraConfig,
-    get_peft_model,
-    set_peft_model_state_dict,
-)
+from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
@@ -70,7 +67,6 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
-        # self.accelerator.state.fsdp_plugin.ignored_modules = [FSDPNoWarpModule]
         accelerate.utils.set_seed(2025)
 
         # logger
@@ -269,13 +265,25 @@ class CosmosHyperspectralTokenizerTrainer:
                     level="WARNING",
                 )
 
+            self.log_msg(
+                f"[Tokenizer Encoder]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer_encoder)}"
+            )
+            self.log_msg(
+                f"[Tokenizer Decoder]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer_decoder)}"
+            )
             if (
                 self.use_quantizer
                 and isinstance(self.quantizer, nn.Module)
                 and len(list(self.quantizer.parameters())) > 0
             ):
                 self.log_msg("[Quantizer]: quantizer has parameters")
+                self.log_msg(
+                    "[Quantizer]: quantizer parameter table:\n{}".format(
+                        parameter_count_table(self.quantizer)
+                    )
+                )
 
+        # the encoder and decoder is one class
         else:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
@@ -297,6 +305,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.log_msg(
                     f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
                 )
+
+            # the params
+            self.log_msg(
+                f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}"
+            )
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -982,6 +995,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 if is_testing:
                     self.tokenizer.eval()
                 latent = None
+                # TODO: add ema tokenizer
+
                 if self.use_quantizer:
                     recon, q_loss, q_info = self.tokenizer(x)
                 else:
@@ -1371,7 +1386,10 @@ class CosmosHyperspectralTokenizerTrainer:
             # train step
             self.train_step(batch)
 
-            if self.global_step % self.val_cfg.val_duration == 0:
+            if (
+                self.global_step % self.val_cfg.val_duration == 0
+            ):  # and self.accelerator.sync_gradients:
+                self.log_msg("[Train]: start validation ...")
                 self.val_loop()
 
             if self.global_step >= self.train_cfg.max_steps:

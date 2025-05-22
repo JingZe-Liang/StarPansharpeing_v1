@@ -34,19 +34,21 @@ We are cooking the codes, stay tuned.
 11. add Phase Consistency Model's multi-scale discriminator
 12. ~~add nested channel drop~~
 13. add maskbit training generator code
-14. use maskbit autoencoder
+14. use maskbit autoencoder (the disc from maskbit, not stable)
 15. use bsq-vit autoencoder
 16. ~~test vgg-lpips loss in the hyperspectral dataset (if there is a linlayer in the checkpoint?)~~ (not working)
 17. cooking the cosmos_f16 tokenizer (continuous latents)
 18. add shortcut model code
 19. may use the Sana diffusion model as the diffusion generator
-
+20. add UMoE block
+21. Mean flow model code compactbility
 
 
 ## Checks
 - [x] Check using the pretrained Cosmos tokenizer on RGB images, whether it will cause the reconstructed image to be blurry.
 > not blurry, it may due to the fact that I didn't train it well.
-- [ ] If we can use muon optimizer ?
+- [x] If we can use muon optimizer ?
+> YES! The Muon optimizer is much more efficient, higher PSNR value, and more stable.
 
 ## Some Refs
 1. [GMFlow: Gaussian Mixture Flow Matching Model](https://github.com/Lakonik/GMFlow?tab=readme-ov-file).
@@ -54,6 +56,11 @@ We are cooking the codes, stay tuned.
 3. [Conv-LoRA](https://github.com/autogluon/autogluon/blob/081e3c6e4134beb84637863624d8b68a5c15bac1/multimodal/src/autogluon/multimodal/models/adaptation_layers.py#L703) (MoE) adaptors may suit Cosmos tokenizer.
 
 ## Logs
+
+2025/05/21
+
+> 1. MoE tokenizer does not work well using triton RMS norm (**may due to the gn?**)
+> 2. The LoRA pretrained on MMSeg dataset can not converge well on WV3, GF2 ...datasets, may be due to the small dataset size.
 
 2025/05/02
 

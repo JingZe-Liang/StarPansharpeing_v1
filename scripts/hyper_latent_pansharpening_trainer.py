@@ -843,6 +843,7 @@ class PansharpeningTrainer:
 
     def val_loop(self):
         self.pansp_model.eval()
+        torch.cuda.empty_cache()
 
         if not hasattr(self, "_val_loader_iter") and self.val_cfg.max_val_iters > 0:
             # create a new iterator for the validation loader

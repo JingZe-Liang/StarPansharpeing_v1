@@ -15,10 +15,12 @@
 
 """Shared utilities for the networks module."""
 
-from typing import Any
+from inspect import Parameter, isclass, isfunction, signature
+from typing import Any, Literal
 
 import torch
 from einops import pack, rearrange, unpack
+from param import Callable
 
 from .rmsnorm_triton import TritonRMSNorm2dFunc
 
@@ -61,6 +63,10 @@ def nonlinearity(x):
     return x * torch.sigmoid(x)
 
 
+def gelu_nonlinear(x):
+    return torch.nn.functional.gelu(x, approximate="tanh")
+
+
 # * --- Norm --- #
 
 
@@ -86,6 +92,7 @@ class RMSNorm2d(torch.nn.Module):
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
 
+    @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = (
             x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
@@ -96,6 +103,7 @@ class RMSNorm2d(torch.nn.Module):
 
 
 class LayerNorm2d(torch.nn.LayerNorm):
+    @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = x - torch.mean(x, dim=1, keepdim=True)
         out = out / torch.sqrt(torch.square(out).mean(dim=1, keepdim=True) + self.eps)
@@ -109,7 +117,11 @@ class TritonRMSNorm2d(torch.nn.LayerNorm):
         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 
-def Normalize(in_channels, norm_type="gn", **norm_kwargs):
+def Normalize(
+    in_channels,
+    norm_type: str | Literal["gn", "bn2d", "ln2d", "rms_native", "rms_triton"] = "gn",
+    **norm_kwargs,
+):
     if norm_type == "gn":
         return torch.nn.GroupNorm(
             num_channels=in_channels,
@@ -117,19 +129,22 @@ def Normalize(in_channels, norm_type="gn", **norm_kwargs):
             affine=True,
             num_groups=norm_kwargs.get("num_groups", 32),
         )
-    elif norm_type == "ln":
-        norm_kwargs.pop("num_groups", None)
-        return LayerNorm2d(in_channels)
+    elif norm_type == "bn2d":
+        cls = torch.nn.BatchNorm2d
+    elif norm_type == "ln2d":
+        cls = LayerNorm2d
     elif norm_type == "rms_native":
-        norm_kwargs.pop("num_groups", None)
-        return RMSNorm2d(in_channels, **norm_kwargs)
+        cls = RMSNorm2d
     elif norm_type == "rms_triton":
-        norm_kwargs.pop("num_groups", None)
-        return TritonRMSNorm2d(in_channels, **norm_kwargs)
+        cls = TritonRMSNorm2d
+    elif norm_type in (None, "none"):
+        return None
     else:
         raise ValueError(
             f"Unknown normalization type: {norm_type}. Supported types are: 'gn', 'ln', 'rms'."
         )
+
+    return cls(in_channels, **extract_needed_kwargs(norm_kwargs, cls))
 
 
 class CausalNormalize(torch.nn.Module):
@@ -183,3 +198,55 @@ def log(t, eps=1e-5):
 
 def entropy(prob):
     return (-prob * log(prob)).sum(dim=-1)
+
+
+def extract_needed_kwargs(
+    kwargs: dict, cls: Callable | type, include_default: bool = False
+) -> dict:
+    """
+    Extracts the subset of `kwargs` that match the parameters of a given class's __init__ method or a function.
+
+    If a parameter is not provided in `kwargs` but has a default value, the default is used.
+    Missing required parameters will raise a ValueError.
+
+    Args:
+        kwargs (dict): A dictionary of keyword arguments to filter.
+        cls (type or function): A class or function whose signature is used to extract the needed kwargs.
+
+    Returns:
+        dict: A dictionary containing only the relevant keyword arguments.
+
+    Raises:
+        AssertionError: If `cls` is a class without an __init__ method.
+        ValueError: If a required argument is missing or an unsupported type is passed.
+    """
+    needed_kwargs = {}
+    if isclass(cls):
+        assert hasattr(cls, "__init__"), f"{cls} does not have an __init__ method."
+        sig = signature(cls.__init__)
+    elif isfunction(cls):
+        sig = signature(cls)
+    else:
+        raise ValueError(f"Expected a class or function, got {type(cls)}.")
+
+    for param in sig.parameters.values():
+        if param.name == "self":
+            continue
+        if param.name in kwargs:
+            needed_kwargs[param.name] = kwargs[param.name]
+        elif param.default is not Parameter.empty and include_default:
+            needed_kwargs[param.name] = param.default
+        # else:
+        #     raise ValueError(
+        #         f"Missing required argument '{param.name}' for {cls.__name__}."
+        #     )
+    return needed_kwargs
+
+
+def val2tuple(x: list | tuple | Any, min_len: int = 1) -> tuple:
+    if isinstance(x, (list, tuple)):
+        x = list(x)
+    else:
+        x = [x] * min_len
+
+    return tuple(x)

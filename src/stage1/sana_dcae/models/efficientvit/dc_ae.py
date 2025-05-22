@@ -35,12 +35,12 @@ from ...models.nn.ops import (
     DownsamplePadConv,
     EfficientViTBlock,
     IdentityLayer,
-    UpsampleRepeatConv,
     InterpolateConvUpSampleLayer,
     OpSequential,
     PixelUnshuffleChannelAveragingDownSampleLayer,
     ResBlock,
     ResidualBlock,
+    UpsampleRepeatConv,
 )
 from ...models.utils.network import shape_not_matched_ckpt_load
 
@@ -719,11 +719,11 @@ def dc_ae_f8c16(
             "encoder.block_type=[ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "encoder.width_list=[128,256,512,512] encoder.depth_list=[0,4,2,2] "
             "encoder.downsample_block_type=Conv "
-            "encoder.norm=[gn,gn,rms2d,rms2d] encoder.act=[relu,relu,silu,silu] "
+            "encoder.norm=[gn,gn,trms2d,trms2d] encoder.act=silu "
             "decoder.block_type=[ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "decoder.width_list=[128,256,512,512] decoder.depth_list=[0,6,4,2] "
             "decoder.upsample_block_type=InterpolateConv "
-            "decoder.norm=[gn,gn,rms2d,rms2d] decoder.act=[relu,relu,silu,silu] "
+            "decoder.norm=[gn,gn,trms2d,trms2d] decoder.act=silu "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "
             "scaling_factor=0.41407"
@@ -751,7 +751,7 @@ def dc_ae_f16c16_pure_conv(
             "encoder.width_list=[128,256,256,512,512] encoder.depth_list=[0,4,4,2,2] "
             "decoder.block_type=[ResBlock,ResBlock,ResBlock,ResBlock,ResBlock] "
             "decoder.width_list=[128,256,256,512,512] decoder.depth_list=[0,4,6,2,2] "
-            "decoder.norm=rms2d decoder.act=silu "
+            "decoder.norm=gn decoder.act=silu "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "
             "scaling_factor=0.41407"
@@ -778,11 +778,11 @@ def dc_ae_f16c16(
             "encoder.block_type=[ResBlock,ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "encoder.width_list=[128,256,256,512,512] encoder.depth_list=[0,4,4,2,2] "
             "encoder.downsample_block_type=Conv "
-            "encoder.norm=[gn,gn,gn,rms2d,rms2d] encoder.act=[relu,relu,relu,silu,silu] "
+            "encoder.norm=[gn,gn,gn,trms2d,trms2d] encoder.act=silu "
             "decoder.block_type=[ResBlock,ResBlock,ResBlock,EViTS5_GLU,EViTS5_GLU] "
             "decoder.width_list=[128,256,256,512,512] decoder.depth_list=[0,4,6,2,2] "
             "decoder.upsample_block_type=InterpolateConv "
-            "decoder.norm=[gn,gn,gn,rms2d,rms2d] decoder.act=[relu,relu,relu,silu,silu] "
+            "decoder.norm=[gn,gn,gn,trms2d,trms2d] decoder.act=silu "
             "encoder.act_checkpoint=false "
             "decoder.act_checkpoint=false "
             "scaling_factor=0.41407"

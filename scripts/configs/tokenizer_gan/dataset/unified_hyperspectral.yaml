@@ -16,11 +16,11 @@ train_paths:
   - - data/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
   - - data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
   - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
   - - data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
   - - data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
   - - data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
   - - data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  # - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
 
 val_paths:
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
@@ -29,43 +29,39 @@ val_paths:
   - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
   - - data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar
   - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
+  # - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  # - batch_size: 16
-  #   repeat_n: 2
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 18
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 16
-  # - batch_size: 4
-  # - batch_size: 16
-  # - batch_size: 16
-  # - batch_size: 16
-  # - batch_size: 16
+  # - batch_size: 22
+  # - batch_size: 8
+  # - batch_size: 8
+  # - batch_size: 8
+  # - batch_size: 22
+  # - batch_size: 8
+  # - batch_size: 8
+  # - batch_size: 8
+  # - batch_size: 22
+  # - batch_size: 22
+  # - batch_size: 22
+  # - batch_size: 22
+  # - batch_size: 22
 
   ## not use act_ckpt
-  # - batch_size: 10
-  #   repeat_n: 2
-  # - batch_size: 2
-  # - batch_size: 2
-  # - batch_size: 2
-  # - batch_size: 10
-  # - batch_size: 2
-  # - batch_size: 2
-  # - batch_size: 2
-  # - batch_size: 10
-  # - batch_size: 2
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 10
+  # - batch_size: 9
+  # - batch_size: 3
+  # - batch_size: 3
+  # - batch_size: 3
+  # - batch_size: 9
+  # - batch_size: 3
+  # - batch_size: 3
+  # - batch_size: 3
+  # - batch_size: 9
+  # - batch_size: 9
+  # - batch_size: 9
+  # - batch_size: 9
+  # - batch_size: 9
 
   ## no moe type
   - batch_size: 10
@@ -77,14 +73,13 @@ train_changed_kwargs_by_loader:
   - batch_size: 4
   - batch_size: 4
   - batch_size: 10
-  - batch_size: 4
   - batch_size: 10
   - batch_size: 10
   - batch_size: 10
   - batch_size: 10
+  # - batch_size: 6
 
 val_changed_kwargs_by_loader:
-  - batch_size: 8
   - batch_size: 8
   - batch_size: 8
   - batch_size: 8
