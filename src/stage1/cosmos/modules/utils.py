@@ -16,11 +16,10 @@
 """Shared utilities for the networks module."""
 
 from inspect import Parameter, isclass, isfunction, signature
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import torch
 from einops import pack, rearrange, unpack
-from param import Callable
 
 from .rmsnorm_triton import TritonRMSNorm2dFunc
 
@@ -234,7 +233,7 @@ def extract_needed_kwargs(
             continue
         if param.name in kwargs:
             needed_kwargs[param.name] = kwargs[param.name]
-        elif param.default is not Parameter.empty and include_default:
+        elif include_default and param.default is not Parameter.empty:
             needed_kwargs[param.name] = param.default
         # else:
         #     raise ValueError(

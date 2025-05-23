@@ -98,7 +98,7 @@ GID_GF2_val:
   - - data/GID-GF2/hyper_images/GID-GF2-val-4_bands-px_512-MSI-0000.tar
 
 DCF_2019_val:
-  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0015..0017}.tar
 
 OHS_train:
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar

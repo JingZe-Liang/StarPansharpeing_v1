@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: hyperspectral # unified_hyperspectral
+  - dataset: unified_hyperspectral # hyperspectral # unified_hyperspectral
   - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
@@ -22,18 +22,18 @@ defaults:
 #     _target_: accelerate.utils.GradientAccumulationPlugin
 #     num_steps: 3
 
-dataset:
-  used: OHS
-  shuffle_size: 100
-  num_workers: 3
-  prefetch_factor: 6
-  dataset_names_to_bs:
-    MMSeg_YREB: 26
-    DCF_2019: 7
-    GID_GF2: 7
-    DryadHyper: 16
-    MUSLI: 7
-    OHS: 7
+# dataset:
+#   used: DCF_2019
+#   shuffle_size: 100
+#   num_workers: 3
+#   prefetch_factor: 6
+#   dataset_names_to_bs:
+#     MMSeg_YREB: 26
+#     DCF_2019: 6
+#     GID_GF2: 7
+#     DryadHyper: 16
+#     MUSLI: 7
+#     OHS: 7
 
 # transform_prob: 0.5
 
@@ -68,18 +68,19 @@ tokenizer:
   # enc_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/encoder/model.safetensors
   # dec_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/decoder/model.safetensors
   uni_tokenizer_path: #runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors
-  loading_type: #pretrained
+  loading_type: null #pretrained
   use_channel_drop: false
   enc_moe: false
   dec_moe: false
   norm_type: gn
   norm_groups: 32
-  padding_mode: zeros # for boundary?
   conv_in_module: conv
   conv_out_module: conv
   block_name: dico_block
   hidden_factor: 2
   patch_size: 4
+  padding_mode: reflect # for boundary?
+  downsample_manually_pad: false
 
   # channel_drop_config:
   #   learnable: false
@@ -111,8 +112,8 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path: #runs/stage1_cosmos/2025-05-17_21-56-25_cosmos_pretrained_f8c16p4_repa/checkpoints/checkpoint_5
-  ema_load_path: #runs/stage1_cosmos/2025-05-19_14-04-10_cosmos_pretrained_f8c16p4_repa_no_moe/ema
-  only_load_tokenizer: true
+  ema_load_path: runs/stage1_cosmos/2025-05-23_13-29-23_cosmos_f8c16p4_uniconv_in_densor_model/ema
+  only_load_tokenizer: false
   compile_model: false
 
   finetune_cfg:
@@ -122,14 +123,14 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 3.0e-4
+    lr: 2.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
 
   disc_optimizer:
     _target_: src.utilities.optim.get_moun_optimizer
     _partial_: true
-    lr: 3.0e-4
+    lr: 2.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
 
@@ -152,7 +153,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_pretrained_f8c16p4_${dataset.used}
+    run_comment: cosmos_f8c16p4_uniconv_in_densor_model
     log_with_time: True
     visualize_every: 500
     log_every: 10

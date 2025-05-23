@@ -25,6 +25,7 @@ https://github.com/CompVis/stable-diffusion/blob/
 
 import math
 import sys
+from contextlib import nullcontext
 from functools import partial
 from inspect import signature
 from typing import Any, Callable, Literal, Optional, Sequence, Union
@@ -43,6 +44,7 @@ from typing_extensions import deprecated
 from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
 from src.stage1.cosmos.modules.utils import (
     Normalize,
+    extract_needed_kwargs,
     gelu_nonlinear,
     nonlinearity,
     val2tuple,
@@ -50,6 +52,24 @@ from src.stage1.cosmos.modules.utils import (
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
+
+compile_forward_fn = True
+if compile_forward_fn:
+    _compile_decorator = torch.compile
+    log_print("will compile the forward function", "debug")
+else:
+
+    def _null_decorator(**any_kwargs) -> Callable[..., Any]:
+        def _inner_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            return func
+
+        return _inner_decorator
+
+    def _null_decorator_no_any_kwgs(func: Callable[..., Any]) -> Callable[..., Any]:
+        return func
+
+    _compile_decorator = _null_decorator_no_any_kwgs
+    log_print("not compile the forward function", "debug")
 
 # * --- Upsample and Downsample --- #
 
@@ -82,19 +102,37 @@ def get_same_padding(
 
 
 class DownsamplePadConv(nn.Module):
-    def __init__(self, in_channels: int, padding_mode: str = "constant"):
+    def __init__(
+        self,
+        in_channels: int,
+        padding_mode: str = "constant",
+        padding_in_conv: bool = False,
+    ):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=2, padding=0
-        )
         self.padding_mode = padding_mode
+        self.padding_in_conv = padding_in_conv
+        log_print(f"[DownsamplePadConv] padding_in_conv: {padding_in_conv}", "debug")
+
+        self.conv = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=3,
+            stride=2,
+            padding=0 if not padding_in_conv else 1,
+            padding_mode=padding_mode
+            if padding_in_conv
+            else "zeros",  # 'zeros' as default
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pad = (0, 1, 0, 1)
-        if self.padding_mode != "constant":
-            x = F.pad(x, pad, mode=self.padding_mode)
-        else:
-            x = F.pad(x, pad, mode="constant", value=0)
+        # LDM VAE also use the unsymmetric padding
+        if not self.padding_in_conv:  # cosmos manually pad
+            pad = (0, 1, 0, 1)  # lower and righter pads, why? inductive bias?
+            if self.padding_mode != "constant":
+                x = F.pad(x, pad, mode=self.padding_mode)
+            else:
+                x = F.pad(x, pad, mode="constant", value=0)
+
         return self.conv(x)
 
 
@@ -225,6 +263,9 @@ class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
         return x
 
 
+# * --- GLUMBConv --- #
+
+
 class ConvLayer(nn.Module):
     def __init__(
         self,
@@ -344,20 +385,20 @@ REGISTERED_ACT_DICT: dict[str, type] = {
 }
 
 
-def build_kwargs_from_config(config: dict, target_func: Callable):
-    valid_keys = list(signature(target_func).parameters)
-    kwargs = {}
-    for key in config:
-        if key in valid_keys:
-            kwargs[key] = config[key]
-    return kwargs
+# def build_kwargs_from_config(config: dict, target_func: Callable):
+#     valid_keys = list(signature(target_func).parameters)
+#     kwargs = {}
+#     for key in config:
+#         if key in valid_keys:
+#             kwargs[key] = config[key]
+#     return kwargs
 
 
 def build_act(name: str, **kwargs) -> Optional[nn.Module]:
     if name in REGISTERED_ACT_DICT:
         act_cls = REGISTERED_ACT_DICT[name]
-        args = build_kwargs_from_config(kwargs, act_cls)
-        return act_cls(**args)
+        kwargs = extract_needed_kwargs(kwargs, act_cls)
+        return act_cls(**kwargs)
     else:
         return None
 
@@ -423,6 +464,7 @@ def build_upsample_block(
             kernel_size=3,
             factor=2,
             padding_mode=padding_mode,
+            mode="nearest",
         )
     else:
         raise ValueError(f"block_type {block_type} is not supported for upsampling")
@@ -445,6 +487,8 @@ def build_downsample_block(
     out_channels: int,
     shortcut: Optional[str],
     padding_mode: str = "zeros",
+    *,
+    padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
 ) -> nn.Module:
     if block_type == "Conv":
         block = nn.Conv2d(
@@ -456,7 +500,11 @@ def build_downsample_block(
             padding_mode=padding_mode,
         )
     elif block_type == "PadConv":
-        block = DownsamplePadConv(in_channels=in_channels)
+        block = DownsamplePadConv(
+            in_channels=in_channels,
+            padding_in_conv=not padconv_use_manually_pad,
+            padding_mode=padding_mode,
+        )
     elif block_type == "ConvPixelUnshuffle":
         block = ConvPixelUnshuffleDownSampleLayer(
             in_channels=in_channels,
@@ -603,7 +651,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
             kernel_size=3,
             stride=1,
             padding=1,
-            padding_mode="replicate",
+            padding_mode="reflect",
         )
         self.slots_t_to_mod = nn.Sequential(
             nn.SiLU(),
@@ -712,6 +760,170 @@ class AttnBlock(nn.Module):
         return self.forward_fn(x)
 
 
+# * --- Dico Block --- #
+
+
+class DiCoCompactChannelAttention(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.global_avg = nn.AdaptiveAvgPool2d(1)
+        self.body = nn.Conv2d(in_channels, in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.global_avg(x)
+        h = self.body(h)
+        h = self.sigmoid(h) * x
+        return h
+
+
+class FeedForward(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, hidden_act="gelu"):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+
+        self.gate_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.up_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.down_proj = nn.Conv2d(self.intermediate_size, self.hidden_size, 1, 1, 0)
+        self.act_fn = ACT2FN[hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
+class LlamaFFN(nn.Module):
+    def __init__(self, hidden_size, intermediate_size):
+        super().__init__()
+        self.w1 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
+        self.w2 = nn.Conv2d(intermediate_size, hidden_size, 1, 1, 0)
+        self.w3 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x) * self.w3(x)))
+
+
+class DiCoBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int | None = None,
+        dropout: float = 0.0,
+        norm_type: str = "gn",
+        norm_groups: int = 32,
+        use_residual: bool = False,
+        padding_mode: str = "zeros",
+        act_checkpoint: bool = False,
+        use_ffn: bool = True,
+    ):
+        super().__init__()
+        self.use_residual = use_residual
+        self.act_checkpoint = act_checkpoint
+        self.use_ffn = use_ffn
+        if out_channels is None:
+            out_channels = in_channels
+
+        log_print(
+            f"[Dico block]: in: {in_channels} "
+            f"out: {out_channels} "
+            f"hidden: {hidden_channels}",
+            "debug",
+        )
+
+        self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
+
+        self.dropout = nn.Dropout(dropout)
+
+        # conv module
+        self.body = nn.Sequential(
+            # point conv
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            # depth conv
+            nn.Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode=padding_mode,
+                groups=out_channels,
+            ),
+            # nn.Conv2d(
+            #     in_channels,
+            #     out_channels,
+            #     kernel_size=3,
+            #     stride=1,
+            #     padding=1,
+            #     padding_mode=padding_mode,
+            # ),
+            nn.GELU(approximate="tanh"),
+        )
+
+        # cca
+        self.cca = DiCoCompactChannelAttention(out_channels)
+        self.body_out = nn.Conv2d(
+            out_channels, out_channels, kernel_size=1, stride=1, padding=0
+        )
+
+        # ffn
+        if self.use_ffn:
+            self.ffn = FeedForward(out_channels, hidden_channels)
+            # self.ffn = LlamaFFN(hidden_size=out_channels, intermediate_size=hidden_channels)
+            # self.ffn = nn.Conv2d(
+            #     out_channels,
+            #     hidden_channels,
+            #     kernel_size=3,
+            #     stride=1,
+            #     padding=1,
+            #     padding_mode=padding_mode,
+            # )
+            self.norm_ffn = Normalize(
+                out_channels, norm_type=norm_type, num_groups=norm_groups
+            )
+
+        self.nin_shortcut = (
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    @_compile_decorator
+    def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
+        h = x
+
+        # token mixer
+        h = self.norm(h)
+        h = self.body(h)
+        h = self.cca(h)
+        h = self.body_out(h) + self.nin_shortcut(x)
+
+        # ffn
+        if self.use_ffn:
+            h1 = h
+            h = self.norm_ffn(h)
+            h = self.dropout(h)
+            h = self.ffn(h) + h1
+
+        return h
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.act_checkpoint and self.training:
+            return checkpoint(self.forward_fn, x, use_reentrant=True)
+        return self.forward_fn(x)
+
+
 @deprecated(
     "this class does not work with FSDP, please specify the FSDP wrapped module directly"
     "and the accelerator will handle the wrapping automatically"
@@ -794,167 +1006,6 @@ class MoE2DBlock(nn.Module):
         if self.training and self.act_checkpoint:
             return checkpoint(self._forward_fn, x, use_reentrant=True)
         return self._forward_fn(x)
-
-
-class DiCoCompactChannelAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.global_avg = nn.AdaptiveAvgPool2d(1)
-        self.body = nn.Conv2d(in_channels, in_channels, 1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.global_avg(x)
-        h = self.body(h)
-        h = self.sigmoid(h) * x
-        return h
-
-
-class FeedForward(nn.Module):
-    def __init__(self, hidden_size, intermediate_size, hidden_act="gelu"):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-
-        self.gate_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
-        self.up_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
-        self.down_proj = nn.Conv2d(self.intermediate_size, self.hidden_size, 1, 1, 0)
-        self.act_fn = ACT2FN[hidden_act]
-
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
-class LlamaFFN(nn.Module):
-    def __init__(self, hidden_size, intermediate_size):
-        super().__init__()
-        self.w1 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
-        self.w2 = nn.Conv2d(intermediate_size, hidden_size, 1, 1, 0)
-        self.w3 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
-
-    def forward(self, x):
-        return self.w2(F.silu(self.w1(x) * self.w3(x)))
-
-
-class DiCoBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int | None = None,
-        dropout: float = 0.0,
-        norm_type: str = "gn",
-        norm_groups: int = 32,
-        use_residual: bool = False,
-        padding_mode: str = "zeros",
-        act_checkpoint: bool = False,
-        use_ffn: bool = True,
-    ):
-        super().__init__()
-        self.use_residual = use_residual
-        self.act_checkpoint = act_checkpoint
-        self.use_ffn = use_ffn
-        if out_channels is None:
-            out_channels = in_channels
-
-        log_print(
-            f"[Dico block]: in: {in_channels}"
-            f"out: {out_channels}"
-            f"hidden: {hidden_channels}",
-            "debug",
-        )
-
-        self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
-
-        self.dropout = nn.Dropout(dropout)
-
-        # conv module
-        self.body = nn.Sequential(
-            # point conv
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
-            # depth conv
-            nn.Conv2d(
-                out_channels,
-                out_channels,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-                padding_mode=padding_mode,
-                groups=out_channels,
-            ),
-            # nn.Conv2d(
-            #     in_channels,
-            #     out_channels,
-            #     kernel_size=3,
-            #     stride=1,
-            #     padding=1,
-            #     padding_mode=padding_mode,
-            # ),
-            nn.GELU(approximate="tanh"),
-        )
-
-        # cca
-        self.cca = DiCoCompactChannelAttention(out_channels)
-        self.body_out = nn.Conv2d(
-            out_channels, out_channels, kernel_size=1, stride=1, padding=0
-        )
-
-        # ffn
-        if self.use_ffn:
-            self.ffn = FeedForward(out_channels, hidden_channels)
-            # self.ffn = LlamaFFN(hidden_size=out_channels, intermediate_size=hidden_channels)
-            # self.ffn = nn.Conv2d(
-            #     out_channels,
-            #     hidden_channels,
-            #     kernel_size=3,
-            #     stride=1,
-            #     padding=1,
-            #     padding_mode=padding_mode,
-            # )
-            self.norm_ffn = Normalize(
-                out_channels, norm_type=norm_type, num_groups=norm_groups
-            )
-
-        self.nin_shortcut = (
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-            )
-            if in_channels != out_channels
-            else nn.Identity()
-        )
-
-    @torch.compile
-    def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
-        h = x
-
-        # token mixer
-        h = self.norm(h)
-        h = self.body(h)
-        h = self.cca(h)
-        h = self.body_out(h) + self.nin_shortcut(x)
-
-        # ffn
-        if self.use_ffn:
-            h1 = h
-            h = self.norm_ffn(h)
-            h = self.dropout(h)
-            h = self.ffn(h) + h1
-
-        return h
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, use_reentrant=True)
-        return self.forward_fn(x)
 
 
 class ResnetBlockMoE2D(nn.Module):
@@ -1053,7 +1104,7 @@ class DiffBandsInputConvIn(nn.Module):
                     kernel_size=3,
                     stride=1,
                     padding=1,
-                    padding_mode="replicate",
+                    padding_mode="reflect",
                 )
             elif basic_module == "mobile":
                 module = nn.Sequential(
@@ -1064,7 +1115,7 @@ class DiffBandsInputConvIn(nn.Module):
                         3,
                         1,
                         1,
-                        padding_mode="replicate",
+                        padding_mode="reflect",
                         groups=hidden_dim,
                     ),
                 )
@@ -1100,7 +1151,7 @@ class DiffBandsInputConvIn(nn.Module):
                         kernel_size=3,
                         stride=1,
                         padding=1,
-                        padding_mode="replicate",
+                        padding_mode="reflect",
                     ),
                     MoE2DBlock(
                         in_channels=hidden_dim,
@@ -1173,7 +1224,7 @@ class DiffBandsInputConvOut(nn.Module):
                     kernel_size=3,
                     stride=1,
                     padding=1,
-                    padding_mode="replicate",
+                    padding_mode="reflect",
                 )
             elif basic_module == "mobile":
                 module = nn.Sequential(
@@ -1183,7 +1234,7 @@ class DiffBandsInputConvOut(nn.Module):
                         3,
                         1,
                         1,
-                        padding_mode="replicate",
+                        padding_mode="reflect",
                         groups=hidden_dim,
                     ),
                     nn.Conv2d(hidden_dim, c, 1, 1, 0),
@@ -1307,7 +1358,7 @@ class DiffBandsInputConvOut(nn.Module):
 
 
 def make_block_fn(
-    block_name: str = "resblock",
+    block_name: Literal["resblock", "dico_block"] = "resblock",
     moe_n_experts=4,
     act_checkpoint=False,
     use_residual_factor=False,
@@ -1391,13 +1442,17 @@ class Encoder(nn.Module):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
-        downsample_type: str = "PadConv",  # used in original cosmos tokenizer
-        downsample_shortcut: str | None = None,
-        force_not_attn: bool = False,
+        # downsampling
+        downsample_type: Literal[
+            "PadConv", "Conv", "ConvPixelUnshuffle"
+        ] = "PadConv",  # used in original cosmos tokenizer
+        downsample_shortcut: Literal["averaging"] | None = None,
+        # patch size, patcher, and blocks
         patch_size: int = 4,
         patch_method: str = "haar",
         conv_in_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        force_not_attn: bool = False,
         # if block_name != 'moe', does not use
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
@@ -1409,6 +1464,7 @@ class Encoder(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
+        downsample_manually_pad: bool = True,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -1508,7 +1564,12 @@ class Encoder(nn.Module):
             down.attn = attn
             if i_level < self.num_downsamples:
                 down.downsample = build_downsample_block(
-                    downsample_type, block_in, block_in, shortcut=downsample_shortcut
+                    downsample_type,
+                    block_in,
+                    block_in,
+                    shortcut=downsample_shortcut,
+                    padding_mode=padding_mode,
+                    padconv_use_manually_pad=downsample_manually_pad,
                 )
                 curr_res = curr_res // 2
             self.down.append(down)
@@ -1580,8 +1641,10 @@ class Decoder(nn.Module):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
-        upsample_type: str = "RepeatConv",
-        upsample_shortcut: str | None = None,
+        upsample_type: Literal[
+            "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
+        ] = "RepeatConv",
+        upsample_shortcut: Literal["duplicating"] | None = None,
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         force_not_attn: bool = False,
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
@@ -1594,6 +1657,8 @@ class Decoder(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
+        patch_size: int = 4,
+        patch_method: str = "haar",
         **ignore_kwargs,
     ):
         super().__init__()
@@ -1613,10 +1678,8 @@ class Decoder(nn.Module):
         log_print(f"[Decoder]: Using block type: {block_name} ")
 
         # UnPatcher.
-        self.patch_size = patch_size = ignore_kwargs.get("patch_size", 1)
-        self.unpatcher = UnPatcher(
-            patch_size, ignore_kwargs.get("patch_method", "rearrange")
-        )
+        self.patch_size = patch_size
+        self.unpatcher = UnPatcher(patch_size, patch_method)
 
         # calculate the number of upsample operations
         self.num_upsamples = int(math.log2(spatial_compression)) - int(
@@ -1727,7 +1790,9 @@ class Decoder(nn.Module):
             )
 
         # fsdp warpper, but not used
-        _wrap_fsdp_last_layer = ignore_kwargs.get("wrap_fsdp_last_layer", False)
+        _wrap_fsdp_last_layer = ignore_kwargs.get(
+            "wrap_fsdp_last_layer", False
+        )  # TODO: remove this
         self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
         if _wrap_fsdp_last_layer:
             self.conv_out = FSDPNoWarpModule(conv_out)

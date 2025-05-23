@@ -2,7 +2,7 @@ used: unified_hyperspectral
 dataset_names_to_img_size:
   unified_hyperspectral: 512
 
-channels: [3, 12, 32, 8, 13, 50, 4, 224]
+channels: [3, 12, 32, 8, 13, 50, 4]
 img_size: 512
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 
@@ -34,19 +34,19 @@ val_paths:
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  # - batch_size: 22
-  # - batch_size: 8
-  # - batch_size: 8
-  # - batch_size: 8
-  # - batch_size: 22
-  # - batch_size: 8
-  # - batch_size: 8
-  # - batch_size: 8
-  # - batch_size: 22
-  # - batch_size: 22
-  # - batch_size: 22
-  # - batch_size: 22
-  # - batch_size: 22
+  - batch_size: 16
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 16
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 5
+  - batch_size: 16
+  - batch_size: 16
+  - batch_size: 16
+  - batch_size: 16
+  - batch_size: 16
 
   ## not use act_ckpt
   # - batch_size: 9
@@ -64,19 +64,19 @@ train_changed_kwargs_by_loader:
   # - batch_size: 9
 
   ## no moe type
-  - batch_size: 10
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 10
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 10
-  - batch_size: 10
-  - batch_size: 10
-  - batch_size: 10
-  - batch_size: 10
+  # - batch_size: 10
+  # - batch_size: 4
+  # - batch_size: 4
+  # - batch_size: 4
+  # - batch_size: 10
+  # - batch_size: 4
+  # - batch_size: 4
+  # - batch_size: 4
+  # - batch_size: 10
+  # - batch_size: 10
+  # - batch_size: 10
+  # - batch_size: 10
+  # - batch_size: 10
   # - batch_size: 6
 
 val_changed_kwargs_by_loader:

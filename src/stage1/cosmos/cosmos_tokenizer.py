@@ -240,8 +240,6 @@ class ContinuousImageTokenizer(nn.Module):
         z_factor: int = 1,
         latent_channels: int = 8,
         loading_type: Literal["pretrained", "nvidia"] | None = "nvidia",
-        enc_moe: bool = False,
-        dec_moe: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -785,10 +783,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 12,  # [3, 12, 32, 8, 13, 50, 4, 224],
+        "in_channels": [3, 12, 32, 8, 13, 50, 4],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 12,  # [3, 12, 32, 8, 13, 50, 4, 224],
+        "out_channels": [3, 12, 32, 8, 13, 50, 4],
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -803,7 +801,7 @@ if __name__ == "__main__":
         # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
         # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
         ## diffbands type
-        "uni_tokenizer_path": "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-23_13-29-23_cosmos_f8c16p4_uniconv_in_densor_model/ema/tokenizer/model.safetensors",
         ## dense type
         # "uni_tokenizer_path": "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
         "hook_for_repa": False,
@@ -812,14 +810,16 @@ if __name__ == "__main__":
         "force_not_attn": True,
         "enc_moe": False,
         "dec_moe": False,
-        "downsample_type": "Conv",
-        "downsample_shortcut": "averaging",
-        "upsample_type": "RepeatConv",
-        "upsample_shortcut": "duplicating",
+        # "downsample_type": "Conv",
+        # "downsample_shortcut": "averaging",
+        # "upsample_type": "RepeatConv",
+        # "upsample_shortcut": "duplicating",
         "padding_mode": "replicate",
-        "norm_type": "rms_triton",
+        "block_name": "dico_block",
+        "norm_type": "gn",
+        "norm_groups": 32,
     }
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(2)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
 
@@ -832,7 +832,7 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="OHS")
     dl_iter = iter(dl)
     tokenizer = tokenizer.eval()
 

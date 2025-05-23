@@ -369,7 +369,11 @@ class CosmosHyperspectralTokenizerTrainer:
             "- <level>[{level}]</level> "
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
-        log_format_in_cmd = "{time:HH:mm:ss} - {level.icon}  <level>[{level}]</level> - <level>{message}</level>"
+        log_format_in_cmd = (
+            "{time:HH:mm:ss} "
+            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- <level>{message}</level>"
+        )
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
