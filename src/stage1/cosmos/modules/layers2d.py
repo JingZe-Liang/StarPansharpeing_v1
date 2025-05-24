@@ -27,7 +27,7 @@ import math
 import sys
 from contextlib import nullcontext
 from functools import partial
-from inspect import signature
+from inspect import isclass, signature
 from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 import numpy as np
@@ -46,14 +46,16 @@ from src.stage1.cosmos.modules.utils import (
     Normalize,
     extract_needed_kwargs,
     gelu_nonlinear,
+    mp_sum,
     nonlinearity,
+    unit_magnitude_normalize,
     val2tuple,
 )
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
 
-compile_forward_fn = True
+compile_forward_fn = False
 if compile_forward_fn:
     _compile_decorator = torch.compile
     log_print("will compile the forward function", "debug")
@@ -74,23 +76,6 @@ else:
 # * --- Upsample and Downsample --- #
 
 
-class UpsampleRepeatConv(nn.Module):
-    def __init__(self, in_channels: int, padding_mode: str = "zeros"):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            padding_mode=padding_mode,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
-        return self.conv(x)
-
-
 def get_same_padding(
     kernel_size: Union[int, tuple[int, ...]],
 ) -> Union[int, tuple[int, ...]]:
@@ -101,17 +86,53 @@ def get_same_padding(
         return kernel_size // 2
 
 
+def resample_norm_keep(x, x_resampled):
+    return x_resampled * torch.norm(x) / torch.norm(x_resampled)
+
+
+class UpsampleRepeatConv(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        padding_mode: str = "zeros",
+        norm_type: str | None = None,
+        norm_keep: bool = False,
+    ):
+        super().__init__()
+        self.norm_keep = norm_keep
+        self.conv = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            padding_mode=padding_mode,
+        )
+        # self.norm = Normalize(
+        #     in_channels=in_channels, num_groups=32, norm_type=norm_type
+        # )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+        x_resp = self.conv(x)
+        if self.norm_keep:
+            x_resp = resample_norm_keep(x, x_resp)
+        return x_resp
+
+
 class DownsamplePadConv(nn.Module):
     def __init__(
         self,
         in_channels: int,
         padding_mode: str = "constant",
         padding_in_conv: bool = False,
+        norm_type: Optional[str] = None,
+        norm_keep: bool = False,
     ):
         super().__init__()
         self.padding_mode = padding_mode
         self.padding_in_conv = padding_in_conv
-        log_print(f"[DownsamplePadConv] padding_in_conv: {padding_in_conv}", "debug")
+        self.norm_keep = norm_keep
 
         self.conv = nn.Conv2d(
             in_channels,
@@ -124,16 +145,23 @@ class DownsamplePadConv(nn.Module):
             else "zeros",  # 'zeros' as default
         )
 
+        # self.norm = Normalize(
+        #     in_channels=in_channels, num_groups=32, norm_type=norm_type
+        # )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # LDM VAE also use the unsymmetric padding
         if not self.padding_in_conv:  # cosmos manually pad
-            pad = (0, 1, 0, 1)  # lower and righter pads, why? inductive bias?
-            if self.padding_mode != "constant":
+            pad = (0, 1, 0, 1)
+            if self.padding_mode not in ("constant", "zeros"):
                 x = F.pad(x, pad, mode=self.padding_mode)
             else:
                 x = F.pad(x, pad, mode="constant", value=0)
 
-        return self.conv(x)
+        x_resp = self.conv(x)
+        if self.norm_keep:
+            x_resp = resample_norm_keep(x, x_resp)
+        return x_resp
 
 
 class ConvPixelUnshuffleDownSampleLayer(nn.Module):
@@ -144,9 +172,11 @@ class ConvPixelUnshuffleDownSampleLayer(nn.Module):
         kernel_size: int,
         factor: int,
         padding_mode: str = "zeros",
+        norm_keep: bool = False,
     ):
         super().__init__()
         self.factor = factor
+        self.norm_keep = norm_keep
         out_ratio = factor**2
         assert out_channels % out_ratio == 0
         self.conv = nn.Conv2d(
@@ -160,6 +190,8 @@ class ConvPixelUnshuffleDownSampleLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
         x = F.pixel_unshuffle(x, self.factor)
+        if self.norm_keep:
+            x = resample_norm_keep(x, x)
         return x
 
 
@@ -197,10 +229,14 @@ class ConvPixelShuffleUpSampleLayer(nn.Module):
         kernel_size: int,
         factor: int,
         padding_mode: str = "zeros",
+        norm_type: Optional[str] = None,
     ):
         super().__init__()
         self.factor = factor
         out_ratio = factor**2
+        self.norm = Normalize(
+            in_channels=in_channels, num_groups=32, norm_type=norm_type
+        )
         self.conv = nn.Conv2d(
             in_channels,
             out_channels * out_ratio,
@@ -210,7 +246,7 @@ class ConvPixelShuffleUpSampleLayer(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv(x)
+        x = self.conv(self.norm(x))
         x = F.pixel_shuffle(x, self.factor)
         return x
 
@@ -224,10 +260,13 @@ class InterpolateConvUpSampleLayer(nn.Module):
         factor: int,
         mode: str = "nearest",
         padding_mode: str = "zeros",
+        norm_type: Optional[str] = None,
+        norm_keep: bool = False,
     ) -> None:
         super().__init__()
         self.factor = factor
         self.mode = mode
+        self.norm_keep = norm_keep
         self.conv = nn.Conv2d(
             in_channels,
             out_channels,
@@ -236,10 +275,15 @@ class InterpolateConvUpSampleLayer(nn.Module):
             padding=get_same_padding(kernel_size),
             padding_mode=padding_mode,
         )
+        # self.norm = Normalize(
+        #     in_channels=in_channels, num_groups=32, norm_type=self.norm_type
+        # )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.nn.functional.interpolate(x, scale_factor=self.factor, mode=self.mode)
-        x = self.conv(x)
+        x_resp = self.conv(x)
+        if self.norm_keep:
+            x_resp = resample_norm_keep(x, x_resp)
         return x
 
 
@@ -310,6 +354,54 @@ class ConvLayer(nn.Module):
         if self.act:
             x = self.act(x)
         return x
+
+
+class MPConv(nn.Conv2d):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        bias=True,
+        padding_mode="zeros",
+        device=None,
+        dtype=None,
+    ):
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias,
+            padding_mode,
+            device,
+            dtype,
+        )
+
+    @_compile_decorator
+    def forward(self, x, gain=1):
+        w = self.weight.to(torch.float32)
+        if self.training:
+            with torch.no_grad():
+                self.weight.copy_(
+                    unit_magnitude_normalize(w)
+                )  # forced weight normalization
+        w = unit_magnitude_normalize(w)  # traditional weight normalization
+        w = w * (gain / np.sqrt(w[0].numel()))  # magnitude-preserving scaling
+        w = w.to(x.dtype)
+
+        # if w.ndim == 2:
+        #     return x @ w.t()
+        # assert w.ndim == 4
+
+        return self._conv_forward(x, w, self.bias)
 
 
 # TODO: this version causes the norm is high
@@ -385,15 +477,6 @@ REGISTERED_ACT_DICT: dict[str, type] = {
 }
 
 
-# def build_kwargs_from_config(config: dict, target_func: Callable):
-#     valid_keys = list(signature(target_func).parameters)
-#     kwargs = {}
-#     for key in config:
-#         if key in valid_keys:
-#             kwargs[key] = config[key]
-#     return kwargs
-
-
 def build_act(name: str, **kwargs) -> Optional[nn.Module]:
     if name in REGISTERED_ACT_DICT:
         act_cls = REGISTERED_ACT_DICT[name]
@@ -446,7 +529,19 @@ def build_upsample_block(
     out_channels: int,
     shortcut: Optional[str],
     padding_mode: str = "zeros",
+    norm_type: str | None = None,  # deprecated
+    norm_keep: bool = False,
 ) -> nn.Module:
+    log_print(
+        f"[build_upsample_block] block_type: {block_type}, "
+        f"in_channels: {in_channels}, "
+        f"out_channels: {out_channels}, "
+        f"shortcut: {shortcut}, "
+        f"padding_mode: {padding_mode}, "
+        f"norm keep: {norm_keep}",
+        "debug",
+    )
+
     if block_type == "ConvPixelShuffle":
         block = ConvPixelShuffleUpSampleLayer(
             in_channels=in_channels,
@@ -456,7 +551,9 @@ def build_upsample_block(
             padding_mode=padding_mode,
         )
     elif block_type == "RepeatConv":
-        block = UpsampleRepeatConv(in_channels, padding_mode=padding_mode)
+        block = UpsampleRepeatConv(
+            in_channels, padding_mode=padding_mode, norm_keep=norm_keep
+        )
     elif block_type == "InterpolateConv":
         block = InterpolateConvUpSampleLayer(
             in_channels=in_channels,
@@ -465,6 +562,7 @@ def build_upsample_block(
             factor=2,
             padding_mode=padding_mode,
             mode="nearest",
+            norm_keep=norm_keep,
         )
     else:
         raise ValueError(f"block_type {block_type} is not supported for upsampling")
@@ -489,7 +587,20 @@ def build_downsample_block(
     padding_mode: str = "zeros",
     *,
     padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
+    norm_type: str | None = None,
+    norm_keep: bool = False,
 ) -> nn.Module:
+    log_print(
+        f"[build_downsample_block] block_type: {block_type}, "
+        f"in_channels: {in_channels}, "
+        f"out_channels: {out_channels}, "
+        f"shortcut: {shortcut}, "
+        f"padding_mode: {padding_mode} "
+        f"padconv_use_manually_pad: {padconv_use_manually_pad}, "
+        f"norm keep: {norm_keep}, ",
+        "debug",
+    )
+
     if block_type == "Conv":
         block = nn.Conv2d(
             in_channels=in_channels,
@@ -498,12 +609,14 @@ def build_downsample_block(
             stride=2,
             padding=1,
             padding_mode=padding_mode,
+            bias=True,
         )
     elif block_type == "PadConv":
         block = DownsamplePadConv(
             in_channels=in_channels,
             padding_in_conv=not padconv_use_manually_pad,
             padding_mode=padding_mode,
+            norm_keep=norm_keep,
         )
     elif block_type == "ConvPixelUnshuffle":
         block = ConvPixelUnshuffleDownSampleLayer(
@@ -587,6 +700,7 @@ class ResnetBlock(nn.Module):
         if use_residual_factor:
             self.residual_factor = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
+    @_compile_decorator
     def forward_fn(
         self,
         x: torch.Tensor,
@@ -651,7 +765,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
             kernel_size=3,
             stride=1,
             padding=1,
-            padding_mode="reflect",
+            padding_mode="zeros",
         )
         self.slots_t_to_mod = nn.Sequential(
             nn.SiLU(),
@@ -767,11 +881,12 @@ class DiCoCompactChannelAttention(nn.Module):
     def __init__(
         self,
         in_channels: int,
+        conv_cls: nn.Module = nn.Conv2d,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.global_avg = nn.AdaptiveAvgPool2d(1)
-        self.body = nn.Conv2d(in_channels, in_channels, 1)
+        self.body = conv_cls(in_channels, in_channels, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -781,16 +896,29 @@ class DiCoCompactChannelAttention(nn.Module):
         return h
 
 
-class FeedForward(nn.Module):
-    def __init__(self, hidden_size, intermediate_size, hidden_act="gelu"):
+class GLUFeedForward(nn.Module):
+    def __init__(
+        self,
+        hidden_size,
+        intermediate_size,
+        hidden_act="gelu_fast",  # gelu_fast, gelu
+        conv_cls=nn.Conv2d,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.gate_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
-        self.up_proj = nn.Conv2d(self.hidden_size, self.intermediate_size, 1, 1, 0)
-        self.down_proj = nn.Conv2d(self.intermediate_size, self.hidden_size, 1, 1, 0)
+        self.gate_proj = conv_cls(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.up_proj = conv_cls(self.hidden_size, self.intermediate_size, 1, 1, 0)
+        self.down_proj = conv_cls(self.intermediate_size, self.hidden_size, 1, 1, 0)
         self.act_fn = ACT2FN[hidden_act]
+
+    #     self.weight_init()
+
+    # def weight_init(self):
+    #     torch.nn.init.trunc_normal_(self.gate_proj.weight, std=0.02)
+    #     torch.nn.init.trunc_normal_(self.up_proj.weight, std=0.02)
+    #     torch.nn.init.trunc_normal_(self.down_proj.weight, std=0.02)
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -798,14 +926,63 @@ class FeedForward(nn.Module):
 
 
 class LlamaFFN(nn.Module):
-    def __init__(self, hidden_size, intermediate_size):
+    def __init__(self, hidden_size, intermediate_size, conv_cls=nn.Conv2d):
         super().__init__()
-        self.w1 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
-        self.w2 = nn.Conv2d(intermediate_size, hidden_size, 1, 1, 0)
-        self.w3 = nn.Conv2d(hidden_size, intermediate_size, 1, 1, 0)
+        self.w1 = conv_cls(hidden_size, intermediate_size, 1, 1, 0)
+        self.w2 = conv_cls(intermediate_size, hidden_size, 1, 1, 0)
+        self.w3 = conv_cls(hidden_size, intermediate_size, 1, 1, 0)
+
+        self.weight_init()
+
+    def weight_init(self):
+        torch.nn.init.trunc_normal_(self.w1.weight, std=0.02)
+        torch.nn.init.trunc_normal_(self.w2.weight, std=0.02)
+        torch.nn.init.trunc_normal_(self.w3.weight, std=0.02)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x) * self.w3(x)))
+
+
+class Mlp(nn.Module):
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        norm_layer=None,
+        bias=True,
+        drop=0.0,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias = (bias, bias)
+        drop_probs = (drop, drop)
+        linear_layer = partial(nn.Conv2d, kernel_size=1)
+
+        self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
+        self.act = act_layer() if isclass(act_layer) else act_layer
+        self.drop1 = nn.Dropout(drop_probs[0])
+        self.norm = (
+            norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        )
+        self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
+        self.drop2 = nn.Dropout(drop_probs[1])
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
+@_compile_decorator
+def modulation(x, shift, scale):
+    return x * (scale + 1) + shift
 
 
 class DiCoBlock(nn.Module):
@@ -821,6 +998,8 @@ class DiCoBlock(nn.Module):
         padding_mode: str = "zeros",
         act_checkpoint: bool = False,
         use_ffn: bool = True,
+        conv_type: str = "conv",
+        ffn_type: str = "mlp",
     ):
         super().__init__()
         self.use_residual = use_residual
@@ -832,20 +1011,29 @@ class DiCoBlock(nn.Module):
         log_print(
             f"[Dico block]: in: {in_channels} "
             f"out: {out_channels} "
-            f"hidden: {hidden_channels}",
+            f"hidden: {hidden_channels} "
+            f"conv type: {conv_type} ",
             "debug",
         )
 
         self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
-
-        self.dropout = nn.Dropout(dropout)
+        # self.dropout = nn.Dropout(dropout)
+        conv_cls = (
+            MPConv if conv_type == "mpconv" else nn.Conv2d
+        )  # mpconv cannot support the torch.compile
 
         # conv module
+        # self.body_in = nn.Sequential(
+        #     Normalize(in_channels, norm_type),
+        #     conv_cls(in_channels, out_channels, kernel_size=1, stride=1),
+        # )
+        # self.body_in = conv_cls(in_channels, out_channels, kernel_size=1, stride=1)
+
         self.body = nn.Sequential(
             # point conv
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            conv_cls(in_channels, out_channels, kernel_size=1, stride=1),
             # depth conv
-            nn.Conv2d(
+            conv_cls(
                 out_channels,
                 out_channels,
                 kernel_size=3,
@@ -854,73 +1042,104 @@ class DiCoBlock(nn.Module):
                 padding_mode=padding_mode,
                 groups=out_channels,
             ),
-            # nn.Conv2d(
-            #     in_channels,
-            #     out_channels,
-            #     kernel_size=3,
-            #     stride=1,
-            #     padding=1,
-            #     padding_mode=padding_mode,
-            # ),
-            nn.GELU(approximate="tanh"),
+            ACT2FN["gelu_fast"],
         )
+        self.body_out = conv_cls(out_channels, out_channels, kernel_size=1, stride=1)
 
         # cca
-        self.cca = DiCoCompactChannelAttention(out_channels)
-        self.body_out = nn.Conv2d(
-            out_channels, out_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.cca = DiCoCompactChannelAttention(out_channels, conv_cls=conv_cls)
 
         # ffn
         if self.use_ffn:
-            self.ffn = FeedForward(out_channels, hidden_channels)
-            # self.ffn = LlamaFFN(hidden_size=out_channels, intermediate_size=hidden_channels)
-            # self.ffn = nn.Conv2d(
-            #     out_channels,
-            #     hidden_channels,
-            #     kernel_size=3,
-            #     stride=1,
-            #     padding=1,
-            #     padding_mode=padding_mode,
-            # )
+            if ffn_type == "mlp":
+                self.ffn = Mlp(
+                    in_features=out_channels,
+                    hidden_features=hidden_channels,
+                    out_features=out_channels,
+                    act_layer=ACT2FN["gelu_fast"],
+                    norm_layer=None,
+                    bias=True,
+                )
+            elif ffn_type == "glu":
+                self.ffn = GLUFeedForward(
+                    out_channels, hidden_channels, conv_cls=nn.Conv2d
+                )
+            elif ffn_type == "llama":
+                self.ffn = LlamaFFN(
+                    hidden_size=out_channels,
+                    intermediate_size=hidden_channels,
+                    conv_cls=nn.Conv2d,
+                )
+            else:
+                raise ValueError(f"Unknown ffn_type: {ffn_type}")
             self.norm_ffn = Normalize(
                 out_channels, norm_type=norm_type, num_groups=norm_groups
             )
 
         self.nin_shortcut = (
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-            )
+            conv_cls(in_channels, out_channels, kernel_size=1, stride=1)
             if in_channels != out_channels
             else nn.Identity()
         )
 
+        # self.factors = nn.ParameterDict(
+        #     {
+        #         "mixer_f": nn.Parameter(torch.randn(out_channels, 1, 1)),
+        #         "ffn_f": nn.Parameter(torch.randn(out_channels, 1, 1)),
+        #     }
+        # )
+
+        # self.adaln = nn.Sequential(
+        #     nn.SiLU(),
+        #     conv_cls(
+        #         in_channels,
+        #         out_channels * 6,
+        #         kernel_size=1,
+        #         stride=1,
+        #     ),
+        #     conv_cls(
+        #         out_channels * 6,
+        #         out_channels * 6,
+        #         kernel_size=3,
+        #         stride=1,
+        #         padding=1,
+        #         groups=out_channels * 6,
+        #     ),
+        # )
+
+    #     self.apply(self.weight_init)
+
+    # def weight_init(self, m):
+    #     if isinstance(m, (nn.Conv2d, MPConv)):
+    #         nn.init.xavier_normal_(m.weight)
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0.0)
+
     @_compile_decorator
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
+        # h = self.body_in(x)
+        # sc1, sf1, gt1, sc2, sf2, gt2 = self.adaln(x).chunk(6, dim=1)
         h = x
 
         # token mixer
-        h = self.norm(h)
-        h = self.body(h)
+        # h = self.body(modulation(self.norm(h), sf1, sc1))
+        h = self.body(self.norm(h))
         h = self.cca(h)
-        h = self.body_out(h) + self.nin_shortcut(x)
+        h = self.body_out(h)
+        # h = h * gt1 + self.nin_shortcut(x)
+        h = h + self.nin_shortcut(x)
 
         # ffn
         if self.use_ffn:
-            h1 = h
-            h = self.norm_ffn(h)
-            h = self.dropout(h)
-            h = self.ffn(h) + h1
+            # h = gt2 * self.ffn(modulation(self.norm_ffn(h), sf2, sc2)) + h
+            h = self.ffn(self.norm_ffn(h)) + h
 
         return h
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, use_reentrant=True)
+
         return self.forward_fn(x)
 
 
@@ -1104,7 +1323,7 @@ class DiffBandsInputConvIn(nn.Module):
                     kernel_size=3,
                     stride=1,
                     padding=1,
-                    padding_mode="reflect",
+                    padding_mode="zeros",
                 )
             elif basic_module == "mobile":
                 module = nn.Sequential(
@@ -1115,7 +1334,7 @@ class DiffBandsInputConvIn(nn.Module):
                         3,
                         1,
                         1,
-                        padding_mode="reflect",
+                        padding_mode="zeros",
                         groups=hidden_dim,
                     ),
                 )
@@ -1131,7 +1350,7 @@ class DiffBandsInputConvIn(nn.Module):
                         norm=(None, None, "rms_triton"),
                         act_func=("silu", "silu", None),
                     ),
-                    nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1, padding=0),
+                    nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1),
                 )
             elif basic_module == "resnet":
                 module = ResnetBlock(
@@ -1151,7 +1370,7 @@ class DiffBandsInputConvIn(nn.Module):
                         kernel_size=3,
                         stride=1,
                         padding=1,
-                        padding_mode="reflect",
+                        padding_mode="zeros",
                     ),
                     MoE2DBlock(
                         in_channels=hidden_dim,
@@ -1171,12 +1390,7 @@ class DiffBandsInputConvIn(nn.Module):
                 )
 
             self.in_modules["conv_in_{}".format(c)] = module
-            # keep the modules has grad in FSDP, DDP training
-            # self.register_buffer(
-            #     f"buf_{c}",
-            #     torch.zeros(1, c, 3, 3),
-            #     persistent=False,
-            # )
+
             log_print(
                 f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
             )
@@ -1193,11 +1407,9 @@ class DiffBandsInputConvIn(nn.Module):
         if self.training:
             for c in self.band_lst:
                 if c != c_:
-                    # buf = getattr(self, f"buf_{c}")
-                    buf = torch.zeros(1, c, 3, 3, device=x.device, dtype=x.dtype)
                     m = self.in_modules["conv_in_{}".format(c)]
-                    no_use_h = m(buf)
-                    h = h + no_use_h.mean() * 0.0
+                    dummy_loss = sum(p.sum() * 0.0 for p in m.parameters())
+                    h = h + dummy_loss
 
         return h
 
@@ -1224,7 +1436,7 @@ class DiffBandsInputConvOut(nn.Module):
                     kernel_size=3,
                     stride=1,
                     padding=1,
-                    padding_mode="reflect",
+                    padding_mode="zeros",
                 )
             elif basic_module == "mobile":
                 module = nn.Sequential(
@@ -1234,7 +1446,7 @@ class DiffBandsInputConvOut(nn.Module):
                         3,
                         1,
                         1,
-                        padding_mode="reflect",
+                        padding_mode="zeros",
                         groups=hidden_dim,
                     ),
                     nn.Conv2d(hidden_dim, c, 1, 1, 0),
@@ -1291,16 +1503,9 @@ class DiffBandsInputConvOut(nn.Module):
 
             self.in_modules["conv_out_{}".format(c)] = module
 
-            # keep the modules has grad in FSDP, DDP training
             log_print(
                 f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}"
             )
-
-        # self.register_buffer(
-        #     f"buf_out",
-        #     torch.zeros(1, 256, 3, 3),
-        #     persistent=False,
-        # )
 
         self.out_channel = None
 
@@ -1317,11 +1522,9 @@ class DiffBandsInputConvOut(nn.Module):
         if self.training:
             for c in self.band_lst:
                 if c != out_channel:
-                    # buf = self.buf_out
-                    buf = torch.zeros(1, 256, 3, 3, device=x.device, dtype=x.dtype)
                     m = self.in_modules["conv_out_{}".format(c)]
-                    no_use_h = m(buf)
-                    h = h + no_use_h.mean() * 0.0
+                    dummy_loss = sum(p.sum() * 0.0 for p in m.parameters())
+                    h = h + dummy_loss
 
         return h
 
@@ -1404,6 +1607,8 @@ def make_block_fn(
                 use_residual=True,
                 padding_mode=padding_mode,
                 act_checkpoint=act_checkpoint,
+                ffn_type="mlp",
+                use_ffn=True,
             )
 
     elif block_name == "res_block":
@@ -1465,6 +1670,7 @@ class Encoder(nn.Module):
         norm_type: str = "gn",
         norm_groups: int = 32,
         downsample_manually_pad: bool = True,
+        resample_norm_keep: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -1570,6 +1776,7 @@ class Encoder(nn.Module):
                     shortcut=downsample_shortcut,
                     padding_mode=padding_mode,
                     padconv_use_manually_pad=downsample_manually_pad,
+                    norm_keep=resample_norm_keep,
                 )
                 curr_res = curr_res // 2
             self.down.append(down)
@@ -1600,6 +1807,20 @@ class Encoder(nn.Module):
             padding_mode=padding_mode,
         )
 
+    #     self.apply(self.weight_init)
+    #     log_print(f"[Decoder]: weight init")
+
+    # def weight_init(self, m):
+    #     if isinstance(m, (nn.Conv2d, nn.Linear)):
+    #         # torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+    #         torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
+    #         if hasattr(m, "bias") and m.bias is not None:
+    #             torch.nn.init.zeros_(m.bias)
+    #     elif isinstance(m, nn.GroupNorm):
+    #         torch.nn.init.ones_(m.weight)
+    #         if hasattr(m, "bias") and m.bias is not None:
+    #             torch.nn.init.zeros_(m.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patcher(x)
 
@@ -1608,11 +1829,17 @@ class Encoder(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1])
+                log_print(
+                    f"[encoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
+                )
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level < self.num_downsamples:
                 hs.append(self.down[i_level].downsample(hs[-1]))
+                log_print(
+                    f"[decoder] level {i_level} downsample, norm={h.norm().item()}, max={h.abs().max()}"
+                )
 
         # middle
         h = hs[-1]
@@ -1659,6 +1886,7 @@ class Decoder(nn.Module):
         norm_groups: int = 32,
         patch_size: int = 4,
         patch_method: str = "haar",
+        resample_norm_keep: bool = False,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -1764,6 +1992,7 @@ class Decoder(nn.Module):
                     block_out,
                     shortcut=upsample_shortcut,
                     padding_mode=padding_mode,
+                    norm_keep=resample_norm_keep,
                 )
                 curr_res = curr_res * 2
             self.up.insert(0, up)
@@ -1800,6 +2029,20 @@ class Decoder(nn.Module):
         else:
             self.conv_out = conv_out
 
+        # self.apply(self.weight_init)
+        # log_print(f"[Decoder]: weight init")
+
+    # def weight_init(self, m):
+    #     if isinstance(m, (nn.Conv2d, nn.Linear)):
+    #         # torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+    #         torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
+    #         if hasattr(m, "bias") and m.bias is not None:
+    #             torch.nn.init.zeros_(m.bias)
+    #     elif isinstance(m, nn.GroupNorm):
+    #         torch.nn.init.ones_(m.weight)
+    #         if hasattr(m, "bias") and m.bias is not None:
+    #             torch.nn.init.zeros_(m.bias)
+
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         h = self.conv_in(z)
 
@@ -1815,8 +2058,14 @@ class Decoder(nn.Module):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
+                log_print(
+                    f"[decoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
+                )
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
+                log_print(
+                    f"[decoder] level {i_level} upsample, norm={h.norm().item()}, max={h.abs().max()}"
+                )
 
         h = self.norm_out(h)
         h = nonlinearity(h)
@@ -2380,7 +2629,9 @@ if __name__ == "__main__":
             moe_token_mixer_type="dico_block",
             force_not_attn=True,
             norm_type="gn",
-            hidden_factor=3,
+            norm_groups=1,
+            hidden_factor=2,
+            resample_norm_keep=True,
         )
         decoder = Decoder(
             8,
@@ -2396,18 +2647,19 @@ if __name__ == "__main__":
             patch_size=4,
             # upsample_type="ConvPixelShuffle",
             # upsample_shortcut="duplicating",
-            block_name="res_moe",
+            block_name="dico_block",
             force_not_attn=True,
-            norm_type="gn",
+            norm_type="rms_triton",
             moe_token_mixer_type="dico_block",
-            hidden_factor=3,
+            hidden_factor=2,
+            resample_norm_keep=True,
         )
         dtype = torch.bfloat16
-        device = torch.device("cuda:1")
+        device = torch.device("cuda:0")
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        bs = 16
+        bs = 2
         img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
         opt = torch.optim.Adam([*encoder.parameters(), *decoder.parameters()], lr=1e-3)
         opt.zero_grad()
@@ -2462,8 +2714,14 @@ if __name__ == "__main__":
             act_checkpoint=True,
             force_not_attn=True,
             norm_type="gn",
+            norm_groups=32,
             block_name="dico_block",
             hidden_factor=2,
+            downsample_manually_pad=True,
+            # downsample_type="Conv",
+            # downsample_shortcut="averaging",
+            resample_norm_keep=False,
+            # downsample_type="ConvPixelUnshuffle",
         )
         decoder = Decoder(
             [4, 8, 16, 24],
@@ -2480,63 +2738,70 @@ if __name__ == "__main__":
             moe_type="tc+ec",
             force_not_attn=True,
             norm_type="gn",
+            norm_groups=32,
             block_name="dico_block",
             hidden_factor=2,
+            # upsample_type="InterpolateConv",
+            # upsample_shortcut="duplicating",
+            resample_norm_keep=False,
+            # upsample_type="ConvPixelShuffle",
         )
         dtype = torch.bfloat16
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        from fvcore.nn import parameter_count_table
+        # from fvcore.nn import parameter_count_table
 
-        log_print(parameter_count_table(encoder))
-        log_print(parameter_count_table(decoder))
-
-        bs = 8
-        img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
+        # log_print(parameter_count_table(encoder))
+        # log_print(parameter_count_table(decoder))
 
         from contextlib import nullcontext
 
         if optimize:
             optimizer = torch.optim.AdamW(
                 [*encoder.parameters(), *decoder.parameters()],
-                lr=1e-3,
+                lr=1e-4,
             )
             optimizer.zero_grad()
             context = nullcontext
         else:
             context = nullcontext  # torch.no_grad
 
-        with accelerator.autocast():
-            with context():
-                slots = encoder(img)
-                recon = decoder(slots, img.shape[1])
+        for _ in range(200):
+            bs = 8
+            img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype)
 
-        print(recon.shape)
+            with accelerator.autocast():
+                with context():
+                    z = encoder(img)
+                    recon = decoder(z, img.shape[1])
+                    # exit(0)
 
-        if optimize:
-            loss = recon.mean()
-            accelerator.backward(loss)
-            optimizer.step()
+            print(recon.shape)
 
-        accelerator.backward(recon.mean())
-        p_norms = {}
-        for n, p in encoder.named_parameters():
-            p_norms[n] = p.norm().item()
+            if optimize:
+                loss = F.mse_loss(recon, img)
+                accelerator.backward(loss)
+                optimizer.step()
 
-        # sort norms
-        p_norms = {
-            k: v
-            for k, v in sorted(p_norms.items(), key=lambda item: item[1], reverse=True)
-        }
-        largest_n = 300
-        # print the largest n norms
-        for k, v in p_norms.items():
-            print(f"{k}: {v:.4f}")
-            if largest_n > 0:
-                largest_n -= 1
-            else:
-                break
+        # accelerator.backward(recon.mean())
+        # p_norms = {}
+        # for n, p in encoder.named_parameters():
+        #     p_norms[n] = p.norm().item()
+
+        # # sort norms
+        # p_norms = {
+        #     k: v
+        #     for k, v in sorted(p_norms.items(), key=lambda item: item[1], reverse=True)
+        # }
+        # largest_n = 300
+        # # print the largest n norms
+        # for k, v in p_norms.items():
+        #     print(f"{k}: {v:.4f}")
+        #     if largest_n > 0:
+        #         largest_n -= 1
+        #     else:
+        #         break
 
         # enc_n = 0
         # dec_n = 0
@@ -2563,7 +2828,8 @@ if __name__ == "__main__":
         out = moe_block(x)
         print("output shape: ", out.shape)
 
-    test_auto_enc_dec()
+    # test_auto_enc_dec()
     # test_diff_enc_dec()
-    # test_multi_bands_enc_dec()
+    test_multi_bands_enc_dec(True)
+
     # test_moe_layer()

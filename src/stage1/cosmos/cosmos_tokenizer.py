@@ -1,5 +1,4 @@
 import inspect
-import sys
 import warnings
 from collections import OrderedDict, namedtuple
 from functools import partial
@@ -11,7 +10,7 @@ import torch
 from torch import Tensor, nn
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
+from src.stage1.cosmos.modules.layers2d import Encoder, Decoder
 from src.stage1.cosmos.modules.utils import Normalize
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.stage1.discretization.collections.kl_continuous import (
@@ -801,7 +800,7 @@ if __name__ == "__main__":
         # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
         # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
         ## diffbands type
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-23_13-29-23_cosmos_f8c16p4_uniconv_in_densor_model/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-24_01-37-24_cosmos_f8c16p4_uniconv_in_dense_model_no_repa/ema/tokenizer/model.safetensors",
         ## dense type
         # "uni_tokenizer_path": "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
         "hook_for_repa": False,
@@ -814,10 +813,15 @@ if __name__ == "__main__":
         # "downsample_shortcut": "averaging",
         # "upsample_type": "RepeatConv",
         # "upsample_shortcut": "duplicating",
-        "padding_mode": "replicate",
-        "block_name": "dico_block",
+        "padding_mode": "reflect",
+        "block_name": "res_block",
         "norm_type": "gn",
         "norm_groups": 32,
+        "downsample_mode": "reflect",
+        "downsample_type": "PadConv",
+        "upsample_type": "RepeatConv",
+        "resample_norm_type": "gn",
+        "downsample_manually_pad": False,
     }
     torch.cuda.set_device(2)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
@@ -832,7 +836,7 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="OHS")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="DCF")
     dl_iter = iter(dl)
     tokenizer = tokenizer.eval()
 

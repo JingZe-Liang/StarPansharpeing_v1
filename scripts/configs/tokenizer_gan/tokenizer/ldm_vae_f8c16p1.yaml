@@ -1,0 +1,17 @@
+_target_: src.stage1.ldm.tokenizer.autoencoder.AutoencoderKL
+embed_dim: 16
+ddconfig:
+  z_channels: 32
+  resolution: 256
+  in_channels: ${dataset.channels}
+  out_ch: ${dataset.channels}
+  ch: 128
+  ch_mult: [1, 2, 2, 4]
+  dropout: 0.0
+  block_type: dico_block
+  attn_type: "none"
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  double_z: false
+  act_checkpoint: true
+  hidden_factor: 2

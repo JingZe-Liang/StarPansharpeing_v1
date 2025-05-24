@@ -94,7 +94,7 @@ train_loader:
   paths: ${dataset.train_paths}
   basic_kwargs:
     shuffle_size: -1
-    num_workers: 1
+    num_workers: 3
     resample: true
     prefetch_factor: 3
     shuffle_within_workers: false

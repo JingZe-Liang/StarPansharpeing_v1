@@ -27,7 +27,9 @@ img = (img - _mean) / _std
 
 # dino
 _model_kwargs = {"interpolate_antialias": True}
-repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14").cuda()
+repa_encoder = torch.hub.load(
+    "facebookresearch/dinov2", "dinov2_vitb14", source="local"
+).cuda()
 repa_encoder.eval()
 repa_encoder.image_size = 224
 

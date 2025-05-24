@@ -15,9 +15,11 @@
 
 """Shared utilities for the networks module."""
 
+from functools import partial
 from inspect import Parameter, isclass, isfunction, signature
 from typing import Any, Callable, Literal
 
+import numpy as np
 import torch
 from einops import pack, rearrange, unpack
 
@@ -58,12 +60,22 @@ def is_odd(n: int) -> bool:
     return not divisible_by(n, 2)
 
 
-def nonlinearity(x):
-    return x * torch.sigmoid(x)
+def nonlinearity(x, mp=True):
+    # return x * torch.sigmoid(x)
+    if mp:
+        return torch.nn.functional.silu(x) / 0.596
+    return torch.nn.functional.silu(x)
 
 
-def gelu_nonlinear(x):
-    return torch.nn.functional.gelu(x, approximate="tanh")
+def gelu_nonlinear(x, clamp=None):
+    x = torch.nn.functional.gelu(x, approximate="tanh")
+    if clamp is not None:
+        x = torch.clamp(x, min=-clamp, max=clamp)
+    return x
+
+
+def mp_sum(a, b, t=0.5):
+    return a.lerp(b, t) / np.sqrt((1 - t) ** 2 + t**2)
 
 
 # * --- Norm --- #
@@ -116,9 +128,19 @@ class TritonRMSNorm2d(torch.nn.LayerNorm):
         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 
+def unit_magnitude_normalize(x, dim=None, eps=1e-4):
+    if dim is None:
+        dim = list(range(1, x.ndim))
+    norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
+    norm = torch.add(eps, norm, alpha=np.sqrt(norm.numel() / x.numel()))
+    return x / norm.to(x.dtype)
+
+
 def Normalize(
     in_channels,
-    norm_type: str | Literal["gn", "bn2d", "ln2d", "rms_native", "rms_triton"] = "gn",
+    norm_type: str
+    | Literal["gn", "bn2d", "ln2d", "rms_native", "rms_triton", "unit_vec_norm", "none"]
+    | None = "gn",
     **norm_kwargs,
 ):
     if norm_type == "gn":
@@ -132,15 +154,20 @@ def Normalize(
         cls = torch.nn.BatchNorm2d
     elif norm_type == "ln2d":
         cls = LayerNorm2d
+    elif norm_type == "unit_vec_norm":
+        return partial(
+            unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4)
+        )
     elif norm_type == "rms_native":
         cls = RMSNorm2d
     elif norm_type == "rms_triton":
         cls = TritonRMSNorm2d
     elif norm_type in (None, "none"):
-        return None
+        return torch.nn.Identity()
     else:
         raise ValueError(
-            f"Unknown normalization type: {norm_type}. Supported types are: 'gn', 'ln', 'rms'."
+            f"Unknown normalization type: {norm_type}. Supported types are: 'gn', 'bn2d', 'ln2d', 'rms_native', "
+            "'rms_triton', None or 'none'."
         )
 
     return cls(in_channels, **extract_needed_kwargs(norm_kwargs, cls))

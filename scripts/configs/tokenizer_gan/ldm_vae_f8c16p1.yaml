@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # hyperspectral # unified_hyperspectral
-  - tokenizer: uni_cosmos_f8c16p4
+  - tokenizer: ldm_vae_f8c16p1
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -58,43 +58,22 @@ vq_loss:
   disc_weight: 0.8
   reconstruction_loss_type: l1
 
-tokenizer:
-  hook_for_repa: false
-  hook_module: decoder.decoder.mid.block_2
-  act_checkpoint: false
-  force_not_attn: true
-  # enc_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/encoder/model.safetensors
-  # dec_path: runs/stage1_cosmos/cosmos_MMSeg_YREB_f8c16p4/ema/decoder/model.safetensors
-  # enc_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/encoder/model.safetensors
-  # dec_path: runs/stage1_cosmos/2025-04-08_13-48-48_cosmos_tokenizer_f8c32p1/ema/decoder/model.safetensors
-  uni_tokenizer_path: #runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors
-  loading_type: null #pretrained
-  use_channel_drop: false
-  enc_moe: false
-  dec_moe: false
-  norm_type: gn
-  norm_groups: 32
-  conv_in_module: conv
-  conv_out_module: conv
-  block_name: dico_block
-  hidden_factor: 2
-  patch_size: 4
-  padding_mode: reflect # for boundary?
-  downsample_manually_pad: true
-  resample_norm_keep: false
-
-  # channel_drop_config:
-  #   learnable: false
-  #   drop_type: uniform_4
-  #   max_channels: 16
-  #   img_size: 32
-  #   drop_prob: 1.0
-
-  ## downsample and upsample
-  # downsample_type: Conv
-  # downsample_shortcut: averaging
-  # upsample_type: RepeatConv
-  # upsample_shortcut: duplicating
+dataset:
+  train_changed_kwargs_by_loader:
+    ## use act_ckpt
+    - batch_size: 18
+    - batch_size: 6
+    - batch_size: 6
+    - batch_size: 6
+    - batch_size: 18
+    - batch_size: 6
+    - batch_size: 6
+    - batch_size: 6
+    - batch_size: 18
+    - batch_size: 18
+    - batch_size: 18
+    - batch_size: 18
+    - batch_size: 18
 
 ema:
   beta: 0.995
@@ -102,8 +81,8 @@ ema:
   update_every: 2
 
 train:
-  tokenizer_name: uni_cosmos_f8c16p4
-  proj_dir: runs/stage1_cosmos
+  tokenizer_name: ldm_vae_f8c16p1
+  proj_dir: runs/stage1_ldm_vae
   finetune_strategy: finetune_all # dcae_refine_decoder_head
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -112,8 +91,8 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-05-17_21-56-25_cosmos_pretrained_f8c16p4_repa/checkpoints/checkpoint_5
-  ema_load_path: #runs/stage1_cosmos/2025-05-23_18-11-07_cosmos_f8c16p4_uniconv_in_densor_model/ema
+  resume_path:
+  ema_load_path:
   only_load_tokenizer: false
   compile_model: false
 
@@ -154,7 +133,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_f8c16p4_uniconv_resblock_resample_norm_in_dense_model
+    run_comment: ${train.tokenizer_name}_unihyperspectral_dico_block
     log_with_time: True
     visualize_every: 500
     log_every: 10
