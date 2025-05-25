@@ -355,9 +355,7 @@ class AttnBlock(nn.Module):
         v = rearrange(v, "b c h w -> b (h w) c")
 
         # sdpa
-        h_ = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, is_causal=False, scale=int(c) ** (-0.5)
-        )
+        h_ = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         h_ = rearrange(h_, "b (h w) c -> b c h w", h=h, w=w)
         h_ = self.proj_out(h_)
         if self.use_residual_factor:
@@ -1035,12 +1033,13 @@ class DiffBandsInputConvIn(nn.Module):
         hidden_dim: int,
         basic_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         padding_mode: str = "zeros",
+        check_grads: bool = True,
     ):
         super().__init__()
 
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
-        self.is_ddp = PartialState().use_distributed
+        self.is_ddp = PartialState().use_distributed or check_grads
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
@@ -1149,13 +1148,14 @@ class DiffBandsInputConvOut(nn.Module):
         hidden_dim: int,
         basic_module: str = "conv",
         padding_mode: str = "zeros",
+        check_grads: bool = True,
     ):
         super().__init__()
 
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
         self.basic_module = basic_module
-        self.is_ddp = PartialState().use_distributed
+        self.is_ddp = PartialState().use_distributed or check_grads
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
@@ -1506,6 +1506,7 @@ class DiCoBlock(nn.Module):
                 groups=out_channels,
             ),
             nn.GELU(approximate="tanh"),
+            # nn.SiLU(),
         )
         self.body_out = conv_cls(out_channels, out_channels, kernel_size=1, stride=1)
 
@@ -1548,6 +1549,20 @@ class DiCoBlock(nn.Module):
             else nn.Identity()
         )
 
+        self.weight_init()
+
+    def weight_init(self):
+        # initialize weights
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                torch.nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+            elif isinstance(m, nn.GroupNorm):
+                m.weight.data.fill_(1.0)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
     @_compile_decorator
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
         h = x
@@ -1582,6 +1597,7 @@ class ResnetBlock(nn.Module):
         out_channels: int | None = None,
         dropout: float,
         use_residual_factor: bool = False,
+        act_type: tuple = ("gelu", "gelu"),
         **kwargs,
     ):
         super().__init__()
@@ -1590,10 +1606,12 @@ class ResnetBlock(nn.Module):
         padding_mode = kwargs.get("padding_mode", "zeros")
         norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
+        self.use_dico_cca = kwargs.get("use_dico_cca", False)
 
         self.norm1 = Normalize(
             in_channels, num_groups=gn_norm_groups, norm_type=norm_type
         )
+        self.act1 = ACT2FN[act_type[0]]
         self.conv1 = nn.Conv2d(
             in_channels,
             out_channels,
@@ -1605,6 +1623,7 @@ class ResnetBlock(nn.Module):
         self.norm2 = Normalize(
             out_channels, num_groups=gn_norm_groups, norm_type=norm_type
         )
+        self.act2 = ACT2FN[act_type[1]]
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(
             out_channels,
@@ -1629,6 +1648,8 @@ class ResnetBlock(nn.Module):
         self.use_residual_factor = use_residual_factor
         if use_residual_factor:
             self.residual_factor = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+        if self.use_dico_cca:
+            self.dico_cca = DiCoCompactChannelAttention(out_channels)
 
     @_compile_decorator
     def forward_fn(
@@ -1639,11 +1660,13 @@ class ResnetBlock(nn.Module):
     ) -> torch.Tensor:
         h = x
         h = self.norm1(h)
-        h = nonlinearity(h)
+        h = self.act1(h)
         h = self.conv1(h)
+        if self.use_dico_cca:
+            h = self.dico_cca(h)
 
         h = self.norm2(h)
-        h = nonlinearity(h)
+        h = self.act2(h)
         h = self.dropout(h)
         h = self.conv2(h)
 

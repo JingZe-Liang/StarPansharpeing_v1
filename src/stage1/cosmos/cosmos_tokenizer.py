@@ -782,10 +782,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 32,
+        "in_channels": 32,  # [3, 12, 32, 8, 13, 50, 4],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 32,
+        "out_channels": 32,  # [3, 12, 32, 8, 13, 50, 4],
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -802,15 +802,15 @@ if __name__ == "__main__":
         "block_name": "dico_block",
         "quantizer_type": None,
         "loading_type": "pretrained",
-        "force_not_attn": True,
         "enc_moe": False,
         "dec_moe": False,
         "padding_mode": "zeros",
         "norm_type": "gn",
         "norm_groups": 32,
         "resample_norm_type": "gn",
+        "attn_type": "none",
     }
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
 

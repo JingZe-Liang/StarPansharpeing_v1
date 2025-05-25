@@ -60,7 +60,7 @@ def is_odd(n: int) -> bool:
     return not divisible_by(n, 2)
 
 
-def nonlinearity(x, mp=True):
+def nonlinearity(x, mp=False):
     # return x * torch.sigmoid(x)
     if mp:
         return torch.nn.functional.silu(x) / 0.596

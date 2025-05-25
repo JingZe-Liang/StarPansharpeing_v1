@@ -24,13 +24,9 @@ https://github.com/CompVis/stable-diffusion/blob/
 """
 
 import math
-import sys
-from contextlib import nullcontext
 from functools import partial
-from inspect import isclass, signature
 from typing import Any, Callable, Literal, Optional, Sequence, Union
 
-import bs4
 import numpy as np
 
 # pytorch_diffusion + derived encoder decoder
@@ -47,6 +43,7 @@ from src.stage1.cosmos.modules.blocks import (
     Normalize,
     ResnetBlock,
     ResnetBlockMoE2D,
+    ResnetBlockSlotsInjected,
     TimestepEmbedder,
     build_downsample_block,
     build_upsample_block,
@@ -84,7 +81,7 @@ def make_block_fn(
     moe_type="tc",
     padding_mode: str = "zeros",
     norm_type: str = "gn",
-    token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+    token_mixer_type: Literal["resblock", "dico_block", "res_moe"] = "resblock",
     **kwargs,
 ):
     if block_name == "res_moe":
@@ -135,6 +132,8 @@ def make_block_fn(
                 use_residual_factor=use_residual_factor,
                 padding_mode=padding_mode,
                 norm_type=norm_type,
+                use_dico_cca=False,
+                act_type=("gelu", "gelu"),
                 **kwargs,
             )
 
@@ -330,17 +329,17 @@ class Encoder(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1])
-                log_print(
-                    f"[encoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
-                )
+                # log_print(
+                #     f"[encoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
+                # )
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level < self.num_downsamples:
                 hs.append(self.down[i_level].downsample(hs[-1]))
-                log_print(
-                    f"[decoder] level {i_level} downsample, norm={h.norm().item()}, max={h.abs().max()}"
-                )
+                # log_print(
+                #     f"[decoder] level {i_level} downsample, norm={h.norm().item()}, max={h.abs().max()}"
+                # )
 
         # middle
         h = hs[-1]
@@ -557,14 +556,14 @@ class Decoder(nn.Module):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
-                log_print(
-                    f"[decoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
-                )
+                # log_print(
+                #     f"[decoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
+                # )
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
-                log_print(
-                    f"[decoder] level {i_level} upsample, norm={h.norm().item()}, max={h.abs().max()}"
-                )
+                # log_print(
+                #     f"[decoder] level {i_level} upsample, norm={h.norm().item()}, max={h.abs().max()}"
+                # )
 
         h = self.norm_out(h)
         h = nonlinearity(h)
@@ -576,20 +575,6 @@ class Decoder(nn.Module):
         h = self.conv_out(*conv_out_h)
         h = self.unpatcher(h)
         return h
-
-    def forward_with_cfg(self, x, t, z, y=None, cfg_scale=1.0):
-        """
-        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, z)
-        eps, rest = model_out[:, : self.out_channels], model_out[:, self.out_channels :]
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
 
     def get_last_layer(self):
         if not self._wrap_fsdp_last_layer:
@@ -1106,7 +1091,9 @@ if __name__ == "__main__":
         import accelerate
 
         accelerator = accelerate.Accelerator(mixed_precision="bf16")
-        device = accelerator.device
+        # device = accelerator.device
+        torch.cuda.set_device(0)
+        device = torch.device("cuda")
 
         img_size = 512
         # 1024/4=256
@@ -1123,13 +1110,14 @@ if __name__ == "__main__":
             8,
             patch_size=4,
             act_checkpoint=False,
-            attn_type="lite_mla",
+            attn_type="none",
             norm_type="gn",
             norm_groups=32,
-            block_name="dico_block",
+            block_name="res_block",
             hidden_factor=2,
             downsample_manually_pad=True,
             resample_norm_keep=False,
+            conv_in_module="resnet",
         )
         decoder = Decoder(
             [4, 8, 16, 24],
@@ -1144,27 +1132,28 @@ if __name__ == "__main__":
             patch_size=4,
             act_checkpoint=False,
             moe_type="tc+ec",
-            attn_type="lite_mla",
+            attn_type="none",
             norm_type="gn",
             norm_groups=32,
-            block_name="dico_block",
+            block_name="res_block",
             hidden_factor=2,
             resample_norm_keep=False,
+            conv_out_module="resnet",
         )
         dtype = torch.bfloat16
         encoder = encoder.to(device, dtype)
         decoder = decoder.to(device, dtype)
 
-        optimizer = torch.optim.AdamW(
+        optimizer = torch.optim.Adam(
             [*encoder.parameters(), *decoder.parameters()],
             lr=1e-4,
         )
 
         for _ in range(200):
-            bs = 8
+            bs = 4
             # img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype).clip(-1,1)
             x = (
-                torch.randint(0, 255, (bs, 8, 256, 256), dtype=torch.float32).to(
+                torch.randint(0, 255, (bs, 8, 512, 512), dtype=torch.float32).to(
                     device, dtype
                 )
                 / 255.0

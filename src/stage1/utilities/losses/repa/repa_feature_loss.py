@@ -1,12 +1,13 @@
 import math
 import warnings
 from functools import partial
-from typing import Literal
+from typing import Literal, override
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState
+from einops import rearrange
 from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
@@ -85,7 +86,7 @@ class REPALoss(torch.nn.Module):
         c_dim_first=False,
         build_proj=False,
         img_is_neg1_1=True,
-        rgb_channels: list | Literal["random"] | str = None,
+        rgb_channels: list | Literal["random"] | str | None = None,
         img_resize: Literal["dino"] | tuple | None = "dino",
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
@@ -146,7 +147,7 @@ class REPALoss(torch.nn.Module):
                 is_1d=not c_dim_first,
             )
             logger.warning(
-                "build repa loss in loss class, remembe to optimize the projector, "
+                "build repa loss in loss class, remember to optimize the projector, "
                 "or match to repa dim in model forward"
             )
         else:
@@ -324,6 +325,114 @@ class REPALoss(torch.nn.Module):
             return self.projector.parameters()
         else:
             return []
+
+
+class VFLoss(REPALoss):
+    def __init__(
+        self,
+        distmat_margin: float,
+        cos_margin: float,
+        distmat_weight: float = 1.0,
+        cos_weight: float = 1.0,
+        c_dim_first=False,
+        build_proj=False,
+        img_is_neg1_1=True,
+        rgb_channels: list | Literal["random"] | str | None = None,
+        img_resize: Literal["dino"] | tuple | None = "dino",
+        dino_fixed_bs: int | None = None,
+        dino_img_size: int = 224,
+        vf_weight: float = 100.0,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        """
+        visual foundation model loss for tokenizer feature alignment.
+        """
+
+        super().__init__(
+            c_dim_first,
+            build_proj,
+            img_is_neg1_1,
+            rgb_channels,
+            img_resize,
+            dino_fixed_bs,
+            dino_img_size,
+            dtype,
+        )
+        self.distmat_margin = distmat_margin
+        self.cos_margin = cos_margin
+        self.distmat_weight = distmat_weight
+        self.cos_weight = cos_weight
+        self.vf_weight = vf_weight
+
+    def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
+        vf_weight = self.vf_weight
+
+        if last_layer is not None:
+            nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
+            vf_grads = torch.autograd.grad(vf_loss, last_layer, retain_graph=True)[0]
+
+            vf_weight = torch.norm(nll_grads) / (torch.norm(vf_grads) + 1e-4)
+            vf_weight = torch.clamp(vf_weight, 0.0, 1e8).detach()
+            vf_weight = vf_weight * self.vf_weight
+
+        return vf_weight
+
+    def vf_loss(self, z: Tensor, aux_feature: Tensor):
+        z_flat = rearrange(z, "b c h w -> b c (h w)")
+        aux_feature_flat = rearrange(aux_feature, "b c h w -> b c (h w)")
+        z_norm = torch.nn.functional.normalize(z_flat, dim=1)
+        aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
+        z_cos_sim = torch.einsum("bci,bcj->bij", z_norm, z_norm)
+        aux_feature_cos_sim = torch.einsum(
+            "bci,bcj->bij", aux_feature_norm, aux_feature_norm
+        )
+        diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
+        vf_loss_1 = torch.nn.functional.relu(diff - self.distmat_margin).mean()
+        vf_loss_2 = torch.nn.functional.relu(
+            1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, z)
+        ).mean()
+        vf_loss = vf_loss_1 * self.distmat_weight + vf_loss_2 * self.cos_weight
+
+        return vf_loss
+
+    def forward(self, z, nll_loss=None, last_layer=None):
+        """
+        Forward pass for the visual foundation model loss.
+
+        Args:
+            z (Tensor): The main feature tensor.
+            aux_feature (Tensor): The auxiliary feature tensor.
+            nll_loss (Tensor, optional): The negative log-likelihood loss. Defaults to None.
+            last_layer (Tensor, optional): The last layer of the model for gradient calculation. Defaults to None.
+
+        Returns:
+            Tensor: The computed VF loss.
+        """
+        # encode
+        aux_feature = self._encode_img(img).detach()
+
+        # iterpolate features
+        _tgt_sz = z.shape[-2:] if self.c_dim_first else z.shape[-2]
+        aux_feature = self.interp_feat(aux_feature, _tgt_sz)
+
+        z = self.projector(z)
+        assert z.shape == aux_feature.shape, (
+            "z and aux_feature must have the same shape to compute the repa loss"
+        )
+
+        # loss
+        vf_loss = self.vf_loss(z, aux_feature)
+
+        # weighted
+        if nll_loss is not None and last_layer is not None:
+            vf_weight = (
+                self.calculate_adaptive_weight_vf(nll_loss, vf_loss, last_layer)
+                * self.vf_weight
+            )
+        else:
+            vf_weight = 1.0 * self.vf_weight
+
+        return vf_loss * vf_weight
 
 
 if __name__ == "__main__":

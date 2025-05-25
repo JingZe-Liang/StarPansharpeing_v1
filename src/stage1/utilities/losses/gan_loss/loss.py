@@ -98,14 +98,6 @@ def vanilla_d_loss(logits_real, logits_fake):
     return d_loss
 
 
-def hinge_g_loss(logits_fake):
-    return -torch.mean(logits_fake)
-
-
-def vanilla_g_loss(logits_fake):
-    return torch.mean(F.softplus(-logits_fake))
-
-
 def _sigmoid_cross_entropy_with_logits(labels, logits):
     """
     non-saturating loss
@@ -257,7 +249,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             "stylegan3d",
         ]
         if force_not_use_recon_loss:
-            assert reconstruction_loss_type in ["l1", "l2", "dwt"]
+            assert reconstruction_loss_type in ["l1", "mse", "dwt"]
 
         # state
         self.device = PartialState().device
@@ -871,6 +863,27 @@ class VQLPIPSWithDiscriminator(nn.Module):
             ssim_loss = self.zero
 
         return dict(recon_loss=recon_loss, ssim_loss=ssim_loss)
+
+    def vf_loss(z, aux_feature):
+        assert z is not None, "z is None"
+        assert aux_feature is not None, "aux_feature is None"
+
+        z_flat = rearrange(z, "b c h w -> b c (h w)")
+        aux_feature_flat = rearrange(aux_feature, "b c h w -> b c (h w)")
+        z_norm = torch.nn.functional.normalize(z_flat, dim=1)
+        aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
+        z_cos_sim = torch.einsum("bci,bcj->bij", z_norm, z_norm)
+        aux_feature_cos_sim = torch.einsum(
+            "bci,bcj->bij", aux_feature_norm, aux_feature_norm
+        )
+        diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
+        vf_loss_1 = torch.nn.functional.relu(diff - self.distmat_margin).mean()
+        vf_loss_2 = torch.nn.functional.relu(
+            1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, z)
+        ).mean()
+        vf_loss = vf_loss_1 * self.distmat_weight + vf_loss_2 * self.cos_weight
+
+        return vf_loss
 
     def gen_loss(
         self,
