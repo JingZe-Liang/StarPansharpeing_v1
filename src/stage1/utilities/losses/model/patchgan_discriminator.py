@@ -285,25 +285,24 @@ class NLayerDiscriminator(nn.Module):
 
 if __name__ == "__main__":
     ## patch gan
-    net = NLayerDiscriminator(
-        input_nc=[3, 4, 8], ndf=64, n_layers=3, use_actnorm=False
-    ).cuda()
+    net = NLayerDiscriminator(input_nc=[3, 4, 8], ndf=64, n_layers=3, use_actnorm=False)
     print(net)
 
     import accelerate
     import torch
 
-    accelerator = accelerate.Accelerator()
-    torch.cuda.set_device(1)
-    net = accelerator.prepare(net)
+    # accelerator = accelerate.Accelerator()
+    # torch.cuda.set_device(1)
+    # net = accelerator.prepare(net)
 
-    x = torch.randn(1, 3, 256, 256).cuda()
+    x = torch.randn(1, 3, 256, 256)
     y = net(x)
-    accelerator.backward(y.mean())
+    print(y.shape)
+    # accelerator.backward(y.mean())
 
-    x = torch.randn(1, 3, 256, 256).cuda()
-    y = net(x)
-    accelerator.backward(y.mean())
+    # x = torch.randn(1, 3, 256, 256).cuda()
+    # y = net(x)
+    # accelerator.backward(y.mean())
 
-    for name, param in net.named_parameters():
-        print(name, param.grad.shape)
+    # for name, param in net.named_parameters():
+    #     print(name, param.grad.shape)

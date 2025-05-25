@@ -138,12 +138,16 @@ class FusionNet(nn.Module):
             log_print("[Fusionet]: construct the regression head")
 
     def forward(self, x, y):  # x= lms; y = pan
-        pan_concat = y.repeat(1, self.spectral_num, 1, 1)
-        input = torch.sub(pan_concat, x)
+        # for the image space input
+        # pan_concat = y.repeat(1, self.spectral_num, 1, 1)
+        # input = torch.sub(pan_concat, x)
+
+        # for the latent space input
+        pan = y
+        input = torch.sub(pan, x)
+
         rs = self.relu(self.conv1(input))
-
         rs = self.backbone(rs)  # ResNet's backbone!
-
         output = self.head(rs)
 
         if self.is_classifier:  # (bs, 2, c, h, w)
@@ -154,3 +158,14 @@ class FusionNet(nn.Module):
         else:  # (bs, c, h, w)
             # regression head, add the input
             return output + x
+
+
+if __name__ == "__main__":
+    # Test the FusionNet class
+    model = FusionNet(spectral_num=16, channel=32, is_classifier=False)
+
+    x = torch.randn(1, 16, 64, 64)  # Example input latent
+    y = torch.randn(1, 16, 64, 64)  # Example input pan
+
+    fused = model(x, y)
+    print(fused.shape)  # Should be (1, 16, 64, 64)

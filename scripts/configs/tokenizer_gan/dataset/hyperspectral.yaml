@@ -145,9 +145,9 @@ val_loader:
   paths: ${dataset.wds_path_val}
   basic_kwargs:
     batch_size: ${dataset.batch_size_val}
-    num_workers: ${dataset.num_workers}
-    prefetch_factor: ${dataset.prefetch_factor}
-    shuffle_within_workers: ${dataset.shuffle_within_workers}
+    num_workers: 0 #${dataset.num_workers}
+    prefetch_factor: null #${dataset.prefetch_factor}
+    shuffle_within_workers: false #${dataset.shuffle_within_workers}
     resample: true
     check_channels: false
     # channels: 8

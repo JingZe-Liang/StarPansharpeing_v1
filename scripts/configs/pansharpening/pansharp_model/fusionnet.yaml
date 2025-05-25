@@ -1,3 +1,3 @@
 _target_: src.stage2.pansharpening.models.fusionnet.FusionNet
 spectral_num: ${tokenizer.z_channels}
-channel: 64 # original 32
+channel: 32 # original 32

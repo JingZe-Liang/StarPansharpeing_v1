@@ -19,11 +19,11 @@ encoder: Default
 decoder: Default
 act_checkpoint: true
 norm_in_quant_conv: false
-# enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
-# dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
-uni_tokenizer_path: "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors"
+uni_tokenizer_path: "runs/stage1_cosmos/2025-05-22_23-21-47_cosmos_pretrained_f8c16p4_MMSeg_YREB/ema/tokenizer/model.safetensors"
 wrap_fsdp_last_layer: false
 quantizer_type: null
 loading_type: pretrained
 hook_for_repa: false
 force_not_attn: True
+block_name: dico_block
+hidden_factor: 2

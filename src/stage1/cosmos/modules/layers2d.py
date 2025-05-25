@@ -129,6 +129,9 @@ class DownsamplePadConv(nn.Module):
         norm_type: Optional[str] = None,
         norm_keep: bool = False,
     ):
+        # Zihan NOTE: using pad (left and right) align the center of the pixel when downsampling
+        # but (may?) cause the boundary artifact when upsampling
+
         super().__init__()
         self.padding_mode = padding_mode
         self.padding_in_conv = padding_in_conv
@@ -152,7 +155,8 @@ class DownsamplePadConv(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # LDM VAE also use the unsymmetric padding
         if not self.padding_in_conv:  # cosmos manually pad
-            pad = (0, 1, 0, 1)
+            # to align on the center of the downsampled image pixels
+            pad = (0, 1, 0, 1)  # lower and righter pads, why? inductive bias?
             if self.padding_mode not in ("constant", "zeros"):
                 x = F.pad(x, pad, mode=self.padding_mode)
             else:

@@ -27,7 +27,7 @@ ema:
 
 train:
   tokenizer_name: cosmos_f8c16p4
-  base_model_pretrained_path: # tokenizer base model loading
+  base_model_pretrained_path: runs/stage1_cosmos/2025-05-22_23-21-47_cosmos_pretrained_f8c16p4_MMSeg_YREB/ema/tokenizer/model.safetensors # tokenizer base model loading
   peft_pretrained_path: # tokenizer peft model loading
   seperate_enc_dec: false
   online_tokenize: false
@@ -56,7 +56,7 @@ train:
     lr: 4.0e-4
     eps: 1.0e-8
     foreach: true
-    betas: [0.8, 0.95]
+    # betas: [0.8, 0.95]
 
   pansharp_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

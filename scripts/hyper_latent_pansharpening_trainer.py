@@ -1,3 +1,4 @@
+import sys
 import time
 from contextlib import nullcontext
 from functools import partial
@@ -26,7 +27,6 @@ from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
 
 colored_traceback.add_hook()
-
 
 # from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
@@ -557,12 +557,14 @@ class PansharpeningTrainer:
                     recon = to_dec(x)  # x is the latent
             else:
                 to_enc = lambda img: self.tokenizer.encode(img)
-                to_dec = lambda latent: self.tokenizer.decode(latent)
+                to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
 
                 if mode == "encode":
                     latent = to_enc(x)
                 elif mode == "decode":
-                    recon = to_dec(x)
+                    # _dummy_img_sz = torch.tensor(x.shape[-2:]) * self.tokenizer_cfg.spatial_compression
+                    _bc = [x.shape[0], self.dataset_cfg.consts.bands]
+                    recon = to_dec(x, _bc)
                     if isinstance(recon, tuple):
                         recon = recon[0]
 
@@ -636,10 +638,8 @@ class PansharpeningTrainer:
             sr_latent = sr_tok_out["latent"].detach()
 
         with self.accelerator.autocast():
-            pred_latent = self.pansp_model(
-                lrms_latent,
-                pan_latent,
-            )
+            # import ipdb; ipdb.set_trace()
+            pred_latent = self.pansp_model(lrms_latent, pan_latent)
             sr_loss = self.pansp_loss(pred_latent, sr_latent)
 
             # loss
@@ -740,7 +740,7 @@ class PansharpeningTrainer:
             _log_tok_losses = self.format_log(train_out["sr_log_losses"])
 
             self.log_msg(
-                f"[Train State]: lr {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
+                f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")

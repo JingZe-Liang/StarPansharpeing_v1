@@ -135,7 +135,11 @@ def merge_modalities(
             multi_tar_urls = [multi_tar_urls]
         elif len(modality_names) == 1:
             # Brace expand doesn't work with a single entry, e.g. shard_dir/[foo]/shard00000.tar
-            multi_tar_urls = [multi_tar_urls.replace("{", "").replace("}", "")]
+            multi_tar_urls = [multi_tar_urls.replace("{", "", 1).replace("}", "", 1)]
+            multi_tar_urls = [
+                list(braceexpand.braceexpand(tar_url)) for tar_url in multi_tar_urls
+            ]
+            multi_tar_urls = sum(multi_tar_urls, [])  # Flatten the list
         else:
             # Remaining cases where multiple modalities are specified, e.g. shard_dir/[foo,bar]/shard00000.tar
             multi_tar_urls = list(braceexpand.braceexpand(multi_tar_urls))

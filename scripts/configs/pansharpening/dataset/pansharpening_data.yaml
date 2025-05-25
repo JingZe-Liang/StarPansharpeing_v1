@@ -2,8 +2,8 @@ cfgs:
   used: MMSeg_YREB
   batch_size_train: 32
   batch_size_val: 32
-  num_workers: 2
-  prefetch_factor: 6
+  num_workers: 1
+  prefetch_factor: null
   train_name: ${dataset.cfgs.used}_train
   val_name: ${dataset.cfgs.used}_val
 

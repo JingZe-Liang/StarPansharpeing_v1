@@ -733,7 +733,7 @@ def process_dataset(cfg: DictConfig) -> None:
     log_print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Determine device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     log_print(f"Using device: {device}")
 
     # 1. Instantiate components based on config
@@ -743,7 +743,7 @@ def process_dataset(cfg: DictConfig) -> None:
         sensor=cfg.processor.sensor,
         nbands=cfg.processor.nbands,  # Get nbands from data config
         pan_weight_lst=(
-            OmegaConf.to_container(cfg.processor.pan_weights)
+            OmegaConf.to_container(cfg.processor.pan_weights)  # type: ignore
             if not isinstance(cfg.processor.pan_weights, str)
             else cfg.processor.pan_weights
         ),  # Convert to list
@@ -858,15 +858,10 @@ def process_dataset(cfg: DictConfig) -> None:
                     sample_data, processor.latent_save_backend
                 )
 
-                # if output_sink is None:
-                #     output_sink = sinks[name] = wds.TarWriter(tar_path)
-                #     log_print(f"Writing to {tar_path}")
-
                 assert pansharp_sample is not None, "Pansharpening sample is None"
                 assert latent_sample is not None, "Latent sample is None"
 
                 if sample_data:  # Check if the dictionary is not empty
-                    # output_sink.write(sample_data)
                     pansharp_sink.write(pansharp_sample)
                     latent_sink.write(latent_sample)
 
@@ -890,9 +885,6 @@ def process_dataset(cfg: DictConfig) -> None:
             )
 
     # close all sinks
-    # for sink in sinks.values():
-    #     sink.close()
-    #     print("Closed all TAR writters")
     sink_manager.close_all()
 
     log_print(

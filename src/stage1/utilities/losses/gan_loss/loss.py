@@ -299,8 +299,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 codebook_enlarge_ratio=3,
                 codebook_enlarge_steps=2000,
             )
+
         elif quantizer_type == "vq_advance":
             default_quant_opts = dict(quantizer_loss_weight=0.1)
+        # TODO: add ibq here
+        elif quantizer_type == "ibq":
+            raise NotImplementedError("ibq loss is not implemented")
         elif quantizer_type in ("bsq", "lfq"):
             default_quant_opts = dict(
                 quantizer_loss_weight=0.1,

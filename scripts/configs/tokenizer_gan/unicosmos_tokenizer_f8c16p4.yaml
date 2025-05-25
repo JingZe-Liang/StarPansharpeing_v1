@@ -136,22 +136,28 @@ train:
     adamw_eps: 1.0e-8
 
   tokenizer_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+    # num_training_steps: ${train.max_steps}
+    # num_cycles: 1
+    # reduced_factor: 2
+    # min_lr: 1.0e-5
+    _target_: transformers.optimization.get_constant_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 1000
-    num_training_steps: ${train.max_steps}
-    num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
 
   disc_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+    # num_training_steps: ${train.max_steps}
+    # num_cycles: 1
+    # reduced_factor: 2
+    # min_lr: 1.0e-5
+    _target_: transformers.optimization.get_constant_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 1000
-    num_training_steps: ${train.max_steps}
-    num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
 
   log:
     run_comment: cosmos_f8c16p4_uniconv_resblock_resample_norm_in_dense_model

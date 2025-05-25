@@ -484,7 +484,7 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             assert torch.is_tensor(z), "z should be the (quantized) latent"
 
-        dec = self.decoder(z, inp_shape[1])
+        dec = self.decoder(z, inp_shape[1])  # [b, c, h, w]
 
         if self.quantizer_type is not None:
             return dec, q_loss, loss_breakdown
@@ -782,10 +782,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": [3, 12, 32, 8, 13, 50, 4],
+        "in_channels": 12,
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": [3, 12, 32, 8, 13, 50, 4],
+        "out_channels": 12,
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -804,6 +804,7 @@ if __name__ == "__main__":
         ## dense type
         # "uni_tokenizer_path": "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
         "hook_for_repa": False,
+        "block_name": "dico_block",
         "quantizer_type": None,
         "loading_type": "pretrained",
         "force_not_attn": True,
@@ -823,7 +824,7 @@ if __name__ == "__main__":
         "resample_norm_type": "gn",
         "downsample_manually_pad": False,
     }
-    torch.cuda.set_device(2)
+    torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
 

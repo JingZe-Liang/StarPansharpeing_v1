@@ -30,7 +30,7 @@ processor:
   ratio: 4
   sensor: MMSeg_YREB
   pan_weights: mean # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
-  downsample_type: avgpool
+  downsample_type: interpolate_bicubic
   nbands: ${total_bands_of_sensors.${processor.sensor}}
 
 consts:

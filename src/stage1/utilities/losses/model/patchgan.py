@@ -161,3 +161,9 @@ class PatchGANDiscriminator(nn.Module):
 
     def forward(self, input):
         return self.network(input)
+
+
+if __name__ == "__main__":
+    disc = PatchGANDiscriminator(n_layers=5)
+    x = torch.randn(1, 3, 256, 256)
+    print(disc(x).shape)
