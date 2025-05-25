@@ -58,9 +58,10 @@ class LIPIPSHyperpspectral(nn.Module):
         self,
         model_type: Literal[
             "vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"
-        ],
+        ]
+        | str,
         group_size: int = 3,
-        num_groups_to_select: int | None = None,
+        num_groups_to_select: int | float | None = None,
         padding_mode: Literal["zero", "repeat"] = "zero",
         compute_on_logits: bool = True,
         img_is_neg1_to_1: bool = True,

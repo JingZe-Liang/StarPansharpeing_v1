@@ -57,6 +57,12 @@ We are cooking the codes, stay tuned.
 
 ## Logs
 
+2025/05/25
+> 1. Only convolution layers of tokenizer will make the norm and the max value of layers to be larger. **Add Attention or LiteMLA will fix this issue**.
+> This issue happens not only in cosmos tokenizer but also in LDM AutoencoderKL.
+
+- [ ] Try to find if add attention will fix the diffbands input low quality reconstrution.
+
 2025/05/21
 
 > 1. MoE tokenizer does not work well using triton RMS norm (**may due to the gn?**)

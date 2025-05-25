@@ -801,7 +801,7 @@ class CosmosHyperspectralTokenizerTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
-                if "get_moun_optimizer" in optimizer_cfg._target_:
+                if "get_muon_optimizer" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)

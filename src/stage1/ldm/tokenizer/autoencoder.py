@@ -12,7 +12,7 @@ from transformers.activations import ACT2FN
 
 from src.utilities.logging import log_print
 
-compile_forward_fn = True
+compile_forward_fn = False
 if compile_forward_fn:
     _compile_decorator = torch.compile
     log_print("will compile the forward function", "debug")
@@ -742,7 +742,7 @@ class Encoder(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
-                # print(f"[encoder] - h norm {h.norm()}, h max {h.abs().max()}")
+                print(f"[encoder] - h norm {h.norm()}, h max {h.abs().max()}")
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
@@ -883,7 +883,7 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h, temb)
-                # print(f"[decoder] - h norm {h.norm()}, h max {h.abs().max()}")
+                print(f"[decoder] - h norm {h.norm()}, h max {h.abs().max()}")
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
@@ -1028,23 +1028,30 @@ if __name__ == "__main__":
         "in_channels": [3, 4, 8],
         "out_ch": [3, 4, 8],
         "ch": 128,
-        "ch_mult": [1, 2, 2, 4],
+        "ch_mult": [2, 2, 4],
         "num_res_blocks": 2,
         "attn_resolutions": [16],
         "dropout": 0.0,
-        "block_type": "dico_block",
-        "attn_type": "none",
+        "block_type": "res_block",
+        "attn_type": "vanilla",
     }
-    model = AutoencoderKL(embed_dim=32, ddconfig=dd_config).cuda()
+    dtype = torch.bfloat16
+    model = AutoencoderKL(embed_dim=32, ddconfig=dd_config).cuda().to(dtype)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # Simple training loop
     num_steps = 100
-    batch_size = 2
+    batch_size = 8
 
     for step in range(num_steps):
         # Create random input
-        x = torch.randn(batch_size, 3, 256, 256).cuda()
+        # x = torch.randn(batch_size, 3, 256, 256).cuda().clip(-1,1)
+        x = (
+            torch.randint(0, 255, (batch_size, 3, 256, 256), dtype=torch.float32).cuda()
+            / 255.0
+        )
+        x = x * 2 - 1
+        x = x.clip(-1, 1).to(dtype)
 
         # Forward pass
         optimizer.zero_grad()
@@ -1063,8 +1070,8 @@ if __name__ == "__main__":
 
         # Print stats
         print(f"Step {step}, Loss: {loss.item():.6f}")
-        print(f"Z shape: {z[0].shape if isinstance(z, tuple) else z.shape}")
-        print(f"Reconstruction shape: {x_recon.shape}")
+        # print(f"Z shape: {z[0].shape if isinstance(z, tuple) else z.shape}")
+        # print(f"Reconstruction shape: {x_recon.shape}")
         # print(
         #     f"Gradient norm: {sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None):.6f}"
         # )

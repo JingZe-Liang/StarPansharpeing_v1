@@ -7,13 +7,13 @@ sys.path.append(__file__[: __file__.find("scripts")])
 from src.stage1.sana_dcae.models.efficientvit.dc_ae import (
     DCAE,
     dc_ae_f8c16,
-    dc_ae_f16c16,
     dc_ae_f8c16_pure_conv,
+    dc_ae_f16c16,
     dc_ae_f16c16_pure_conv,
     dc_ae_f32c32,
     dc_ae_f64c128,
 )
-from src.utilities.optim import get_moun_optimizer
+from src.utilities.optim import get_muon_optimizer
 
 # model
 extra_cfg = OmegaConf.create(
@@ -44,7 +44,7 @@ extra_cfg = OmegaConf.create(
 cfg = dc_ae_f16c16(name="dc-ae-f16c16", extra=extra_cfg, pretrained_path=None)
 model = DCAE(cfg).cuda(1)
 
-opt = get_moun_optimizer(
+opt = get_muon_optimizer(
     model.named_parameters(),
     lr=1e-3,
     weight_decay=0.1,

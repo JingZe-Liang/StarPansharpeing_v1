@@ -7,19 +7,20 @@ https://github.com/NVIDIA/Megatron-LM/pull/1428/files/f432fbe45c169aeb5a0805ff6f
 
 import math
 from typing import Iterable
-from .utils import to_local, to_dist
 
 import torch
-from torch.distributed.tensor import DTensor
 from loguru import logger
+from torch.distributed.tensor import DTensor
+
+from .utils import to_dist, to_local
 
 try:
     from flash_muon_cuda import matmul_transpose_assign
 
-    _flash_moun_cuda_available = True
+    _flash_muon_cuda_available = True
 except ImportError:
     __url = "https://github.com/nil0x9/flash-muon"
-    _flash_moun_cuda_available = False
+    _flash_muon_cuda_available = False
     print(
         "Flash-Muon-CUDA not installed, "
         f"please install it from {__url} if you want to use the cuda kernel ns optimization"
@@ -142,7 +143,7 @@ class Muon(torch.optim.Optimizer):
             ns_steps=ns_steps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
-            use_cuda_kernel=use_cuda_kernel and _flash_moun_cuda_available,
+            use_cuda_kernel=use_cuda_kernel and _flash_muon_cuda_available,
         )
 
         params = list(muon_params)

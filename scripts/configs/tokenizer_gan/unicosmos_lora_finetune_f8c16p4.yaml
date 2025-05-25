@@ -125,14 +125,14 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_moun_optimizer
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
     lr: 2.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_moun_optimizer
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
     lr: 2.0e-4
     weight_decay: 0.1

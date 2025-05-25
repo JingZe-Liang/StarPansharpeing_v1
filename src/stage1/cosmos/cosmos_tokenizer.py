@@ -10,7 +10,7 @@ import torch
 from torch import Tensor, nn
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.modules.layers2d import Encoder, Decoder
+from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
 from src.stage1.cosmos.modules.utils import Normalize
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.stage1.discretization.collections.kl_continuous import (
@@ -782,10 +782,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 12,
+        "in_channels": 32,
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 12,
+        "out_channels": 32,
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -797,12 +797,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        # "enc_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/encoder.jit",
-        # "dec_path": "src/stage1/cosmos/pretrained/Cosmos-0.1-Tokenizer-CI16x16/decoder.jit",
-        ## diffbands type
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-24_01-37-24_cosmos_f8c16p4_uniconv_in_dense_model_no_repa/ema/tokenizer/model.safetensors",
-        ## dense type
-        # "uni_tokenizer_path": "runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-23_13-41-39_cosmos_pretrained_f8c16p4_OHS/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "dico_block",
         "quantizer_type": None,
@@ -810,19 +805,10 @@ if __name__ == "__main__":
         "force_not_attn": True,
         "enc_moe": False,
         "dec_moe": False,
-        # "downsample_type": "Conv",
-        # "downsample_shortcut": "averaging",
-        # "upsample_type": "RepeatConv",
-        # "upsample_shortcut": "duplicating",
-        "padding_mode": "reflect",
-        "block_name": "res_block",
+        "padding_mode": "zeros",
         "norm_type": "gn",
         "norm_groups": 32,
-        "downsample_mode": "reflect",
-        "downsample_type": "PadConv",
-        "upsample_type": "RepeatConv",
         "resample_norm_type": "gn",
-        "downsample_manually_pad": False,
     }
     torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
@@ -837,16 +823,16 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="DCF")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="OHS")
     dl_iter = iter(dl)
     tokenizer = tokenizer.eval()
 
     # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
     # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
-    # from src.utilities.optim import get_moun_optimizer
+    # from src.utilities.optim import get_muon_optimizer
 
-    # opt = get_moun_optimizer(
+    # opt = get_muon_optimizer(
     #     tokenizer.named_parameters(),
     #     lr=1e-4,
     #     weight_decay=0.1,
