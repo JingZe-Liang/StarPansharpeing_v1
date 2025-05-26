@@ -1,7 +1,7 @@
 import math
 import warnings
 from functools import partial
-from typing import Literal, override
+from typing import Literal, Sequence, override
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,7 @@ warnings.filterwarnings(
 )
 
 
-def interpolate_features_2d(x: Tensor, tgt_size: tuple[int]):
+def interpolate_features_2d(x: Tensor, tgt_size: tuple[int] | torch.Size):
     B, D, H, W = x.shape
     H_tgt, W_tgt = tgt_size
 
@@ -106,7 +106,7 @@ class REPALoss(torch.nn.Module):
         super().__init__()
         self.rgb_channels = rgb_channels
         self.img_resize = img_resize
-        if isinstance(img_resize, (tuple, list)):
+        if isinstance(img_resize, Sequence):
             assert img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0, (
                 "img_size[0] must be divisible by patch size"
             )
@@ -124,7 +124,10 @@ class REPALoss(torch.nn.Module):
                 )
 
         # encoder
-        self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+        # ! download in local of dino weights
+        self.repa_encoder: nn.Module = torch.hub.load(
+            "facebookresearch/dinov2", "dinov2_vitb14"
+        )  # type: ignore
         self.repa_encoder.image_size = dino_img_size
         self.repa_encoder = self.repa_encoder.to(dtype)
 
@@ -281,7 +284,7 @@ class REPALoss(torch.nn.Module):
         model_feat = self.interp_feat(model_feat, _tgt_sz)
 
         # 2. dino feature -> Featup -> model feature
-        # TODO: use featup to upsampel the dino feature into (high-resolution) model (or says)
+        # TODO: use featup to upsample the dino feature into (high-resolution) model (or says)
         # tokenizer feature
 
         # flatten the model feature
@@ -303,7 +306,13 @@ class REPALoss(torch.nn.Module):
         return repa_loss.mean()
 
     def _to_dtensor(self, img: Tensor):
-        if AcceleratorState().is_fsdp2:
+        to_dt = False
+        try:
+            to_dt = AcceleratorState().is_fsdp2
+        except:
+            pass
+
+        if to_dt:
             dm = self.repa_encoder.patch_embed.proj.weight.device_mesh
             img = DTensor.from_local(img, dm, placements=(Shard(0),))
 
@@ -341,8 +350,8 @@ class VFLoss(REPALoss):
         img_resize: Literal["dino"] | tuple | None = "dino",
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
-        vf_weight: float = 100.0,
         dtype: torch.dtype = torch.bfloat16,
+        vf_weight: float = 100.0,
     ):
         """
         visual foundation model loss for tokenizer feature alignment.
@@ -367,13 +376,15 @@ class VFLoss(REPALoss):
     def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
         vf_weight = self.vf_weight
 
-        if last_layer is not None:
+        if last_layer is not None and nll_loss is not None:
             nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
             vf_grads = torch.autograd.grad(vf_loss, last_layer, retain_graph=True)[0]
 
             vf_weight = torch.norm(nll_grads) / (torch.norm(vf_grads) + 1e-4)
             vf_weight = torch.clamp(vf_weight, 0.0, 1e8).detach()
             vf_weight = vf_weight * self.vf_weight
+        else:
+            vf_weight = self.vf_weight
 
         return vf_weight
 
@@ -395,7 +406,7 @@ class VFLoss(REPALoss):
 
         return vf_loss
 
-    def forward(self, z, nll_loss=None, last_layer=None):
+    def forward(self, z, img, nll_loss=None, last_layer=None):
         """
         Forward pass for the visual foundation model loss.
 
@@ -424,21 +435,39 @@ class VFLoss(REPALoss):
         vf_loss = self.vf_loss(z, aux_feature)
 
         # weighted
-        if nll_loss is not None and last_layer is not None:
-            vf_weight = (
-                self.calculate_adaptive_weight_vf(nll_loss, vf_loss, last_layer)
-                * self.vf_weight
-            )
-        else:
-            vf_weight = 1.0 * self.vf_weight
+        vf_weight = self.calculate_adaptive_weight_vf(nll_loss, vf_loss, last_layer)
 
         return vf_loss * vf_weight
 
 
 if __name__ == "__main__":
     # Example usage
-    loss_fn = REPALoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True).cuda()
-    img = torch.randn(2, 3, 224, 224).cuda()
-    features = torch.randn(2, 768, 28, 28).cuda()
-    loss = loss_fn(img, features)
-    print("Loss:", loss.item())
+    # loss_fn = REPALoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True).cuda()
+    # img = torch.randn(2, 3, 224, 224).cuda()
+    # features = torch.randn(2, 768, 28, 28).cuda()
+    # loss = loss_fn(img, features)
+    # print("Loss:", loss.item())
+
+    loss_fn = (
+        VFLoss(
+            distmat_margin=0.1,
+            cos_margin=0.1,
+            distmat_weight=1.0,
+            cos_weight=1.0,
+            c_dim_first=True,
+            build_proj=False,
+            img_is_neg1_1=True,
+            rgb_channels="random",
+            img_resize="dino",
+            dino_fixed_bs=None,
+            dino_img_size=224,
+        )
+        .to(torch.bfloat16)
+        .cuda()
+    )
+    dtype = torch.bfloat16
+    img = torch.randn(2, 3, 224, 224).to(dtype).cuda()
+    z = torch.randn(2, 768, 32, 32).to(dtype).cuda()
+    with torch.autocast("cuda", dtype):
+        loss = loss_fn(z, img)
+    print("VFLoss:", loss.item())

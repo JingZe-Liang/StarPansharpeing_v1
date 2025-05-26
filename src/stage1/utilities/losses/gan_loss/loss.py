@@ -23,7 +23,7 @@ from ..model import (
     StyleGANDiscriminator,
     no_weight_gradients,
 )
-from ..repa import REPALoss
+from ..repa import REPALoss, VFLoss
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
 
 
@@ -231,6 +231,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # repa loss
         repa_loss_weight: float | None = None,
         repa_loss_options: dict = {},
+        # vf loss
+        vf_loss_weight: float | None = None,
+        vf_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
         ssim_weight: float = 0.1,
@@ -291,7 +294,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 codebook_enlarge_ratio=3,
                 codebook_enlarge_steps=2000,
             )
-
         elif quantizer_type == "vq_advance":
             default_quant_opts = dict(quantizer_loss_weight=0.1)
         # TODO: add ibq here
@@ -336,6 +338,17 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.repa_loss = REPALoss(**to_object(repa_loss_options)).cuda()
             logger.info(f"[repa loss]: {self.repa_loss}")
             logger.info(f"[vq loss]: repa loss used, weighted {self.repa_loss_weight}")
+
+        # * visual foudation loss
+        self.vf_loss_weight = vf_loss_weight
+        self.use_vf = False
+        if vf_loss_weight is not None and vf_loss_weight > 0:
+            self.use_vf = True
+            assert not self.use_repa, (
+                "repa loss and vf loss can not be used at the same time"
+            )
+            self.vf_loss = VFLoss(**to_object(vf_loss_options)).cuda()  # to device
+            logger.info(f"[vq loss]: vf loss used, weighted {self.vf_loss_weight}")
 
         # * LeCAM ema loss
         self.gen_loss_weight = gen_loss_weight

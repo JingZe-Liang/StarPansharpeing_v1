@@ -62,6 +62,12 @@ We are cooking the codes, stay tuned.
 > This issue happens not only in cosmos tokenizer but also in LDM AutoencoderKL.
 
 - [ ] Try to find if add attention will fix the diffbands input low quality reconstrution.
+> seems that the attention layer does not fix the large norm issue.
+
+1. use pixel(un)shuffle as downsample and upsample operators (No.2 runnning)
+2. just padconv and repeatconv as downsample and upsample operators (No. 6 running).
+3. use previous weight with resblock (w/o attention) can finetune good.
+
 
 2025/05/21
 

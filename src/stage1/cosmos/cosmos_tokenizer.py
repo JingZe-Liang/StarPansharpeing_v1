@@ -232,6 +232,8 @@ class ContinuousImageTokenizer(nn.Module):
     _hook_for_repa: bool = False
     _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _hook_feature: torch.Tensor | None = None
+    _proj_for_vf: bool = False
+    z: torch.Tensor | None = None  # the latent z
 
     def __init__(
         self,
@@ -245,9 +247,15 @@ class ContinuousImageTokenizer(nn.Module):
         kwargs: dict = kwargs_to_basic_types(kwargs)
 
         self._hook_for_repa = kwargs.pop("hook_for_repa", False)
+        self._proj_for_vf = kwargs.pop("proj_for_vf", False)
         self._hook_module = kwargs.pop("hook_module", self._hook_module)
+        assert not (self._hook_for_repa and self._proj_for_vf), (
+            "repa and vf losses should not be used at the same time"
+        )
         if self._hook_for_repa:
             self._repa_proj = build_mlp(512, 768, 768)
+        if self._proj_for_vf:
+            self._vf_proj = build_mlp(latent_channels, 768, 768)
 
         self.quantizer_type = kwargs.pop("quantizer_type", None)
         assert self.quantizer_type in [
@@ -433,8 +441,16 @@ class ContinuousImageTokenizer(nn.Module):
         # only one feature
         if hasattr(self, "_repa_proj"):
             return self._repa_proj(self._hook_feature)
-        else:
-            return None
+
+        return None
+
+    @torch.autocast("cuda", torch.bfloat16)
+    def get_vf_feature(self):
+        if hasattr(self, "_vf_proj"):
+            assert self.z is not None, "z should be set before get_vf_feature"
+            return self._vf_proj(self.z)
+
+        return None
 
     def get_last_layer(self):
         if not self.decoder.decoder._wrap_fsdp_last_layer:
@@ -448,14 +464,16 @@ class ContinuousImageTokenizer(nn.Module):
         if self.quantizer_type == "bsq":
             # here must be l2-normed
             h = nn.functional.normalize(h, dim=1)
+            self.z = h if hasattr(self, "_vf_proj") else None
 
             # TODO: bsq not supported channel drop
             self.quantizer: BSQ
-            dec, bsq_loss, loss_breakdown = self.quantizer(h)
+            hq, bsq_loss, loss_breakdown = self.quantizer(h)
 
-            return dec, bsq_loss, loss_breakdown
+            return hq, bsq_loss, loss_breakdown
 
         elif self.quantizer_type == "kl":
+            self.z = h if hasattr(self, "_vf_proj") else None
             m_, logvar_ = h.chunk(2, dim=1)
             posterior = self.quantizer((m_, logvar_))
             kl_loss = posterior.kl()
@@ -474,6 +492,8 @@ class ContinuousImageTokenizer(nn.Module):
 
         if self.use_channel_drop:
             h = self.channel_drop(h)
+
+        self.z = h if hasattr(self, "_vf_proj") else None  # save latent z for vf loss
 
         return h
 

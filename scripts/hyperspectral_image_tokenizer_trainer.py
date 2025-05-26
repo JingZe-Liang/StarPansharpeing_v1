@@ -948,6 +948,27 @@ class CosmosHyperspectralTokenizerTrainer:
             self.accelerator._models.pop(-1)
             self.accelerator._optimizers.pop(-1)
 
+        # vf loss
+        if self.vq_loss_fn.use_vf and self.accelerator.is_fsdp2:
+            self.log_msg("prepare vf encoder for FSDP2", level="WARNING")
+
+            self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = [
+                "NestedTensorBlock"
+            ]
+            self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
+            self.vq_loss_fn.repa_loss.repa_encoder, _ = self.accelerator.prepare(
+                self.vq_loss_fn.repa_loss.repa_encoder,
+                torch.optim.AdamW(
+                    self.vq_loss_fn.repa_loss.repa_encoder.parameters()
+                ),  # dummy optimizer
+            )
+            for p in self.vq_loss_fn.repa_loss.repa_encoder.parameters():
+                if isinstance(p, DTensor):
+                    p._local_tensor = p._local_tensor.to(self.device)
+
+            self.accelerator._models.pop(-1)
+            self.accelerator._optimizers.pop(-1)
+
     def step_train_state(self):
         self.train_state.update("train")
 
@@ -1024,6 +1045,13 @@ class CosmosHyperspectralTokenizerTrainer:
             repa_feature = _unwrap_tok.get_repa_feature()
             assert repa_feature is not None, "repa_feature is None"
             out_d["repa_feature"] = repa_feature
+
+        elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
+            _unwrap_tok, "_proj_vf", False
+        ):
+            vf_feature = _unwrap_tok.get_vf_feature()
+            assert vf_feature is not None, "vf_feature is None"
+            out_d["vf_feature"] = vf_feature
 
         return out_d
 

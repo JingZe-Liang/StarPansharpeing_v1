@@ -144,15 +144,8 @@ class DiffBandsInputConvIn(nn.Module):
                 kernel_size=kw,
                 stride=2,
                 padding=padw,
-                # padding_mode="replicate",
             )
 
-            # keep the modules has grad in FSDP, DDP training
-            # self.register_buffer(
-            #     f"buf_{c}",
-            #     torch.zeros(1, c, 3, 3),
-            #     persistent=False,
-            # )
             log_print(f"[Disc] set conv to hidden module and buffer for channel {c}")
         log_print(f"[Disc] diffbands input convs: {self.in_modules}")
 
@@ -168,12 +161,9 @@ class DiffBandsInputConvIn(nn.Module):
         if self.training:
             for c in self.band_lst:
                 if c != c_:
-                    # buf = getattr(self, f"buf_{c}")
-                    buf = torch.zeros(1, c, 3, 3, device=x.device, dtype=x.dtype)
                     m = self.in_modules["conv_in_{}".format(c)]
-                    no_use_h = m(buf)
-
-                    h = h + no_use_h.mean() * 0.0
+                    dummy_loss = sum(p.sum() * 0.0 for p in m.parameters())
+                    h = h + dummy_loss
 
         return h
 

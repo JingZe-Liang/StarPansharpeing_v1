@@ -51,12 +51,74 @@ def zeropower_via_newtonschulz5(G, steps: int):
         X = X.mT
 
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    eps = 1e-8  # 1e-7 as eps by default
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
     # Perform the NS iterations
     for _ in range(steps):
         A = X @ X.mT
         B = (
             b * A + c * A @ A
+        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        X = a * X + B @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
+
+
+@torch.compile
+def zeropower_via_newtonschulz6_diff_abc(G, steps: int = 6, norm=False):
+    """
+    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
+    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
+    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
+    zero even beyond the point where the iteration no longer converges all the way to one everywhere
+    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
+    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
+    performance at all relative to UV^T, where USV^T = G is the SVD.
+    """
+
+    assert (
+        G.ndim >= 2
+    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+
+    # Different steps use different a, b, c: https://kexue.fm/archives/10922
+    # abc_s = torch.tensor([
+    #     (3955, -8306, 5008),
+    #     (3735, -6681, 3463),
+    #     (3799, -6499, 3211),
+    #     (4019, -6385, 2906),
+    #     (2677, -3029, 1162),
+    #     (2172, -1833, 682),
+    # ]) / 1024
+
+    abc_s = [
+        [3.86230469, -8.11132812, 4.89062500],
+        [3.64746094, -6.52441406, 3.38183594],
+        [3.70996094, -6.34667969, 3.13574219],
+        [3.92480469, -6.23535156, 2.83789062],
+        [2.61425781, -2.95800781, 1.13476562],
+        [2.12109375, -1.79003906, 0.66601562],
+    ]
+
+    # a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.bfloat16()
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    eps = 1e-8  # 1e-7 as eps by default
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    # Perform the NS iterations
+    for i in range(steps):
+        a, b, c = abc_s[i]
+        A = X @ X.mT
+        A2 = A @ A
+        if i == 0 and norm:
+            n = ((A2**2).sum(dim=(-2, -1), keepdim=True) + eps) ** 0.125
+            X, A, A2 = X / n, A / n**2, A2 / n**4
+        B = (
+            b * A + c * A2
         )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
@@ -130,6 +192,8 @@ class Muon(torch.optim.Optimizer):
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
+        ns_norm=False,
+        ns_diff_abc=False,
         adamw_params=None,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
@@ -141,6 +205,8 @@ class Muon(torch.optim.Optimizer):
             momentum=momentum,
             nesterov=nesterov,
             ns_steps=ns_steps,
+            ns_norm=ns_norm,
+            ns_diff_abc=ns_diff_abc,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
             use_cuda_kernel=use_cuda_kernel and _flash_muon_cuda_available,
@@ -230,8 +296,12 @@ class Muon(torch.optim.Optimizer):
                 if (
                     self.defaults["use_cuda_kernel"]
                     and min(list(g.shape)) % _cuda_dim_in_min == 0
-                ):  # cuda cuda constraint
+                ):  # cuda kernel layout constraint
                     u = fast_newtonschulz(g, steps=group["ns_steps"])
+                elif self.defaults["ns_diff_abc"]:
+                    u = zeropower_via_newtonschulz6_diff_abc(
+                        g, steps=6, norm=group["ns_norm"]
+                    )
                 else:
                     u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 
