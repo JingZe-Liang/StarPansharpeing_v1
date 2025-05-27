@@ -785,6 +785,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss: torch.Tensor | None = None,
         real_g_loss: torch.Tensor | None = None,
         repa_loss: torch.Tensor | None = None,
+        vf_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
         # other =======
@@ -800,6 +801,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "ssim_loss": ssim_loss.detach().mean(),
                 "perceptual_loss": percep_loss.detach().mean(),
                 "repa_loss": repa_loss.detach().mean(),
+                "vf_loss": vf_loss.detach().mean(),
                 "gram_loss": gram_loss.detach().mean(),
                 "d_weight": self.zero,
                 "disc_factor": self.zero,
@@ -816,6 +818,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "gram_loss": gram_loss.detach().mean(),
                     "ssim_loss": ssim_loss.detach().mean(),
                     "repa_loss": repa_loss.detach().mean(),
+                    "vf_loss": vf_loss.detach().mean(),
                     # discriminator loss
                     "d_weight": disc_weight,
                     "disc_factor": torch.tensor(disc_factor),
@@ -935,7 +938,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         vf_loss = self.zero
         if self.use_vf:
             vf_loss = self.vf_loss(tokenizer_feat, inputs, nll_loss, enc_last_layer)
-            vf_loss = vf_loss * self.vf_loss_weight
+            vf_loss = vf_loss * self.vf_loss_weight  # 0.1 by default
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(
@@ -978,6 +981,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             reconstruction_loss=recon_loss,
             gen_loss=g_loss,
             repa_loss=repa_loss,
+            vf_loss=vf_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,
             gram_loss=gram_loss,

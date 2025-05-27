@@ -341,8 +341,8 @@ class VFLoss(REPALoss):
         self,
         distmat_margin: float = 0.25,
         cos_margin: float = 0.5,
-        distmat_weight: float = 0.0,
-        cos_weight: float = 0.0,
+        distmat_weight: float = 1.0,
+        cos_weight: float = 1.0,
         c_dim_first=False,
         build_proj=False,
         img_is_neg1_1=True,
@@ -372,6 +372,21 @@ class VFLoss(REPALoss):
         self.distmat_weight = distmat_weight
         self.cos_weight = cos_weight
         self.vf_weight = vf_weight
+
+        logger.debug(repr(self))
+
+    def __repr__(self):
+        return (
+            "VFLoss: "
+            + super().__repr__()
+            + (
+                f"\n(\n    distmat_margin: {self.distmat_margin}\n"
+                f"    cos_margin: {self.cos_margin}\n"
+                f"    distmat_weight: {self.distmat_weight}\n"
+                f"    cos_weight: {self.cos_weight}\n"
+                f"    vf_weight: {self.vf_weight}\n)"
+            )
+        )
 
     def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
         vf_weight = self.vf_weight

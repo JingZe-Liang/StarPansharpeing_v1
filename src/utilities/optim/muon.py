@@ -385,10 +385,10 @@ class Muon(torch.optim.Optimizer):
             if p.requires_grad:
                 if p.ndim >= 2 and name not in ignored_keys_for_muon:
                     muon_params.append(p)
-                    # logger.debug(f"Muon params: {name} - shaped: {p.shape}")
+                    logger.debug(f"Muon params: {name} - shaped: {p.shape}")
                 else:
                     adamw_params.append(p)
-                    # logger.debug(f"AdamW params: {name} - shaped: {p.shape}")
+                    logger.debug(f"AdamW params: {name} - shaped: {p.shape}")
             else:
                 logger.debug(f"{name} is not requires_grad")
 

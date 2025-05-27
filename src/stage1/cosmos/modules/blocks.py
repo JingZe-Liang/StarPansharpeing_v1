@@ -26,7 +26,7 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = True
+compile_forward_fn = False
 if compile_forward_fn:
     _compile_decorator = torch.compile
     log_print("will compile the forward function", "debug")

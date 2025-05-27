@@ -541,6 +541,7 @@ class CosmosHyperspectralTokenizerTrainer:
         peft_cfg.target_modules = list(peft_cfg.target_modules)
         peft_cfg.modules_to_save = list(peft_cfg.modules_to_save)
 
+        # add conv in/conv out modules, and additional lora target modules
         if hasattr(self.tokenizer, "peft_first_last_convs_module_names"):
             peft_cfg.modules_to_save = (
                 self.tokenizer.peft_first_last_convs_module_names()  # type: ignore
@@ -549,6 +550,13 @@ class CosmosHyperspectralTokenizerTrainer:
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
                 "when dealing with different hyperspectral dataset"
             )
+        if hasattr(self.tokenizer, "additional_peft_target_modules"):
+            additional_tgt_modules = self.tokenizer.additional_peft_target_modules()
+            peft_cfg.target_modules += list(additional_tgt_modules)
+            self.log_msg(
+                f"[PEFT]: use tokenizer defined additional target modules: {additional_tgt_modules} for tuning"
+            )
+
         if not peft_cfg.modules_to_save:
             self.log_msg(
                 f"[PEFT]: additional peft modules (except lora layers) are {peft_cfg.modules_to_save}"
@@ -769,11 +777,11 @@ class CosmosHyperspectralTokenizerTrainer:
                         ]
 
                     # TODO: buggy to compute the perceptage of the learnabel params
-                    _len_params_tuned = len(params)
-                    _len_all_params = len(list(self.tokenizer.parameters()))
-                    self.log_msg(
-                        f"[Optimizer]: peft tuning, {_len_params_tuned / _len_all_params * 100}% of all params to train"
-                    )
+                    # _len_params_tuned = len(params)
+                    # _len_all_params = len(list(self.tokenizer.parameters()))
+                    # self.log_msg(
+                    #     f"[Optimizer]: peft tuning, {_len_params_tuned / _len_all_params * 100}% of all params to train"
+                    # )
 
             # * add with quantizer params
             if self.sep_enc_dec:
@@ -1047,7 +1055,7 @@ class CosmosHyperspectralTokenizerTrainer:
             out_d["repa_feature"] = repa_feature
 
         elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
-            _unwrap_tok, "_proj_vf", False
+            _unwrap_tok, "_vf_proj", False
         ):
             vf_feature = _unwrap_tok.get_vf_feature()
             assert vf_feature is not None, "vf_feature is None"
@@ -1080,7 +1088,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 q_loss_total=out_d.get("q_loss", None),
                 q_loss_breakdown=out_d.get("q_info", None),
                 tokenizer_feat=tok_feat,
-                last_layer=self.get_last_layer(),
+                last_layer=self.get_last_layer(mode="dec"),
+                enc_last_layer=self.get_last_layer(mode="enc"),
                 global_step=self.global_step,
                 optimizer_idx=optim_idx,
                 add_prefix=False,
@@ -1111,23 +1120,31 @@ class CosmosHyperspectralTokenizerTrainer:
         for p in model.parameters():
             p.requires_grad = not freeze
 
-    def get_last_layer(self, use_ema: bool = False):
-        if use_ema:
-            if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(
-                    self.ema_decoder
-                ).ema_model.get_last_layer()
-            else:
-                w = self.accelerator.unwrap_model(
-                    self.ema_tokenizer
-                ).ema_model.get_last_layer()
-        else:
+    def get_last_layer(self, use_ema: bool = False, mode="dec") -> nn.Parameter:
+        # if use_ema:
+        #     if self.sep_enc_dec:
+        #         w = self.accelerator.unwrap_model(
+        #             self.ema_decoder
+        #         ).ema_model.get_last_layer()
+        #     else:
+        #         w = self.accelerator.unwrap_model(
+        #             self.ema_tokenizer
+        #         ).ema_model.get_last_layer()
+        # else:
+        if mode == "dec":
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(
                     self.tokenizer_decoder
                 ).decoder.get_last_layer()
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
+        else:  # encoder last conv out weight
+            if self.sep_enc_dec:
+                w = self.accelerator.unwrap_model(
+                    self.tokenizer_encoder
+                ).encoder.conv_out.weight
+            else:
+                w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
 
         if isinstance(w, DTensor):
             w = w.full_tensor().cuda()
@@ -1353,6 +1370,14 @@ class CosmosHyperspectralTokenizerTrainer:
                     log_token_loss,
                     n_round=n_round,
                     select=["repa_loss"],
+                )
+                strings.extend(_log_token)
+
+            if self.vq_loss_fn.use_vf:
+                _log_token = dict_round_to_list_str(
+                    log_token_loss,
+                    n_round=n_round,
+                    select=["vf_loss"],
                 )
                 strings.extend(_log_token)
 
@@ -1875,7 +1900,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "unicosmos_lora_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

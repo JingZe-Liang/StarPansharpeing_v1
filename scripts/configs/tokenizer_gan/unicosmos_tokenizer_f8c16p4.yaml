@@ -77,7 +77,7 @@ tokenizer:
   attn_type: none
   padding_mode: reflect # for boundary?
 
-  latent_channels: 32
+  latent_channels: 16
 
   # channel_drop_config:
   #   learnable: false

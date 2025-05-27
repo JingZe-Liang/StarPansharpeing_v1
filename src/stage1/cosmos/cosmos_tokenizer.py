@@ -453,10 +453,16 @@ class ContinuousImageTokenizer(nn.Module):
         return None
 
     def get_last_layer(self):
+        # get decoder last layer weight for discriminator loss
         if not self.decoder.decoder._wrap_fsdp_last_layer:
             return self.decoder.decoder.conv_out.weight
         else:
             return self.decoder.decoder.conv_out.wrap_mod.weight
+
+    def get_last_enc_layer(self):
+        # get encoder last layer weight for visual foundation loss
+        # return self.encoder.encoder.conv_out.weight
+        return self.encoder.quant_conv.weight
 
     def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
         h = self.encoder(x)
@@ -747,12 +753,38 @@ class ContinuousImageTokenizer(nn.Module):
                 )
 
     def peft_first_last_convs_module_names(self):
-        return [
+        module_to_save_layers = [
+            # convs
             "encoder.encoder.conv_in",
             "decoder.decoder.conv_out"
             if not self.decoder.decoder._wrap_fsdp_last_layer
             else "decoder.decoder.conv_out.wrap_mod",
+            "encoder.quant_conv",
+            "decoder.quant_conv",
         ]
+        # normalization layers
+        for name, module in self.named_modules():
+            if name.endswith("norm1") or name.endswith("norm2"):
+                module_to_save_layers.append(name)
+
+        # projections for repa or vf losses
+        if self._hook_for_repa:
+            module_to_save_layers.append("_repa_proj")
+        if self._proj_for_vf:
+            module_to_save_layers.append("_vf_proj")
+
+        return module_to_save_layers
+
+    def additional_peft_target_modules(self):
+        add_tgt_modules = []
+        for name, module in self.named_modules():
+            # add nin_shortcut modules
+            if name.endswith("nin_shortcut") and not isinstance(module, nn.Identity):
+                add_tgt_modules.append(name)
+            # if name.endswith('quant_conv'):  # encoder.quant_conv, decoder.quant_conv
+            #     add_tgt_modules.append(name)
+
+        return add_tgt_modules
 
     def register_layer_output_hooks(self):
         self._per_layer_norms = {}
@@ -817,7 +849,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-26_15-37-25_cosmos_repa_DCF_2019/checkpoints/checkpoint_55/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "res_block",
         "quantizer_type": None,
@@ -834,7 +866,7 @@ if __name__ == "__main__":
         "upsample_type": "ConvPixelShuffle",
         "upsample_shortcut": "duplicating",
     }
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
 

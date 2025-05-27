@@ -966,14 +966,16 @@ if __name__ == "__main__":
     #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
     # # ]
     test_wds_path = [
-        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
-        ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
-        ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
-        ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
-        ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
+        # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        # ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
+        # ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
+        # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
+        # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
+        # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
+        # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
         ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
-        ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
+        ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
     ]
     test_batch_size = 16
     test_num_workers = 3
@@ -996,8 +998,13 @@ if __name__ == "__main__":
     changed_kwargs = [
         {
             "batch_size": 8,
-        }
-    ] * len(test_wds_path)
+        },
+        {
+            "batch_size": 4,
+            "channels": 8,
+            "check_channels": True,
+        },
+    ]  # * len(test_wds_path)
     channels = [12, 8, 13, 50, 4, 8, 224]
     accelerator = accelerate.Accelerator()
 

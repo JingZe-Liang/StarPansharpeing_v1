@@ -2,7 +2,7 @@ used: WV3
 shuffle_size: -1
 num_workers: 3
 prefetch_factor: 6
-shuffle_within_workers: true
+shuffle_within_workers: false
 
 dataset_names_to_bs:
   MMSeg_YREB: 32
@@ -79,11 +79,11 @@ MUSLI_train:
 
 WV3_train:
   - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-    - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
+  - - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
 
 WV3_val:
   - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-    - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
+  - - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
 
 DFC_2020_val:
   - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
@@ -132,13 +132,20 @@ train_loader:
   paths: ${dataset.wds_path_train}
   loader_type: ${dataset.loader_type}
   basic_kwargs:
-    batch_size: ${dataset.batch_size_train}
+    # batch_size: ${dataset.batch_size_train}
     num_workers: ${dataset.num_workers}
     prefetch_factor: ${dataset.prefetch_factor}
     shuffle_within_workers: ${dataset.shuffle_within_workers}
     resample: true
-  # changed_kwargs_by_loader:
-  #   - batch_size: 20
+    check_channels: true
+    channels: 8
+
+  # for the lora training wv3, gf2, qb, IKONOS
+  changed_kwargs_by_loader:
+    - batch_size: 12
+    - batch_size: 4
+      channels: 8
+      check_channels: true
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
@@ -149,5 +156,8 @@ val_loader:
     prefetch_factor: null #${dataset.prefetch_factor}
     shuffle_within_workers: false #${dataset.shuffle_within_workers}
     resample: true
-    check_channels: false
-    # channels: 8
+  changed_kwargs_by_loader:
+    - batch_size: 4
+    - batch_size: 4
+      channels: 8
+      check_channels: true

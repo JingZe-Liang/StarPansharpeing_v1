@@ -18,9 +18,9 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: MMSeg_YREB
+  used: WV3
   prefetch_factor:
-  num_workers: 0
+  num_workers: 2
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
@@ -32,7 +32,7 @@ dataset:
     Houston: 7
     DryadHyper: 16
     MUSLI: 1
-    WV3: 22
+    WV3: 8
 
   transform_prob: 0.5
 
@@ -41,24 +41,40 @@ accelerator:
     num_steps: 2
 
 tokenizer:
-  hook_for_repa: true
+  hook_for_repa: false
+  proj_for_vf: true
+  hook_module: decoder.decoder.mid.block_2
+
   act_checkpoint: false
-  wrap_fsdp_last_layer: false
-  uni_tokenizer_path: runs/stage1_cosmos/2025-05-19_17-22-23_cosmos_pretrained_f8c16p4_repa_no_moe/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors
   loading_type: pretrained
-  # enc_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/encoder.jit"
-  # dec_path: "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI8x8/decoder.jit"
-  # loading_type: nvidia
-  force_not_attn: true
+  use_channel_drop: false
+  enc_moe: false
+  dec_moe: false
+  norm_type: gn
+  norm_groups: 32
+  block_name: res_block
+  # conv_in_module: resnet
+  # conv_out_module: resnet
+  patch_method: haar
+  hidden_factor: 4
+  patch_size: 4
+  attn_type: none
+  padding_mode: reflect # for boundary?
+  latent_channels: 16
 
-  padding_mode: replicate
-  norm_type: rms_triton
+  # channel_drop_config:
+  #   learnable: false
+  #   drop_type: uniform_4
+  #   max_channels: 16
+  #   img_size: 32
+  #   drop_prob: 1.0
+
   ## downsample and upsample
-  downsample_type: Conv
+  downsample_type: ConvPixelUnshuffle
   downsample_shortcut: averaging
-  upsample_type: RepeatConv
+  upsample_type: ConvPixelShuffle
   upsample_shortcut: duplicating
-
 
 vq_loss:
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
@@ -69,14 +85,23 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: hinge
   ssim_weight: 0.2
-  disc_weight: 0.5
-  repa_loss_weight: 0.0 #1.5
+  disc_weight: 0.8
+  repa_loss_weight: #1.5
+  vf_loss_weight: 0.1
   repa_loss_options:
-    # c_dim_first: true
-    # build_proj: false
-    # rgb_channels: random
-    # img_resize:
-    # dino_img_size: 224
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: random
+    img_resize:
+    dino_img_size: 224
+  vf_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: random
+    img_resize:
+    dino_img_size: 224
+    distmat_margin: 0.25
+    cos_margin: 0.5
 
 ema:
   beta: 0.995
@@ -97,10 +122,13 @@ peft:
     - k
     - v
     - proj_out
-  lora_dropout: 0
+  lora_dropout: 0.0
   modules_to_save:
     - encoder.encoder.conv_in
     - decoder.decoder.conv_out
+    - _repa_proj
+    - encoder.quant_conv
+    - decoder.quant_conv
 
 train:
   tokenizer_name: cosmos_uni
@@ -127,16 +155,32 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.9, 0.95]
 
   disc_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.9, 0.95]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -146,15 +190,21 @@ train:
     num_cycles: 1
     reduced_factor: 2
     min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   disc_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+    # num_training_steps: ${train.max_steps}
+    # num_cycles: 1
+    # reduced_factor: 2
+    # min_lr: 1.0e-5
+    _target_: transformers.optimization.get_constant_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 1000
-    num_training_steps: ${train.max_steps}
-    num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
 
   log:
     run_comment: lora_fintune_f8c16p4_${dataset.used}
@@ -166,4 +216,4 @@ train:
 
 val:
   val_duration: 1000
-  max_val_iters: 4 # val only `max_val_iters` batches
+  max_val_iters: 40 # val only `max_val_iters` batches
