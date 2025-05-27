@@ -1069,6 +1069,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         optim_idx = 0 if train_tokenizer else 1  # tokenizer -> 0, discriminator -> 1
 
+        if (tok_feat := out_d.get("repa_feature", None)) is None:
+            tok_feat = out_d.get("vf_feature", None)
+
         # loss
         with self.accelerator.autocast():
             disc_train_loss_d, log_disc = self.vq_loss_fn.forward(
@@ -1076,7 +1079,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 reconstructions=out_d["recon"],
                 q_loss_total=out_d.get("q_loss", None),
                 q_loss_breakdown=out_d.get("q_info", None),
-                tokenizer_feat=out_d.get("repa_feature", None),
+                tokenizer_feat=tok_feat,
                 last_layer=self.get_last_layer(),
                 global_step=self.global_step,
                 optimizer_idx=optim_idx,

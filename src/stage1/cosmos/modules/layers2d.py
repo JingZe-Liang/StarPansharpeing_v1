@@ -36,6 +36,7 @@ import torch.nn.functional as F
 from typing_extensions import deprecated
 
 from src.stage1.cosmos.modules.blocks import (
+    ConvNeXtBlock,
     DiCoBlock,
     DiffBandsInputConvIn,
     DiffBandsInputConvOut,
@@ -71,7 +72,11 @@ class FSDPNoWarpModule(nn.Module):
 
 
 def make_block_fn(
-    block_name: Literal["resblock", "dico_block"] = "resblock",
+    block_name: Literal[
+        "res_block",
+        "dico_block",
+        "convnext",
+    ] = "res_block",
     moe_n_experts=4,
     act_checkpoint=False,
     use_residual_factor=False,
@@ -81,7 +86,7 @@ def make_block_fn(
     moe_type="tc",
     padding_mode: str = "zeros",
     norm_type: str = "gn",
-    token_mixer_type: Literal["resblock", "dico_block", "res_moe"] = "resblock",
+    token_mixer_type: Literal["res_block", "dico_block", "res_moe"] = "res_block",
     **kwargs,
 ):
     if block_name == "res_moe":
@@ -121,6 +126,19 @@ def make_block_fn(
                 use_ffn=True,
             )
 
+    elif block_name == "convnext":
+
+        def block_fn(block_in, block_out, dropout, curr_res):
+            return ConvNeXtBlock(
+                block_in,
+                block_in * hidden_factor,
+                block_out,
+                norm_type=norm_type,
+                act_checkpoint=act_checkpoint,
+                drop_path=dropout,
+                **kwargs,
+            )
+
     elif block_name == "res_block":
 
         def block_fn(block_in, block_out, dropout, curr_res):
@@ -139,7 +157,7 @@ def make_block_fn(
 
     else:
         raise ValueError(
-            f"block_name {block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block'"
+            f"block_name {block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block', 'convnext'"
         )
 
     return block_fn
@@ -1092,7 +1110,7 @@ if __name__ == "__main__":
 
         accelerator = accelerate.Accelerator(mixed_precision="bf16")
         # device = accelerator.device
-        torch.cuda.set_device(0)
+        torch.cuda.set_device(1)
         device = torch.device("cuda")
 
         img_size = 512
@@ -1117,7 +1135,7 @@ if __name__ == "__main__":
             hidden_factor=2,
             downsample_manually_pad=True,
             resample_norm_keep=False,
-            conv_in_module="resnet",
+            conv_in_module="conv",
         )
         decoder = Decoder(
             [4, 8, 16, 24],
@@ -1138,7 +1156,7 @@ if __name__ == "__main__":
             block_name="res_block",
             hidden_factor=2,
             resample_norm_keep=False,
-            conv_out_module="resnet",
+            conv_out_module="conv",
         )
         dtype = torch.bfloat16
         encoder = encoder.to(device, dtype)

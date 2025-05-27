@@ -802,10 +802,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 32,  # [3, 12, 32, 8, 13, 50, 4],
+        "in_channels": 8,  # [3, 12, 32, 8, 13, 50, 4],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 32,  # [3, 12, 32, 8, 13, 50, 4],
+        "out_channels": 8,  # [3, 12, 32, 8, 13, 50, 4],
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -817,18 +817,22 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-23_13-41-39_cosmos_pretrained_f8c16p4_OHS/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-26_15-37-25_cosmos_repa_DCF_2019/checkpoints/checkpoint_55/model.safetensors",
         "hook_for_repa": False,
-        "block_name": "dico_block",
+        "block_name": "res_block",
         "quantizer_type": None,
         "loading_type": "pretrained",
         "enc_moe": False,
         "dec_moe": False,
-        "padding_mode": "zeros",
+        "padding_mode": "reflect",
         "norm_type": "gn",
         "norm_groups": 32,
         "resample_norm_type": "gn",
         "attn_type": "none",
+        "downsample_type": "ConvPixelUnshuffle",
+        "downsample_shortcut": "averaging",
+        "upsample_type": "ConvPixelShuffle",
+        "upsample_shortcut": "duplicating",
     }
     torch.cuda.set_device(0)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
@@ -843,7 +847,7 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="OHS")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="DCF")
     dl_iter = iter(dl)
     tokenizer = tokenizer.eval()
 

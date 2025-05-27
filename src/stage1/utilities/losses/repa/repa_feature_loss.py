@@ -339,10 +339,10 @@ class REPALoss(torch.nn.Module):
 class VFLoss(REPALoss):
     def __init__(
         self,
-        distmat_margin: float,
-        cos_margin: float,
-        distmat_weight: float = 1.0,
-        cos_weight: float = 1.0,
+        distmat_margin: float = 0.25,
+        cos_margin: float = 0.5,
+        distmat_weight: float = 0.0,
+        cos_weight: float = 0.0,
         c_dim_first=False,
         build_proj=False,
         img_is_neg1_1=True,
@@ -351,7 +351,7 @@ class VFLoss(REPALoss):
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
-        vf_weight: float = 100.0,
+        vf_weight: float = 1.0,
     ):
         """
         visual foundation model loss for tokenizer feature alignment.

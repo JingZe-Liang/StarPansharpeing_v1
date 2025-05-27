@@ -493,7 +493,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss_breakdown: NamedTuple | Dict | None = None,
         q_loss_total: torch.Tensor | None = None,
         outer_recon_loss: torch.Tensor | None = None,
-        last_layer: torch.Tensor | None = None,
+        last_layer: nn.Parameter | torch.Tensor | None = None,
+        enc_last_layer: nn.Parameter | None = None,
         cond: torch.Tensor | None = None,
         tokenizer_feat: torch.Tensor | None = None,
         split: str = "train",  # TODO: remove this
@@ -544,6 +545,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 q_loss_total=q_loss_total,
                 outer_recon_loss=outer_recon_loss,
                 tokenizer_feat=tokenizer_feat,
+                enc_last_layer=enc_last_layer,
             )
 
         # * ==========================================================
@@ -877,32 +879,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return dict(recon_loss=recon_loss, ssim_loss=ssim_loss)
 
-    def vf_loss(z, aux_feature):
-        assert z is not None, "z is None"
-        assert aux_feature is not None, "aux_feature is None"
-
-        z_flat = rearrange(z, "b c h w -> b c (h w)")
-        aux_feature_flat = rearrange(aux_feature, "b c h w -> b c (h w)")
-        z_norm = torch.nn.functional.normalize(z_flat, dim=1)
-        aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
-        z_cos_sim = torch.einsum("bci,bcj->bij", z_norm, z_norm)
-        aux_feature_cos_sim = torch.einsum(
-            "bci,bcj->bij", aux_feature_norm, aux_feature_norm
-        )
-        diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
-        vf_loss_1 = torch.nn.functional.relu(diff - self.distmat_margin).mean()
-        vf_loss_2 = torch.nn.functional.relu(
-            1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, z)
-        ).mean()
-        vf_loss = vf_loss_1 * self.distmat_weight + vf_loss_2 * self.cos_weight
-
-        return vf_loss
-
     def gen_loss(
         self,
         inputs: torch.Tensor,
         reconstructions: torch.Tensor,
-        last_layer: torch.Tensor | None,
+        last_layer: nn.Parameter | None,
         global_step: int,
         q_loss_breakdown: NamedTuple | Dict | None,
         split: str,
@@ -910,7 +891,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         cond: torch.Tensor | None = None,
         q_loss_total: torch.Tensor | None = None,
         outer_recon_loss: torch.Tensor | None = None,
-        tokenizer_feat: torch.Tensor | None = None,
+        tokenizer_feat: torch.Tensor
+        | None = None,  # repa projected or z (latent) vf projected
+        enc_last_layer: nn.Parameter | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
         # generator update
         if self.disc_network_type == "stylegan3d":
@@ -948,6 +931,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
             repa_loss = self.repa_loss(inputs, tokenizer_feat)
             repa_loss = repa_loss * self.repa_loss_weight
 
+        # * vf loss
+        vf_loss = self.zero
+        if self.use_vf:
+            vf_loss = self.vf_loss(tokenizer_feat, inputs, nll_loss, enc_last_layer)
+            vf_loss = vf_loss * self.vf_loss_weight
+
         # * (un)conditional gan loss
         disc_factor = adopt_weight(
             self.disc_factor, global_step, threshold=self.disc_iter_start_for_g
@@ -978,7 +967,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss, q_loss_logs = self.q_loss(q_loss_total, q_loss_breakdown, global_step)
 
         # * basic losses
-        loss = nll_loss + g_loss + repa_loss
+        loss = nll_loss + g_loss + repa_loss + vf_loss
 
         # * form logs
         log = self.train_generator_log_form(

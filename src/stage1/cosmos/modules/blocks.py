@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
+from timm.layers import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 
@@ -25,7 +26,7 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = False
+compile_forward_fn = True
 if compile_forward_fn:
     _compile_decorator = torch.compile
     log_print("will compile the forward function", "debug")
@@ -199,7 +200,7 @@ class ResidualBlock(nn.Module):
         self.shortcut = shortcut
         self.post_act = build_act(post_act)
 
-    # @torch.compile
+    @_compile_decorator
     def forward_main(self, x: torch.Tensor) -> torch.Tensor:
         if self.pre_norm is None:
             return self.main(x)
@@ -1374,7 +1375,7 @@ class ResnetBlockMoE2D(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
-        token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+        token_mixer_type: Literal["res_block", "dico_block"] = "res_block",
         **resnet_kwargs,
     ):
         super().__init__()
@@ -1382,7 +1383,7 @@ class ResnetBlockMoE2D(nn.Module):
         self.out_channels = in_channels if out_channels is None else out_channels
 
         log_print(f"[ResnetBlockMoE2D] using token mixer: {token_mixer_type}", "debug")
-        if token_mixer_type == "resblock":
+        if token_mixer_type == "res_block":
             self.token_mixer = ResnetBlock(
                 in_channels=in_channels,
                 out_channels=self.out_channels,
@@ -1405,6 +1406,15 @@ class ResnetBlockMoE2D(nn.Module):
                 norm_type=norm_type,
                 use_ffn=False,  # moe serves as ffn
                 norm_groups=resnet_kwargs.get("num_groups", 32),
+            )
+        elif token_mixer_type == "convnext":
+            self.token_mixer = ConvNeXtBlock(
+                dim=in_channels,
+                hidden_dim=int(hidden_factor * self.out_channels),
+                out_dim=self.out_channels,
+                act_checkpoint=act_checkpoint,
+                drop_path=drop_out,
+                norm_type=norm_type,
             )
         self.moe_prenorm = Normalize(
             self.out_channels, norm_type=norm_type, num_groups=norm_groups
@@ -1762,8 +1772,77 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         self, x: torch.Tensor, slots: torch.Tensor, t: torch.Tensor
     ) -> torch.Tensor:
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, slots, t, use_reentrant=True)
+            return checkpoint(self.forward_fn, x, slots, t, use_reentrant=True)  # type: ignore
         return self.forward_fn(x, slots, t)
+
+
+# * --- Convnext blocks --- #
+
+
+class ConvNeXtBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        hidden_dim,
+        out_dim,
+        norm_type="gn",
+        drop_path=0.0,
+        layer_scale_init_value=1e-6,
+        act_checkpoint=False,
+        padding_mode="zeros",
+        num_groups=32,
+    ):
+        super().__init__()
+
+        self.dwconv = nn.Conv2d(
+            dim, dim, kernel_size=7, padding=3, groups=dim, padding_mode=padding_mode
+        )
+        self.norm = Normalize(dim, norm_type=norm_type, num_groups=num_groups)
+
+        self.pwconv1 = nn.Conv2d(dim, hidden_dim, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv2d(hidden_dim, out_dim, kernel_size=1)
+
+        # Layer Scaling
+        self.gamma = (
+            nn.Parameter(
+                layer_scale_init_value * torch.ones((out_dim)), requires_grad=True
+            )
+            if layer_scale_init_value > 0
+            else None
+        )
+        if dim != out_dim:
+            self.nin_shortcut = nn.Conv2d(dim, out_dim, kernel_size=1, stride=1)
+        else:
+            self.nin_shortcut = nn.Identity()
+
+        # Stochastic Depth
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.act_checkpoint = act_checkpoint
+
+    @_compile_decorator
+    def forward_fn(self, x):
+        input = x
+
+        x = self.dwconv(x)
+        x = self.norm(x)
+
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+
+        # Layer Scaling
+        if self.gamma is not None:
+            x = self.gamma.view(-1, 1, 1) * x
+
+        x = self.nin_shortcut(input) + self.drop_path(x)
+
+        return x
+
+    def forward(self, x):
+        if self.act_checkpoint and self.training:
+            return checkpoint(self.forward_fn, x, use_reentrant=True)  # type: ignore
+        return self.forward_fn(x)
 
 
 # * --- Diffusion blocks --- #

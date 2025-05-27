@@ -29,11 +29,11 @@ dataset:
   prefetch_factor: 6
   dataset_names_to_bs:
     MMSeg_YREB: 20
-    DCF_2019: 7
+    DCF_2019: 16
     GID_GF2: 7
     DryadHyper: 16
     MUSLI: 7
-    OHS: 7
+    OHS: 9
   transform_prob: 0.5
 
 vq_loss:
@@ -61,8 +61,8 @@ tokenizer:
   hook_for_repa: true
   hook_module: decoder.decoder.mid.block_2
   act_checkpoint: false
-  uni_tokenizer_path: #runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors
-  loading_type: #pretrained
+  uni_tokenizer_path: runs/stage1_cosmos/2025-05-27_03-37-12_cosmos_f8c16p4_OHS/ema/tokenizer/model.safetensors
+  loading_type: pretrained
   use_channel_drop: false
   enc_moe: false
   dec_moe: false
@@ -72,10 +72,12 @@ tokenizer:
   # conv_in_module: resnet
   # conv_out_module: resnet
   patch_method: haar
-  hidden_factor: 2
+  hidden_factor: 4
   patch_size: 4
   attn_type: none
   padding_mode: reflect # for boundary?
+
+  latent_channels: 32
 
   # channel_drop_config:
   #   learnable: false
@@ -107,8 +109,8 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path: #runs/stage1_cosmos/2025-05-26_11-57-32_cosmos_repa_DCF_2019/checkpoints/checkpoint_20
-  ema_load_path: runs/stage1_cosmos/2025-05-26_11-57-32_cosmos_repa_DCF_2019/ema
-  only_load_tokenizer: false
+  ema_load_path: #runs/stage1_cosmos/2025-05-27_03-37-12_cosmos_f8c16p4_OHS/ema
+  only_load_tokenizer: true
   compile_model: false
 
   finetune_cfg:
@@ -121,8 +123,8 @@ train:
     lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
-    ns_norm: true
     ns_diff_abc: true
+    ns_norm: true
 
   disc_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
@@ -130,8 +132,8 @@ train:
     lr: 1.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
-    ns_norm: true
     ns_diff_abc: true
+    ns_norm: true
 
   tokenizer_sched:
     # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -158,7 +160,7 @@ train:
     num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c16p4_uni
+    run_comment: cosmos_f8c16p4_${dataset.used}
     log_with_time: True
     visualize_every: 500
     log_every: 10
