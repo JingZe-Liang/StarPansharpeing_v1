@@ -5,6 +5,7 @@ from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
+import torch._functorch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
@@ -26,10 +27,11 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = False
+compile_forward_fn = True
+torch._functorch.config.donated_buffer = False  # for adaptive weighting
 if compile_forward_fn:
     _compile_decorator = torch.compile
-    log_print("will compile the forward function", "debug")
+    log_print("will compile the forward function and disable donated buffer", "debug")
 else:
 
     def _null_decorator(**any_kwargs):
@@ -794,7 +796,7 @@ class InterpolateConvUpSampleLayer(nn.Module):
         x_resp = self.conv(x)
         if self.norm_keep:
             x_resp = resample_norm_keep(x, x_resp)
-        return x
+        return x_resp
 
 
 class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):

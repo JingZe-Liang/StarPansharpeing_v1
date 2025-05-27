@@ -538,14 +538,20 @@ class CosmosHyperspectralTokenizerTrainer:
         ), "Deepspeed PEFT tuning supports not implemented yet"
 
         peft_cfg: LoraConfig = hydra.utils.instantiate(self.cfg.peft)
-        peft_cfg.target_modules = list(peft_cfg.target_modules)
-        peft_cfg.modules_to_save = list(peft_cfg.modules_to_save)
+        peft_cfg.target_modules = (
+            list(peft_cfg.target_modules) if peft_cfg.target_modules is not None else []
+        )
+        peft_cfg.modules_to_save = (
+            list(peft_cfg.modules_to_save)
+            if peft_cfg.modules_to_save is not None
+            else []
+        )
 
         # add conv in/conv out modules, and additional lora target modules
         if hasattr(self.tokenizer, "peft_first_last_convs_module_names"):
-            peft_cfg.modules_to_save = (
-                self.tokenizer.peft_first_last_convs_module_names()  # type: ignore
-            )
+            peft_cfg.modules_to_save += (
+                self.tokenizer.peft_first_last_convs_module_names()
+            )  # type: ignore
             self.log_msg(
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
                 "when dealing with different hyperspectral dataset"
@@ -553,20 +559,20 @@ class CosmosHyperspectralTokenizerTrainer:
         if hasattr(self.tokenizer, "additional_peft_target_modules"):
             additional_tgt_modules = self.tokenizer.additional_peft_target_modules()
             peft_cfg.target_modules += list(additional_tgt_modules)
-            self.log_msg(
-                f"[PEFT]: use tokenizer defined additional target modules: {additional_tgt_modules} for tuning"
-            )
 
+        self.log_msg(
+            f"[PEFT]: use tokenizer defined lora target modules: {peft_cfg.target_modules} for tuning"
+        )
         if not peft_cfg.modules_to_save:
             self.log_msg(
-                f"[PEFT]: additional peft modules (except lora layers) are {peft_cfg.modules_to_save}"
+                f"[PEFT]: fully finetuning modules (except lora layers) are {peft_cfg.modules_to_save}"
             )
 
         self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer")
         self.tokenizer_peft_wrapped = get_peft_model(
             self.tokenizer,
             peft_config=peft_cfg,
-            adapter_name="default",
+            adapter_name="default",  # dataset name ?
             low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
         )
         self.log_msg(self.tokenizer_peft_wrapped.print_trainable_parameters())
@@ -1900,7 +1906,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_lora_f8c16p4"
+_key = "unicosmos_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

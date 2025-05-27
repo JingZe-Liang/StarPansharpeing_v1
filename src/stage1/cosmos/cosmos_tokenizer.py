@@ -759,13 +759,19 @@ class ContinuousImageTokenizer(nn.Module):
             "decoder.decoder.conv_out"
             if not self.decoder.decoder._wrap_fsdp_last_layer
             else "decoder.decoder.conv_out.wrap_mod",
+            # quant convs need to be fully finetuned
             "encoder.quant_conv",
             "decoder.quant_conv",
         ]
-        # normalization layers
+
+        module_to_save_layers = []
+        # convolution and normalization layers
         for name, module in self.named_modules():
-            if name.endswith("norm1") or name.endswith("norm2"):
+            if "norm" in name and (not isinstance(module, nn.Identity)):
                 module_to_save_layers.append(name)
+                log_print(
+                    f"[Cosmos Tokenizer]: add norm {name} to fully finetune", "debug"
+                )
 
         # projections for repa or vf losses
         if self._hook_for_repa:
@@ -778,11 +784,19 @@ class ContinuousImageTokenizer(nn.Module):
     def additional_peft_target_modules(self):
         add_tgt_modules = []
         for name, module in self.named_modules():
-            # add nin_shortcut modules
-            if name.endswith("nin_shortcut") and not isinstance(module, nn.Identity):
+            if (
+                (not name.startswith("_"))
+                and isinstance(module, (nn.Conv2d, nn.Linear))
+                and name
+                not in (
+                    "encoder.encoder.conv_in",
+                    "decoder.decoder.conv_out",
+                    "encoder.quant_conv",
+                    "decoder.quant_conv",
+                )
+            ):
                 add_tgt_modules.append(name)
-            # if name.endswith('quant_conv'):  # encoder.quant_conv, decoder.quant_conv
-            #     add_tgt_modules.append(name)
+                log_print(f"[Cosmos Tokenizer]: add {name} to lora finetune", "debug")
 
         return add_tgt_modules
 
@@ -849,7 +863,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27_03-30-44_cosmos_f8c16p4_DCF_2019/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "res_block",
         "quantizer_type": None,
@@ -869,6 +883,10 @@ if __name__ == "__main__":
     torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
     # tokenizer = torch.compile(tokenizer)
+
+    # peft modules
+    log_print(str(tokenizer.peft_first_last_convs_module_names()))
+    log_print(str(tokenizer.additional_peft_target_modules()))
 
     # from fvcore.nn import parameter_count_table
 

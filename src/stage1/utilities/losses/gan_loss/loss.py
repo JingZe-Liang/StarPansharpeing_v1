@@ -347,7 +347,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             assert not self.use_repa, (
                 "repa loss and vf loss can not be used at the same time"
             )
-            self.vf_loss = VFLoss(**to_object(vf_loss_options)).cuda()  # to device
+            self.vf_loss = VFLoss(**to_object(vf_loss_options)).cuda()
             logger.info(f"[vq loss]: vf loss used, weighted {self.vf_loss_weight}")
 
         # * LeCAM ema loss
@@ -499,7 +499,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         tokenizer_feat: torch.Tensor | None = None,
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
+    ):
         """
         Forward pass of the model.
 
