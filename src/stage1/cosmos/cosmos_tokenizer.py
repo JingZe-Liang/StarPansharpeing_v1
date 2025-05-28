@@ -788,15 +788,16 @@ class ContinuousImageTokenizer(nn.Module):
         module_to_save_layers = [
             # convs
             "encoder.encoder.conv_in",
-            "decoder.decoder.conv_out"
-            if not self.decoder.decoder._wrap_fsdp_last_layer
-            else "decoder.decoder.conv_out.wrap_mod",
+            (
+                "decoder.decoder.conv_out"
+                if not self.decoder.decoder._wrap_fsdp_last_layer
+                else "decoder.decoder.conv_out.wrap_mod"
+            ),
             # quant convs need to be fully finetuned
             "encoder.quant_conv",
             "decoder.quant_conv",
         ]
 
-        module_to_save_layers = []
         # convolution and normalization layers
         for name, module in self.named_modules():
             if "norm" in name and (not isinstance(module, nn.Identity)):
@@ -895,7 +896,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27_03-30-44_cosmos_f8c16p4_DCF_2019/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "res_block",
         "quantizer_type": None,

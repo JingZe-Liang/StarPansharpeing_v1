@@ -104,7 +104,7 @@ OHS_train:
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar
 
 OHS_val:
-  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0013..0015}.tar
+  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0012..0015}.tar
 
 train_name: ${dataset.used}_train
 val_name: ${dataset.used}_val

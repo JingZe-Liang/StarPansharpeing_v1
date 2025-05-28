@@ -18,9 +18,9 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: WV3
+  used: OHS
   prefetch_factor:
-  num_workers: 2
+  num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
@@ -33,6 +33,7 @@ dataset:
     DryadHyper: 16
     MUSLI: 1
     WV3: 8
+    OHS: 5
 
   transform_prob: 0.5
 
@@ -42,8 +43,9 @@ accelerator:
 
 tokenizer:
   hook_for_repa: false
-  proj_for_vf: true
+  proj_for_vf: false
   hook_module: decoder.decoder.mid.block_2
+  vf_on_z_or_module: module
 
   act_checkpoint: false
   uni_tokenizer_path: runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors
@@ -54,8 +56,6 @@ tokenizer:
   norm_type: gn
   norm_groups: 32
   block_name: res_block
-  # conv_in_module: resnet
-  # conv_out_module: resnet
   patch_method: haar
   hidden_factor: 4
   patch_size: 4
@@ -87,7 +87,7 @@ vq_loss:
   ssim_weight: 0.2
   disc_weight: 0.8
   repa_loss_weight: #1.5
-  vf_loss_weight: 0.1
+  vf_loss_weight: #0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -97,8 +97,8 @@ vq_loss:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: random
-    img_resize:
+    rgb_channels: ${dataset.rgb_channels}
+    img_resize: 224
     dino_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
@@ -116,19 +116,19 @@ peft:
   use_dora: true
   use_rslora: true
   target_modules:
-    - conv1
-    - conv2
-    - q
-    - k
-    - v
-    - proj_out
+    # - conv1
+    # - conv2
+    # - q
+    # - k
+    # - v
+    # - proj_out
   lora_dropout: 0.0
   modules_to_save:
-    - encoder.encoder.conv_in
-    - decoder.decoder.conv_out
-    - _repa_proj
-    - encoder.quant_conv
-    - decoder.quant_conv
+    # - encoder.encoder.conv_in
+    # - decoder.decoder.conv_out
+    # - _repa_proj
+    # - encoder.quant_conv
+    # - decoder.quant_conv
 
 train:
   tokenizer_name: cosmos_uni
