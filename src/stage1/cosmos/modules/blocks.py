@@ -5,7 +5,7 @@ from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
-import torch._functorch
+import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState

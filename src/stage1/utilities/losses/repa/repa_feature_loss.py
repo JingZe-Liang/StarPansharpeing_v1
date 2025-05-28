@@ -1,8 +1,9 @@
 import math
 import warnings
 from functools import partial
-from typing import Literal, Sequence, override
+from typing import Literal, Sequence
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +13,9 @@ from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Shard
+
+from src.utilities.config_utils import to_object
+from src.utilities.logging.print import log_print
 
 warnings.filterwarnings(
     "once",
@@ -91,6 +95,7 @@ class REPALoss(torch.nn.Module):
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
+        dino_type: str = "torch",  # [torch, timm]
     ):
         """Align the tokenizer/model feature with DINO v2 pretrained model feature.
 
@@ -104,35 +109,44 @@ class REPALoss(torch.nn.Module):
             dino_img_size (int, optional): dino image size. Defaults to 224.
         """
         super().__init__()
-        self.rgb_channels = rgb_channels
-        self.img_resize = img_resize
+        self.rgb_channels = to_object(rgb_channels)
+        self.img_resize = to_object(img_resize)
         if isinstance(img_resize, Sequence):
             assert img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0, (
                 "img_size[0] must be divisible by patch size"
             )
         self.dino_fixed_bs = dino_fixed_bs
         if self.rgb_channels is not None:
-            if isinstance(self.rgb_channels, (list, tuple)):
-                assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
-            elif isinstance(self.rgb_channels, str):
+            if isinstance(self.rgb_channels, str):
                 assert self.rgb_channels in ("random",), (
                     "rgb_channels must be randomly selected"
                 )
+            elif isinstance(self.rgb_channels, Sequence):
+                assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
             else:
                 raise TypeError(
                     f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}"
                 )
 
         # encoder
-        # ! download in local of dino weights
-        self.repa_encoder: nn.Module = torch.hub.load(
-            "facebookresearch/dinov2", "dinov2_vitb14"
-        )  # type: ignore
+        self.dino_type = dino_type
+        if self.dino_type == "timm":
+            assert ()
+            self.repa_encoder: nn.Module = timm.create_model(
+                "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
+                pretrained=True,
+                dynamic_img_size=True,
+            )
+        elif self.dino_type == "torch":
+            self.repa_encoder: nn.Module = torch.hub.load(
+                "facebookresearch/dinov2", "dinov2_vitb14"
+            )  # type: ignore
+
+        log_print("[REPA Loss]: load pretrained dino visual foundation model done")
         self.repa_encoder.image_size = dino_img_size
         self.repa_encoder = self.repa_encoder.to(dtype)
 
-        for param in self.repa_encoder.parameters():
-            param.requires_grad = False
+        self.repa_encoder.requires_grad_(False)
         self.repa_encoder.eval()
 
         self.c_dim_first = c_dim_first
@@ -196,7 +210,7 @@ class REPALoss(torch.nn.Module):
                 _rgb_chan_select = torch.randperm(img.shape[1])[:3]
                 rgb_channels = _rgb_chan_select.tolist()
             elif (
-                not isinstance(self.rgb_channels, (list, tuple))
+                not isinstance(self.rgb_channels, Sequence)
                 and self.rgb_channels.startswith("random")
                 and self.rgb_channels != "random"
             ):
@@ -244,19 +258,32 @@ class REPALoss(torch.nn.Module):
         img = self._norm_img_before_repa(img)
 
         @torch.autocast("cuda", torch.bfloat16)
-        def _forward_featurs(img):
+        def _forward_features(img):
             # from torch.distributed.tensor.device_mesh import init_device_mesh, DeviceMesh
             # from torch.distributed.tensor import DTensor
             img = self._to_dtensor(img)
 
-            if not self.c_dim_first:  # distill for vit 1d features
-                img_feats = self.repa_encoder.forward_features(img)[
-                    "x_norm_patchtokens"
-                ]  # (bs, 256, 768)
-            else:  # distill for cnn 2d features
-                img_feats = self.repa_encoder.get_intermediate_layers(
-                    img, 1, reshape=True, norm=True
-                )[0]  # last layer feature
+            if self.dino_type == "torch":
+                if not self.c_dim_first:  # distill for vit 1d features
+                    img_feats = self.repa_encoder.forward_features(img)[  # type: ignore
+                        "x_norm_patchtokens"
+                    ]  # (bs, 256, 768)
+                else:  # distill for cnn 2d features
+                    img_feats = self.repa_encoder.get_intermediate_layers(  # type: ignore
+                        img, 1, reshape=True, norm=True
+                    )[0]  # last layer feature
+            elif self.dino_type == "timm":
+                b, c, h, w = img.shape
+                assert h % 16 == 0 and w % 16 == 0, "image size must be divisible by 16"
+                img_feats = (
+                    self.repa_encoder.forward_features(img)[:, 1:]  # type: ignore
+                    .reshape(b, h // 16, w // 16, -1)
+                    .permute(0, 3, 1, 2)
+                )  # (bs, c, h, w)
+            else:
+                raise ValueError(
+                    f"Unknown dino_type: {self.dino_type}. Must be 'torch' or 'timm'."
+                )
 
             if isinstance(img_feats, DTensor):
                 img_feats = img_feats.full_tensor()
@@ -265,17 +292,17 @@ class REPALoss(torch.nn.Module):
 
         # loop to get the features
         if self.dino_fixed_bs is None or img.shape[0] < self.dino_fixed_bs:
-            img_feats = _forward_featurs(img)
+            img_feats = _forward_features(img)
         else:
             img_feats = torch.cat(
                 [
-                    _forward_featurs(img[i : i + self.dino_fixed_bs])
+                    _forward_features(img[i : i + self.dino_fixed_bs])
                     for i in range(0, img.shape[0], self.dino_fixed_bs)
                 ],
                 dim=0,
             )
 
-        return img_feats.detach()
+        return img_feats
 
     def _repa_loss(self, img_feat: Tensor, model_feat: Tensor):
         # [bs, l, c] or [bs, c, h, w]
@@ -291,7 +318,15 @@ class REPALoss(torch.nn.Module):
         model_feat = self.projector(model_feat)
 
         # repa loss
-        dim = 1 if self.c_dim_first else -1
+        if self.c_dim_first:
+            dim = 1
+            rarg_pattn = "b c h w -> b c (h w)"
+        else:
+            dim = -1
+            rarg_pattn = "b h w c -> b (h w) c"
+
+        img_feat = rearrange(img_feat, rarg_pattn)
+        model_feat = rearrange(model_feat, rarg_pattn)
         img_feat = norm_feature(img_feat, dim=dim)
         model_feat = norm_feature(model_feat, dim=dim)
 
@@ -299,6 +334,7 @@ class REPALoss(torch.nn.Module):
             "img_feat and model_feat must have the same shape to compute the repa loss"
         )
         repa_loss = -torch.sum(img_feat * model_feat, dim=dim)
+
         # repa_loss = (
         #     torch.cosine_similarity(img_feat.flatten(1), model_feat.flatten(1), dim=1)
         #     / img_feat.shape[0]
@@ -376,16 +412,12 @@ class VFLoss(REPALoss):
         logger.debug(repr(self))
 
     def __repr__(self):
-        return (
-            "VFLoss: "
-            + super().__repr__()
-            + (
-                f"\n(\n    distmat_margin: {self.distmat_margin}\n"
-                f"    cos_margin: {self.cos_margin}\n"
-                f"    distmat_weight: {self.distmat_weight}\n"
-                f"    cos_weight: {self.cos_weight}\n"
-                f"    vf_weight: {self.vf_weight}\n)"
-            )
+        return "VFLoss: " + (
+            f"\n(\n    distmat_margin: {self.distmat_margin}\n"
+            f"    cos_margin: {self.cos_margin}\n"
+            f"    distmat_weight: {self.distmat_weight}\n"
+            f"    cos_weight: {self.cos_weight}\n"
+            f"    vf_weight: {self.vf_weight}\n)"
         )
 
     def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
@@ -429,7 +461,7 @@ class VFLoss(REPALoss):
             z (Tensor): The main feature tensor.
             aux_feature (Tensor): The auxiliary feature tensor.
             nll_loss (Tensor, optional): The negative log-likelihood loss. Defaults to None.
-            last_layer (Tensor, optional): The last layer of the model for gradient calculation. Defaults to None.
+            last_layer (Tensor, optional): The last layer of the encoder for gradient calculation. Defaults to None.
 
         Returns:
             Tensor: The computed VF loss.

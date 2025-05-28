@@ -27,14 +27,14 @@ dataset_names_to_n_channels:
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: [4, 3, 2]
-  DCF_2019: [4, 2, 0]
+  DCF_2019: [5, 3, 2]
   DCF_2020: [9, 6, 3]
-  GID_GF2: [4, 2, 0]
+  GID_GF2: [3, 2, 1]
   DryadHyper: [90, 60, 40]
   Houston: [40, 20, 10]
   DFC_2020: [9, 6, 4]
   MUSLI: [66, 38, 16]
-  WV3: [4, 2, 0]
+  WV3: [5, 3, 2]
   OHS: [18, 11, 6]
 
 dataset_names_to_img_size:

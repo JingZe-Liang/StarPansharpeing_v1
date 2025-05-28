@@ -233,6 +233,11 @@ class ContinuousImageTokenizer(nn.Module):
     _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _hook_feature: torch.Tensor | None = None
     _proj_for_vf: bool = False
+    _vf_on_z_or_module: Literal["z", "module"] = (
+        "module"  # vf loss on z or module output
+    )
+    _dino_feature_dim: int = 768  # [768, 1024]
+
     z: torch.Tensor | None = None  # the latent z
 
     def __init__(
@@ -249,13 +254,25 @@ class ContinuousImageTokenizer(nn.Module):
         self._hook_for_repa = kwargs.pop("hook_for_repa", False)
         self._proj_for_vf = kwargs.pop("proj_for_vf", False)
         self._hook_module = kwargs.pop("hook_module", self._hook_module)
+        self._vf_on_z_or_module = kwargs.pop(
+            "vf_on_z_or_module", self._vf_on_z_or_module
+        )
         assert not (self._hook_for_repa and self._proj_for_vf), (
             "repa and vf losses should not be used at the same time"
         )
         if self._hook_for_repa:
-            self._repa_proj = build_mlp(512, 768, 768)
+            self._repa_proj = build_mlp(
+                512, self._dino_feature_dim, self._dino_feature_dim
+            )
         if self._proj_for_vf:
-            self._vf_proj = build_mlp(latent_channels, 768, 768)
+            if self._vf_on_z_or_module == "z":
+                self._vf_proj = build_mlp(
+                    latent_channels, self._dino_feature_dim, self._dino_feature_dim
+                )
+            else:
+                self._vf_proj = build_mlp(
+                    512, self._dino_feature_dim, self._dino_feature_dim
+                )
 
         self.quantizer_type = kwargs.pop("quantizer_type", None)
         assert self.quantizer_type in [
@@ -350,6 +367,7 @@ class ContinuousImageTokenizer(nn.Module):
             if kwargs.get("norm_in_quant_conv", False):
                 warnings.warn(
                     '"norm_in_quant_conv" is not supported for pretrained settings and not recommended to use'
+                    "it will be removed"
                 )
                 quant_conv = nn.Sequential(
                     Normalize(z_factor * z_channels, norm_type="rms_triton"),
@@ -383,7 +401,7 @@ class ContinuousImageTokenizer(nn.Module):
             log_print(f"use channel drop: {kwargs['channel_drop_config']}")
 
         # register repa hook
-        if self._hook_for_repa:
+        if self._hook_for_repa or self._vf_on_z_or_module == "module":
             self.register_feature_hook()
 
         num_parameters = sum(param.numel() for param in self.parameters())
@@ -447,8 +465,17 @@ class ContinuousImageTokenizer(nn.Module):
     @torch.autocast("cuda", torch.bfloat16)
     def get_vf_feature(self):
         if hasattr(self, "_vf_proj"):
-            assert self.z is not None, "z should be set before get_vf_feature"
-            return self._vf_proj(self.z)
+            if self._vf_on_z_or_module == "z":
+                # project on latent
+                assert self.z is not None, "z should be set before get_vf_feature"
+                return self._vf_proj(self.z)
+            elif self._vf_on_z_or_module == "module":
+                return self._vf_proj(self._hook_feature)
+                # proj on block out
+            else:
+                raise ValueError(
+                    f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
+                )
 
         return None
 
@@ -462,7 +489,12 @@ class ContinuousImageTokenizer(nn.Module):
     def get_last_enc_layer(self):
         # get encoder last layer weight for visual foundation loss
         # return self.encoder.encoder.conv_out.weight
-        return self.encoder.quant_conv.weight
+        if self._vf_on_z_or_module == "z":
+            return self.encoder.quant_conv.weight
+        else:  # module
+            # decoder.decoder.mid.block_2
+            # hard code here, say the block_2 is a resnet block
+            return self.get_submodule(self._hook_module).conv2.weight
 
     def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
         h = self.encoder(x)

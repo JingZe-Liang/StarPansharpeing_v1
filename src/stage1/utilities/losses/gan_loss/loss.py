@@ -27,11 +27,6 @@ from ..repa import REPALoss, VFLoss
 from .hyperspectral_percep_loss import LIPIPSHyperpspectral
 
 
-class DummyLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-
 def dict_to_namedtuple(dictionary: dict, name="NamedTuple"):
     """Convert a dictionary to a namedtuple dynamically"""
     if not dictionary:
