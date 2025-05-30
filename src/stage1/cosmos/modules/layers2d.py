@@ -76,6 +76,7 @@ def make_block_fn(
         "res_block",
         "dico_block",
         "convnext",
+        "res_moe",
     ] = "res_block",
     moe_n_experts=4,
     act_checkpoint=False,
@@ -86,7 +87,7 @@ def make_block_fn(
     moe_type="tc",
     padding_mode: str = "zeros",
     norm_type: str = "gn",
-    token_mixer_type: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+    token_mixer_type: Literal["res_block", "dico_block", "convnext"] = "res_block",
     **kwargs,
 ):
     if block_name == "res_moe":
@@ -194,7 +195,7 @@ class Encoder(nn.Module):
         moe_n_shared_experts: int = 1,
         hidden_factor: int = 2,
         moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
-        moe_token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+        moe_token_mixer_type: Literal["res_block", "dico_block"] = "res_block",
         # padding and norm
         padding_mode: str = "zeros",
         norm_type: str = "gn",
@@ -211,6 +212,7 @@ class Encoder(nn.Module):
         self.moe_n_shared_experts = moe_n_shared_experts
         self.hidden_factor = hidden_factor
         self.moe_type = moe_type
+        self.block_name = block_name
 
         log_print(
             f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, "
@@ -398,7 +400,7 @@ class Decoder(nn.Module):
         moe_n_shared_experts: int = 1,
         hidden_factor: int = 2,
         moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
-        moe_token_mixer_type: Literal["resblock", "dico_block"] = "resblock",
+        moe_token_mixer_type: Literal["res_block", "dico_block"] = "res_block",
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
@@ -415,6 +417,7 @@ class Decoder(nn.Module):
         self.moe_n_shared_experts = moe_n_shared_experts
         self.hidden_factor = hidden_factor
         self.moe_type = moe_type
+        self.block_name = block_name
 
         log_print(
             f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, "

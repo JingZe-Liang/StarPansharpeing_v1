@@ -333,6 +333,9 @@ class ContinuousImageTokenizer(nn.Module):
         dec_path = kwargs.pop("dec_path", "")
         uni_tokenizer_path = kwargs.pop("uni_tokenizer_path", "")
 
+        # 强制参数内存连续性
+        self.register_buffer("dummy_param", torch.tensor(0))
+
         # pretrained encoder and decoder
         if loading_type == "nvidia":
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
@@ -494,7 +497,17 @@ class ContinuousImageTokenizer(nn.Module):
         else:  # module
             # decoder.decoder.mid.block_2
             # hard code here, say the block_2 is a resnet block
-            return self.get_submodule(self._hook_module).conv2.weight
+            block_name = self.encoder.encoder.block_name
+            if block_name == "res_block":
+                return self.get_submodule(self._hook_module).conv2.weight
+            elif block_name == "res_moe":
+                # return self.get_submodule(self._hook_module).moe.moe['moe_tc'].shared_experts.down_proj.weight
+                # return self.get_submodule(self._hook_module).token_mixer.conv2.weight
+                return None
+            else:
+                raise ValueError(
+                    f"block_name {block_name} not supported, only res_block and res_moe are supported"
+                )
 
     def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
         h = self.encoder(x)
@@ -896,11 +909,11 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "",  # "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
-        "block_name": "res_block",
+        "block_name": "res_moe",
         "quantizer_type": None,
-        "loading_type": "pretrained",
+        "loading_type": None,  # "pretrained",
         "enc_moe": False,
         "dec_moe": False,
         "padding_mode": "reflect",
@@ -918,8 +931,9 @@ if __name__ == "__main__":
     # tokenizer = torch.compile(tokenizer)
 
     # peft modules
-    log_print(str(tokenizer.peft_first_last_convs_module_names()))
-    log_print(str(tokenizer.additional_peft_target_modules()))
+    # log_print(str(tokenizer.peft_first_last_convs_module_names()))
+    # log_print(str(tokenizer.additional_peft_target_modules()))
+    tokenizer.get_last_enc_layer()
 
     # from fvcore.nn import parameter_count_table
 
@@ -932,7 +946,7 @@ if __name__ == "__main__":
 
     dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="DCF")
     dl_iter = iter(dl)
-    tokenizer = tokenizer.eval()
+    # tokenizer = tokenizer.eval()
 
     # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
     # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
@@ -950,28 +964,31 @@ if __name__ == "__main__":
     from src.utilities.logging.print import catch_any
 
     metric = MeanMetric().cuda()
-    with torch.autocast("cuda", torch.bfloat16) and catch_any() and torch.no_grad():
+    with torch.autocast("cuda", torch.bfloat16) and catch_any():  # and torch.no_grad():
         for i in range(20):
             x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
-            y, *_ = tokenizer(x)
-            yy = ((y[[2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
-            xx = (((x[0, [2, 1, 0]]).permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+            y = tokenizer(x)
+            # yy = ((y[[2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+            # xx = (((x[0, [2, 1, 0]]).permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
 
             # psnr
-            psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-            psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-            print(f"PSNR: {psnr_val}")
+            # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+            # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+            # print(f"PSNR: {psnr_val}")
+            # print(y.shape)
+
             print(y.shape)
+            y.mean().backward()
 
             # grads
-            # for n, p in tokenizer.named_parameters():
-            #     if p.grad is None:
-            #         print(f"{n} grad is None")
+            for n, p in tokenizer.named_parameters():
+                if p.grad is None:
+                    print(f"{n} grad is None")
 
             # opt.zero_grad()
             # y.mean().backward()
             # opt.step()
-            metric.update(psnr_val)
+            # metric.update(psnr_val)
 
         print(metric.compute())
 

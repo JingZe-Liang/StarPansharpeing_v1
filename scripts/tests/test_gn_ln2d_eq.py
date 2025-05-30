@@ -1,4 +1,7 @@
-# import torch
+import torch
+import torch.nn as nn
+
+from src.stage1.cosmos.modules.utils import RMSNorm2d
 
 # gn = torch.nn.GroupNorm(num_groups=1, num_channels=3, eps=1e-6, affine=True)
 
@@ -38,20 +41,35 @@
 # print(f"GroupNorm and LayerNorm2D only channel are close: {close}")  # False
 
 
-from safetensors.torch import load_file, save_file
+class RMSNorm2dTorch(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.norm = torch.nn.RMSNorm(
+            normalized_shape=c,
+            eps=1e-6,
+            elementwise_affine=True,
+        )
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)  # Change to (N, H, W, C)
+        x = self.norm(x)
+        return x.permute(0, 3, 1, 2)
 
 
-d = load_file(
-    "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model.safetensors"
-)
-d["decoder.quant_conv.weight"] = d["decoder.post_quant_conv.weight"]
-d["decoder.quant_conv.bias"] = d["decoder.post_quant_conv.bias"]
+norm2dtorch = RMSNorm2dTorch(3).cuda()
+x = torch.arange(3 * 32 * 32).float()
+x = x.reshape(3, 32, 32)[None].cuda()
+x_norm2dtorch = norm2dtorch(x)
 
-del d["decoder.post_quant_conv.weight"]
-del d["decoder.post_quant_conv.bias"]
+print(x_norm2dtorch.shape)  # Should be (1, 3, 32, 32)
 
-save_file(
-    d,
-    "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/cosmos_f8c16p4_psnr_39/ema/tokenizer/model2.safetensors",
-)
-print("done.")
+# Test RMSNorm2dTriton
+
+rms2dtriton = RMSNorm2d(3).cuda()
+x_rms2dtriton = rms2dtriton(x)
+print(x_rms2dtriton.shape)  # Should be (1, 3, 32, 32)
+
+
+# close
+closed = torch.allclose(x_norm2dtorch, x_rms2dtriton, atol=1e-6)
+print(f"RMSNorm2dTorch and RMSNorm2dTriton are close: {closed}")  # True

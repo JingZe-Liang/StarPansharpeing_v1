@@ -375,6 +375,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 # as suggested in the original paper
                 blur_kernel_size=4,
                 blur_resample=True,
+                activation_fn="leaky_relu",
             )
         elif disc_network_type.lower() == "stylegan":
             self.discriminator = StyleGANDiscriminator(

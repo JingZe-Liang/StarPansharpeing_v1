@@ -126,19 +126,37 @@ class DiffBandsInputConvIn(nn.Module):
         self,
         band_lst: list[int],
         hidden_dim: int,
-        basic_module: nn.Module = nn.Conv2d,
+        basic_module: str = "conv_act_norm",
     ):
         super().__init__()
 
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
+        if basic_module == "conv":
+            basic_module_fn = nn.Conv2d
+        elif basic_module == "conv_act_norm":
+
+            def basic_module_fn(
+                in_channels, out_channels, kernel_size, stride, padding
+            ):
+                return nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        out_channels,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                    ),
+                    nn.GroupNorm(32, out_channels, eps=1e-6),
+                    nn.LeakyReLU(negative_slope=0.2),
+                )
 
         kw = 4
         padw = 1
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
-            self.in_modules["conv_in_{}".format(c)] = basic_module(
+            self.in_modules["conv_in_{}".format(c)] = basic_module_fn(  # type: ignore
                 in_channels=c,
                 out_channels=hidden_dim,
                 kernel_size=kw,
@@ -205,7 +223,17 @@ class NLayerDiscriminator(nn.Module):
             use_bias = norm_layer.func != nn.BatchNorm2d
         else:
             use_bias = norm_layer != nn.BatchNorm2d
-        log_print("patch gan discriminator - use bias: {}".format(use_bias))
+
+        log_print(
+            "[NLayerDisc] config: "
+            f"input_nc={input_nc}, "
+            f"ndf={ndf}, "
+            f"n_layers={n_layers}, "
+            f"use_actnorm={use_actnorm}, "
+            f"use_bn={use_bn}, "
+            f"norm_layer={norm_layer}, "
+            f"use_bias={use_bias}"
+        )
 
         kw = 4
         padw = 1
@@ -216,6 +244,7 @@ class NLayerDiscriminator(nn.Module):
             else DiffBandsInputConvIn(
                 band_lst=input_nc,
                 hidden_dim=ndf,
+                basic_module="conv_act_norm",
             )
         )
         sequence = [
@@ -275,8 +304,15 @@ class NLayerDiscriminator(nn.Module):
 
 if __name__ == "__main__":
     ## patch gan
-    net = NLayerDiscriminator(input_nc=[3, 4, 8], ndf=64, n_layers=3, use_actnorm=False)
+    net = NLayerDiscriminator(input_nc=3, ndf=128, n_layers=3, use_actnorm=False)
     print(net)
+
+    # total params
+    # total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    # log_print(f"Total parameters: {total_params:,}")
+    from fvcore.nn import FlopCountAnalysis, parameter_count_table
+
+    print(parameter_count_table(net))
 
     import accelerate
     import torch

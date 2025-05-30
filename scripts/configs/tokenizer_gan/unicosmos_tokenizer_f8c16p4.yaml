@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
   - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
@@ -22,44 +22,45 @@ defaults:
 #     _target_: accelerate.utils.GradientAccumulationPlugin
 #     num_steps: 3
 
-dataset:
-  used: DCF_2019
-  shuffle_size: 30
-  num_workers: 2
-  prefetch_factor: 6
-  shuffle_within_workers: true
-  dataset_names_to_bs:
-    MMSeg_YREB: 20
-    DCF_2019: 16
-    GID_GF2: 7
-    DryadHyper: 16
-    MUSLI: 7
-    OHS: 9
-  transform_prob: 0.5
+# dataset:
+#   used: DCF_2019
+#   shuffle_size: 30
+#   num_workers: 2
+#   prefetch_factor: 6
+#   shuffle_within_workers: true
+#   dataset_names_to_bs:
+#     MMSeg_YREB: 20
+#     DCF_2019: 16
+#     GID_GF2: 7
+#     DryadHyper: 16
+#     MUSLI: 7
+#     OHS: 9
+#   transform_prob: 0.5
 
 vq_loss:
-  repa_loss_weight: #1.5
+  repa_loss_weight: 1.0
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: random
     img_resize: 224 # null for no resize
     dino_img_size: 224
-  vf_loss_weight: 0.1
+  vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: ${dataset.rgb_channels}
+    rgb_channels: random #${dataset.rgb_channels}
     img_resize: 224
     dino_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
   quantizer_type:
   quantizer_options:
-  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
+  disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
+  disc_num_layers: 4
   use_actnorm: false
-  disc_norm_type: bn2d # gn or bn? works with patchgan_v2
+  disc_norm_type: gn # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: hinge
@@ -68,29 +69,30 @@ vq_loss:
   reconstruction_loss_type: l1
 
 tokenizer:
-  hook_for_repa: false
+  hook_for_repa: true
   hook_module: decoder.decoder.mid.block_2
-  proj_for_vf: true
+  proj_for_vf: false
   vf_on_z_or_module: module
 
-  act_checkpoint: false
-  uni_tokenizer_path: #runs/stage1_cosmos/2025-05-27_03-30-44_cosmos_f8c16p4_DCF_2019/ema/tokenizer/model.safetensors
-  loading_type: #pretrained
+  act_checkpoint: true
+  uni_tokenizer_path: runs/stage1_cosmos/2025-05-30_22-48-10_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema/tokenizer/model.safetensors
+  loading_type: pretrained
   use_channel_drop: false
   enc_moe: false
   dec_moe: false
   norm_type: gn
   norm_groups: 32
   block_name: res_block
+  moe_token_mixer_type: res_block
   # conv_in_module: resnet
   # conv_out_module: resnet
   patch_method: haar
   hidden_factor: 4
-  patch_size: 4
+  patch_size: 1
   attn_type: none
   padding_mode: reflect # for boundary?
 
-  latent_channels: 32
+  latent_channels: 16
 
   # channel_drop_config:
   #   learnable: false
@@ -121,10 +123,11 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-05-26_11-57-32_cosmos_repa_DCF_2019/checkpoints/checkpoint_20
-  ema_load_path: #runs/stage1_cosmos/2025-05-27_13-48-02_cosmos_f8c32p4_DCF2019/ema
+  resume_path:
+  ema_load_path: #runs/stage1_cosmos/2025-05-29_23-22-43_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema
   compile_model: false
   only_load_tokenizer: true
+  grad_check: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -175,7 +178,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_repa
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_vf_loss
     log_with_time: True
     visualize_every: 500
     log_every: 10

@@ -18,14 +18,14 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: OHS
+  used: MMSeg_YREB
   prefetch_factor:
   num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
   dataset_names_to_bs:
-    MMSeg_YREB: 22
+    MMSeg_YREB: 24
     DCF_2019: 7
     DFC_2020: 18
     GID_GF2: 7
@@ -48,7 +48,7 @@ tokenizer:
   vf_on_z_or_module: module
 
   act_checkpoint: false
-  uni_tokenizer_path: runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_DCF_2019_psnr_42/ema/tokenizer/model.safetensors
   loading_type: pretrained
   use_channel_drop: false
   enc_moe: false
@@ -87,7 +87,7 @@ vq_loss:
   ssim_weight: 0.2
   disc_weight: 0.8
   repa_loss_weight: #1.5
-  vf_loss_weight: #0.1
+  vf_loss_weight:
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -138,7 +138,7 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 150_000
+  max_steps: 350_000
   save_every: 500
   seperate_enc_dec: false
   resume_path:
@@ -155,7 +155,7 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 1.0e-4
+    lr: 3.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
     ns_diff_abc: true
@@ -172,7 +172,7 @@ train:
     _partial_: true
     lr: 1.0e-4
     weight_decay: 0.1
-    adamw_eps: 1.0e-8
+    adamw_eps: 3.0e-8
     ns_diff_abc: true
     ns_norm: false
     # _target_: torch.optim.AdamW
@@ -195,16 +195,16 @@ train:
     # num_warmup_steps: 1000
 
   disc_sched:
-    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-    # _partial_: true
-    # num_warmup_steps: 1000
-    # num_training_steps: ${train.max_steps}
-    # num_cycles: 1
-    # reduced_factor: 2
-    # min_lr: 1.0e-5
-    _target_: transformers.optimization.get_constant_schedule_with_warmup
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   log:
     run_comment: lora_fintune_f8c16p4_${dataset.used}

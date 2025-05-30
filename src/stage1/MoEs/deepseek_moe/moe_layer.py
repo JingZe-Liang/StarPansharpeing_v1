@@ -390,6 +390,8 @@ class DeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
 
+        y = y.contiguous()
+
         if self.compute_moe_info:
             return y, moe_info
         else:
@@ -886,6 +888,8 @@ class DeepseekECMoE(nn.Module):
         # 应用共享专家 (如果有)
         if self.n_shared_experts is not None:
             outputs = outputs + self.shared_experts(identity)
+
+        outputs = outputs.contiguous()
 
         if self.compute_moe_info:
             return outputs, moe_info

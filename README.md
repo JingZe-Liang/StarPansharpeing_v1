@@ -53,20 +53,25 @@ We are cooking the codes, stay tuned.
 ## Some Refs
 1. [GMFlow: Gaussian Mixture Flow Matching Model](https://github.com/Lakonik/GMFlow?tab=readme-ov-file).
 2. IMM codes: [official codes](https://github.com/lumalabs/imm), [unofficial codes](https://github.com/rosinality/inductive-moment-matching/blob/main/src/imm/loss.py).
-3. [Conv-LoRA](https://github.com/autogluon/autogluon/blob/081e3c6e4134beb84637863624d8b68a5c15bac1/multimodal/src/autogluon/multimodal/models/adaptation_layers.py#L703) (MoE) adaptors may suit Cosmos tokenizer.
-
-## Logs
-
+3. [Conv-LoRA](https://github.com/autogluon/autogluon/blob/081e3c6e4134beb84637863624d8b68a5c15bac1/multimodal/src/autogluon/multimodal/models/adaptation_layers.py#L703) (MoE) adaptors may suit Cosmos
 2025/05/25
 > 1. Only convolution layers of tokenizer will make the norm and the max value of layers to be larger. **Add Attention or LiteMLA will fix this issue**.
 > This issue happens not only in cosmos tokenizer but also in LDM AutoencoderKL.
 
-- [ ] Try to find if add attention will fix the diffbands input low quality reconstrution.
+- [x] ~~Try to find if add attention will fix the diffbands input low quality reconstrution.~~ (does not work!)
 > seems that the attention layer does not fix the large norm issue.
 
 1. use pixel(un)shuffle as downsample and upsample operators (No.2 runnning)
 2. just padconv and repeatconv as downsample and upsample operators (No. 6 running).
 3. use previous weight with resblock (w/o attention) can finetune good.
+
+
+## Logs
+
+2025/05/29
+> Pretrained on DFC2019 dataset and finetune on other dataset (MMseg: PSNR 36 << PSNR 39 pretrained; OHS 30 ~= 30 pretrained).
+
+- [ ] try to train diffbands tokenizer at pretrained stage and lora finetuned again on different datasets.
 
 
 2025/05/21

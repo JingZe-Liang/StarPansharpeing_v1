@@ -136,6 +136,7 @@ dmypy.json
 src/stage1/cosmos/pretrained/
 data
 data/
+data_local/
 !src/data
 runs/
 .ruff_cache/

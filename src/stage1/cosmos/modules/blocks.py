@@ -1337,6 +1337,7 @@ class MoE2DBlock(nn.Module):
         else:
             raise ValueError(f"[MoE2DBlockTC] Unknown moe_type={self.moe_type}")
 
+    @_compile_decorator
     def _forward_fn(self, x: torch.Tensor):
         # x: (B, C, H, W)
         h, w = x.shape[-2:]
@@ -1377,12 +1378,13 @@ class ResnetBlockMoE2D(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
-        token_mixer_type: Literal["res_block", "dico_block"] = "res_block",
+        token_mixer_type: Literal["res_block", "dico_block", "convnext"] = "res_block",
         **resnet_kwargs,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
+        self.token_mixer_type = token_mixer_type
 
         log_print(f"[ResnetBlockMoE2D] using token mixer: {token_mixer_type}", "debug")
         if token_mixer_type == "res_block":
@@ -1418,6 +1420,11 @@ class ResnetBlockMoE2D(nn.Module):
                 drop_path=drop_out,
                 norm_type=norm_type,
             )
+        else:
+            raise ValueError(
+                f"[ResnetBlockMoE2D] Unknown token_mixer_type={token_mixer_type}, "
+                "supported types are: ['res_block', 'dico_block', 'convnext']"
+            )
         self.moe_prenorm = Normalize(
             self.out_channels, norm_type=norm_type, num_groups=norm_groups
         )
@@ -1434,7 +1441,7 @@ class ResnetBlockMoE2D(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # token mixer
-        h = self.token_mixer(x)  # shortcut in the block
+        h = self.token_mixer(x)  # shortcut is in the block
         # ffn
         h = self.moe(self.moe_prenorm(h)) + h
         return h
