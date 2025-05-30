@@ -33,7 +33,7 @@ dataset:
     DryadHyper: 16
     MUSLI: 1
     WV3: 8
-    OHS: 5
+    OHS: 6
 
   transform_prob: 0.5
 
@@ -48,7 +48,7 @@ tokenizer:
   vf_on_z_or_module: module
 
   act_checkpoint: false
-  uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p4_DCF_2019_psnr_42/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors
   loading_type: pretrained
   use_channel_drop: false
   enc_moe: false
@@ -110,11 +110,11 @@ ema:
 
 peft:
   _target_: peft.LoraConfig
-  peft_type: lokr
-  r: 8
+  peft_type: lora
+  r: 16
   lora_alpha: 8
-  use_dora: true
-  use_rslora: true
+  use_dora: false
+  use_rslora: false
   target_modules:
     # - conv1
     # - conv2
@@ -122,7 +122,7 @@ peft:
     # - k
     # - v
     # - proj_out
-  lora_dropout: 0.0
+  lora_dropout: 0.1
   modules_to_save:
     # - encoder.encoder.conv_in
     # - decoder.decoder.conv_out
@@ -142,8 +142,8 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path:
-  only_load_tokenizer: true
+  ema_load_path: #runs/stage1_cosmos_lora/2025-05-29_23-50-53_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/ema
+  only_load_tokenizer: false
   save_peft_ckpts: true
   grad_check: false
   compile_model: false
@@ -155,14 +155,14 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
+    lr: 2.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
     ns_diff_abc: true
-    ns_norm: false
+    ns_norm: true
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
+    # lr: 2.0e-4
     # weight_decay: 1.0e-4
     # eps: 1.0e-8
     # betas: [0.9, 0.95]
@@ -170,14 +170,14 @@ train:
   disc_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 1.0e-4
+    lr: 2.0e-4
     weight_decay: 0.1
     adamw_eps: 3.0e-8
     ns_diff_abc: true
-    ns_norm: false
+    ns_norm: true
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
+    # lr: 2.0e-4
     # weight_decay: 1.0e-4
     # eps: 1.0e-8
     # betas: [0.9, 0.95]
@@ -207,7 +207,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: lora_fintune_f8c16p4_${dataset.used}
+    run_comment: lora_fintune_f8c16p4_${dataset.used}_uni_pretrained
     log_with_time: True
     visualize_every: 200
     log_every: 10

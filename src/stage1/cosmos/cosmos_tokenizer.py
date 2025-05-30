@@ -797,7 +797,7 @@ class ContinuousImageTokenizer(nn.Module):
                     "warning",
                 )
 
-    def peft_first_last_convs_module_names(self):
+    def peft_first_last_convs_module_names(self, add_norms: bool = False):
         module_to_save_layers = [
             # convs
             "encoder.encoder.conv_in",
@@ -807,13 +807,13 @@ class ContinuousImageTokenizer(nn.Module):
                 else "decoder.decoder.conv_out.wrap_mod"
             ),
             # quant convs need to be fully finetuned
-            "encoder.quant_conv",
-            "decoder.quant_conv",
+            # "encoder.quant_conv",
+            # "decoder.quant_conv",
         ]
 
         # convolution and normalization layers
         for name, module in self.named_modules():
-            if "norm" in name and (not isinstance(module, nn.Identity)):
+            if "norm" in name and (not isinstance(module, nn.Identity)) and add_norms:
                 module_to_save_layers.append(name)
                 log_print(
                     f"[Cosmos Tokenizer]: add norm {name} to fully finetune", "debug"
@@ -837,8 +837,8 @@ class ContinuousImageTokenizer(nn.Module):
                 not in (
                     "encoder.encoder.conv_in",
                     "decoder.decoder.conv_out",
-                    "encoder.quant_conv",
-                    "decoder.quant_conv",
+                    # "encoder.quant_conv",
+                    # "decoder.quant_conv",
                 )
             ):
                 add_tgt_modules.append(name)

@@ -34,19 +34,19 @@ val_paths:
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 12
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 12
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 4
-  - batch_size: 12
-  - batch_size: 12
-  - batch_size: 12
-  - batch_size: 12
-  - batch_size: 12
+  - batch_size: 20
+  - batch_size: 6
+  - batch_size: 6
+  - batch_size: 6
+  - batch_size: 20
+  - batch_size: 6
+  - batch_size: 6
+  - batch_size: 6
+  - batch_size: 20
+  - batch_size: 20
+  - batch_size: 20
+  - batch_size: 20
+  - batch_size: 20
 
   ## not use act_ckpt
   # - batch_size: 9

@@ -360,7 +360,7 @@ class DiCoBlock(nn.Module):
                 padding_mode=padding_mode,
                 groups=out_channels,
             ),
-            ACT2FN["gelu_fast"],
+            ACT2FN["gelu"],
         )
         self.body_out = conv_cls(out_channels, out_channels, kernel_size=1, stride=1)
 
@@ -373,7 +373,7 @@ class DiCoBlock(nn.Module):
                 in_features=out_channels,
                 hidden_features=hidden_channels,
                 out_features=out_channels,
-                act_layer=ACT2FN["gelu_fast"],
+                act_layer=ACT2FN["gelu"],
                 bias=True,
                 drop=0.0,
             )

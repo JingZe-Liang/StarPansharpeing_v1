@@ -58,30 +58,78 @@ def get_cli_cfg_isolate_with_hydra_cfg(
 
     if _req_help:
         from rich import print
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
 
-        print("-" * 60)
+        console = Console()
+
+        # 创建标题
+        title = Text("🚀 Hyperspectral 1D Tokenizer CLI Help", style="bold magenta")
+        console.print(Panel(title, expand=False))
+
+        # CLI 参数表格
+        cli_table = Table(
+            title="📋 CLI Arguments", show_header=True, header_style="bold cyan"
+        )
+        cli_table.add_column("Parameter", style="green", width=20)
+        cli_table.add_column("Type", style="yellow", width=10)
+        cli_table.add_column("Default", style="blue", width=15)
+        cli_table.add_column("Description", style="white")
+
         if list(cli_default_dict.keys()) != list(CLI_DEFAUTL_DICT.keys()):
-            print("\nHelp information:\n\ncli arguments:\n")
             for key, value in cli_default_dict.items():
-                print(f"\t{key}: default value {value}")
-            print(
-                "\t help(h, -h, --help): bool, whether to show the help information\n"
-            )
+                cli_table.add_row(
+                    key, type(value).__name__, str(value), "Custom CLI parameter"
+                )
         else:
-            print(
-                "\nHelp information:\n\n"
-                "cli arguments:\n"
-                "\t config_name:          str, the name of the config file to use\n"
-                "\t only_rank_zero_catch: bool, whether to only catch the exception on rank 0\n"
-                "\t help(h, -h, --help):  bool, whether to show the help information\n"
+            cli_table.add_row(
+                "config_name", "str", "None", "Name of the config file to use"
             )
-        print("\nUsage:")
-        print("\t python main.py config_name=some_config_name some_hydra_args\n")
-        print("-" * 60)
-        print("\nHydra arguments:\n \trefer to the choosen config file\n")
-        print("-" * 60)
-        print("\nDefault config file choices:\n")
-        print(exp_config_dict)
+            cli_table.add_row(
+                "only_rank_zero_catch",
+                "bool",
+                "True",
+                "Whether to only catch exceptions on rank 0",
+            )
+
+        cli_table.add_row(
+            "help", "bool", "False", "Show this help information (h, -h, --help)"
+        )
+
+        console.print(cli_table)
+        console.print()
+
+        usage_panel = Panel(
+            "[bold green]python main.py[/bold green] [cyan]config_name=some_config_name[/cyan] [yellow]some_hydra_args[/yellow]",
+            title="💡 Usage Example",
+            title_align="left",
+        )
+        console.print(usage_panel)
+        console.print()
+
+        hydra_panel = Panel(
+            "Hydra arguments depend on the chosen config file.\nRefer to your specific config file for available options.",
+            title="⚙️  Hydra Arguments",
+            title_align="left",
+        )
+        console.print(hydra_panel)
+        console.print()
+
+        config_table = Table(
+            title="📁 Available Config Files",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        config_table.add_column("Config Name", style="green", width=20)
+        config_table.add_column("File Path", style="blue")
+
+        for config_name, config_path in exp_config_dict.items():
+            config_table.add_row(config_name, config_path)
+
+        console.print(config_table)
+
         exit(0)
 
     # exp config
