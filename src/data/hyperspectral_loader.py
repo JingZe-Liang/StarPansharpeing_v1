@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader, Dataset
 from typing_extensions import deprecated
 
 from src.data.codecs import safetensors_decode_io, tiff_decode_io
+from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     extract_modality_names,
     flatten_sub_dict,
@@ -39,8 +40,12 @@ from src.data.utils import (
     remove_extension,
     remove_meta_data,
 )
-from src.utilities.config_utils import kwargs_to_basic_types
+from src.utilities.config_utils import (
+    function_config_to_basic_types,
+    kwargs_to_basic_types,
+)
 from src.utilities.logging import log_print
+from src.utilities.train_utils.state import StepsCounter
 
 __compile_collate_fn = False
 if __compile_collate_fn:
@@ -101,7 +106,9 @@ def hyper_transform(
 ):
     if isinstance(probs, float):
         probs = [probs] * len(op_list)
-    assert len(probs) == len(op_list)
+    assert len(probs) == len(op_list), (
+        "Number of probabilities must match number of operations."
+    )
 
     _op_list_cls = dict(
         grayscale=lambda p: HyperRandomGrayScale(p=p),
@@ -594,7 +601,12 @@ def only_hyperspectral_img_folder_dataloader(
     return dataset, dataloader
 
 
-def chained_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
+def chained_dataloaders(
+    dataloaders,
+    infinit=True,
+    shuffle_loaders=True,
+    curriculum_fn=None,
+):
     """
     Chains multiple dataloaders into a single generator that yields samples from
     the provided dataloaders. Supports both finite and infinite iteration modes.
@@ -645,6 +657,11 @@ def chained_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
         >>>     process(sample)
     """
 
+    if curriculum_fn is not None:
+        shuffle_loaders = False  # curriculum learning requires fixed order
+        assert infinit, "using curriculum learning requires infinit=True"
+        assert StepsCounter._initialized, "StepsCounter has not initialized"
+
     def _chain_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
         n = len(dataloaders)
         iters = [iter(dl) for dl in dataloaders]
@@ -680,7 +697,41 @@ def chained_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
             sample = None
 
             while attempt < max_attempts and active_indices:
-                idx = active_indices.pop()
+                # * --- CURRICULUM LEARNING SELECTION STRATEGY --- #
+                if curriculum_fn:
+                    # Get probability distribution for current step
+                    raw_probs = curriculum_fn(
+                        StepsCounter()["train"]  # sigleton class instance
+                    )
+
+                    # Filter only active loaders and their probabilities
+                    valid_indices = []
+                    valid_probs = []
+                    for idx in active_indices:
+                        # if not is_exhausted[idx]:
+                        valid_indices.append(idx)
+                        valid_probs.append(raw_probs[idx])
+
+                    # Normalize probabilities for active loaders
+                    total_prob = sum(valid_probs)
+                    if total_prob > 0:
+                        normalized_probs = [p / total_prob for p in valid_probs]
+                        # Select loader based on curriculum probabilities
+                        idx = random.choices(
+                            valid_indices, weights=normalized_probs, k=1
+                        )[0]
+                    else:
+                        # Fallback to uniform selection if all probs zero
+                        idx = random.choice(valid_indices)
+
+                # * --- STANDARD SELECTION STRATEGY --- #
+                else:
+                    if shuffle_loaders:
+                        random.shuffle(active_indices)
+                    idx = active_indices[0]  # Select first active index
+
+                # Remove the selected index from active_indices for this attempt
+                active_indices.remove(idx)
                 attempt += 1
 
                 try:
@@ -726,9 +777,13 @@ def chained_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
     return chained_loader
 
 
+@function_config_to_basic_types
 def get_hyperspectral_img_loaders_with_different_backends(
     paths: WebdatasetPath,
     loader_type: Literal["webdataset", "folder"] = "webdataset",
+    # curriculums
+    curriculum_type: str | None = None,
+    curriculum_kwargs: dict | None = None,
     # * there are three choices to provide the loaders' configuration:
     # 1. provide a basic config and change some of cfg by different loaders
     basic_kwargs: dict | None = None,
@@ -776,38 +831,32 @@ def get_hyperspectral_img_loaders_with_different_backends(
         AssertionError: If configuration parameters don't match expected formats
     """
 
-    # clear the kwargs
-    (
-        paths,
-        loader_kwargs,
-        rep_loader_kwargs,
-        basic_kwargs,
-        changed_kwargs_by_loader,
-    ) = map(
-        kwargs_to_basic_types,
-        (
-            paths,
-            loader_kwargs,
-            rep_loader_kwargs,
-            basic_kwargs,
-            changed_kwargs_by_loader,
-        ),
-    )  # type: ignore
-
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
 
-        def ensure_non_empty_worker_shard(paths: str | list[str], loader_kwargs: dict):
+        def expand_paths_and_correct_loader_kwargs(
+            paths: str | list[str], loader_kwargs: dict
+        ):
             # Ensure that the number of workers is not greater than the number of shards
             if isinstance(paths, str):
                 paths = list(braceexpand.braceexpand(paths))
                 _len = len(paths)
+            elif isinstance(paths, (list, tuple)):
+                path_exp = []
+                for p in paths:
+                    assert isinstance(p, str), (
+                        "'paths' should be a list of strings or a string that can be expanded"
+                        f"list of {type(p)} is not allowed."
+                    )
+                    lst_p = list(braceexpand.braceexpand(p))
+                    path_exp.extend(lst_p)
+                _len = len(path_exp)
+                paths = path_exp
+            else:
+                raise ValueError(
+                    f"paths should be a string or a list of strings, but got {type(paths)}"
+                )
 
-            assert isinstance(paths, (list, tuple)), (
-                f"paths should be a list or string, but got {type(paths)}"
-            )
-
-            _len = len(paths)
             assert _len > 0, f"paths should not be empty, but got {paths}"
 
             for p in paths:
@@ -821,10 +870,10 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 loader_kwargs["num_workers"] = _len
                 log_print(
                     f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
-                    level="warning",
+                    level="debug",
                 )
 
-            return loader_kwargs
+            return paths, loader_kwargs
 
         # Groups of dataloaders
         if isinstance(paths, list) and isinstance(paths[0], Sequence):
@@ -832,7 +881,9 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 "input paths contains list of lists, we will chain the dataloader with each loader"
             )
             if rep_loader_kwargs is not None:
-                log_print("rep_loader_kwargs is provided", "debug")
+                log_print(
+                    f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug"
+                )
                 assert isinstance(rep_loader_kwargs, list), (
                     f"rep_loader_kwargs should be a list, but got {type(rep_loader_kwargs)}"
                 )
@@ -864,9 +915,10 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
                 rep_loader_kwargs = [loader_kwargs] * len(paths)
 
+            # * --- build datasets and dataloaders --- #
             datasets = []
             dataloaders = []
-            for p_lst, loader_kwargs in zip(paths, rep_loader_kwargs):
+            for i, (p_lst, loader_kwargs) in enumerate(zip(paths, rep_loader_kwargs)):
                 # assertions
                 assert isinstance(p_lst, (list, tuple)), (
                     f"paths should be a list of lists, but got {type(p_lst)}"
@@ -889,13 +941,28 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     loader_kwargs["resample"] = False
                 loader_kwargs["epoch_len"] = -1
 
-                loader_kwargs = ensure_non_empty_worker_shard(p_lst, loader_kwargs)
+                p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
+                    p_lst, loader_kwargs
+                )
+                log_print(
+                    f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n"
+                    + "-" * 30
+                )
 
                 dataset, dataloader = get_hyperspectral_dataloaders(
                     p_lst, **loader_kwargs
                 )
                 datasets.append(dataset)
                 dataloaders.append(dataloader)
+
+            # curriculum
+            if curriculum_type is not None:
+                curriculum_fn = get_curriculum_fn(  # type: ignore
+                    c_type=curriculum_type,
+                    **curriculum_kwargs,
+                )
+            else:
+                curriculum_fn = None
 
             # make the chainable dataloader
             if not chain_loader_infinit:
@@ -905,11 +972,16 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     "warning",
                 )
             dataloader = chained_dataloaders(
-                dataloaders, chain_loader_infinit, shuffle_loaders
+                dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
             )
             return datasets, dataloader
         else:
-            loader_kwargs = ensure_non_empty_worker_shard(paths, loader_kwargs)
+            paths, loader_kwargs = expand_paths_and_correct_loader_kwargs(
+                paths, loader_kwargs
+            )
+            log_print(
+                f"dataset gets paths: \n<cyan>[{'\n'.join(paths)}</>\n" + "-" * 30
+            )
             return get_hyperspectral_dataloaders(paths, **loader_kwargs)
 
     # torch dataset
@@ -959,22 +1031,20 @@ def generate_wds_config_modify_only_some_kwgs(
 
 if __name__ == "__main__":
     # Test config
-    # test_wds_path = [
-    #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
-    #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0001.tar",
-    #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0002.tar",
-    #     "data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar",
-    # # ]
     test_wds_path = [
-        # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
-        # ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
-        # ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
-        # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
-        # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
-        # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
-        # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
+        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
+        ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
+        ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
+        ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
         ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
+        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
+        [
+            "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
+            "data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar",
+            "data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar",
+        ],
         ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
     ]
     test_batch_size = 16
@@ -998,13 +1068,14 @@ if __name__ == "__main__":
     changed_kwargs = [
         {
             "batch_size": 8,
-        },
+        }
+    ] * 9 + [
         {
-            "batch_size": 4,
-            "channels": 8,
+            "batch_size": 8,
+            "channels": 4,
             "check_channels": True,
-        },
-    ]  # * len(test_wds_path)
+        }
+    ]
     channels = [12, 8, 13, 50, 4, 8, 224]
     accelerator = accelerate.Accelerator()
 
@@ -1028,8 +1099,11 @@ if __name__ == "__main__":
         img = sample["img"]
 
         tbar.set_description_str(
-            "rank: {}, img shape: {}, loader idx: {}".format(
-                accelerator.process_index, img.shape, sample["__loader_idx__"]
+            "rank: {}, img shape: {}, loader idx: {}, url: {}".format(
+                accelerator.process_index,
+                img.shape,
+                sample["__loader_idx__"],
+                sample["__url__"][0],
             )
         )
         # if img.shape[1] == 3:

@@ -126,7 +126,7 @@ class DiffBandsInputConvIn(nn.Module):
         self,
         band_lst: list[int],
         hidden_dim: int,
-        basic_module: str = "conv_act_norm",
+        basic_module: str = "conv_norm_act",
     ):
         super().__init__()
 
@@ -134,7 +134,7 @@ class DiffBandsInputConvIn(nn.Module):
         self.hidden_dim = hidden_dim
         if basic_module == "conv":
             basic_module_fn = nn.Conv2d
-        elif basic_module == "conv_act_norm":
+        elif basic_module == "conv_norm_act":
 
             def basic_module_fn(
                 in_channels, out_channels, kernel_size, stride, padding
@@ -244,7 +244,7 @@ class NLayerDiscriminator(nn.Module):
             else DiffBandsInputConvIn(
                 band_lst=input_nc,
                 hidden_dim=ndf,
-                basic_module="conv_act_norm",
+                basic_module="conv_norm_act",
             )
         )
         sequence = [
@@ -293,10 +293,12 @@ class NLayerDiscriminator(nn.Module):
     def weight_init(self, m):
         if isinstance(m, nn.Conv2d):
             nn.init.normal_(m.weight.data, 0.0, 0.02)
-        elif isinstance(m, nn.BatchNorm2d):
+        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
             nn.init.normal_(m.weight.data, 1.0, 0.02)
-            nn.init.constant_(m.bias.data, 0)
+            if hasattr(m, "bias") and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0)
 
+    @torch.compile
     def forward(self, input):
         """Standard forward."""
         return self.main(input)

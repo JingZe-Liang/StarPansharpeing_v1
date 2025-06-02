@@ -16,7 +16,7 @@ from src.stage1.discretization.collections import BinarySphericalQuantizer as BS
 from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
 )
-from src.utilities.config_utils import kwargs_to_basic_types
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
 
@@ -240,6 +240,7 @@ class ContinuousImageTokenizer(nn.Module):
 
     z: torch.Tensor | None = None  # the latent z
 
+    @function_config_to_basic_types
     def __init__(
         self,
         z_channels: int,
@@ -249,8 +250,6 @@ class ContinuousImageTokenizer(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
-        kwargs: dict = kwargs_to_basic_types(kwargs)
-
         self._hook_for_repa = kwargs.pop("hook_for_repa", False)
         self._proj_for_vf = kwargs.pop("proj_for_vf", False)
         self._hook_module = kwargs.pop("hook_module", self._hook_module)

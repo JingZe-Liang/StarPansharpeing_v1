@@ -126,7 +126,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg("[Data]: init dataloaders manually")
             self.train_dataset, self.train_dataloader = (
                 get_hyperspectral_img_loaders_with_different_backends(
-                    paths=to_cont(self.dataset_cfg.wds_path_train),
+                    paths=self.dataset_cfg.wds_path_train,
                     batch_size=self.dataset_cfg.batch_size_train,
                     num_workers=self.dataset_cfg.num_workers,
                     shuffle_size=self.dataset_cfg.shuffle_size,
@@ -143,7 +143,7 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.val_dataset, self.val_dataloader = (
                 get_hyperspectral_img_loaders_with_different_backends(
-                    paths=to_cont(self.dataset_cfg.wds_path_val),
+                    paths=self.dataset_cfg.wds_path_val,
                     batch_size=self.dataset_cfg.batch_size_val,
                     num_workers=self.dataset_cfg.num_workers,
                     shuffle_size=self.dataset_cfg.shuffle_size,

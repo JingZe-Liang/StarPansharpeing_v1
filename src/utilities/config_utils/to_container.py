@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from functools import wraps
 from typing import Any
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -41,18 +42,42 @@ def kwargs_to_basic_types(
     return to_object_recursive(kwargs) if kwargs is not None else None
 
 
+def function_config_to_basic_types(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Convert args
+        new_args = [kwargs_to_basic_types(arg) for arg in args]
+
+        # Convert kwargs
+        new_kwargs = kwargs_to_basic_types(kwargs)
+
+        return func(*new_args, **new_kwargs)
+
+    return wrapper
+
+
 if __name__ == "__main__":
     # Example usage
     config = DictConfig({"key": "value", "list": [1, 2, 3]})
-    print(type(to_object(config)["list"]))  # <class 'list'>
-    print(to_object_recursive(config))  # {'key': 'value', 'list': [1, 2, 3]}
+    # print(type(to_object(config)["list"]))  # <class 'list'>
+    # print(to_object_recursive(config))  # {'key': 'value', 'list': [1, 2, 3]}
 
-    config = ListConfig([1, 2, 3])
-    print(to_object(config))  # [1, 2, 3]
-    print(to_object_recursive(config))  # [1, 2, 3]
+    print(type(config))
+    print(type(config.list))
 
-    config = [1, 2, 3, ListConfig([1, 2, 3])]
-    print(
-        type(to_object(config)[-1])
-    )  # [1, 2, 3, [1, 2, 3]], but last element is a ListConfig
-    print(type(to_object_recursive(config)[-1]))  # [1, 2, 3, [1, 2, 3]]
+    @function_config_to_basic_types
+    def func(**kwargs):
+        for k, v in kwargs.items():
+            print(k, type(v))
+
+    func(key=config.key, lst=config.list)
+
+    # config = ListConfig([1, 2, 3])
+    # print(to_object(config))  # [1, 2, 3]
+    # print(to_object_recursive(config))  # [1, 2, 3]
+
+    # config = [1, 2, 3, ListConfig([1, 2, 3])]
+    # print(
+    #     type(to_object(config)[-1])
+    # )  # [1, 2, 3, [1, 2, 3]], but last element is a ListConfig
+    # print(type(to_object_recursive(config)[-1]))  # [1, 2, 3, [1, 2, 3]]

@@ -13,10 +13,10 @@ __warn_once_set = set()
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
-logger.level("INFO", icon="💬", color="<white>")
-logger.level("WARNING", icon="⚠️", color="<yellow>")
-logger.level("ERROR", icon="❌", color="<red>")
-logger.level("CRITICAL", icon="💥", color="<red>")
+logger.level("INFO", icon="➡️", color="<light-black>")
+logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
+logger.level("ERROR", icon="❌", color="<red><bold>")
+logger.level("CRITICAL", icon="💥", color="<red><bold>")
 
 
 # Configure logger

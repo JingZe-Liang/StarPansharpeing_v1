@@ -1,9 +1,43 @@
+import warnings
+
+
 class StepsCounter:
-    def __init__(self, step_names: list[str]):
+    _instance = None
+    _initialized = False
+    step_names = []
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(StepsCounter, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, step_names: list[str] | None = None):
+        if self._initialized:
+            warnings.warn(
+                "StepsCounter is a singleton. Attempting to re-initialize. "
+                "New step_names will be added to the existing instance.",
+                UserWarning,
+            )
+            if step_names is None:
+                return
+
+            for name in step_names:
+                if name not in self.step_names:
+                    self.step_names.append(name)
+                    setattr(self, f"n_{name}_steps", 0)
+            return
+        elif step_names is None and len(self.step_names) == 0:
+            raise ValueError(
+                "step_names must be provided for the first initialization of StepsCounter."
+            )
+
         # all set to 0
-        self.step_names = step_names
-        for name in step_names:
+        self.step_names = list(
+            step_names
+        )  # Use list() to ensure it's a mutable list and a copy
+        for name in self.step_names:
             setattr(self, f"n_{name}_steps", 0)
+        self._initialized = True
 
     def __repr__(self):
         return f"StepsCounter({self.state_dict()})"
@@ -41,7 +75,16 @@ class StepsCounter:
 
 if __name__ == "__main__":
     sc = StepsCounter(["train", "val"])
-    print(sc.train)
+
+    sc.update("train", 5)
+    print(sc["train"])
+
+    sc2 = StepsCounter(["test"])
+    sc2.update("test", 10)
+    print(sc2["test"])
+
+    sc2.update("train", 3)
+    print(sc["train"])
 
     # accelerator = accelerate.Accelerator()
 

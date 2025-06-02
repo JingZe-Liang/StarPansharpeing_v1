@@ -3,4 +3,5 @@ from .patchgan_disc_maskbit import NLayerDiscriminatorv2
 from .patchgan_discriminator import NLayerDiscriminator
 from .stylegan import StyleGANDiscriminator
 from .stylegan3d import StyleGAN3DDiscriminator
+from .r3gan_disc import Discriminator as R3GANDiscriminator
 from .stylegan_utils.ops.conv2d_gradfix import no_weight_gradients

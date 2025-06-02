@@ -13,8 +13,9 @@ from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Shard
+from torch.utils.file_baton import FileBaton
 
-from src.utilities.config_utils import to_object
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
 warnings.filterwarnings(
@@ -84,7 +85,23 @@ def next_divisble_of_y(x, y):
     return math.ceil(x / y) * y
 
 
+def load_repa_encoder(dino_type: str) -> nn.Module:
+    if dino_type == "timm":
+        model = timm.create_model(
+            "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
+            pretrained=True,
+            dynamic_img_size=True,
+        )
+    elif dino_type == "torch":
+        model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")  # type: ignore
+    else:
+        raise ValueError(f"Unknown dino type {dino_type}, must be 'torch' or 'timm'.")
+
+    return model
+
+
 class REPALoss(torch.nn.Module):
+    @function_config_to_basic_types
     def __init__(
         self,
         c_dim_first=False,
@@ -109,8 +126,8 @@ class REPALoss(torch.nn.Module):
             dino_img_size (int, optional): dino image size. Defaults to 224.
         """
         super().__init__()
-        self.rgb_channels = to_object(rgb_channels)
-        self.img_resize = to_object(img_resize)
+        self.rgb_channels = rgb_channels
+        self.img_resize = img_resize
         if isinstance(img_resize, Sequence):
             assert img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0, (
                 "img_size[0] must be divisible by patch size"
@@ -130,17 +147,19 @@ class REPALoss(torch.nn.Module):
 
         # encoder
         self.dino_type = dino_type
-        if self.dino_type == "timm":
-            assert ()
-            self.repa_encoder: nn.Module = timm.create_model(
-                "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
-                pretrained=True,
-                dynamic_img_size=True,
-            )
-        elif self.dino_type == "torch":
-            self.repa_encoder: nn.Module = torch.hub.load(
-                "facebookresearch/dinov2", "dinov2_vitb14"
-            )  # type: ignore
+        baton = FileBaton(
+            "/tmp/repa_model_reading.lock"
+        )  # Use a file baton to ensure single process access
+
+        # load repa encoder in multiprocessing context
+        if baton.try_acquire():
+            try:
+                self.repa_encoder = load_repa_encoder(self.dino_type)
+            finally:
+                baton.release()
+        else:
+            baton.wait()
+            self.repa_encoder = load_repa_encoder(self.dino_type)
 
         log_print("[REPA Loss]: load pretrained dino visual foundation model done")
         self.repa_encoder.image_size = dino_img_size

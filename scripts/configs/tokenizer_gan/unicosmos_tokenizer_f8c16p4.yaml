@@ -56,11 +56,11 @@ vq_loss:
     cos_margin: 0.5
   quantizer_type:
   quantizer_options:
-  disc_network_type: patchgan_v2 # [patchgan, patchgan_v2, stylegan]
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
-  disc_num_layers: 4
+  disc_num_layers: 3
   use_actnorm: false
-  disc_norm_type: gn # gn or bn? works with patchgan_v2
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: hinge
@@ -178,7 +178,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_vf_loss
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_repa
     log_with_time: True
     visualize_every: 500
     log_every: 10
