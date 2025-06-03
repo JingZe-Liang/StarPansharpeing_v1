@@ -2,24 +2,24 @@ used: unified_hyperspectral
 dataset_names_to_img_size:
   unified_hyperspectral: 512
 
-channels: [3, 12, 32, 8, 13, 50, 4]
+channels: [3, 4, 8, 12, 13, 32, 50]
 img_size: 512
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 
 train_paths:
   - - data_local/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
-  - - data_local/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar
-  - - data_local/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
-  - - data_local/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
   - - data_local/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
-  - - data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar
-  - - data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
-  - - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
   - - data_local/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
   - - data_local/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
   - - data_local/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
   - - data_local/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
   - - data_local/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  - - data_local/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar
+  - - data_local/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+  - - data_local/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
+  - - data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar
+    - data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
+    - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
   # - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
 
 val_paths:

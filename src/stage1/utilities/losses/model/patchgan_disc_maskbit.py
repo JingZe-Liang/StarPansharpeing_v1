@@ -207,11 +207,12 @@ class DiscriminatorLayer(torch.nn.Module):
         }
 
         self.body = torch.nn.Sequential(
-            Conv2dSame(
-                in_channels,
-                out_channels,
-                kernel_size=3,
-            ),
+            # Conv2dSame(
+            #     in_channels,
+            #     out_channels,
+            #     kernel_size=3,
+            # ),
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1),
             torch.nn.AvgPool2d(kernel_size=2, stride=2)
             if not blur_resample
             else BlurBlock(out_channels, BLUR_KERNEL_MAP[blur_kernel_size]),
@@ -244,14 +245,21 @@ class DiffBandsInputConvIn(nn.Module):
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
         if basic_module == "conv":
-            basic_module_fn = Conv2dSame
+            basic_module_fn = nn.Conv2d  # Conv2dSame
         elif basic_module == "conv_norm_act":
 
             def basic_module_fn(
                 in_channels, out_channels, kernel_size, stride, padding
             ):
                 return nn.Sequential(
-                    Conv2dSame(
+                    # Conv2dSame(
+                    #     in_channels,
+                    #     out_channels,
+                    #     kernel_size=kernel_size,
+                    #     stride=stride,
+                    #     padding=padding,
+                    # ),
+                    nn.Conv2d(
                         in_channels,
                         out_channels,
                         kernel_size=kernel_size,
@@ -311,7 +319,7 @@ class NLayerDiscriminatorv2(nn.Module):
         num_stages: int = 4,
         activation_fn: str = "leaky_relu",
         norm_type: str = "gn",
-        blur_resample: bool = False,
+        blur_resample: bool = True,
         blur_kernel_size: int = 4,
     ):
         """Initializes the NLayerDiscriminatorv2.
@@ -407,9 +415,11 @@ class NLayerDiscriminatorv2(nn.Module):
         # self.pool = torch.nn.AdaptiveMaxPool2d((16, 16))
 
         self.to_logits = torch.nn.Sequential(
-            Conv2dSame(out_channels, out_channels, 1),
+            # Conv2dSame(out_channels, out_channels, 1),
+            nn.Conv2d(out_channels, out_channels, 1, 1, 0),
             activation(),
-            Conv2dSame(out_channels, 1, kernel_size=5),
+            # Conv2dSame(out_channels, 1, kernel_size=5),
+            nn.Conv2d(out_channels, 1, 5, 1, 2),
         )
 
         #! Add weight initialization to match original NLayerDiscriminator

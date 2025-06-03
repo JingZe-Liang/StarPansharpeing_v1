@@ -126,7 +126,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg("[Data]: init dataloaders manually")
             self.train_dataset, self.train_dataloader = (
                 get_hyperspectral_img_loaders_with_different_backends(
-                    paths=to_cont(self.dataset_cfg.wds_path_train),
+                    paths=self.dataset_cfg.wds_path_train,
                     batch_size=self.dataset_cfg.batch_size_train,
                     num_workers=self.dataset_cfg.num_workers,
                     shuffle_size=self.dataset_cfg.shuffle_size,
@@ -143,7 +143,7 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.val_dataset, self.val_dataloader = (
                 get_hyperspectral_img_loaders_with_different_backends(
-                    paths=to_cont(self.dataset_cfg.wds_path_val),
+                    paths=self.dataset_cfg.wds_path_val,
                     batch_size=self.dataset_cfg.batch_size_val,
                     num_workers=self.dataset_cfg.num_workers,
                     shuffle_size=self.dataset_cfg.shuffle_size,
@@ -1343,49 +1343,31 @@ class CosmosHyperspectralTokenizerTrainer:
                             )
                             continue
                         v = v.item()
-                    strings.append(f"{k}: {v:.{n_round}f}")
+                    strings.append(f"<cyan>{k}</>: {v:.{n_round}f}")  # colorize the key
                 else:
-                    strings.append(f"{k}: {v}")
+                    strings.append(f"<cyan>{k}</>: {v}")
             return strings
 
         n_round = 4
 
         strings = []
+
+        # * tokenzier losses
         if log_token_loss is not None:
+            _selects = ["reconstruct_loss", "ssim_loss", "g_loss", "d_weight"]
+            if self.vq_loss_fn.use_perceptual_loss:
+                _selects.extend(["perceptual_loss", "gram_loss"])
+            if self.vq_loss_fn.use_repa:
+                _selects.extend(["repa_loss"])
+            if self.vq_loss_fn.use_vf:
+                _selects.extend(["vf_loss"])
+
             _log_token = dict_round_to_list_str(
                 log_token_loss,
                 n_round=n_round,
-                select=[
-                    "reconstruct_loss",
-                    "ssim_loss",
-                    "g_loss",
-                ],
+                select=_selects,
             )
             strings.extend(_log_token)
-
-            if self.vq_loss_fn.use_perceptual_loss:
-                _log_token = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round=n_round,
-                    select=["perceptual_loss", "gram_loss"],
-                )
-                strings.extend(_log_token)
-
-            if self.vq_loss_fn.use_repa:
-                _log_token = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round=n_round,
-                    select=["repa_loss"],
-                )
-                strings.extend(_log_token)
-
-            if self.vq_loss_fn.use_vf:
-                _log_token = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round=n_round,
-                    select=["vf_loss"],
-                )
-                strings.extend(_log_token)
 
             if self.use_quantizer:
                 _quant_logs_out_select = {
@@ -1417,21 +1399,20 @@ class CosmosHyperspectralTokenizerTrainer:
                     select=_quant_logs_out_select.get(self.quantizer_type or "", None),
                 )
                 strings.extend(_log_q)
-
+        # * discriminator losses
         elif log_disc_loss is not None:
-            _log_disc = dict_round_to_list_str(
+            _selects = ["disc_loss", "logits_real", "logits_fake", "lecam_loss"]
+            if log_disc_loss.get("r1_scale", 0.0) != 0.0:
+                _selects.append("r1_scale")
+            if log_disc_loss.get("r2_scale", 0.0) != 0.0:
+                _selects.append("r2_scale")
+
+            _disc_reg_logs = dict_round_to_list_str(
                 log_disc_loss,
                 n_round,
-                select=["disc_loss", "logits_real", "logits_fake", "lecam_loss"],
+                _selects,
             )
-            strings.extend(_log_disc)
-            if log_disc_loss.get("r1_scale", 0) != 0:
-                _disc_reg_logs = dict_round_to_list_str(
-                    log_disc_loss,
-                    n_round,
-                    ["r1_loss", "r1_scale"],
-                )
-                strings.extend(_disc_reg_logs)
+            strings.extend(_disc_reg_logs)
 
         else:
             raise ValueError("At least one of the logs should be provided")
