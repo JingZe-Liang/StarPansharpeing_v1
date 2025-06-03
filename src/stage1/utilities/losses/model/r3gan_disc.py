@@ -9,6 +9,7 @@ from src.stage1.utilities.losses.model.layers.r3gan_fused_operators import (
 from src.stage1.utilities.losses.model.layers.r3gan_resamplers import (
     InterpolativeDownsampler,
 )
+from src.utilities.logging import log_print
 
 
 def MSRInitializer(Layer, ActivationGain=1.0):
@@ -210,6 +211,71 @@ class DiscriminatorStage(nn.Module):
         return x
 
 
+class DiffBandsInputConvIn(nn.Module):
+    def __init__(
+        self,
+        band_lst: list[int],
+        hidden_dim: int,
+        basic_module: str = "conv_norm_act",
+    ):
+        super().__init__()
+
+        self.band_lst = band_lst
+        self.hidden_dim = hidden_dim
+        if basic_module == "conv":
+            basic_module_fn = nn.Conv2d
+        elif basic_module == "conv_norm_act":
+
+            def basic_module_fn(
+                in_channels, out_channels, kernel_size, stride, padding
+            ):
+                return nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        out_channels,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                    ),
+                    nn.GroupNorm(32, out_channels, eps=1e-6),
+                    nn.LeakyReLU(negative_slope=0.2),
+                )
+
+        kw = 4
+        padw = 1
+
+        self.in_modules = nn.ModuleDict()
+        for c in band_lst:
+            self.in_modules["conv_in_{}".format(c)] = basic_module_fn(  # type: ignore
+                in_channels=c,
+                out_channels=hidden_dim,
+                kernel_size=kw,
+                stride=2,
+                padding=padw,
+            )
+
+            log_print(f"[Disc] set conv to hidden module and buffer for channel {c}")
+        log_print(f"[Disc] diffbands input convs: {self.in_modules}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        c_ = x.shape[1]
+        module = getattr(self.in_modules, "conv_in_{}".format(c_))
+        if module is None:
+            raise ValueError(
+                f"[Disc] no module for channel {c_}, please check the channel list"
+            )
+        h = module(x)
+
+        if self.training:
+            for c in self.band_lst:
+                if c != c_:
+                    m = self.in_modules["conv_in_{}".format(c)]
+                    dummy_loss = sum(p.sum() * 0.0 for p in m.parameters())
+                    h = h + dummy_loss
+
+        return h
+
+
 class Discriminator(nn.Module):
     """完整的判别器网络"""
 
@@ -265,9 +331,14 @@ class Discriminator(nn.Module):
         )
 
         # 输入特征提取层：RGB -> 特征
-        self.ExtractionLayer = Convolution(
-            InputChannels, WidthPerStage[0], KernelSize=1
-        )
+        if isinstance(InputChannels, (list, tuple)):
+            self.ExtractionLayer = DiffBandsInputConvIn(
+                InputChannels, WidthPerStage[0], basic_module="conv_norm_act"
+            )
+        else:
+            self.ExtractionLayer = Convolution(
+                InputChannels, WidthPerStage[0], KernelSize=1
+            )
         self.MainLayers = nn.ModuleList(MainLayers)
 
         # 条件嵌入层（可选）
@@ -295,7 +366,7 @@ class Discriminator(nn.Module):
 if __name__ == "__main__":
     # * --- Testers --- #
     disc = Discriminator(
-        InputChannels=3,
+        InputChannels=[3, 6],
         # FIXME: hard coded here
         WidthPerStage=[96, 192, 384, 768],
         CardinalityPerStage=[12, 24, 48, 96],

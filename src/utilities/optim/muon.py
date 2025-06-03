@@ -204,7 +204,7 @@ class Muon(torch.optim.Optimizer):
             wd=weight_decay,
             momentum=momentum,
             nesterov=nesterov,
-            ns_steps=ns_steps,
+            ns_steps=ns_steps if not ns_diff_abc else 6,  # ns_diff_abc use 6 ns steps
             ns_norm=ns_norm,
             ns_diff_abc=ns_diff_abc,
             adamw_betas=adamw_betas,

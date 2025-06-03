@@ -1,6 +1,6 @@
 import warnings
 from collections import namedtuple
-from typing import Dict, NamedTuple
+from typing import Dict, Literal, NamedTuple
 
 import torch
 import torch.distributed.tensor as dtensor
@@ -152,13 +152,16 @@ def d_r1_loss(logits_real, img_real):
         (grad_real,) = torch.autograd.grad(
             outputs=logits_real.sum(), inputs=img_real, allow_unused=True
         )
-    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+    # grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+    grad_penalty = grad_real.square().mean()
     return grad_penalty
 
 
 def d_r1r2_loss(logits, img):
+    # with no_weight_gradients():  # stylegan costume operator no gradient context
     (grad,) = torch.autograd.grad(outputs=logits.sum(), inputs=img, create_graph=True)
-    return grad.square().sum([1, 2, 3])
+    # return grad.square().sum([1, 2, 3])  # is 2d image
+    return grad.square().mean()  # is 2d image
 
 
 def r3gan_d_loss(logits_real, logits_fake):
@@ -243,7 +246,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         img_is_neg1_to_1: bool = True,
         perceptual_options: dict = {},
         # generator loss
-        reconstruction_loss_type: str | None = "l1",
+        reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "l1",
         reconstruction_weight: float = 1.0,
         gen_loss_weight: float | None = None,
         # quantizer losses
@@ -263,7 +266,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         force_not_use_recon_loss: bool = False,
     ):
         super().__init__()
-        assert disc_loss in ["hinge", "vanilla", "non_saturate", "r3gan"]
+        assert disc_loss in ["hinge", "vanilla", "non_saturate", "relative"]
         assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", None]
         assert disc_network_type in [
             "patchgan",
@@ -307,7 +310,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * if is dwt reocn loss
         if self.reconstruction_loss_type == "dwt":
-            self.dwt = DWTForward(J=1, mode="zero", wave="haar").to(
+            self.dwt = DWTForward(
+                J=1, mode="zero", wave="haar"
+            ).to(  # DWT decomposition, simplest haar transform
                 self.device, self.dtype
             )
 
@@ -388,6 +393,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 n_layers=disc_num_layers,
                 use_actnorm=use_actnorm,
                 ndf=disc_ndf,
+                use_bn=disc_norm_type == "bn2d",
             )
             # spectral norm
             if disc_spectral_norm:
@@ -452,7 +458,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         elif disc_loss == "non_saturate":
             self.discriminator_loss = non_saturate_discriminator_loss
             self.generator_loss = non_saturate_gen_loss
-        elif disc_loss == "r3gan":
+        elif disc_loss == "relative":
             self.discriminator_loss = r3gan_d_loss
             self.generator_loss = r3gan_g_loss
         else:
@@ -778,7 +784,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         logits_fake: torch.Tensor,
         # r1 loss ===
         r1_scale: torch.Tensor | None = None,
-        r1_loss: torch.Tensor | None = None,
+        r2_scale: torch.Tensor | None = None,
         add_prefix: bool = False,
     ):
         if disc_factor == 0:
@@ -798,14 +804,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "lecam_loss": lecam_loss.detach(),
             }
 
-        # r1 regularization
-        if r1_loss is not None and r1_scale is not None:
-            logs.update(
-                {
-                    "r1_loss": r1_loss.detach().mean(),
-                    "r1_scale": r1_scale.detach().mean(),
-                }
-            )
+        # r1, r2 regularization
+        if r1_scale is not None:
+            logs.update({"r1_scale": r1_scale.detach().mean()})
+        if r2_scale is not None:
+            logs.update({"r2_scale": r2_scale.detach().mean()})
+
         if add_prefix:
             logs = dict_add_prefix(logs, split)
 
@@ -979,7 +983,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         vf_loss = self.zero
         if self.use_vf:
             vf_loss = self.vf_loss(tokenizer_feat, inputs, nll_loss, enc_last_layer)
-            vf_loss = vf_loss * self.vf_loss_weight  # 0.1 by default
+            vf_loss = vf_loss * self.vf_loss_weight  # vf weight is 0.1 by default
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(
@@ -999,7 +1003,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     )
 
                 # g loss
-                if self.disc_loss_type == "r3gan":
+                if self.disc_loss_type == "relative":
                     logits_real = self.discriminator(inputs.contiguous().detach())
                     g_loss = self.generator_loss(logits_fake, logits_real)
                 else:
@@ -1057,18 +1061,26 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 reconstructions, "(n t) c h w -> n c t h w", t=self.num_frames
             )
 
+        # prepare for adv, r1, r2 losses
+        inputs = inputs.contiguous()
+        reconstructions = reconstructions.contiguous().detach()
+        _use_r1_or_r2_loss = (
+            self.disc_reg_freq > 0 and (global_step + 1) % self.disc_reg_freq == 0
+        )
+        if _use_r1_or_r2_loss:
+            inputs.requires_grad_(True)
+            reconstructions.requires_grad_(True)
+
         # second pass for discriminator update
         with torch.autocast(device_type="cuda", dtype=inputs.dtype):
             if cond is None:
                 # detach that only gradients on discriminator
-                logits_real = self.discriminator(inputs.contiguous())
-                logits_fake = self.discriminator(reconstructions.contiguous().detach())
+                logits_real = self.discriminator(inputs)
+                logits_fake = self.discriminator(reconstructions)
             else:
-                logits_real = self.discriminator(
-                    torch.cat((inputs.contiguous(), cond), dim=1)
-                )
+                logits_real = self.discriminator(torch.cat((inputs, cond), dim=1))
                 logits_fake = self.discriminator(
-                    torch.cat((reconstructions.contiguous().detach(), cond), dim=1)
+                    torch.cat((reconstructions, cond), dim=1)
                 )
 
         disc_factor = adopt_weight(
@@ -1094,28 +1106,28 @@ class VQLPIPSWithDiscriminator(nn.Module):
         non-sature loss: real logits: +5, fake logits: -5
         hinge loss: logits_real >> logits_fake; logits_real: (1., 2.), logits_fake: (-1., -2.)
         """
-        if self.disc_reg_freq > 0 and (global_step + 1) % self.disc_reg_freq == 0:
+        if _use_r1_or_r2_loss:
             # TODO: fix it
             # raise RuntimeError("use r1 reg, debugging ...")
             if self.disc_reg_type == "r1":
-                inputs.requires_grad_(True)
-                logits_real = self.discriminator(inputs.contiguous())
+                # inputs.requires_grad_(True)
+                # logits_real = self.discriminator(inputs.contiguous())
                 r1_loss = d_r1_loss(logits_real, inputs)
                 r1_loss_scale = self.disc_reg_gamma / 2 * r1_loss * self.disc_reg_freq
                 d_loss = d_loss + r1_loss_scale  # changed d_loss
             else:
-                inputs.requires_grad_(True)
-                reconstructions.requires_grad_(True)
+                # inputs.requires_grad_(True)
+                # reconstructions.requires_grad_(True)
                 r1_loss = d_r1r2_loss(logits_real, inputs)
                 r2_loss = d_r1r2_loss(logits_fake, reconstructions)
-                r_loss = self.disc_reg_gamma / 2 * (r1_loss + r2_loss)
-                d_loss = d_loss + r_loss
+                r_loss_scale = self.disc_reg_gamma / 2 * (r1_loss + r2_loss)
+                d_loss = d_loss + r_loss_scale
                 # r1_loss as (r1, r2) loss
-                r1_loss_scale = r_loss
-                r1_loss = r1_loss + r2_loss
+                r1_loss_scale = r1_loss.detach() * self.disc_reg_gamma / 2
+                r2_loss_scale = r2_loss.detach() * self.disc_reg_gamma / 2
         else:
-            r1_loss = self.zero
             r1_loss_scale = self.zero
+            r2_loss_scale = self.zero
 
         log = self.train_disc_log_form(
             split=split,
@@ -1125,7 +1137,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             logits_real=logits_real,
             logits_fake=logits_fake,
             r1_scale=r1_loss_scale,
-            r1_loss=r1_loss,
+            r2_scale=r2_loss_scale,
             add_prefix=add_prefix,
         )
         disc_loss = dict(disc_loss=d_loss)

@@ -18,11 +18,6 @@ from torch.utils.file_baton import FileBaton
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
-warnings.filterwarnings(
-    "once",
-    message="[Repa Resize]: image not resize into dino pretrained size",
-)
-
 
 def interpolate_features_2d(x: Tensor, tgt_size: tuple[int] | torch.Size):
     B, D, H, W = x.shape
@@ -269,8 +264,10 @@ class REPALoss(torch.nn.Module):
                     next_divisble_of_y(img.shape[-2], 14),
                     next_divisble_of_y(img.shape[-1], 14),
                 )
-                warnings.warn(
-                    "[Repa Resize]: image not resize into dino pretrained size"
+                log_print(
+                    "[Repa Resize]: image not resize into dino pretrained size",
+                    "warning",
+                    warn_once=True,
                 )
             img = F.interpolate(**_interp_kwargs)
 

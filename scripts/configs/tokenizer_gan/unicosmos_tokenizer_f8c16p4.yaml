@@ -38,7 +38,7 @@ defaults:
 #   transform_prob: 0.5
 
 vq_loss:
-  repa_loss_weight: 1.0
+  repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -56,17 +56,21 @@ vq_loss:
     cos_margin: 0.5
   quantizer_type:
   quantizer_options:
-  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
   disc_ndf: 128
   disc_num_layers: 3
   use_actnorm: false
-  disc_norm_type: bn2d # gn or bn? works with patchgan_v2
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
   disc_start_for_g: 0
   disc_start_for_d: 0
-  disc_loss: hinge
-  ssim_weight: 0.2
-  disc_weight: 0.8
-  reconstruction_loss_type: l1
+  disc_loss: relative
+  ssim_weight: 0.04
+  disc_weight: 0.1
+  reconstruction_loss_type: mse
+  # r1, r2 loss seems not necessary
+  # disc_reg_gamma: 1
+  # disc_reg_type: r1r2
+  # disc_reg_freq: 2
 
 tokenizer:
   hook_for_repa: true
@@ -102,10 +106,10 @@ tokenizer:
   #   drop_prob: 1.0
 
   ## downsample and upsample
-  downsample_type: ConvPixelUnshuffle
-  downsample_shortcut: averaging
-  upsample_type: ConvPixelShuffle
-  upsample_shortcut: duplicating
+  # downsample_type: ConvPixelUnshuffle
+  # downsample_shortcut: averaging
+  # upsample_type: ConvPixelShuffle
+  # upsample_shortcut: duplicating
 
 ema:
   beta: 0.995
@@ -113,7 +117,7 @@ ema:
   update_every: 2
 
 train:
-  tokenizer_name: uni_cosmos_f8c16p4
+  tokenizer_name: uni_cosmos_f8c16p${tokenizer.patch_size}
   proj_dir: runs/stage1_cosmos
   finetune_strategy: finetune_all # dcae_refine_decoder_head
   max_grad_norm: 0.03
@@ -124,7 +128,7 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-05-29_23-22-43_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema
+  ema_load_path: runs/stage1_cosmos/2025-06-03_13-33-47_cosmos_f8c16p4_unified_hyperspectral_repa_no_pix_shuffle/ema
   compile_model: false
   only_load_tokenizer: true
   grad_check: false
@@ -134,24 +138,37 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 2.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: true
-    adamw_betas: [0.5, 0.9]
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+    betas: [0.5, 0.95]
+    foreach: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # adamw_betas: [0., 0.9]  #[0.5, 0.9], gan training beta1 is zero
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 2.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: true
-    adamw_betas: [0.5, 0.9]
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+    betas: [0.0, 0.9] #[0.9, 0.95]
+    foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -178,7 +195,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_repa
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_repa_no_pix_shuffle
     log_with_time: True
     visualize_every: 500
     log_every: 10

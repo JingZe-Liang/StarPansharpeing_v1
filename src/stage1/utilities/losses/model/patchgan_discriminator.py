@@ -1,10 +1,25 @@
 import functools
 from collections.abc import Sequence
+from functools import partial, wraps
 
 import torch
 import torch.nn as nn
 
 from src.utilities.logging import log_print
+
+compile_forward_fn = False
+if compile_forward_fn:
+    _compile_decorator = torch.compile
+else:
+
+    def _null_decorator_no_any_kwgs(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    _compile_decorator = _null_decorator_no_any_kwgs
 
 
 class ActNorm(nn.Module):
@@ -211,12 +226,13 @@ class NLayerDiscriminator(nn.Module):
         super(NLayerDiscriminator, self).__init__()
         if not use_actnorm:
             # Zihan Note: GroupNorm underperforms than BatchNorm
-            norm_layer = nn.BatchNorm2d
-            # lambda channels: nn.GroupNorm(
-            #     num_groups=32, num_channels=channels
-            # )
+            if use_bn:
+                norm_layer = nn.BatchNorm2d
+            else:
+                norm_layer = lambda c: nn.GroupNorm(32, c)
         else:
             norm_layer = ActNorm
+
         if isinstance(
             norm_layer, functools.partial
         ):  # no need to use bias as BatchNorm2d has affine parameters
@@ -231,7 +247,6 @@ class NLayerDiscriminator(nn.Module):
             f"n_layers={n_layers}, "
             f"use_actnorm={use_actnorm}, "
             f"use_bn={use_bn}, "
-            f"norm_layer={norm_layer}, "
             f"use_bias={use_bias}"
         )
 
@@ -298,7 +313,7 @@ class NLayerDiscriminator(nn.Module):
             if hasattr(m, "bias") and m.bias is not None:
                 nn.init.constant_(m.bias.data, 0)
 
-    @torch.compile
+    @_compile_decorator
     def forward(self, input):
         """Standard forward."""
         return self.main(input)
@@ -306,7 +321,9 @@ class NLayerDiscriminator(nn.Module):
 
 if __name__ == "__main__":
     ## patch gan
-    net = NLayerDiscriminator(input_nc=3, ndf=128, n_layers=3, use_actnorm=False)
+    net = NLayerDiscriminator(
+        input_nc=3, ndf=128, n_layers=3, use_actnorm=False, use_bn=False
+    )
     print(net)
 
     # total params
