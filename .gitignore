@@ -138,6 +138,7 @@ data
 data/
 data_local/
 !src/data
+!scripts/configs/pansharpening_simulation/data
 runs/
 .ruff_cache/
 .vscode/

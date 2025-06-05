@@ -1,0 +1,16 @@
+_target_: src.data.get_hyperspectral_dataloaders
+wds_paths:
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
+  - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+batch_size: 16 # Example batch size
+num_workers: 3
+shuffle_size: -1
+to_neg_1_1: true
+hyper_transforms_lst: null
+transform_prob: 0.0
+random_apply: 1
+resample: false
+shuffle_within_workers: false
+remove_meta_data: false

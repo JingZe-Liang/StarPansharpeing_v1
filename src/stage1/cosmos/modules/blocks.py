@@ -27,7 +27,7 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = True
+compile_forward_fn = False
 torch._functorch.config.donated_buffer = False  # for adaptive weighting
 if compile_forward_fn:
     _compile_decorator = torch.compile

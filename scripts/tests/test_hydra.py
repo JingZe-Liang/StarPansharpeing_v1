@@ -5,6 +5,7 @@ from omegaconf import OmegaConf
 
 OmegaConf.register_new_resolver("eval", lambda x: ast.literal_eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
+OmegaConf.register_new_resolver("class", lambda x: hydra.utils.get_class(x))
 
 
 @hydra.main(
@@ -24,8 +25,12 @@ def main(args):
     # print(args.vq_loss)
     # print(args.dataset)
 
-    _, loader = hydra.utils.instantiate(args.dataset.train_loader)
-    print(type(loader))
+    # _, loader = hydra.utils.instantiate(args.dataset.train_loader)
+    # print(type(loader))
+
+    model_cls_path = "src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer"
+    model_cls = hydra.utils.get_class(model_cls_path)
+    print(model_cls)
 
 
 main()

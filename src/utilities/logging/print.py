@@ -29,7 +29,11 @@ if __re_config_logger:
         sys.stderr,
         level="DEBUG",
         colorize=True,
-        format="{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level> - <level>{message}</level>",
+        format=(
+            "{time:HH:mm:ss} "
+            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- <level>{message}</level>"
+        ),
     )
     logger.info("Logger reconfigured", level="info")
     __re_config_logger = False

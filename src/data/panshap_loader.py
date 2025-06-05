@@ -217,9 +217,10 @@ if __name__ == "__main__":
         wds_paths=[
             "data/MMSeg_YREB/[pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
         ],
-        batch_size=4,
-        num_workers=0,
+        batch_size=32,
+        num_workers=3,
         resample=True,
+        prefetch_factor=6,
     )
 
     from tqdm import tqdm

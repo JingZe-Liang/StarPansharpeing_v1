@@ -1,0 +1,49 @@
+_target_: src.utilities.network_utils.network_loading.load_diffbands_tokenizer_then_peft_lora
+model_cls: ${class:src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer}
+model_kwargs:
+  attn_resolutions: [32]
+  channels: 128
+  channels_mult: [2, 4, 4]
+  dropout: 0.0
+  in_channels: ${consts.nbands}
+  spatial_compression: 8
+  num_res_blocks: 2
+  out_channels: ${consts.nbands}
+  resolution: 1024
+  patch_size: 4
+  latent_channels: 16
+  z_channels: 16
+  z_factor: 1
+  name: CI
+  formulation: AE
+  encoder: Default
+  decoder: Default
+  norm_in_quant_conv: false
+  wrap_fsdp_last_layer: false
+  hook_for_repa: false
+  proj_for_vf: false
+  hook_module: decoder.decoder.mid.block_2
+  vf_on_z_or_module: module
+  act_checkpoint: false
+  uni_tokenizer_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors
+  loading_type: pretrained
+  use_channel_drop: false
+  enc_moe: false
+  dec_moe: false
+  norm_type: gn
+  norm_groups: 32
+  block_name: res_block
+  patch_method: haar
+  hidden_factor: 4
+  attn_type: none
+  padding_mode: reflect
+  ## downsample and upsample
+  downsample_type: ConvPixelUnshuffle
+  downsample_shortcut: averaging
+  upsample_type: ConvPixelShuffle
+  upsample_shortcut: duplicating
+tokenizer_pretrained_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors
+load_main_model_in_peft_fn: false
+peft_pretrained_path: runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt
+peft_kwargs:
+  merge_and_unload: true

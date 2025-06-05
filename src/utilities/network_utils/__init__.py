@@ -1,4 +1,5 @@
 from .network_loading import (
+    load_diffbands_tokenizer_then_peft_lora,
     load_fsdp_model,
     load_peft_model_checkpoint,
     load_weights_with_shape_check,

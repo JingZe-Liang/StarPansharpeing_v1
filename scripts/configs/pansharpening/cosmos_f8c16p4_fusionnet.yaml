@@ -27,14 +27,14 @@ ema:
 
 train:
   tokenizer_name: cosmos_f8c16p4
-  base_model_pretrained_path: runs/stage1_cosmos/2025-05-22_23-21-47_cosmos_pretrained_f8c16p4_MMSeg_YREB/ema/tokenizer/model.safetensors # tokenizer base model loading
-  peft_pretrained_path: # tokenizer peft model loading
+  base_model_pretrained_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors # tokenizer base model loading
+  peft_pretrained_path: runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt # tokenizer peft model loading
   seperate_enc_dec: false
-  online_tokenize: false
+  online_tokenize: true
   quantizer_type:
   prepare_tokenizer_in_accelerator: true
 
-  proj_dir: runs/stage1_cosmos/
+  proj_dir: runs/stage2_pansharpening/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
 
@@ -59,16 +59,14 @@ train:
     # betas: [0.8, 0.95]
 
   pansharp_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
-    num_warmup_steps: 1000
+    num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
     num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_large_f8c16p4
+    run_comment: cosmos_f8c16p4_fusionnet
     log_with_time: True
     visualize_every: 200
     log_every: 10

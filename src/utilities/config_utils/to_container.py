@@ -5,7 +5,7 @@ from typing import Any
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 
-def to_object(config: Any) -> dict | list:
+def to_object(config: Any):
     """
     Convert a DictConfig or ListConfig to a Python object.
     """
@@ -19,7 +19,7 @@ def to_object(config: Any) -> dict | list:
     #     raise ValueError(f"Unknown config type: {type(config)}")
 
 
-def to_object_recursive(config: Iterable) -> dict | list:
+def to_object_recursive(config: Iterable):
     """
     Recursively convert a DictConfig or ListConfig to a Python object.
     """
@@ -34,7 +34,7 @@ def to_object_recursive(config: Iterable) -> dict | list:
 
 def kwargs_to_basic_types(
     kwargs: DictConfig | ListConfig | dict | list | None,
-) -> dict | list | None:
+):
     """
     Convert a dictionary or list of dictionaries to basic types.
     """
@@ -43,6 +43,13 @@ def kwargs_to_basic_types(
 
 
 def function_config_to_basic_types(func):
+    """
+    handle the hydra or omegaconf config objects that are passed to a function
+    and convert them to basic types (dict, list, str, int, float, etc.).
+    This is useful for functions that expect basic types as arguments
+    and may receive DictConfig or ListConfig objects from Hydra or OmegaConf.
+    """
+
     @wraps(func)
     def wrapper(*args, **kwargs):
         # Convert args

@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   - data: hyper_wds
-  - tokenizer: cosmos_f8c16p4
+  - tokenizer: cosmos_f8c16p4_lora
   # self ============
   - _self_
   # hydra overrides ====
@@ -40,6 +40,7 @@ consts:
   ratio: ${processor.ratio}
   nbands: ${total_bands_of_sensors.${processor.sensor}}
   tokenizer_checkpoint_path:
+  run_device: 1
 
 output:
   output_dir: data/MMSeg_YREB

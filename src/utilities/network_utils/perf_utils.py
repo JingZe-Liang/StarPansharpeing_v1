@@ -6,20 +6,16 @@ from tqdm import trange
 
 def func_mem_wrapper(func):
     def wrapper(*args, **kwargs):
-        # 记录初始显存占用
         torch.cuda.reset_peak_memory_stats()  # reset the peak memory stats
         initial_memory = torch.cuda.memory_allocated()
 
         ret = func(*args, **kwargs)
 
-        # 执行 tokenizer 并记录显存占用
         allocated_memory = torch.cuda.memory_allocated()
         peak_memory = torch.cuda.max_memory_allocated()
 
-        # 计算显存增量
         memory_usage = allocated_memory - initial_memory
 
-        # 打印显存占用信息
         print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
         print(
             f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"

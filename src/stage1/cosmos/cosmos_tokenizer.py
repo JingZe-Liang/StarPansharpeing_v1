@@ -893,10 +893,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 8,  # [3, 12, 32, 8, 13, 50, 4],
+        "in_channels": 12,  # [3, 12, 32, 8, 13, 50, 4],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 8,  # [3, 12, 32, 8, 13, 50, 4],
+        "out_channels": 12,  # [3, 12, 32, 8, 13, 50, 4],
         "resolution": 1024,
         "patch_size": 4,
         "patch_method": "haar",
@@ -908,11 +908,11 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "",  # "runs/stage1_cosmos/2025-05-27-pretrained_cosmos_DCF2019_PSNR_41/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
-        "block_name": "res_moe",
+        "block_name": "res_block",  # res_block, res_moe
         "quantizer_type": None,
-        "loading_type": None,  # "pretrained",
+        "loading_type": "pretrained",  # "pretrained",
         "enc_moe": False,
         "dec_moe": False,
         "padding_mode": "reflect",
@@ -926,13 +926,24 @@ if __name__ == "__main__":
         "upsample_shortcut": "duplicating",
     }
     torch.cuda.set_device(1)
-    tokenizer = ContinuousImageTokenizer(**config).to("cuda", torch.bfloat16)
+    tokenizer = ContinuousImageTokenizer(**config)
     # tokenizer = torch.compile(tokenizer)
+
+    # load lora layers
+    from src.utilities.network_utils import load_peft_model_checkpoint
+
+    peft_cfg, tokenizer = load_peft_model_checkpoint(
+        tokenizer,
+        "runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt",
+    )
+    tokenize = tokenizer.to("cuda", torch.bfloat16)
+    tokenizer.eval()
+    log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
 
     # peft modules
     # log_print(str(tokenizer.peft_first_last_convs_module_names()))
     # log_print(str(tokenizer.additional_peft_target_modules()))
-    tokenizer.get_last_enc_layer()
+    # tokenizer.get_last_enc_layer()
 
     # from fvcore.nn import parameter_count_table
 
@@ -943,7 +954,7 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="DCF")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
     dl_iter = iter(dl)
     # tokenizer = tokenizer.eval()
 
@@ -963,37 +974,37 @@ if __name__ == "__main__":
     from src.utilities.logging.print import catch_any
 
     metric = MeanMetric().cuda()
-    with torch.autocast("cuda", torch.bfloat16) and catch_any():  # and torch.no_grad():
+    with torch.autocast("cuda", torch.bfloat16) and catch_any() and torch.no_grad():
         for i in range(20):
             x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
             y = tokenizer(x)
-            # yy = ((y[[2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
-            # xx = (((x[0, [2, 1, 0]]).permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+            # yy = ((y[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+            # xx = ((x[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
 
             # psnr
-            # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-            # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-            # print(f"PSNR: {psnr_val}")
-            # print(y.shape)
-
+            psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+            psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+            print(f"PSNR: {psnr_val}")
             print(y.shape)
-            y.mean().backward()
+
+            # print(y.shape)
+            # y.mean().backward()
 
             # grads
-            for n, p in tokenizer.named_parameters():
-                if p.grad is None:
-                    print(f"{n} grad is None")
+            # for n, p in tokenizer.named_parameters():
+            #     if p.grad is None:
+            #         print(f"{n} grad is None")
 
             # opt.zero_grad()
             # y.mean().backward()
             # opt.step()
             # metric.update(psnr_val)
 
-        print(metric.compute())
+        # print(metric.compute())
 
-        import time
+        # import time
 
-        time.sleep(20)
+        # time.sleep(20)
 
         # feat = tokenizer.get_repa_feature()
         # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()

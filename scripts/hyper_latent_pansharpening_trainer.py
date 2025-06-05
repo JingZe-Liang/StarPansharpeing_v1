@@ -268,7 +268,11 @@ class PansharpeningTrainer:
             "- <level>[{level}]</level> "
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
-        log_format_in_cmd = "<level>[{level}]</level> - <level>{message}</level>"
+        log_format_in_cmd = (
+            "{time:HH:mm:ss} "
+            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- <level>{message}</level>"
+        )
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
@@ -740,7 +744,7 @@ class PansharpeningTrainer:
             _log_tok_losses = self.format_log(train_out["sr_log_losses"])
 
             self.log_msg(
-                f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:.4e} | "
+                f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:.5f} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
@@ -834,10 +838,11 @@ class PansharpeningTrainer:
             hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
-        pred_latent = self.pansp_model(
-            lrms_latent, pan_latent
-        )  # works in the latent space
-        pred_img = self.forward_tokenizer(pred_latent, mode="decode")
+        with self.accelerator.autocast():
+            pred_latent = self.pansp_model(
+                lrms_latent, pan_latent
+            )  # works in the latent space
+            pred_img = self.forward_tokenizer(pred_latent, mode="decode")["recon"]
 
         return {"pred_img": pred_img, "pred_latent": pred_latent}
 
@@ -845,10 +850,12 @@ class PansharpeningTrainer:
         self.pansp_model.eval()
         torch.cuda.empty_cache()
 
-        if not hasattr(self, "_val_loader_iter") and self.val_cfg.max_val_iters > 0:
+        if self.val_cfg.max_val_iters > 0:
             # create a new iterator for the validation loader
             # state in the loader generator
-            self._val_loader_iter = iter(self.finite_val_loader())
+            if not hasattr(self, "_val_loader_iter"):
+                self._val_loader_iter = iter(self.finite_val_loader())
+
             tbar = trange(
                 self.val_cfg.max_val_iters,
                 desc="validating ...",
@@ -863,10 +870,6 @@ class PansharpeningTrainer:
             tbar = self.finite_val_loader()
             self.log_msg(
                 f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
-        else:
-            raise RuntimeError(
-                "val_cfg.max_val_iters should be > 0, or <= 0 to use the whole val set"
             )
 
         # track psnr and ssim
@@ -921,8 +924,8 @@ class PansharpeningTrainer:
 
             # visualize the last val batch
             self.visualize_reconstruction(
-                pred_img_rgb,
-                batch_img_rgb,
+                batch_img_rgb,  # gt
+                pred_img_rgb,  # prediction
                 add_step=True,
                 img_name="val/pansharpened",
                 no_to_rgb=True,
@@ -997,7 +1000,7 @@ class PansharpeningTrainer:
                 x_np = to_img(x)
             else:
                 rgb_channels = to_cont(
-                    self.dataset_cfg.rgb_channels
+                    self.dataset_cfg.consts.rgb_channels
                 )  # _prefixed_rgb_channels[c]
                 x_np = to_img(x[:, rgb_channels])
 

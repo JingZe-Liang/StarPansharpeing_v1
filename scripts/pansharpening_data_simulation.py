@@ -3,7 +3,7 @@ import os
 import warnings
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Callable, Dict, Literal
+from typing import Any, Callable, Dict, Literal, Union
 
 import hydra
 import numpy as np
@@ -13,11 +13,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import webdataset as wds
 from omegaconf import DictConfig, OmegaConf
+from peft import PeftConfig
 from scipy.signal import windows
 from tqdm import tqdm
 
 from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
+from src.utilities.network_utils import load_diffbands_tokenizer_then_peft_lora
 
 warnings.filterwarnings(
     "once",
@@ -28,6 +31,13 @@ warnings.filterwarnings(
     "ignore",
     module="torch.utils.checkpoint",
 )
+
+# * --- omegaconf resolvers --- #
+
+OmegaConf.register_new_resolver("eval", lambda x: eval(x))
+OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
+OmegaConf.register_new_resolver("class", lambda x: hydra.utils.get_class(x))
+
 
 # * --- Pansharpening simulators --- #
 
@@ -331,6 +341,7 @@ class Interp23Tap(nn.Module):
 
 
 class PansharpSimulator(nn.Module):
+    @function_config_to_basic_types
     def __init__(
         self,
         ratio: int,
@@ -552,7 +563,7 @@ class PansharpTokenizeProcessor(nn.Module):
         # --- 3. Tokenize HRMS, LRMS, and repeated PAN ---
         if not hasattr(self.tokenizer, "encode"):
             raise AttributeError(
-                "The provided tokenizer object does not have an 'encode' method."
+                "The provided tokenizer objeqt does not have an 'encode' method."
             )
 
         with torch.no_grad():
@@ -733,7 +744,9 @@ def process_dataset(cfg: DictConfig) -> None:
     log_print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Determine device
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        f"cuda:{cfg.consts.run_device}" if torch.cuda.is_available() else "cpu"
+    )
     log_print(f"Using device: {device}")
 
     # 1. Instantiate components based on config
@@ -742,17 +755,22 @@ def process_dataset(cfg: DictConfig) -> None:
         ratio=cfg.processor.ratio,
         sensor=cfg.processor.sensor,
         nbands=cfg.processor.nbands,  # Get nbands from data config
-        pan_weight_lst=(
-            OmegaConf.to_container(cfg.processor.pan_weights)  # type: ignore
-            if not isinstance(cfg.processor.pan_weights, str)
-            else cfg.processor.pan_weights
-        ),  # Convert to list
+        pan_weight_lst=cfg.processor.pan_weights,
         downsample_type=cfg.processor.downsample_type,
     )
     pansharp_sim = pansharp_sim.to(device)
 
-    tokenizer = hydra.utils.instantiate(cfg.tokenizer)
+    # loading tokenizer
+    tokenizer: tuple[PeftConfig, nn.Module] | nn.Module = hydra.utils.instantiate(
+        cfg.tokenizer
+    )
+    if isinstance(tokenizer, tuple):
+        assert len(tokenizer) == 2, (
+            "Tokenizer instantiation returns a tuple, must be a PEFT config and a lora-loaded network"
+        )
+        peft_config, tokenizer = tokenizer
     tokenizer = tokenizer.to(device)
+
     # load state dict
     if cfg.consts.tokenizer_checkpoint_path is not None:
         _imcompact_keys = tokenizer.load_state_dict(
@@ -767,9 +785,8 @@ def process_dataset(cfg: DictConfig) -> None:
         )
 
     tokenizer.eval()
-    for p in tokenizer.parameters():
-        p.requires_grad = False  # Freeze parameters for inference
-    log_print(f"Loaded tokenizer from {tokenizer.__class__.__name__}")
+    tokenizer.requires_grad_(False)  # Freeze tokenizer parameters
+    log_print(f"Prepared tokenizer from {tokenizer.__class__.__name__}")
 
     def before_save_fn(
         img: np.ndarray, const: float | None = None, dtype: np.dtype | None = None

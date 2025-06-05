@@ -1,7 +1,6 @@
 import os
 import warnings
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Literal
 
 import accelerate
@@ -11,6 +10,7 @@ from loguru import logger as logging
 from peft import PeftConfig, PeftModel
 from torch.nn.modules.module import _IncompatibleKeys
 
+from ..config_utils import function_config_to_basic_types
 from ..logging.print import log_print
 
 
@@ -377,13 +377,13 @@ def load_peft_model_checkpoint(
     """
     Load a PEFT model checkpoint and merge it with the base model.
 
-    Args:
-        base_model (nn.Module): The base model to merge with.
+    Args:odel (nn.Module): The base model to merge with.
         base_model_pretrained_path (str | None): Path to the base model checkpoint.
         peft_pretrained_path (str): Path to the PEFT model checkpoint.
         merge_and_unload (bool): Whether to merge and unload the PEFT model.
 
     Returns:
+        base_m
         tuple: A tuple containing the PeftConfig and the merged PeftModel or nn.Module.
     """
     if base_model_pretrained_path:
@@ -403,8 +403,70 @@ def load_peft_model_checkpoint(
     )
 
     if merge_and_unload:
-        peft_model = peft_model.merge_and_unload(
+        peft_model = peft_model.merge_and_unload(  # type: ignore
             progressbar=True, adapter_names=["default"]
         )
 
     return peft_config, peft_model
+
+
+# * --- LORA weights loading entry --- #
+
+
+@function_config_to_basic_types
+def load_diffbands_tokenizer_then_peft_lora(
+    model_cls: nn.Module,
+    tokenizer_pretrained_path: str,
+    peft_pretrained_path: str,
+    load_main_model_in_peft_fn: bool = False,  # if False, handling loading main checkpoint in the tokenizer class
+    model_kwargs: dict | None = None,
+    peft_kwargs: dict | None = None,
+) -> tuple[PeftConfig, nn.Module | PeftModel]:
+    """
+    Loads a tokenizer model with a pretrained PEFT (Parameter-Efficient Fine-Tuning) configuration.
+    This function initializes a tokenizer model using the provided model class and arguments,
+    then loads a PEFT model checkpoint into the tokenizer. Optionally, it can also load the
+    main model checkpoint during the PEFT loading process.
+    Args:
+        model_cls (nn.Module): The class of the tokenizer model to be instantiated.
+        tokenizer_pretrained_path (str): Path to the pretrained tokenizer checkpoint.
+        peft_pretrained_path (str): Path to the pretrained PEFT checkpoint.
+        load_main_model_in_peft_fn (bool, optional): If True, the main model checkpoint is
+            loaded during the PEFT loading process. If False, the main model checkpoint
+            should be handled by the tokenizer class. Defaults to False.
+        model_kwargs (dict | None): Keyword arguments to initialize the tokenizer model.
+            Must be provided.
+        peft_kwargs (dict | None): Additional keyword arguments for loading the PEFT model.
+            Defaults to None.
+    Returns:
+        tuple[PeftConfig, nn.Module | PeftModel]: A tuple containing the PEFT configuration
+        and the tokenizer model with the PEFT checkpoint loaded.
+    Raises:
+        AssertionError: If `model_kwargs` is not provided.
+    Example:
+        peft_config, tokenizer = load_diffbands_tokenizer_then_peft_lora(
+            model_cls=MyTokenizerClass,
+            tokenizer_pretrained_path="path/to/tokenizer",
+            peft_pretrained_path="path/to/peft",
+            load_main_model_in_peft_fn=True,
+            model_kwargs={"arg1": value1, "arg2": value2},
+            peft_kwargs={"peft_arg1": peft_value1}
+    """
+    if peft_kwargs is None:
+        peft_kwargs = {}
+    assert model_kwargs is not None, "model_kwargs must be provided"
+
+    tokenizer = model_cls(**model_kwargs)
+
+    peft_config, tokenizer = load_peft_model_checkpoint(
+        tokenizer,
+        peft_pretrained_path,
+        base_model_pretrained_path=tokenizer_pretrained_path
+        if load_main_model_in_peft_fn
+        else None,
+        **peft_kwargs,
+    )
+
+    log_print(f"Tokenizer loaded with PEFT config: {peft_config}")
+
+    return peft_config, tokenizer
