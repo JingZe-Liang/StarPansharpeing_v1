@@ -84,11 +84,12 @@ def staged_curriculum(
 
     # Check if step exceeds the last stage threshold
     if step >= stages[-1][0]:
-        warnings.warn(
+        log_print(
             f"Training step {step} exceeds the last defined stage threshold "
             f"{stages[-1][0]}. Using probabilities from the last stage.",
-            CurriculumWarning,
-            stacklevel=2,
+            stack_level=2,
+            level="warning",
+            warn_once=True,
         )
 
     return stages[-1][1]  # Return last stage if no earlier stage matches

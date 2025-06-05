@@ -286,7 +286,9 @@ class LIPIPSHyperpspectral(nn.Module):
                 # )
             return loss_layers / len(features_input)
 
-    def _compute_gram_loss(self, input: th.Tensor, target: th.Tensor) -> th.Tensor:
+    def _compute_gram_loss(
+        self, input: th.Tensor, target: th.Tensor
+    ) -> th.Tensor | float:
         """Compute Gram matrix loss between input and target feature maps.
 
         Args:

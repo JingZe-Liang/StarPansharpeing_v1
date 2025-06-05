@@ -250,3 +250,13 @@ def flatten_sub_dict(regardless_of_any_collisions=True):
         return sample_flatten
 
     return _inner
+
+
+def to_n_tuple(val: int | float | tuple, n: int):
+    if isinstance(val, tuple):
+        assert len(val) == n, f"Expected tuple of length {n}, got {len(val)}"
+        return val
+
+    assert isinstance(val, (int, float)), f"Expected int or float, got {type(val)}"
+
+    return tuple([val] * n)

@@ -12,12 +12,15 @@ import tifffile
 import torch
 import torch.distributed
 import webdataset as wds
+from bokeh import log
 from kornia.augmentation import (
     AugmentationSequential,
+    CenterCrop,
     RandomBoxBlur,
     RandomChannelShuffle,
     RandomCutMixV2,
     RandomHorizontalFlip,
+    RandomResizedCrop,
     RandomRotation,
     RandomSharpness,
     RandomVerticalFlip,
@@ -39,6 +42,7 @@ from src.data.utils import (
     norm_img,
     remove_extension,
     remove_meta_data,
+    to_n_tuple,
 )
 from src.utilities.config_utils import (
     function_config_to_basic_types,
@@ -103,6 +107,7 @@ def hyper_transform(
     op_list: tuple[str],
     probs: tuple[float, float] | float = 0.5,
     random_apply: int | tuple[int] = 2,
+    default_img_size: int = 256,
 ):
     if isinstance(probs, float):
         probs = [probs] * len(op_list)
@@ -110,15 +115,21 @@ def hyper_transform(
         "Number of probabilities must match number of operations."
     )
 
+    _default_size: tuple[int, int] = to_n_tuple(default_img_size, 2)
+
     _op_list_cls = dict(
         grayscale=lambda p: HyperRandomGrayScale(p=p),
         channel_shuffle=lambda p: RandomChannelShuffle(p=p),
-        sharpness=lambda p: RandomSharpness(p=p, sharpness=[0.5, 1.0]),
+        sharpness=lambda p: RandomSharpness(p=p, sharpness=(0.5, 1.0)),
         rotation=lambda p: RandomRotation((-30, 30), p=p),
         horizontal_flip=lambda p: RandomHorizontalFlip(p=p),
         vertical_flip=lambda p: RandomVerticalFlip(p=p),
         cutmix=lambda p: RandomCutMixV2(num_mix=1, p=p, cut_size=(0.4, 0.6)),
         blur=lambda p: RandomBoxBlur((3, 3), p=p),
+        center_crop=lambda p: CenterCrop(_default_size, p=p),
+        resized_crop=lambda p: RandomResizedCrop(
+            _default_size, scale=(0.5, 1.0), ratio=(0.75, 1.333), p=p
+        ),
     )
 
     ops = []
@@ -507,6 +518,7 @@ class HyperImageDataset(Dataset):
         img_path = self.img_paths[idx]
         key = img_path.stem
 
+        # mmap load faster not as in tar data stream in webdataset
         img = load_file(img_path, device="cpu")["img"]
         # img = img.to(torch.float32).permute(2, 0, 1)
 
@@ -575,7 +587,7 @@ def only_hyperspectral_img_folder_dataloader(
     if use_transf:
         collate_fn = partial(
             collate_fn_for_dict,
-            augmentations=transform,
+            augmentations=transform,  # type: ignore
             norm=True,
             to_negative_1_1=to_neg_1_1,
         )
@@ -605,7 +617,7 @@ def chained_dataloaders(
     dataloaders,
     infinit=True,
     shuffle_loaders=True,
-    curriculum_fn=None,
+    curriculum_fn: Callable | None = None,
 ):
     """
     Chains multiple dataloaders into a single generator that yields samples from
@@ -699,10 +711,15 @@ def chained_dataloaders(
             while attempt < max_attempts and active_indices:
                 # * --- CURRICULUM LEARNING SELECTION STRATEGY --- #
                 if curriculum_fn:
+                    train_step: int = StepsCounter()["train"]  # sigleton class instance
+                    # log step sometimes
+                    if train_step % 1000 == 0:
+                        log_print(
+                            f"[Curriculum]: train step {train_step}", "debug"
+                        )  # debug log
+
                     # Get probability distribution for current step
-                    raw_probs = curriculum_fn(
-                        StepsCounter()["train"]  # sigleton class instance
-                    )
+                    raw_probs = curriculum_fn(train_step)
 
                     # Filter only active loaders and their probabilities
                     valid_indices = []
@@ -957,6 +974,9 @@ def get_hyperspectral_img_loaders_with_different_backends(
 
             # curriculum
             if curriculum_type is not None:
+                assert curriculum_kwargs is not None, (
+                    f"curriculum_kwargs must be provided if {curriculum_type=}."
+                )
                 curriculum_fn = get_curriculum_fn(  # type: ignore
                     c_type=curriculum_type,
                     **curriculum_kwargs,

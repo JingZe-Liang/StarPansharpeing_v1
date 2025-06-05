@@ -32,6 +32,9 @@ class StepsCounter:
             )
 
         # all set to 0
+        assert step_names is not None, (
+            "step_names cannot be None when first initializing StepsCounter."
+        )
         self.step_names = list(
             step_names
         )  # Use list() to ensure it's a mutable list and a copy
