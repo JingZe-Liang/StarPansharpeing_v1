@@ -1,3 +1,4 @@
+import re
 import sys
 from contextlib import ContextDecorator
 from functools import wraps
@@ -10,6 +11,7 @@ from loguru import logger
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 __warn_once_set = set()
+__warn_once_pattern_set = set()
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
@@ -54,6 +56,8 @@ def log_print(
     level: LogLevel = "info",
     only_rank_zero: bool = True,
     warn_once: bool = False,
+    warn_once_pattern: str | None = None,
+    stack_level: int = 1,
     **kwargs,
 ) -> None:
     """
@@ -68,17 +72,28 @@ def log_print(
                                Defaults to True.
         warn_once (bool): If True, only log the message once (as a warning) and skip duplicates.
                           Defaults to False.
+        stack_level (int): The stack level to adjust the depth of the log message.
+                           Defaults to 1, which means it will log the caller's information.
     """
     if only_rank_zero and not is_rank_zero():
         return
 
-    if warn_once and msg in __warn_once_set:
-        return
-    elif warn_once:
-        __warn_once_set.add(msg)
+    if warn_once or warn_once_pattern is not None:
         level = "warning"
 
-    logger_with_correct_depth = logger.opt(depth=2, colors=True)
+        if warn_once_pattern is not None:
+            if any(
+                re.search(stored_pattern, msg)
+                for stored_pattern in __warn_once_pattern_set
+            ):
+                return
+            __warn_once_pattern_set.add(warn_once_pattern)
+        else:
+            if msg in __warn_once_set:
+                return
+            __warn_once_set.add(msg)
+
+    logger_with_correct_depth = logger.opt(depth=stack_level + 1, colors=True)
     log_fn = getattr(logger_with_correct_depth, level)
 
     if only_rank_zero:
@@ -126,3 +141,10 @@ class catch_any(ContextDecorator):
 
 if __name__ == "__main__":
     logger.info("this is a log")
+
+    for i in range(100):
+        log_print(
+            f"This is a warning once message at step {i}",
+            warn_once_pattern=r".* at step \d+",
+            level="warning",
+        )
