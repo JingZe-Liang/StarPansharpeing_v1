@@ -79,8 +79,8 @@ tokenizer:
   vf_on_z_or_module: module
 
   act_checkpoint: true
-  uni_tokenizer_path: runs/stage1_cosmos/2025-05-30_22-48-10_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema/tokenizer/model.safetensors
-  loading_type: pretrained
+  uni_tokenizer_path: #runs/stage1_cosmos/2025-05-30_22-48-10_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
   use_channel_drop: false
   enc_moe: false
   dec_moe: false
@@ -127,8 +127,8 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-05-26_11-57-32_cosmos_repa_DCF_2019/checkpoints/checkpoint_20
-  ema_load_path: runs/pretrained/cosmos-uni-f8c16p4/ema
+  resume_path:
+  ema_load_path: runs/stage1_cosmos/2025-06-03_17-30-14_cosmos_f8c16p4_unified_hyperspectral_repa_no_pix_shuffle/ema
   compile_model: false
   only_load_tokenizer: false
 

@@ -2,11 +2,15 @@ used: unified_hyperspectral
 dataset_names_to_img_size:
   unified_hyperspectral: 512
 
-channels: [3, 4, 8, 12, 13, 32, 50]
+channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 224, 242, 368]}
 img_size: 512
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 
 train_paths:
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar
+  - - data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar
+  - - data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar
+  - - data/MDAS-EeteS/MDAS-EeteS-242_bands-px_256-MSI-0000.tar
   - - data_local/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
   - - data_local/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
   - - data_local/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
@@ -20,9 +24,12 @@ train_paths:
   - - data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar
     - data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
     - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
-  # - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
+  - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
 
 val_paths:
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0101.tar
+  - - data/TUM_128/hyper_images/TUM_128_data_0006.tar
   - - data_local/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
   - - data_local/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
   - - data_local/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
@@ -30,23 +37,30 @@ val_paths:
   - - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar
   - - data_local/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
   - - data_local/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
-  # - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
+  - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 20
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 20
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 20
-  - batch_size: 20
-  - batch_size: 20
-  - batch_size: 20
-  - batch_size: 20
+  - batch_size: 26  # BigEarthNet_S2
+    permute: false
+  - batch_size: 26  # TUM_128
+  - batch_size: 18  # MDAS-HySpex
+  - batch_size: 18  # MDAS-EeteS
+  - batch_size: 20  # MMSeg_YREB
+  - batch_size: 20  # DFC_2020
+  - batch_size: 20  # WorldView3
+  - batch_size: 20  # QuickBird
+  - batch_size: 20  # WorldView2
+  - batch_size: 20  # WorldView4
+  - batch_size: 20  # IKONOS
+  - batch_size: 6   # OHS
+  - batch_size: 6   # Houston
+  - batch_size: 6   # DCF_2019
+  - batch_size: 6   # GID-GF2
+  - batch_size: 6   # DryadHyper
+  - batch_size: 6   # MDAS-Optical
+  - batch_size: 6   # DryadHyper
 
   ## not use act_ckpt
   # - batch_size: 9
@@ -80,6 +94,11 @@ train_changed_kwargs_by_loader:
   # - batch_size: 6
 
 val_changed_kwargs_by_loader:
+  - batch_size: 6
+    permute: false
+  - batch_size: 6
+  - batch_size: 6
+  - batch_size: 6
   - batch_size: 6
   - batch_size: 6
   - batch_size: 6

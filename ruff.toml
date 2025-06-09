@@ -4,7 +4,8 @@ indent-width = 4
 extend-exclude = [".vscode", ".idea", "__pycache__", ".python-version", ".ruff.toml", "ruff.toml", "setup.cfg", "pyproject.toml"]
 exclude = [
     "src/stage2/generative/maskbit",
-    "src/stage2/generative/Sana"
+    "src/stage2/generative/Sana",
+    "**/datasets/**",
 ]
 
 [format]

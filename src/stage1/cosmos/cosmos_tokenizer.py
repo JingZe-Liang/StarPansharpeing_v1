@@ -893,12 +893,12 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": 12,  # [3, 12, 32, 8, 13, 50, 4],
+        "in_channels": [3, 10, 12, 32, 8, 13, 50, 4],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": 12,  # [3, 12, 32, 8, 13, 50, 4],
+        "out_channels": [3, 10, 12, 32, 8, 13, 50, 4],
         "resolution": 1024,
-        "patch_size": 4,
+        "patch_size": 1,
         "patch_method": "haar",
         "latent_channels": 16,
         "z_channels": 16,
@@ -908,7 +908,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": False,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-06-03_17-30-14_cosmos_f8c16p4_unified_hyperspectral_repa_no_pix_shuffle/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "res_block",  # res_block, res_moe
         "quantizer_type": None,
@@ -918,27 +918,27 @@ if __name__ == "__main__":
         "padding_mode": "reflect",
         "norm_type": "gn",
         "norm_groups": 32,
-        "resample_norm_type": "gn",
         "attn_type": "none",
-        "downsample_type": "ConvPixelUnshuffle",
-        "downsample_shortcut": "averaging",
-        "upsample_type": "ConvPixelShuffle",
-        "upsample_shortcut": "duplicating",
+        # "resample_norm_type": "gn",
+        # "downsample_type": "ConvPixelUnshuffle",
+        # "downsample_shortcut": "averaging",
+        # "upsample_type": "ConvPixelShuffle",
+        # "upsample_shortcut": "duplicating",
     }
     torch.cuda.set_device(1)
-    tokenizer = ContinuousImageTokenizer(**config)
+    tokenizer = ContinuousImageTokenizer(**config).cuda()
     # tokenizer = torch.compile(tokenizer)
 
     # load lora layers
-    from src.utilities.network_utils import load_peft_model_checkpoint
+    # from src.utilities.network_utils import load_peft_model_checkpoint
 
-    peft_cfg, tokenizer = load_peft_model_checkpoint(
-        tokenizer,
-        "runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt",
-    )
-    tokenize = tokenizer.to("cuda", torch.bfloat16)
-    tokenizer.eval()
-    log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
+    # peft_cfg, tokenizer = load_peft_model_checkpoint(
+    #     tokenizer,
+    #     "runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt",
+    # )
+    # tokenize = tokenizer.to("cuda", torch.bfloat16)
+    # tokenizer.eval()
+    # log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
 
     # peft modules
     # log_print(str(tokenizer.peft_first_last_convs_module_names()))
@@ -956,7 +956,7 @@ if __name__ == "__main__":
 
     dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
     dl_iter = iter(dl)
-    # tokenizer = tokenizer.eval()
+    tokenizer = tokenizer.eval().to(torch.bfloat16)
 
     # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
     # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)

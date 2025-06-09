@@ -4,30 +4,33 @@ import torch
 from tqdm import trange
 
 
-def func_mem_wrapper(func):
-    def wrapper(*args, **kwargs):
-        torch.cuda.reset_peak_memory_stats()  # reset the peak memory stats
-        initial_memory = torch.cuda.memory_allocated()
+def func_mem_wrapper(device):
+    def func_wrap(func):
+        def wrapper(*args, **kwargs):
+            torch.cuda.reset_peak_memory_stats(device)  # reset the peak memory stats
+            initial_memory = torch.cuda.memory_allocated(device)
 
-        ret = func(*args, **kwargs)
+            ret = func(*args, **kwargs)
 
-        allocated_memory = torch.cuda.memory_allocated()
-        peak_memory = torch.cuda.max_memory_allocated()
+            allocated_memory = torch.cuda.memory_allocated(device)
+            peak_memory = torch.cuda.max_memory_allocated(device)
 
-        memory_usage = allocated_memory - initial_memory
+            memory_usage = allocated_memory - initial_memory
 
-        print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
-        print(
-            f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
-        )
-        print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
-        print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
+            print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
+            print(
+                f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
+            )
+            print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
+            print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
 
-        print(torch.cuda.memory_summary(torch.cuda.current_device()))
+            print(torch.cuda.memory_summary(device))
 
-        return ret
+            return ret
 
-    return wrapper
+        return wrapper
+
+    return func_wrap
 
 
 def func_speed_wrapper(test_num=100):

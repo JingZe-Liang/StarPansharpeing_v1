@@ -12,7 +12,6 @@ import tifffile
 import torch
 import torch.distributed
 import webdataset as wds
-from bokeh import log
 from kornia.augmentation import (
     AugmentationSequential,
     CenterCrop,
@@ -105,17 +104,17 @@ class HyperRandomGrayScale(IntensityAugmentationBase2D):
 
 def hyper_transform(
     op_list: tuple[str],
-    probs: tuple[float, float] | float = 0.5,
+    probs: tuple[float, ...] | float = 0.5,
     random_apply: int | tuple[int] = 2,
     default_img_size: int = 256,
 ):
     if isinstance(probs, float):
-        probs = [probs] * len(op_list)
-    assert len(probs) == len(op_list), (
+        probs = tuple([probs] * len(op_list))
+    assert len(probs) == len(op_list), (  # type: ignore
         "Number of probabilities must match number of operations."
     )
 
-    _default_size: tuple[int, int] = to_n_tuple(default_img_size, 2)
+    _default_size: tuple[int, ...] = to_n_tuple(default_img_size, 2)
 
     _op_list_cls = dict(
         grayscale=lambda p: HyperRandomGrayScale(p=p),
@@ -215,6 +214,7 @@ def get_hyperspectral_dataloaders(
     num_workers: int,
     shuffle_size: int = 100,
     to_neg_1_1: bool = True,
+    permute: bool = True,
     hyper_transforms_lst: tuple[str, ...] | None = (
         "grayscale",
         "channel_shuffle",
@@ -228,7 +228,7 @@ def get_hyperspectral_dataloaders(
     resample: bool = True,
     prefetch_factor: int | None = 6,
     pin_memory: bool = False,
-    shuffle_within_workers: bool = True,
+    shuffle_within_workers: bool = False,
     check_channels: bool = False,
     channels: int | None = None,
     remove_meta_data: bool = False,
@@ -284,7 +284,7 @@ def get_hyperspectral_dataloaders(
     dataset = dataset.map(remove_extension)
     if remove_meta_data:
         dataset = dataset.map(remove_meta_data)
-    dataset = dataset.map(partial(norm_img, to_neg_1_1=to_neg_1_1))
+    dataset = dataset.map(partial(norm_img, to_neg_1_1=to_neg_1_1, permute=permute))
     if check_channels:
         assert channels is not None, (
             "channels must be specified if check_channels is True"
@@ -306,7 +306,9 @@ def get_hyperspectral_dataloaders(
         pin_memory=pin_memory,
         drop_last=False,
         timeout=timeout if num_workers > 0 else 0,
-        generator=torch.Generator().manual_seed(2025),
+        generator=torch.Generator().manual_seed(
+            hash("uestc_ZihanCao_add_my_wechat:iamzihan123") % (2**31)  # magic number
+        ),
         shuffle=False,
     )
 
@@ -364,6 +366,7 @@ def get_fast_test_hyperspectral_data(
         "WV2": "data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar",
         "WV4": "data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar",
         "IKONOS": "data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar",
+        "BigEarthNetS2": "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
     }[data_type]
 
     _, dataloader = get_hyperspectral_dataloaders(
@@ -377,6 +380,9 @@ def get_fast_test_hyperspectral_data(
         remove_meta_data=False,
         prefetch_factor=None,
         resample=False,
+        permute=True
+        if "BigEarthNet" not in wds_paths
+        else False,  # BigEarthNet images are already permuted
     )
 
     return dataloader
@@ -505,27 +511,28 @@ class HyperImageDataset(Dataset):
 
     """
 
-    def __init__(self, dir: str, return_key: bool = False):
+    def __init__(self, dir: str, return_key: bool = False, extension="safetensors"):
         self.path = Path(dir)
         self.return_key = return_key
-        self.img_paths = natsorted(list(self.path.glob("*.safetensors")))
+        self.img_paths = natsorted(list(self.path.glob(f"*.{extension}")))
+        self.extension = extension
+        assert extension in ("safetensors", "tiff", "tif"), (
+            f"Unsupported extension: {extension}. Supported extensions are 'safetensors', 'tiff', 'tif'."
+        )
 
     def __len__(self):
         return len(self.img_paths)
 
-    @torch.no_grad()
     def __getitem__(self, idx):
         img_path = self.img_paths[idx]
         key = img_path.stem
 
         # mmap load faster not as in tar data stream in webdataset
-        img = load_file(img_path, device="cpu")["img"]
-        # img = img.to(torch.float32).permute(2, 0, 1)
-
-        # # to 0 to 1
-        # img = img / img.max()
-        # if self.to_neg_1_1:
-        #     img = img * 2 - 1
+        if self.extension == "safetensors":
+            img = load_file(img_path, device="cpu")["img"]
+        elif self.extension in ("tiff", "tif"):
+            img = tifffile.imread(self.img_paths[idx])
+            img = torch.as_tensor(img).float()
 
         ret = {}
         if self.return_key:
@@ -720,6 +727,7 @@ def chained_dataloaders(
 
                     # Get probability distribution for current step
                     raw_probs = curriculum_fn(train_step)
+                    # log_print(f"probs {raw_probs}", "debug")
 
                     # Filter only active loaders and their probabilities
                     valid_indices = []
@@ -1052,20 +1060,24 @@ def generate_wds_config_modify_only_some_kwgs(
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
-        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
-        ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
-        ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
-        ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
-        ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
-        ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
-        ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
-        [
-            "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
-            "data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar",
-            "data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar",
-        ],
-        ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
+        # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        # ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
+        # ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
+        # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
+        # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
+        # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
+        # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
+        # [
+        #     "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
+        #     "data_local/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar",
+        #     "data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar",
+        # ],
+        # ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
+        # ["data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar"],
+        ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
+        # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
+        # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
     ]
     test_batch_size = 16
     test_num_workers = 3
@@ -1086,46 +1098,53 @@ if __name__ == "__main__":
         check_channels=False,
     )
     changed_kwargs = [
-        {
-            "batch_size": 8,
-        }
-    ] * 9 + [
-        {
-            "batch_size": 8,
-            "channels": 4,
-            "check_channels": True,
-        }
+        # {},
+        {"permute": False},
+        # {},
+        # {},
     ]
-    channels = [12, 8, 13, 50, 4, 8, 224]
+    curriculum_kwargs = {
+        "start_prob": [0.3, 0.8, 0.8, 0.6, 0.6, 0.2, 0.8, 0.6, 0.6, 0.6],
+        "end_prob": [0.8, 0.2, 0.2, 0.4, 0.4, 0.8, 0.2, 0.4, 0.4, 0.4],
+        "total_steps": 600,
+    }
+    # channels = [12, 8, 13, 50, 4, 8, 224]
     accelerator = accelerate.Accelerator()
 
+    step_counter = StepsCounter(["train"])
     _, test_loader = get_hyperspectral_img_loaders_with_different_backends(
         test_wds_path,
         loader_type="webdataset",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=True,
+        # curriculum_type="linear",
+        # curriculum_kwargs=curriculum_kwargs,
     )
-
-    # # for sample in iter(test_dataset):
-    # #     print(sample.keys())
 
     from tqdm import tqdm
 
-    total_samples_256 = 0
-    total_samples_512 = 0
-
+    indices = set()
     for sample in (tbar := tqdm(test_loader)):
         img = sample["img"]
 
+        index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
+        index = set(index)
+        indices.update(index)
+
         tbar.set_description_str(
-            "rank: {}, img shape: {}, loader idx: {}, url: {}".format(
+            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}".format(
                 accelerator.process_index,
                 img.shape,
                 sample["__loader_idx__"],
-                sample["__url__"][0],
+                # sample["__url__"][0],
+                indices,
             )
         )
+
+        assert img.shape[-2] == img.shape[-1]
+        # assert img.shape[1] < img.shape[-1]
+        step_counter.update("train")
         # if img.shape[1] == 3:
         #     print(sample["__url__"])
         #     break

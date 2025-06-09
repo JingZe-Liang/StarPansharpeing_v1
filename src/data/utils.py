@@ -252,7 +252,7 @@ def flatten_sub_dict(regardless_of_any_collisions=True):
     return _inner
 
 
-def to_n_tuple(val: int | float | tuple, n: int):
+def to_n_tuple(val: int | float | tuple, n: int) -> tuple[int | float, ...]:
     if isinstance(val, tuple):
         assert len(val) == n, f"Expected tuple of length {n}, got {len(val)}"
         return val

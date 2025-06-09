@@ -151,7 +151,7 @@ def get_multimodal_dataloaders(
     pin_memory: bool = True,
     remove_meta: bool = False,
     normed_keys: list[str] = ["img", "hrms", "lrms", "pan"],
-) -> tuple[wds.WebDataset, wds.WebLoader]:
+) -> tuple[wds.DataPipeline, wds.WebLoader]:
     dataset = wds.DataPipeline(
         wds.ResampledShards(wds_paths) if resample else wds.SimpleShardList(wds_paths),
         merge_modalities,
@@ -172,14 +172,14 @@ def get_multimodal_dataloaders(
             )
         ),
         wds.shuffle(shuffle_size),
-        wds.batched(batch_size, partial=True),
+        # wds.batched(batch_size, partial=True),
     )
     if remove_meta:
         dataset = dataset.append(wds.map(remove_meta_data))
 
     dataloader = wds.WebLoader(
         dataset,
-        batch_size=None,
+        batch_size=batch_size,
         num_workers=num_workers,
         persistent_workers=True if num_workers > 0 else False,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
@@ -187,11 +187,11 @@ def get_multimodal_dataloaders(
         pin_memory=pin_memory,
     )
     dataloader = dataloader.with_length(10_000)  # 10k pairs of the dataloader
-    dataloader = dataloader.unbatched()
+    # dataloader = dataloader.unbatched()
 
-    if shuffle_size > 0:
-        dataloader = dataloader.shuffle(shuffle_size)
-    dataloader = dataloader.batched(batch_size)
+    # if shuffle_size > 0:
+    #     dataloader = dataloader.shuffle(shuffle_size)
+    # dataloader = dataloader.batched(batch_size)
 
     log_print(f"[Pansharpening Dataset]: constructed the dataloader")
 
@@ -215,12 +215,14 @@ if __name__ == "__main__":
 
     _, loader = get_multimodal_dataloaders(
         wds_paths=[
-            "data/MMSeg_YREB/[pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
+            "data/MMSeg_YREB/[hyper_images,pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
         ],
         batch_size=32,
         num_workers=3,
         resample=True,
         prefetch_factor=6,
+        pin_memory=False,
+        shuffle_size=-1,
     )
 
     from tqdm import tqdm
