@@ -13,10 +13,6 @@ def to_object(config: Any):
         return OmegaConf.to_object(config)
     else:
         return config
-    # elif isinstance(config, (list, dict)):
-    #     return config
-    # else:
-    #     raise ValueError(f"Unknown config type: {type(config)}")
 
 
 def to_object_recursive(config: Iterable):

@@ -12,7 +12,6 @@ import tifffile
 import torch
 import torch.distributed
 import webdataset as wds
-from bokeh import log
 from kornia.augmentation import (
     AugmentationSequential,
     CenterCrop,

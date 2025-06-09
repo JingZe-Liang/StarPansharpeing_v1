@@ -42,13 +42,8 @@ from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print
-from src.utilities.network_utils import load_fsdp_model
+from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
-
-# omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
-OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
-
 
 ## TODO:
 # 1. add diffusion, rectify flow, or inductive moumentumn matching to the decoder
@@ -871,13 +866,21 @@ class CosmosHyperspectralTokenizerTrainer:
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
 
     def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module | FSDPModule):
-        if not self._is_fsdp:
+        fsdp_plugin = self.accelerator.state.fsdp_plugin
+        cpu_offload_enabled = (
+            hasattr(fsdp_plugin, "cpu_offload")
+            and fsdp_plugin.cpu_offload is not None
+            and fsdp_plugin.cpu_offload.offload_params
+        )
+        # cpu_offload_enabled = False
+        if not self._is_fsdp and cpu_offload_enabled:
             return model
 
         self.log_msg(
             "FSDP module seems do not move the original parameter (_local_tensor) on the"
             "correct rank, we need to manully move them on cuda while using `to_local` or `redistributed` methods",
             level="WARNING",
+            warn_once=True,
         )
         _cpu_device = torch.device("cpu")
         for name, param in model.named_parameters():
@@ -919,19 +922,30 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer_decoder, self.tokenizer_optim = self.accelerator.prepare(
                 self.tokenizer_decoder, self.tokenizer_optim
             )
+            # self.tokenizer_encoder = self.set_fsdp_cpu_local_tensor_to_each_rank(
+            #     self.tokenizer_encoder
+            # )
+            # self.tokenizer_decoder = self.set_fsdp_cpu_local_tensor_to_each_rank(
+            #     self.tokenizer_decoder
+            # )
         else:
             self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(
                 self.tokenizer, self.tokenizer_optim
             )
+            # self.tokenizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
 
         # quantizer
         if self.quantizer is not None:
             self.quantizer = self.accelerator.prepare(self.quantizer)
+            # self.quantizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.quantizer)
 
         # discriminator
         (self.vq_loss_fn.discriminator, self.disc_optim) = self.accelerator.prepare(
             self.vq_loss_fn.discriminator, self.disc_optim
         )
+        # self.vq_loss_fn.discriminator = self.set_fsdp_cpu_local_tensor_to_each_rank(
+        #     self.vq_loss_fn.discriminator
+        # )
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -1126,7 +1140,7 @@ class CosmosHyperspectralTokenizerTrainer:
         for p in model.parameters():
             p.requires_grad = not freeze
 
-    def get_last_layer(self, use_ema: bool = False, mode="dec") -> nn.Parameter:
+    def get_last_layer(self, use_ema: bool = False, mode="dec"):
         # if use_ema:
         #     if self.sep_enc_dec:
         #         w = self.accelerator.unwrap_model(
@@ -1152,9 +1166,7 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
 
-        if isinstance(w, DTensor):
-            w = w.full_tensor().cuda()
-
+        w = safe_dtensor_operation(w, prefer_full=True)
         return w
 
     def gradient_check(self, model: nn.Module):
@@ -1887,7 +1899,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_lora_f8c16p4"
+_key = "unicosmos_f16c16p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -1930,14 +1942,15 @@ if __name__ == "__main__":
         },
     )
 
-    logger.info(
+    log_print(
         "\n"
         + "=" * 60
         + "\n"
         + f"[Config]: {_configs}\n"
         + "-" * 40
         + "\n\n"
-        + "Start Running , Good Luck!"
+        + "Start Running , Good Luck!",
+        only_rank_zero=True,
     )
 
     # Main function

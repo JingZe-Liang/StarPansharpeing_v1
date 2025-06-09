@@ -4,58 +4,75 @@ hydra:
     dir: .
 
 defaults:
-  - _self_
   # tokenizer ==========
-  - dataset: hyperspectral
+  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
   - tokenizer: uni_cosmos_f16c16p1
   - quantizer: quant
+  - vq_loss: remote_clip_RN50
   - accelerator: base
+  - _self_
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
 vq_loss:
-  _target_: src.stage1.utilities.VQLPIPSWithDiscriminator
-  disc_network_type: patchgan
-  disc_ndf: 128
-  use_actnorm: false
-  disc_input_size: ${dataset.img_size}
-  disc_in_channels: ${dataset.channels}
-  # perceptual
-  perceptual_weight: 0.1
-  perceptual_type: resnet
-  perceptual_groups_to_select: null
-  perceptual_loss_on_logits: false
-  gram_model: null
-  gram_loss_weight: 1.0
-  # ssim loss
-  loss_ssim: true
-  ssim_weight: 0.1
-  # lecam
-  lecam_loss_weight: 0.001
-  # recon loss
-  reconstruction_weight: 4.0
-  reconstruction_loss_type: l1
-  force_not_use_recon_loss: false # compute the reconstruction loss outside
-  # gen and disc losses
-  gen_loss_weight: null
-  disc_weight: 0.02
-  disc_start: 0
-  disc_reg_r1: 10
-  disc_reg_freq: 0 # 0 means disabled
-  disc_loss: non_saturate
-  # quantizer
-  quantizer_type: null
+  repa_loss_weight: 0.1
+  repa_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: random
+    img_resize: 224 # null for no resize
+    dino_img_size: 224
+  vf_loss_weight:
+  vf_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: random #${dataset.rgb_channels}
+    img_resize: 224
+    dino_img_size: 224
+    distmat_margin: 0.25
+    cos_margin: 0.5
+  quantizer_type:
   quantizer_options:
-    quantizer_loss_weight: 0.1
-    codebook_enlarge_ratio: 3.0
-    codebook_enlarge_steps: 2000
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_ndf: 128
+  disc_num_layers: 3
+  use_actnorm: false
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_start_for_g: 0
+  disc_start_for_d: 0
+  disc_loss: relative
+  ssim_weight: 0.04
+  disc_weight: 0.1
+  reconstruction_loss_type: mse
 
 ema:
-  beta: 0.99
+  beta: 0.999
   update_after_step: 1000
   update_every: 2
+
+tokenizer:
+  hook_for_repa: true
+  hook_module: decoder.decoder.mid.block_2
+  proj_for_vf: false
+  vf_on_z_or_module: module
+  act_checkpoint: true
+  uni_tokenizer_path: #runs/stage1_cosmos/2025-06-06_22-29-45_cosmos_f8c16p1_unified_hyperspectral_repa_no_pix_shuffle/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
+  use_channel_drop: false
+  enc_moe: false
+  dec_moe: false
+  norm_type: gn
+  norm_groups: 32
+  block_name: res_block
+  moe_token_mixer_type: res_block
+  patch_method: haar
+  patch_size: 1
+  attn_type: none
+  padding_mode: reflect # for boundary?
+  latent_channels: 32
+  z_channels: 32
 
 train:
   tokenizer_name: cosmos_uni
@@ -64,57 +81,85 @@ train:
   max_grad_norm: 0.03
   track_metrics_duration: -1
   track_metrics_after: 2000
-  visualize_every: 200
-  max_steps: 200_000
+  visualize_every: 500
+  max_steps: 500_000
   save_every: 500
   seperate_enc_dec: false
-  resume_path:
+  resume_path: runs/stage1_cosmos/2025-06-07_00-26-55_cosmos_f8c32p1_unified_hyperspectral_repa_no_pix_shuffle/checkpoints/checkpoint_399
   ema_load_path: #/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-04-02_02-15-54/cosmos_tokenizer_pos_training/ema
+  only_load_tokenizer: true
+  compile_model: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: 2
     adapt_latent_n_layers: 2
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 1.0e-6
-    eps: 1.0e-8
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    adamw_betas: ${tuple:[0., 0.9]} #[0.5, 0.9], gan training beta1 is zero
+
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas:  ${tuple:[0.5, 0.95]}
+    # foreach: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.mars.MARS
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 1.0e-6
-    eps: 1.0e-8
-    betas: [0.8, 0.95]
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    adamw_betas: ${tuple:[0., 0.9]} #[0.5, 0.9], gan training beta1 is zero
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: ${tuple:[0.0, 0.9]}
+    # foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
-    min_lr: 2.0e-5
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   disc_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
     reduced_factor: 2
-    min_lr: 2.0e-5
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   log:
-    run_comment: unicosmos_f16c16p1
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p1_${dataset.used}_repa_no_pix_shuffle
     log_with_time: True
     visualize_every: 200
     log_every: 10
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 1000

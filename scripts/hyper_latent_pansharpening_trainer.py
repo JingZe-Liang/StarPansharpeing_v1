@@ -26,18 +26,17 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
 
+from utilities.network_utils.Dtensor import safe_dtensor_operation
+
 colored_traceback.add_hook()
 
-# from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
+from src.utilities.config_utils import (
+    to_object as to_cont,  # register new resolvers at the same time
+)
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.train_utils.state import StepsCounter
-
-to_cont = partial(OmegaConf.to_container, resolve=True)
-# omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
-OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 
 
 class PansharpeningTrainer:
@@ -316,7 +315,7 @@ class PansharpeningTrainer:
             if self.accelerator.is_main_process:
                 self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
                 self.accelerator.init_trackers("train")
-                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(
+                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(  # type: ignore
                     "tensorboard"
                 )
 
@@ -363,7 +362,8 @@ class PansharpeningTrainer:
                             )
                             # ensure the corss rank does not involve cpu bankend
                             _grad = _grad.cuda()
-                        _p_grad = p.grad.full_tensor()  # across all ranks
+                        # _p_grad = p.grad.full_tensor()  # across all ranks
+                        _p_grad = safe_dtensor_operation(p.grad)
                     _grad_norm = (_p_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
@@ -744,7 +744,7 @@ class PansharpeningTrainer:
             _log_tok_losses = self.format_log(train_out["sr_log_losses"])
 
             self.log_msg(
-                f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:.5f} | "
+                f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
