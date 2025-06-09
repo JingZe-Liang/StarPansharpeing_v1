@@ -272,6 +272,8 @@ class ContinuousImageTokenizer(nn.Module):
                 self._vf_proj = build_mlp(
                     512, self._dino_feature_dim, self._dino_feature_dim
                 )
+        if kwargs.get("attn_type") in ("none", None):
+            self._no_split_modules.remove("AttnBlock")
 
         self.quantizer_type = kwargs.pop("quantizer_type", None)
         assert self.quantizer_type in [

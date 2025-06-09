@@ -106,6 +106,7 @@ val_changed_kwargs_by_loader:
   - batch_size: 6
   - batch_size: 6
   - batch_size: 6
+  - batch_size: 6
 
 train_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends

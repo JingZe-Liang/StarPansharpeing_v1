@@ -31,19 +31,19 @@ dataset_names_to_n_channels:
   IKONOS: 4
 
 dataset_names_to_rgb_channels:
-  MMSeg_YREB: [4, 3, 2]
-  DCF_2019: [5, 3, 2]
-  DCF_2020: [9, 6, 3]
-  GID_GF2: [3, 2, 1]
-  DryadHyper: [90, 60, 40]
-  Houston: [40, 20, 10]
-  DFC_2020: [9, 6, 4]
-  MUSLI: [66, 38, 16]
-  WV3: [5, 3, 2]
-  OHS: [18, 11, 6]
-  QB: [2, 1, 0]
-  GF1: [2, 1, 0]
-  IKONOS: [2, 1, 0]
+  MMSeg_YREB: ${list:[4, 3, 2]}
+  DCF_2019: ${list:[5, 3, 2]}
+  DCF_2020: ${list:[9, 6, 3]}
+  GID_GF2: ${list:[3, 2, 1]}
+  DryadHyper: ${list:[90, 60, 40]}
+  Houston: ${list:[40, 20, 10]}
+  DFC_2020: ${list:[9, 6, 4]}
+  MUSLI: ${list:[66, 38, 16]}
+  WV3: ${list:[5, 3, 2]}
+  OHS: ${list:[18, 11, 6]}
+  QB: ${list:[2, 1, 0]}
+  GF1: ${list:[2, 1, 0]}
+  IKONOS: ${list:[2, 1, 0]}
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
