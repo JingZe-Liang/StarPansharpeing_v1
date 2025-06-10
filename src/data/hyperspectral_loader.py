@@ -215,6 +215,7 @@ def get_hyperspectral_dataloaders(
     shuffle_size: int = 100,
     to_neg_1_1: bool = True,
     permute: bool = True,
+    check_nan: bool = False,
     hyper_transforms_lst: tuple[str, ...] | None = (
         "grayscale",
         "channel_shuffle",
@@ -284,7 +285,14 @@ def get_hyperspectral_dataloaders(
     dataset = dataset.map(remove_extension)
     if remove_meta_data:
         dataset = dataset.map(remove_meta_data)
-    dataset = dataset.map(partial(norm_img, to_neg_1_1=to_neg_1_1, permute=permute))
+    dataset = dataset.map(
+        partial(
+            norm_img,
+            to_neg_1_1=to_neg_1_1,
+            permute=permute,
+            check_nan=check_nan,
+        )
+    )
     if check_channels:
         assert channels is not None, (
             "channels must be specified if check_channels is True"
@@ -1075,9 +1083,9 @@ if __name__ == "__main__":
         # ],
         # ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
         # ["data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar"],
-        ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
+        # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
-        # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
+        ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
     ]
     test_batch_size = 16
     test_num_workers = 3
@@ -1099,9 +1107,9 @@ if __name__ == "__main__":
     )
     changed_kwargs = [
         # {},
-        {"permute": False},
+        # {"permute": False},
         # {},
-        # {},
+        {"check_nan": True},
     ]
     curriculum_kwargs = {
         "start_prob": [0.3, 0.8, 0.8, 0.6, 0.6, 0.2, 0.8, 0.6, 0.6, 0.6],
@@ -1128,21 +1136,23 @@ if __name__ == "__main__":
     for sample in (tbar := tqdm(test_loader)):
         img = sample["img"]
 
-        index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
-        index = set(index)
-        indices.update(index)
+        # index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
+        # index = set(index)
+        # indices.update(index)
 
         tbar.set_description_str(
-            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}".format(
+            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}, min-max: {}".format(
                 accelerator.process_index,
                 img.shape,
                 sample["__loader_idx__"],
                 # sample["__url__"][0],
                 indices,
+                (img.min().item(), img.max().item()),
             )
         )
 
         assert img.shape[-2] == img.shape[-1]
+        assert torch.isnan(img).sum() == 0, "Image contains NaN values"
         # assert img.shape[1] < img.shape[-1]
         step_counter.update("train")
         # if img.shape[1] == 3:

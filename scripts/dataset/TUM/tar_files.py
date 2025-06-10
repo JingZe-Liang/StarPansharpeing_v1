@@ -90,11 +90,11 @@ if __name__ == "__main__":
     tif_files = chain(tif_files1, tif_files2)
 
     # 示例用法
-    # tar_files(
-    #     input_paths=tif_files,
-    #     output_file="/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/TUM_128/hyper_images/TUM_128_data_%04d.tar",
-    #     max_size=2 * 1024 * 1024 * 1024,  # 2GB
-    # )
+    tar_files(
+        input_paths=tif_files,
+        output_file="/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/TUM_128/hyper_images/TUM_128_data_%04d.tar",
+        max_size=2 * 1024 * 1024 * 1024,  # 2GB
+    )
 
     # for tif_file in tif_files:
     #     img = read_img(tif_file)

@@ -1288,6 +1288,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         with self.accelerator.accumulate(*_accum_models):
             # with torch.autograd.set_detect_anomaly(True):
+            # self.log_msg(f"input shape: {x.shape}", level="debug")
+
             out_d = self.forward_tokenizer(x)
 
             # train tokenizer and discriminator

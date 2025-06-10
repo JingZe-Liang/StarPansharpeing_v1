@@ -6,6 +6,7 @@ import braceexpand
 import numpy as np
 import torch
 import webdataset as wds
+from zarr import ones_like
 
 from ..utilities.logging.print import log_print
 
@@ -70,6 +71,7 @@ def norm_img(
     norm_keys: list[str] = ["img"],
     to_neg_1_1: bool = True,
     permute: bool = True,
+    check_nan: bool = False,
     on_device: bool = False,
 ):
     """
@@ -104,9 +106,15 @@ def norm_img(
         )
         if on_device:
             img = img.to(torch.device("cuda"), non_blocking=True)
-        img = img / img.max()
+        if check_nan:
+            img = torch.nan_to_num(img, nan=0.0, posinf=1, neginf=0.0)
+        _img_max = img.max()
+        if _img_max < 1e-4:
+            img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
+        else:
+            img = img / (_img_max + 1e-6)
         if to_neg_1_1:
-            img = img * 2 - 1
+            img = (img * 2 - 1).clip(-1.0, 1.0)
         if permute:
             if img.ndim == 3:
                 img = img.permute(-1, 0, 1)
