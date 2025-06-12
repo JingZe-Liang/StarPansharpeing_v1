@@ -379,6 +379,17 @@ class CosmosHyperspectralTokenizerTrainer:
                 backtrace=True,
                 colorize=False,
             )
+            # including trace and debug
+            self.logger.add(
+                log_file.parent / "debug.log",
+                format=log_format_in_file,
+                level="DEBUG",
+                filter=lambda record: record["level"].no <= 10,
+                rotation="10 MB",
+                enqueue=True,
+                backtrace=True,
+                colorize=False,
+            )
         self.logger.add(
             sys.stdout,
             format=log_format_in_cmd,
@@ -444,9 +455,10 @@ class CosmosHyperspectralTokenizerTrainer:
             # take out the grad of norms
             model_cls_n = model.__class__.__name__
             norms = {}
+            _n_params_sumed = 0
             if log_type == "grad_norm_sum":
                 norms[f"{model_cls_n}_grad_norm"] = 0
-                _n_params_sumed = 0
+
             for n, p in model.named_parameters():
                 if p.grad is not None:
                     # must sync grad here, `is_main_process` would cause the ranks do not sync
@@ -459,7 +471,8 @@ class CosmosHyperspectralTokenizerTrainer:
                             )
                             # ensure the corss rank does not involve cpu bankend
                             _grad = _grad.cuda()
-                        _p_grad = p.grad.full_tensor()  # across all ranks
+                        # _p_grad = p.grad.full_tensor()  # across all ranks
+                        _grad = safe_dtensor_operation(_grad)
                     _grad_norm = (_p_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
@@ -1488,6 +1501,11 @@ class CosmosHyperspectralTokenizerTrainer:
             # state in the loader generator
             self._val_loader_iter = iter(self.finite_val_loader())
 
+        if hasattr(self.tokenizer_optim, "eval"):
+            self.log_msg("set optimizer to eval mode (support for splus optimizer)")
+            self.tokenizer_optim.eval()
+            self.disc_optim.eval()
+
         # set all mode
         def _set_all_model_modes(train=False):
             if not train:  # eval
@@ -1555,6 +1573,11 @@ class CosmosHyperspectralTokenizerTrainer:
             )
 
         _set_all_model_modes(train=True)
+
+        if hasattr(self.tokenizer_optim, "train"):
+            self.log_msg("set optimizer to train mode (support for splus optimizer)")
+            self.tokenizer_optim.train()
+            self.disc_optim.train()
 
     def save_state(self):
         self.accelerator.save_state()

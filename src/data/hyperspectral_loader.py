@@ -1,3 +1,4 @@
+import json
 import os
 import random
 from functools import partial
@@ -8,10 +9,12 @@ import accelerate
 import braceexpand
 import numpy as np
 import scipy.io
+import scipy.special
 import tifffile
 import torch
 import torch.distributed
 import webdataset as wds
+import wids
 from kornia.augmentation import (
     AugmentationSequential,
     CenterCrop,
@@ -23,30 +26,35 @@ from kornia.augmentation import (
     RandomRotation,
     RandomSharpness,
     RandomVerticalFlip,
+    Resize,
 )
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from natsort import natsorted
-from safetensors import safe_open
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Dataset
 from typing_extensions import deprecated
 
-from src.data.codecs import safetensors_decode_io, tiff_decode_io
+from src.data.codecs import (
+    img_decode_io,
+    safetensors_decode_io,
+    string_decode_io,
+    tiff_decode_io,
+    wids_image_decode,
+)
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     extract_modality_names,
     flatten_sub_dict,
+    img_size_filter,
     may_repeat_channels,
     merge_modalities,
     norm_img,
     remove_extension,
-    remove_meta_data,
     to_n_tuple,
 )
-from src.utilities.config_utils import (
-    function_config_to_basic_types,
-    kwargs_to_basic_types,
-)
+from src.data.utils import remove_meta_data as remove_meta_data_fn
+from src.data.wids_samplers import IndexFilteredDistributedSampler, IndexFilteredSampler
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.train_utils.state import StepsCounter
 
@@ -55,6 +63,10 @@ if __compile_collate_fn:
     torch._dynamo.config.recompile_limit = 20
 
 type WebdatasetPath = str | list[str] | list[list[str]]
+type SupportedLoaderType = Literal["webdataset", "folder", "wids"]
+
+loader_seed = hash("uestc_ZihanCao_add_my_wechat:iamzihan123") % (2**31)
+loader_generator = torch.Generator().manual_seed(loader_seed)
 
 
 @deprecated(
@@ -91,6 +103,13 @@ def get_dict_tensor_mapper(to_neg_1_1=True):
     return wds_to_dict_tensor_mapper
 
 
+def filter_undecoded(sample, key):
+    if isinstance(sample[key], bytes):
+        return None
+    else:
+        return sample
+
+
 class HyperRandomGrayScale(IntensityAugmentationBase2D):
     def __init__(self, p=0.5):
         super().__init__(p)
@@ -103,7 +122,7 @@ class HyperRandomGrayScale(IntensityAugmentationBase2D):
 
 
 def hyper_transform(
-    op_list: tuple[str],
+    op_list: tuple[str, ...],
     probs: tuple[float, ...] | float = 0.5,
     random_apply: int | tuple[int] = 2,
     default_img_size: int = 256,
@@ -114,7 +133,7 @@ def hyper_transform(
         "Number of probabilities must match number of operations."
     )
 
-    _default_size: tuple[int, ...] = to_n_tuple(default_img_size, 2)
+    _default_size: tuple[int, int] = to_n_tuple(default_img_size, 2)
 
     _op_list_cls = dict(
         grayscale=lambda p: HyperRandomGrayScale(p=p),
@@ -148,6 +167,27 @@ def hyper_transform(
 
     def dict_mapper(sample):
         sample = op_seq(sample)
+        return sample
+
+    return dict_mapper
+
+
+def large_image_resizer_clipper(
+    tgt_size: int | tuple[int, int],
+    op_for_large: str = "clip",
+):
+    if isinstance(tgt_size, int):
+        tgt_size: tuple[int, int] = to_n_tuple(tgt_size, 2)
+
+    if op_for_large == "clip":
+        clipper = RandomResizedCrop(tgt_size, scale=(0.5, 1.0), ratio=(0.75, 1.333))
+    elif op_for_large == "resize":
+        clipper = Resize(tgt_size, antialias=True)
+    else:
+        raise ValueError(f"op_for_large {op_for_large} not supported")
+
+    def dict_mapper(sample: dict):
+        sample["img"] = clipper(sample["img"])
         return sample
 
     return dict_mapper
@@ -208,6 +248,9 @@ def collate_fn_for_dict(
     return results
 
 
+# * --- webdataset loader --- #
+
+
 def get_hyperspectral_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
@@ -216,6 +259,12 @@ def get_hyperspectral_dataloaders(
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,
+    img_key: str = "img",  # image key in the sample dictionary, default is "img"
+    constraint_size: int
+    | tuple[int, int]
+    | None = None,  # int for minimal_size; tuple for (min, max)
+    resize_before_transform: int
+    | None = None,  # resize to the same size before transformation and batching
     hyper_transforms_lst: tuple[str, ...] | None = (
         "grayscale",
         "channel_shuffle",
@@ -260,7 +309,7 @@ def get_hyperspectral_dataloaders(
         and transform_prob > 0
     )
     if use_transf:
-        transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)
+        transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)  # type: ignore
         log_print(
             f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
         )
@@ -278,13 +327,47 @@ def get_hyperspectral_dataloaders(
         detshuffle=True if shuffle_size > 0 else False,
         empty_check=False,
     )
-    dataset = dataset.decode(
+
+    # decode
+    default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
         wds.handle_extension("safetensors", safetensors_decode_io),
-    )
+    ]
+    if img_key == "img_content":
+        default_decoder.append(wds.handle_extension("img_content", img_decode_io))
+    dataset = dataset.decode(*default_decoder)
+
+    # extension
     dataset = dataset.map(remove_extension)
+
+    # catch the undecoded images
+    dataset = dataset.map(partial(filter_undecoded, key=img_key))
+
+    # meta data
     if remove_meta_data:
-        dataset = dataset.map(remove_meta_data)
+        dataset = dataset.map(remove_meta_data_fn)
+
+    # rename key
+    if img_key != "img":
+        dataset = dataset.rename_keys(("img", img_key))
+
+    # pass the minimal size or range of the image
+    if constraint_size is not None:
+
+        def size_filter_fn(sample):
+            img = sample["img"]
+            img_size = np.prod(img.shape[:2]).item()
+            if isinstance(constraint_size, int):
+                if img_size >= constraint_size:
+                    return sample
+            elif isinstance(constraint_size, tuple):
+                if img_size >= constraint_size[0] and img_size <= constraint_size[1]:
+                    return sample
+            return None
+
+        dataset = dataset.map(size_filter_fn)
+
+    # norm
     dataset = dataset.map(
         partial(
             norm_img,
@@ -293,6 +376,8 @@ def get_hyperspectral_dataloaders(
             check_nan=check_nan,
         )
     )
+
+    # channel check
     if check_channels:
         assert channels is not None, (
             "channels must be specified if check_channels is True"
@@ -301,7 +386,21 @@ def get_hyperspectral_dataloaders(
             img=partial(may_repeat_channels, rep_channels=channels)
         )
 
-    dataset = dataset.batched(batch_size, collation_fn=collate_fn_for_dict)
+    # resize
+    if resize_before_transform is not None:
+        dataset = dataset.map_dict(
+            img=Resize(
+                to_n_tuple(resize_before_transform, 2),  # type: ignore
+                side="short",
+                keepdim=True,
+            )
+        )
+
+    dataset = dataset.batched(
+        batch_size, collation_fn=collate_fn_for_dict
+    )  # stacked into batch
+
+    # augmentations
     if use_transf:
         dataset = dataset.map_dict(img=transform)
 
@@ -314,9 +413,7 @@ def get_hyperspectral_dataloaders(
         pin_memory=pin_memory,
         drop_last=False,
         timeout=timeout if num_workers > 0 else 0,
-        generator=torch.Generator().manual_seed(
-            hash("uestc_ZihanCao_add_my_wechat:iamzihan123") % (2**31)  # magic number
-        ),
+        generator=loader_generator,
         shuffle=False,
     )
 
@@ -358,6 +455,7 @@ def get_fast_test_hyperspectral_data(
         "WV2",
         "WV4",
         "IKONOS",
+        "RS5M",
     ] = "DCF",
     batch_size: int = 1,
 ):
@@ -374,6 +472,7 @@ def get_fast_test_hyperspectral_data(
         "WV2": "data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar",
         "WV4": "data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar",
         "IKONOS": "data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar",
+        "RS5M": "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-0010.tar",
         "BigEarthNetS2": "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
     }[data_type]
 
@@ -389,11 +488,16 @@ def get_fast_test_hyperspectral_data(
         prefetch_factor=None,
         resample=False,
         permute=True
-        if "BigEarthNet" not in wds_paths
+        if "BigEarthNet" != data_type
         else False,  # BigEarthNet images are already permuted
+        img_key="img_content" if "RS5M" == data_type else "img",
+        # resize_before_transform=512 if "RS5M" == data_type else None,
     )
 
     return dataloader
+
+
+# * --- folder loader --- #
 
 
 def ms_pan_dir_paired_loader(
@@ -617,7 +721,7 @@ def only_hyperspectral_img_folder_dataloader(
         shuffle=shuffle,
         drop_last=False,
         collate_fn=_collate_fn,
-        generator=torch.Generator().manual_seed(2025),
+        generator=loader_generator,
         pin_memory=pin_memory,
         multiprocessing_context="spawn"
         if (num_workers > 0 and __compile_collate_fn)
@@ -628,11 +732,152 @@ def only_hyperspectral_img_folder_dataloader(
     return dataset, dataloader
 
 
+# * --- wids loaders --- #
+
+
+def get_hyperspectral_wids_dataloaders(
+    index_file: str,
+    batch_size: int,
+    num_workers: int,
+    shuffle_size: int = 100,
+    to_neg_1_1: bool = True,
+    permute: bool = True,
+    img_size_filter_file: str | None = None,
+    constraint_size: int | tuple[int, int] | None = None,
+    resize_before_transform: int | None = 512,
+    hyper_transforms_lst: tuple[str, ...] | None = (
+        "grayscale",
+        "channel_shuffle",
+        "rotation",
+        "cutmix",
+        "horizontal_flip",
+        "vertical_flip",
+    ),
+    transform_prob: float = 0.2,
+    random_apply: int | tuple[int, int] = 1,
+    prefetch_factor: int | None = 6,
+    pin_memory: bool = False,
+    remove_meta_data: bool = False,
+    persistent_workers: bool = False,
+    wids_local_name_prefix: str | None = None,
+    **__discard_kwargs,  # discard other kwargs
+):
+    dataset = wids.ShardListDataset(
+        index_file,
+        localname=lambda x: f"{wids_local_name_prefix}/{x}"
+        if wids_local_name_prefix is not None
+        else x,
+        transformations=partial(
+            wids_image_decode, norm=to_neg_1_1, permute=permute, resize=None
+        ),  # type: ignore
+    )
+
+    # image size filtering
+    img_index = None
+    if constraint_size is not None and img_size_filter_file is not None:
+        img_index = img_size_filter(
+            img_size_filter_file,
+            min_size=constraint_size
+            if isinstance(constraint_size, int)
+            else constraint_size[0],
+            max_size=None if isinstance(constraint_size, int) else constraint_size[1],  # type: ignore
+        )
+
+    # dataloader
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        if img_index is None:
+            sampler = wids.DistributedChunkedSampler(
+                dataset,
+                shuffle=shuffle_size > 0,
+                num_replicas=torch.distributed.get_world_size(),
+                rank=torch.distributed.get_rank(),
+                seed=loader_seed,
+            )
+        else:
+            sampler = IndexFilteredDistributedSampler(
+                dataset,
+                valid_indices=img_index,
+                shuffle=shuffle_size > 0,
+                num_replicas=torch.distributed.get_world_size(),
+                rank=torch.distributed.get_rank(),
+                seed=loader_seed,
+            )
+    elif shuffle_size > 0:
+        if img_index is None:
+            sampler = wids.ChunkedSampler(
+                dataset,
+                chunksize=shuffle_size,
+                shuffle=True,
+                seed=loader_seed,
+            )
+        else:
+            sampler = IndexFilteredSampler(
+                dataset,
+                valid_indices=img_index,
+                chunksize=shuffle_size,
+                shuffle=True,
+                seed=loader_seed,
+            )
+    else:
+        sampler = None
+
+    dataloader = wds.WebLoader(
+        dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        drop_last=False,
+        sampler=sampler,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        generator=loader_generator,
+    )
+
+    # resize
+    if resize_before_transform is not None:
+        if isinstance(resize_before_transform, int):
+            resize_before_transform = to_n_tuple(  # type: ignore
+                resize_before_transform, 2
+            )
+        resizer = Resize(resize_before_transform, side="short", keepdim=True)
+        dataloader = dataloader.map_dict(
+            img=resizer  # [c, h, w]
+        )
+    else:
+        log_print(
+            "[Wids dataset]: no resize function, the images are used as the original size "
+            "that may cause batching dimension mismatch",
+            "warning",
+        )
+
+    # batched
+    dataloader = dataloader.batched(batch_size)
+
+    # remove meta
+    if remove_meta_data:
+        dataloader = dataloader.map(remove_meta_data_fn)
+
+    # augmentations
+    use_transf = (
+        hyper_transforms_lst is not None
+        and len(hyper_transforms_lst) > 0
+        and transform_prob > 0
+    )
+    if use_transf:
+        transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)  # type: ignore
+        log_print(
+            f"[Wids dataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
+        )
+        dataloader = dataloader.map_dict(img=transform)
+
+    return dataset, dataloader
+
+
 def chained_dataloaders(
     dataloaders,
     infinit=True,
     shuffle_loaders=True,
-    curriculum_fn: Callable | None = None,
+    curriculum_fn: Callable[[int], list[float]] | None = None,
 ):
     """
     Chains multiple dataloaders into a single generator that yields samples from
@@ -687,7 +932,7 @@ def chained_dataloaders(
     if curriculum_fn is not None:
         shuffle_loaders = False  # curriculum learning requires fixed order
         assert infinit, "using curriculum learning requires infinit=True"
-        assert StepsCounter._initialized, "StepsCounter has not initialized"
+        # assert StepsCounter._initialized, "StepsCounter has not initialized"
 
     def _chain_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
         n = len(dataloaders)
@@ -728,10 +973,9 @@ def chained_dataloaders(
                 if curriculum_fn:
                     train_step: int = StepsCounter()["train"]  # sigleton class instance
                     # log step sometimes
-                    if train_step % 1000 == 0:
-                        log_print(
-                            f"[Curriculum]: train step {train_step}", "debug"
-                        )  # debug log
+                    _log_cur = train_step % 200 == 0
+                    if _log_cur:
+                        log_print(f"[Curriculum]: train step {train_step}", "debug")
 
                     # Get probability distribution for current step
                     raw_probs = curriculum_fn(train_step)
@@ -748,12 +992,25 @@ def chained_dataloaders(
                     # Normalize probabilities for active loaders
                     total_prob = sum(valid_probs)
                     if total_prob > 0:
-                        normalized_probs = [p / total_prob for p in valid_probs]
+                        # softmax the valid probabilities
+                        normalized_probs = scipy.special.softmax(
+                            valid_probs, axis=0
+                        ).tolist()
+                        # normalized_probs = [p / total_prob for p in valid_probs]
                         # Select loader based on curriculum probabilities
                         idx = random.choices(
                             valid_indices, weights=normalized_probs, k=1
                         )[0]
+                        if _log_cur:
+                            log_print(
+                                f"[Curriculum]: selected loader {idx} with prob: {normalized_probs}",
+                                only_rank_zero=False,
+                            )
                     else:
+                        log_print(
+                            "All curriculum probabilities are less than 0", "warning"
+                        )
+
                         # Fallback to uniform selection if all probs zero
                         idx = random.choice(valid_indices)
 
@@ -762,9 +1019,10 @@ def chained_dataloaders(
                     if shuffle_loaders:
                         random.shuffle(active_indices)
                     idx = active_indices[0]  # Select first active index
+                    # round-robin strategy
+                    active_indices.pop(0)
+                    active_indices.append(idx)
 
-                # Remove the selected index from active_indices for this attempt
-                active_indices.remove(idx)
                 attempt += 1
 
                 try:
@@ -776,6 +1034,12 @@ def chained_dataloaders(
                         iters[idx] = iter(dataloaders[idx])  # Reset iterator
                     else:
                         is_exhausted[idx] = True
+
+                    # Remove the index from active_indices only if it failed
+                    if (
+                        idx in active_indices
+                    ):  # Check if it's still there (it should be)
+                        active_indices.remove(idx)
 
                     # Refresh active indices if needed
                     if not active_indices:
@@ -813,7 +1077,7 @@ def chained_dataloaders(
 @function_config_to_basic_types
 def get_hyperspectral_img_loaders_with_different_backends(
     paths: WebdatasetPath,
-    loader_type: Literal["webdataset", "folder"] = "webdataset",
+    loader_type: SupportedLoaderType = "webdataset",
     # curriculums
     curriculum_type: str | None = None,
     curriculum_kwargs: dict | None = None,
@@ -864,6 +1128,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
         AssertionError: If configuration parameters don't match expected formats
     """
 
+    # fluid webdataset/datapipline
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
 
@@ -997,6 +1262,10 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     c_type=curriculum_type,
                     **curriculum_kwargs,
                 )
+                log_print(
+                    f"use {curriculum_type} curriculum learning with kwargs: {curriculum_kwargs}",
+                    "debug",
+                )
             else:
                 curriculum_fn = None
 
@@ -1036,6 +1305,233 @@ def get_hyperspectral_img_loaders_with_different_backends(
         raise ValueError(f"Unsupported loader type: {loader_type}")
 
 
+@function_config_to_basic_types
+def get_hyperspectral_img_loaders_with_different_backends_v2(
+    paths: WebdatasetPath,
+    loader_type: SupportedLoaderType | None = None,
+    # curriculums
+    curriculum_type: str | None = None,
+    curriculum_kwargs: dict | None = None,
+    # * there are three choices to provide the loaders' configuration:
+    # 1. provide a basic config and change some of cfg by different loaders
+    basic_kwargs: dict | None = None,
+    changed_kwargs_by_loader: list[dict] | None = None,
+    # 2. every loader has its own kwargs
+    rep_loader_kwargs: list[dict] | None = None,
+    chain_loader_infinit: bool = True,
+    shuffle_loaders: bool = True,
+    # 3. simple for all loaders
+    **loader_kwargs,
+):
+    """
+    Get hyperspectral image dataloaders with flexible configuration options.
+
+    This function supports loading hyperspectral image data using different backends
+    (WebDataset for tar files or folder-based loaders) with configurable options
+    for each data source.
+
+    Args:
+        paths (WebdatasetPath): Path(s) to data sources. Can be:
+            - A single string path to a tar file or directory
+            - A list of string paths for multiple tar files
+            - A list of lists of strings for grouped data sources
+        loader_type (str, optional): The data loading backend to use:
+            - "webdataset": For WebDataset tar files (default)
+            - "folder": For directory of safetensors image files
+        basic_kwargs (dict, optional): Base configuration applied to all loaders.
+        changed_kwargs_by_loader (list[dict], optional): List of dicts with parameters
+            to override in basic_kwargs for each data source group.
+        rep_loader_kwargs (list[dict], optional): Complete configuration for each data
+            source group. If provided, each dict configures a separate loader.
+        chain_loader_infinit (bool, optional): If True, the chained loader will repeat
+            infinitely. If False, it will stop after one complete cycle. Defaults to True.
+        **loader_kwargs: Default configuration parameters applied to all loaders if neither
+            basic_kwargs/changed_kwargs_by_loader nor rep_loader_kwargs are provided.
+
+    Returns:
+        tuple:
+            - For "webdataset" with multiple groups: (list of datasets, chained dataloader)
+            - For "webdataset" with single group: (dataset, dataloader)
+            - For "folder": (dataset, dataloader) for directory images
+
+    Raises:
+        ValueError: If an unsupported loader_type is provided or input paths are invalid
+        AssertionError: If configuration parameters don't match expected formats
+    """
+    loader_types: list[SupportedLoaderType] = []
+    if loader_type is not None:
+        log_print(
+            f"loader_type is provided: {loader_type}, "
+            f"input all paths should be {loader_type} loader",
+            "debug",
+        )
+
+    # clear the kwargs
+    # 1. paths is a list of list of string
+    if isinstance(paths, list) and isinstance(paths[0], Sequence):
+        log_print(
+            "input paths contains list of lists, we will chain the dataloader with each loader"
+        )
+        if rep_loader_kwargs is not None:  # every loader kwargs
+            log_print(f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug")
+            assert isinstance(rep_loader_kwargs, list), (
+                f"rep_loader_kwargs should be a list, but got {type(rep_loader_kwargs)}"
+            )
+            assert len(rep_loader_kwargs) == len(paths), (
+                f"rep_loader_kwargs should be the same length as paths, "
+                f"but got {len(rep_loader_kwargs)} and {len(paths)}"
+            )
+        elif basic_kwargs is not None:
+            log_print("basic_kwargs is provided", "debug")
+            if changed_kwargs_by_loader is None:
+                changed_kwargs_by_loader = [{}] * len(paths)
+
+            # assertions
+            assert isinstance(basic_kwargs, dict), (
+                f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
+            )
+            assert isinstance(changed_kwargs_by_loader, list), (
+                f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
+            )
+            assert len(changed_kwargs_by_loader) == len(paths), (
+                f"changed_kwargs_by_loader should be the same length as paths, "
+                f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
+            )
+
+            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
+                basic_kwargs, changed_kwargs_by_loader
+            )
+        else:
+            log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
+            rep_loader_kwargs = [loader_kwargs] * len(paths)
+
+        for i in range(len(rep_loader_kwargs)):
+            kwg_ldt = rep_loader_kwargs[i].pop("loader_type", "webdataset")
+            loader_types.append(kwg_ldt if loader_type is None else loader_type)
+    # 2. paths is a list of strings
+    elif isinstance(paths, (list, tuple)) and any(isinstance(p, str) for p in paths):
+        raise NotImplementedError(
+            "paths is a list of strings, please use a list of lists of strings instead. For example: "
+            "paths=[data1/{0000..0002}.tar, [data2/{0000..0002}.tar, data2/0003.tar]] should be "
+            "paths=[[data1/{0000..0002}.tar], [data2/{0000..0002}.tar, data2/0003.tar]]"
+        )
+    # 3. paths is a string
+    else:
+        log_print("input paths is a string, use the loader_kwargs", "debug")
+        if len(loader_kwargs) != 0:
+            assert basic_kwargs is None and changed_kwargs_by_loader is None, (
+                "loader_kwargs should be used only when basic_kwargs and changed_kwargs_by_loader are None"
+            )
+            rep_loader_kwargs = [loader_kwargs]
+        elif basic_kwargs is not None:
+            assert len(loader_kwargs) == 0 and changed_kwargs_by_loader is None, (
+                "basic_kwargs should be used only when loader_kwargs is empty and changed_kwargs_by_loader is None"
+            )
+            rep_loader_kwargs = [basic_kwargs]
+        else:
+            raise ValueError(
+                "when paths is a string, loader_kwargs should not be provided or "
+                "should be empty when basic_kwargs is provided, changed_kwargs_by_loader should always be None"
+            )
+        kwg_ldt = rep_loader_kwargs[0].pop("loader_type", "webdataset")
+        loader_types.append(kwg_ldt if loader_type is None else loader_type)
+
+    # * --- build datasets and dataloaders --- #
+    datasets = []
+    dataloaders = []
+
+    # for-loop over the paths and rep_loader_kwargs
+    for i, (p_lst, loader_kwargs, loader_type) in enumerate(
+        zip(paths, rep_loader_kwargs, loader_types)
+    ):
+        p_lst: list[str] | str
+        # webdataset or wids loader
+        if loader_type in ("webdataset", "wids"):
+            # assertions
+            assert isinstance(p_lst, (list, tuple)), (
+                f"paths should be a list of lists, but got {type(p_lst)}"
+            )
+            assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
+            if len(p_lst) == 1:
+                p_lst = p_lst[0]
+                assert isinstance(p_lst, str), (
+                    f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
+                )
+            else:
+                for p in p_lst:
+                    assert isinstance(p, str), (
+                        f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
+                    )
+
+            # resample must be false
+            if not shuffle_loaders:
+                loader_kwargs["resample"] = False
+            loader_kwargs["epoch_len"] = -1
+
+            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
+                p_lst, loader_kwargs
+            )
+            log_print(
+                f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n"
+                + "-" * 30
+            )
+
+            if loader_type == "webdataset":
+                log_print("Using webdataset loader")
+                dataset, dataloader = get_hyperspectral_dataloaders(
+                    p_lst, **loader_kwargs
+                )
+            elif loader_type == "wids":
+                log_print("Using wids loader")
+                assert isinstance(p_lst, list) and len(p_lst) == 1, (
+                    "must contain only one json file"
+                )
+                p_lst = p_lst[0]
+                assert isinstance(p_lst, str) and p_lst.endswith(".json"), (
+                    f"wids loader expects a single json file as index_file, but got {p_lst}"
+                )
+                dataset, dataloader = get_hyperspectral_wids_dataloaders(
+                    index_file=p_lst,
+                    **loader_kwargs,
+                )
+            datasets.append(dataset)
+            dataloaders.append(dataloader)
+        # folder loader
+        elif loader_type == "folder":
+            log_print("Using folder loader")
+            assert isinstance(paths, str), f"paths should be a string, but got paths"
+            return only_hyperspectral_img_folder_dataloader(paths, **loader_kwargs)
+        else:
+            raise ValueError(f"Unsupported loader type: {loader_type}")
+
+    # prepare for curriculum
+    if curriculum_type is not None:
+        assert curriculum_kwargs is not None, (
+            f"curriculum_kwargs must be provided if {curriculum_type=}."
+        )
+        curriculum_fn = get_curriculum_fn(  # type: ignore
+            c_type=curriculum_type,
+            **curriculum_kwargs,
+        )
+    else:
+        curriculum_fn = None
+
+    # make the chainable dataloader
+    if not chain_loader_infinit:
+        log_print(
+            "chain loader generator is finite, the loader can not be iter and next. "
+            "Please set <cyan>chain_loader_infinit=True</> if you are know what you are doing.",
+            "warning",
+        )
+
+    # prepare chained unified dataloader
+    dataloader = chained_dataloaders(
+        dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
+    )
+
+    return datasets, dataloader
+
+
 def generate_wds_config_modify_only_some_kwgs(
     basic_cfg: dict, changed_kwargs: list[dict[str, Any]]
 ) -> list[dict]:
@@ -1065,10 +1561,81 @@ def generate_wds_config_modify_only_some_kwgs(
     return cfgs
 
 
+def get_wids_index_json_info(path: str):
+    assert path.endswith(".json"), (
+        f"wids json file should end with .json, but got {path}"
+    )
+    assert os.path.exists(path), (
+        f"wids json file {path} does not exist, please check the path"
+    )
+
+    with open(path, "r") as f:
+        index_d = json.load(f)
+    assert "shardlist" in index_d, (
+        f"wids json file {path} should contain 'shardlist' key, but got {index_d.keys()}"
+    )
+
+    index_info = index_d["shardlist"]
+    n = len(index_info)
+
+    return index_info, n
+
+
+def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs: dict):
+    # Ensure that the number of workers is not greater than the number of shards
+    if isinstance(paths, str):
+        if paths.endswith(".json"):  # is indexed wids json file
+            _, _len = get_wids_index_json_info(paths)
+            paths = [paths]
+        else:
+            paths = list(braceexpand.braceexpand(paths))
+            _len = len(paths)
+    elif isinstance(paths, (list, tuple)):
+        path_exp = []
+        for p in paths:
+            assert isinstance(p, str), (
+                "'paths' should be a list of strings or a string that can be expanded"
+                f"list of {type(p)} is not allowed."
+            )
+            assert not p.endswith(".json"), (
+                "list of paths contains multiple wids json files or "
+                "combination of tar file path and wids json file path, "
+                "please use a list of lists of strings instead. "
+                "If you want to use wids json dataset, "
+                "please use a single json file as index_file."
+            )
+            lst_p = list(braceexpand.braceexpand(p))
+            path_exp.extend(lst_p)
+        _len = len(path_exp)
+        paths = path_exp
+    else:
+        raise ValueError(
+            f"paths should be a string or a list of strings, but got {type(paths)}"
+        )
+
+    assert _len > 0, f"paths should not be empty, but got {paths}"
+
+    for p in paths:
+        # assert tar file exists
+        assert os.path.exists(p), f"tar file or wids json file {p} does not exist"
+
+    # n_worker should less than the number of shards
+    n_workers = loader_kwargs.get("num_workers", 0)
+    if _len < n_workers and n_workers > 0:
+        # set n_workers to the number of shards
+        loader_kwargs["num_workers"] = _len
+        log_print(
+            f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
+            level="debug",
+        )
+
+    return paths, loader_kwargs
+
+
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
-        # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
         # ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
         # ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
         # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
@@ -1085,13 +1652,27 @@ if __name__ == "__main__":
         # ["data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar"],
         # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
-        ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
+        # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
+        [
+            "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
+            "/HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0027}.tar",
+            "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
+            "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0027}.tar",
+        ],
+        # ["/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/shardindex.json"]
+        # [
+        #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
+        #     # "/HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0007}.tar",
+        #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
+        #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar",
+        # ],
     ]
-    test_batch_size = 16
+    test_batch_size = 8
     test_num_workers = 3
     test_shuffle_size = -1
 
     loader_kwargs = dict(
+        loader_type="wids",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1099,42 +1680,66 @@ if __name__ == "__main__":
         transform_prob=0.0,
         random_apply=(1, 2),
         pin_memory=False,
-        prefetch_factor=1,
-        shuffle_within_workers=False,
+        prefetch_factor=2,
         remove_meta_data=False,
+        resize_before_transform=512,
+        shuffle_within_workers=False,
         resample=True,
         check_channels=False,
     )
     changed_kwargs = [
+        {},
+        # {},
+        # {},
         # {},
         # {"permute": False},
         # {},
-        {"check_nan": True},
+        # {"check_nan": True},
+        # {
+        #     "img_key": "img_content",
+        #     "constraint_size": 128 * 128,
+        #     "resize_before_transform": 512,
+        # },
+        {
+            "img_key": "img_content",
+            "constraint_size": 256 * 256,
+            "resize_before_transform": 512,
+        },
+        # {}
     ]
     curriculum_kwargs = {
-        "start_prob": [0.3, 0.8, 0.8, 0.6, 0.6, 0.2, 0.8, 0.6, 0.6, 0.6],
-        "end_prob": [0.8, 0.2, 0.2, 0.4, 0.4, 0.8, 0.2, 0.4, 0.4, 0.4],
+        "start_prob": [0.3, 2.0],
+        "end_prob": [0.5, 0.5],
         "total_steps": 600,
     }
     # channels = [12, 8, 13, 50, 4, 8, 224]
     accelerator = accelerate.Accelerator()
 
     step_counter = StepsCounter(["train"])
-    _, test_loader = get_hyperspectral_img_loaders_with_different_backends(
+    _, test_loader = get_hyperspectral_img_loaders_with_different_backends_v2(
         test_wds_path,
         loader_type="webdataset",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=True,
-        # curriculum_type="linear",
-        # curriculum_kwargs=curriculum_kwargs,
+        curriculum_type="linear",
+        curriculum_kwargs=curriculum_kwargs,
     )
 
     from tqdm import tqdm
 
     indices = set()
-    for sample in (tbar := tqdm(test_loader)):
+
+    sizes = {}
+    for i, sample in enumerate(tbar := tqdm(test_loader)):
         img = sample["img"]
+
+        s = np.prod(img.shape[-2:])
+        # update sizes of the count
+        if s not in sizes:
+            sizes[s] = img.shape[0]
+        else:
+            sizes[s] += img.shape[0]
 
         # index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
         # index = set(index)
@@ -1151,16 +1756,60 @@ if __name__ == "__main__":
             )
         )
 
-        assert img.shape[-2] == img.shape[-1]
-        assert torch.isnan(img).sum() == 0, "Image contains NaN values"
-        # assert img.shape[1] < img.shape[-1]
-        step_counter.update("train")
-        # if img.shape[1] == 3:
-        #     print(sample["__url__"])
+        # if i == 2000:
         #     break
-        # if img.shape[1] not in channels:
-        #     print(sample["__url__"])
-        #     raise ValueError(f"Unknown image channel: {img.shape[1]}")
+
+        step_counter.update("train")
+
+    # * plot the image size bar image
+    # import matplotlib.pyplot as plt
+
+    # # group the sizes into n groups
+    # ngroups = 50
+    # uniq_sizes = sorted(sizes.keys())
+    # # group the sizes into n groups
+    # grouped_sizes = {k: 0 for k in uniq_sizes[:: len(uniq_sizes) // ngroups]}
+    # for size, count in sizes.items():
+    #     # find the closest key in grouped_sizes
+    #     closest_key = min(grouped_sizes.keys(), key=lambda x: abs(x - size))
+    #     grouped_sizes[closest_key] += count
+    # sizes = grouped_sizes
+    # # plot the sizes
+    # plt.figure(figsize=(10, 6))
+
+    # plt.bar(
+    #     [np.sqrt(k) for k in sizes.keys()],
+    #     list(sizes.values()),
+    #     width=20,
+    #     align="center",
+    #     # color="blue",
+    #     # alpha=0.7,
+    # )
+    # plt.xlabel("Image Size (sqrt of pixels)")
+    # plt.ylabel("Number of Samples")
+    # plt.title("Distribution of Image Sizes in Hyperspectral Dataset")
+    # plt.xticks(rotation=45)
+    # plt.grid(axis="y")
+    # plt.tight_layout()
+    # plt.savefig("hyperspectral_image_sizes.png", dpi=300)
+
+    # if i % 200 == 0:
+    #     # the top-10 sizes
+    #     sz_lst = sorted(sizes.items(), key=lambda x: x[1], reverse=True)[:10]
+    #     sz_lst = [f"{np.round(np.sqrt(k), 1).item()}: {v}" for k, v in sz_lst]
+    #     print(f"top-10 sizes: {sz_lst}, total samples: {sum(sizes.values())}")
+
+    # assert img.shape[-2] == img.shape[-1]
+    # assert torch.isnan(img).sum() == 0, "Image contains NaN values"
+    # assert img.shape[1] < img.shape[-1]
+
+    # step_counter.update("train")
+    # if img.shape[1] == 3:
+    #     print(sample["__url__"])
+    #     break
+    # if img.shape[1] not in channels:
+    #     print(sample["__url__"])
+    #     raise ValueError(f"Unknown image channel: {img.shape[1]}")
 
     #     if img.shape[-1] == 256:
     #         total_samples_256 += img.shape[0]

@@ -1,6 +1,7 @@
 import ast
 
 import hydra
+import scipy.special
 from omegaconf import OmegaConf
 
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
@@ -12,7 +13,7 @@ OmegaConf.register_new_resolver("tuple", lambda x: tuple(x))
 
 @hydra.main(
     config_path="../configs/tokenizer_gan",
-    config_name="unicosmos_tokenizer_f16c16p1",
+    config_name="unicosmos_tokenizer_f8c16p4",
     version_base=None,
 )
 def main(args):
@@ -34,7 +35,8 @@ def main(args):
     # model_cls = hydra.utils.get_class(model_cls_path)
     # print(model_cls)
 
-    print(args.train.disc_optimizer.betas)
+    start_probs = args.dataset.train_loader.curriculum_kwargs.start_prob
+    print(scipy.special.softmax(start_probs))
 
 
 main()

@@ -6,9 +6,7 @@ import sys
 from urllib.parse import urlparse, urlunparse
 
 import braceexpand
-
-from wids import wids
-from wids import wids_dl
+from wids import wids, wids_dl
 from wids.wids_specs import load_remote_dsdesc_raw
 
 # default_cmds = wids_dl.default_cmds
@@ -122,6 +120,7 @@ def main_create(args):
     fnames = []
     for f in args.files:
         fnames.extend(braceexpand.braceexpand(f))
+    print(f"extended file names: {fnames}")
 
     # create the shard index
     files = []
@@ -136,7 +135,9 @@ def main_create(args):
             print("keep the local file unchanged")
             assert os.path.exists(fname), f"file {fname} does not exist"
 
-        md5sum = wids.compute_file_md5sum(downloaded)
+        md5sum = (
+            wids.compute_file_md5sum(downloaded) if not args.force_not_md5sum else ""
+        )
         nsamples = wids.compute_num_samples(downloaded)
         filesize = os.stat(downloaded).st_size
         files.append(
@@ -307,6 +308,13 @@ def main():
         "--force_not_download",
         "-fnd",
         help="force not download",
+        action="store_true",
+        default=False,
+    )
+    create_parser.add_argument(
+        "--force_not_md5sum",
+        "-fnm",
+        help="force not compute md5sum",
         action="store_true",
         default=False,
     )

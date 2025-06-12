@@ -1,17 +1,17 @@
 import re
 from itertools import chain
-from typing import Dict
+from typing import Iterable, TypeAlias
 
 import braceexpand
 import numpy as np
+import pandas as pd
 import torch
 import webdataset as wds
-from zarr import ones_like
 
 from ..utilities.logging.print import log_print
 
-type LoadedData = torch.Tensor | np.ndarray | str
-type SampleType = dict[str, dict[str, LoadedData] | LoadedData]
+LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
+SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
 
 
 def extract_modality_names(s):
@@ -121,9 +121,12 @@ def norm_img(
             elif img.ndim == 4:
                 img = img.permute(0, -1, 1, 2)
             else:
-                raise ValueError(
-                    f"Unsupported number of dimensions for {key}: {img.ndim}. Expected 3 or 4."
+                log_print(
+                    f"found img dim with {img.ndim} dimensions, expected 3 or 4",
+                    level="warning",
+                    warn_once=True,
                 )
+                return None  # None for webdataset means drop this sample
 
         sample[key] = img
 
@@ -131,7 +134,9 @@ def norm_img(
 
 
 def merge_modalities(
-    source, modality_name_map: dict | None = None, handler=wds.warn_and_stop
+    source: Iterable[dict],
+    modality_name_map: dict | None = None,
+    handler=wds.warn_and_stop,
 ):
     for src in source:
         multi_tar_urls = src["url"].translate(str.maketrans("[]", "{}"))
@@ -225,6 +230,26 @@ def merge_modalities(
                 continue
             else:
                 break
+
+
+# * --- filters --- #
+
+
+def img_size_filter(
+    parquet_file: str,
+    min_size: int = 256,
+    max_size: int | None = None,
+) -> set[int]:
+    """Filter function to check if the image size is within the specified range."""
+    shapes = pd.read_parquet(parquet_file)
+    shapes = shapes[shapes["height"] >= min_size and shapes["width"] >= min_size]
+    if max_size is not None:
+        shapes = shapes[(shapes["height"] <= max_size) & (shapes["width"] <= max_size)]
+    indexes = shapes["index"].tolist()
+    log_print(
+        "[img_size_filter] Found {len(indexes)} samples that fit the size constraint."
+    )
+    return set(indexes)
 
 
 def flatten_sub_dict(regardless_of_any_collisions=True):

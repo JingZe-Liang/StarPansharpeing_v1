@@ -909,7 +909,7 @@ if __name__ == "__main__":
         "formulation": "AE",
         "encoder": "Default",
         "decoder": "Default",
-        "act_checkpoint": False,
+        "act_checkpoint": True,
         "uni_tokenizer_path": "runs/stage1_cosmos/2025-06-03_17-30-14_cosmos_f8c16p4_unified_hyperspectral_repa_no_pix_shuffle/ema/tokenizer/model.safetensors",
         "hook_for_repa": False,
         "block_name": "res_block",  # res_block, res_moe
@@ -956,12 +956,12 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="MMSeg")
+    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="RS5M")
     dl_iter = iter(dl)
     tokenizer = tokenizer.eval().to(torch.bfloat16)
 
-    # x = torch.randn(8, 12, 256, 256, dtype=torch.bfloat16).cuda()
-    # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
+    x = torch.randn(1, 3, 1024, 1024, dtype=torch.bfloat16).cuda()
+    opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
     # from src.utilities.optim import get_muon_optimizer
 
@@ -976,21 +976,27 @@ if __name__ == "__main__":
     from src.utilities.logging.print import catch_any
 
     metric = MeanMetric().cuda()
-    with torch.autocast("cuda", torch.bfloat16) and catch_any() and torch.no_grad():
+    with torch.autocast("cuda", torch.bfloat16) and catch_any():  # and torch.no_grad():
         for i in range(20):
-            x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
+            # x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
             y = tokenizer(x)
             # yy = ((y[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
             # xx = ((x[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
 
             # psnr
-            psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-            psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-            print(f"PSNR: {psnr_val}")
-            print(y.shape)
-
+            # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+            # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+            # print(f"PSNR: {psnr_val}")
             # print(y.shape)
-            # y.mean().backward()
+
+            print(y.shape)
+            opt.zero_grad()
+            y.mean().backward()
+            opt.step()
+
+            import time
+
+            time.sleep(2)
 
             # grads
             # for n, p in tokenizer.named_parameters():
@@ -1003,10 +1009,6 @@ if __name__ == "__main__":
             # metric.update(psnr_val)
 
         # print(metric.compute())
-
-        # import time
-
-        # time.sleep(20)
 
         # feat = tokenizer.get_repa_feature()
         # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()

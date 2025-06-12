@@ -1,16 +1,18 @@
 import io
+import warnings
 from typing import Any, Dict
 
 import numpy as np
 import scipy.io
 import tifffile
 import torch
-from safetensors.torch import (
-    load as load_safetensors,
-)
-from safetensors.torch import (
-    save as save_safetensors,
-)  # Ensure safetensors is installed
+from PIL import Image
+from safetensors.torch import load as load_safetensors
+from safetensors.torch import save as save_safetensors
+
+from src.utilities.logging import log_print
+
+from .utils import to_n_tuple
 
 # --- Encoding Functions ---
 
@@ -83,6 +85,43 @@ def safetensors_codec_io(data_dict: Dict[str, torch.Tensor]) -> bytes:
 
 
 # --- Decoding Functions ---
+
+# Image.MAX_IMAGE_PIXELS = None  # Disable the decompression bomb protection in PIL
+
+
+def img_decode_io(img_bytes: bytes):
+    with warnings.catch_warnings(record=True) as w:
+        try:
+            # import ipdb; ipdb.set_trace()  # noqa: T201
+            img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+
+            for warning in w:
+                _w = Image.DecompressionBombWarning
+                if issubclass(warning.category, _w):
+                    # Handle decompression bomb warnings specifically
+                    warnings.warn(
+                        f"Image decompression bomb warning: {warning.message}, image size: {img.shape}",
+                        category=UserWarning,
+                    )
+                    break
+                else:
+                    # Handle other image decoding warnings
+                    warnings.warn(
+                        f"Image decoding warning: {warning.message}",
+                        category=UserWarning,
+                    )
+            return img
+        except Image.DecompressionBombError as e:
+            log_print(f"Too large image: {e}", "warning", warn_once=True)
+            return None
+        except Exception as e:
+            log_print(f"Error decoding image: {e}", "error")
+            return None
+
+
+def string_decode_io(string_bytes: bytes) -> str:
+    """Decodes bytes into a string."""
+    return string_bytes.decode("utf-8")  # Assuming UTF-8 encoding for the string
 
 
 def tiff_decode_io(
@@ -195,3 +234,70 @@ def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
             img,
         )
         return buffer.getvalue()
+
+
+# * --- wids codecs --- #
+
+
+def wids_image_decode(
+    sample: dict[str, Any],
+    read_caption=False,
+    read_name=False,
+    norm=True,
+    permute=True,
+    resize: int | tuple[int, int] | None = None,
+):
+    if ".img.tiff" in sample or ".img.tif" in sample:
+        try:
+            sample["img"] = tiff_decode_io(sample[".img.tiff"].getvalue())
+            del sample[".img.tiff"]  # Remove the original BytesIO object
+        except KeyError:
+            sample["img"] = tiff_decode_io(sample[".img.tif"].getvalue())
+            del sample[".img.tif"]  # Remove the original BytesIO object
+        finally:
+            log_print(f"Decode image error")
+    if ".img_content" in sample:
+        sample["img"] = img_decode_io(sample[".img_content"].getvalue())
+        del sample[".img_content"]
+    if ".caption" in sample:
+        if read_caption:
+            sample["caption"] = string_decode_io(sample[".caption"].getvalue())
+        del sample[".caption"]
+    if ".img_name" in sample:
+        if read_name:
+            sample["img_name"] = string_decode_io(sample[".img_name"].getvalue())
+        del sample[".img_name"]
+
+    assert "img" in sample, "Image key 'img' not found in sample."
+    if sample["img"] is None:
+        raise ValueError("Decoded image is None, possibly due to decoding error.")
+
+    img = sample["img"].astype(np.float32) / 255.0
+    if norm:
+        sample["img"] = img * 2 - 1  # to [-1, 1]
+    if permute:
+        # Permute the image dimensions from HWC to CHW
+        sample["img"] = np.transpose(sample["img"], (2, 0, 1))
+    if resize is not None:
+        if permute:
+            img = torch.as_tensor(sample["img"])[None].float()
+        else:
+            img = torch.as_tensor(np.transpose(sample["img"], (1, 2, 0)))[None].float()
+
+        if isinstance(resize, int):
+            sz = to_n_tuple(resize, 2)
+        img = torch.nn.functional.interpolate(
+            img, size=sz, mode="bilinear", align_corners=False
+        )[0]
+        if not permute:
+            img = img.permute(1, 2, 0)
+
+    # remove None key/values
+    _key_to_del = []
+    for k, v in sample.items():
+        if v is None:
+            _key_to_del.append(k)
+    for k in _key_to_del:
+        del sample[k]
+
+    return sample

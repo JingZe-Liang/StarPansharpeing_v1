@@ -54,13 +54,21 @@ def is_rank_zero() -> bool:
         return True
 
 
+def get_dist_rank() -> tuple[bool, int]:
+    return (
+        dist.is_initialized(),
+        dist.get_rank() if dist.is_initialized() else 0,
+    )
+
+
 @beartype
 def log_print(
     msg: str,
     level: LogLevel = "info",
     only_rank_zero: bool = True,
-    warn_once: bool = False,
+    warn_once: bool = False,  # deprecated
     warn_once_pattern: str | None = None,
+    once: bool = False,
     stack_level: int = 1,
     **kwargs,
 ) -> None:
@@ -82,8 +90,10 @@ def log_print(
     if only_rank_zero and not is_rank_zero():
         return
 
-    if warn_once or warn_once_pattern is not None:
-        level = "warning"
+    log_once = once or warn_once
+
+    if log_once or warn_once_pattern is not None:
+        level = "warning" if warn_once else level
 
         if warn_once_pattern is not None:
             if any(

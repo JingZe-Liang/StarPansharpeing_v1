@@ -26,6 +26,10 @@ train_paths:
     - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
   - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
+  - - /HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar
+    - /HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar
+    - /HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0031}.tar
+    - /HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar
 
 val_paths:
   - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0101.tar
@@ -39,14 +43,17 @@ val_paths:
   - - data_local/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
   - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
+  - - /HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0030..0031}.tar
+    - /HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-0030.tar
+
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 20  # BigEarthNet_S2
+  - batch_size: 18  # BigEarthNet_S2
     permute: false
   - batch_size: 12  # TUM_128
-  - batch_size: 5  # MDAS-HySpex
-  - batch_size: 5  # MDAS-EeteS
+  - batch_size: 5   # MDAS-HySpex
+  - batch_size: 5   # MDAS-EeteS
   - batch_size: 18  # MMSeg_YREB
   - batch_size: 18  # DFC_2020
   - batch_size: 18  # WorldView3
@@ -56,10 +63,19 @@ train_changed_kwargs_by_loader:
   - batch_size: 18  # IKONOS
   - batch_size: 5   # OHS
   - batch_size: 5   # Houston
-  - batch_size: 6   # DCF_2019
+  - batch_size: 5   # DCF_2019
   - batch_size: 5   # GID-GF2
   - batch_size: 5   # MDAS-Optical
   - batch_size: 4   # DryadHyper
+  - batch_size: 5   # RS5M-512 pixel
+    img_key: img_content
+    constraint_size: 65536
+    resize_before_transform: 512
+    num_workers: 0
+  # - batch_size: 1   # RS5M-1024 pixel
+  #   img_key: img_content
+  #   constraint_size: 1048576
+  #   resize_before_transform: 1024
 
   ## not use act_ckpt
   # - batch_size: 9
@@ -105,18 +121,46 @@ val_changed_kwargs_by_loader:
   - batch_size: 6
   - batch_size: 6
   - batch_size: 6
+  - batch_size: 6
+    img_key: img_content
+    constraint_size: 65536
+    resize_before_transform: 512
+    num_workers: 0
 
 train_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
   loader_type: webdataset
   paths: ${dataset.train_paths}
   basic_kwargs:
-    shuffle_size: 40
-    num_workers: 2
+    shuffle_size: -1
+    num_workers: 1
     resample: true
-    prefetch_factor: 3
+    prefetch_factor: 1
     shuffle_within_workers: false
   changed_kwargs_by_loader: ${dataset.train_changed_kwargs_by_loader}
+  curriculum_type: linear
+  curriculum_kwargs:
+    total_steps: 500_000 #${training.max_steps}
+    start_prob:
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.2
+      - 0.1
+      - 0.2
+      - 0.2
+      - 0.2
+      - 0.2
+      - 0.2
+      - 0.2
+      - 0.1
+      - 0.1
+      - 0.1
+      - 0.3
+      - 0.3
+      - 4.0  # relative large value (logits) to sample this dataset
+    end_prob: ${eval:"[0.5]*18"}
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
