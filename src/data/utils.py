@@ -1,12 +1,16 @@
+import random
 import re
 from itertools import chain
-from typing import Iterable, TypeAlias
+from typing import Any, Callable, Iterable, TypeAlias
 
 import braceexpand
 import numpy as np
 import pandas as pd
+import scipy.special
 import torch
 import webdataset as wds
+
+from src.utilities.train_utils.state import StepsCounter
 
 from ..utilities.logging.print import log_print
 
@@ -293,3 +297,249 @@ def to_n_tuple(val: int | float | tuple, n: int) -> tuple[int | float, ...]:
     assert isinstance(val, (int, float)), f"Expected int or float, got {type(val)}"
 
     return tuple([val] * n)
+
+
+# * --- Chainable loaders --- #
+
+
+def chained_dataloaders(
+    dataloaders,
+    infinit=True,
+    shuffle_loaders=True,
+    curriculum_fn: Callable[[int], list[float]] | None = None,
+    other_sample_fn: list[Callable[[SampleType], SampleType]] | None = None,
+):
+    """
+    Chains multiple dataloaders into a single generator that yields samples from
+    the provided dataloaders. Supports both finite and infinite iteration modes.
+
+    Args:
+        dataloaders (list): A list of dataloaders to chain together. Each dataloader
+            should be an iterable that yields data samples.
+        infinit (bool, optional): If True, the chained dataloader will reset and
+            continue iterating indefinitely. If False, the iteration will stop
+            once all dataloaders are exhausted. Defaults to True.
+        shuffle_loaders (bool, optional): If True, the order of dataloaders will
+            be shuffled when selecting which dataloader to sample from. Defaults to True.
+        curriculum_fn (Callable[[int], list[float]], optional): A function that
+            takes the current training step as input and returns a list of probabilities
+            for each dataloader. This is used for curriculum learning to select dataloaders
+            based on their probabilities. If None, a standard round-robin selection is used.
+        other_sample_fn (list[Callable[[SampleType], SampleType]], optional): A list of
+            functions that take a sample and return a modified sample. These functions
+            are applied to each sample yielded by the chained dataloader.
+
+    Yields:
+        dict: A sample from one of the dataloaders, with an additional key
+            "__loader_idx__" indicating the index of the dataloader from which
+            the sample was drawn.
+
+    Notes:
+        - In infinite mode (`infinit=True`), the dataloaders will reset once
+          exhausted, allowing continuous iteration.
+        - In finite mode (`infinit=False`), the iteration stops when all dataloaders
+          are exhausted.
+        - If all dataloaders fail to yield data unexpectedly in infinite mode,
+          a warning will be logged.
+        - The function logs critical and debug messages when all dataloaders
+          are exhausted or fail to yield data.
+
+    Example:
+        >>> dataloader1 = (
+        ...     DataLoader(
+        ...         dataset1
+        ...     )
+        ... )
+        >>> dataloader2 = (
+        ...     DataLoader(
+        ...         dataset2
+        ...     )
+        ... )
+        >>> chained_loader = chained_dataloaders(
+        ...     [
+        ...         dataloader1,
+        ...         dataloader2,
+        ...     ],
+        ...     infinit=False,
+        ... )
+        >>> for sample in chained_loader:
+        >>>     process(sample)
+    """
+
+    if curriculum_fn is not None:
+        shuffle_loaders = False  # curriculum learning requires fixed order
+        assert infinit, "using curriculum learning requires infinit=True"
+        # assert StepsCounter._initialized, "StepsCounter has not initialized"
+
+    def _chain_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
+        n = len(dataloaders)
+        iters = [iter(dl) for dl in dataloaders]
+        is_exhausted = [False] * n
+
+        def get_active_idx():
+            active_indices = [i for i in range(n) if not is_exhausted[i]]
+            if shuffle_loaders:
+                random.shuffle(active_indices)
+            return active_indices
+
+        active_indices = get_active_idx()
+
+        while True:
+            if all(is_exhausted):
+                if infinit:
+                    log_print(
+                        "All loaders are exhausted, this should not happen in infinite mode",
+                        "critical",
+                    )
+                log_print("All loaders exhausted, stop iteration", "debug")
+                break
+
+            # Reinitialize active indices if empty
+            if not active_indices:
+                active_indices = get_active_idx()
+                if not active_indices:  # No active loaders left
+                    break
+
+            # Attempt to get next sample with retry logic
+            max_attempts = len(active_indices) * 2  # Reasonable upper bound
+            attempt = 0
+            sample = None
+
+            while attempt < max_attempts and active_indices:
+                # * --- CURRICULUM LEARNING SELECTION STRATEGY --- #
+                if curriculum_fn:
+                    train_step: int = StepsCounter()["train"]  # sigleton class instance
+                    # log step sometimes
+                    _log_cur = train_step % 200 == 0
+                    if _log_cur:
+                        log_print(f"[Curriculum]: train step {train_step}", "debug")
+
+                    # Get probability distribution for current step
+                    raw_probs = curriculum_fn(train_step)
+                    # log_print(f"probs {raw_probs}", "debug")
+
+                    # Filter only active loaders and their probabilities
+                    valid_indices = []
+                    valid_probs = []
+                    for idx in active_indices:
+                        # if not is_exhausted[idx]:
+                        valid_indices.append(idx)
+                        valid_probs.append(raw_probs[idx])
+
+                    # Normalize probabilities for active loaders
+                    total_prob = sum(valid_probs)
+                    if total_prob > 0:
+                        # softmax the valid probabilities
+                        normalized_probs = scipy.special.softmax(
+                            valid_probs, axis=0
+                        ).tolist()
+                        # normalized_probs = [p / total_prob for p in valid_probs]
+                        # Select loader based on curriculum probabilities
+                        idx = random.choices(
+                            valid_indices, weights=normalized_probs, k=1
+                        )[0]
+                        if _log_cur:
+                            log_print(
+                                f"[Curriculum]: selected loader {idx} with prob: {normalized_probs}",
+                                only_rank_zero=False,
+                            )
+                    else:
+                        log_print(
+                            "All curriculum probabilities are less than 0", "warning"
+                        )
+
+                        # Fallback to uniform selection if all probs zero
+                        idx = random.choice(valid_indices)
+
+                # * --- STANDARD SELECTION STRATEGY --- #
+                else:
+                    if shuffle_loaders:
+                        random.shuffle(active_indices)
+                    idx = active_indices[0]  # Select first active index
+                    # round-robin strategy
+                    active_indices.pop(0)
+                    active_indices.append(idx)
+
+                attempt += 1
+
+                try:
+                    sample = next(iters[idx])
+                    sample["__loader_idx__"] = idx
+                    break  # Successfully got sample
+                except StopIteration:
+                    if infinit:
+                        iters[idx] = iter(dataloaders[idx])  # Reset iterator
+                    else:
+                        is_exhausted[idx] = True
+
+                    # Remove the index from active_indices only if it failed
+                    if (
+                        idx in active_indices
+                    ):  # Check if it's still there (it should be)
+                        active_indices.remove(idx)
+
+                    # Refresh active indices if needed
+                    if not active_indices:
+                        active_indices = get_active_idx()
+                        if not active_indices:
+                            break  # No more loaders to try
+
+            if sample is not None:
+                # additional sample functions
+                if other_sample_fn is not None:
+                    for fn in other_sample_fn:
+                        sample = fn(sample)
+
+                yield sample
+            else:
+                # All attempts failed
+                if infinit:
+                    log_print(
+                        "All loaders failed to yield data unexpectedly", "warning"
+                    )
+                else:
+                    break  # In finite mode, exit when we can't get any samples
+
+            if not infinit and all(is_exhausted):
+                break
+
+    if not infinit:
+        log_print(
+            "Chained dataloader is finite and will stop once all data is exhausted. "
+            "Set it to True if you want infinite iterations.",
+            "warning",
+        )
+
+    log_print(f"Chaining {len(dataloaders)} dataloaders, {shuffle_loaders=}...")
+    chained_loader = _chain_dataloaders(dataloaders, infinit, shuffle_loaders)
+
+    return chained_loader
+
+
+def generate_wds_config_modify_only_some_kwgs(
+    basic_cfg: dict, changed_kwargs: list[dict[str, Any]]
+) -> list[dict]:
+    """
+    Generate a list of modified configurations based on a basic configuration and a list of changed keyword arguments.
+
+    Args:
+        basic_cfg (dict): The basic configuration dictionary.
+        changed_kwargs (list[dict[str, Any]]): A list of dictionaries containing the changed keyword arguments.
+
+    Returns:
+        list[dict]: A list of modified configurations.
+    """
+    assert isinstance(basic_cfg, dict), (
+        f"basic_cfg should be a dict, but got {type(basic_cfg)}"
+    )
+    assert isinstance(changed_kwargs, list), (
+        f"changed_kwargs should be a list, but got {type(changed_kwargs)}"
+    )
+
+    cfgs = []
+    for kwg in changed_kwargs:
+        cfg = basic_cfg.copy()  # or deepcopy
+        cfg.update(kwg)
+        cfgs.append(cfg)
+
+    return cfgs

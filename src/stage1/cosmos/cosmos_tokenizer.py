@@ -3,7 +3,8 @@ import warnings
 from collections import OrderedDict, namedtuple
 from functools import partial
 from itertools import chain
-from typing import Literal, NamedTuple, Sequence, override
+from pathlib import Path
+from typing import Callable, Literal, NamedTuple, Sequence, override
 
 import numpy as np
 import torch
@@ -564,6 +565,7 @@ class ContinuousImageTokenizer(nn.Module):
             return dec
 
     def forward(self, input: torch.Tensor):
+        torch.compiler.cudagraph_mark_step_begin()
         latent = self.encode(input)
         dec = self.decode(latent, input.shape)
 
@@ -887,6 +889,13 @@ class ContinuousImageTokenizer(nn.Module):
             self._per_layer_norms = {}
 
         return norms
+
+    # lora layer utilities
+    type LoraName = str
+
+    def loras_loading(self, lora_weights: dict[LoraName, Path | str]): ...
+
+    def change_lora(self, lora_name: str): ...
 
 
 if __name__ == "__main__":

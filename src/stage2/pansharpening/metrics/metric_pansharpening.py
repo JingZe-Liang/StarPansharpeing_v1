@@ -8,7 +8,9 @@ License: GPL v3
 
 ---------------------------------------------------------
 
-Copyright (c) ZihanCao, University of Electronic Science and Technology of China (UESTC), Mathematical School
+Copyright (c) ZihanCao,
+University of Electronic Science and Technology of China (UESTC),
+Mathematical School
 """
 
 from functools import partial
@@ -204,7 +206,7 @@ class AnalysisPanAcc(object):
         assert sr is not None and lms is not None and pan is not None and ms is not None
         if ms is None:
             ms = torch.nn.functional.interpolate(
-                lms, scale_factor=1 / self.rato, mode="bilinear", align_corners=False
+                lms, scale_factor=1 / self.ratio, mode="bilinear", align_corners=False
             )
 
         acc_ds = {"D_S": 1.0, "D_lambda": 1.0, "HQNR": 0.0}
@@ -215,7 +217,7 @@ class AnalysisPanAcc(object):
             lambda x: np.clip(x * _max_value, 0, _max_value), [sr, ms, lms, pan]
         )
         for i, (sr_i, ms_i, lms_i, pan_i) in enumerate(zip(sr, ms, lms, pan)):
-            QNR_index, D_lambda, D_S, _ = self.FS_metric_fn(
+            QNR_index, D_lambda, D_S = self.FS_metric_fn(
                 I_F=sr_i, I_MS_LR=ms_i, I_MS=lms_i, I_PAN=pan_i
             )
             acc_d = dict(HQNR=QNR_index, D_lambda=D_lambda, D_S=D_S)
@@ -258,9 +260,9 @@ class AnalysisPanAcc(object):
             bs, c, h, w = args[1].shape
             assert (
                 args[0].shape
-                == torch.Size(bs, c, h // self.ratio, w // self.ratio)
+                == torch.Size((bs, c, int(h * self.ratio), int(w * self.ratio)))
                 == args[2].shape
-                == args[3].shape
+                # == args[3].shape
             )
         else:
             raise ValueError("args should have 2 or 4 elements")

@@ -1,3 +1,11 @@
+"""
+Modified from the wids package to create a json indexing file that
+supports access the any index sample in sharded .tar files.
+
+Author: `Webdataset` team and Zihan Cao (UESTC)
+Time: 2025-06-17
+"""
+
 import argparse
 import json
 import os

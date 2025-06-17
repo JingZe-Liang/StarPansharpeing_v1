@@ -1,6 +1,5 @@
 import json
 import os
-import random
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
@@ -9,7 +8,6 @@ import accelerate
 import braceexpand
 import numpy as np
 import scipy.io
-import scipy.special
 import tifffile
 import torch
 import torch.distributed
@@ -43,8 +41,10 @@ from src.data.codecs import (
 )
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
+    chained_dataloaders,
     extract_modality_names,
     flatten_sub_dict,
+    generate_wds_config_modify_only_some_kwgs,
     img_size_filter,
     may_repeat_channels,
     merge_modalities,
@@ -128,7 +128,7 @@ def hyper_transform(
     default_img_size: int = 256,
 ):
     if isinstance(probs, float):
-        probs = tuple([probs] * len(op_list))
+        probs: tuple[float, ...] = tuple([probs] * len(op_list))
     assert len(probs) == len(op_list), (  # type: ignore
         "Number of probabilities must match number of operations."
     )
@@ -331,10 +331,10 @@ def get_hyperspectral_dataloaders(
     # decode
     default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
+        # webdataset read safetensors in tar, can not suit the memmap for fast loading
         wds.handle_extension("safetensors", safetensors_decode_io),
+        wds.handle_extension("jpg png img_content", img_decode_io),
     ]
-    if img_key == "img_content":
-        default_decoder.append(wds.handle_extension("img_content", img_decode_io))
     dataset = dataset.decode(*default_decoder)
 
     # extension
@@ -873,207 +873,6 @@ def get_hyperspectral_wids_dataloaders(
     return dataset, dataloader
 
 
-def chained_dataloaders(
-    dataloaders,
-    infinit=True,
-    shuffle_loaders=True,
-    curriculum_fn: Callable[[int], list[float]] | None = None,
-):
-    """
-    Chains multiple dataloaders into a single generator that yields samples from
-    the provided dataloaders. Supports both finite and infinite iteration modes.
-
-    Args:
-        dataloaders (list): A list of dataloaders to chain together. Each dataloader
-            should be an iterable that yields data samples.
-        infinit (bool, optional): If True, the chained dataloader will reset and
-            continue iterating indefinitely. If False, the iteration will stop
-            once all dataloaders are exhausted. Defaults to True.
-        shuffle_loaders (bool, optional): If True, the order of dataloaders will
-            be shuffled when selecting which dataloader to sample from. Defaults to True.
-
-    Yields:
-        dict: A sample from one of the dataloaders, with an additional key
-            "__loader_idx__" indicating the index of the dataloader from which
-            the sample was drawn.
-
-    Notes:
-        - In infinite mode (`infinit=True`), the dataloaders will reset once
-          exhausted, allowing continuous iteration.
-        - In finite mode (`infinit=False`), the iteration stops when all dataloaders
-          are exhausted.
-        - If all dataloaders fail to yield data unexpectedly in infinite mode,
-          a warning will be logged.
-        - The function logs critical and debug messages when all dataloaders
-          are exhausted or fail to yield data.
-
-    Example:
-        >>> dataloader1 = (
-        ...     DataLoader(
-        ...         dataset1
-        ...     )
-        ... )
-        >>> dataloader2 = (
-        ...     DataLoader(
-        ...         dataset2
-        ...     )
-        ... )
-        >>> chained_loader = chained_dataloaders(
-        ...     [
-        ...         dataloader1,
-        ...         dataloader2,
-        ...     ],
-        ...     infinit=False,
-        ... )
-        >>> for sample in chained_loader:
-        >>>     process(sample)
-    """
-
-    if curriculum_fn is not None:
-        shuffle_loaders = False  # curriculum learning requires fixed order
-        assert infinit, "using curriculum learning requires infinit=True"
-        # assert StepsCounter._initialized, "StepsCounter has not initialized"
-
-    def _chain_dataloaders(dataloaders, infinit=True, shuffle_loaders=True):
-        n = len(dataloaders)
-        iters = [iter(dl) for dl in dataloaders]
-        is_exhausted = [False] * n
-
-        def get_active_idx():
-            active_indices = [i for i in range(n) if not is_exhausted[i]]
-            if shuffle_loaders:
-                random.shuffle(active_indices)
-            return active_indices
-
-        active_indices = get_active_idx()
-
-        while True:
-            if all(is_exhausted):
-                if infinit:
-                    log_print(
-                        "All loaders are exhausted, this should not happen in infinite mode",
-                        "critical",
-                    )
-                log_print("All loaders exhausted, stop iteration", "debug")
-                break
-
-            # Reinitialize active indices if empty
-            if not active_indices:
-                active_indices = get_active_idx()
-                if not active_indices:  # No active loaders left
-                    break
-
-            # Attempt to get next sample with retry logic
-            max_attempts = len(active_indices) * 2  # Reasonable upper bound
-            attempt = 0
-            sample = None
-
-            while attempt < max_attempts and active_indices:
-                # * --- CURRICULUM LEARNING SELECTION STRATEGY --- #
-                if curriculum_fn:
-                    train_step: int = StepsCounter()["train"]  # sigleton class instance
-                    # log step sometimes
-                    _log_cur = train_step % 200 == 0
-                    if _log_cur:
-                        log_print(f"[Curriculum]: train step {train_step}", "debug")
-
-                    # Get probability distribution for current step
-                    raw_probs = curriculum_fn(train_step)
-                    # log_print(f"probs {raw_probs}", "debug")
-
-                    # Filter only active loaders and their probabilities
-                    valid_indices = []
-                    valid_probs = []
-                    for idx in active_indices:
-                        # if not is_exhausted[idx]:
-                        valid_indices.append(idx)
-                        valid_probs.append(raw_probs[idx])
-
-                    # Normalize probabilities for active loaders
-                    total_prob = sum(valid_probs)
-                    if total_prob > 0:
-                        # softmax the valid probabilities
-                        normalized_probs = scipy.special.softmax(
-                            valid_probs, axis=0
-                        ).tolist()
-                        # normalized_probs = [p / total_prob for p in valid_probs]
-                        # Select loader based on curriculum probabilities
-                        idx = random.choices(
-                            valid_indices, weights=normalized_probs, k=1
-                        )[0]
-                        if _log_cur:
-                            log_print(
-                                f"[Curriculum]: selected loader {idx} with prob: {normalized_probs}",
-                                only_rank_zero=False,
-                            )
-                    else:
-                        log_print(
-                            "All curriculum probabilities are less than 0", "warning"
-                        )
-
-                        # Fallback to uniform selection if all probs zero
-                        idx = random.choice(valid_indices)
-
-                # * --- STANDARD SELECTION STRATEGY --- #
-                else:
-                    if shuffle_loaders:
-                        random.shuffle(active_indices)
-                    idx = active_indices[0]  # Select first active index
-                    # round-robin strategy
-                    active_indices.pop(0)
-                    active_indices.append(idx)
-
-                attempt += 1
-
-                try:
-                    sample = next(iters[idx])
-                    sample["__loader_idx__"] = idx
-                    break  # Successfully got sample
-                except StopIteration:
-                    if infinit:
-                        iters[idx] = iter(dataloaders[idx])  # Reset iterator
-                    else:
-                        is_exhausted[idx] = True
-
-                    # Remove the index from active_indices only if it failed
-                    if (
-                        idx in active_indices
-                    ):  # Check if it's still there (it should be)
-                        active_indices.remove(idx)
-
-                    # Refresh active indices if needed
-                    if not active_indices:
-                        active_indices = get_active_idx()
-                        if not active_indices:
-                            break  # No more loaders to try
-
-            if sample is not None:
-                yield sample
-            else:
-                # All attempts failed
-                if infinit:
-                    log_print(
-                        "All loaders failed to yield data unexpectedly", "warning"
-                    )
-                else:
-                    break  # In finite mode, exit when we can't get any samples
-
-            if not infinit and all(is_exhausted):
-                break
-
-    if not infinit:
-        log_print(
-            "Chained dataloader is finite and will stop once all data is exhausted. "
-            "Set it to True if you want infinite iterations.",
-            "warning",
-        )
-
-    log_print(f"Chaining {len(dataloaders)} dataloaders, {shuffle_loaders=}...")
-    chained_loader = _chain_dataloaders(dataloaders, infinit, shuffle_loaders)
-
-    return chained_loader
-
-
 @function_config_to_basic_types
 def get_hyperspectral_img_loaders_with_different_backends(
     paths: WebdatasetPath,
@@ -1532,35 +1331,6 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     return datasets, dataloader
 
 
-def generate_wds_config_modify_only_some_kwgs(
-    basic_cfg: dict, changed_kwargs: list[dict[str, Any]]
-) -> list[dict]:
-    """
-    Generate a list of modified configurations based on a basic configuration and a list of changed keyword arguments.
-
-    Args:
-        basic_cfg (dict): The basic configuration dictionary.
-        changed_kwargs (list[dict[str, Any]]): A list of dictionaries containing the changed keyword arguments.
-
-    Returns:
-        list[dict]: A list of modified configurations.
-    """
-    assert isinstance(basic_cfg, dict), (
-        f"basic_cfg should be a dict, but got {type(basic_cfg)}"
-    )
-    assert isinstance(changed_kwargs, list), (
-        f"changed_kwargs should be a list, but got {type(changed_kwargs)}"
-    )
-
-    cfgs = []
-    for kwg in changed_kwargs:
-        cfg = basic_cfg.copy()  # or deepcopy
-        cfg.update(kwg)
-        cfgs.append(cfg)
-
-    return cfgs
-
-
 def get_wids_index_json_info(path: str):
     assert path.endswith(".json"), (
         f"wids json file should end with .json, but got {path}"
@@ -1635,7 +1405,7 @@ def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
-        ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
+        # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
         # ["data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"],
         # ["data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar"],
         # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
@@ -1653,12 +1423,12 @@ if __name__ == "__main__":
         # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
         # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
-        [
-            "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
-            "/HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0027}.tar",
-            "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
-            "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0027}.tar",
-        ],
+        # [
+        #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
+        #     "/HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0027}.tar",
+        #     "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
+        #     "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0027}.tar",
+        # ],
         # ["/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/shardindex.json"]
         # [
         #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
@@ -1666,6 +1436,7 @@ if __name__ == "__main__":
         #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
         #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar",
         # ],
+        ["data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0000.tar"],
     ]
     test_batch_size = 8
     test_num_workers = 3
@@ -1688,7 +1459,7 @@ if __name__ == "__main__":
         check_channels=False,
     )
     changed_kwargs = [
-        {},
+        # {},
         # {},
         # {},
         # {},
@@ -1700,11 +1471,12 @@ if __name__ == "__main__":
         #     "constraint_size": 128 * 128,
         #     "resize_before_transform": 512,
         # },
-        {
-            "img_key": "img_content",
-            "constraint_size": 256 * 256,
-            "resize_before_transform": 512,
-        },
+        # {
+        #     "img_key": "img_content",
+        #     "constraint_size": 256 * 256,
+        #     "resize_before_transform": 512,
+        # },
+        {},
         # {}
     ]
     curriculum_kwargs = {
@@ -1722,8 +1494,8 @@ if __name__ == "__main__":
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=True,
-        curriculum_type="linear",
-        curriculum_kwargs=curriculum_kwargs,
+        # curriculum_type="linear",
+        # curriculum_kwargs=curriculum_kwargs,
     )
 
     from tqdm import tqdm

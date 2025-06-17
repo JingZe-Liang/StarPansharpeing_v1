@@ -239,6 +239,29 @@ def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
 # * --- wids codecs --- #
 
 
+def wids_remove_none_keys(sample: dict[str, Any]) -> dict[str, Any]:
+    """Remove keys with None values from the sample dictionary."""
+    # remove None key/values
+    _key_to_del = []
+    for k, v in sample.items():
+        if v is None:
+            _key_to_del.append(k)
+    for k in _key_to_del:
+        del sample[k]
+
+    return sample
+
+
+def is_tiff_file(file_path: str) -> bool:
+    """Check if the file is a TIFF file based on its extension."""
+    return file_path.lower().endswith((".tiff", ".tif"))
+
+
+def is_rgb_file(file_path: str) -> bool:
+    """Check if the file is an RGB image based on its extension."""
+    return file_path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
+
+
 def wids_image_decode(
     sample: dict[str, Any],
     read_caption=False,
@@ -247,15 +270,17 @@ def wids_image_decode(
     permute=True,
     resize: int | tuple[int, int] | None = None,
 ):
-    if ".img.tiff" in sample or ".img.tif" in sample:
-        try:
-            sample["img"] = tiff_decode_io(sample[".img.tiff"].getvalue())
-            del sample[".img.tiff"]  # Remove the original BytesIO object
-        except KeyError:
-            sample["img"] = tiff_decode_io(sample[".img.tif"].getvalue())
-            del sample[".img.tif"]  # Remove the original BytesIO object
-        finally:
-            log_print(f"Decode image error")
+    _keys_to_try = [".img.tiff", ".img.tif"]
+    for k in _keys_to_try:
+        if k in sample:
+            if is_tiff_file(k):
+                sample["img"] = tiff_decode_io(sample[k].getvalue())
+                del sample[k]
+            elif is_rgb_file(k):
+                sample["img"] = img_decode_io(sample[k].getvalue())
+                del sample[k]
+            else:
+                raise ValueError(f"Unsupported file type for key {k}: {sample[k]}")
     if ".img_content" in sample:
         sample["img"] = img_decode_io(sample[".img_content"].getvalue())
         del sample[".img_content"]
@@ -267,37 +292,53 @@ def wids_image_decode(
         if read_name:
             sample["img_name"] = string_decode_io(sample[".img_name"].getvalue())
         del sample[".img_name"]
+    if "img" not in sample:
+        return sample
+    else:
+        if sample["img"] is None:
+            raise ValueError("Decoded image is None, possibly due to decoding error.")
 
-    assert "img" in sample, "Image key 'img' not found in sample."
-    if sample["img"] is None:
-        raise ValueError("Decoded image is None, possibly due to decoding error.")
-
-    img = sample["img"].astype(np.float32) / 255.0
-    if norm:
-        sample["img"] = img * 2 - 1  # to [-1, 1]
-    if permute:
-        # Permute the image dimensions from HWC to CHW
-        sample["img"] = np.transpose(sample["img"], (2, 0, 1))
-    if resize is not None:
+        img = sample["img"].astype(np.float32) / 255.0
+        if norm:
+            sample["img"] = img * 2 - 1  # to [-1, 1]
         if permute:
-            img = torch.as_tensor(sample["img"])[None].float()
-        else:
-            img = torch.as_tensor(np.transpose(sample["img"], (1, 2, 0)))[None].float()
+            # Permute the image dimensions from HWC to CHW
+            sample["img"] = np.transpose(sample["img"], (2, 0, 1))
+        if resize is not None:
+            if permute:
+                img = torch.as_tensor(sample["img"])[None].float()
+            else:
+                img = torch.as_tensor(np.transpose(sample["img"], (1, 2, 0)))[
+                    None
+                ].float()
 
-        if isinstance(resize, int):
-            sz = to_n_tuple(resize, 2)
-        img = torch.nn.functional.interpolate(
-            img, size=sz, mode="bilinear", align_corners=False
-        )[0]
-        if not permute:
-            img = img.permute(1, 2, 0)
+            sz = resize
+            if isinstance(resize, int):
+                sz = to_n_tuple(sz, 2)
+            img = torch.nn.functional.interpolate(
+                img, size=sz, mode="bilinear", align_corners=False
+            )[0]
+            if not permute:
+                img = img.permute(1, 2, 0)
 
-    # remove None key/values
-    _key_to_del = []
-    for k, v in sample.items():
-        if v is None:
-            _key_to_del.append(k)
-    for k in _key_to_del:
-        del sample[k]
+        sample = wids_remove_none_keys(sample)
+
+        return sample
+
+
+def wids_latent_decode(sample: dict[str, Any]):
+    if ".latents.npz" in sample:
+        sample["latents"] = npz_decode_io(sample[".latents.npz"].getvalue())
+        del sample[".latents.npz"]
+    if ".latents.safetensors" in sample:
+        sample["latents"] = safetensors_decode_io(
+            sample[".latents.safetensors"].getvalue()
+        )
+        del sample[".latents.safetensors"]
+    if ".latents.npy" in sample:
+        sample["latents"] = npy_codec_io(sample[".latents.npy"].getvalue())
+        del sample[".latents.npy"]
+
+    sample = wids_remove_none_keys(sample)
 
     return sample

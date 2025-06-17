@@ -1,12 +1,12 @@
 repos:
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: "v0.11.7"
+    rev: "v0.11.13"
     hooks:
       - id: ruff
         args: [--fix]
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions)
       - id: ruff-format
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0 # Use a specific tag or commit hash, check for latest version
     hooks:

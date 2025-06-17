@@ -4,9 +4,10 @@
 # @Author  : Xiao Wu
 # @reference:
 #
+import cv2
 import numpy as np
 from scipy import ndimage
-import cv2
+
 from .HQNR import HQNR
 from .my_D_s import D_s as my_Ds
 
@@ -277,7 +278,7 @@ def indexes_evaluation_FS(
             I_F, I_MS_LR, I_MS, I_PAN, ratio, Qblocks_size
         )
     else:
-        QNR_index, D_lambda, D_S = HQNR(
+        QNR_index, D_lambda, D_S, _ = HQNR(
             I_F, I_MS_LR, I_MS, I_PAN, Qblocks_size, sensor, ratio
         )
 

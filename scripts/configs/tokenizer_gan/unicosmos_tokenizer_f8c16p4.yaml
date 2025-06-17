@@ -127,8 +127,8 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: runs/stage1_cosmos/2025-06-13_00-00-41_cosmos_f8c16p4_unified_hyperspectral_uni/checkpoints/checkpoint_0
-  ema_load_path: #runs/stage1_cosmos/2025-06-12_20-42-01_cosmos_f8c16p4_unified_hyperspectral_uni/ema
+  resume_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-06-15_01-22-15_cosmos_f8c16p4_unified_hyperspectral_uni/checkpoints/checkpoint_9
+  ema_load_path:
   compile_model: false
   only_load_tokenizer: false
 
@@ -137,13 +137,13 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
+    _target_: src.utilities.optim.get_muon_optimizer
+    _partial_: true
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 2.0e-4
@@ -151,23 +151,23 @@ train:
     # eps: 1.0e-8
     # betas: [0.5, 0.95]
     # foreach: true
-    _target_: src.utilities.optim.splus.SPlus
-    _partial_: true
-    lr: 2.0e-3
-    b1: 0.5
-    b2: 0.95
-    ema_rate: 0.999
-    weight_decay: 0.01
+    # _target_: src.utilities.optim.splus.SPlus
+    # _partial_: true
+    # lr: 4.0e-2
+    # b1: 0.5
+    # b2: 0.95
+    # ema_rate: 0.999
+    # weight_decay: 0.01
 
   disc_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # adamw_betas: ${tuple:[0., 0.9]}  #[0.5, 0.9], gan training beta1 is zero
+    _target_: src.utilities.optim.get_muon_optimizer
+    _partial_: true
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    adamw_betas: ${tuple:[0., 0.9]}  #[0.5, 0.9], gan training beta1 is zero
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 2.0e-4
@@ -175,13 +175,13 @@ train:
     # eps: 1.0e-8
     # betas: [0.0, 0.9] #[0.9, 0.95]
     # foreach: true
-    _target_: src.utilities.optim.splus.SPlus
-    _partial_: true
-    lr: 2.0e-3
-    b1: 0.0
-    b2: 0.9
-    ema_rate: 0.999
-    weight_decay: 0.01
+    # _target_: src.utilities.optim.splus.SPlus
+    # _partial_: true
+    # lr: 2.0e-3
+    # b1: 0.0
+    # b2: 0.9
+    # ema_rate: 0.999
+    # weight_decay: 0.01
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

@@ -28,10 +28,24 @@ from .utils import (
 )
 
 compile_forward_fn = True
-torch._functorch.config.donated_buffer = False  # for adaptive weighting
+# options
+compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
+compile_full_graph = True
+epilogue_fusion = True
+shape_padding = True
 if compile_forward_fn:
-    _compile_decorator = torch.compile
+    _compile_decorator = torch.compile(
+        mode=compile_mode,
+        fullgraph=compile_full_graph,
+        # options={
+        #     "max_autotune": False,
+        #     "triton.cudagraphs": True,
+        #     "shape_padding": shape_padding,
+        #     "epilogue_fusion": epilogue_fusion,
+        # },
+    )
     log_print("will compile the forward function and disable donated buffer", "debug")
+    torch._functorch.config.donated_buffer = False  # for adaptive weighting
 else:
 
     def _null_decorator(**any_kwargs):
@@ -1692,8 +1706,8 @@ class ResnetBlock(nn.Module):
         x = self.nin_shortcut(x)
         if self.use_residual_factor:
             h = h * self.residual_factor
-
-        return x + h
+        res = x + h
+        return res
 
     def forward(
         self,
@@ -1702,10 +1716,12 @@ class ResnetBlock(nn.Module):
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # slots, t not used, compacted with ResnetBlockSlotsInjected
-
+        # torch.compiler.cudagraph_mark_step_begin()
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, use_reentrant=True)  # type: ignore
-        return self.forward_fn(x)
+            return checkpoint(
+                self.forward_fn, x, use_reentrant=True
+            )  # .clone()  # type: ignore
+        return self.forward_fn(x)  # .clone()
 
 
 class ResnetBlockSlotsInjected(ResnetBlock):
