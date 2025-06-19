@@ -70,7 +70,7 @@ def _make_scratch(in_shape, out_shape, groups=1, expand=False):
     out_shape2 = out_shape
     out_shape3 = out_shape
     out_shape4 = out_shape
-    if expand == True:
+    if expand:
         out_shape1 = out_shape
         out_shape2 = out_shape * 2
         out_shape3 = out_shape * 4
@@ -301,7 +301,7 @@ class ResidualConvUnit_custom(nn.Module):
             groups=self.groups,
         )
 
-        if self.bn == True:
+        if self.bn:
             self.bn1 = nn.BatchNorm2d(features)
             self.bn2 = nn.BatchNorm2d(features)
 
@@ -321,12 +321,12 @@ class ResidualConvUnit_custom(nn.Module):
 
         out = self.activation(x)
         out = self.conv1(out)
-        if self.bn == True:
+        if self.bn:
             out = self.bn1(out)
 
         out = self.activation(out)
         out = self.conv2(out)
-        if self.bn == True:
+        if self.bn:
             out = self.bn2(out)
 
         if self.groups > 1:
@@ -363,7 +363,7 @@ class FeatureFusionBlock_custom(nn.Module):
 
         self.expand = expand
         out_features = features
-        if self.expand == True:
+        if self.expand:
             out_features = features // 2
 
         self.out_conv = nn.Conv2d(

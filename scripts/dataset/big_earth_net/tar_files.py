@@ -94,11 +94,11 @@ def tar_files(
 
 
 if __name__ == "__main__":
-    path = "/HardDisk/ZiHanCao/datasets/Multispectral-BigEarthNet/S2/S2_tiff"
+    path = "/HardDisk/ZiHanCao/datasets/Multispectral-BigEarthNet/S2/S2_tiff_jp2k_80"
     img_paths = Path(path).rglob("**/*.tif")
     # 示例用法
     tar_files(
         input_paths=img_paths,
-        output_file="/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/hyper_images/BigEarthNet_data_%04d.tar",
-        max_size=2 * 1024 * 1024 * 1024,  # 2GB
+        output_file="/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/hyper_images_compressed/BigEarthNet_data_%04d.tar",
+        max_size=4 * 1024 * 1024 * 1024,  # 4GB
     )

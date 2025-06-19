@@ -1,3 +1,5 @@
+import json
+import os
 import random
 import re
 from itertools import chain
@@ -9,6 +11,7 @@ import pandas as pd
 import scipy.special
 import torch
 import webdataset as wds
+from librosa import ex
 
 from src.utilities.train_utils.state import StepsCounter
 
@@ -18,11 +21,18 @@ LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
 SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
 
 
-def extract_modality_names(s):
+def extract_modality_names(s, square_bracket=False):
     # Regular expression pattern to match anything enclosed in '{' and '}', and comma separated
-    pattern = r"\{([^}]*)\}"
+    pattern = r"\{([^}]*)\}" if not square_bracket else r"\[([^\]]*)\]"
     match = re.search(pattern, s)
     return match.group(1).split(",") if match else []
+
+
+def is_path_multimodal(path: str) -> bool:
+    """
+    Check for either [] or {}, with no slashes inside.
+    """
+    return bool(re.search(r"(?:\[[^/]*\]|\{[^/]*\})", path))
 
 
 def remove_extension(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
@@ -543,3 +553,129 @@ def generate_wds_config_modify_only_some_kwgs(
         cfgs.append(cfg)
 
     return cfgs
+
+
+def get_wids_index_json_info(path: str):
+    assert path.endswith(".json"), (
+        f"wids json file should end with .json, but got {path}"
+    )
+    assert os.path.exists(path), (
+        f"wids json file {path} does not exist, please check the path"
+    )
+
+    with open(path, "r") as f:
+        index_d = json.load(f)
+    assert "shardlist" in index_d, (
+        f"wids json file {path} should contain 'shardlist' key, but got {index_d.keys()}"
+    )
+
+    index_info = index_d["shardlist"]
+    n = len(index_info)
+
+    return index_info, n
+
+
+def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs: dict):
+    # Ensure that the number of workers is not greater than the number of shards
+    if isinstance(paths, str):
+        if paths.endswith(".json"):  # is indexed wids json file
+            _, _len = get_wids_index_json_info(paths)
+            paths = [paths]
+        else:
+            paths = list(braceexpand.braceexpand(paths))
+            _len = len(paths)
+    elif isinstance(paths, (list, tuple)):
+        path_exp = []
+        for p in paths:
+            assert isinstance(p, str), (
+                "'paths' should be a list of strings or a string that can be expanded"
+                f"list of {type(p)} is not allowed."
+            )
+            assert not p.endswith(".json"), (
+                "list of paths contains multiple wids json files or "
+                "combination of tar file path and wids json file path, "
+                "please use a list of lists of strings instead. "
+                "If you want to use wids json dataset, "
+                "please use a single json file as index_file."
+            )
+            lst_p = list(braceexpand.braceexpand(p))
+            path_exp.extend(lst_p)
+        _len = len(path_exp)
+        paths = path_exp
+    else:
+        raise ValueError(
+            f"paths should be a string or a list of strings, but got {type(paths)}"
+        )
+
+    assert _len > 0, f"paths should not be empty, but got {paths}"
+
+    for p in paths:
+        # assert tar file exists
+        assert os.path.exists(p), f"tar file or wids json file {p} does not exist"
+
+    # n_worker should less than the number of shards
+    n_workers = loader_kwargs.get("num_workers", 0)
+    if _len < n_workers and n_workers > 0:
+        # set n_workers to the number of shards
+        loader_kwargs["num_workers"] = _len
+        log_print(
+            f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
+            level="debug",
+        )
+
+    return paths, loader_kwargs
+
+
+# multimodal version of expand_paths_and_correct_loader_kwargs
+def expand_paths_and_correct_loader_kwargs_mm(
+    paths: str | list[str], loader_kwargs: dict
+):
+    # Ensure that the number of workers is not greater than the number of shards
+    if isinstance(paths, str):
+        # Ensure is multimodal
+        n_modalities = len(extract_modality_names(paths, square_bracket=True))
+        assert n_modalities > 1, (
+            f"n_modalities must be greater than 1, when the path is {paths}"
+        )
+
+        mm_paths = paths.translate(str.maketrans("[]", "{}"))
+        mm_paths = list(braceexpand.braceexpand(mm_paths))
+        _len = len(mm_paths) // n_modalities
+    elif isinstance(paths, (list, tuple)):
+        mm_paths = []
+        n_modalities = 1
+        for p in paths:
+            assert isinstance(p, str), (
+                "'paths' should be a list of strings or a string that can be expanded"
+                f"list of {type(p)} is not allowed."
+            )
+            n_modalities = len(extract_modality_names(p, square_bracket=True))
+            assert n_modalities > 1, (
+                f"n_modalities must be greater than 1, when the path is {p}"
+            )
+            mm_p = p.translate(str.maketrans("[]", "{}"))
+            lst_p = list(braceexpand.braceexpand(mm_p))
+            mm_paths.extend(lst_p)
+        _len = len(mm_paths) // n_modalities
+    else:
+        raise ValueError(
+            f"paths should be a string or a list of strings, but got {type(paths)}"
+        )
+
+    assert _len > 0, f"paths should not be empty, but got {paths}"
+
+    for p in mm_paths:
+        # assert tar file exists
+        assert os.path.exists(p), f"tar file or wids json file {p} does not exist"
+
+    # n_worker should less than the number of shards
+    n_workers = loader_kwargs.get("num_workers", 0)
+    if _len < n_workers and n_workers > 0:
+        # set n_workers to the number of shards
+        loader_kwargs["num_workers"] = _len
+        log_print(
+            f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
+            level="debug",
+        )
+
+    return paths, loader_kwargs

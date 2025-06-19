@@ -4,7 +4,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence, assert_type
 
 import accelerate
 import colored_traceback
@@ -1031,6 +1031,18 @@ class CosmosHyperspectralTokenizerTrainer:
             raise ValueError(f"Unknown mode {mode}")
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
+        aug_pipe: Callable[[torch.Tensor], torch.Tensor] | None = getattr(
+            self, "tokenizer_augmentation_pipe", None
+        )
+        if aug_pipe is not None:
+            assert_type(aug_pipe, Callable[[torch.Tensor], torch.Tensor])
+            assert callable(aug_pipe), "tokenizer_augmentation_pipe must be callable"
+
+            # Augmentation
+            # says we want the augmentation does on x -> \tilde{x}
+            # but the reconstruction \bar{x} = f(x) \approx f(aug(x)) = \tilde{x} does not changed
+            x = aug_pipe(x)
+
         with self.accelerator.autocast():
             if self.sep_enc_dec:
                 if not ema:
@@ -1078,7 +1090,7 @@ class CosmosHyperspectralTokenizerTrainer:
             _q_dict = dict(q_loss=None, q_info=None, latent_q=None)
         out_d.update(_q_dict)
 
-        # repa feature
+        # repa or vf feature
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
         if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
             _unwrap_tok, "_hook_for_repa", False

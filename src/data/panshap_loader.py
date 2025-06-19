@@ -175,6 +175,9 @@ class MultimodalityDataloader:
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
+        return_nested_dict: bool | None = None,
+        extracted_keys: list[list[tuple[str, str]]]
+        | None = None,  # num_of_modalities[extracted_keys[(in_key, out_key)]]
     ):
         # get wids datasets
         self.wds_paths = wds_paths
@@ -184,6 +187,13 @@ class MultimodalityDataloader:
         self.shuffle_size = None
         self.num_workers = None
         self.total_len = -1
+        self.return_nested_dict = return_nested_dict  # remove the '__any_key' keys
+        self.extracted_keys = extracted_keys
+
+        if extracted_keys is not None:
+            assert len(extracted_keys) == len(wds_paths), (
+                "extracted_keys must have the same length as wds_paths"
+            )
 
         for name, p in self.wds_paths.items():
             self.mm_names.append(name)
@@ -193,7 +203,10 @@ class MultimodalityDataloader:
                 transformations=[
                     # image decoder ===
                     partial(
-                        wids_image_decode, norm=to_neg_1_1, permute=permute, resize=None
+                        wids_image_decode,
+                        to_neg_1_1=to_neg_1_1,
+                        permute=permute,
+                        resize=None,
                     ),  # type: ignore
                     # latents decoder ===
                     wids_latent_decode,
@@ -212,15 +225,59 @@ class MultimodalityDataloader:
         return self.total_len // getattr(self, "batch_size", 1)
 
     def __getitem__(self, index):
-        modality_sample: dict[ModalityName, Any] = {}
-        for name, ds in self.datasets.items():
+        modality_sample: dict[ModalityName | str, Any] = {}
+        for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
-            if isinstance(sample, dict):
-                modality_sample[name] = sample
+            if isinstance(sample, dict):  # <-- default in this case
+                if self.return_nested_dict is not None and not self.return_nested_dict:
+                    modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
+                elif self.extracted_keys is not None:
+                    ext_key = self.extracted_keys[i]
+                    modality_sample.update(self.extract_keys(sample, ext_key, None))
+                else:
+                    modality_sample[name] = sample
             else:
-                modality_sample[name] = {"img": sample}
+                modality_sample[name] = {"default": sample}
 
         return modality_sample
+
+    def extract_key_for_non_nested_dict(self, subsample: dict):
+        content_not_dudent = [x for x in subsample.keys() if not x.startswith("__")]
+
+        if len(content_not_dudent) == 1:  # modality_name: Tensor
+            return subsample[content_not_dudent[0]]
+        else:  # modality_name: {"img": Tensor, 'img2': Tensor, ...}
+            subsample_f = {}
+            for name in content_not_dudent:
+                subsample_f[name] = subsample[name]
+
+        return subsample_f
+
+    def extract_keys(
+        self,
+        samples: dict,
+        keys: list[tuple],
+        modality_name: str | None = None,
+    ):
+        # flatten the nested dict into a flat dict
+
+        def extract_fn(x: dict, key: str):
+            parts = key.split(".")
+            for p in parts:
+                x = x.get(p, None)
+                if x is None:
+                    return None
+            return x
+
+        extracted = {}
+        for in_k, out_k in keys:
+            extract_value = extract_fn(samples, in_k)
+            if extract_value is not None:
+                if modality_name is not None:
+                    out_k = modality_name + "_" + out_k
+                extracted[out_k] = extract_value
+
+        return extracted
 
     @staticmethod
     def get_loader_sampler(dataset, shuffle_size: int = -1):
@@ -276,6 +333,8 @@ class MultimodalityDataloader:
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
+        return_nested_dict: bool | None = None,
+        extracted_keys: list[list[tuple[str, str]]] | None = None,
         batch_size: int = 32,
         num_workers: int = 1,
         shuffle_size: int = 100,
@@ -286,6 +345,8 @@ class MultimodalityDataloader:
             to_neg_1_1=to_neg_1_1,
             permute=permute,
             wids_local_name_prefix=wids_local_name_prefix,
+            extracted_keys=extracted_keys,
+            return_nested_dict=return_nested_dict,
         )
 
         # dataloader
@@ -315,6 +376,9 @@ class MultimodalityDataloader:
         # dataloader = dataloader.with_length(10_000)
 
         return dataset, dataloader
+
+
+# * --- Multi-modal Webdataset --- #
 
 
 def get_multimodal_dataloaders(
@@ -381,12 +445,13 @@ def get_multimodal_dataloaders(
 
 
 def test_wids_mm_loaders(*args):
-    torch.distributed.init_process_group(
-        backend="nccl",  # or "nccl" if you have GPUs
-        init_method="tcp://localhost:12346",
-        world_size=args[1],
-        rank=args[0],  # this will be set by mp.spawn
-    )
+    if 0 < len(args) < 2:
+        torch.distributed.init_process_group(
+            backend="nccl",  # or "nccl" if you have GPUs
+            init_method="tcp://localhost:12346",
+            world_size=args[1],
+            rank=args[0],  # this will be set by mp.spawn
+        )
 
     datasets, loaders = MultimodalityDataloader.create_loader(
         {
@@ -394,7 +459,11 @@ def test_wids_mm_loaders(*args):
             "latents": "data/MMSeg_YREB/latents/shardindex.json",
         },
         batch_size=2,
-        num_workers=1,
+        num_workers=0,
+        extracted_keys=[
+            [("img", "img")],
+            [("latents.hrms_latent", "hrms_latent")],
+        ],
     )
 
     # if torch.distributed.is_initialized():
@@ -405,7 +474,8 @@ def test_wids_mm_loaders(*args):
     rank = args[0] if len(args) > 0 else 0
 
     for i, sample in enumerate(loaders):
-        print(f"Rank {rank} - Batch {i}: index {sample['latents']['__index__']}")
+        # print(f"Rank {rank} - Batch {i}: index {sample['latents']['__index__']}")
+        print(sample.keys())
 
 
 if __name__ == "__main__":
@@ -446,20 +516,20 @@ if __name__ == "__main__":
     # if i >= 5:
     #     break
 
-    # test_wids_mm_loaders()
+    test_wids_mm_loaders()
 
-    # mp
-    import torch.multiprocessing as mp
+    # # mp
+    # import torch.multiprocessing as mp
 
-    mp.set_start_method("spawn")
+    # mp.set_start_method("spawn")
 
-    # start with 2 processes
-    world_size = 2
-    # torch distributed init
+    # # start with 2 processes
+    # world_size = 2
+    # # torch distributed init
 
-    mp.spawn(
-        test_wids_mm_loaders,
-        args=(world_size,),
-        nprocs=world_size,
-        join=True,
-    )
+    # mp.spawn(
+    #     test_wids_mm_loaders,
+    #     args=(world_size,),
+    #     nprocs=world_size,
+    #     join=True,
+    # )

@@ -14,6 +14,8 @@ from src.data.codecs import (
     tiff_decode_io,
 )
 from src.data.utils import (
+    chained_dataloaders,
+    expand_paths_and_correct_loader_kwargs_mm,
     flatten_sub_dict,
     generate_wds_config_modify_only_some_kwgs,
     merge_modalities,
@@ -33,13 +35,18 @@ from src.utilities.logging import log_print
 
 
 def get_image_bands_info(sample: dict):
-    assert "img" in sample, "Sample must contain 'img' key"
-    bs = sample["img"].shape[0]
-    sample["bands"] = [sample["img"].shape[1]] * bs
+    assert "hrms" in sample, "Sample must contain 'hrms' key"
+    bs = sample["hrms"].shape[0]
+    sample["bands"] = [sample["hrms"].shape[1]] * bs
 
     return sample
 
 
+def extract_keys(samples: dict, keys: list[str]):
+    return {key: samples[key] for key in keys}
+
+
+# * --- WebDataset --- #
 def get_generative_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
@@ -51,6 +58,7 @@ def get_generative_dataloaders(
     pin_memory: bool = True,
     remove_meta: bool = False,
     normed_keys: list[str] = ["img"],
+    **__discarded_kwargs,
 ) -> tuple[wds.DataPipeline, wds.WebLoader]:
     dataset = wds.DataPipeline(
         wds.ResampledShards(wds_paths) if resample else wds.SimpleShardList(wds_paths),
@@ -73,6 +81,7 @@ def get_generative_dataloaders(
             )
         ),
         wds.shuffle(shuffle_size),
+        wds.map(partial(extract_keys, keys=["hrms", "hrms_latent"])),
     )
     if remove_meta:
         dataset.append(wds.map(remove_meta_data))
@@ -86,18 +95,28 @@ def get_generative_dataloaders(
         drop_last=False,
         pin_memory=pin_memory,
     )
-    dataloader.rename_keys(("hrms", "img"))
     dataloader = dataloader.map(get_image_bands_info)
-    dataloader = dataloader.with_length(10_000)  # 10k iterations of the dataloader
+    # dataloader = dataloader.with_length(10_000)  # 10k iterations of the dataloader
 
     log_print(f"[Pansharpening Dataset]: constructed the dataloader")
 
     return dataset, dataloader
 
 
+# * --- Wids dataset --- #
+
+from src.data.panshap_loader import MultimodalityDataloader
+
+
+class GenerativeMMDataloader(MultimodalityDataloader): ...
+
+
+# * --- Entry function --- #
+
+
 @function_config_to_basic_types
 def get_hyperspectral_img_loaders_with_different_backends_v2(
-    paths: str | list[str],
+    paths: str | list[str] | list[list[str]],
     loader_type: str | None = None,
     # curriculums
     curriculum_type: str | None = None,
@@ -258,41 +277,40 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 loader_kwargs["resample"] = False
             loader_kwargs["epoch_len"] = -1
 
-            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
+            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs_mm(
                 p_lst, loader_kwargs
             )
             log_print(
-                f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n"
-                + "-" * 30
+                f"dataset group {i} gets paths: \n<cyan>[{p_lst}]</>\n" + "-" * 30
             )
 
             if loader_type == "webdataset":
                 log_print("Using webdataset loader")
-                dataset, dataloader = get_hyperspectral_dataloaders(
-                    p_lst, **loader_kwargs
-                )
-            elif loader_type == "wids":
-                log_print("Using wids loader")
-                assert isinstance(p_lst, list) and len(p_lst) == 1, (
-                    "must contain only one json file"
-                )
-                p_lst = p_lst[0]
-                assert isinstance(p_lst, str) and p_lst.endswith(".json"), (
-                    f"wids loader expects a single json file as index_file, but got {p_lst}"
-                )
-                dataset, dataloader = get_hyperspectral_wids_dataloaders(
-                    index_file=p_lst,
-                    **loader_kwargs,
-                )
+                dataset, dataloader = get_generative_dataloaders(p_lst, **loader_kwargs)
+            # elif loader_type == "wids":
+            #     log_print("Using wids loader")
+            #     assert (
+            #         isinstance(p_lst, list) and len(p_lst) == 1
+            #     ), "must contain only one json file"
+            #     p_lst = p_lst[0]
+            #     assert (
+            #         isinstance(p_lst, str) and p_lst.endswith(".json")
+            #     ), f"wids loader expects a single json file as index_file, but got {p_lst}"
+            #     dataset, dataloader = get_hyperspectral_wids_dataloaders(
+            #         index_file=p_lst,
+            #         **loader_kwargs,
+            #     )
+            else:
+                raise ValueError(f"loader_type {loader_type} is not supported")
             datasets.append(dataset)
             dataloaders.append(dataloader)
         # folder loader
-        elif loader_type == "folder":
-            log_print("Using folder loader")
-            assert isinstance(paths, str), f"paths should be a string, but got paths"
-            return only_hyperspectral_img_folder_dataloader(paths, **loader_kwargs)
-        else:
-            raise ValueError(f"Unsupported loader type: {loader_type}")
+        # elif loader_type == "folder":
+        #     log_print("Using folder loader")
+        #     assert isinstance(paths, str), f"paths should be a string, but got paths"
+        #     return only_hyperspectral_img_folder_dataloader(paths, **loader_kwargs)
+        # else:
+        #     raise ValueError(f"Unsupported loader type: {loader_type}")
 
     # prepare for curriculum
     if curriculum_type is not None:
@@ -320,3 +338,35 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     )
 
     return datasets, dataloader
+
+
+if __name__ == "__main__":
+    # path = "data/MMSeg_YREB/[latents,pansharpening_pairs]/MMSeg_YREB_train_part-12_bands-MSI-0000.tar"
+
+    # dataset, dataloader = get_generative_dataloaders(path, batch_size=8, num_workers=0)
+
+    # for sample in dataloader:
+    #     print(sample.keys())
+
+    main_kwargs = {
+        "batch_size": 8,
+        "num_workers": 0,
+    }
+    loader_kwargs = [{}, {}]
+    paths = [
+        [
+            "data/MMSeg_YREB/[latents,pansharpening_pairs]/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
+        ],
+        [
+            "data/MMSeg_YREB/[latents,pansharpening_pairs]/MMSeg_YREB_train_part-12_bands-MSI-0001.tar",
+        ],
+    ]
+    _, loader = get_hyperspectral_img_loaders_with_different_backends_v2(
+        paths,
+        loader_type="webdataset",
+        basic_kwargs=main_kwargs,
+        changed_kwargs_by_loader=loader_kwargs,
+    )
+
+    for sample in loader:
+        print(sample.keys())

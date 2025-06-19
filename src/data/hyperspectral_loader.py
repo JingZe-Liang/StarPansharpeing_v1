@@ -42,9 +42,11 @@ from src.data.codecs import (
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     chained_dataloaders,
+    expand_paths_and_correct_loader_kwargs_mm,
     extract_modality_names,
     flatten_sub_dict,
     generate_wds_config_modify_only_some_kwgs,
+    get_wids_index_json_info,
     img_size_filter,
     may_repeat_channels,
     merge_modalities,
@@ -69,9 +71,17 @@ loader_seed = hash("uestc_ZihanCao_add_my_wechat:iamzihan123") % (2**31)
 loader_generator = torch.Generator().manual_seed(loader_seed)
 
 
+class FunctionDeprecatedWarning(UserWarning):
+    """
+    Custom warning for deprecated functions.
+    """
+
+    pass
+
+
 @deprecated(
     "get_dict_tensor_mapper is deprecated",
-    category=UserWarning,
+    category=FunctionDeprecatedWarning,
 )
 def get_dict_tensor_mapper(to_neg_1_1=True):
     """
@@ -326,6 +336,7 @@ def get_hyperspectral_dataloaders(
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
         empty_check=False,
+        handler=wds.warn_and_continue,
     )
 
     # decode
@@ -1331,77 +1342,6 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     return datasets, dataloader
 
 
-def get_wids_index_json_info(path: str):
-    assert path.endswith(".json"), (
-        f"wids json file should end with .json, but got {path}"
-    )
-    assert os.path.exists(path), (
-        f"wids json file {path} does not exist, please check the path"
-    )
-
-    with open(path, "r") as f:
-        index_d = json.load(f)
-    assert "shardlist" in index_d, (
-        f"wids json file {path} should contain 'shardlist' key, but got {index_d.keys()}"
-    )
-
-    index_info = index_d["shardlist"]
-    n = len(index_info)
-
-    return index_info, n
-
-
-def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs: dict):
-    # Ensure that the number of workers is not greater than the number of shards
-    if isinstance(paths, str):
-        if paths.endswith(".json"):  # is indexed wids json file
-            _, _len = get_wids_index_json_info(paths)
-            paths = [paths]
-        else:
-            paths = list(braceexpand.braceexpand(paths))
-            _len = len(paths)
-    elif isinstance(paths, (list, tuple)):
-        path_exp = []
-        for p in paths:
-            assert isinstance(p, str), (
-                "'paths' should be a list of strings or a string that can be expanded"
-                f"list of {type(p)} is not allowed."
-            )
-            assert not p.endswith(".json"), (
-                "list of paths contains multiple wids json files or "
-                "combination of tar file path and wids json file path, "
-                "please use a list of lists of strings instead. "
-                "If you want to use wids json dataset, "
-                "please use a single json file as index_file."
-            )
-            lst_p = list(braceexpand.braceexpand(p))
-            path_exp.extend(lst_p)
-        _len = len(path_exp)
-        paths = path_exp
-    else:
-        raise ValueError(
-            f"paths should be a string or a list of strings, but got {type(paths)}"
-        )
-
-    assert _len > 0, f"paths should not be empty, but got {paths}"
-
-    for p in paths:
-        # assert tar file exists
-        assert os.path.exists(p), f"tar file or wids json file {p} does not exist"
-
-    # n_worker should less than the number of shards
-    n_workers = loader_kwargs.get("num_workers", 0)
-    if _len < n_workers and n_workers > 0:
-        # set n_workers to the number of shards
-        loader_kwargs["num_workers"] = _len
-        log_print(
-            f"n_workers={n_workers} is larger than the number of shards {_len}, set n_workers={_len}",
-            level="debug",
-        )
-
-    return paths, loader_kwargs
-
-
 if __name__ == "__main__":
     # Test config
     test_wds_path = [
@@ -1436,14 +1376,19 @@ if __name__ == "__main__":
         #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
         #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar",
         # ],
-        ["data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0000.tar"],
+        # ["data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0000.tar"],
+        # ["data/MUSLI/hyper_images/MUSLI_MSI-_bands-px_512-MSI-jp2k-80-0000.tar"]
+        # [
+        #     "data/BigEarthNet_S2/hyper_images_compressed/BigEarthNet_data_{0000..0006}.tar"
+        # ]
+        ["data/HyperGlobal/hyper_images/HyperGlobal450k-xx_bands-px_128_0000.tar"]
     ]
     test_batch_size = 8
-    test_num_workers = 3
+    test_num_workers = 1
     test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type="wids",
+        loader_type="webdataset",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1453,7 +1398,7 @@ if __name__ == "__main__":
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=512,
+        resize_before_transform=None,
         shuffle_within_workers=False,
         resample=True,
         check_channels=False,
@@ -1464,7 +1409,7 @@ if __name__ == "__main__":
         # {},
         # {},
         # {"permute": False},
-        # {},
+        {},
         # {"check_nan": True},
         # {
         #     "img_key": "img_content",
@@ -1476,7 +1421,7 @@ if __name__ == "__main__":
         #     "constraint_size": 256 * 256,
         #     "resize_before_transform": 512,
         # },
-        {},
+        # {},
         # {}
     ]
     curriculum_kwargs = {
@@ -1532,6 +1477,28 @@ if __name__ == "__main__":
         #     break
 
         step_counter.update("train")
+
+        # plot a batch
+        import torchvision.utils as vutils
+
+        img_s = (
+            vutils.make_grid(
+                (img[:8, [32, 15, 8]] + 1) / 2,
+                nrow=4,
+                padding=2,
+                normalize=True,
+            )
+            .permute(1, 2, 0)
+            .cpu()
+            .numpy()
+            * 255.0
+        ).astype(np.uint8)
+
+        import PIL.Image as Image
+
+        Image.fromarray(img_s).save(f"S2_compress_{i}.png")
+        if i == 2:
+            break
 
     # * plot the image size bar image
     # import matplotlib.pyplot as plt

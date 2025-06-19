@@ -22,6 +22,7 @@ def tiff_codec_io(
     planarconfig: str | tifffile.PLANARCONFIG | None = None,
     photometric: str | tifffile.PHOTOMETRIC | None = None,
     compression: str = "zlib",
+    compression_args: dict[str, Any] | None = None,
 ) -> bytes:
     """Encodes a NumPy array into TIFF formatted bytes.
 
@@ -48,6 +49,7 @@ def tiff_codec_io(
             planarconfig=planarconfig,
             photometric=photometric,
             compression=compression,
+            compressionargs=compression_args,
         )
 
         return buffer.getvalue()
@@ -127,64 +129,93 @@ def string_decode_io(string_bytes: bytes) -> str:
 def tiff_decode_io(
     tiff_bytes: bytes,
     use_out_param: bool = True,  # Flag to control using 'out' parameter
+    backend: str = "tifffile",  # Backend to use for TIFF decoding
 ) -> np.ndarray:
     """
     Decodes TIFF formatted bytes into a NumPy array.
     Optionally reads metadata first to pre-allocate memory for the 'out' parameter.
     """
-    __predefined_buf_size = 16 * 1024 * 1024
-    __max_workers = 4
+    # import time
+    # t1 = time.perf_counter()
 
-    if use_out_param:
-        try:
-            # Step 1: Read metadata using TiffFile to get shape and dtype from the first series
-            expected_shape: tuple[int, ...]
-            expected_dtype: np.dtype
-            with io.BytesIO(tiff_bytes) as metadata_buffer:
-                with tifffile.TiffFile(metadata_buffer) as tif:
-                    if not tif.series or not tif.series[0]:
-                        raise ValueError(
-                            "TIFF file contains no series or series[0] is invalid."
-                        )
-                    current_series: tifffile.TiffPageSeries = tif.series[0]
-                    expected_shape = current_series.shape
-                    expected_dtype = np.dtype(
-                        current_series.dtype
-                    )  # Ensure it's a numpy.dtype
+    if backend == "tifffile":
+        __predefined_buf_size = 16 * 1024 * 1024
+        __max_workers = 8
 
-            # Step 2: Pre-allocate the output array
-            output_array: np.ndarray = np.empty(expected_shape, dtype=expected_dtype)
+        if use_out_param:
+            try:
+                # Step 1: Read metadata using TiffFile to get shape and dtype from the first series
+                expected_shape: tuple[int, ...]
+                expected_dtype: np.dtype
+                with io.BytesIO(tiff_bytes) as metadata_buffer:
+                    with tifffile.TiffFile(metadata_buffer) as tif:
+                        if not tif.series or not tif.series[0]:
+                            raise ValueError(
+                                "TIFF file contains no series or series[0] is invalid."
+                            )
+                        current_series: tifffile.TiffPageSeries = tif.series[0]
+                        expected_shape = current_series.shape
+                        expected_dtype = np.dtype(
+                            current_series.dtype
+                        )  # Ensure it's a numpy.dtype
 
-            # Step 3: Read image data into the pre-allocated array
-            # Use a new BytesIO object for imread to ensure the stream is at the beginning
-            with io.BytesIO(tiff_bytes) as data_buffer:
-                tifffile.imread(
-                    data_buffer,
-                    out=output_array,
-                    buffersize=__predefined_buf_size,  # Example buffer size
-                    maxworkers=__max_workers,  # Example max workers
+                # Step 2: Pre-allocate the output array
+                output_array: np.ndarray = np.empty(
+                    expected_shape, dtype=expected_dtype
                 )
-            return output_array
-        except Exception as e:
-            # Fallback to the simpler method if any error occurs during the 'out' optimization path
-            # You might want to log the error 'e' for debugging purposes
-            # print(f"Warning: Failed to use 'out' parameter optimization: {e}. Falling back.")
+
+                # Step 3: Read image data into the pre-allocated array
+                # Use a new BytesIO object for imread to ensure the stream is at the beginning
+                with io.BytesIO(tiff_bytes) as data_buffer:
+                    tifffile.imread(
+                        data_buffer,
+                        out=output_array,
+                        buffersize=__predefined_buf_size,  # Example buffer size
+                        maxworkers=__max_workers,  # Example max workers
+                    )
+                # t2 = time.perf_counter()
+                # log_print(
+                #     "tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug"
+                # )
+                return output_array
+            except Exception as e:
+                # Fallback to the simpler method if any error occurs during the 'out' optimization path
+                # You might want to log the error 'e' for debugging purposes
+                # print(f"Warning: Failed to use 'out' parameter optimization: {e}. Falling back.")
+                with io.BytesIO(tiff_bytes) as buffer:
+                    img: np.ndarray = tifffile.imread(
+                        buffer,
+                        buffersize=__predefined_buf_size,
+                        maxworkers=__max_workers,
+                    )
+                # t2 = time.perf_counter()
+                # log_print(
+                #     "tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug"
+                # )
+                return img
+        else:
+            # Original behavior if use_out_param is False
             with io.BytesIO(tiff_bytes) as buffer:
                 img: np.ndarray = tifffile.imread(
                     buffer,
                     buffersize=__predefined_buf_size,
                     maxworkers=__max_workers,
                 )
+            # t2 = time.perf_counter()
+            # log_print("tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug")
             return img
     else:
-        # Original behavior if use_out_param is False
-        with io.BytesIO(tiff_bytes) as buffer:
-            img: np.ndarray = tifffile.imread(
-                buffer,
-                buffersize=__predefined_buf_size,
-                maxworkers=__max_workers,
-            )
-        return img
+        # use nvimgcodec backend
+
+        # from nvidia.nvimgcodec import Decoder, DecodeSource
+        # decoder = Decoder()
+        # data = DecodeSource(tiff_bytes)
+        # img = decoder.decode(data)
+
+        raise NotImplementedError(
+            f"TIFF decoding with backend '{backend}' is not implemented. "
+            "Please use 'tifffile' backend."
+        )
 
 
 def mat_decode_io(mat_bytes: bytes) -> Dict[str, np.ndarray]:
@@ -266,7 +297,7 @@ def wids_image_decode(
     sample: dict[str, Any],
     read_caption=False,
     read_name=False,
-    norm=True,
+    to_neg_1_1=True,
     permute=True,
     resize: int | tuple[int, int] | None = None,
 ):
@@ -281,6 +312,7 @@ def wids_image_decode(
                 del sample[k]
             else:
                 raise ValueError(f"Unsupported file type for key {k}: {sample[k]}")
+    # rs5m compatibility
     if ".img_content" in sample:
         sample["img"] = img_decode_io(sample[".img_content"].getvalue())
         del sample[".img_content"]
@@ -292,15 +324,21 @@ def wids_image_decode(
         if read_name:
             sample["img_name"] = string_decode_io(sample[".img_name"].getvalue())
         del sample[".img_name"]
+
     if "img" not in sample:
         return sample
     else:
         if sample["img"] is None:
             raise ValueError("Decoded image is None, possibly due to decoding error.")
 
-        img = sample["img"].astype(np.float32) / 255.0
-        if norm:
-            sample["img"] = img * 2 - 1  # to [-1, 1]
+        img = sample["img"].astype(np.float32)
+        _img_max = img.max()
+        if _img_max < 1e-4:
+            img = np.zeros_like(img) if not to_neg_1_1 else np.ones_like(img) / 2
+        else:
+            img = img / (_img_max + 1e-6)
+        if to_neg_1_1:
+            sample["img"] = (img * 2 - 1).clip(-1.0, 1.0)  # to [-1, 1]
         if permute:
             # Permute the image dimensions from HWC to CHW
             sample["img"] = np.transpose(sample["img"], (2, 0, 1))

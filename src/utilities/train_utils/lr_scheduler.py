@@ -101,10 +101,9 @@ def get_cosine_schedule_reduced_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
-import matplotlib.pyplot as plt
-
-
 def __plot_lr_schedule():
+    import matplotlib.pyplot as plt
+
     # 模拟参数
     num_warmup_steps = 500
     num_training_steps = 5000
@@ -157,5 +156,6 @@ def __plot_lr_schedule():
     plt.savefig("lr_schedule.png")
 
 
-# 调用函数绘制曲线
-__plot_lr_schedule()
+if __name__ == "__main__":
+    # 调用函数绘制曲线
+    __plot_lr_schedule()

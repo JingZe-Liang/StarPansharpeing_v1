@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 import multiprocessing as mp
 
+from src.utilities.logging.print import log_print
+
 
 # 设置日志
 logging.basicConfig(
@@ -142,7 +144,7 @@ class BigEarthNetProcessor:
 
         return tensor_data
 
-    def save_tensor(self, tensor_data, output_path):
+    def save_tensor(self, tensor_data, output_path, compression=True):
         """
         保存张量数据
 
@@ -157,14 +159,32 @@ class BigEarthNetProcessor:
             # logger.info(f"Saved tensor to {output_path}, shape: {tensor.shape}")
 
             # save in tif files
-            tifffile.imwrite(output_path, tensor_data)
+            if not compression:
+                tifffile.imwrite(output_path, tensor_data)
+            else:
+                log_print("save tiff file with jpeg2000 compression", once=True)
+                tifffile.imwrite(
+                    output_path,
+                    tensor_data,
+                    compression="jpeg2000",
+                    compressionargs={
+                        "level": 80,
+                        "codecformat": "jp2",
+                        "reversible": False,
+                    },
+                )
             # logger.info(f"Saved tensor to {output_path}, shape: {tensor_data.shape}")
 
         except Exception as e:
             logger.error(f"Error saving tensor to {output_path}: {e}")
 
     def process_dataset(
-        self, input_dir, output_dir, tile_dirs=None, process_n: int = 1
+        self,
+        input_dir,
+        output_dir,
+        tile_dirs=None,
+        process_n: int = 1,
+        compression=True,
     ):
         """
         处理整个数据集
@@ -205,7 +225,7 @@ class BigEarthNetProcessor:
 
                 # 保存张量
                 output_file = output_path / f"{patch_name}.tif"
-                self.save_tensor(tensor_data, output_file)
+                self.save_tensor(tensor_data, output_file, compression)
 
                 total_processed += 1
 
@@ -699,7 +719,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/HardDisk/ZiHanCao/datasets/Multispectral-BigEarthNet/S2/S2_tiff",
+        default="/HardDisk/ZiHanCao/datasets/Multispectral-BigEarthNet/S2/S2_tiff_jp2k_80",
         help="Output directory for tensor files",
     )
     parser.add_argument(
