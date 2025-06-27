@@ -79,7 +79,7 @@ tokenizer:
   vf_on_z_or_module: module
 
   act_checkpoint: true
-  uni_tokenizer_path: #runs/stage1_cosmos/2025-05-30_22-48-10_cosmos_f8c16p4_unified_hyperspectral_vf_loss/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: #runs/stage1_cosmos/2025-06-15_17-11-45_cosmos_f8c16p4_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
   loading_type: #pretrained
   use_channel_drop: false
   enc_moe: false
@@ -97,6 +97,7 @@ tokenizer:
   padding_mode: reflect # for boundary?
 
   latent_channels: 16
+  z_channels: 16
 
   # channel_drop_config:
   #   learnable: false
@@ -117,7 +118,7 @@ ema:
   update_every: 2
 
 train:
-  tokenizer_name: uni_cosmos_f8c16p${tokenizer.patch_size}
+  tokenizer_name: uni_cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}
   proj_dir: runs/stage1_cosmos
   finetune_strategy: finetune_all # dcae_refine_decoder_head
   max_grad_norm: 0.03
@@ -127,8 +128,8 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: /Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/runs/stage1_cosmos/2025-06-15_01-22-15_cosmos_f8c16p4_unified_hyperspectral_uni/checkpoints/checkpoint_9
-  ema_load_path:
+  resume_path: #runs/stage1_cosmos/2025-06-19_23-56-29_cosmos_f8c8p1_unified_hyperspectral_uni/checkpoints/checkpoint_13
+  ema_load_path: runs/stage1_cosmos/2025-06-15_17-11-45_cosmos_f8c16p4_unified_hyperspectral_uni/ema
   compile_model: false
   only_load_tokenizer: false
 
@@ -208,7 +209,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.latent_channels}p4_${dataset.used}_uni
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}_uni
     log_with_time: True
     visualize_every: 500
     log_every: 10

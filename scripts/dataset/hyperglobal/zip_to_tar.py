@@ -1,6 +1,7 @@
 # unzip mat file into tiff file into tar file
 import io
 import os
+import tarfile
 import zipfile
 
 import webdataset as wds
@@ -10,9 +11,42 @@ from tqdm import tqdm
 from src.data.codecs import tiff_codec_io
 
 
-def zipfile_to_tarfile(zip_file_path, tar_file_writer: wds.ShardWriter, tbar=True):
+def targz_file_to_tarfile(
+    tar_gz_file_path: str, tar_file_writer: wds.ShardWriter, use_tbar=True
+):
+    file = tarfile.open(tar_gz_file_path, "r:gz")
+    if use_tbar:
+        tbar = tqdm(file)
+    else:
+        tbar = file
+
+    for member in tbar:
+        if (
+            member.isfile()
+            and member.name.endswith(".tiff")
+            or member.name.endswith(".tif")
+        ):
+            string = f"Processing {member.name}, "
+            if use_tbar:
+                tbar.set_description(string)
+            else:
+                print(string)
+
+            # Extract the file content
+            file_content = file.extractfile(member).read()
+
+            # Write to the shard writer
+            # tar_file_writer.write(
+            #     {
+            #         "__key__": "-".join(os.path.split(member.name)).replace(".tiff", "").replace(".tif", ""),
+            #         "img.tiff": file_content,
+            #     }
+            # )
+
+
+def zipfile_to_tarfile(zip_file_path, tar_file_writer: wds.ShardWriter, use_tbar=True):
     with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
-        if tbar:
+        if use_tbar:
             tbar = tqdm(zip_ref.infolist())
         else:
             tbar = zip_ref.infolist()
@@ -31,7 +65,7 @@ def zipfile_to_tarfile(zip_file_path, tar_file_writer: wds.ShardWriter, tbar=Tru
                 img = mat_data["img"]
                 string += str(img.shape)
 
-                if tbar:
+                if use_tbar:
                     tbar.set_description(string)
                 else:
                     print(string)
@@ -58,7 +92,7 @@ if __name__ == "__main__":
     from braceexpand import braceexpand
 
     shard_pattern = (
-        "data/HyperGlobal/hyper_images/4/HyperGlobal450k-xx_bands-px_128_%04d.tar"
+        "data/Hyspectnet11k/hyper_images/Hyspectnet11k-xx_bands-px_128_%04d.tar"
     )
 
     Path(shard_pattern).parent.mkdir(parents=True, exist_ok=True)
@@ -66,15 +100,15 @@ if __name__ == "__main__":
         shard_pattern,
         maxsize=4 * 1024 * 1024 * 1024,  # 4G
     )
-    # _zipfiles = [
-    #     "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part{4..5}.zip",
-    #     "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/GF5-part{1..5}.zip",
-    # ]
-    # zipfiles = []
-    # for zipf in _zipfiles:
-    #     zipfiles.extend(braceexpand(zipf))
+    _zipfiles = [
+        "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part{1..5}.zip",
+        "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/GF5-part{1..5}.zip",
+    ]
+    zipfiles = []
+    for zipf in _zipfiles:
+        zipfiles.extend(braceexpand(zipf))
 
-    zipfiles = ["/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part4.zip"]
+    # zipfiles = ["/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part4.zip"]
 
     for zip_file_path in zipfiles:
         print(f"Processing {zip_file_path}")

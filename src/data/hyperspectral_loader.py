@@ -42,7 +42,7 @@ from src.data.codecs import (
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     chained_dataloaders,
-    expand_paths_and_correct_loader_kwargs_mm,
+    expand_paths_and_correct_loader_kwargs,
     extract_modality_names,
     flatten_sub_dict,
     generate_wds_config_modify_only_some_kwgs,
@@ -187,18 +187,22 @@ def large_image_resizer_clipper(
     op_for_large: str = "clip",
 ):
     if isinstance(tgt_size, int):
-        tgt_size: tuple[int, int] = to_n_tuple(tgt_size, 2)
+        tgt_size = to_n_tuple(tgt_size, 2)
 
     if op_for_large == "clip":
-        clipper = RandomResizedCrop(tgt_size, scale=(0.5, 1.0), ratio=(0.75, 1.333))
+        clipper = RandomResizedCrop(
+            tgt_size, scale=(0.6, 1.0), ratio=(0.75, 1.333), p=1.0, keepdim=True
+        )
     elif op_for_large == "resize":
-        clipper = Resize(tgt_size, antialias=True)
+        clipper = Resize(tgt_size, antialias=True, p=1, keepdim=True)
     else:
         raise ValueError(f"op_for_large {op_for_large} not supported")
 
-    def dict_mapper(sample: dict):
-        sample["img"] = clipper(sample["img"])
-        return sample
+    # def dict_mapper(sample: dict):
+    #     sample["img"] = clipper(sample["img"])
+    #     return sample
+    def dict_mapper(img: torch.Tensor):
+        return clipper(img)
 
     return dict_mapper
 
@@ -345,6 +349,7 @@ def get_hyperspectral_dataloaders(
         # webdataset read safetensors in tar, can not suit the memmap for fast loading
         wds.handle_extension("safetensors", safetensors_decode_io),
         wds.handle_extension("jpg png img_content", img_decode_io),
+        "torch",
     ]
     dataset = dataset.decode(*default_decoder)
 
@@ -360,7 +365,7 @@ def get_hyperspectral_dataloaders(
 
     # rename key
     if img_key != "img":
-        dataset = dataset.rename_keys(("img", img_key))
+        dataset = dataset.rename_keys(("img", img_key), keep_unselected=True)
 
     # pass the minimal size or range of the image
     if constraint_size is not None:
@@ -400,11 +405,15 @@ def get_hyperspectral_dataloaders(
     # resize
     if resize_before_transform is not None:
         dataset = dataset.map_dict(
-            img=Resize(
-                to_n_tuple(resize_before_transform, 2),  # type: ignore
-                side="short",
-                keepdim=True,
+            img=large_image_resizer_clipper(
+                tgt_size=resize_before_transform,
+                op_for_large="clip",
             )
+            # Resize(
+            #     to_n_tuple(resize_before_transform, 2),  # type: ignore
+            #     side="short",
+            #     keepdim=True,
+            # )
         )
 
     dataset = dataset.batched(
@@ -850,7 +859,10 @@ def get_hyperspectral_wids_dataloaders(
             resize_before_transform = to_n_tuple(  # type: ignore
                 resize_before_transform, 2
             )
-        resizer = Resize(resize_before_transform, side="short", keepdim=True)
+        # resizer = Resize(resize_before_transform, side="short", keepdim=True)
+        resizer = large_image_resizer_clipper(
+            tgt_size=resize_before_transform, op_for_large="clip"
+        )
         dataloader = dataloader.map_dict(
             img=resizer  # [c, h, w]
         )
@@ -1377,15 +1389,41 @@ if __name__ == "__main__":
         #     # "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar",
         # ],
         # ["data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0000.tar"],
-        # ["data/MUSLI/hyper_images/MUSLI_MSI-_bands-px_512-MSI-jp2k-80-0000.tar"]
+        # ["data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-0000.tar"]
+        # [
+        #     "data/DOTA_v1/hyper_images/DOTA_v1-3_bands-px_1024-{0000..0001}.tar",
+        #     "data/DIOR_RSVG_Dataset/hyper_images/DIOR_RSVG_3_bands-px_800-RGB-jp2k-80-0000.tar",
+        #     "data/InriaAerialLabelingDataset/hyper_images/InriaAerialLabelingDataset-3_bands-px_512-RGB-jp2k-80-0000.tar",
+        #     "data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-0000.tar",
+        #     "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar",
+        #     "data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar",
+        #     "data/RSCaptions/hyper_images/RSCaptionCollection-hyper_images-0000.tar",
+        #     "data/RSCaptions/hyper_images/RSCaptionCollection-RSICD-0000.tar",
+        #     "data/RSCaptions/hyper_images/RSCaptionCollection-RSITMD-0000.tar",
+        #     "data/RSCaptions/hyper_images/RSCaptionCollection-Sydney_caption-0000.tar",
+        #     "data/RSCaptions/hyper_images/RSCaptionCollection-UCM-0000.tar",
+        #     "data/UDD/hyper_images/UDD-3_bands-px_512-RGB-jp2k-95-0000.tar",
+        #     "data/VDD/hyper_images/VDD_3_bands-px_2k-RGB-0000.tar",
+        #     "data/xView2/hyper_images/xView2-3_bands-px_1024-RGB-jp2k-80-0000.tar",
+        #     "data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-{0000..0010}.tar",
+        #     "data/miniFrance/miniFrance_test_3_bands-px_1024-MSI-{0000..0017}.tar",
+        #   "data/ERA_UAV_Video_Dataset/hyper_images/ERA_UAV_Video_Dataset_key_frames_3_bands-px_512-RGB-jp2k-80-0000.tar",
+        # ],
         # [
         #     "data/BigEarthNet_S2/hyper_images_compressed/BigEarthNet_data_{0000..0006}.tar"
         # ]
-        ["data/HyperGlobal/hyper_images/HyperGlobal450k-xx_bands-px_128_0000.tar"]
+        # [
+        #     "data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0000..0017}.tar"
+        # ],
+        # [
+        #     "data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_0000.tar"
+        # ]  # [39, 32, 16]
+        [p.as_posix() for p in Path("data/MMOT/train").glob("*.tar")]
+        + [p.as_posix() for p in Path("data/MMOT/val").glob("*.tar")]
     ]
     test_batch_size = 8
-    test_num_workers = 1
-    test_shuffle_size = -1
+    test_num_workers = 0
+    test_shuffle_size = 100
 
     loader_kwargs = dict(
         loader_type="webdataset",
@@ -1393,13 +1431,13 @@ if __name__ == "__main__":
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
         to_neg_1_1=True,
-        transform_prob=0.0,
+        transform_prob=1.0,
         random_apply=(1, 2),
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=None,
-        shuffle_within_workers=False,
+        resize_before_transform=512,
+        shuffle_within_workers=True,
         resample=True,
         check_channels=False,
     )
@@ -1409,7 +1447,8 @@ if __name__ == "__main__":
         # {},
         # {},
         # {"permute": False},
-        {},
+        # {},
+        {"img_key": "npy"},
         # {"check_nan": True},
         # {
         #     "img_key": "img_content",
@@ -1483,7 +1522,8 @@ if __name__ == "__main__":
 
         img_s = (
             vutils.make_grid(
-                (img[:8, [32, 15, 8]] + 1) / 2,
+                (img[:8, [4, 3, 2]] + 1) / 2,
+                # img / 2 + 0.5,
                 nrow=4,
                 padding=2,
                 normalize=True,
@@ -1497,8 +1537,8 @@ if __name__ == "__main__":
         import PIL.Image as Image
 
         Image.fromarray(img_s).save(f"S2_compress_{i}.png")
-        if i == 2:
-            break
+        if i == 6:
+            exit(0)
 
     # * plot the image size bar image
     # import matplotlib.pyplot as plt

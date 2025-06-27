@@ -2,12 +2,12 @@ used: unified_hyperspectral
 dataset_names_to_img_size:
   unified_hyperspectral: 512
 
-channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 224, 242, 368]}
+channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]}
 img_size: 512
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 
 train_paths:
-  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0006}.tar
   - - data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar
   - - data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar
   - - data/MDAS-EeteS/MDAS-EeteS-242_bands-px_256-MSI-0000.tar
@@ -26,15 +26,160 @@ train_paths:
     - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
   - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
-  - - /HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar
-    - /HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar
-    - /HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0031}.tar
-    - /HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0031}.tar
+  - - data/RS5M/train/pub11-train-{0000..0031}.tar
+    - data/RS5M/val/pub11-val-{0000..0031}.tar
+    - data/RS5M/train/rs3-train-{0000..0031}.tar
+    - data/RS5M/val/rs3-val-{0000..0031}.tar
   - - data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-{0000..0010}.tar
     - data/miniFrance/miniFrance_test_3_bands-px_1024-MSI-{0000..0017}.tar
+    - data/DOTA_v1/hyper_images/DOTA_v1-3_bands-px_1024-{0000..0001}.tar
+    - data/DIOR_RSVG_Dataset/hyper_images/DIOR_RSVG_3_bands-px_800-RGB-jp2k-80-0000.tar
+    - data/InriaAerialLabelingDataset/hyper_images/InriaAerialLabelingDataset-3_bands-px_512-RGB-jp2k-80-0000.tar
+    - data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-0000.tar
+    - data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar
+    - data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-hyper_images-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-RSICD-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-RSITMD-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-Sydney_caption-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-UCM-0000.tar
+    - data/UDD/hyper_images/UDD-3_bands-px_512-RGB-jp2k-95-0000.tar
+    - data/VDD/hyper_images/VDD_3_bands-px_2k-RGB-0000.tar
+    - data/xView2/hyper_images/xView2-3_bands-px_1024-RGB-jp2k-80-0000.tar
+    - data/ERA_UAV_Video_Dataset/hyper_images/ERA_UAV_Video_Dataset_key_frames_3_bands-px_512-RGB-jp2k-80-0000.tar
+  - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0000..0017}.tar
+  - - data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_{0000..0011}.tar
+  - - data/MMOT/train/data23-2.tar
+    - data/MMOT/train/data23-3.tar
+    - data/MMOT/train/data25-1.tar
+    - data/MMOT/train/data25-2.tar
+    - data/MMOT/train/data27-2.tar
+    - data/MMOT/train/data27-3.tar
+    - data/MMOT/train/data30-1.tar
+    - data/MMOT/train/data30-6.tar
+    - data/MMOT/train/data30-7.tar
+    - data/MMOT/train/data30-8.tar
+    - data/MMOT/train/data35-1.tar
+    - data/MMOT/train/data36-1.tar
+    - data/MMOT/train/data36-2.tar
+    - data/MMOT/train/data36-3.tar
+    - data/MMOT/train/data36-6.tar
+    - data/MMOT/train/data36-7.tar
+    - data/MMOT/train/data36-8.tar
+    - data/MMOT/train/data36-9.tar
+    - data/MMOT/train/data37-3.tar
+    - data/MMOT/train/data37-4.tar
+    - data/MMOT/train/data37-5.tar
+    - data/MMOT/train/data37-6.tar
+    - data/MMOT/train/data37-7.tar
+    - data/MMOT/train/data37-8.tar
+    - data/MMOT/train/data37-9.tar
+    - data/MMOT/train/data39-4.tar
+    - data/MMOT/train/data39-5.tar
+    - data/MMOT/train/data40-1.tar
+    - data/MMOT/train/data40-2.tar
+    - data/MMOT/train/data42-4.tar
+    - data/MMOT/train/data42-5.tar
+    - data/MMOT/train/data43-1.tar
+    - data/MMOT/train/data43-2.tar
+    - data/MMOT/train/data43-3.tar
+    - data/MMOT/train/data43-4.tar
+    - data/MMOT/train/data43-5.tar
+    - data/MMOT/train/data43-6.tar
+    - data/MMOT/train/data43-7.tar
+    - data/MMOT/train/data43-8.tar
+    - data/MMOT/train/data44-1.tar
+    - data/MMOT/train/data44-2.tar
+    - data/MMOT/train/data44-3.tar
+    - data/MMOT/train/data46-10.tar
+    - data/MMOT/train/data46-1.tar
+    - data/MMOT/train/data46-2.tar
+    - data/MMOT/train/data46-3.tar
+    - data/MMOT/train/data46-4.tar
+    - data/MMOT/train/data46-5.tar
+    - data/MMOT/train/data46-6.tar
+    - data/MMOT/train/data46-7.tar
+    - data/MMOT/train/data46-8.tar
+    - data/MMOT/train/data46-9.tar
+    - data/MMOT/train/data48-2.tar
+    - data/MMOT/train/data48-3.tar
+    - data/MMOT/train/data49-1.tar
+    - data/MMOT/train/data50-1.tar
+    - data/MMOT/train/data50-2.tar
+    - data/MMOT/train/data50-3.tar
+    - data/MMOT/train/data50-4.tar
+    - data/MMOT/train/data50-5.tar
+    - data/MMOT/train/data51-1.tar
+    - data/MMOT/train/data51-2.tar
+    - data/MMOT/train/data51-3.tar
+    - data/MMOT/train/data51-4.tar
+    - data/MMOT/train/data51-5.tar
+    - data/MMOT/train/data51-6.tar
+    - data/MMOT/train/data52-1.tar
+    - data/MMOT/train/data52-2.tar
+    - data/MMOT/train/data52-3.tar
+    - data/MMOT/train/data52-4.tar
+    - data/MMOT/train/data52-5.tar
+    - data/MMOT/train/data52-6.tar
+    - data/MMOT/train/data52-7.tar
+    - data/MMOT/train/data52-8.tar
+    - data/MMOT/train/data52-9.tar
+    # val
+    - data/MMOT/test/data23-1.tar
+    - data/MMOT/test/data28-3.tar
+    - data/MMOT/test/data30-2.tar
+    - data/MMOT/test/data31-1.tar
+    - data/MMOT/test/data36-10.tar
+    - data/MMOT/test/data36-5.tar
+    - data/MMOT/test/data37-2.tar
+    - data/MMOT/test/data40-3.tar
+    - data/MMOT/test/data42-2.tar
+    - data/MMOT/test/data47-2.tar
+    - data/MMOT/test/data24-1.tar
+    - data/MMOT/test/data28-4.tar
+    - data/MMOT/test/data30-3.tar
+    - data/MMOT/test/data33-1.tar
+    - data/MMOT/test/data36-11.tar
+    - data/MMOT/test/data37-10.tar
+    - data/MMOT/test/data39-1.tar
+    - data/MMOT/test/data40-4.tar
+    - data/MMOT/test/data42-3.tar
+    - data/MMOT/test/data47-3.tar
+    - data/MMOT/test/data27-1.tar
+    - data/MMOT/test/data28-5.tar
+    - data/MMOT/test/data30-4.tar
+    - data/MMOT/test/data34-1.tar
+    - data/MMOT/test/data36-12.tar
+    - data/MMOT/test/data37-11.tar
+    - data/MMOT/test/data39-2.tar
+    - data/MMOT/test/data40-5.tar
+    - data/MMOT/test/data46-11.tar
+    - data/MMOT/test/data47-4.tar
+    - data/MMOT/test/data28-1.tar
+    - data/MMOT/test/data28-6.tar
+    - data/MMOT/test/data30-5.tar
+    - data/MMOT/test/data34-2.tar
+    - data/MMOT/test/data36-13.tar
+    - data/MMOT/test/data37-12.tar
+    - data/MMOT/test/data39-3.tar
+    - data/MMOT/test/data41-1.tar
+    - data/MMOT/test/data46-12.tar
+    - data/MMOT/test/data48-1.tar
+    - data/MMOT/test/data28-2.tar
+    - data/MMOT/test/data30-10.tar
+    - data/MMOT/test/data30-9.tar
+    - data/MMOT/test/data34-3.tar
+    - data/MMOT/test/data36-4.tar
+    - data/MMOT/test/data37-1.tar
+    - data/MMOT/test/data39-6.tar
+    - data/MMOT/test/data42-1.tar
+    - data/MMOT/test/data47-1.tar
+    - data/MMOT/test/data49-2.tar
+
+  # - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 val_paths:
-  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0101.tar
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0006.tar
   - - data/TUM_128/hyper_images/TUM_128_data_0006.tar
   - - data_local/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
   - - data_local/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
@@ -45,26 +190,33 @@ val_paths:
   - - data_local/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
   - - data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar
-  - - /HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0030..0031}.tar
-    - /HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-0030.tar
+  - - data/RS5M/val/pub11-val-{0030..0031}.tar
+    - data/RS5M/val/rs3-val-0030.tar
   - - data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0010.tar
+  - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_0017.tar
+  - - data/UDD/hyper_images/UDD-3_bands-px_512-RGB-jp2k-95-0000.tar
+    - data/RSCaptions/hyper_images/RSCaptionCollection-RSITMD-0000.tar
+  - - data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_0011.tar
+  - - data/MMOT/test/data47-1.tar
+    - data/MMOT/test/data49-2.tar
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 18 # BigEarthNet_S2
+  - batch_size: 16 # BigEarthNet_S2
     permute: false
   - batch_size: 12 # TUM_128
+    num_workers: 0
   - batch_size: 5 # MDAS-HySpex
     num_workers: 0
   - batch_size: 5 # MDAS-EeteS
     num_workers: 0
-  - batch_size: 18 # MMSeg_YREB
-  - batch_size: 18 # DFC_2020
-  - batch_size: 18 # WorldView3
-  - batch_size: 18 # QuickBird
-  - batch_size: 18 # WorldView2
-  - batch_size: 18 # WorldView4
-  - batch_size: 18 # IKONOS
+  - batch_size: 16 # MMSeg_YREB
+  - batch_size: 16 # DFC_2020
+  - batch_size: 16 # WorldView3
+  - batch_size: 16 # QuickBird
+  - batch_size: 16 # WorldView2
+  - batch_size: 16 # WorldView4
+  - batch_size: 16 # IKONOS
   - batch_size: 5 # OHS
   - batch_size: 5 # Houston
   - batch_size: 5 # DCF_2019
@@ -77,39 +229,19 @@ train_changed_kwargs_by_loader:
     constraint_size: 65536
     resize_before_transform: 512
     num_workers: 0
-  - batch_size: 1 # miniFrance
+  - batch_size: 2 # miniFrance and other
     num_workers: 0
-
-  ## not use act_ckpt
-  # - batch_size: 9
-  # - batch_size: 3
-  # - batch_size: 3
-  # - batch_size: 3
-  # - batch_size: 9
-  # - batch_size: 3
-  # - batch_size: 3
-  # - batch_size: 3
-  # - batch_size: 9
-  # - batch_size: 9
-  # - batch_size: 9
-  # - batch_size: 9
-  # - batch_size: 9
-
-  ## no moe type
-  # - batch_size: 10
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 10
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 4
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 10
-  # - batch_size: 6
+    resize_before_transform: 768
+  - batch_size: 16 # HyperGlobal
+    num_workers: 0
+  - batch_size: 8
+    num_workers: 0
+  - batch_size: 4
+    num_workers: 0
+    resize_before_transform: 512
+    img_key: npy
+  # - batch_size: 1 # MUSLI (512 pixel)
+  #   num_workers: 0
 
 val_changed_kwargs_by_loader:
   - batch_size: 6
@@ -124,13 +256,19 @@ val_changed_kwargs_by_loader:
   - batch_size: 6
   - batch_size: 6
   - batch_size: 6
-  - batch_size: 6
+  - batch_size: 6 # RS5M
     img_key: img_content
     constraint_size: 65536
     resize_before_transform: 512
-    num_workers: 0
-  - batch_size: 2
-    num_workers: 0
+  - batch_size: 4 # miniFrance
+    resize_before_transform: 768
+  - batch_size: 6  # hyperglobal
+  - batch_size: 6 # rscaption-collection
+    resize_before_transform: 512
+  - batch_size: 6 # hyspecnet-11k
+  - batch_size: 6 # MMOT
+    resize_before_transform: 512
+    img_key: npy
 
 train_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
@@ -138,35 +276,62 @@ train_loader:
   paths: ${dataset.train_paths}
   basic_kwargs:
     shuffle_size: -1
-    num_workers: 1
+    num_workers: 0
     resample: true
-    prefetch_factor: 1
+    prefetch_factor: 0
     shuffle_within_workers: false
   changed_kwargs_by_loader: ${dataset.train_changed_kwargs_by_loader}
   curriculum_type: linear
   curriculum_kwargs:
     total_steps: 500_000 #${training.max_steps}
     start_prob:
+      - 0.8  # BigEarthNet_S2
+      - 0.3  # TUM
+      - 0.3  # MDAS-HySpex
+      - 0.3  # MDAS-EeteS
+      - 0.2  # MMSeg_YREB
+      - 0.3  # DFC_2020
+      - 0.2  # WorldView3
+      - 0.2  # QuickBird
+      - 0.2  # WorldView2
+      - 0.2  # WorldView4
+      - 0.2  # IKONOS
+      - 0.3  # OHS
+      - 0.1  # Houston
+      - 0.3  # DCF_2019
+      - 0.3  # GID-GF2
+      - 0.2  # MDAS-Optical
+      - 0.2  # DryadHyper
+      - 2.5  # RS5M, relative large value (logits) to sample this dataset
+      - 2.0  # miniFrance
+      - 1.2  # HyperGlobal450k
+      - 1.2  # hyspecnet11k
+      - 1.6  # MMOT
+      # - 0.2 # MUSLI
+    end_prob:
+      - 0.8
+      - 0.4
+      - 0.4
+      - 0.4
       - 0.3
       - 0.3
       - 0.3
       - 0.3
-      - 0.2
-      - 0.1
-      - 0.2
-      - 0.2
-      - 0.2
-      - 0.2
-      - 0.2
-      - 0.2
-      - 0.1
-      - 0.1
-      - 0.1
       - 0.3
       - 0.3
-      - 1.5 # relative large value (logits) to sample this dataset
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.3
+      - 0.3
+      - 1.2 # relative large value (logits) to sample this dataset
+      - 1.8
+      - 0.6
       - 1.0
-    end_prob: ${eval:"[0.5]*19"}
+      - 1.0
+      # - 0.2
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends

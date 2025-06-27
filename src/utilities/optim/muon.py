@@ -6,7 +6,7 @@ https://github.com/NVIDIA/Megatron-LM/pull/1428/files/f432fbe45c169aeb5a0805ff6f
 """
 
 import math
-from typing import Iterable
+from typing import Iterable, cast
 
 import torch
 from loguru import logger
@@ -27,6 +27,44 @@ except ImportError:
     )
 
 _cuda_dim_in_min = 8
+__abc_s_type = "su"
+
+if __abc_s_type == "su":  # JianlinSu's abc_s
+    abc_s = [
+        (3.86230469, -8.11132812, 4.89062500),
+        (3.64746094, -6.52441406, 3.38183594),
+        (3.70996094, -6.34667969, 3.13574219),
+        (3.92480469, -6.23535156, 2.83789062),
+        (2.61425781, -2.95800781, 1.13476562),
+        (2.12109375, -1.79003906, 0.66601562),
+    ]
+elif __abc_s_type == "su2":  # JianlinSu's abc_s version2
+    abc_s = torch.tensor(
+        [
+            (8.287212018145622, -23.59588651909882, 17.300387312530923),
+            (4.107059111542197, -2.9478499167379084, 0.54484310829266),
+            (3.9486908534822938, -2.908902115962947, 0.5518191394370131),
+            (3.3184196573706055, -2.488488024314878, 0.5100489401237208),
+            (2.3006520199548186, -1.6689039845747518, 0.4188073119525678),
+            (1.8913014077874002, -1.2679958271945908, 0.37680408948524996),
+            (1.875, -1.25, 0.375),
+        ]
+    ).to(torch.float64)
+    denorm = torch.tensor([1.01, 1.01**3, 1.01**5])
+    abc_s = abc_s / denorm[None]
+    abc_s = abc_s.detach().cpu().numpy().tolist()  # convert to list for compatibility
+elif __abc_s_type == "you":  # YouJiaChen's abc_s
+    # Only for 5 NS steps
+    abc_s = [
+        (4.0848, -6.8946, 2.9270),
+        (3.9505, -6.3029, 2.6377),
+        (3.7418, -5.5913, 2.3037),
+        (2.8769, -3.1427, 1.2046),
+        (2.8366, -3.0525, 1.2012),
+    ]
+else:
+    raise ValueError(f"Unknown abc_s type: {__abc_s_type}")
+abc_s = cast(list[list], abc_s)
 
 
 # This code snippet is a modified version adapted from the following GitHub repository:
@@ -67,7 +105,9 @@ def zeropower_via_newtonschulz5(G, steps: int):
 
 
 @torch.compile
-def zeropower_via_newtonschulz6_diff_abc(G, steps: int = 6, norm=False):
+def zeropower_via_newtonschulz6_diff_abc(
+    G, steps: int = 6, norm=False, ns_dtype=torch.bfloat16
+):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -92,17 +132,9 @@ def zeropower_via_newtonschulz6_diff_abc(G, steps: int = 6, norm=False):
     #     (2172, -1833, 682),
     # ]) / 1024
 
-    abc_s = [
-        [3.86230469, -8.11132812, 4.89062500],
-        [3.64746094, -6.52441406, 3.38183594],
-        [3.70996094, -6.34667969, 3.13574219],
-        [3.92480469, -6.23535156, 2.83789062],
-        [2.61425781, -2.95800781, 1.13476562],
-        [2.12109375, -1.79003906, 0.66601562],
-    ]
+    global abc_s, __abc_s_type
 
-    # a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    X = G.to(dtype=ns_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
@@ -110,8 +142,14 @@ def zeropower_via_newtonschulz6_diff_abc(G, steps: int = 6, norm=False):
     eps = 1e-8  # 1e-7 as eps by default
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
     # Perform the NS iterations
-    for i in range(steps):
-        a, b, c = abc_s[i]
+    # if __abc_s_type == 'su':
+    #     iters=abc_s
+    # elif __abc_s_type == 'su2':
+    #     iters = abc_s[: steps] + max(steps - 7, 0) * abc_s[-1:]
+    abc_s = cast(list[list], abc_s)
+    iters = abc_s[:steps] + max(steps - len(abc_s), 0) * abc_s[-1:]
+
+    for i, (a, b, c) in enumerate(iters):
         A = X @ X.mT
         A2 = A @ A
         if i == 0 and norm:

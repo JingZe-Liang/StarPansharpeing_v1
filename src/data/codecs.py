@@ -267,6 +267,10 @@ def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
         return buffer.getvalue()
 
 
+def npy_decode_io(npy_bytes: bytes) -> np.ndarray:
+    return np.load(io.BytesIO(npy_bytes))
+
+
 # * --- wids codecs --- #
 
 
@@ -316,7 +320,7 @@ def wids_image_decode(
     if ".img_content" in sample:
         sample["img"] = img_decode_io(sample[".img_content"].getvalue())
         del sample[".img_content"]
-    if ".caption" in sample:
+    if ".caption" in sample or ".txt" in sample:
         if read_caption:
             sample["caption"] = string_decode_io(sample[".caption"].getvalue())
         del sample[".caption"]
@@ -324,6 +328,9 @@ def wids_image_decode(
         if read_name:
             sample["img_name"] = string_decode_io(sample[".img_name"].getvalue())
         del sample[".img_name"]
+    if ".npy" in sample:
+        sample["img"] = npy_decode_io(sample[".npy"].getvalue())
+        del sample[".npy"]
 
     if "img" not in sample:
         return sample

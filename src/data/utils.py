@@ -87,6 +87,7 @@ def norm_img(
     permute: bool = True,
     check_nan: bool = False,
     on_device: bool = False,
+    clip_zero: bool = True,
 ):
     """
     Normalize the image to [0, 1] and optionally to [-1, 1].
@@ -114,14 +115,13 @@ def norm_img(
                 f"Unsupported type for {key}: {type(sample[key])}. Expected dict, np.ndarray, or torch.Tensor."
             )
 
-        img = torch.as_tensor(
-            _img,
-            dtype=torch.float32,
-        )
+        img = torch.as_tensor(_img, dtype=torch.float32)
         if on_device:
             img = img.to(torch.device("cuda"), non_blocking=True)
         if check_nan:
             img = torch.nan_to_num(img, nan=0.0, posinf=1, neginf=0.0)
+        if clip_zero:
+            img = img.clip(min=0.0, max=None)  # clip to [0, inf)
         _img_max = img.max()
         if _img_max < 1e-4:
             img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
@@ -299,7 +299,7 @@ def flatten_sub_dict(regardless_of_any_collisions=True):
     return _inner
 
 
-def to_n_tuple(val: int | float | tuple, n: int) -> tuple[int | float, ...]:
+def to_n_tuple(val: int | float | tuple, n: int) -> tuple:
     if isinstance(val, tuple):
         assert len(val) == n, f"Expected tuple of length {n}, got {len(val)}"
         return val

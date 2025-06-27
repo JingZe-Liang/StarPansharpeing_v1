@@ -317,14 +317,14 @@ def main():
         "-fnd",
         help="force not download",
         action="store_true",
-        default=False,
+        default=True,  # default value False
     )
     create_parser.add_argument(
         "--force_not_md5sum",
         "-fnm",
         help="force not compute md5sum",
         action="store_true",
-        default=False,
+        default=True,  # default value False
     )
 
     # Create the parser for the "update" command

@@ -39,6 +39,30 @@ if __re_config_logger:
     __re_config_logger = False
 
 
+def set_logger_file(file: str | None = None, level: LogLevel = "debug") -> None:
+    log_format_in_file = (
+        "<green>[{time:MM-DD HH:mm:ss}]</green> "
+        "- <level>[{level}]</level> "
+        "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
+    )
+
+    import time
+
+    t = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+    if file is None:
+        file = f"tmp/logs/{t}.log"
+    logger.add(
+        file,
+        format=log_format_in_file,
+        level=level.upper(),
+        enqueue=True,
+        rotation="1 MB",
+        backtrace=True,
+        colorize=True,
+    )
+    log_print("Set logger to log to file: {file} with level {level}")
+
+
 def is_rank_zero() -> bool:
     """
     Check if the current process is the main process (rank 0).
