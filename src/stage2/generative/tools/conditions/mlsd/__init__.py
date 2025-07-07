@@ -15,14 +15,15 @@ from .utils import pred_lines
 remote_model_path = "/home/tdt/txt2img/controlnet/Uni-ControlNet/annotator/ckpts/mlsd_large_512_fp32.pth"
 
 
-class MLSDdetector:
+class MLSDdetector(torch.nn.Module):
     def __init__(self):
+        super().__init__()
         model_path = os.path.join(annotator_ckpts_path, "mlsd_large_512_fp32.pth")
         if not os.path.exists(model_path):
             load_file_from_url(remote_model_path, model_dir=annotator_ckpts_path)
         model = MobileV2_MLSD_Large()
         model.load_state_dict(torch.load(model_path), strict=True)
-        self.model = model.cuda().eval()
+        self.model = model.eval()
 
     def __call__(self, input_image, thr_v, thr_d):
         assert input_image.ndim == 3

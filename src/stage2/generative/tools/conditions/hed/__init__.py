@@ -172,15 +172,16 @@ class Network(torch.nn.Module):
         )
 
 
-class HEDdetector:
+class HEDdetector(torch.nn.Module):
     def __init__(self):
+        super().__init__()
         remote_model_path = "https://hf-mirror.com/lllyasviel/ControlNet/resolve/main/annotator/ckpts/network-bsds500.pth"
         modelpath = os.path.join(annotator_ckpts_path, "network-bsds500.pth")
         if not os.path.exists(modelpath):
             load_file_from_url(remote_model_path, model_dir=annotator_ckpts_path)
-        self.netNetwork = Network(modelpath).cuda().eval()
+        self.netNetwork = Network(modelpath).eval()
 
-    def __call__(self, input_image):
+    def forward_img(self, input_image):
         assert input_image.ndim == 3
         input_image = input_image[:, :, ::-1].copy()
         with torch.no_grad():
@@ -190,6 +191,23 @@ class HEDdetector:
             edge = self.netNetwork(image_hed)[0]
             edge = (edge.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             return edge[0]
+
+    def forward_batch(self, input_images: torch.Tensor):
+        # [bs, c, h, w], 0 .. 1
+        assert input_images.ndim == 4 and input_images.shape[1] == 3
+
+        with torch.no_grad():
+            edges = self.netNetwork(input_images)
+            # edges = (edges * 255.0).clip(0, 255)
+            return edges
+
+    def forward(self, input_image, dt="array"):
+        if dt == "array":
+            return self.forward_img(input_image)
+        elif dt == "tensor":
+            return self.forward_batch(input_image)
+        else:
+            raise ValueError(f"{dt} is not supported")
 
 
 def nms(x, t, s):

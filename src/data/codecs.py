@@ -1,6 +1,6 @@
 import io
 import warnings
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 import numpy as np
 import scipy.io
@@ -94,7 +94,6 @@ def safetensors_codec_io(data_dict: Dict[str, torch.Tensor]) -> bytes:
 def img_decode_io(img_bytes: bytes):
     with warnings.catch_warnings(record=True) as w:
         try:
-            # import ipdb; ipdb.set_trace()  # noqa: T201
             img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
 
             for warning in w:
@@ -294,7 +293,11 @@ def is_tiff_file(file_path: str) -> bool:
 
 def is_rgb_file(file_path: str) -> bool:
     """Check if the file is an RGB image based on its extension."""
-    return file_path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
+    return file_path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".img_content"))
+
+
+def is_text_file(file_path: str) -> bool:
+    return file_path.lower().endswith((".caption", ".txt", ".img_name"))
 
 
 def wids_image_decode(
@@ -303,72 +306,93 @@ def wids_image_decode(
     read_name=False,
     to_neg_1_1=True,
     permute=True,
+    resize_fn: str = "interpolate",
     resize: int | tuple[int, int] | None = None,
+    process_img_keys: str | list[str] | Literal["ALL"] | None = "img",
 ):
-    _keys_to_try = [".img.tiff", ".img.tif"]
-    for k in _keys_to_try:
-        if k in sample:
-            if is_tiff_file(k):
-                sample["img"] = tiff_decode_io(sample[k].getvalue())
-                del sample[k]
-            elif is_rgb_file(k):
-                sample["img"] = img_decode_io(sample[k].getvalue())
-                del sample[k]
-            else:
-                raise ValueError(f"Unsupported file type for key {k}: {sample[k]}")
-    # rs5m compatibility
-    if ".img_content" in sample:
-        sample["img"] = img_decode_io(sample[".img_content"].getvalue())
-        del sample[".img_content"]
-    if ".caption" in sample or ".txt" in sample:
-        if read_caption:
-            sample["caption"] = string_decode_io(sample[".caption"].getvalue())
-        del sample[".caption"]
-    if ".img_name" in sample:
-        if read_name:
-            sample["img_name"] = string_decode_io(sample[".img_name"].getvalue())
-        del sample[".img_name"]
-    if ".npy" in sample:
-        sample["img"] = npy_decode_io(sample[".npy"].getvalue())
-        del sample[".npy"]
+    def _image_modality_post_process(sample: dict[str, Any], key: str = "img"):
+        img = sample[key].astype(np.float32)
+        # check if is image
+        if img.ndim not in (2, 3) or not isinstance(img, np.ndarray):
+            log_print(
+                f"[Wids Decoder]: key {key} is not an image, shaped as {img.shape}, typed as {img.dtype}, skipping.",
+                warn_once=True,
+            )
+            return sample
 
-    if "img" not in sample:
-        return sample
-    else:
-        if sample["img"] is None:
-            raise ValueError("Decoded image is None, possibly due to decoding error.")
-
-        img = sample["img"].astype(np.float32)
         _img_max = img.max()
         if _img_max < 1e-4:
             img = np.zeros_like(img) if not to_neg_1_1 else np.ones_like(img) / 2
         else:
             img = img / (_img_max + 1e-6)
+
         if to_neg_1_1:
-            sample["img"] = (img * 2 - 1).clip(-1.0, 1.0)  # to [-1, 1]
+            img = (img * 2 - 1).clip(-1.0, 1.0)  # to [-1, 1]
+
         if permute:
             # Permute the image dimensions from HWC to CHW
-            sample["img"] = np.transpose(sample["img"], (2, 0, 1))
+            img = np.transpose(img, (2, 0, 1))
+
         if resize is not None:
             if permute:
-                img = torch.as_tensor(sample["img"])[None].float()
+                img = torch.as_tensor(img)[None].float()
             else:
-                img = torch.as_tensor(np.transpose(sample["img"], (1, 2, 0)))[
-                    None
-                ].float()
+                img = torch.as_tensor(np.transpose(img, (1, 2, 0)))[None].float()
 
             sz = resize
             if isinstance(resize, int):
                 sz = to_n_tuple(sz, 2)
-            img = torch.nn.functional.interpolate(
-                img, size=sz, mode="bilinear", align_corners=False
-            )[0]
+
+            if resize_fn == "interpolate":
+                img = torch.nn.functional.interpolate(
+                    img, size=sz, mode="bilinear", align_corners=False
+                )[0]
+            else:
+                raise NotImplementedError(f"not implmented function {resize_fn}")
+
             if not permute:
                 img = img.permute(1, 2, 0)
 
-        sample = wids_remove_none_keys(sample)
+        sample[key] = img
 
         return sample
+
+    _img_flag = False
+
+    _keys = list(sample.keys())
+    for key in _keys:
+        if key.startswith("__"):
+            continue
+
+        if is_tiff_file(key):
+            sample[key] = tiff_decode_io(sample.pop(key).getvalue())
+            _img_flag = True
+        elif is_rgb_file(key):
+            sample[key] = img_decode_io(sample.pop(key).getvalue())
+            _img_flag = True
+        elif is_text_file(key):
+            sample[key] = string_decode_io(sample.pop(key).getvalue())
+        else:
+            raise ValueError(f"Unsupported file type for {key}")
+
+    if _img_flag and process_img_keys is not None:
+        if isinstance(process_img_keys, str):
+            if process_img_keys == "ALL":
+                process_img_keys = [
+                    k for k in sample.keys() if is_rgb_file(k) or is_tiff_file(k)
+                ]
+            else:
+                process_img_keys = [process_img_keys]
+
+        for key in process_img_keys:
+            sample = _image_modality_post_process(sample, key)
+    else:
+        assert process_img_keys is None, (
+            "process_img_keys should be None when there is no image modality"
+        )
+
+    # sample = wids_remove_none_keys(sample)
+    return sample
 
 
 def wids_latent_decode(sample: dict[str, Any]):

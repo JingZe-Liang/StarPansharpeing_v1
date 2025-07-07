@@ -1,0 +1,60 @@
+# Configuration for hyperspectral data condition preparation
+# Specifically designed for MMSeg_YREB dataset
+# @package _global_
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # self ============
+  - _self_
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+data:
+  # _target_: src.data.hyperspectral_loader.get_hyperspectral_dataloaders
+  # wds_paths:
+  #   - "data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar"
+  # batch_size: 1 # 保持为1以避免内存问题
+  # num_workers: 0
+  # shuffle_size: -1
+  # to_neg_1_1: false
+  # transform_prob: 0.0
+  # resample: false
+  # data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
+  # data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
+  # data/DIOR_RSVG_Dataset/hyper_images/DIOR_RSVG_3_bands-px_800-RGB-jp2k-80-0000.tar
+  # data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
+  # data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  # data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-0000.tar
+  # data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
+  # data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar
+  # data/RSCaptions/hyper_images/
+  # data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  # data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+  # data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
+  # data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
+  # data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+  # data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar
+  # data/MDAS-HySpex/
+  data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0004.tar
+
+output:
+  output_dir: "data/BigEarthNet_S2"
+  tar_name: "hyperspectral_conditions"
+  # tar_rel_path: "conditions/hyperspectral_conditions"
+
+processor:
+  conditions: ["hed", "segmentation", "sketch", "mlsd"] # 生成这些条件
+  rgb_channels: [4, 3, 2] #[74, 42, 10] #[3, 2, 1] #[4, 3, 2] #[3, 2, 1] #[9, 6, 3] # 选择接近红、绿、蓝的波段（根据你的数据调整）
+  device: "cuda:1"
+  to_pil: true
+  save_original_rgb: true # 保存原始RGB图像用于对比
+  condition_save_format: "png" # 条件图像保存为PNG格式
+  caption_save_format: "txt" # 描述保存为文本文件
+
+consts:
+  run_device: 1 # GPU设备ID

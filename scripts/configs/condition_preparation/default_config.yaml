@@ -1,0 +1,31 @@
+# Default configuration for condition preparation
+# @package _global_
+
+data:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_dataloaders
+  wds_paths:
+    - "data_local/MMSeg_YREB/hyper_images/*.tar" # Example path, adjust as needed
+  batch_size: 1
+  num_workers: 4
+  shuffle: false
+  to_neg_1_1: true
+
+output:
+  output_dir: "data_local/MMSeg_YREB/conditions"
+  tar_name: "conditions_generated"
+  tar_rel_path: "conditions/conditions_generated.tar"
+
+processor:
+  conditions: "all" # or list like ["hed", "segmentation", "sketch", "mlsd", "caption"]
+  rgb_channels: [0, 1, 2] # RGB channels to extract from hyperspectral data
+  device: "cuda"
+  to_pil: true
+  save_original_rgb: true
+  condition_save_format: "png" # png, jpg, or safetensors
+  caption_save_format: "txt" # txt, json, or safetensors
+
+consts:
+  run_device: 0 # GPU device ID
+
+defaults:
+  - _self_

@@ -267,8 +267,8 @@ class BaseSegmentor(nn.Module):
             mmcv.imwrite(img, out_file)
 
         if not (show or out_file):
-            warnings.warn(
-                "show==False and out_file is not specified, only "
-                "result image will be returned"
-            )
+            # warnings.warn(
+            #     "show==False and out_file is not specified, only "
+            #     "result image will be returned"
+            # )
             return img

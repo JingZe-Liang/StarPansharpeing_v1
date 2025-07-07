@@ -28,6 +28,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 warnings.filterwarnings("ignore")  # ignore warning
+import sys
+
+sys.path.append("src/stage2/generative/Sana")
 
 import numpy as np
 import pyrallis

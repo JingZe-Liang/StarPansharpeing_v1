@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import braceexpand
@@ -134,7 +135,6 @@ def main_create(args):
     files = []
     for fname in fnames:
         print(fname)
-        # import ipdb; ipdb.set_trace()
         if not args.force_not_download:
             print("Downloading file into /tmp/shard.tar")
             downloaded = wids_dl.download_file(fname, "/tmp/shard.tar")
@@ -148,6 +148,8 @@ def main_create(args):
         )
         nsamples = wids.compute_num_samples(downloaded)
         filesize = os.stat(downloaded).st_size
+        # only save the name
+        fname = Path(fname).name
         files.append(
             dict(url=fname, md5sum=md5sum, nsamples=nsamples, filesize=filesize)
         )

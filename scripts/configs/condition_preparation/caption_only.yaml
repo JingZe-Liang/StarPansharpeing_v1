@@ -1,0 +1,14 @@
+# Configuration for generating captions only
+# @package _global_
+
+defaults:
+  - default_config
+
+processor:
+  conditions: ["caption"]
+  caption_save_format: "txt"
+  save_original_rgb: false # We only need captions, not images
+
+output:
+  tar_name: "captions_only"
+  tar_rel_path: "conditions/captions_only.tar"

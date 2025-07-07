@@ -1,4 +1,5 @@
 import ast
+from pathlib import Path
 
 import hydra
 import scipy.special
@@ -12,8 +13,8 @@ OmegaConf.register_new_resolver("tuple", lambda x: tuple(x))
 
 
 @hydra.main(
-    config_path="../configs/tokenizer_gan",
-    config_name="unicosmos_tokenizer_f8c16p4",
+    config_path="../configs/tokenizer_gan/dataset",
+    config_name="unified_hyperspectral.yaml",
     version_base=None,
 )
 def main(args):
@@ -35,8 +36,10 @@ def main(args):
     # model_cls = hydra.utils.get_class(model_cls_path)
     # print(model_cls)
 
-    start_probs = args.dataset.train_loader.curriculum_kwargs.start_prob
-    print(scipy.special.softmax(start_probs))
+    # start_probs = args.dataset.train_loader.curriculum_kwargs.start_prob
+    # print(scipy.special.softmax(start_probs))
+
+    print(args.train_paths[-1][0])
 
 
 main()

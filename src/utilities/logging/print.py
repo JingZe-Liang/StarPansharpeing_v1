@@ -2,6 +2,7 @@ import re
 import sys
 from contextlib import ContextDecorator
 from functools import wraps
+from pathlib import Path
 from typing import Literal
 
 import torch.distributed as dist
@@ -39,7 +40,9 @@ if __re_config_logger:
     __re_config_logger = False
 
 
-def set_logger_file(file: str | None = None, level: LogLevel = "debug") -> None:
+def set_logger_file(
+    file: str | Path | None = None, level: LogLevel = "debug", add_time: bool = True
+) -> None:
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
         "- <level>[{level}]</level> "
@@ -51,12 +54,28 @@ def set_logger_file(file: str | None = None, level: LogLevel = "debug") -> None:
     t = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     if file is None:
         file = f"tmp/logs/{t}.log"
+    else:
+        file = Path(file)
+        if file.is_dir():
+            if add_time:
+                file = file / f"{t}.log"
+            else:
+                file = file / "log.log"
+        else:
+            assert file.suffix == ".log", "File must be a .log file"
+            if add_time:
+                file = file.parent / f"{t}_{file.name}"
+
+        file = file.as_posix()  # Convert to string path
+
+    Path(file).parent.mkdir(parents=True, exist_ok=True)
+
     logger.add(
         file,
         format=log_format_in_file,
         level=level.upper(),
         enqueue=True,
-        rotation="1 MB",
+        rotation="10 MB",
         backtrace=True,
         colorize=True,
     )

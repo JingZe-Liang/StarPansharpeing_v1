@@ -1,3 +1,4 @@
+import glob
 import io
 import sys
 from pathlib import Path
@@ -400,10 +401,14 @@ def read_image(
                 key_ = list(f.keys())[-1]
                 img = f[key_][:]
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
-        img = np.array(Image.open(img_path))
-        # may be mask
-        if img.ndim == 2 and img_path.suffix.lower() == ".png":
-            img = img[..., None]
+        try:
+            img = np.array(Image.open(img_path))
+            # may be mask
+            if img.ndim == 2 and img_path.suffix.lower() == ".png":
+                img = img[..., None]
+        except Exception as e:
+            logger.warning(f"Failed to load image from: {img_path.as_posix()}. {e}")
+            return None
     elif img_path.suffix == ".npy":
         img = np.load(img_path)
     elif img_path.suffix.lower() in [".tif", ".tiff"] and tiff_bands_seperated:
@@ -655,6 +660,7 @@ def clip_img_to_webdataset(
     process_img_type: str = "clip",
     rescale: str = "clamp",
     force_save_dtype: str | np.dtype = "auto",
+    add_global_index: bool = False,
 ):
     def slide_image_and_save(img, img_name):
         if process_img_type == "clip":
@@ -719,10 +725,17 @@ def clip_img_to_webdataset(
             img_name = img_name.replace(
                 ".", "-"
             )  # ensure the webdataset extrace 'img' as the key
+            saved_name = (
+                f"{total_img_saved_count}_{img_name}_patch-{patch_idx}"
+                if add_global_index
+                else f"{img_name}_patch-{patch_idx}"
+            )
+            saved_ext = save_backend if save_backend not in ("jpeg", "JPEG") else "jpg"
+
             sink.write(
                 {
-                    "__key__": f"{total_img_saved_count}_{img_name}_patch-{patch_idx}",
-                    f"img.{save_backend if save_backend not in ('jpeg', 'JPEG') else 'jpg'}": img_saver_backend_compact_with_wds(
+                    "__key__": saved_name,
+                    f"img.{saved_ext}": img_saver_backend_compact_with_wds(
                         patch,
                         save_backend,
                         **save_kwargs,
@@ -864,6 +877,23 @@ def SAR_img_to_gray(sar_img: np.ndarray | str):
     )
 
 
+def mp_tarfile_rearrange(tarfile_dir: str | Path):
+    import shutil
+
+    parent_dir = Path(tarfile_dir)
+
+    # rearrange the output files
+    tar_files = [str(p) for p in parent_dir.glob("**/*.tar")]
+    tar_files = natsort.natsorted(tar_files)
+
+    for total_i, tarf in enumerate(tar_files):
+        name = Path(tarf).name
+        prefix_name = "-".join(name.split("-")[:-1])
+        name = f"{prefix_name}-{str(total_i).zfill(4)}.tar"
+        shutil.move(str(tarf), str(parent_dir / name))
+        logger.info(f"renamed {tarf} to {parent_dir / name}")
+
+
 if __name__ == "__main__":
     _mp = False
 
@@ -880,6 +910,9 @@ if __name__ == "__main__":
             "tiff_bands_seperated": False,
         },
     }
+
+    # mp_tarfile_rearrange("data/Disaterm3/hyper_images")
+    # exit(0)
 
     if not _mp:
         # all_msi_files = list(Path("data/HLS").glob("*B01.tif"))
@@ -930,11 +963,51 @@ if __name__ == "__main__":
         # webdataset_pts = "data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-%04d.tar"
 
         # OpenEarthMap dataset
-        path = "data/YuZhongDataset/OpenEarthMap/OpenEarthMap_wo_xBD"
-        all_msi_files_s = list(Path(path).glob("*/images/*.tif"))
-        webdataset_pts = (
-            "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-%04d.tar"
-        )
+        # path = "data/YuZhongDataset/OpenEarthMap/OpenEarthMap_wo_xBD"
+        # all_msi_files_s = list(Path(path).glob("*/images/*.tif"))
+        # webdataset_pts = (
+        #     "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-%04d.tar"
+        # )
+
+        # TEOChatlas
+        # path = 'data/TEOChatlas'
+
+        # disaterm3
+        # all_msi_files_s = [
+        #     list(Path("data/Disaterm3/train_images/train_images").glob("**/*.png"))
+        #     + list(Path("data/Disaterm3/train_images/train_images").glob("**/*.jpg"))
+        #     + list(Path("data/Disaterm3/test/test/rgb_images").glob("**/*.png"))
+        #     + list(Path("data/Disaterm3/test/test/rgb_images").glob("**/*.jpg"))
+        # ]
+        # webdataset_pts = (
+        #     "data/Disaterm3/hyper_images/Disaterm3-3_bands-px_1024-RGB-jp2k-90-%04d.tar"
+        # )
+
+        # CityBench
+        # all_msi_files_s = list(Path("data/CityBench-CityData").glob("**/*.jpg"))
+        # all_msi_files_s += list(Path("data/CityBench-CityData").glob("**/*.png"))
+        # webdataset_pts = (
+        #     "data/CityBench-CityData/hyper_images/CityBench-CityData-%04d.tar"
+        # )
+
+        # Hyperspectral-collections
+        # all_msi_files_s = list(Path("data/HyperSpectral-Collections").glob("*.mat"))
+        # webdataset_pts = "data/HyperSpectral-Collections/hyper_images/hyperspectral_collections_%04d.tar"
+        # func_kwargs.update(
+        #     dict(
+        #         process_img_type="clip",
+        #         img_clip_size=(256, 256),
+        #         img_stride=(256, 256),
+        #         save_backend="tiff",
+        #         save_kwargs=dict(
+        #             tiff_compression_type="jpeg2000",
+        #         ),
+        #     )
+        # )
+
+        # AerialGV
+        all_msi_files_s = list(glob.glob("data/AerialVG/images/*"))
+        webdataset_pts = "data/AerialVG/hyper_images/AerialVG-3_bands-RGB-%04d.tar"
 
         # Inria Aeiral images
         # path = "data/YuZhongDataset/InriaAerialLabelingDataset/AerialImageDataset"
@@ -1034,7 +1107,18 @@ if __name__ == "__main__":
             )
 
         # 获取所有 msi_files
-        all_msi_files = list(Path("data/HLS").glob("*B01.tif"))
+        all_msi_files = list(
+            Path("data/Disaterm3/train_images/train_images").glob("**/*.png")
+        )
+        all_msi_files += list(
+            Path("data/Disaterm3/train_images/train_images").glob("**/*.jpg")
+        )
+        all_msi_files += list(
+            Path("data/Disaterm3/test/test/rgb_images").glob("**/*.png")
+        )
+        all_msi_files += list(
+            Path("data/Disaterm3/test/test/rgb_images").glob("**/*.jpg")
+        )
 
         # 按进程数分割 msi_files
         num_processes = 8  # mp.cpu_count()
@@ -1042,7 +1126,7 @@ if __name__ == "__main__":
 
         # 为每个进程指定输出文件夹
         output_folders = [
-            f"data/HLS_tiff/hyper_images/part_{i}" for i in range(num_processes)
+            f"data/Disaterm3/hyper_images/part_{i}" for i in range(num_processes)
         ]
         for folder in output_folders:
             Path(folder).mkdir(parents=True, exist_ok=True)
@@ -1050,7 +1134,7 @@ if __name__ == "__main__":
         # 定义每个进程的任务
         def process_files(msi_files, output_folder, is_main_process):
             loop_dataset_tif_MSI_images_to_webdataset(
-                webdataset_pattern=f"{output_folder}/HLS_MSI-13_bands-px_512-MSI-jp2k-80-%04d.tar",
+                webdataset_pattern=f"{output_folder}/Disaterm3_3_bands-px_1024-RGB-jp2k-90-%04d.tar",
                 msi_files=msi_files,
                 process_img_type=func_kwargs["process_img_type"],
                 img_clip_size=func_kwargs["img_clip_size"],
@@ -1058,6 +1142,7 @@ if __name__ == "__main__":
                 save_kwargs=func_kwargs["save_kwargs"],
                 read_fn_kwargs=func_kwargs["read_fn_kwargs"],
                 tqdm_or_not=is_main_process,
+                save_backend=func_kwargs.get("save_backend", "jpeg"),
             )
 
         # 在调用时传递进程索引
@@ -1072,6 +1157,5 @@ if __name__ == "__main__":
                     )
                 ],
             )
-            pool.join()
 
         logger.info("All processes completed successfully.")

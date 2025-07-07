@@ -27,7 +27,7 @@ except ImportError:
     )
 
 _cuda_dim_in_min = 8
-__abc_s_type = "su"
+__abc_s_type = "su2"
 
 if __abc_s_type == "su":  # JianlinSu's abc_s
     abc_s = [

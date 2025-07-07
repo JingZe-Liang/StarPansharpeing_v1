@@ -11,7 +11,10 @@ import pandas as pd
 import scipy.special
 import torch
 import webdataset as wds
-from librosa import ex
+from kornia.augmentation import (
+    RandomResizedCrop,
+    Resize,
+)
 
 from src.utilities.train_utils.state import StepsCounter
 
@@ -36,10 +39,14 @@ def is_path_multimodal(path: str) -> bool:
 
 
 def remove_extension(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
+    # 'img.tiff' -> 'img'
+    # '.img' -> 'img'
+    # 'img' -> 'img'
+
     sample_dict = {}
     for k, v in sample.items():
         k_wo_ext = k
-        _has_ext = k.find(".") != -1
+        _has_ext = k.rfind(".", 1) != -1
         if _has_ext:
             k_wo_ext = k[: k.find(".")]
         sample_dict[k_wo_ext] = v
@@ -77,6 +84,32 @@ def _check_dots(s: str):
     if ".gz" in s:
         return s.count(".") == 2
     return s.count(".") == 1
+
+
+def de_structure_tar(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
+    result = {}
+    for k, val in sample.items():
+        if "/" in k:
+            file_name = k.split("/")[-1]  # Get the last part of the path
+            result[file_name] = val
+        else:
+            result[k] = val
+    return result
+
+
+def search_one_key_not_dunder(sample: dict[str, LoadedData], key: str):
+    _not_dunder_keys: list[str] = []
+    for k in sample.keys():
+        if not k.startswith("__"):
+            _not_dunder_keys.append(k)
+    assert len(_not_dunder_keys) == 1, (
+        'Expected exactly one key not starting with "__", but found: '
+        + str(_not_dunder_keys)
+    )
+
+    sample[key] = sample.pop(_not_dunder_keys[0])
+
+    return sample
 
 
 # @torch.compile
@@ -131,8 +164,10 @@ def norm_img(
             img = (img * 2 - 1).clip(-1.0, 1.0)
         if permute:
             if img.ndim == 3:
+                # (H, W, C) -> (C, H, W)
                 img = img.permute(-1, 0, 1)
             elif img.ndim == 4:
+                #  # (B, C, H, W) -> (B, C, H, W)
                 img = img.permute(0, -1, 1, 2)
             else:
                 log_print(
@@ -249,7 +284,7 @@ def merge_modalities(
 # * --- filters --- #
 
 
-def img_size_filter(
+def wids_img_size_filter_by_parquet_index(
     parquet_file: str,
     min_size: int = 256,
     max_size: int | None = None,
@@ -307,6 +342,91 @@ def to_n_tuple(val: int | float | tuple, n: int) -> tuple:
     assert isinstance(val, (int, float)), f"Expected int or float, got {type(val)}"
 
     return tuple([val] * n)
+
+
+def wids_filter_img_size(constraint_size: int | tuple):
+    def size_filter_fn(sample):
+        img = sample["img"]
+        img_size = np.prod(img.shape[-2:]).item()
+        if isinstance(constraint_size, int):
+            if img_size >= constraint_size:
+                return sample
+        elif isinstance(constraint_size, tuple):
+            if img_size >= constraint_size[0] and img_size <= constraint_size[1]:
+                return sample
+        # return a null dict
+        log_print("is None", "debug")
+        return None
+
+    return size_filter_fn
+
+
+def large_image_resizer_clipper(
+    tgt_size: int | tuple[int, int],
+    img_key: str = "img",
+    op_for_large: str = "clip",
+):
+    """
+    Create a function to process large images by either random cropping or resizing.
+
+    Args:
+        tgt_size (int | tuple[int, int]): Target image size. If int, will be converted to (h, w).
+        op_for_large (str): Operation for large images. "clip" for random crop, "resize" for resizing.
+
+    Returns:
+        dict_mapper (function): A function that takes an image tensor (torch.Tensor) as input and returns the processed image tensor.
+
+    Example:
+        process = large_image_resizer_clipper(224, op_for_large="resize")
+        result = process(img_tensor)
+    """
+    if isinstance(tgt_size, int):
+        tgt_size = to_n_tuple(tgt_size, 2)
+
+    if op_for_large == "clip":
+        clipper = RandomResizedCrop(
+            tgt_size,
+            scale=(0.6, 1.0),
+            ratio=(0.75, 1.333),
+            p=1.0,
+            keepdim=True,
+            cropping_mode="resample",
+        )
+    elif op_for_large == "resize":
+        clipper = Resize(tgt_size, antialias=True, p=1, keepdim=True)
+    else:
+        raise ValueError(f"op_for_large {op_for_large} not supported")
+
+    def sample_mapper(sample: dict):
+        try:
+            sample[img_key] = clipper(sample[img_key])
+        except Exception as e:
+            log_print(f"worker pid <u>{os.getpid()}</u> clip img error: {e}", "warning")
+            return None
+        return sample
+
+    # def dict_mapper(img: torch.Tensor):
+    #     return clipper(img)
+
+    return sample_mapper
+
+
+def wids_filter_out_none_map_dict_iterator(self: wds.pipeline.DataPipeline):
+    """Create an iterator through the entire dataset, using the given number of repetitions.
+
+    Yields:
+        Samples from the dataset.
+    """
+    for _ in range(self.repetitions):
+        count = 0
+        for sample in self.iterator1():
+            if sample is None:
+                continue
+            yield sample
+            count += 1
+        if count == 0:
+            # if the dataset is empty, don't keep looping
+            break
 
 
 # * --- Chainable loaders --- #
@@ -679,3 +799,37 @@ def expand_paths_and_correct_loader_kwargs_mm(
         )
 
     return paths, loader_kwargs
+
+
+# * --- Collate functions --- #
+
+
+__default_wids_keys = [
+    "__key__",
+    "__index__",
+    "__shard__",
+    "__shardindex__",
+]
+
+
+# TODO: complete this collate function
+def multimodal_wids_collate_fn(batch: list[dict]):
+    """
+    Custom collate function for multimodal WIDS dataset.
+    This function handles the different modalities in the batch.
+    """
+
+    collated_batch = {
+        "__key__": {},
+        "__index__": {},
+        "__shard__": {},
+        "__shardindex__": {},
+    }
+    for d in batch:
+        if not isinstance(d, dict):
+            raise TypeError(f"Expected dict, got {type(d)}")
+        for name, mm_dict in d.items():
+            for key, value in mm_dict.items():
+                if key in __default_wids_keys:
+                    # collated_batch
+                    ...

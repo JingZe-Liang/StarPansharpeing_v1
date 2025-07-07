@@ -24,7 +24,6 @@ from kornia.augmentation import (
     RandomRotation,
     RandomSharpness,
     RandomVerticalFlip,
-    Resize,
 )
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from natsort import natsorted
@@ -42,17 +41,22 @@ from src.data.codecs import (
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     chained_dataloaders,
+    de_structure_tar,
     expand_paths_and_correct_loader_kwargs,
     extract_modality_names,
     flatten_sub_dict,
     generate_wds_config_modify_only_some_kwgs,
     get_wids_index_json_info,
-    img_size_filter,
+    large_image_resizer_clipper,
     may_repeat_channels,
     merge_modalities,
     norm_img,
     remove_extension,
+    search_one_key_not_dunder,
     to_n_tuple,
+    wids_filter_img_size,
+    wids_filter_out_none_map_dict_iterator,
+    wids_img_size_filter_by_parquet_index,
 )
 from src.data.utils import remove_meta_data as remove_meta_data_fn
 from src.data.wids_samplers import IndexFilteredDistributedSampler, IndexFilteredSampler
@@ -114,6 +118,10 @@ def get_dict_tensor_mapper(to_neg_1_1=True):
 
 
 def filter_undecoded(sample, key):
+    if key not in sample:
+        log_print(f"{key} not in sample", "error")
+        raise ValueError(f"{key} not in sample, sample keys: {sample.keys()}")
+
     if isinstance(sample[key], bytes):
         return None
     else:
@@ -182,31 +190,6 @@ def hyper_transform(
     return dict_mapper
 
 
-def large_image_resizer_clipper(
-    tgt_size: int | tuple[int, int],
-    op_for_large: str = "clip",
-):
-    if isinstance(tgt_size, int):
-        tgt_size = to_n_tuple(tgt_size, 2)
-
-    if op_for_large == "clip":
-        clipper = RandomResizedCrop(
-            tgt_size, scale=(0.6, 1.0), ratio=(0.75, 1.333), p=1.0, keepdim=True
-        )
-    elif op_for_large == "resize":
-        clipper = Resize(tgt_size, antialias=True, p=1, keepdim=True)
-    else:
-        raise ValueError(f"op_for_large {op_for_large} not supported")
-
-    # def dict_mapper(sample: dict):
-    #     sample["img"] = clipper(sample["img"])
-    #     return sample
-    def dict_mapper(img: torch.Tensor):
-        return clipper(img)
-
-    return dict_mapper
-
-
 @torch.no_grad()
 def collate_fn_for_dict(
     sample: list,
@@ -227,9 +210,9 @@ def collate_fn_for_dict(
         dict: Collated dictionary of samples.
     """
     results = {}
+    assert len(sample) > 0, "sample is empty"
     keys = sample[0].keys()
     _stack = False
-    assert len(sample) > 0, "sample is empty"
 
     for k in keys:
         sample_lst = []
@@ -273,7 +256,8 @@ def get_hyperspectral_dataloaders(
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,
-    img_key: str = "img",  # image key in the sample dictionary, default is "img"
+    img_key: str = "auto",  # image key in the sample dictionary, default is "img"
+    tgt_key: str = "img",
     constraint_size: int
     | tuple[int, int]
     | None = None,  # int for minimal_size; tuple for (min, max)
@@ -287,7 +271,7 @@ def get_hyperspectral_dataloaders(
         "horizontal_flip",
         "vertical_flip",
     ),
-    transform_prob: float = 0.2,
+    transform_prob: float = 0.0,
     random_apply: int | tuple[int, int] = 1,
     resample: bool = True,
     prefetch_factor: int | None = 6,
@@ -295,11 +279,12 @@ def get_hyperspectral_dataloaders(
     shuffle_within_workers: bool = False,
     check_channels: bool = False,
     channels: int | None = None,
+    is_structured_tar: bool = False,
     remove_meta_data: bool = False,
     repeat_n: int = 1,
     timeout: int = 300,
     epoch_len: int = 0,
-    persistent_workers: bool = False,
+    persistent_workers: bool = True,
 ) -> tuple[wds.WebDataset, wds.WebLoader]:
     """Get dataloaders for hyperspectral image data
 
@@ -343,6 +328,12 @@ def get_hyperspectral_dataloaders(
         handler=wds.warn_and_continue,
     )
 
+    # de-structure tar files
+    if is_structured_tar:
+        # says we only need the images, so we just the flatten the tar file
+        log_print(f"[HyperWebdataset]: the tar file is structured tar, de-structure it")
+        dataset = dataset.map(de_structure_tar)
+
     # decode
     default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
@@ -356,16 +347,19 @@ def get_hyperspectral_dataloaders(
     # extension
     dataset = dataset.map(remove_extension)
 
-    # catch the undecoded images
-    dataset = dataset.map(partial(filter_undecoded, key=img_key))
-
     # meta data
     if remove_meta_data:
         dataset = dataset.map(remove_meta_data_fn)
 
     # rename key
-    if img_key != "img":
-        dataset = dataset.rename_keys(("img", img_key), keep_unselected=True)
+    if img_key != "img":  # the img_key is converted to img
+        if img_key == "auto":
+            dataset = dataset.map(partial(search_one_key_not_dunder, key=tgt_key))
+        else:
+            dataset = dataset.rename_keys((tgt_key, img_key), keep_unselected=True)
+
+    # catch the undecoded images
+    dataset = dataset.map(partial(filter_undecoded, key=tgt_key))
 
     # pass the minimal size or range of the image
     if constraint_size is not None:
@@ -404,29 +398,26 @@ def get_hyperspectral_dataloaders(
 
     # resize
     if resize_before_transform is not None:
-        dataset = dataset.map_dict(
-            img=large_image_resizer_clipper(
+        dataset = dataset.map(
+            large_image_resizer_clipper(
                 tgt_size=resize_before_transform,
                 op_for_large="clip",
             )
-            # Resize(
-            #     to_n_tuple(resize_before_transform, 2),  # type: ignore
-            #     side="short",
-            #     keepdim=True,
-            # )
         )
 
-    dataset = dataset.batched(
-        batch_size, collation_fn=collate_fn_for_dict
-    )  # stacked into batch
+    if shuffle_within_workers:
+        dataset = dataset.batched(
+            batch_size, collation_fn=collate_fn_for_dict
+        )  # stacked into batch
 
     # augmentations
     if use_transf:
-        dataset = dataset.map_dict(img=transform)
+        dataset = dataset.map_dict(img=transform)  # type: ignore
 
     dataloader = wds.WebLoader(
         dataset,
-        batch_size=None,
+        batch_size=batch_size if not shuffle_within_workers else None,
+        collate_fn=None if shuffle_within_workers else collate_fn_for_dict,
         num_workers=num_workers,
         persistent_workers=persistent_workers if num_workers > 0 else False,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
@@ -756,7 +747,7 @@ def only_hyperspectral_img_folder_dataloader(
 
 
 def get_hyperspectral_wids_dataloaders(
-    index_file: str,
+    index_file: str | list[str],
     batch_size: int,
     num_workers: int,
     shuffle_size: int = 100,
@@ -764,7 +755,8 @@ def get_hyperspectral_wids_dataloaders(
     permute: bool = True,
     img_size_filter_file: str | None = None,
     constraint_size: int | tuple[int, int] | None = None,
-    resize_before_transform: int | None = 512,
+    resize_before_transform: int | tuple[int, int] | None = 512,
+    tgt_key: str = "img",
     hyper_transforms_lst: tuple[str, ...] | None = (
         "grayscale",
         "channel_shuffle",
@@ -780,6 +772,7 @@ def get_hyperspectral_wids_dataloaders(
     remove_meta_data: bool = False,
     persistent_workers: bool = False,
     wids_local_name_prefix: str | None = None,
+    filter_out_none: bool = True,
     **__discard_kwargs,  # discard other kwargs
 ):
     dataset = wids.ShardListDataset(
@@ -787,15 +780,24 @@ def get_hyperspectral_wids_dataloaders(
         localname=lambda x: f"{wids_local_name_prefix}/{x}"
         if wids_local_name_prefix is not None
         else x,
-        transformations=partial(
-            wids_image_decode, norm=to_neg_1_1, permute=permute, resize=None
-        ),  # type: ignore
+        transformations=[
+            partial(  # type: ignore
+                wids_image_decode,
+                to_neg_1_1=to_neg_1_1,
+                permute=permute,
+                resize=None,
+                process_img_keys="ALL",
+            ),
+            wids_filter_img_size(constraint_size=constraint_size)
+            if constraint_size is not None
+            else lambda x: x,
+        ],
     )
 
     # image size filtering
     img_index = None
     if constraint_size is not None and img_size_filter_file is not None:
-        img_index = img_size_filter(
+        img_index = wids_img_size_filter_by_parquet_index(
             img_size_filter_file,
             min_size=constraint_size
             if isinstance(constraint_size, int)
@@ -853,19 +855,39 @@ def get_hyperspectral_wids_dataloaders(
         generator=loader_generator,
     )
 
+    # rename
+    def rename_keys(sample, tgt_key=tgt_key):
+        _keys = list(sample.keys())
+        for k in _keys:
+            if not k.startswith("__"):
+                sample[tgt_key] = sample.pop(k)
+                break
+
+        return sample
+
+    dataloader = dataloader.map(rename_keys)
+
+    # filter out None
+    def filter_out_none(sample):
+        for k, v in sample.items():
+            if v is None and not k.startswith("__"):
+                return None
+
+        return sample
+
+    if filter_out_none:
+        dataloader = dataloader.map(filter_out_none, handler=wds.warn_and_continue)
+
     # resize
     if resize_before_transform is not None:
         if isinstance(resize_before_transform, int):
             resize_before_transform = to_n_tuple(  # type: ignore
                 resize_before_transform, 2
             )
-        # resizer = Resize(resize_before_transform, side="short", keepdim=True)
         resizer = large_image_resizer_clipper(
             tgt_size=resize_before_transform, op_for_large="clip"
         )
-        dataloader = dataloader.map_dict(
-            img=resizer  # [c, h, w]
-        )
+        dataloader = dataloader.map(resizer, handler=wds.warn_and_continue)
     else:
         log_print(
             "[Wids dataset]: no resize function, the images are used as the original size "
@@ -1229,7 +1251,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
 
         for i in range(len(rep_loader_kwargs)):
             kwg_ldt = rep_loader_kwargs[i].pop("loader_type", "webdataset")
-            loader_types.append(kwg_ldt if loader_type is None else loader_type)
+            loader_types.append(kwg_ldt if kwg_ldt is not None else "webdataset")
     # 2. paths is a list of strings
     elif isinstance(paths, (list, tuple)) and any(isinstance(p, str) for p in paths):
         raise NotImplementedError(
@@ -1256,7 +1278,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 "should be empty when basic_kwargs is provided, changed_kwargs_by_loader should always be None"
             )
         kwg_ldt = rep_loader_kwargs[0].pop("loader_type", "webdataset")
-        loader_types.append(kwg_ldt if loader_type is None else loader_type)
+        loader_types.append(kwg_ldt if kwg_ldt is not None else "webdataset")
 
     # * --- build datasets and dataloaders --- #
     datasets = []
@@ -1412,21 +1434,23 @@ if __name__ == "__main__":
         # [
         #     "data/BigEarthNet_S2/hyper_images_compressed/BigEarthNet_data_{0000..0006}.tar"
         # ]
-        # [
-        #     "data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0000..0017}.tar"
-        # ],
+        # ["data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_0018.tar"],
         # [
         #     "data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_0000.tar"
-        # ]  # [39, 32, 16]
-        [p.as_posix() for p in Path("data/MMOT/train").glob("*.tar")]
-        + [p.as_posix() for p in Path("data/MMOT/val").glob("*.tar")]
+        # ],  # [39, 32, 16]
+        # ["data/TEOChatlas/train/GeoChat_Instruct_images2.tar"]
+        # ["data/TEOChatlas/train/TEOChatlas_images.tar"],
+        # ["data/CityBench-CityData/hyper_images/CityBench-CityData-0000.tar"],
+        # [p.as_posix() for p in Path("data/MMOT/train").glob("*.tar")]
+        # + [p.as_posix() for p in Path("data/MMOT/val").glob("*.tar")],
+        ["data/Chikusei/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 8
+    test_batch_size = 2
     test_num_workers = 0
-    test_shuffle_size = 100
+    test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type="webdataset",
+        loader_type=None,
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1437,7 +1461,7 @@ if __name__ == "__main__":
         prefetch_factor=2,
         remove_meta_data=False,
         resize_before_transform=512,
-        shuffle_within_workers=True,
+        shuffle_within_workers=False,
         resample=True,
         check_channels=False,
     )
@@ -1447,8 +1471,15 @@ if __name__ == "__main__":
         # {},
         # {},
         # {"permute": False},
-        # {},
-        {"img_key": "npy"},
+        # {
+        #     "loader_type": "wids",
+        #     "is_structured_tar": False,
+        #     "img_key": "auto",
+        #     "constraint_size": 128 * 128,
+        # },
+        {"loader_type": "wids"},
+        # {"img_key": "auto"},
+        # {"img_key": "npy"},
         # {"check_nan": True},
         # {
         #     "img_key": "img_content",
@@ -1487,7 +1518,7 @@ if __name__ == "__main__":
     indices = set()
 
     sizes = {}
-    for i, sample in enumerate(tbar := tqdm(test_loader)):
+    for i, sample in enumerate((tbar := tqdm(test_loader))):
         img = sample["img"]
 
         s = np.prod(img.shape[-2:])
@@ -1502,13 +1533,13 @@ if __name__ == "__main__":
         # indices.update(index)
 
         tbar.set_description_str(
-            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}, min-max: {}".format(
+            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}".format(
                 accelerator.process_index,
                 img.shape,
                 sample["__loader_idx__"],
                 # sample["__url__"][0],
                 indices,
-                (img.min().item(), img.max().item()),
+                # (img.min().item(), img.max().item()),
             )
         )
 
@@ -1518,27 +1549,27 @@ if __name__ == "__main__":
         step_counter.update("train")
 
         # plot a batch
-        import torchvision.utils as vutils
+        # import torchvision.utils as vutils
 
-        img_s = (
-            vutils.make_grid(
-                (img[:8, [4, 3, 2]] + 1) / 2,
-                # img / 2 + 0.5,
-                nrow=4,
-                padding=2,
-                normalize=True,
-            )
-            .permute(1, 2, 0)
-            .cpu()
-            .numpy()
-            * 255.0
-        ).astype(np.uint8)
+        # img_s = (
+        #     vutils.make_grid(
+        #         (img[:8,] + 1) / 2,
+        #         # img / 2 + 0.5,
+        #         nrow=4,
+        #         padding=2,
+        #         normalize=True,
+        #     )
+        #     .permute(1, 2, 0)
+        #     .cpu()
+        #     .numpy()
+        #     * 255.0
+        # ).astype(np.uint8)
 
-        import PIL.Image as Image
+        # import PIL.Image as Image
 
-        Image.fromarray(img_s).save(f"S2_compress_{i}.png")
-        if i == 6:
-            exit(0)
+        # Image.fromarray(img_s).save(f"S2_compress_{i}.png")
+        # if i == 6:
+        #     exit(0)
 
     # * plot the image size bar image
     # import matplotlib.pyplot as plt

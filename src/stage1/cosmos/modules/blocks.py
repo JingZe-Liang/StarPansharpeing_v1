@@ -5,6 +5,7 @@ from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
+import torch._dynamo
 import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,6 +47,7 @@ if compile_forward_fn:
     )
     log_print("will compile the forward function and disable donated buffer", "debug")
     torch._functorch.config.donated_buffer = False  # for adaptive weighting
+    torch._dynamo.config.cache_size_limit = 20
 else:
 
     def _null_decorator(**any_kwargs):

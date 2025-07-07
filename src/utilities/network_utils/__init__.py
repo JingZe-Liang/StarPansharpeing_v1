@@ -8,3 +8,4 @@ from .network_loading import (
 )
 from .pack import one_d_to_two_d, two_d_to_one_d
 from .perf_utils import func_mem_wrapper, func_speed_wrapper
+from .shaping import reshape_wrapper

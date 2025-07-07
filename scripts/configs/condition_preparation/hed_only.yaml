@@ -1,0 +1,13 @@
+# Configuration for generating HED edge detection conditions
+# @package _global_
+
+defaults:
+  - default_config
+
+processor:
+  conditions: ["hed"]
+  condition_save_format: "png"
+
+output:
+  tar_name: "hed_conditions"
+  tar_rel_path: "conditions/hed_conditions.tar"

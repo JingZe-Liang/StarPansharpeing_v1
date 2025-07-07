@@ -18,6 +18,7 @@ from scipy.signal import windows
 from tqdm import tqdm
 
 from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
+from src.data.tar_utils import TarSinkManager, tar_sink_manager
 from src.stage2.pansharpening.simulator import (
     Interp23Tap,
     MTFConv,
@@ -37,13 +38,6 @@ warnings.filterwarnings(
     "ignore",
     module="torch.utils.checkpoint",
 )
-
-# * --- omegaconf resolvers --- #
-
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
-OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
-OmegaConf.register_new_resolver("class", lambda x: hydra.utils.get_class(x))
-
 
 # * --- Tokenizer processor --- #
 
@@ -207,52 +201,6 @@ class PansharpTokenizeProcessor(nn.Module):
         # For now, returning the list, assuming the main loop will handle it.
         # *** IMPORTANT: The main loop below needs adjustment to handle this list ***
         return output_list  # Return list of dicts
-
-
-@contextmanager
-def tar_sink_manager():
-    """
-    Context manager for writing to a tar file.
-    """
-
-    total_sinks = {}
-
-    def get_sink(name, tar_path):
-        if name not in total_sinks:
-            total_sinks[name] = wds.TarWriter(tar_path)
-            log_print(f"Created new tar sink for {tar_path}")
-        return total_sinks[tar_path]
-
-    try:
-        yield get_sink
-
-    finally:
-        for sink in total_sinks.values():
-            sink.close()
-            log_print(f"Closed tar sink for {sink.name}")
-
-
-class TarSinkManager:
-    total_sinks = {}
-
-    def __init__(self, base_dir: str):
-        self.base_dir = base_dir
-
-    def get_sink(self, name: str, tar_rel_path: str):
-        tar_path = os.path.join(self.base_dir, tar_rel_path)
-        os.makedirs(os.path.dirname(tar_path), exist_ok=True)
-
-        if name not in self.total_sinks:
-            self.total_sinks[name] = wds.TarWriter(tar_path)
-            log_print(f"Created new tar sink for {tar_path}")
-        return self.total_sinks[name]
-
-    def close_all(self):
-        for name, sink in self.total_sinks.items():
-            sink.close()
-            log_print(f"Closed tar sink for {name}")
-        self.total_sinks.clear()
-        log_print("Closed all tar sinks.")
 
 
 def seperate_pansharpening_latent_pairs(

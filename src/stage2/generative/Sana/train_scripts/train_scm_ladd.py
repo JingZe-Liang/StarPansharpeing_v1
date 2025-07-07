@@ -88,6 +88,29 @@ def ema_update(model_dest: nn.Module, model_src: nn.Module, rate):
         p_dest.data.mul_(rate).add_((1 - rate) * p_src.data)
 
 
+def dict_batch_to_list(batch: dict, cat_conditions=False):
+    # prefix conditions from keys
+    z = batch["img_latent"]
+    y = batch["text_feat"]
+    y_mask = batch["text_mask"]
+    data_info = batch.get("data_info", None)
+
+    # conditions
+    hed = batch.get("hec_latent", None)
+    mlsd = batch.get("mlsd_latent", None)
+    seg = batch.get("segmentation_latent", None)
+    sketch = batch.get("sketch_latent", None)
+    conditions = [hed, mlsd, seg, sketch]
+
+    if cat_conditions:
+        for c in conditions:
+            assert c is not None
+        conditions = torch.cat(conditions, dim=1)  # type: ignore
+        return z, y, y_mask, data_info, conditions
+
+    return z, y, y_mask, data_info, conditions
+
+
 @torch.inference_mode()
 @torch.no_grad()
 def log_validation(

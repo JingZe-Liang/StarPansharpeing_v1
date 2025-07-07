@@ -4,7 +4,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, assert_type
+from typing import Callable, Literal, Sequence, assert_type, cast
 
 import accelerate
 import colored_traceback
@@ -167,6 +167,9 @@ class CosmosHyperspectralTokenizerTrainer:
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss)
         self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
 
+        # Augmentation pipelines and anti-degradation network / losses
+        self.setup_aug_pipe_and_anti_degradation_network()
+
         # optimizers and lr schedulers
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = (
             self.get_optimizer_lr_scheduler()
@@ -305,6 +308,39 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(
                 f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}"
             )
+
+    def setup_aug_pipe_and_anti_degradation_network(self):
+        self.use_training_aug = False
+        self.aug_pipe = getattr(self.train_cfg, "aug_pipeline", None)
+        self.antideg_net = getattr(self.train_cfg, "anti_degradation_network", None)
+        self.aug_pipeline_train_obj = getattr(
+            self.train_cfg, "aug_pipeline_train_obj", None
+        )
+
+        if self.aug_pipe is not None:
+            self.log_msg(f"[Tokenizer]: using augmentation pipeline")
+            assert self.aug_pipeline_train_obj in [
+                "decoder_clean",
+                "decoder_deg",
+                "anti_deg_network",
+            ], "Augmentation pipeline is specified but no train object is provided"
+
+            self.aug_pipe = hydra.utils.instantiate(self.train_cfg.aug_pipeline)
+            if (
+                self.aug_pipeline_train_obj == "anti_deg_network"
+                and self.antideg_net is not None
+            ):
+                self.antideg_net = hydra.utils.instantiate(self.antideg_net)
+                self.antideg_net_optim = hydra.utils.instantiate(
+                    self.train_cfg.antideg_net_optim
+                )
+                self.log_msg(
+                    f"Using anti-degradation network: {self.antideg_net.__class__.__name__}"
+                )
+            self.use_training_aug = True
+
+    def setup_invariant_pipeline(self):
+        self.invariant_pipe = None
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -960,6 +996,12 @@ class CosmosHyperspectralTokenizerTrainer:
         #     self.vq_loss_fn.discriminator
         # )
 
+        # augmentation network
+        if self.use_training_aug and self.antideg_net is not None:
+            self.antideg_net.dtype = self.dtype
+            self.accelerator.prepare(self.antideg_net, self.antideg_net_optim)
+
+        # dataloaders
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
@@ -996,7 +1038,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = [
                 "NestedTensorBlock"
             ]
-            self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
+            self.vq_loss_fn.repa_loss.repa_encoder.dtype = self.dtype  # torch.float32
             self.vq_loss_fn.repa_loss.repa_encoder, _ = self.accelerator.prepare(
                 self.vq_loss_fn.repa_loss.repa_encoder,
                 torch.optim.AdamW(
@@ -1031,18 +1073,7 @@ class CosmosHyperspectralTokenizerTrainer:
             raise ValueError(f"Unknown mode {mode}")
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
-        aug_pipe: Callable[[torch.Tensor], torch.Tensor] | None = getattr(
-            self, "tokenizer_augmentation_pipe", None
-        )
-        if aug_pipe is not None:
-            assert_type(aug_pipe, Callable[[torch.Tensor], torch.Tensor])
-            assert callable(aug_pipe), "tokenizer_augmentation_pipe must be callable"
-
-            # Augmentation
-            # says we want the augmentation does on x -> \tilde{x}
-            # but the reconstruction \bar{x} = f(x) \approx f(aug(x)) = \tilde{x} does not changed
-            x = aug_pipe(x)
-
+        out_d = {}
         with self.accelerator.autocast():
             if self.sep_enc_dec:
                 if not ema:
@@ -1081,7 +1112,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     recon = self.tokenizer(x)
 
         # basic out
-        out_d = dict(latent=latent, recon=recon)
+        out_d.update({"latent": latent, "recon": recon})
 
         # quantizer output dict
         if self.use_quantizer:
@@ -1241,6 +1272,19 @@ class CosmosHyperspectralTokenizerTrainer:
             split="train",
         )
 
+        if self.use_training_aug and self.aug_pipeline_train_obj == "anti_deg_network":
+            assert "aug_x" in tok_dict, "aug_x not in tokenizer output dict"
+            assert self.antideg_net is not None, "antideg_net not defined"
+            deg_x = tok_dict["aug_x"]
+            gt = x
+            recovery = self.antideg_net(deg_x)
+            recovery_loss = (
+                torch.nn.functional.mse_loss(recovery, gt)
+                * self.train_cfg.antideg_loss_weight
+            )
+            gen_loss = gen_loss + recovery_loss
+            log_losses["recovery_loss"] = recovery_loss.item()
+
         if self.accelerator.sync_gradients:
             # backward
             self.tokenizer_optim.zero_grad()
@@ -1252,6 +1296,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.gradient_check(self.tokenizer)
             self.tokenizer_optim.step()
             self.tokenizer_sched.step()
+
+            if self.antideg_net is not None:
+                self.antideg_net_optim.step()
+                # self.gradient_check(self.antideg_net)
 
             # ema update
             self.ema_update(mode="tokenizer")
@@ -1278,15 +1326,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return disc_loss, log_disc
 
-    def train_step(
-        self,
-        batch: dict,
-    ):
-        torch.autograd.set_detect_anomaly(True)
+    def train_step(self, batch: dict):
+        # torch.autograd.set_detect_anomaly(True)
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
 
         quality_track_n = self.train_cfg.track_metrics_duration
         quality_track_after = self.train_cfg.track_metrics_after
+        check_quality = None
         if quality_track_n >= 0:
             self._psnr_fn = PeakSignalNoiseRatio(data_range=1.0).to(
                 self.device, self.dtype
@@ -1315,18 +1361,51 @@ class CosmosHyperspectralTokenizerTrainer:
             # with torch.autograd.set_detect_anomaly(True):
             # self.log_msg(f"input shape: {x.shape}", level="debug")
 
-            out_d = self.forward_tokenizer(x)
+            if self.use_training_aug:
+                # NOTE: augmentation pipeline
+                # is decoder_clean, x_clean -> aug -> x_deg
+                # 1. -> encoder -> latent_deg -> decoder -> decoder_clean -> disc (tokenizer)
+                #    -> x_clean -> disc (discriminator)
+                # 2. -> encoder -> latent_deg -> decoder -> decoder_deg -> disc (tokenizer)
+                #    -> x_deg -> disc (discriminator)
+                # * version 2 is just the degrading the clean x into a degraded one, does not
+                # * require the decoder to recover from the degraded latent <----- augmentation
+                # ! version 1 requires the decoder to recover from the degraded latent <---- decoding the restoration
+                # (may some generation ability).
 
-            # train tokenizer and discriminator
-            tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
-            disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                self.aug_pipe = cast(Callable, self.aug_pipe)
+                x_deg = self.aug_pipe(x)
+
+                # forward the tokenizer using degraded images
+                out_d = self.forward_tokenizer(x_deg)
+
+                if self.aug_pipeline_train_obj == "decoder_clean":
+                    # x: clean image
+                    tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
+                    # train discriminator on clean image
+                    disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+
+                elif self.aug_pipeline_train_obj == "decoder_deg":
+                    tokenizer_loss, log_token_loss = self.train_tokenizer_step(
+                        x_deg, out_d
+                    )
+                    # train discriminator on degraded image
+                    disc_loss, log_disc_loss = self.train_disc_step(x_deg, out_d)
+
+                else:
+                    # The case for "anti_deg_network" is handled inside train_tokenizer_step
+                    out_d["aug_x"] = x_deg
+                    tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
+                    disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+
+            else:
+                out_d = self.forward_tokenizer(x)  # no augmentation
+                # train tokenizer and discriminator
+                tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
+                disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
             # track reconstruction quality
-            if (
-                quality_track_n >= 0
-                and self.global_step % quality_track_n != 0
-                and self.global_step >= quality_track_after
-            ):
+            if check_quality is not None:
                 check_quality(x, out_d["recon"])
 
         self.step_train_state()

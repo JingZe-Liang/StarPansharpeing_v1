@@ -148,6 +148,7 @@ tmp/
 *.jpg
 **.pt
 **.pth
+src/stage2/generative/tools/conditions/caption/weights/*
 
 compressed_output/
 env.toml

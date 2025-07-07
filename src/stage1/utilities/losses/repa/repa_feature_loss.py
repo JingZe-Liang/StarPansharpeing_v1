@@ -218,7 +218,7 @@ class REPALoss(torch.nn.Module):
     @torch.no_grad()
     def _encode_img(self, img):
         _img_sz = tuple(img.shape[-2:])
-        if self.rgb_channels is not None:
+        if self.rgb_channels is not None and img.shape[1] > 3:
             assert img.shape[1] >= 3, "img must be hyperspectral images"
             if self.rgb_channels == "random":
                 _rgb_chan_select = torch.randperm(img.shape[1])[:3]

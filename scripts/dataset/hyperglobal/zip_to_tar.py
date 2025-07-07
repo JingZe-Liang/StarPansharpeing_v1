@@ -86,32 +86,53 @@ def zipfile_to_tarfile(zip_file_path, tar_file_writer: wds.ShardWriter, use_tbar
                 )
 
 
-if __name__ == "__main__":
+def move_file():
+    import os
+    import shutil
     from pathlib import Path
 
-    from braceexpand import braceexpand
+    path = Path("data/HyperGlobal/hyper_images/hypers")
+    for file in path.iterdir():
+        assert file.is_file(), f"{file} is not a file"
+        if file.name.startswith("EO1"):
+            new_path = path.parent / "EO1" / file.name
+        elif file.name.startswith("GF5"):
+            new_path = path.parent / "GF5" / file.name
+        else:
+            raise ValueError(f"Unknown file type: {file}")
 
-    shard_pattern = (
-        "data/Hyspectnet11k/hyper_images/Hyspectnet11k-xx_bands-px_128_%04d.tar"
-    )
+        shutil.move(file, new_path)
+        print(f"Moved {file} to {new_path}")
 
-    Path(shard_pattern).parent.mkdir(parents=True, exist_ok=True)
-    sink = wds.ShardWriter(
-        shard_pattern,
-        maxsize=4 * 1024 * 1024 * 1024,  # 4G
-    )
-    _zipfiles = [
-        "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part{1..5}.zip",
-        "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/GF5-part{1..5}.zip",
-    ]
-    zipfiles = []
-    for zipf in _zipfiles:
-        zipfiles.extend(braceexpand(zipf))
 
-    # zipfiles = ["/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part4.zip"]
+if __name__ == "__main__":
+    move_file()
 
-    for zip_file_path in zipfiles:
-        print(f"Processing {zip_file_path}")
-        zipfile_to_tarfile(zip_file_path, sink)
+    # from pathlib import Path
 
-    sink.close()
+    # from braceexpand import braceexpand
+
+    # shard_pattern = (
+    #     "data/Hyspectnet11k/hyper_images/Hyspectnet11k-xx_bands-px_128_%04d.tar"
+    # )
+
+    # Path(shard_pattern).parent.mkdir(parents=True, exist_ok=True)
+    # sink = wds.ShardWriter(
+    #     shard_pattern,
+    #     maxsize=4 * 1024 * 1024 * 1024,  # 4G
+    # )
+    # _zipfiles = [
+    #     "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part{1..5}.zip",
+    #     "/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/GF5-part{1..5}.zip",
+    # ]
+    # zipfiles = []
+    # for zipf in _zipfiles:
+    #     zipfiles.extend(braceexpand(zipf))
+
+    # # zipfiles = ["/HardDisk/ZiHanCao/datasets/HyperGlobal-450k/EO1-part4.zip"]
+
+    # for zip_file_path in zipfiles:
+    #     print(f"Processing {zip_file_path}")
+    #     zipfile_to_tarfile(zip_file_path, sink)
+
+    # sink.close()

@@ -1,7 +1,7 @@
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -207,6 +207,7 @@ class MultimodalityDataloader:
                         to_neg_1_1=to_neg_1_1,
                         permute=permute,
                         resize=None,
+                        process_img_keys="ALL",
                     ),  # type: ignore
                     # latents decoder ===
                     wids_latent_decode,
@@ -228,30 +229,41 @@ class MultimodalityDataloader:
         modality_sample: dict[ModalityName | str, Any] = {}
         for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
-            if isinstance(sample, dict):  # <-- default in this case
+            if isinstance(sample, dict):  # * <-- default in this case
                 if self.return_nested_dict is not None and not self.return_nested_dict:
                     modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
                 elif self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
                     modality_sample.update(self.extract_keys(sample, ext_key, None))
                 else:
-                    modality_sample[name] = sample
+                    modality_sample.update(self.extract_without_extension(sample))
             else:
                 modality_sample[name] = {"default": sample}
 
         return modality_sample
 
     def extract_key_for_non_nested_dict(self, subsample: dict):
-        content_not_dudent = [x for x in subsample.keys() if not x.startswith("__")]
+        content_not_dunder = [x for x in subsample.keys() if not x.startswith("__")]
 
-        if len(content_not_dudent) == 1:  # modality_name: Tensor
-            return subsample[content_not_dudent[0]]
+        if len(content_not_dunder) == 1:  # modality_name: Tensor
+            return subsample[content_not_dunder[0]]
         else:  # modality_name: {"img": Tensor, 'img2': Tensor, ...}
             subsample_f = {}
-            for name in content_not_dudent:
+            for name in content_not_dunder:
                 subsample_f[name] = subsample[name]
 
         return subsample_f
+
+    def extract_without_extension(self, samples: dict):
+        _keys = list(samples.keys())
+        for k in _keys:
+            if not str(k).startswith("__"):
+                # .image.tiff -> image
+                # img.png -> img
+                k_e = Path(k).stem.rsplit(".", 1)[-1]
+                samples[k_e] = samples.pop(k)
+
+        return samples
 
     def extract_keys(
         self,
@@ -264,7 +276,7 @@ class MultimodalityDataloader:
         def extract_fn(x: dict, key: str):
             parts = key.split(".")
             for p in parts:
-                x = x.get(p, None)
+                x = x.get(p, None)  # type: ignore
                 if x is None:
                     return None
             return x
@@ -454,16 +466,25 @@ def test_wids_mm_loaders(*args):
         )
 
     datasets, loaders = MultimodalityDataloader.create_loader(
-        {
-            "hyper_images": "data/MMSeg_YREB/hyper_images/shardindex.json",
-            "latents": "data/MMSeg_YREB/latents/shardindex.json",
-        },
+        # {
+        #     "hyper_images": "data/DCF_2020/hyper_images/shardindex.json",
+        #     # "latents": "data/MMSeg_YREB/latents/shardindex.json",
+        #     "conditions": "data/DCF_2020/conditions/shardindex.json",
+        # },
+        {"conditions": "data/WorldView3/conditions/shardindex.json"},
         batch_size=2,
         num_workers=0,
-        extracted_keys=[
-            [("img", "img")],
-            [("latents.hrms_latent", "hrms_latent")],
-        ],
+        # extracted_keys=[
+        #     # [("img", "img")],
+        #     # [("latents.hrms_latent", "hrms_latent")],
+        #     [(".img.tiff", "img")],
+        #     [
+        #         (".mlsd.png", "mlds"),
+        #         (".hed.png", "hed"),
+        #         (".segmentation.png", "segmentation"),
+        #         (".sketch.png", "sketch"),
+        #     ],
+        # ],
     )
 
     # if torch.distributed.is_initialized():

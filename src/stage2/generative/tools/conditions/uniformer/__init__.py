@@ -2,6 +2,7 @@ import os
 
 import cv2
 import numpy as np
+import torch
 
 from ..condition_utils import annotator_ckpts_path
 from ..download_util import load_file_from_url
@@ -67,8 +68,9 @@ def show_result_pyplot(
     return bgr2rgb(img)
 
 
-class SAMDetector:
-    def __init__(self):
+class SAMDetector(torch.nn.Module):
+    def __init__(self, device="cuda"):
+        super().__init__()
         try:
             from segment_anything import (
                 SamAutomaticMaskGenerator,
@@ -96,9 +98,9 @@ class SAMDetector:
             "config.py",
         )
         modelpath = os.path.join(annotator_ckpts_path, "upernet_global_small.pth")
-        self.model = init_segmentor(config_file, modelpath).cuda()
+        self.model = init_segmentor(config_file, modelpath, device)
 
-    def __call__(self, img):
+    def forward(self, img):
         masks = self.mask_generator.generate(img)
         result = np.zeros((1, img.shape[0], img.shape[1]))
         for i, mask in enumerate(masks):

@@ -128,8 +128,8 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-06-19_23-56-29_cosmos_f8c8p1_unified_hyperspectral_uni/checkpoints/checkpoint_13
-  ema_load_path: runs/stage1_cosmos/2025-06-15_17-11-45_cosmos_f8c16p4_unified_hyperspectral_uni/ema
+  resume_path: runs/stage1_cosmos/2025-07-04_01-29-25_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_82
+  ema_load_path: #runs/stage1_cosmos/2025-07-03_01-49-58_cosmos_f8c16p1_unified_hyperspectral_uni/ema
   compile_model: false
   only_load_tokenizer: false
 
@@ -168,7 +168,7 @@ train:
     adamw_eps: 1.0e-8
     ns_diff_abc: true
     ns_norm: false
-    adamw_betas: ${tuple:[0., 0.9]}  #[0.5, 0.9], gan training beta1 is zero
+    adamw_betas: ${tuple:[0., 0.9]} #[0.5, 0.9], gan training beta1 is zero
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 2.0e-4

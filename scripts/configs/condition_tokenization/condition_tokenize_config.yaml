@@ -1,0 +1,32 @@
+# Configuration for condition tokenization
+# This config file defines the parameters for tokenizing condition images using cosmos_tokenizer
+
+# Constants
+consts:
+  run_device: 0 # GPU device ID
+  tokenizer_checkpoint_path: null # Path to tokenizer checkpoint, set this to your checkpoint
+
+# Data configuration
+data:
+  wids_paths:
+    conditions: "data/WorldView3/conditions/shardindex.json" # Path to wids index file
+  batch_size: 8
+  num_workers: 1
+
+# Tokenizer configuration
+tokenizer:
+  _target_: src.stage1.cosmos.model.Cosmos1 # Replace with your tokenizer class
+  # Add tokenizer-specific parameters here
+  # For example:
+  # n_embed: 1024
+  # n_layers: 12
+  # etc.
+
+# Processor configuration
+processor:
+  condition_keys: null # Auto-detect from data if null, or specify list like ['hed', 'mlsd', 'segmentation', 'sketch']
+  latent_save_backend: "safetensors" # "safetensors" or "npz"
+
+# Output configuration
+output:
+  output_dir: "data/condition_latents" # Output directory for tokenized latents
