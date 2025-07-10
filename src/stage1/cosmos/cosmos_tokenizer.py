@@ -904,10 +904,10 @@ if __name__ == "__main__":
         "channels": 128,
         "channels_mult": [2, 4, 4],
         "dropout": 0.0,
-        "in_channels": [3, 10, 12, 32, 8, 13, 50, 4],
+        "in_channels": [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": [3, 10, 12, 32, 8, 13, 50, 4],
+        "out_channels": [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368],
         "resolution": 1024,
         "patch_size": 1,
         "patch_method": "haar",
@@ -919,22 +919,17 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": True,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-06-03_17-30-14_cosmos_f8c16p4_unified_hyperspectral_repa_no_pix_shuffle/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-07-04_20-41-12_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors",
+        "loading_type": "pretrained",  # "pretrained",
         "hook_for_repa": False,
         "block_name": "res_block",  # res_block, res_moe
         "quantizer_type": None,
-        "loading_type": "pretrained",  # "pretrained",
         "enc_moe": False,
         "dec_moe": False,
         "padding_mode": "reflect",
         "norm_type": "gn",
         "norm_groups": 32,
         "attn_type": "none",
-        # "resample_norm_type": "gn",
-        # "downsample_type": "ConvPixelUnshuffle",
-        # "downsample_shortcut": "averaging",
-        # "upsample_type": "ConvPixelShuffle",
-        # "upsample_shortcut": "duplicating",
     }
     torch.cuda.set_device(1)
     tokenizer = ContinuousImageTokenizer(**config).cuda()
@@ -961,16 +956,24 @@ if __name__ == "__main__":
     # print(parameter_count_table(tokenizer))
 
     # x = torch.randn(1, 12, 256, 256).to("cuda", torch.bfloat16)
+    # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="RS5M")
+    # dl_iter = iter(dl)
+    # tokenizer = tokenizer.eval().to(torch.bfloat16)
+    # x = torch.randn(1, 3, 1024, 1024, dtype=torch.bfloat16).cuda()
+    # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
+    from PIL import Image
     from torchmetrics.image import PeakSignalNoiseRatio
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="RS5M")
-    dl_iter = iter(dl)
     tokenizer = tokenizer.eval().to(torch.bfloat16)
-
-    x = torch.randn(1, 3, 1024, 1024, dtype=torch.bfloat16).cuda()
-    opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
+    x = Image.open(
+        "data/BigEarthNet_S2/conditions/conditions/tmp/S2_tiff_jp2k_80_S2A_MSIL2A_20170613T101031_N9999_R022_T34VER_51_64.hed.png"
+    ).convert("RGB")
+    x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
+    x = x / 255.0
+    x = x * 2 - 1  # normalize to [-1, 1]
+    x = x.to(torch.bfloat16)
 
     # from src.utilities.optim import get_muon_optimizer
 
@@ -985,10 +988,11 @@ if __name__ == "__main__":
     from src.utilities.logging.print import catch_any
 
     metric = MeanMetric().cuda()
-    with torch.autocast("cuda", torch.bfloat16) and catch_any():  # and torch.no_grad():
+    with torch.autocast("cuda", torch.bfloat16):
         for i in range(20):
             # x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
-            y = tokenizer(x)
+            with torch.no_grad():
+                y = tokenizer(x)
             # yy = ((y[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
             # xx = ((x[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
 
@@ -999,9 +1003,9 @@ if __name__ == "__main__":
             # print(y.shape)
 
             print(y.shape)
-            opt.zero_grad()
-            y.mean().backward()
-            opt.step()
+            # opt.zero_grad()
+            # y.mean().backward()
+            # opt.step()
 
             import time
 

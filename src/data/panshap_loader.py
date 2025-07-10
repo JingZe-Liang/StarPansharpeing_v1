@@ -1,3 +1,4 @@
+import math
 import sys
 from functools import partial
 from pathlib import Path
@@ -32,7 +33,12 @@ from src.utilities.logging import log_print
 
 type ModalityName = str
 type IndexFilePath = str | Path
-loader_seed = hash("uestc_ZihanCao_add_my_wechat:iamzihan123") % (2**31)
+import hashlib
+
+loader_seed = int(
+    hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16
+) % (2**31)
+loader_generator = torch.Generator().manual_seed(loader_seed)
 
 
 def local_name_fn(name, prefix: str | None = None):
@@ -183,12 +189,15 @@ class MultimodalityDataloader:
         self.wds_paths = wds_paths
         self.datasets = {}
         self.mm_names = []
-        self.batch_size = None
-        self.shuffle_size = None
-        self.num_workers = None
-        self.total_len = -1
         self.return_nested_dict = return_nested_dict  # remove the '__any_key' keys
         self.extracted_keys = extracted_keys
+
+        # loader kwargs
+        self.batch_size = None
+        self.num_workers = None
+        self.shuffle_size = None
+        self.drop_last = None
+        self.total_len = -1
 
         if extracted_keys is not None:
             assert len(extracted_keys) == len(wds_paths), (
@@ -223,7 +232,10 @@ class MultimodalityDataloader:
             self.datasets[name] = ds
 
     def __len__(self):
-        return self.total_len // getattr(self, "batch_size", 1)
+        len_f = self.total_len / getattr(self, "batch_size", 1)
+        return (
+            math.ceil(len_f) if getattr(self, "drop_last", False) else math.floor(len_f)
+        )
 
     def __getitem__(self, index):
         modality_sample: dict[ModalityName | str, Any] = {}
@@ -350,7 +362,9 @@ class MultimodalityDataloader:
         batch_size: int = 32,
         num_workers: int = 1,
         shuffle_size: int = 100,
+        drop_last: bool = False,
         resample: bool = True,
+        **__discarded_kwargs,
     ):
         dataset = cls(
             wds_paths,
@@ -367,10 +381,10 @@ class MultimodalityDataloader:
             shuffle_size=shuffle_size,
         )
 
-        # attribute
         setattr(dataset, "batch_size", batch_size)
         setattr(dataset, "num_workers", num_workers)
         setattr(dataset, "shuffle_size", shuffle_size)
+        setattr(dataset, "drop_last", drop_last)
 
         dataloader = wds.WebLoader(
             dataset,
@@ -378,8 +392,9 @@ class MultimodalityDataloader:
             num_workers=num_workers,
             persistent_workers=True if num_workers > 0 else False,
             prefetch_factor=None if num_workers == 0 else 6,
-            drop_last=False,
+            drop_last=drop_last,
             sampler=sampler,
+            generator=loader_generator,
             # collate_fn=multimodal_wids_collate_fn,
         )
         # if shuffle_size > 0:
@@ -471,7 +486,10 @@ def test_wids_mm_loaders(*args):
         #     # "latents": "data/MMSeg_YREB/latents/shardindex.json",
         #     "conditions": "data/DCF_2020/conditions/shardindex.json",
         # },
-        {"conditions": "data/WorldView3/conditions/shardindex.json"},
+        {
+            "conditions": "data/DCF_2020/conditions/shardindex.json",
+            "img": "data/DCF_2020/hyper_images/shardindex.json",
+        },
         batch_size=2,
         num_workers=0,
         # extracted_keys=[

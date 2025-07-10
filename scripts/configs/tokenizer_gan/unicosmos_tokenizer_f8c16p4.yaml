@@ -128,10 +128,16 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: runs/stage1_cosmos/2025-07-04_01-29-25_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_82
+  resume_path: #runs/stage1_cosmos/2025-07-04_01-29-25_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_82
   ema_load_path: #runs/stage1_cosmos/2025-07-03_01-49-58_cosmos_f8c16p1_unified_hyperspectral_uni/ema
   compile_model: false
   only_load_tokenizer: false
+
+  # augmentations
+  aug_pipeline_train_obj: decoder_deg
+  aug_pipeline:
+    _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    p: 0.1
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

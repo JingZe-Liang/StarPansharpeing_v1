@@ -556,6 +556,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             )
 
 
+# * --- tester --- #
+
+
 def _test_track_mp_sync(rank: int):
     lmt = LossMetricTracker(
         loss_metrics_values={

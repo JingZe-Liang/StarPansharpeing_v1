@@ -59,7 +59,7 @@ def webdataset_conditions_prepare(
     log_print(f"Conditions: {conditions}")
     log_print(f"RGB channels: {rgb_channels}")
     log_print(f"Device: {device}")
-    torch.cuda.set_device(device)  # Set the device for torch operations
+    # torch.cuda.set_device(device)  # Set the device for torch operations
 
     total_n = 0
     sink_man = TarSinkManager(base_dir)
@@ -70,7 +70,7 @@ def webdataset_conditions_prepare(
     if nums is None:
         nums = [None] * len(datasets)
 
-    nums: list[int | None]
+    nums = cast(list[int | None], nums)
     for ds, num in zip_longest(datasets, nums):
         # Wrap the condition preparation generator with tqdm for progress tracking
         condition_generator = prepare_condition_from_webdataset(
@@ -245,7 +245,7 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
       caption_save_format: str
     """
     log_print("Starting condition preparation with configuration:")
-    log_print(OmegaConf.to_yaml(cfg, resolve=True))
+    log_print(OmegaConf.to_yaml(cfg))
 
     # Setup WebDataset pipeline
 
@@ -277,11 +277,13 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
                 path,
                 batch_size=1,
                 num_workers=0,
+                img_key="npy",
+                tgt_key="img",
                 shuffle_size=-1,
                 to_neg_1_1=False,
                 transform_prob=0.0,
                 resample=False,
-                permute=False,
+                permute=True,
             )
             input_dataloader.append(dl)
 

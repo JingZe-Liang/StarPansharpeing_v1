@@ -57,7 +57,13 @@ train_paths:
   - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0000..0011}.tar # E01 175 bands
   - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0012..0018}.tar # GF5 150 bands
   - - data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_{0000..0011}.tar # 202 bands
-  - - ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
+  - - ${eval:"[str(p) for p in Path('data/MMOT/hyper_images').glob('**/*.tar')]"}
+  - - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0004..0006}.tar
+    - data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0015}.tar
+    - data/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
+    - data/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar
+    - data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar
+    - ${eval:"[str(p) for p in Path('data/MMOT/conditions').glob('**/*.tar')]"}
   # - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 val_paths:

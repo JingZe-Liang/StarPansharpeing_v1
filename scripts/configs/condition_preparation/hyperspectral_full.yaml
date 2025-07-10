@@ -40,10 +40,11 @@ data:
   # data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
   # data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar
   # data/MDAS-HySpex/
-  data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0004.tar
+  # data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0004.tar
+  ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
 
 output:
-  output_dir: "data/BigEarthNet_S2"
+  output_dir: "data/MMOT"
   tar_name: "hyperspectral_conditions"
   # tar_rel_path: "conditions/hyperspectral_conditions"
 
@@ -56,5 +57,4 @@ processor:
   condition_save_format: "png" # 条件图像保存为PNG格式
   caption_save_format: "txt" # 描述保存为文本文件
 
-consts:
-  run_device: 1 # GPU设备ID
+device: "cuda"

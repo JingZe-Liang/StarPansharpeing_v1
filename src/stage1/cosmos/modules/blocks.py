@@ -28,7 +28,7 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = True
+compile_forward_fn = False
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True

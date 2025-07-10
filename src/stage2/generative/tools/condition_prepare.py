@@ -7,6 +7,7 @@ from typing import Callable, cast
 
 import cv2
 import numpy as np
+import pudb
 import torch
 from PIL import Image
 from tqdm import tqdm
@@ -204,10 +205,9 @@ def prepare_condition_from_webdataset(
                 out = annotators[cond](img)
 
             if tuple(out.shape[:2]) != tuple(_orig_size):
-                cv2.resize(
+                out = cv2.resize(
                     out,
                     (_orig_size[1], _orig_size[0]),
-                    out,
                     interpolation=cv2.INTER_LINEAR,
                 )
             ret[cond] = (

@@ -33,7 +33,6 @@ colored_traceback.add_hook()
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.generative.MeanFlow.meanflow import MeanFlow
-from src.stage2.pansharpening.metrics import AnalysisPanAcc
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )

@@ -2,8 +2,9 @@ import json
 import os
 import random
 import re
-from itertools import chain
-from typing import Any, Callable, Iterable, TypeAlias
+from itertools import chain, product
+from pathlib import Path
+from typing import Any, Callable, Iterable, TypeAlias, cast
 
 import braceexpand
 import numpy as np
@@ -22,6 +23,10 @@ from ..utilities.logging.print import log_print
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
 SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
+
+
+def not_dunder_keys(sample: dict) -> list[str]:
+    return [k for k in sample.keys() if not k.startswith("__")]
 
 
 def extract_modality_names(s, square_bracket=False):
@@ -97,17 +102,107 @@ def de_structure_tar(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     return result
 
 
-def search_one_key_not_dunder(sample: dict[str, LoadedData], key: str):
+def search_one_key_not_dunder(
+    sample: dict[str, LoadedData], key: str, random_one=False
+):
     _not_dunder_keys: list[str] = []
+    new_sample = {}
     for k in sample.keys():
         if not k.startswith("__"):
             _not_dunder_keys.append(k)
-    assert len(_not_dunder_keys) == 1, (
-        'Expected exactly one key not starting with "__", but found: '
-        + str(_not_dunder_keys)
+        else:
+            new_sample[k] = sample[k]
+
+    if not random_one:
+        assert len(_not_dunder_keys) == 1, (
+            'Expected exactly one key not starting with "__", but found: '
+            + str(_not_dunder_keys)
+        )
+        ch_key = _not_dunder_keys[0]
+    else:
+        if len(_not_dunder_keys) < 1:
+            raise ValueError(
+                'Expected at least one key not starting with "__" when random choosing one key, '
+                "but found: " + str(_not_dunder_keys)
+            )
+        ch_key = random.choice(_not_dunder_keys)
+
+    new_sample[key] = sample[ch_key]
+
+    return new_sample
+
+
+def filter_undecoded(sample, key: str | list[str] | None):
+    if key is None:
+        # check all keys
+        for k, v in sample.items():
+            if not k.startswith("__") and isinstance(v, bytes):
+                log_print(f"{k} is undecoded", "warning")
+                return None
+    else:
+        if isinstance(key, str):
+            key = [key]
+
+        for k in key:
+            if k not in sample:
+                log_print(f"{k} not in sample", "error")
+                raise ValueError(f"{k} not in sample, sample keys: {sample.keys()}")
+            if isinstance(sample[k], bytes):
+                log_print(f"{k} is undecoded", "warning")
+                return None
+
+        return sample
+
+
+def rename_keys(
+    sample: dict,
+    tgt_keys: str | list[str],
+    source_keys: str | list[str],
+    remove_others: bool = False,
+):
+    if isinstance(tgt_keys, str):
+        tgt_keys = [tgt_keys]
+    if isinstance(source_keys, str):
+        source_keys = [source_keys]
+
+    assert len(tgt_keys) == len(source_keys), (
+        "tgt_keys and source_keys must have the same length"
     )
 
-    sample[key] = sample.pop(_not_dunder_keys[0])
+    for sk, tk in zip(source_keys, tgt_keys):
+        if sk in sample:
+            sample[tk] = sample.pop(sk, None)
+            if sample[tk] is None:
+                log_print(
+                    '"Key {sk} not found in sample, setting {tk} to None"', "warning"
+                )
+
+    if remove_others:
+        for k in sample.keys():
+            if k not in source_keys and not k.startswith("__"):
+                del sample[k]
+
+    return sample
+
+
+def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = None):
+    _keys = list(sample.keys())
+    for k in _keys:
+        if not k.startswith("__"):
+            v = sample.pop(k)
+            if tgt_key is None:
+                tgt_key = Path(k).stem.rsplit(".", 1)[-1]
+            elif isinstance(tgt_key, dict):
+                tgt_key = tgt_key[k]  # may raise KeyError
+            elif isinstance(tgt_key, str):
+                sample[tgt_key] = v
+                break
+            else:
+                raise ValueError(
+                    f"Unsupported type for tgt_key: {type(tgt_key)}. Expected str or dict."
+                )
+
+            sample[tgt_key] = v
 
     return sample
 
@@ -115,7 +210,7 @@ def search_one_key_not_dunder(sample: dict[str, LoadedData], key: str):
 # @torch.compile
 def norm_img(
     sample: SampleType,
-    norm_keys: list[str] = ["img"],
+    norm_keys: str | list[str] | None = ["img"],
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,
@@ -133,13 +228,18 @@ def norm_img(
         function: A function that takes a sample and normalizes the image.
     """
 
+    if norm_keys is None:
+        norm_keys = not_dunder_keys(sample)
+    elif isinstance(norm_keys, str):
+        norm_keys = [norm_keys]
+
     for key in norm_keys:
         if key not in sample:
             log_print(f"{key} not in sample", level="warning", warn_once=True)
             continue
 
         if isinstance(sample[key], dict):
-            _sample_dict: dict = sample[key]
+            _sample_dict: dict = sample[key]  # type: ignore
             _img = _sample_dict.get("img")
         elif isinstance(sample[key], (np.ndarray, torch.Tensor)):
             _img = sample[key]
@@ -180,6 +280,70 @@ def norm_img(
         sample[key] = img
 
     return sample
+
+
+def size_filtering(
+    sample, tgt_key: str | list[str] | None, constraint_size: int | tuple
+):
+    if tgt_key is None:
+        tgt_key = [k for k in sample.keys() if not k.startswith("__")]
+    elif isinstance(tgt_key, str):
+        tgt_key = [tgt_key]
+
+    for k in tgt_key:
+        img = sample[k]
+        img_size = np.prod(img.shape[:2]).item()
+        if isinstance(constraint_size, int):
+            if img_size < constraint_size:  # larger than, keep
+                return None
+        elif isinstance(constraint_size, tuple):
+            if not (
+                constraint_size[0] <= img_size <= constraint_size[1]
+            ):  # in the range, keep
+                return None
+
+    return sample
+
+
+def loop_apply_filters(
+    filtering: Callable,
+    loop_kwargs: dict[str, list | tuple],
+    const_kwargs: dict[str, Any] | None = None,
+):
+    if const_kwargs is None:
+        const_kwargs = {}
+
+    for v in loop_kwargs.values():
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(
+                f"Expected list or tuple for loop_kwargs values, but got {type(v)}"
+            )
+
+    # compose looped kwargs
+    keys = loop_kwargs.keys()
+    composited_kwargs = [dict(zip(keys, v)) for v in product(*loop_kwargs.values())]
+
+    def inner(sample):
+        for kwargs in composited_kwargs:
+            # merge constant kwargs
+            _kwargs = {**const_kwargs, **kwargs}
+            # apply filtering
+            res = filtering(sample, **_kwargs)
+
+            if res is not None:
+                return res
+            else:
+                log_print(
+                    "Filtering failed with kwargs: {kwargs} at filter: {filtering.__name__}",
+                    "warning",
+                )
+                continue
+        return None
+
+    return inner
+
+
+# * --- Webdataset reading utilities --- #
 
 
 def merge_modalities(
@@ -363,7 +527,7 @@ def wids_filter_img_size(constraint_size: int | tuple):
 
 def large_image_resizer_clipper(
     tgt_size: int | tuple[int, int],
-    img_key: str = "img",
+    img_key: str | list[str] | None = "img",
     op_for_large: str = "clip",
 ):
     """
@@ -382,6 +546,8 @@ def large_image_resizer_clipper(
     """
     if isinstance(tgt_size, int):
         tgt_size = to_n_tuple(tgt_size, 2)
+    if isinstance(img_key, str):
+        img_key = [img_key]
 
     if op_for_large == "clip":
         clipper = RandomResizedCrop(
@@ -398,8 +564,16 @@ def large_image_resizer_clipper(
         raise ValueError(f"op_for_large {op_for_large} not supported")
 
     def sample_mapper(sample: dict):
+        nonlocal img_key
+
+        if img_key is None:
+            img_key = not_dunder_keys(sample)
+
         try:
-            sample[img_key] = clipper(sample[img_key])
+            _keys = sample.keys()
+            for k in _keys:
+                if k in img_key:
+                    sample[k] = clipper(sample[k])
         except Exception as e:
             log_print(f"worker pid <u>{os.getpid()}</u> clip img error: {e}", "warning")
             return None

@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import time
 from contextlib import nullcontext
@@ -1278,6 +1279,7 @@ class CosmosHyperspectralTokenizerTrainer:
             deg_x = tok_dict["aug_x"]
             gt = x
             recovery = self.antideg_net(deg_x)
+            # Additional recovery loss ensuring the latent space suitable for restoration
             recovery_loss = (
                 torch.nn.functional.mse_loss(recovery, gt)
                 * self.train_cfg.antideg_loss_weight
@@ -1350,9 +1352,7 @@ class CosmosHyperspectralTokenizerTrainer:
         _accum_models = (
             [self.tokenizer_encoder, self.tokenizer_decoder]
             if self.sep_enc_dec
-            else [
-                self.tokenizer,
-            ]
+            else [self.tokenizer]
         )
         _accum_models.append(self.vq_loss_fn.discriminator)
         # import ipdb; ipdb.set_trace()
@@ -1537,9 +1537,19 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return " - ".join(strings)
 
+    def _randomly_batch_sample_key(self, batch):
+        if "img" not in batch:
+            keys_not_dunder = [k for k in batch.keys() if not k.startswith("__")]
+            # randomly choose one
+            k = random.choice(keys_not_dunder)
+            batch["img"] = batch[k]
+
+        return batch
+
     def infinity_train_loader(self):
         while True:
             for batch in self.train_dataloader:
+                batch = self._randomly_batch_sample_key(batch)
                 yield batch
 
     def train_loop(self):
@@ -1578,6 +1588,7 @@ class CosmosHyperspectralTokenizerTrainer:
             raise ValueError("No validation dataloader found")
 
         for batch in self.val_dataloader:
+            batch = self._randomly_batch_sample_key(batch)
             yield batch
 
     def val_step(self, batch: dict) -> torch.Tensor:

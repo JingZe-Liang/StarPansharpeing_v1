@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Literal, Union
 import hydra
 import numpy as np
 import torch
+import torch.compiler
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 from peft import PeftConfig
@@ -43,6 +44,7 @@ class ConditionTokenizeProcessor(nn.Module):
         self.latent_save_backend = latent_save_backend
         assert hasattr(self.tokenizer, "encode"), "Tokenizer must have an encode method"
 
+    @torch.compiler.disable
     def forward(self, batch: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Processes a batch of condition images.
@@ -63,8 +65,11 @@ class ConditionTokenizeProcessor(nn.Module):
 
         # Process each condition type
         condition_latents = {}
+        ck = self.condition_keys
+        if ck is None:
+            ck = [k for k in batch.keys() if not k.startswith("__")]
 
-        for condition_key in self.condition_keys:
+        for condition_key in ck:
             if condition_key not in batch:
                 log_print(
                     f"Condition key '{condition_key}' not found in batch. Skipping.",
@@ -146,29 +151,29 @@ class ConditionTokenizeProcessor(nn.Module):
 
 def tokenize_conditions_from_wids(
     wids_paths: Dict[str, Union[str, Path]],
-    output_dir: str,
-    tokenizer: nn.Module,
     condition_keys: List[str],
     batch_size: int = 8,
     num_workers: int = 1,
-    latent_save_backend: Literal["safetensors", "npz", "npy"] = "safetensors",
+    latent_save_backend: Literal["safetensors", "npz", "npy"] = "npy",
     device: str = "cuda",
 ) -> int:
     """
-    Tokenize condition images from wids multimodal loader and save as webdataset.
+        Tokenize condition images from wids multimodal loader and save as webdataset.
+    ],
+        output_dir: str,
+        tokenizer: nn.Module,
+        Args:
+            wids_paths: Dictionary mapping modality names to wids index file paths
+            output_dir: Output directory for saving tokenized latents
+            tokenizer: Tokenizer model for encoding conditions
+            condition_keys: List of condition keys to tokenize
+            batch_size: Batch size for processing
+            num_workers: Number of workers for data loading
+            latent_save_backend: Backend for saving latents
+            device: Device for processing
 
-    Args:
-        wids_paths: Dictionary mapping modality names to wids index file paths
-        output_dir: Output directory for saving tokenized latents
-        tokenizer: Tokenizer model for encoding conditions
-        condition_keys: List of condition keys to tokenize
-        batch_size: Batch size for processing
-        num_workers: Number of workers for data loading
-        latent_save_backend: Backend for saving latents
-        device: Device for processing
-
-    Returns:
-        int: Total number of samples processed
+        Returns:
+            int: Total number of samples processed
     """
     log_print(f"Starting condition tokenization...")
     log_print(f"Condition keys: {condition_keys}")

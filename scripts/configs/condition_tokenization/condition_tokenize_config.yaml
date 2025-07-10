@@ -1,31 +1,67 @@
 # Configuration for condition tokenization
 # This config file defines the parameters for tokenizing condition images using cosmos_tokenizer
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
 
 # Constants
 consts:
-  run_device: 0 # GPU device ID
+  run_device: 1 # GPU device ID
   tokenizer_checkpoint_path: null # Path to tokenizer checkpoint, set this to your checkpoint
 
 # Data configuration
 data:
   wids_paths:
     conditions: "data/WorldView3/conditions/shardindex.json" # Path to wids index file
-  batch_size: 8
-  num_workers: 1
+  batch_size: 1
+  num_workers: 0
 
 # Tokenizer configuration
 tokenizer:
-  _target_: src.stage1.cosmos.model.Cosmos1 # Replace with your tokenizer class
-  # Add tokenizer-specific parameters here
-  # For example:
-  # n_embed: 1024
-  # n_layers: 12
-  # etc.
+  _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer
+  attn_resolutions: [32]
+  channels: 128
+  channels_mult: [2, 4, 4]
+  dropout: 0.0
+  in_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]}
+  spatial_compression: 8
+  num_res_blocks: 2
+  out_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]}
+  resolution: 1024
+  patc  h_method: haar
+  latent_channels: 16
+  z_channels: 16
+  z_factor: 1
+  name: CI
+  formulation: AE
+  encoder: Default
+  decoder: Default
+  norm_in_quant_conv: false
+  norm_type: gn
+  norm_groups: 32
+  block_name: res_block
+  moe_token_mixer_type: res_block
+  enc_path:
+  dec_path:
+  wrap_fsdp_last_layer: false
+  patch_size: 1
+  hidden_factor: 4
+  attn_type: none
+  padding_mode: reflect # for boundary?
+  act_checkpoint: false
+  uni_tokenizer_path: runs/stage1_cosmos/2025-07-04_20-41-12_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
+  loading_type: pretrained
 
 # Processor configuration
 processor:
   condition_keys: null # Auto-detect from data if null, or specify list like ['hed', 'mlsd', 'segmentation', 'sketch']
-  latent_save_backend: "safetensors" # "safetensors" or "npz"
+  latent_save_backend: "safetensors" # "safetensors" or "npz"; safetensors supports bfloat16 natively
 
 # Output configuration
 output:
