@@ -15,10 +15,15 @@ from src.data.codecs import (
     npz_decode_io,
     safetensors_decode_io,
     tiff_decode_io,
+    wids_caption_embed_decode,
     wids_image_decode,
     wids_latent_decode,
+    wids_remove_none_keys,
 )
+from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
+    chained_dataloaders,
+    expand_paths_and_correct_loader_kwargs,
     flatten_sub_dict,
     merge_modalities,
     norm_img,
@@ -218,8 +223,10 @@ class MultimodalityDataloader:
                         resize=None,
                         process_img_keys="ALL",
                     ),  # type: ignore
-                    # latents decoder ===
+                    # latents, caption decoders ===
                     wids_latent_decode,
+                    wids_caption_embed_decode,
+                    wids_remove_none_keys,
                 ],
             )
             if self.total_len == -1:
@@ -416,7 +423,6 @@ def get_multimodal_dataloaders(
     to_neg_1_1: bool = True,
     resample: bool = True,
     prefetch_factor: int = 6,
-    latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
     pin_memory: bool = True,
     remove_meta: bool = False,
     normed_keys: list[str] = ["img", "hrms", "lrms", "pan"],
@@ -468,10 +474,78 @@ def get_multimodal_dataloaders(
     return dataset, dataloader
 
 
+def get_mm_chained_loaders(
+    paths: list[dict[ModalityName, IndexFilePath]],
+    basic_kwargs: dict | None = None,
+    changed_kwargs_by_loader: list[dict] | None = None,
+    shuffle_loaders: bool = True,
+    curriculum_type: str | None = None,
+    curriculum_kwargs: dict | None = None,
+):
+    # > assertions
+    assert all(isinstance(p, dict) for p in paths), (
+        "paths must be a list of dictionaries, "
+        "where each dictionary contains modality names as keys and index file paths as values."
+    )
+    if changed_kwargs_by_loader is None:
+        changed_kwargs_by_loader = [{} for _ in paths]
+    assert len(paths) == len(changed_kwargs_by_loader), (
+        "changed_kwargs_by_loader must have the same length as paths"
+    )
+
+    # > loop index file and create loaders
+    datasets = []
+    loaders = []
+    for i, (path_dict, per_loader_options) in enumerate(
+        zip(paths, changed_kwargs_by_loader)
+    ):
+        if basic_kwargs is None:
+            loader_kwargs = per_loader_options
+        else:
+            loader_kwargs = basic_kwargs.copy()
+            loader_kwargs.update(per_loader_options)
+
+        log_print(
+            "create loader for path {path_dict} with loader_kwargs {loader_kwargs}",
+            "debug",
+        )
+
+        dataset, loader = MultimodalityDataloader.create_loader(
+            wds_paths=path_dict,
+            **loader_kwargs,
+        )
+
+        # > curriculums fn
+        if curriculum_type is not None:
+            assert curriculum_kwargs is not None, (
+                f"curriculum_kwargs must be provided if {curriculum_type=}."
+            )
+            curriculum_fn = get_curriculum_fn(  # type: ignore
+                c_type=curriculum_type,
+                **curriculum_kwargs,
+            )
+            log_print(
+                f"use {curriculum_type} curriculum learning with kwargs: {curriculum_kwargs} for loader {path_dict}",
+                "debug",
+            )
+        else:
+            curriculum_fn = None
+
+    # > chain dataloaders
+    assert len(datasets) > 0 and len(loaders) > 0, (
+        "At least one dataset and one loader must be provided."
+    )
+    dataloader = chained_dataloaders(
+        loaders, shuffle_loaders=shuffle_loaders, curriculum_fn=curriculum_fn
+    )
+
+    return datasets, dataloader
+
+
 # * --- testers --- #
 
 
-def test_wids_mm_loaders(*args):
+def __test_wids_mm_loaders(*args):
     if 0 < len(args) < 2:
         torch.distributed.init_process_group(
             backend="nccl",  # or "nccl" if you have GPUs
@@ -555,7 +629,7 @@ if __name__ == "__main__":
     # if i >= 5:
     #     break
 
-    test_wids_mm_loaders()
+    __test_wids_mm_loaders()
 
     # # mp
     # import torch.multiprocessing as mp

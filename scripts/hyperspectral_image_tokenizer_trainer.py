@@ -5,7 +5,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, assert_type, cast
+from typing import Callable, Literal, Sequence, cast
 
 import accelerate
 import colored_traceback
@@ -563,16 +563,6 @@ class CosmosHyperspectralTokenizerTrainer:
             _log_fn(msg_string, **kwargs)
 
         log_it(*msgs, **kwargs)
-
-        # if only_rank_zero:
-        #     if self.accelerator.is_main_process:
-        #         log_it(*msgs, **kwargs)
-        # else:  # not only rank zero
-        #     with self.accelerator.main_process_first():
-        #         msg_string = str_msg(*msgs)
-        #         # prefix rank info
-        #         msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
-        #         log_it(msg_string, **kwargs)
 
     def _wrap_peft_tokenizer(self):
         assert "peft" in self.cfg, "peft_cfg not in the config"
@@ -1374,7 +1364,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 # (may some generation ability).
 
                 self.aug_pipe = cast(Callable, self.aug_pipe)
-                x_deg = self.aug_pipe(x)
+                x_deg = self.aug_pipe(x.float()).to(x.device, x.dtype)
 
                 # forward the tokenizer using degraded images
                 out_d = self.forward_tokenizer(x_deg)
@@ -1559,7 +1549,21 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
-            self.train_step(batch)
+            try:
+                self.train_step(batch)
+            except Exception as e:
+                # debug here
+                self.log_msg(
+                    f"Training failed, batch keys are {batch.keys()}", level="debug"
+                )
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        self.log_msg(
+                            f"{k} shape: {v.shape}", only_rank_zero=False, level="debug"
+                        )
+                    else:
+                        self.log_msg(f"{k}: {v}", only_rank_zero=False, level="debug")
+                raise e
 
             if (
                 self.global_step % self.val_cfg.val_duration == 0
@@ -1637,17 +1641,33 @@ class CosmosHyperspectralTokenizerTrainer:
 
         for val_iter in range(self.val_cfg.max_val_iters):
             batch = next(self._val_loader_iter)
-            recon = self.val_step(batch)
+            batch = self._randomly_batch_sample_key(batch)
+            try:
+                recon = self.val_step(batch)
+            except Exception as e:
+                # debug here
+                self.log_msg(
+                    f"Validation failed, batch keys are {batch.keys()}", level="debug"
+                )
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        self.log_msg(
+                            f"{k} shape: {v.shape}", only_rank_zero=False, level="debug"
+                        )
+                    else:
+                        self.log_msg(f"{k}: {v}", only_rank_zero=False, level="debug")
+                raise e
 
             recon_for_metrics = self.to_rgb(recon)
             batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
 
-            psnr_fn.update(batch_img_rgb, recon_for_metrics)
-            ssim_fn.update(batch_img_rgb, recon_for_metrics)
+            with torch.no_grad():
+                psnr_fn.update(batch_img_rgb, recon_for_metrics)
+                ssim_fn.update(batch_img_rgb, recon_for_metrics)
 
-            # recon loss
-            loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
-            loss_metrics.update(loss)
+                # recon loss
+                loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
+                loss_metrics.update(loss)
 
         psnr_val = psnr_fn.compute()
         ssim_val = ssim_fn.compute()

@@ -13,8 +13,8 @@ from natsort import natsorted
 from PIL import Image
 from tqdm import tqdm
 
-from data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.data.codecs import safetensors_codec_io
+from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.data.tar_utils import TarSinkManager
 from src.stage2.generative.tools.condition_prepare import (
     prepare_condition_from_webdataset,
@@ -35,7 +35,10 @@ def webdataset_conditions_prepare(
     to_pil: bool = True,
     save_original_rgb: bool = True,
     condition_save_format: Literal["png", "jpg", "safetensors"] = "png",
-    caption_save_format: Literal["txt", "json", "safetensors"] = "txt",
+    caption_save_format: Literal["txt", "json"] = "json",
+    resume_from: str | None = None,
+    relative_data_dir: str = "conditions",
+    save_attn_mask: bool = False,
 ):
     """
     Process webdataset to generate condition images and captions.
@@ -59,7 +62,7 @@ def webdataset_conditions_prepare(
     log_print(f"Conditions: {conditions}")
     log_print(f"RGB channels: {rgb_channels}")
     log_print(f"Device: {device}")
-    # torch.cuda.set_device(device)  # Set the device for torch operations
+    torch.cuda.set_device(device)  # Set the device for torch operations
 
     total_n = 0
     sink_man = TarSinkManager(base_dir)
@@ -79,6 +82,7 @@ def webdataset_conditions_prepare(
             rgb_channels,
             device="cuda",
             to_pil=to_pil,  # type: ignore
+            resume_from=resume_from,
         )
 
         # Note: Since we don't know the total count, we'll use an unbounded progress bar
@@ -88,12 +92,19 @@ def webdataset_conditions_prepare(
             unit="sample",
             total=num,
         )
-        for sample_idx, (sample, condition_data) in enumerate(zip(ds, progress_bar)):
+
+        rel_data_dir = (
+            relative_data_dir if resume_from is None else f"{relative_data_dir}_resumed"
+        )
+        for sample_idx, (sample, condition_data) in enumerate(progress_bar):
+            if condition_data is None:
+                continue
+
             # Get the sample key from the original webdataset sample
             sample_key = sample.get("__key__", None)
             url = sample.get("__url__", None)
             tar_name = Path(url[0]).name
-            tar_rel_path = f"conditions/{tar_name}"
+            tar_rel_path = f"{rel_data_dir}/{tar_name}"
             sink = sink_man.get_sink(tar_name, tar_rel_path)
 
             assert url is not None, (
@@ -132,26 +143,43 @@ def webdataset_conditions_prepare(
             # Process and save condition images
             for condition_name, condition_output in condition_data.items():
                 if condition_name == "caption":
+                    condition_output = cast(Dict[str, Any], condition_output)
+                    valid_length = condition_output["valid_length"][0].item()
+
                     # Handle caption separately
                     if caption_save_format == "txt":
                         output_sample[f"{condition_name}.txt"] = str(
-                            condition_output
+                            condition_output["caption"]
                         ).encode("utf-8")
                     elif caption_save_format == "json":
                         import json
 
                         output_sample[f"{condition_name}.json"] = json.dumps(
-                            {"caption": str(condition_output)}
+                            {
+                                "caption": str(condition_output["caption"]),
+                                "valid_length": str(valid_length),
+                            }
                         ).encode("utf-8")
-                    elif caption_save_format == "safetensors":
-                        # Convert caption to tensor (encode as bytes then to tensor)
-                        caption_bytes = str(condition_output).encode("utf-8")
-                        caption_tensor = torch.frombuffer(
-                            caption_bytes, dtype=torch.uint8
+                    else:
+                        raise ValueError(
+                            f"Unsupported condition type: {condition_type}"
                         )
-                        output_sample[f"{condition_name}.safetensors"] = (
-                            safetensors_codec_io({"caption": caption_tensor})
-                        )
+
+                    embeds, mask = (
+                        condition_output["caption_feature"],
+                        condition_output["attention_mask"],
+                    )
+                    if embeds is not None and mask is not None:
+                        saved_name = "features.safetensors"
+                        # trunc the caption embed
+                        saved = {"caption_feature": embeds.to(torch.bfloat16)}
+                        if save_attn_mask:
+                            saved_name = "features_and_mask.safetensors"
+                            saved["attention_mask"] = torch.as_tensor(mask).to(
+                                torch.uint8
+                            )
+                        output_sample[saved_name] = safetensors_codec_io(saved)
+
                 else:
                     # Handle image conditions
                     if condition_save_format == "png":
@@ -261,29 +289,33 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
                 cfg.data = [str(p) for p in Path(cfg.data).glob("*.tar")]
 
         input_dataloader = []
-        nums = []
         data_s: list[str] = (
             list(braceexpand(cfg.data)) if isinstance(cfg.data, str) else cfg.data  # type: ignore
         )
         data_s = natsorted(data_s)  # Sort the dataset paths naturally
+
+        nums = [] if cfg.processor.count_tar_num else None
         log_print(f"Set up WebDataset pipeline: {data_s}")
         for path in data_s:
-            log_print(f"Computing smaples for {path}...")
-            num = wids.wids.compute_num_samples(path)
-            nums.append(num)
-            log_print(f"<green>Number of samples in {path}: {num}</>")
+            if cfg.processor.count_tar_num:
+                nums = cast(list[int], nums)
+                nums.append(len(list(Path(path).glob("*.tar"))))
+                log_print(f"Computing number of samples for {path}...")
+                num = wids.wids.compute_num_samples(path)
+                nums.append(num)
+                log_print(f"<green>Number of samples in {path}: {num}</>")
 
             _, dl = get_hyperspectral_dataloaders(
                 path,
                 batch_size=1,
-                num_workers=0,
-                img_key="npy",
-                tgt_key="img",
+                num_workers=cfg.loader.num_workers,
+                img_key=cfg.loader.img_key,
+                tgt_key=cfg.loader.tgt_key,
                 shuffle_size=-1,
                 to_neg_1_1=False,
                 transform_prob=0.0,
                 resample=False,
-                permute=True,
+                permute=getattr(cfg.loader, "permute", True),
             )
             input_dataloader.append(dl)
 
@@ -303,6 +335,8 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
         save_original_rgb=cfg.processor.get("save_original_rgb", True),
         condition_save_format=cfg.processor.get("condition_save_format", "png"),
         caption_save_format=cfg.processor.get("caption_save_format", "txt"),
+        resume_from=cfg.processor.get("resume_from", None),
+        relative_data_dir=cfg.processor.get("relative_data_dir", "conditions"),
     )
 
     log_print(

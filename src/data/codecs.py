@@ -1,20 +1,38 @@
 import io
+import json
 import warnings
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, cast
 
 import numpy as np
 import scipy.io
 import tifffile
 import torch
+import yaml
 from PIL import Image
 from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
 
-from src.utilities.logging import log_print
+from src.utilities.logging import log_print, once
 
 from .utils import to_n_tuple
 
 # --- Encoding Functions ---
+
+
+def py_obj_to_jsonl(metadata: dict):
+    buffer = io.BytesIO()
+    buffer.write(json.dumps(metadata).encode("utf-8") + b"\n")
+
+    return buffer.getvalue()
+
+
+def rgb_codec_io(img, format="jpeg", **kwargs):
+    buffer = io.BytesIO()
+    assert img.ndim == 3 and img.shape[-1] == 3, "Image must be RGB"
+    assert img.dtype == np.uint8, "Image must be of type uint8"
+    Image.fromarray(img).save(buffer, format=format, **kwargs)
+
+    return buffer.getvalue()
 
 
 def tiff_codec_io(
@@ -125,6 +143,24 @@ def string_decode_io(string_bytes: bytes) -> str:
     return string_bytes.decode("utf-8")  # Assuming UTF-8 encoding for the string
 
 
+def json_decode_io(json_bytes: bytes) -> dict | None:
+    """Decodes bytes into a JSON dictionary."""
+    try:
+        return json.loads(json_bytes)
+    except json.JSONDecodeError as e:
+        log_print(f"Error decoding JSON: {e}", "error")
+        return None
+
+
+def yaml_decode_io(yaml_bytes: bytes) -> dict | None:
+    """Decodes bytes into a YAML dictionary."""
+    try:
+        return yaml.load(yaml_bytes, Loader=yaml.FullLoader)
+    except yaml.YAMLError as e:
+        log_print(f"Error decoding YAML: {e}", "error")
+        return None
+
+
 def tiff_decode_io(
     tiff_bytes: bytes,
     use_out_param: bool = True,  # Flag to control using 'out' parameter
@@ -233,7 +269,11 @@ def mat_decode_io(mat_bytes: bytes) -> Dict[str, np.ndarray]:
     return data_dict
 
 
-def safetensors_decode_io(safetensors_bytes: bytes, to_device=False) -> torch.Tensor:
+def safetensors_decode_io(
+    safetensors_bytes: bytes,
+    to_device=False,
+    return_dict=False,
+) -> dict[str, torch.Tensor] | torch.Tensor:
     """Decodes safetensors formatted bytes into a dictionary of PyTorch tensors."""
     # Directly loads the tensors from bytes.
     # Tensors will be loaded onto the device they were saved from,
@@ -243,7 +283,10 @@ def safetensors_decode_io(safetensors_bytes: bytes, to_device=False) -> torch.Te
     if to_device:
         for key, tensor in data_dict.items():
             data_dict[key] = tensor.to(torch.device("cuda"))
-    return data_dict[list(data_dict.keys())[0]]  # assume only one key
+
+    if not return_dict:
+        return data_dict[list(data_dict.keys())[0]]  # assume only one key
+    return data_dict
 
 
 def npz_decode_io(npz_bytes: bytes) -> Dict[str, np.ndarray]:
@@ -259,10 +302,7 @@ def npz_decode_io(npz_bytes: bytes) -> Dict[str, np.ndarray]:
 def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
     """Encodes a NumPy array into NPY file formatted bytes."""
     with io.BytesIO() as buffer:
-        np.savez(
-            buffer,
-            img,
-        )
+        np.savez(buffer, img)
         return buffer.getvalue()
 
 
@@ -300,12 +340,32 @@ def is_text_file(file_path: str) -> bool:
     return file_path.lower().endswith((".caption", ".txt", ".img_name"))
 
 
+def is_config_file(file_path: str) -> bool:
+    return file_path.lower().endswith((".yaml", ".yml", ".json", "jsonl"))
+
+
+def wids_caption_decode(sample: dict):
+    _keys = list(sample.keys())
+    for k in _keys:
+        if is_text_file(k):
+            sample[k] = wids_caption_decode(sample.pop(k).getvalue())
+
+    return sample
+
+
+def wids_config_decode(sample: dict):
+    _keys = list(sample.keys())
+    for k in _keys:
+        if is_config_file(k):
+            sample[k] = wids_config_decode(sample.pop(k).getvalue())
+
+    return sample
+
+
 def wids_image_decode(
     sample: dict[str, Any],
-    read_caption=False,
-    read_name=False,
     to_neg_1_1=True,
-    permute=True,
+    permute: bool | Literal["auto"] = True,
     resize_fn: str = "interpolate",
     resize: int | tuple[int, int] | None = None,
     process_img_keys: str | list[str] | Literal["ALL"] | None = "img",
@@ -329,9 +389,17 @@ def wids_image_decode(
         if to_neg_1_1:
             img = (img * 2 - 1).clip(-1.0, 1.0)  # to [-1, 1]
 
-        if permute:
+        if permute is True:
             # Permute the image dimensions from HWC to CHW
             img = np.transpose(img, (2, 0, 1))
+        elif permute == "auto":
+            h, w, c = img.shape
+            # assume c is the smallest dimension
+            if c < h and c < w:  # is (h, w, c) shape
+                img = np.transpose(img, (2, 0, 1))  # to CHW
+            once(log_print)(
+                f"[Wids Decoder]: auto permute is enabled, the image shape is ({h, w, c}) -> ({tuple(img.shape)})",
+            )
 
         if resize is not None:
             if permute:
@@ -391,23 +459,59 @@ def wids_image_decode(
             "process_img_keys should be None when there is no image modality"
         )
 
-    # sample = wids_remove_none_keys(sample)
     return sample
 
 
 def wids_latent_decode(sample: dict[str, Any]):
+    # three types of latents: npz, safetensors, and npy
+
     if ".latents.npz" in sample:
         sample["latents"] = npz_decode_io(sample[".latents.npz"].getvalue())
         del sample[".latents.npz"]
+
     if ".latents.safetensors" in sample:
         sample["latents"] = safetensors_decode_io(
             sample[".latents.safetensors"].getvalue()
         )
         del sample[".latents.safetensors"]
+
     if ".latents.npy" in sample:
         sample["latents"] = npy_codec_io(sample[".latents.npy"].getvalue())
         del sample[".latents.npy"]
 
-    sample = wids_remove_none_keys(sample)
+    return sample
+
+
+def wids_caption_embed_decode(
+    sample: dict[str, Any], max_length=300
+) -> dict[str, torch.Tensor | str]:
+    # decode caption (str), valid_length (int), and caption_feature (torch.Tensor), and
+    # attention_mask (torch.Tensor, optional)
+
+    if ".caption.json" in sample:
+        caption = json_decode_io(sample.pop(".caption.json").getvalue())
+        assert caption is not None, "Caption JSON decoding failed."
+
+        sample["caption"] = caption["caption"]
+        sample["valid_length"] = int(caption["valid_length"])
+
+    if ".features.safetensors" in sample:
+        name = ".features.safetensors"
+    elif ".features_and_mask.safetensors" in sample:
+        name = ".features_and_mask.safetensors"
+    else:
+        name = None
+
+    if name is not None:
+        embeds = safetensors_decode_io(sample.pop(name).getvalue(), return_dict=True)
+        embeds = cast(Dict[str, torch.Tensor], embeds)
+        sample["caption_feature"] = embeds["caption_feature"]  # bfloat16
+        if "attention_mask" in embeds:
+            sample["attention_mask"] = embeds["attention_mask"].float()
+        else:
+            vl = sample["valid_length"]
+            attn_mask = torch.zeros((max_length,), dtype=torch.float32)
+            attn_mask[:vl] = 1.0
+            sample["attention_mask"] = attn_mask
 
     return sample

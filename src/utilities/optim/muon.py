@@ -64,7 +64,7 @@ elif __abc_s_type == "you":  # YouJiaChen's abc_s
     ]
 else:
     raise ValueError(f"Unknown abc_s type: {__abc_s_type}")
-abc_s = cast(list[list], abc_s)
+abc_s = cast(list[list | tuple], abc_s)
 
 
 # This code snippet is a modified version adapted from the following GitHub repository:

@@ -25,10 +25,47 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=6.0", "ruff>=0.11"]
 
-
 [project.scripts]
 wids-index = "data.wids_index:main"
 
-
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+indent-width = 4
+extend-exclude = [".vscode", ".idea", "__pycache__", ".python-version", ".ruff.toml", "ruff.toml", "setup.cfg", "pyproject.toml"]
+exclude = [
+    "src/stage2/generative/maskbit",
+    "src/stage2/generative/Sana",
+    "**/datasets/**",
+    "src/stage2/generative/models/modules/deformable_attn/ops",
+]
+
+[tool.ruff.format]
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+docstring-code-line-length = 20
+
+[tool.ruff.lint]
+select = ["E501", "I", "E", "W"]
+ignore = ["E402","D103","I001","E731","E741","D202","D403","E731","E501","PLR0913","W291","E722","W293","E701"]
+
+[tool.ruff.lint.pylint]
+max-args = 20
+max-bool-expr = 10
+max-branches = 100
+max-locals = 15
+max-nested-blocks = 5
+max-positional-args = 10
+max-public-methods = 30
+max-returns = 10
+max-statements = 1000
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10

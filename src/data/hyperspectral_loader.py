@@ -1,7 +1,8 @@
-import json
 import os
+import re
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Literal, Sequence
 
 import accelerate
@@ -33,6 +34,7 @@ from typing_extensions import deprecated
 
 from src.data.codecs import (
     img_decode_io,
+    json_decode_io,
     safetensors_decode_io,
     string_decode_io,
     tiff_decode_io,
@@ -45,6 +47,7 @@ from src.data.utils import (
     expand_paths_and_correct_loader_kwargs,
     extract_modality_names,
     filter_undecoded,
+    flatten_nested_list,
     flatten_sub_dict,
     generate_wds_config_modify_only_some_kwgs,
     get_wids_index_json_info,
@@ -54,6 +57,7 @@ from src.data.utils import (
     norm_img,
     remove_dot_and_extensions,
     remove_extension,
+    remove_keys,
     rename_keys,
     search_one_key_not_dunder,
     size_filtering,
@@ -254,7 +258,8 @@ def get_hyperspectral_dataloaders(
     check_nan: bool = False,
     img_key: str
     | list[str] = "auto",  # image key in the sample dictionary, default is "img"
-    tgt_key: str | list[str] = "img",
+    tgt_key: str | list[str] | None = None,
+    keys_to_remove: str | re.Pattern | list[str] | None = None,
     random_one_key: bool = False,
     undecoded_filtered: bool = True,
     constraint_size: int
@@ -311,7 +316,6 @@ def get_hyperspectral_dataloaders(
         log_print(
             f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
         )
-    _default_key = "img"
 
     dataset = wds.WebDataset(
         wds_paths,
@@ -320,7 +324,7 @@ def get_hyperspectral_dataloaders(
         nodesplitter=wds.shardlists.single_node_only
         if not accelerate.state.PartialState().use_distributed
         else wds.shardlists.split_by_node,  # split_by_node if is multi-node training
-        workersplitter=wds.split_by_worker,
+        workersplitter=wds.shardlists.split_by_worker,
         seed=2025,
         verbose=True,
         detshuffle=True if shuffle_size > 0 else False,
@@ -334,15 +338,20 @@ def get_hyperspectral_dataloaders(
         log_print(f"[HyperWebdataset]: the tar file is structured tar, de-structure it")
         dataset = dataset.map(de_structure_tar)
 
+    if keys_to_remove is not None:
+        dataset = dataset.map(remove_keys(keys_to_remove))
+
     # decode
     default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
         # webdataset read safetensors in tar, can not suit the memmap for fast loading
         wds.handle_extension("safetensors", safetensors_decode_io),
         wds.handle_extension("jpg png img_content", img_decode_io),
+        wds.handle_extension("txt", string_decode_io),
+        wds.handle_extension("json jsonl", json_decode_io),
         "torch",  # handle npy file
     ]
-    dataset = dataset.decode(*default_decoder)
+    dataset = dataset.decode(*default_decoder, handler=wds.warn_and_continue)
 
     # extension
     dataset = dataset.map(remove_extension)
@@ -353,6 +362,8 @@ def get_hyperspectral_dataloaders(
 
     # rename key
     if img_key == "auto":
+        if tgt_key is None:
+            tgt_key = "img"
         assert isinstance(tgt_key, str), (
             f'tgt_key must be a string if img_key is "auto", but got {type(tgt_key)}'
         )
@@ -360,19 +371,24 @@ def get_hyperspectral_dataloaders(
         dataset = dataset.map(
             partial(search_one_key_not_dunder, key=tgt_key, random_one=random_one_key)
         )
-    elif isinstance(img_key, (str, tuple, list)) and isinstance(
-        tgt_key, (str, tuple, list)
+    elif isinstance(img_key, (str, tuple, list)) and (
+        isinstance(tgt_key, (str, tuple, list))
     ):
         dataset = dataset.map(
             partial(rename_keys, tgt_keys=tgt_key, source_keys=img_key)
         )
     elif tgt_key is None:
-        pass
+        tgt_key = img_key
     else:
         raise ValueError(
             f"[Webdataset Dataset]: img_key and tgt_key must be either a string or a list of strings, "
             f"but got {type(img_key)} and {type(tgt_key)}"
         )
+
+    # if isinstance(img_key, str) and img_key != "auto":
+    #     img_key = [img_key]
+    if isinstance(tgt_key, str):
+        tgt_key = [tgt_key]
 
     # catch the undecoded images
     if undecoded_filtered:
@@ -423,7 +439,7 @@ def get_hyperspectral_dataloaders(
 
     # augmentations
     if use_transf:
-        dataset = dataset.map_dict(**{_default_key: transform})  # type: ignore
+        dataset = dataset.map_dict(**{k: transform for k in tgt_key})  # type: ignore
 
     dataloader = wds.WebLoader(
         dataset,
@@ -460,7 +476,8 @@ def get_hyperspectral_dataloaders(
         dataloader = dataloader.repeat(nepochs=repeat_n)
 
     log_print(
-        f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}, use transformations: {hyper_transforms_lst}"
+        f"[HyperDataset]: batch size: {batch_size}, num workers: {num_workers}, "
+        f"use transformations: {hyper_transforms_lst if hyper_transforms_lst is None or transform_prob > 0.0 else 'None'} "
     )
 
     return dataset, dataloader
@@ -915,7 +932,11 @@ def get_hyperspectral_wids_dataloaders(
         log_print(
             f"[Wids dataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
         )
-        dataloader = dataloader.map_dict(img=transform)
+        # dataloader = dataloader.map_dict(img=transform)
+        # img keys with one same transform?
+        assert tgt_key is not None, "tgt_key must be specified"
+        tgt_key = [tgt_key] if isinstance(tgt_key, str) else list(tgt_key.values())
+        dataloader = dataloader.map_dict(**{k: transform for k in tgt_key})
 
     return dataset, dataloader
 
@@ -1065,7 +1086,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
             for i, (p_lst, loader_kwargs) in enumerate(zip(paths, rep_loader_kwargs)):
                 # assertions
                 assert isinstance(p_lst, (list, tuple)), (
-                    f"paths should be a list of lists, but got {type(p_lst)}"
+                    f"paths {p_lst} should be a list of lists, but got {type(p_lst)}"
                 )
                 assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
 
@@ -1075,6 +1096,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
                         f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
                     )
                 else:
+                    p_lst = list(flatten_nested_list(p_lst))
                     for p in p_lst:
                         assert isinstance(p, str), (
                             f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
@@ -1131,7 +1153,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 paths, loader_kwargs
             )
             log_print(
-                f"dataset gets paths: \n<cyan>[{'\n'.join(paths)}</>\n" + "-" * 30
+                f"dataset gets paths: \n<green>[{'\n'.join(paths)}</>\n" + "-" * 30
             )
             return get_hyperspectral_dataloaders(paths, **loader_kwargs)
 
@@ -1232,7 +1254,6 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             if changed_kwargs_by_loader is None:
                 changed_kwargs_by_loader = [{}] * len(paths)
 
-            # assertions
             assert isinstance(basic_kwargs, dict), (
                 f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
             )
@@ -1304,6 +1325,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                     f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
                 )
             else:
+                p_lst = list(flatten_nested_list(p_lst))
                 for p in p_lst:
                     assert isinstance(p, str), (
                         f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
@@ -1318,7 +1340,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 p_lst, loader_kwargs
             )
             log_print(
-                f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n"
+                f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n"
                 + "-" * 30
             )
 
@@ -1379,6 +1401,16 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
 
 
 if __name__ == "__main__":
+    import glob
+
+    from src.utilities.logging import set_logger_file
+
+    set_logger_file(
+        file="error.log",
+        level="warning",
+        add_time=False,
+    )
+
     # Test config
     test_wds_path = [
         # ["data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"],
@@ -1399,12 +1431,7 @@ if __name__ == "__main__":
         # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
         # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
-        # [
-        #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
-        #     "/HardDisk/ZiHanCao/datasets/RS5M/train/rs3-train-{0000..0027}.tar",
-        #     "/HardDisk/ZiHanCao/datasets/RS5M/val/pub11-val-{0000..0031}.tar",
-        #     "/HardDisk/ZiHanCao/datasets/RS5M/val/rs3-val-{0000..0027}.tar",
-        # ],
+        # [p.as_posix() for p in Path("data/RS5M").glob("**/*.tar")]
         # ["/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/shardindex.json"]
         # [
         #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
@@ -1443,13 +1470,30 @@ if __name__ == "__main__":
         # ["data/TEOChatlas/train/GeoChat_Instruct_images2.tar"]
         # ["data/TEOChatlas/train/TEOChatlas_images.tar"],
         # ["data/CityBench-CityData/hyper_images/CityBench-CityData-0000.tar"],
-        [p.as_posix() for p in Path("data/MMOT/train").glob("*.tar")]
-        + [p.as_posix() for p in Path("data/MMOT/val").glob("*.tar")],
-        # ["data/Chikusei/hyper_images/shardindex.json"]
-        # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_0004.tar"]
+        # [p.as_posix() for p in Path("data/MMOT/hyper_images").glob("*.tar")],
+        # [
+        # [
+        #     *glob.glob("data/MMOT/conditions/**/*.tar", recursive=True),
+        #     *glob.glob("data/RSCaptions/conditions/**/*.tar", recursive=True),
+        #     "data/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar",
+        #     "data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0015}.tar",
+        #     "data/BigEarthNet_S2/conditions/BigEarthNet_data_{0004..0006}.tar",
+        #     "data/Houston/conditions/Houston-50_bands-px_512-MSI-0000.tar",
+        #     "data/LoveDA/conditions/LoveDA-3_bands-px_1024-0000.tar",
+        #     "data/MDAS-HySpex/conditions/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar",
+        #     "data/MMSeg_YREB/conditions/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar",
+        #     "data/RefSegRS/conditions/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar",
+        #     "data/QuickBird/conditions/QuickBird-4_bands-px_256-MSI-0000.tar",
+        #     "data/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar",
+        #     "data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar",
+        #     "data/EarthView/hyper_images/neon/neon-{0000..0013}.tar",
+        # ]
+        ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
+        # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0005}.tar"]
+        # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
     ]
-    test_batch_size = 2
-    test_num_workers = 0
+    test_batch_size = 64
+    test_num_workers = 2
     test_shuffle_size = -1
 
     loader_kwargs = dict(
@@ -1469,10 +1513,17 @@ if __name__ == "__main__":
         check_channels=False,
     )
     changed_kwargs = [
-        # {},
-        # {},
-        # {},
-        {"img_key": "npy", "tgt_key": "img"},
+        # {"img_key": ["hsi", "rgb"]},
+        # {"img_key": ["npy"], "tgt_key": ["img"]},
+        {
+            "img_key": ["mlsd", "sketch", "hed", "segmentation"],
+            "tgt_key": None,
+            "keys_to_remove": ["rgb.png"],
+            "resize_before_transform": 64,
+            "resample": False,
+        },
+        # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
+        # {"img_key": "npy", "tgt_key": "img"},
         # {"permute": False},
         # {
         #     "loader_type": "wids",
@@ -1496,6 +1547,7 @@ if __name__ == "__main__":
         # {"check_nan": True},
         # {
         #     "img_key": "img_content",
+        #     "tgt_key": "img",
         #     "constraint_size": 128 * 128,
         #     "resize_before_transform": 512,
         # },
@@ -1504,8 +1556,6 @@ if __name__ == "__main__":
         #     "constraint_size": 256 * 256,
         #     "resize_before_transform": 512,
         # },
-        # {},
-        # {}
     ]
     curriculum_kwargs = {
         "start_prob": [0.3, 2.0],
@@ -1521,7 +1571,8 @@ if __name__ == "__main__":
         loader_type="webdataset",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
-        chain_loader_infinit=True,
+        chain_loader_infinit=False,
+        shuffle_loaders=False,
         # curriculum_type="linear",
         # curriculum_kwargs=curriculum_kwargs,
     )
@@ -1531,11 +1582,24 @@ if __name__ == "__main__":
     indices = set()
 
     sizes = {}
-    for i, sample in enumerate((tbar := tqdm(test_loader))):
-        import pudb
+    # for i, sample in enumerate((tbar := tqdm(test_loader))):
 
-        pudb.set_trace()
-        img = sample["img"]
+    test_loader = iter(test_loader)
+    while True:
+        try:
+            sample = next(test_loader)
+        except StopIteration:
+            break
+        except Exception as e:
+            log_print(f"loading sample failed: {e}", level="error")
+            continue
+
+        print(sample.keys(), sample["segmentation"].shape)
+        # print(sample.keys())
+        # continue
+
+        img = sample["segmentation"]
+        assert "img" not in sample and "rgb" not in sample, f"{sample.keys()}"
 
         s = np.prod(img.shape[-2:])
         # update sizes of the count
@@ -1548,16 +1612,16 @@ if __name__ == "__main__":
         # index = set(index)
         # indices.update(index)
 
-        tbar.set_description_str(
-            "rank: {}, img shape: {}, loader idx: {}, exists indices: {}".format(
-                accelerator.process_index,
-                img.shape,
-                sample["__loader_idx__"],
-                # sample["__url__"][0],
-                indices,
-                # (img.min().item(), img.max().item()),
-            )
-        )
+        # tbar.set_description_str(
+        #     "rank: {}, img shape: {}, loader idx: {}, url: {}, exists indices: {}".format(
+        #         accelerator.process_index,
+        #         img.shape,
+        #         sample["__loader_idx__"],
+        #         sample["__url__"][0],
+        #         indices,
+        #         # (img.min().item(), img.max().item()),
+        #     )
+        # )
 
         # if i == 2000:
         #     break

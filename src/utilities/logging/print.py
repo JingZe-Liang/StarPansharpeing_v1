@@ -8,11 +8,21 @@ from typing import Literal
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger
+from rich.console import Console
+
+from .functions import once
 
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 __warn_once_set = set()
 __warn_once_pattern_set = set()
+
+__setup_console = (
+    False  # rich console, when use this, the markup shold be [ ] not loguru < >.
+)
+_console = None
+
+__re_config_logger = True
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
@@ -22,12 +32,47 @@ logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
 
 
+# Setup console
+@once
+def setup_console():
+    global __setup_console, _console
+
+    _console = Console()
+    __setup_console = True
+
+
+if __setup_console:
+    setup_console()
+
+
 # Configure logger
-__re_config_logger = True
-if __re_config_logger:
+def print_custom_markup(text: str):
+    processed_text = text.replace("</", "[/")
+    processed_text = processed_text.replace("<", "[")
+    processed_text = processed_text.replace(">", "]")
+
+    global _console
+    assert _console is not None, (
+        "Console is not initialized. Call setup_console() first."
+    )
+    _console.print(processed_text, markup=True, highlight=False, end="")
+
+
+@once
+def configure_logger(sink=None):
+    global __re_config_logger, _console
+
+    __re_config_logger = False
+
+    if _console is not None:
+        # sink = lambda msg: _console.print(msg, markup=True, highlight=False, end="")
+        sink = print_custom_markup
+    elif sink is None:
+        sink = sys.stderr
+
     logger.remove()
     logger.add(
-        sys.stderr,
+        sink,
         level="DEBUG",
         colorize=True,
         format=(
@@ -37,7 +82,10 @@ if __re_config_logger:
         ),
     )
     logger.info("Logger reconfigured", level="info")
-    __re_config_logger = False
+
+
+if __re_config_logger:
+    configure_logger()
 
 
 def set_logger_file(
@@ -53,6 +101,7 @@ def set_logger_file(
 
     t = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     if file is None:
+        Path("tmp/logs").mkdir(parents=True, exist_ok=True)
         file = f"tmp/logs/{t}.log"
     else:
         file = Path(file)
@@ -77,7 +126,7 @@ def set_logger_file(
         enqueue=True,
         rotation="10 MB",
         backtrace=True,
-        colorize=True,
+        colorize=False,
     )
     log_print("Set logger to log to file: {file} with level {level}")
 
@@ -198,8 +247,9 @@ class catch_any(ContextDecorator):
 
 if __name__ == "__main__":
     logger.info("this is a log")
+    from rich.progress import track
 
-    for i in range(100):
+    for i in track(range(10), description="Processing...", console=_console):
         log_print(
             f"This is a warning once message at step {i}",
             warn_once_pattern=r".* at step \d+",

@@ -335,7 +335,6 @@ class ContinuousImageTokenizer(nn.Module):
         dec_path = kwargs.pop("dec_path", "")
         uni_tokenizer_path = kwargs.pop("uni_tokenizer_path", "")
 
-        # 强制参数内存连续性
         self.register_buffer("dummy_param", torch.tensor(0))
 
         # pretrained encoder and decoder
@@ -967,13 +966,16 @@ if __name__ == "__main__":
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
     tokenizer = tokenizer.eval().to(torch.bfloat16)
-    x = Image.open(
-        "data/BigEarthNet_S2/conditions/conditions/tmp/S2_tiff_jp2k_80_S2A_MSIL2A_20170613T101031_N9999_R022_T34VER_51_64.hed.png"
-    ).convert("RGB")
-    x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
-    x = x / 255.0
-    x = x * 2 - 1  # normalize to [-1, 1]
-    x = x.to(torch.bfloat16)
+    # x = Image.open(
+    #     "data/BigEarthNet_S2/conditions/conditions/tmp/S2_tiff_jp2k_80_S2A_MSIL2A_20170613T101031_N9999_R022_T34VER_51_64.hed.png"
+    # ).convert("RGB")
+    # x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
+    # x = x / 255.0
+    # x = x * 2 - 1  # normalize to [-1, 1]
+
+    dl = get_fast_test_hyperspectral_data("DCF")
+    x = next(iter(dl))["img"]
+    x = x.to(torch.bfloat16).cuda()
 
     # from src.utilities.optim import get_muon_optimizer
 

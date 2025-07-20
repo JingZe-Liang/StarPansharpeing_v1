@@ -130,9 +130,10 @@ class REPALoss(torch.nn.Module):
         self.dino_fixed_bs = dino_fixed_bs
         if self.rgb_channels is not None:
             if isinstance(self.rgb_channels, str):
-                assert self.rgb_channels in ("random",), (
-                    "rgb_channels must be randomly selected"
-                )
+                assert self.rgb_channels in (
+                    "random",
+                    "mean",
+                ), "rgb_channels must be randomly selected"
             elif isinstance(self.rgb_channels, Sequence):
                 assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
             else:
@@ -223,6 +224,7 @@ class REPALoss(torch.nn.Module):
             if self.rgb_channels == "random":
                 _rgb_chan_select = torch.randperm(img.shape[1])[:3]
                 rgb_channels = _rgb_chan_select.tolist()
+                img = img[:, rgb_channels]
             elif (
                 not isinstance(self.rgb_channels, Sequence)
                 and self.rgb_channels.startswith("random")
@@ -245,9 +247,19 @@ class REPALoss(torch.nn.Module):
                 rgb_channels = torch.tensor(
                     [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
                 )
+                img = img[:, rgb_channels]
+            elif self.rgb_channels == "mean":
+                # mean three splitted bands
+                c = img.shape[1]
+                c_3 = c // 3
+                # list(range(c))[::3]
+                bands = [
+                    img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
+                ]
+                img = torch.stack(bands, dim=1)
             else:
                 rgb_channels = self.rgb_channels
-            img = img[:, rgb_channels]
+                img = img[:, rgb_channels]
 
         assert img.shape[1] == 3, "img must be rgb images"
 

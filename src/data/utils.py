@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+import types
 from itertools import chain, product
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeAlias, cast
@@ -23,6 +24,14 @@ from ..utilities.logging.print import log_print
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
 SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
+
+
+def flatten_nested_list(lst):
+    for item in lst:
+        if isinstance(item, Iterable) and not isinstance(item, (str, bytes)):
+            yield from flatten_nested_list(item)
+        else:
+            yield item
 
 
 def not_dunder_keys(sample: dict) -> list[str]:
@@ -47,7 +56,6 @@ def remove_extension(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     # 'img.tiff' -> 'img'
     # '.img' -> 'img'
     # 'img' -> 'img'
-
     sample_dict = {}
     for k, v in sample.items():
         k_wo_ext = k
@@ -102,11 +110,43 @@ def de_structure_tar(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     return result
 
 
+def remove_keys(keys_to_remove: str | re.Pattern | list[str]):
+    if isinstance(keys_to_remove, list):
+        p = keys_to_remove
+    elif isinstance(keys_to_remove, str):
+        if keys_to_remove.startswith("re:"):
+            p = re.compile(keys_to_remove[3:])
+        else:
+            p = [keys_to_remove]
+    elif isinstance(keys_to_remove, re.Pattern):
+        p = keys_to_remove
+    else:
+        raise TypeError("Unsupported type for keys_to_remove")
+
+    def inner(sample: dict):
+        if isinstance(p, list):
+            for k in p:
+                _v = sample.pop(k, None)
+                # if _v is None:
+                #     log_print(
+                #         "Key not found: {} at url {} for remove list {}".format(k, sample["__url__"], p),
+                #         "warning",
+                #     )
+        else:  # re.Pattern
+            for k in list(sample.keys()):
+                if p.match(k):
+                    del sample[k]
+        return sample
+
+    return inner
+
+
 def search_one_key_not_dunder(
-    sample: dict[str, LoadedData], key: str, random_one=False
+    sample: dict[str, LoadedData], key: str | types.SimpleNamespace, random_one=False
 ):
     _not_dunder_keys: list[str] = []
     new_sample = {}
+
     for k in sample.keys():
         if not k.startswith("__"):
             _not_dunder_keys.append(k)
@@ -146,7 +186,9 @@ def filter_undecoded(sample, key: str | list[str] | None):
         for k in key:
             if k not in sample:
                 log_print(f"{k} not in sample", "error")
-                raise ValueError(f"{k} not in sample, sample keys: {sample.keys()}")
+                raise ValueError(
+                    f"{k} not in sample, sample keys: {sample.keys()} at url {sample['__url__']} with name {sample['__key__']}"
+                )
             if isinstance(sample[k], bytes):
                 log_print(f"{k} is undecoded", "warning")
                 return None
@@ -170,7 +212,7 @@ def rename_keys(
     )
 
     for sk, tk in zip(source_keys, tgt_keys):
-        if sk in sample:
+        if sk in sample and tk is not None:
             sample[tk] = sample.pop(sk, None)
             if sample[tk] is None:
                 log_print(
@@ -454,7 +496,7 @@ def wids_img_size_filter_by_parquet_index(
     max_size: int | None = None,
 ) -> set[int]:
     """Filter function to check if the image size is within the specified range."""
-    shapes = pd.read_parquet(parquet_file)
+    shapes = pd.read_parquet(parquet_file)  # TODO: page reading?
     shapes = shapes[shapes["height"] >= min_size and shapes["width"] >= min_size]
     if max_size is not None:
         shapes = shapes[(shapes["height"] <= max_size) & (shapes["width"] <= max_size)]

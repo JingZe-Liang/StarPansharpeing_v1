@@ -7,7 +7,6 @@ from typing import Callable, cast
 
 import cv2
 import numpy as np
-import pudb
 import torch
 from PIL import Image
 from tqdm import tqdm
@@ -65,7 +64,7 @@ class UnifiedAnnotator:
             case "mlsd":
                 self.annotator = MLSDdetector()
             case "caption":
-                self._ann_inner_model, self.annotator = get_qwen25vl_model()
+                self._ann_inner_model, self.annotator = get_qwen25vl_model(encode=True)
                 self.annotator = cast(Callable[[np.ndarray | str], str], self.annotator)
             case "content":
                 pass
@@ -124,7 +123,8 @@ class UnifiedAnnotator:
             _, seg_labels = self.annotator(image)
             image_segment_with_color = np.zeros_like(image)
             seg_labels = seg_labels[0].astype(np.uint8)
-            for i in range(1, seg_labels.max() + 1):
+            max_label = int(seg_labels.max())
+            for i in range(1, max_label + 1):
                 mask = seg_labels == i
                 if np.any(mask):
                     image_segment_with_color[mask] = image[mask].mean(0)
@@ -163,9 +163,10 @@ def prepare_condition_from_webdataset(
     rgb_channels: list[int] | None = None,
     device="cuda",
     to_pil: bool = True,
+    resume_from: str | None = None,
 ):
     if conditions == "all":
-        conditions = ["hed", "segmentation", "sketch", "mlsd"]
+        conditions = ["hed", "segmentation", "sketch", "mlsd", "caption"]
 
     global annotators
     for cond in conditions:
@@ -175,7 +176,22 @@ def prepare_condition_from_webdataset(
         else:
             log_print("annotator already loaded: {}".format(cond))
 
+    _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
     for sample in ds:
+        assert len(sample["__key__"]) == 1, (
+            "WebDataset sample key must be a single string."
+        )
+
+        key = sample["__key__"][0]
+        if resume_from is not None and not _resumed_flag:
+            if key != resume_from:
+                log_print(f"Skipping {key} until resume point {resume_from}.", "debug")
+                yield sample, None
+                continue
+            else:
+                _resumed_flag = True
+                log_print(f"Resuming from {key}.", "info")
+
         img = sample["img"]
 
         # if the image is too large, we need to resize it
@@ -204,17 +220,19 @@ def prepare_condition_from_webdataset(
             with torch.inference_mode():
                 out = annotators[cond](img)
 
-            if tuple(out.shape[:2]) != tuple(_orig_size):
+            # is numpy array
+            if hasattr(out, "shape") and tuple(out.shape[:2]) != tuple(_orig_size):
                 out = cv2.resize(
                     out,
                     (_orig_size[1], _orig_size[0]),
                     interpolation=cv2.INTER_LINEAR,
                 )
+
             ret[cond] = (
                 Image.fromarray(out) if to_pil and isinstance(out, np.ndarray) else out
             )
 
-        yield ret
+        yield sample, ret
 
 
 if __name__ == "__main__":

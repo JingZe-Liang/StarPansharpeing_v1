@@ -1,5 +1,8 @@
+from glob import glob
+from pathlib import Path
+
 import hydra
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
 from ..logging import log_print, once
 from .to_container import (
@@ -8,7 +11,6 @@ from .to_container import (
     to_object,
     to_object_recursive,
 )
-from pathlib import Path
 
 __all__ = [
     "function_config_to_basic_types",
@@ -24,6 +26,7 @@ __all__ = [
 def register_new_resolvers():
     new_solvers = {
         "eval": lambda x: eval(x),
+        "glob": lambda x: ListConfig([str(p) for p in Path().glob(x)]),
         "function": lambda x: hydra.utils.get_method(x),
         "class": lambda x: hydra.utils.get_class(x),
         "list": lambda x: list(x),
@@ -32,7 +35,7 @@ def register_new_resolvers():
 
     for name, resolver in new_solvers.items():
         if not OmegaConf.has_resolver(name):
-            OmegaConf.register_new_resolver(name, resolver)
+            OmegaConf.register_new_resolver(name, resolver, replace=True)
 
     log_print(
         "[Omegaconf]: Registered new resolvers: eval, function, class, list, tuple",

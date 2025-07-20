@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
+from natten import na2d
 from timm.layers import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
@@ -28,7 +29,7 @@ from .utils import (
     val2tuple,
 )
 
-compile_forward_fn = False
+compile_forward_fn = True
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True
@@ -494,15 +495,7 @@ class LiteMLA(nn.Module):
         if qkv.dtype == torch.float16:
             qkv = qkv.float()
 
-        qkv = torch.reshape(
-            qkv,
-            (
-                B,
-                -1,
-                3 * self.dim,
-                H * W,
-            ),
-        )
+        qkv = torch.reshape(qkv, (B, -1, 3 * self.dim, H * W))
         q, k, v = (
             qkv[:, :, 0 : self.dim],
             qkv[:, :, self.dim : 2 * self.dim],
@@ -530,15 +523,7 @@ class LiteMLA(nn.Module):
     def relu_quadratic_att(self, qkv: torch.Tensor) -> torch.Tensor:
         B, _, H, W = list(qkv.size())
 
-        qkv = torch.reshape(
-            qkv,
-            (
-                B,
-                -1,
-                3 * self.dim,
-                H * W,
-            ),
-        )
+        qkv = torch.reshape(qkv, (B, -1, 3 * self.dim, H * W))
         q, k, v = (
             qkv[:, :, 0 : self.dim],
             qkv[:, :, self.dim : 2 * self.dim],
@@ -576,6 +561,54 @@ class LiteMLA(nn.Module):
         else:
             out = self.relu_quadratic_att(qkv)
         out = self.proj(out)
+
+        return out
+
+
+class NattenAttention(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        act_checkpoint: bool = False,
+        norm_type: str = "gn",
+        norm_groups: int = 32,
+        heads: int = 8,
+        ksize: int = 8,
+        stride: int = 1,
+        dilation: int = 1,
+    ):
+        super().__init__()
+        self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
+        self.qkv = nn.Conv2d(
+            in_channels, in_channels * 3, kernel_size=1, stride=1, padding=0
+        )
+        self.proj_out = nn.Conv2d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+        )
+
+        self.heads = heads
+        self.ksize = ksize
+        self.stride = stride
+        self.dilation = dilation
+
+        self.act_checkpoint = act_checkpoint
+
+    def forward(self, x):
+        qkv = self.qkv(self.norm(x))  # [bs, c, h, w]
+        qkv = rearrange(qkv, "b (qkv h c) x y -> qkv b x y h c", qkv=3, h=self.heads)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        out = na2d(  # [bs, x, y, h, c]
+            q,
+            k,
+            v,
+            kernel_size=self.ksize,
+            stride=self.stride,
+            dilation=self.dilation,
+            is_causal=False,
+        )
+        out = rearrange(out, "b x y h c -> b (h c) x y")  # [bs, h*c, x, y]
+        out = self.proj_out(out)
 
         return out
 
@@ -1633,6 +1666,7 @@ class ResnetBlock(nn.Module):
         dropout: float,
         use_residual_factor: bool = False,
         act_type: tuple = ("gelu", "gelu"),
+        nin_shortcut_norm: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -1668,17 +1702,22 @@ class ResnetBlock(nn.Module):
             padding=1,
             padding_mode=padding_mode,
         )
-        self.nin_shortcut = (
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-            )
-            if in_channels != out_channels
-            else nn.Identity()
-        )
+        if in_channels != out_channels:
+            if nin_shortcut_norm:
+                self.nin_shortcut = nn.Sequential(
+                    Normalize(  # type: ignore
+                        in_channels, num_groups=gn_norm_groups, norm_type=norm_type
+                    ),
+                    nn.Conv2d(
+                        in_channels, out_channels, kernel_size=1, stride=1, padding=0
+                    ),
+                )
+            else:
+                self.nin_shortcut = nn.Conv2d(
+                    in_channels, out_channels, kernel_size=1, stride=1, padding=0
+                )
+        else:
+            self.nin_shortcut = nn.Identity()
         self.act_checkpoint = kwargs.get("act_checkpoint", False)
         self.use_residual_factor = use_residual_factor
         if use_residual_factor:

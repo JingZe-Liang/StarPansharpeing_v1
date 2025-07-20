@@ -1,3 +1,4 @@
+import array
 import base64
 import io
 import os
@@ -9,6 +10,10 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, TextStreamer
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
+
+from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import (
+    gemma2_caption_encode,
+)
 
 setattr(Qwen2_5_VLVisionAttention, "is_causal", False)
 
@@ -40,6 +45,22 @@ def array_img_to_base64(img: np.ndarray) -> str:
     return img_base64
 
 
+def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
+    """
+    Convert a numpy array image to PIL Image.
+    """
+
+    # image: 0 .. 1
+    if denorm:
+        img = (img * 255).astype(np.uint8)
+
+    assert (
+        img.ndim == 3 and img.dtype == np.uint8
+    ), "Image must be a 3D numpy array with dtype uint8."
+
+    return Image.fromarray(img).convert("RGB")
+
+
 local_qwen_ckpt = "src/stage2/generative/tools/conditions/caption/weights/Qwen2.5VL"
 remote_qwen_ckpt = "Qwen/Qwen2.5-VL-7B-Instruct"
 
@@ -48,6 +69,9 @@ def get_qwen25vl_model(
     ckpt: str = remote_qwen_ckpt,
     max_tokens: int = max_tokens,
     prompt: str = default_prompt,
+    encode=True,
+    device="cuda",
+    stream=False,
 ):
     # default: Load the model on the available device(s)
     # model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -59,12 +83,11 @@ def get_qwen25vl_model(
         ckpt,
         torch_dtype=torch.bfloat16,
         # attn_implementation="flash_attention_2",
-        device_map="cuda:1",
+        device_map=device,
     ).eval()
 
     # default processor
     processor = AutoProcessor.from_pretrained(ckpt)
-
     # The default range for the number of visual tokens per image in the model is 4-16384.
     # You can set min_pixels and max_pixels according to your needs, such as a token range of 256-1280, to balance performance and cost.
     min_pixels = 256 * 28 * 28
@@ -72,10 +95,17 @@ def get_qwen25vl_model(
     processor = AutoProcessor.from_pretrained(
         "Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels
     )
+    print(f"Loaded Qwen2.5-VL model from {ckpt} and processor")
 
-    def process_img(img: str | np.ndarray) -> str:
+    if encode:
+        text_encode = gemma2_caption_encode(device=device, return_truncated=True)
+        print(f"Loaded Gemma2 text encoder from {ckpt}")
+
+    def process_img(img: str | np.ndarray | Image.Image):
         if isinstance(img, np.ndarray):
-            img = array_img_to_base64(img)
+            # img = array_img_to_base64(img)
+            # to PIL Image
+            img = array_img_to_pil(img)
         elif isinstance(img, str):
             assert os.path.exists(img), f"Image path {img} does not exist."
         else:
@@ -109,11 +139,15 @@ def get_qwen25vl_model(
         inputs = inputs.to(model.device)
 
         # Inference: Generation of the output
-        streamer = TextStreamer(
-            processor.tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-            stream=sys.stdout,
+        streamer = (
+            TextStreamer(
+                processor.tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+                stream=sys.stdout,
+            )
+            if stream
+            else None
         )
         with torch.inference_mode():
             generated_ids = model.generate(
@@ -130,13 +164,27 @@ def get_qwen25vl_model(
             clean_up_tokenization_spaces=False,
         )
 
-        return output_text[0]
+        embeds, attn_mask, valid_length = None, None, None
+        if encode:
+            embeds, attn_mask, valid_length = text_encode(output_text[0])
+
+        return {
+            "caption": output_text[0],
+            "caption_feature": embeds,
+            "attention_mask": attn_mask,
+            "valid_length": valid_length,
+        }
 
     return model, process_img
 
 
 if __name__ == "__main__":
     _, inferencer = get_qwen25vl_model()
+    import PIL.Image as Image
+
     # Example usage
     img_path = "data/TEOChatlas/eval/External_images/AID/airport_37.jpg"
+    img = Image.open(img_path).convert("RGB")
+    img = np.array(img)
+
     print(inferencer(img_path))

@@ -42,14 +42,14 @@ vq_loss:
   repa_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: random
+    rgb_channels: mean
     img_resize: 224 # null for no resize
     dino_img_size: 224
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: random #${dataset.rgb_channels}
+    rgb_channels: mean #${dataset.rgb_channels}
     img_resize: 224
     dino_img_size: 224
     distmat_margin: 0.25
@@ -113,9 +113,9 @@ tokenizer:
   # upsample_shortcut: duplicating
 
 ema:
-  beta: 0.995
+  beta: 0.999
   update_after_step: 1000
-  update_every: 2
+  update_every: 1
 
 train:
   tokenizer_name: uni_cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}
@@ -128,16 +128,16 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-07-04_01-29-25_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_82
-  ema_load_path: #runs/stage1_cosmos/2025-07-03_01-49-58_cosmos_f8c16p1_unified_hyperspectral_uni/ema
+  resume_path: runs/stage1_cosmos/2025-07-17_13-34-53_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_6
+  ema_load_path: #runs/stage1_cosmos/2025-07-04_20-41-12_cosmos_f8c16p1_unified_hyperspectral_uni/ema
   compile_model: false
-  only_load_tokenizer: false
+  only_load_tokenizer: true
 
   # augmentations
-  aug_pipeline_train_obj: decoder_deg
+  aug_pipeline_train_obj: #decoder_deg
   aug_pipeline:
-    _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
-    p: 0.1
+    # _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    # p: 0.1
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -151,6 +151,8 @@ train:
     adamw_eps: 1.0e-8
     ns_diff_abc: true
     ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 2.0e-4
@@ -174,7 +176,8 @@ train:
     adamw_eps: 1.0e-8
     ns_diff_abc: true
     ns_norm: false
-    adamw_betas: ${tuple:[0., 0.9]} #[0.5, 0.9], gan training beta1 is zero
+    momentum: 0.9
+    adamw_betas: ${tuple:[0., 0.95]} #[0.5, 0.9], gan training beta1 is zero
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 2.0e-4

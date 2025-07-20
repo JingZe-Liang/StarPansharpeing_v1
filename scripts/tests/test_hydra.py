@@ -1,20 +1,24 @@
 import ast
+from glob import glob
 from pathlib import Path
 
 import hydra
 import scipy.special
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
 OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 OmegaConf.register_new_resolver("class", lambda x: hydra.utils.get_class(x))
 OmegaConf.register_new_resolver("list", lambda x: list(x))
 OmegaConf.register_new_resolver("tuple", lambda x: tuple(x))
+OmegaConf.register_new_resolver(
+    "glob", lambda x: ListConfig([str(p) for p in Path().glob(x)])
+)
 
 
 @hydra.main(
-    config_path="../configs/tokenizer_gan/dataset",
-    config_name="unified_hyperspectral.yaml",
+    config_path="../configs/tokenizer_gan",
+    config_name="unicosmos_tokenizer_f8c16p4.yaml",
     version_base=None,
 )
 def main(args):
@@ -39,7 +43,7 @@ def main(args):
     # start_probs = args.dataset.train_loader.curriculum_kwargs.start_prob
     # print(scipy.special.softmax(start_probs))
 
-    print(args.train_paths[-1][0])
+    print(OmegaConf.to_container(args.dataset.train_loader, resolve=True))
 
 
 main()

@@ -1,8 +1,14 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 
 # Global Checkpoint Path for condition generation
-annotator_ckpts_path = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/src/stage2/generative/tools/conditions/ckpts"
+ckpt_dir = Path(__file__).parent
+annotator_ckpts_path = (ckpt_dir / "ckpts").as_posix()
+assert (
+    Path(annotator_ckpts_path).exists()
+), "Please download the checkpoints by following the instructions in the README.md"
 
 
 def HWC3(x):

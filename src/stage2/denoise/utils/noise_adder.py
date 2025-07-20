@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from src.stage2.denosie.utils.add_noise import (
+from src.stage2.denoise.utils.add_noise import (
     AddNoiseComplex,
     AddNoiseDeadline,
     AddNoiseImpulse,

@@ -97,7 +97,7 @@ def staged_curriculum(
 
 def get_curriculum_fn(
     c_type: str | Literal["linear", "staged"], total_steps: int, **kwargs
-):
+):  # -> partial[list[float] | list[Any]] | partial[list[float]]:
     """
     Returns the appropriate curriculum function based on the type.
 
