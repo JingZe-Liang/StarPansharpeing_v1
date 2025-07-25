@@ -150,6 +150,7 @@ tmp/
 **.pth
 src/stage2/generative/tools/conditions/caption/weights/*
 src/stage2/generative/tools/conditions/ckpts/*
+CLAUDE.local.md
 
 compressed_output/
 env.toml

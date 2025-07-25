@@ -128,7 +128,7 @@ train:
   max_steps: 500_000
   save_every: 1000
   seperate_enc_dec: false
-  resume_path: runs/stage1_cosmos/2025-07-17_13-34-53_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_6
+  resume_path: runs/stage1_cosmos/2025-07-18_09-03-26_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_232
   ema_load_path: #runs/stage1_cosmos/2025-07-04_20-41-12_cosmos_f8c16p1_unified_hyperspectral_uni/ema
   compile_model: false
   only_load_tokenizer: true

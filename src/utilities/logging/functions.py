@@ -11,7 +11,8 @@ def once(func: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(func)
     def wrapper(*args, **kwargs):
         nonlocal has_run
-        if not has_run:
+        is_auto = kwargs.pop("auto", True)
+        if not has_run or not is_auto:
             has_run = True
             return func(*args, **kwargs)
 

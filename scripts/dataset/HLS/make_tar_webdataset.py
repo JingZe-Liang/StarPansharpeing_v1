@@ -1,5 +1,6 @@
 import glob
 import io
+import math
 import sys
 from pathlib import Path
 from typing import Iterable, Literal, cast
@@ -12,21 +13,26 @@ import safetensors.torch
 import tifffile
 import torch
 import webdataset as wds
-from loguru import logger
 from PIL import Image
 from scipy.io import loadmat
 from torchvision.io import read_video
 from tqdm import tqdm
 
-logger.remove()
-logger.add(
-    sink=sys.stdout,
-    level="DEBUG",
-    format="<green>[{time:MM-DD HH:mm:ss}]</green> <cyan>{name}</cyan> <level>[{level}]</level> - <level>{message}</level>",
-    backtrace=True,
-    diagnose=True,
-    colorize=True,
-)
+from src.utilities.logging.print import configure_logger, logger
+
+Image.MAX_IMAGE_PIXELS = None  # disable the warning for large images
+
+# logger.remove()
+# logger.add(
+#     sink=sys.stdout,
+#     level="DEBUG",
+#     format="<green>[{time:MM-DD HH:mm:ss}]</green> <cyan>{name}</cyan> <level>[{level}]</level> - <level>{message}</level>",
+#     backtrace=True,
+#     diagnose=True,
+#     colorize=True,
+# )
+
+configure_logger(level="info", auto=False)
 
 
 _numpy_dtype_to_tensor = {
@@ -226,7 +232,7 @@ def sliding_window(
             target_w = w
 
         if target_h != h or target_w != w:
-            logger.info(f"Resizing image from ({h}, {w}) to ({target_h}, {target_w})")
+            logger.debug(f"Resizing image from ({h}, {w}) to ({target_h}, {target_w})")
             image = torch.as_tensor(image) if isinstance(image, np.ndarray) else image
             image, shape_inverse = to_batched(image, is_hwc)
             orig_dtype = image.dtype
@@ -240,14 +246,14 @@ def sliding_window(
             image = shape_inverse(image)
 
     shape = image.shape
-    logger.info(f"img shape: {shape}")
+    logger.debug(f"img shape: {shape}")
     h_padded, w_padded = shape[:-1] if is_hwc else shape[-2:]
-    logger.info(
-        f"clip patch with shape: {(h_padded, w_padded)}, patch_size: {patch_size}, stride: {stride}"
+    logger.debug(
+        f"clip patch with shape: {(h_padded, w_padded)}, patch_size: {patch_size}, stride: {stride}",
     )
     rows = list(range(0, h_padded, stride[0]))
     cols = list(range(0, w_padded, stride[1]))
-    logger.info(f"Got {len(rows) * len(cols)} patches")
+    logger.debug(f"Got {len(rows) * len(cols)} patches")
 
     # 确保最后一个 patch 覆盖到边界
     for i in rows:
@@ -297,7 +303,7 @@ def sliding_window(
 
 def resize_img(
     img: np.ndarray | torch.Tensor,
-    size: int,
+    size: int | tuple,
     is_hwc: bool = True,
 ):
     assert not isinstance(img, np.memmap), "np.memmap is not supported for resizing"
@@ -312,12 +318,12 @@ def resize_img(
     dtype = img.dtype
 
     shape = img.shape
-    logger.info(f"resize image from {shape} to {(size, size)}")
+    logger.debug(f"resize image from {shape} to {size}")
 
     # resize
     img = torch.nn.functional.interpolate(
         img.float(),
-        size=(size, size),
+        size=(size, size) if isinstance(size, int) else size,
         mode="bilinear",
         align_corners=False,
     ).to(dtype)
@@ -325,6 +331,44 @@ def resize_img(
 
     dummy_out = None
     return [(torch.as_tensor(img), dummy_out)]
+
+
+def resize_or_clip_img(
+    img: np.ndarray | torch.Tensor,
+    resize_size,
+    patch_size,
+    stride,
+    pad_type="resize",
+    is_hwc: bool = True,
+):
+    if is_hwc:
+        h, w = img.shape[:2]
+    else:
+        h, w = img.shape[-2:]
+
+    h_max = w_max = 1024
+    # if h > h_max and w > w_max:
+    #     ratio = w / h
+    #     if 3 / 4 < ratio < 4 / 3:
+    #         # resize
+    #         yield from resize_img(img, resize_size, is_hwc)
+    #     else:
+    #         # clip
+    #         yield from sliding_window(
+    #             img, patch_size, stride, pad_type=pad_type, is_hwc=is_hwc
+    #         )
+    if h > h_max or w > w_max:
+        # clip
+        yield from sliding_window(
+            img, patch_size, stride, pad_type=pad_type, is_hwc=is_hwc
+        )
+    else:
+        # yield (torch.as_tensor(img), None)
+
+        h = math.ceil(h / 16) * 16
+        w = math.ceil(w / 16) * 16
+
+        yield from resize_img(img, (h, w), is_hwc=is_hwc)
 
 
 def merge_patches(patches, coords, original_shape, patch_size, stride):
@@ -677,12 +721,19 @@ def clip_img_to_webdataset(
                 size=img_resize,
                 is_hwc=transpose,
             )
+        elif process_img_type == "clip_resize":
+            slide_g = resize_or_clip_img(
+                img,
+                img_resize,
+                img_clip_size,
+                img_stride,
+                pad_type="resize",
+                is_hwc=transpose,
+            )
+
         elif process_img_type is None:
             # keep the image size unchanged (no clip or resize)
-            slide_g = [
-                torch.as_tensor(img) if isinstance(img, np.ndarray) else img,
-                (None, None),
-            ]
+            slide_g = [torch.as_tensor(img), (None, None)]
             slide_g = [slide_g]
         else:
             raise ValueError(f"Unsupported process_img_type: {process_img_type}")
@@ -696,7 +747,10 @@ def clip_img_to_webdataset(
         else:
             save_dtype = None
 
+        n_patches = 0
+        patch = None
         for patch_idx, (patch, coord) in enumerate(slide_g):
+            # logger.debug(f"patch_idx: {patch_idx}, patch: {patch}, coord: {coord}")
             if patch is None:
                 # the background is all zero, skip
                 continue
@@ -743,6 +797,13 @@ def clip_img_to_webdataset(
                 }
             )
 
+            n_patches += 1
+
+        if patch is None:
+            logger.warning(f"Image {img_name} has no valid patches, skipping saving.")
+            return 0, img.shape, (None, None)
+        return n_patches, img.shape, patch.shape
+
     img_name = Path(img_path).stem
     img = read_image(
         img_path,
@@ -751,14 +812,17 @@ def clip_img_to_webdataset(
     )
     if img is None:
         logger.warning(f"Failed to read image from {img_path}, skipping.")
-        return
+        return None, None, None
+
     if Path(img_path).suffix.lower() in [".mp4"] and isinstance(img, list):
         # is video
         for i, img_f in enumerate(img):
             img_name_frame = f"{img_name}_frame-{i}"
-            slide_image_and_save(img_f, img_name_frame)
+            n_patch, shape, p_shape = slide_image_and_save(img_f, img_name_frame)
     else:  # is image
-        slide_image_and_save(img, img_name)
+        n_patch, shape, p_shape = slide_image_and_save(img, img_name)
+
+    return n_patch, shape, p_shape
 
 
 @logger.catch(reraise=True)
@@ -769,7 +833,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     img_clip_size: tuple[int, int] = (512, 512),
     img_stride: tuple[int, int] = (512, 512),
     img_resize: int = 512,
-    process_img_type: Literal["clip", "resize", None] = "clip",
+    process_img_type: Literal["clip", "resize", "clip_resize", None] = "clip",
     save_backend: Literal[
         "tiff", "jpeg", "png", "npy", "safetensors", "webdataset"
     ] = "tiff",
@@ -810,9 +874,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     with wds.ShardWriter(webdataset_pattern, maxsize=max_size) as sink:
         for msi_file in (tbar := tqdm(msi_files, disable=not tqdm_or_not)):
             msi_file = cast(Path, msi_file)  # ensure msi_file is Path type
-            if tqdm_or_not:
-                tbar.set_description(f"writing {msi_file.name}")
-            clip_img_to_webdataset(
+            n_patches, shape, patch_shape = clip_img_to_webdataset(
                 sink,
                 img_path=msi_file,
                 img_clip_size=img_clip_size,
@@ -826,6 +888,11 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 rescale="clamp",  # default rescale method
                 force_save_dtype=force_save_dtype,
             )
+
+            if tqdm_or_not:
+                tbar.set_description(
+                    f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}"
+                )
 
     logger.info(f"webdataset written to {webdataset_pattern}")
 
@@ -898,13 +965,14 @@ if __name__ == "__main__":
     _mp = False
 
     func_kwargs = {
-        "process_img_type": None,
-        "img_clip_size": (512, 512),
-        "img_stride": (512, 512),
+        "process_img_type": "clip_resize",
+        "img_clip_size": (1024, 1024),
+        "img_stride": (1024, 1024),
+        "img_resize": 1024,
         "save_kwargs": {
             "tiff_compression_type": "jpeg",
             "tiff_jpg_irreversible": True,
-            "jpeg_quality": 90,
+            "jpeg_quality": 80,
         },
         "read_fn_kwargs": {
             "tiff_bands_seperated": False,
@@ -1006,8 +1074,16 @@ if __name__ == "__main__":
         # )
 
         # AerialGV
-        all_msi_files_s = list(glob.glob("data/AerialVG/images/*"))
-        webdataset_pts = "data/AerialVG/hyper_images/AerialVG-3_bands-RGB-%04d.tar"
+        # all_msi_files_s = list(glob.glob("data/AerialVG/images/*"))
+        # webdataset_pts = "data/AerialVG/hyper_images/AerialVG-3_bands-RGB-%04d.tar"
+
+        # FMoW
+        all_msi_files_s = list(
+            Path(
+                "/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"
+            ).glob("**/*_rgb.jpg")
+        )
+        webdataset_pts = "data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-%04d.tar"
 
         # Inria Aeiral images
         # path = "data/YuZhongDataset/InriaAerialLabelingDataset/AerialImageDataset"

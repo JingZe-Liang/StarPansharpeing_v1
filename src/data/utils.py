@@ -34,6 +34,18 @@ def flatten_nested_list(lst):
             yield item
 
 
+def key_list_to_dict(keys: list[str] | set[str], use_ordered_dict=True):
+    """
+    find complexity O(1) time, but dict is C-implemented, it's faster than ordered dict.
+    """
+    if use_ordered_dict:
+        from collections import OrderedDict
+
+        return OrderedDict((k, None) for k in keys)
+    else:
+        return {k: None for k in keys}
+
+
 def not_dunder_keys(sample: dict) -> list[str]:
     return [k for k in sample.keys() if not k.startswith("__")]
 

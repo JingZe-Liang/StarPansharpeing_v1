@@ -26,6 +26,7 @@ import warnings
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
+from typing import Callable, cast
 
 warnings.filterwarnings("ignore")  # ignore warning
 import sys
@@ -450,8 +451,8 @@ def train(
                         y = text_encoder(
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
-                        )[0][:, None]
-                        y_mask = txt_tokens.attention_mask[:, None, None]
+                        )[0][:, None]  # bs, 1, N, C
+                        y_mask = txt_tokens.attention_mask[:, None, None]  # bs, 1, 1, N
                 elif (
                     "gemma" in config.text_encoder.text_encoder_name
                     or "Qwen" in config.text_encoder.text_encoder_name
@@ -475,14 +476,16 @@ def train(
                             max_length=max_length_all,
                             truncation=True,
                             return_tensors="pt",
-                        ).to(accelerator.device)
+                        ).to(accelerator.device)  # [bs, N]
                         select_index = [0] + list(
                             range(-config.text_encoder.model_max_length + 1, 0)
                         )  # first bos and end N-1
+                        # [bs, l, d] -> [bs=1 -> 0, l, d] -> [l, 1, d] -> ???
                         y = text_encoder(
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
                         )[0][:, None][:, :, select_index]
+                        # [bs, l] -> [bs, 1, 1, l] -> [bs, 1, 1, l]
                         y_mask = txt_tokens.attention_mask[:, None, None][
                             :, :, :, select_index
                         ]
@@ -967,11 +970,15 @@ def main(cfg: SanaConfig) -> None:
                     name=config.text_encoder.text_encoder_name
                 )
 
+            tokenizer = cast(Callable, tokenizer)
+            text_encoder = cast(Callable, text_encoder)
+
             for prompt in validation_prompts:
                 prompt_embed_path = osp.join(
                     config.train.valid_prompt_embed_root,
                     f"{prompt[:50]}_{valid_prompt_embed_suffix}",
                 )
+
                 if "T5" in config.text_encoder.text_encoder_name:
                     txt_tokens = tokenizer(
                         prompt,
@@ -1010,9 +1017,11 @@ def main(cfg: SanaConfig) -> None:
                     select_index = [0] + list(
                         range(-config.text_encoder.model_max_length + 1, 0)
                     )
+                    # [bs, l, d] -> [bs, l, d]
                     caption_emb = text_encoder(
                         txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask
                     )[0][:, select_index]
+                    # [bs, l] -> [bs, l], correct.
                     caption_emb_mask = txt_tokens.attention_mask[:, select_index]
                 else:
                     raise ValueError(

@@ -17,7 +17,7 @@ from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import
 
 setattr(Qwen2_5_VLVisionAttention, "is_causal", False)
 
-max_tokens = 512
+max_tokens = 300
 default_prompt = f"""
 You will act as a remote sensing analyst to describe the content of the image.
 Please provide a detailed description of the image in 1 to 3 sentences, including the following aspects:
@@ -115,11 +115,8 @@ def get_qwen25vl_model(
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "image": img,
-                    },
                     {"type": "text", "text": prompt},
+                    {"type": "image", "image": img},
                 ],
             }
         ]

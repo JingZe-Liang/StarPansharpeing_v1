@@ -289,27 +289,26 @@ def gemma2_caption_encode(
             # add_special_tokens=True,  # no <eos>
         )
         text_input_ids: torch.Tensor = text_inputs.input_ids.to(device)
-        valid_length = text_input_ids.ne(tokenizer.pad_token_id).sum(dim=1)
+        # valid_length = text_input_ids.ne(tokenizer.pad_token_id).sum(dim=1)
 
         prompt_attention_mask = text_inputs.attention_mask
         prompt_attention_mask = prompt_attention_mask.to(device)
         prompt_embeds = text_encoder(
             text_input_ids, attention_mask=prompt_attention_mask
         )
+
+        # keep the last N tokens of the embedding
         prompt_embeds = prompt_embeds[0][:, select_index]
-        prompt_attention_mask = prompt_attention_mask[0]
+        prompt_attention_mask = prompt_attention_mask[0, select_index]
+        valid_length = prompt_attention_mask.sum().item()
+        logger.debug(f"{valid_length=}")
 
         if return_truncated:
-            valid_len = valid_length[0].item()
-            truncated_embeds = prompt_embeds[:, :valid_len]
-            # truncated_mask = prompt_attention_mask[:valid_len]
+            truncated_embeds = prompt_embeds[:, :valid_length]
+            # truncated_mask = prompt_attention_mask[:valid_length]
             return truncated_embeds, prompt_attention_mask, valid_length
 
-        return (
-            prompt_embeds,
-            prompt_attention_mask,
-            valid_length,
-        )
+        return prompt_embeds, prompt_attention_mask, valid_length
 
     return encode
 

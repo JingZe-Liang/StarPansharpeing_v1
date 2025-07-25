@@ -462,7 +462,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.accelerator.init_trackers("train")
                 self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(
                     "tensorboard"
-                )
+                )  # type: ignore
 
         return log_file
 
@@ -510,7 +510,7 @@ class CosmosHyperspectralTokenizerTrainer:
                             _grad = _grad.cuda()
                         # _p_grad = p.grad.full_tensor()  # across all ranks
                         _grad = safe_dtensor_operation(_grad)
-                    _grad_norm = (_p_grad.data**2).sum() ** 0.5
+                    _grad_norm = (_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
                     else:

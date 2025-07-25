@@ -27,13 +27,13 @@ train_paths:
     - data/RS5M/val/pub11-val-{0000..0031}.tar
     - data/RS5M/train/rs3-train-{0000..0031}.tar
     - data/RS5M/val/rs3-val-{0000..0031}.tar
-  - - data/AerialVG/hyper_images/AerialVG-3_bands-RGB-0000.tar
-    - data/CityBench-CityData/hyper_images/CityBench-CityData-0000.tar
-    - data/Disaterm3/hyper_images/Disaterm3_3_bands-px_1024-RGB-jp2k-90-{0000..0007}.tar
-    - data/TEOChatlas/train/GeoChat_Instruct_images{1..2}.tar
+  - - data/TEOChatlas/train/GeoChat_Instruct_images{1..2}.tar
     - data/TEOChatlas/train/TEOChatlas_images.tar # fmow
     - data/TEOChatlas/eval/External_images.tar
     - data/TEOChatlas/eval/TEOChatlas_images.tar
+    - data/AerialVG/hyper_images/AerialVG-3_bands-RGB-0000.tar
+    - data/CityBench-CityData/hyper_images/CityBench-CityData-0000.tar
+    - data/Disaterm3/hyper_images/Disaterm3_3_bands-px_1024-RGB-jp2k-90-{0000..0007}.tar
     - data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-{0000..0010}.tar
     - data/miniFrance/miniFrance_test_3_bands-px_1024-MSI-{0000..0017}.tar
     - data/DOTA_v1/hyper_images/DOTA_v1-3_bands-px_1024-{0000..0001}.tar
@@ -45,24 +45,20 @@ train_paths:
     - data_local/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
     - data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar
     - data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar
-    - data/RSCaptions/hyper_images/RSCaptionCollection-hyper_images-0000.tar
-    - data/RSCaptions/hyper_images/RSCaptionCollection-RSICD-0000.tar
-    - data/RSCaptions/hyper_images/RSCaptionCollection-RSITMD-0000.tar
-    - data/RSCaptions/hyper_images/RSCaptionCollection-Sydney_caption-0000.tar
-    - data/RSCaptions/hyper_images/RSCaptionCollection-UCM-0000.tar
+    - ${glob:data/RSCaptions/hyper_images/*.tar}
     - data/UDD/hyper_images/UDD-3_bands-px_512-RGB-jp2k-95-0000.tar
     - data/VDD/hyper_images/VDD_3_bands-px_2k-RGB-0000.tar
     - data/xView2/hyper_images/xView2-3_bands-px_1024-RGB-jp2k-80-0000.tar
     - data/ERA_UAV_Video_Dataset/hyper_images/ERA_UAV_Video_Dataset_key_frames_3_bands-px_512-RGB-jp2k-80-0000.tar
-  - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0000..0011}.tar # E01 175 bands
-  - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_{0012..0018}.tar # GF5 150 bands
+  - - data/HyperGlobal/hyper_images/HyperGlobal-EO1-bands-px_64_{0000..0011}.tar # E01 175 bands
+  - - data/HyperGlobal/hyper_images/HyperGlobal-GF5-bands-px_64_{0000..0004}.tar # GF5 150 bands
   - - data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_{0000..0011}.tar # 202 bands
   - ${glob:"data/MMOT/hyper_images/**/*.tar"}
   - - ${glob:"data/MMOT/conditions/**/*.tar"} # auto deflatten the list of list
     - ${glob:"data/RSCaptions/conditions/**/*.tar"}
     - data/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
     - data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
-    - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar
+    - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0002..0005}.tar
     - data/Houston/conditions/Houston-50_bands-px_512-MSI-0000.tar
     - data/LoveDA/conditions/LoveDA-3_bands-px_1024-0000.tar
     - data/MDAS-HySpex/conditions/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar
@@ -72,7 +68,7 @@ train_paths:
     - data/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar
     - data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar
   - - data/EarthView/hyper_images/neon/neon-{0000..0013}.tar
-  - ${glob:"data/EarthView/hyper_images/satellogic/**/*.tar"}
+  - ${glob:"data/EarthView/hyper_images/satellogic/*.tar"}
   # - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 val_paths:
@@ -90,7 +86,7 @@ val_paths:
   - - data/RS5M/val/pub11-val-{0030..0031}.tar
     - data/RS5M/val/rs3-val-0030.tar
   - - data/miniFrance/miniFrance_labeled_unlabeled_3_bands-px_1024-MSI-0010.tar
-  - - data/HyperGlobal/hyper_images/HyperGlobal450k-150_bands-px_128_0017.tar
+  - - data/HyperGlobal/hyper_images/HyperGlobal-EO1-bands-px_64_0011.tar
   - - data/UDD/hyper_images/UDD-3_bands-px_512-RGB-jp2k-95-0000.tar
     - data/RSCaptions/hyper_images/RSCaptionCollection-RSITMD-0000.tar
   - - data/hyspecnet11k/hyper_images/hyspecnet11k_202_bands_px_128_0011.tar
@@ -217,12 +213,12 @@ train_loader:
       - 0.2 # MDAS-Optical
       - 0.2 # DryadHyper
       - 2.7 # RS5M, relative large value (logits) to sample this dataset
-      - 2.0 # miniFrance
-      - 1.6 # HyperGlobal450k EO1
-      - 1.6 # HyperGlobal450k GF5
+      - 1.6 # miniFrance
+      - 1.4 # HyperGlobal450k EO1
+      - 1.4 # HyperGlobal450k GF5
       - 1.4 # hyspecnet11k
-      - 1.8 # MMOT
-      - 1.6 # conditions
+      - 1.6 # MMOT
+      - 1.8 # conditions
       - 1.6 # neon
       - 2.0 # satellogic
       # - 0.2 # MUSLI

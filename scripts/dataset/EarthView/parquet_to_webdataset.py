@@ -1,4 +1,5 @@
 import functools
+import io
 import os
 import shutil
 import tarfile
@@ -65,6 +66,24 @@ def parquet_reader_duckdb(parquet_file):
     return Dataset(arrow_table)
 
 
+def parquet_reader_pyarrow(parquet_file):
+    table = pq.read_table(parquet_file, use_threads=True, memory_map=True)
+
+    def inner():
+        nonlocal table
+
+        for tile_i in range(table.num_rows):
+            pyd = table.slice(tile_i, 1).to_pydict()
+            # keys: rgb, 1m
+            pyd["1m"] = np.array(pyd["1m"][0])
+            pyd["rgb"] = np.array(pyd["rgb"][0])
+            pyd["metadata"] = pyd["metadata"][0]
+
+            yield pyd
+
+    return table.num_rows, inner()
+
+
 def reading_parquet_file_neon(parquet_file):
     # ds = parquet_to_webdataset(parquet_file)  #! this will cache the dataset into /tmp, Why?
     ds = parquet_reader(parquet_file)
@@ -87,11 +106,11 @@ def reading_parquet_file_neon(parquet_file):
             # create sample
             sample = {
                 "__key__": name + f"-tile-{tile_i}" + f"-seq-{i}",
-                "rgb.jpg": rgb_codec_io(rgb_i, quality=85),
+                "rgb.jpg": rgb_codec_io(rgb_i, quality=80),
                 "hsi.tiff": tiff_codec_io(
                     hsi_i,
                     compression="jpeg2000",
-                    compression_args={"level": 85},
+                    compression_args={"level": 80},
                 ),
                 "metadata.jsonl": py_obj_to_jsonl(metadata),
             }
@@ -100,16 +119,21 @@ def reading_parquet_file_neon(parquet_file):
 
 
 def reading_parquet_file_satellogic(parquet_file):
-    # ds = parquet_to_webdataset(parquet_file)  #! this will cache the dataset into /tmp, Why?
-    ds = parquet_reader(parquet_file)
-    # ds = parquet_reader_duckdb(parquet_file)
+    tile_n = None
 
+    # > reading parquet file
+    # ds = parquet_to_webdataset(parquet_file)  #! this will cache the dataset into /tmp, Why?
+    # ds = parquet_reader(parquet_file)
+    # ds = parquet_reader_duckdb(parquet_file)
+    tile_n, ds = parquet_reader_pyarrow(parquet_file)
+
+    # > loops
     name = Path(parquet_file).stem
     name = name.replace(".", "-")
-    tile_n = len(ds)
+    tile_n = len(ds) if tile_n is None else tile_n  # type: ignore
     for tile_i, sample in enumerate(ds):
-        rgb = np.array(sample["rgb"]).astype(np.uint8)
-        nir = np.array(sample["1m"]).astype(np.uint8)  # 255. max, also to uint8
+        rgb = np.asarray(sample["rgb"]).astype(np.uint8)
+        nir = np.asarray(sample["1m"]).astype(np.uint8)  # 255. max, also to uint8
         # cat together
         img = np.concatenate([rgb, nir], axis=1)
         metadata = sample["metadata"]
@@ -125,7 +149,7 @@ def reading_parquet_file_satellogic(parquet_file):
                 "img.tiff": tiff_codec_io(
                     img_i,
                     compression="jpeg2000",
-                    compression_args={"level": 85},
+                    compression_args={"level": 80},
                 ),
                 "metadata.jsonl": py_obj_to_jsonl(metadata),
             }
@@ -248,6 +272,7 @@ def parquet_to_webdataset(
 def parquet_to_webdataset_async(
     parquet_dir: str | list[str],
     output_root: str | Path = "data/EarthView/hyper_images2",
+    to_wds=False,
     n_threads: int = 4,
     dataset_name: str = "neon",
     remove_file: bool = False,
@@ -275,20 +300,36 @@ def parquet_to_webdataset_async(
     reading_fn = reading_fns[dataset_name]
 
     def worker(thread_idx: int, file_list):
-        out_dir = output_root / f"thread_{thread_idx}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pattern = str(out_dir / f"{dataset_name}-%04d.tar")
-
         _len = len(file_list)
-        logger.info(f"thread {thread_idx} writing {_len} files to {pattern}")
+        logger.info(f"thread {thread_idx} writing {_len} files")
 
         try:
-            with wds.writer.ShardWriter(
-                pattern, maxsize=8 * 1024**3, start_shard=0
-            ) as sink:
+            # > all to webdataset shards
+            if to_wds:
+                out_dir = output_root / f"thread_{thread_idx}"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                pattern = str(out_dir / f"{dataset_name}-%04d.tar")
+
+                with wds.writer.ShardWriter(
+                    pattern, maxsize=8 * 1024**3, start_shard=0
+                ) as sink:
+                    for f in file_list:
+                        for sample in reading_fn(str(f)):
+                            sink.write(sample)
+            # > all to dir
+            else:
+                Path(output_root).mkdir(parents=True, exist_ok=True)
+
                 for f in file_list:
                     for sample in reading_fn(str(f)):
-                        sink.write(sample)
+                        pair_name = Path(output_root, sample["__key__"])
+                        img_name = pair_name.with_suffix(".img.tiff")
+                        metadata_name = pair_name.with_suffix(".metadata.jsonl")
+                        with open(img_name, "wb") as img_file:
+                            img_file.write(sample["img.tiff"])
+                        with open(metadata_name, "wb") as meta_file:
+                            meta_file.write(sample["metadata.jsonl"])
+
             logger.info(
                 f"Thread {thread_idx} finished, processed {len(file_list)} files"
             )
@@ -444,12 +485,17 @@ if __name__ == "__main__":
     # )
     # exit(0)
 
+    # list_untared_grouped(
+    #     "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/conditions/tmp"
+    # )
+    # exit(0)
+
     import os
 
     import braceexpand
 
     # path = "data/EarthView/data/train-{00349..00606}-of-00607.parquet"
-    path = "data/EarthView/satellogic/train-{01660..03000}-of-07863.parquet"
+    path = "data/EarthView/satellogic/train-{02135..04000}-of-07863.parquet"
     paths = list(braceexpand.braceexpand(path))
 
     reading_fns = {
@@ -466,9 +512,10 @@ if __name__ == "__main__":
 
     parquet_to_webdataset_async(
         paths,
-        output_root="data/EarthView/hyper_images/satellogic",
+        output_root="data/EarthView/hyper_images/satellogic/shard2",
         n_threads=3,  # type: ignore
         dataset_name="satellogic",
+        to_wds=False,
     )
 
     # parquet_to_webdataset_async_mp_tp(

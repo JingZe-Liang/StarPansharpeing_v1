@@ -318,14 +318,14 @@ def main():
         "--force_not_download",
         "-fnd",
         help="force not download",
-        action="store_true",
+        action="store_false",
         default=True,  # default value False
     )
     create_parser.add_argument(
         "--force_not_md5sum",
         "-fnm",
         help="force not compute md5sum",
-        action="store_true",
+        action="store_false",
         default=True,  # default value False
     )
 

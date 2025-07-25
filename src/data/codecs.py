@@ -45,13 +45,15 @@ def tiff_codec_io(
     """Encodes a NumPy array into TIFF formatted bytes.
 
     Args:
-        img (np.ndarray): Input image array to be encoded.
+        img (np.ndarray): Input image array to be encoded. Can be 2D (grayscale) or 3D (color) array.
         planarconfig (str | tifffile.PLANARCONFIG | None, optional): TIFF planar configuration. Defaults to None.
-            Can be 'CONTIG' (contiguous) or 'SEPARATE' (planar).
+            Can be 'CONTIG' (contiguous, interleaved channels) or 'SEPARATE' (planar, separate planes).
         photometric (str | tifffile.PHOTOMETRIC | None, optional): TIFF photometric interpretation. Defaults to None.
-            Common values include 'RGB', 'MINISBLACK', etc.
+            Common values include 'MINISBLACK' (grayscale), 'RGB', 'PALETTE', 'MASK', etc.
         compression (str, optional): Compression method to use. Defaults to "zlib".
-            Other options include 'lzw', 'jpeg', 'packbits', 'deflate', etc.
+            Other options include 'lzw', 'jpeg', 'packbits', 'deflate', 'none', etc.
+        compression_args (dict[str, Any] | None, optional): Additional arguments for the compression method.
+            For example, {'level': 5} for zlib compression level.
 
     Returns:
         bytes: TIFF formatted bytes of the encoded image.
@@ -59,6 +61,7 @@ def tiff_codec_io(
     Note:
         The function uses tifffile library to encode the image. The planarconfig and photometric
         parameters should match the image data structure to ensure correct encoding.
+        For example, for an RGB image, photometric should be 'RGB' and planarconfig can be 'CONTIG'.
     """
     with io.BytesIO() as buffer:
         tifffile.imwrite(

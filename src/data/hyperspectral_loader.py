@@ -1488,8 +1488,9 @@ if __name__ == "__main__":
         #     "data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar",
         #     "data/EarthView/hyper_images/neon/neon-{0000..0013}.tar",
         # ]
-        ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
-        # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0005}.tar"]
+        # ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
+        # ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar"]
+        ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
     ]
     test_batch_size = 64
@@ -1522,6 +1523,7 @@ if __name__ == "__main__":
             "resize_before_transform": 64,
             "resample": False,
         },
+        # {'img_key': 'img', 'resize_before_transform': 256},
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},
         # {"permute": False},
@@ -1594,19 +1596,20 @@ if __name__ == "__main__":
             log_print(f"loading sample failed: {e}", level="error")
             continue
 
-        print(sample.keys(), sample["segmentation"].shape)
-        # print(sample.keys())
+        # print(sample.keys(), sample["segmentation"].shape)
+        print(sample.keys())
         # continue
 
-        img = sample["segmentation"]
-        assert "img" not in sample and "rgb" not in sample, f"{sample.keys()}"
+        # img = sample["segmentation"]
+        # img =sample['img']
+        # assert "img" not in sample and "rgb" not in sample, f"{sample.keys()}"
 
-        s = np.prod(img.shape[-2:])
         # update sizes of the count
-        if s not in sizes:
-            sizes[s] = img.shape[0]
-        else:
-            sizes[s] += img.shape[0]
+        # s = np.prod(img.shape[-2:])
+        # if s not in sizes:
+        #     sizes[s] = img.shape[0]
+        # else:
+        #     sizes[s] += img.shape[0]
 
         # index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
         # index = set(index)

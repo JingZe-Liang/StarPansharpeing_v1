@@ -40,6 +40,7 @@ exclude = [
     "src/stage2/generative/maskbit",
     "src/stage2/generative/Sana",
     "**/datasets/**",
+    "data/",
     "src/stage2/generative/models/modules/deformable_attn/ops",
 ]
 

@@ -185,7 +185,7 @@ def prepare_condition_from_webdataset(
         key = sample["__key__"][0]
         if resume_from is not None and not _resumed_flag:
             if key != resume_from:
-                log_print(f"Skipping {key} until resume point {resume_from}.", "debug")
+                # log_print(f"Skipping {key} until resume point {resume_from}.", "debug")
                 yield sample, None
                 continue
             else:

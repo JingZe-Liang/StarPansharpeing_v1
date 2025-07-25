@@ -59,7 +59,7 @@ def print_custom_markup(text: str):
 
 
 @once
-def configure_logger(sink=None):
+def configure_logger(sink=None, level="debug", auto=True):
     global __re_config_logger, _console
 
     __re_config_logger = False
@@ -73,7 +73,8 @@ def configure_logger(sink=None):
     logger.remove()
     logger.add(
         sink,
-        level="DEBUG",
+        level=level.upper(),
+        enqueue=True,
         colorize=True,
         format=(
             "{time:HH:mm:ss} "
@@ -81,7 +82,7 @@ def configure_logger(sink=None):
             "- <level>{message}</level>"
         ),
     )
-    logger.info("Logger reconfigured", level="info")
+    logger.debug("Logger reconfigured")
 
 
 if __re_config_logger:
