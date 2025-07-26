@@ -1,8 +1,9 @@
+import json
 import os
 import warnings
 from itertools import zip_longest
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Union, cast
+from typing import Any, Dict, List, Literal, Sequence, Union, cast
 
 import numpy as np
 import torch
@@ -13,7 +14,7 @@ from natsort import natsorted
 from PIL import Image
 from tqdm import tqdm
 
-from data.hyperspectral_loader import get_hyperspectral_dataloaders
+from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.utilities.logging import log_print
 
 warnings.filterwarnings("ignore", module="torch.utils.checkpoint")
@@ -128,8 +129,14 @@ def webdataset_conditions_prepare(
                 if img.ndim == 4:  # Remove batch dimension if present
                     img = img[0]
                 if img.ndim == 3 and img.shape[0] > 3:  # Extract RGB channels
-                    if rgb_channels is not None:
+                    if isinstance(rgb_channels, (list, tuple)):
                         img = img[rgb_channels]
+                    elif rgb_channels == "mean":
+                        c_3 = img.shape[0] // 3
+                        bands = [
+                            img[i * c_3 : (i + 1) * c_3, :, :].mean(0) for i in range(3)
+                        ]
+                        img = np.stack(bands, axis=0)
                     else:
                         img = img[:3]  # Take first 3 channels as RGB
 
@@ -140,7 +147,7 @@ def webdataset_conditions_prepare(
 
                 # Save as PNG
                 rgb_image = Image.fromarray(img)
-                output_sample["rgb.png"] = rgb_image
+                output_sample["rgb.jpg"] = rgb_image
 
             # > Process and save condition images or captions
             for condition_name, condition_output in condition_data.items():
@@ -154,8 +161,6 @@ def webdataset_conditions_prepare(
                             condition_output["caption"]
                         ).encode("utf-8")
                     elif caption_save_format == "json":
-                        import json
-
                         output_sample[f"{condition_name}.json"] = json.dumps(
                             {
                                 "caption": str(condition_output["caption"]),
@@ -183,14 +188,16 @@ def webdataset_conditions_prepare(
                         output_sample[saved_name] = safetensors_codec_io(saved)
 
                 else:
+                    if isinstance(condition_output, np.ndarray):
+                        condition_output = Image.fromarray(condition_output)
+
                     # Handle image conditions
+                    if condition_name != "segmentation":
+                        condition_output = condition_output.convert("L")
+
                     if condition_save_format == "png":
                         if isinstance(condition_output, Image.Image):
                             output_sample[f"{condition_name}.png"] = condition_output
-                        elif isinstance(condition_output, np.ndarray):
-                            output_sample[f"{condition_name}.png"] = Image.fromarray(
-                                condition_output
-                            )
                         else:
                             log_print(
                                 f"Unsupported condition output type for {condition_name}: {type(condition_output)}",
@@ -199,27 +206,24 @@ def webdataset_conditions_prepare(
                     elif condition_save_format == "jpg":
                         if isinstance(condition_output, Image.Image):
                             output_sample[f"{condition_name}.jpg"] = condition_output
-                        elif isinstance(condition_output, np.ndarray):
-                            output_sample[f"{condition_name}.jpg"] = Image.fromarray(
-                                condition_output
-                            )
-                    elif condition_save_format == "safetensors":
-                        if isinstance(condition_output, Image.Image):
-                            condition_array = np.array(condition_output)
-                        elif isinstance(condition_output, np.ndarray):
-                            condition_array = condition_output
-                        else:
-                            log_print(
-                                f"Cannot convert {condition_name} to array for safetensors",
-                                level="warning",
-                            )
-                            continue
 
-                        # Convert numpy array to torch tensor
-                        condition_tensor = torch.from_numpy(condition_array)
-                        output_sample[f"{condition_name}.safetensors"] = (
-                            safetensors_codec_io({condition_name: condition_tensor})
-                        )
+                    # elif condition_save_format == "safetensors":
+                    #     if isinstance(condition_output, Image.Image):
+                    #         condition_array = np.array(condition_output)
+                    #     elif isinstance(condition_output, np.ndarray):
+                    #         condition_array = condition_output
+                    #     else:
+                    #         log_print(
+                    #             f"Cannot convert {condition_name} to array for safetensors",
+                    #             level="warning",
+                    #         )
+                    #         continue
+
+                    #     # Convert numpy array to torch tensor
+                    #     condition_tensor = torch.from_numpy(condition_array)
+                    #     output_sample[f"{condition_name}.safetensors"] = (
+                    #         safetensors_codec_io({condition_name: condition_tensor})
+                    #     )
 
             # Write the processed sample to tar
             if output_sample:
@@ -662,9 +666,9 @@ def concate_tars(*src_tars, output_tar: str, repeat_find=True):
 if __name__ == "__main__":
     # > utilities re-tar the conditions
     # comp_conditions_hyper_images_names(
-    #     "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
+    #     "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0002.tar",
     #     # "data/BigEarthNet_S2/conditions/tmp",
-    #     condition_tar="data/BigEarthNet_S2/conditions/BigEarthNet_data_0000_re_tar.tar",
+    #     condition_tar="data/BigEarthNet_S2/conditions/BigEarthNet_data_0002.tar",
     # )
     # exit()
 

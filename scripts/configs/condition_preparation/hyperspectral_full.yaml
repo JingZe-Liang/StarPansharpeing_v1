@@ -40,12 +40,16 @@ data:
   # data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
   # data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar
   # data/MDAS-HySpex/
-  # data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0001.tar
-  data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
+  # data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0006}.tar
+  # data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
+  # data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
+  # ${eval:"[str(p) for p in Path('data/RSCaptions').glob('*.tar')]"}
+  # data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar
+  # data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
   # ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
 
 output:
-  output_dir: "data/MMSeg_YREB"
+  output_dir: "data/RSCaptions"
   tar_name: "hyperspectral_conditions"
 
 loader:
@@ -56,11 +60,11 @@ loader:
 
 processor:
   conditions: ["caption"] #["hed", "segmentation", "sketch", "mlsd"] # 生成这些条件
-  rgb_channels: [2, 1, 0] #[74, 42, 10] #[3, 2, 1] #[4, 3, 2] #[3, 2, 1] #[9, 6, 3] # 选择接近红、绿、蓝的波段（根据你的数据调整）
+  rgb_channels: #[2, 1, 0] #[2, 1, 0] #[74, 42, 10] #[3, 2, 1] #[4, 3, 2] #[3, 2, 1] #[9, 6, 3] # 选择接近红、绿、蓝的波段（根据你的数据调整）
   device: "cuda:1"
   to_pil: true
   save_original_rgb: false # 保存原始RGB图像用于对比
-  condition_save_format: "png" # 条件图像保存为PNG格式
+  condition_save_format: "jpg" # 条件图像保存为PNG格式
   caption_save_format: "json" # 描述保存为文本文件
   resume_from: #S2_tiff_jp2k_80_S2A_MSIL2A_20170617T113321_N9999_R080_T29UPU_30_45
   relative_data_dir: condition_captions

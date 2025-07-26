@@ -935,7 +935,7 @@ def get_hyperspectral_wids_dataloaders(
         # dataloader = dataloader.map_dict(img=transform)
         # img keys with one same transform?
         assert tgt_key is not None, "tgt_key must be specified"
-        tgt_key = [tgt_key] if isinstance(tgt_key, str) else list(tgt_key.values())
+        tgt_key = [tgt_key] if isinstance(tgt_key, str) else list(tgt_key.values())  # type: ignore
         dataloader = dataloader.map_dict(**{k: transform for k in tgt_key})
 
     return dataset, dataloader
@@ -1490,10 +1490,11 @@ if __name__ == "__main__":
         # ]
         # ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
         # ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar"]
-        ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
+        # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
+        ["data/MUSLI/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 64
+    test_batch_size = 2
     test_num_workers = 2
     test_shuffle_size = -1
 
@@ -1516,13 +1517,14 @@ if __name__ == "__main__":
     changed_kwargs = [
         # {"img_key": ["hsi", "rgb"]},
         # {"img_key": ["npy"], "tgt_key": ["img"]},
-        {
-            "img_key": ["mlsd", "sketch", "hed", "segmentation"],
-            "tgt_key": None,
-            "keys_to_remove": ["rgb.png"],
-            "resize_before_transform": 64,
-            "resample": False,
-        },
+        # {
+        #     "img_key": ["mlsd", "sketch", "hed", "segmentation"],
+        #     "tgt_key": None,
+        #     "keys_to_remove": ["rgb.png"],
+        #     "resize_before_transform": 64,
+        #     "resample": False,
+        # },
+        {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
         # {'img_key': 'img', 'resize_before_transform': 256},
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},

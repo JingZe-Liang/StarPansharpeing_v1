@@ -3,7 +3,7 @@ import json
 import math
 import os
 import sys
-from typing import Callable, cast
+from typing import Callable, Literal, cast
 
 import cv2
 import numpy as np
@@ -160,7 +160,7 @@ annotators: dict[str, Callable] = {}
 def prepare_condition_from_webdataset(
     ds,
     conditions: str | list[str] = "all",
-    rgb_channels: list[int] | None = None,
+    rgb_channels: list[int] | Literal["mean"] | None = None,
     device="cuda",
     to_pil: bool = True,
     resume_from: str | None = None,
@@ -196,9 +196,20 @@ def prepare_condition_from_webdataset(
 
         # if the image is too large, we need to resize it
         if math.prod(tuple(_orig_size := img.shape[-2:])) > 1024 * 1024:
-            log_print(f"Image is too large, resizing to 1024x1024...", "warning")
+            _orig_size = np.array(tuple(_orig_size))
+            l_max_i = np.argmax(_orig_size)
+            l_max = _orig_size[l_max_i]
+            ratio = 1024 / l_max
+            log_print(
+                f"Image is too large {tuple(_orig_size)}, resizing to {tuple(_orig_size * ratio)}...",
+                "debug",
+            )
             img = torch.nn.functional.interpolate(
-                img, size=(1024, 1024), mode="bilinear"
+                img,
+                antialias=True,
+                scale_factor=ratio,
+                mode="bilinear",
+                # size=(1024, 1024),
             )
 
         # img is batched
@@ -208,6 +219,10 @@ def prepare_condition_from_webdataset(
         # extract RGB channels
         if rgb_channels is None:
             assert img.shape[0] == 3, "Image must have 3 channels."
+        elif rgb_channels == "mean":
+            c_3 = img.shape[0] // 3
+            bands = [img[i * c_3 : (i + 1) * c_3, :, :].mean(0) for i in range(3)]
+            img = np.stack(bands, axis=0)
         else:
             img = img[rgb_channels]
         img = img.transpose(1, 2, 0)  # Convert to HWC format

@@ -248,7 +248,7 @@ class MultimodalityDataloader:
         modality_sample: dict[ModalityName | str, Any] = {}
         for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
-            if isinstance(sample, dict):  # * <-- default in this case
+            if isinstance(sample, dict):  # * default in this case
                 if self.return_nested_dict is not None and not self.return_nested_dict:
                     modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
                 elif self.extracted_keys is not None:

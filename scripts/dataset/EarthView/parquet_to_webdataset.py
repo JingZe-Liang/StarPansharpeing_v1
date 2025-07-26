@@ -495,7 +495,7 @@ if __name__ == "__main__":
     import braceexpand
 
     # path = "data/EarthView/data/train-{00349..00606}-of-00607.parquet"
-    path = "data/EarthView/satellogic/train-{02135..04000}-of-07863.parquet"
+    path = "data/EarthView/satellogic/train-{02395..04000}-of-07863.parquet"
     paths = list(braceexpand.braceexpand(path))
 
     reading_fns = {

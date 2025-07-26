@@ -161,7 +161,8 @@ def read_tar_filenames_safe(
                 if progress:
                     tbar.clear()
                 log_print(
-                    f"Failed to next file (head, index, or format error) from tar: {e}\n Break reading.",
+                    f"Failed to next file (head, index, or format error) from tar: "
+                    f"{e}\n Break reading.",
                     "warning",
                 )
                 break
