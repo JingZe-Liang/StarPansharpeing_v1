@@ -1666,7 +1666,7 @@ class ResnetBlock(nn.Module):
         dropout: float,
         use_residual_factor: bool = False,
         act_type: tuple = ("gelu", "gelu"),
-        nin_shortcut_norm: bool = True,
+        nin_shortcut_norm: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -1721,7 +1721,7 @@ class ResnetBlock(nn.Module):
         self.act_checkpoint = kwargs.get("act_checkpoint", False)
         self.use_residual_factor = use_residual_factor
         if use_residual_factor:
-            self.residual_factor = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+            self.residual_factor = nn.Parameter(torch.ones(1, out_channels, 1, 1))
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
 

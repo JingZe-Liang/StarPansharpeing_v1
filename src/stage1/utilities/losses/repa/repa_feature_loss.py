@@ -80,7 +80,7 @@ def next_divisble_of_y(x, y):
     return math.ceil(x / y) * y
 
 
-def load_repa_encoder(dino_type: str) -> nn.Module:
+def load_repa_encoder(dino_type: str):
     if dino_type == "timm":
         model = timm.create_model(
             "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",

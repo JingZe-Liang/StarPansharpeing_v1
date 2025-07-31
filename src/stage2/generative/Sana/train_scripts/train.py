@@ -411,6 +411,8 @@ def train(
         lm_time_all = 0
         vae_time_all = 0
         model_time_all = 0
+
+        # > loops
         for step, batch in enumerate(train_dataloader):
             # image, json_info, key = batch
             accelerator.wait_for_everyone()
@@ -435,20 +437,22 @@ def train(
             data_info = batch[3]
 
             lm_time_start = time.time()
+
+            # > text features
             if load_text_feat:
                 y = batch[1]  # bs, 1, N, C
                 y_mask = batch[2]  # bs, 1, 1, N
             else:
                 if "T5" in config.text_encoder.text_encoder_name:
                     with torch.no_grad():
-                        txt_tokens = tokenizer(
+                        txt_tokens = tokenizer(  # type: ignore
                             batch[1],
                             max_length=max_length,
                             padding="max_length",
                             truncation=True,
                             return_tensors="pt",
                         ).to(accelerator.device)
-                        y = text_encoder(
+                        y = text_encoder( # type: ignore
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
                         )[0][:, None]  # bs, 1, N, C
@@ -470,7 +474,7 @@ def train(
                                 + config.text_encoder.model_max_length
                                 - 2
                             )  # magic number 2: [bos], [_]
-                        txt_tokens = tokenizer(
+                        txt_tokens = tokenizer(  # type: ignore
                             prompt,
                             padding="max_length",
                             max_length=max_length_all,
@@ -481,7 +485,7 @@ def train(
                             range(-config.text_encoder.model_max_length + 1, 0)
                         )  # first bos and end N-1
                         # [bs, l, d] -> [bs=1 -> 0, l, d] -> [l, 1, d] -> ???
-                        y = text_encoder(
+                        y = text_encoder(  # type: ignore
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
                         )[0][:, None][:, :, select_index]

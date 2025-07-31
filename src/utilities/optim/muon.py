@@ -10,9 +10,17 @@ from typing import Iterable, cast
 
 import torch
 from loguru import logger
+from torch import Tensor
 from torch.distributed.tensor import DTensor
+from torch.optim.adam import adam
+from torch.optim.optimizer import (
+    _device_dtype_check_for_fused,
+    _get_scalar_dtype,
+    _use_grad_for_differentiable,
+)
 
-from .utils import to_dist, to_local
+# from .utils import to_dist, to_local
+from src.utilities.optim.utils import to_dist, to_local
 
 try:
     from flash_muon_cuda import matmul_transpose_assign
@@ -26,8 +34,10 @@ except ImportError:
         f"please install it from {__url} if you want to use the cuda kernel ns optimization"
     )
 
-_cuda_dim_in_min = 8
-__abc_s_type = "su2"
+_cuda_dim_in_min = (
+    8  # ! should not be changed, CUDA kernel requires the minimum dimension to be 8
+)
+__abc_s_type = "su2"  # default ns a, b, c
 
 if __abc_s_type == "su":  # JianlinSu's abc_s
     abc_s = [
@@ -225,21 +235,29 @@ class Muon(torch.optim.Optimizer):
     def __init__(
         self,
         lr=1e-3,
+        # muon specific
         weight_decay=0.1,
         muon_params=None,
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
         ns_norm=False,
-        ns_diff_abc=False,
+        ns_diff_abc=True,
+        # adam specific
         adamw_params=None,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
+        adamw_wd=0.0,
+        adamw_amsgrad=False,
+        adamw_foreach=True,  # a bit faster?
+        adamw_fused=None,
+        # muon cuda kernel
         use_cuda_kernel: bool = False,
     ):
         defaults = dict(
             lr=lr,
             wd=weight_decay,
+            adamw_wd=adamw_wd,
             momentum=momentum,
             nesterov=nesterov,
             ns_steps=ns_steps if not ns_diff_abc else 6,  # ns_diff_abc use 6 ns steps
@@ -247,22 +265,40 @@ class Muon(torch.optim.Optimizer):
             ns_diff_abc=ns_diff_abc,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
+            adamw_amsgrad=adamw_amsgrad,
+            adamw_foreach=adamw_foreach,
+            adamw_fused=adamw_fused,
             use_cuda_kernel=use_cuda_kernel and _flash_muon_cuda_available,
+            differentiable=False,
+            capturable=False,
+            maximize=False,
+            decoupled_weight_decay=False,
         )
         logger.debug(f"[Muon optimizer]: defaults: {defaults}")
 
-        params = list(muon_params)
-        adamw_params = list(adamw_params) if adamw_params is not None else []
-        params.extend(adamw_params)
+        params = []
+        if muon_params:
+            params.append({"params": muon_params, "use_muon": True, **defaults})
+            logger.debug("Muon params: {}".format(len(muon_params)))
+        if adamw_params:
+            params.append({"params": adamw_params, "use_muon": False, **defaults})
+            logger.debug("AdamW params: {}".format(len(adamw_params)))
+
+        # params = list(muon_params)
+        # adamw_params = list(adamw_params) if adamw_params is not None else []
+        # params.extend(adamw_params)
+
         super().__init__(params, defaults)
+
         # Sort parameters into those for which we will use Muon, and those for which we will not
-        for p in muon_params:
-            # Use Muon for every parameter in muon_params which is >= 2D and doesn't look like an embedding or head layer
-            # assert p.ndim == 2, p.ndim
-            self.state[p]["use_muon"] = True
-        for p in adamw_params:
-            # Do not use Muon for parameters in adamw_params
-            self.state[p]["use_muon"] = False
+        # for p in muon_params:
+        #     # Use Muon for every parameter in muon_params which is >= 2D and doesn't look like an embedding or head layer
+        #     # assert p.ndim == 2, p.ndim
+        #     self.state[p]["use_muon"] = True
+
+        # for p in adamw_params:
+        #     # Do not use Muon for parameters in adamw_params
+        #     self.state[p]["use_muon"] = False
 
     def adjust_lr_for_muon(self, lr, param_shape):
         if len(param_shape) >= 2:
@@ -279,7 +315,282 @@ class Muon(torch.optim.Optimizer):
         adjusted_lr = lr * adjusted_ratio
         return adjusted_lr
 
+    def _muon_step(self, group: dict):
+        assert group["use_muon"]
+
+        params = group["params"]
+        lr = group["lr"]
+        wd = group["wd"]
+        momentum = group["momentum"]
+
+        # generate weight updates in distributed fashion
+        for p in params:
+            # sanity check
+            g = p.grad
+            _orig_g_shape = g.shape
+            if g is None:
+                continue
+            if g.ndim > 2:
+                g = g.view(g.size(0), -1)
+            assert g is not None
+
+            # calc update
+            state = self.state[p]
+            if "momentum_buffer" not in state:
+                state["momentum_buffer"] = torch.zeros_like(g)
+            buf = state["momentum_buffer"]
+            buf.mul_(momentum).add_(g)
+            if group["nesterov"]:
+                g = g.add(buf, alpha=momentum)
+            else:
+                g = buf
+
+            # to local
+            meta = None
+            if isinstance(g, DTensor):
+                g, meta = to_local(g, keep_sharded=False)
+
+            if (
+                self.defaults["use_cuda_kernel"]
+                and min(list(g.shape)) % _cuda_dim_in_min == 0
+            ):  # cuda kernel layout constraint
+                u = fast_newtonschulz(g, steps=group["ns_steps"])
+            elif self.defaults["ns_diff_abc"]:
+                u = zeropower_via_newtonschulz6_diff_abc(
+                    g, steps=6, norm=group["ns_norm"]
+                )
+            else:
+                u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+
+            # back to shard
+            if meta is not None:
+                g = to_dist(g, **meta)
+
+            # scale update
+            adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
+
+            # apply weight decay
+            p.data.mul_(1 - lr * wd)
+
+            # apply update
+            p.data.add_(u.view(_orig_g_shape), alpha=-adjusted_lr)
+
+    def _adamw_step(self, group: dict):
+        assert not group["use_muon"]
+
+        params: list[torch.nn.Parameter] = group["params"]
+        lr = group["lr"]
+        beta1, beta2 = group["adamw_betas"]
+        eps = group["adamw_eps"]
+        weight_decay = group["adamw_wd"]
+
+        for p in params:
+            g = p.grad
+            if g is None:
+                continue
+            state = self.state[p]
+            if "step" not in state:
+                state["step"] = 0
+                state["moment1"] = torch.zeros_like(g)
+                state["moment2"] = torch.zeros_like(g)
+            state["step"] += 1
+            step = state["step"]
+            buf1 = state["moment1"]
+            buf2 = state["moment2"]
+            buf1.lerp_(g, 1 - beta1)
+            buf2.lerp_(g.square(), 1 - beta2)
+
+            g = buf1 / (eps + buf2.sqrt())
+
+            bias_correction1 = 1 - beta1**step
+            bias_correction2 = 1 - beta2**step
+            scale = bias_correction1 / bias_correction2**0.5
+            p.data.mul_(1 - lr * weight_decay)
+            p.data.add_(g, alpha=-lr / scale)
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+
+        # set adamw states
+        for group in self.param_groups:
+            if group["use_muon"]:
+                return
+
+            group.setdefault("adamw_amsgrad", False)
+            group.setdefault("maximize", False)
+            group.setdefault("adamw_foreach", None)
+            group.setdefault("capturable", False)
+            group.setdefault("differentiable", False)
+            group.setdefault("decoupled_weight_decay", False)
+            fused = group.setdefault("adamw_fused", None)
+            for p in group["params"]:
+                p_state = self.state.get(p, [])
+                if len(p_state) != 0 and not torch.is_tensor(p_state["step"]):
+                    step_val = float(p_state["step"])
+                    p_state["step"] = (
+                        torch.tensor(
+                            step_val,
+                            dtype=_get_scalar_dtype(is_fused=fused),
+                            device=p.device,
+                        )
+                        if group["capturable"] or group["adamw_fused"]
+                        else torch.tensor(step_val, dtype=_get_scalar_dtype())
+                    )
+
+    def _torch_adamw_init_group(
+        self,
+        group,
+        params_with_grad,
+        grads,
+        exp_avgs,
+        exp_avg_sqs,
+        max_exp_avg_sqs,
+        state_steps,
+    ):
+        has_complex = False
+        for p in group["params"]:
+            if p.grad is not None:
+                has_complex |= torch.is_complex(p)
+                params_with_grad.append(p)
+                if p.grad.is_sparse:
+                    raise RuntimeError(
+                        "Adam does not support sparse gradients, please consider SparseAdam instead"
+                    )
+                grads.append(p.grad)
+
+                state = self.state[p]
+                # Lazy state initialization
+                if len(state) == 0:
+                    if group["adamw_fused"]:
+                        _device_dtype_check_for_fused(p)
+                    # note(crcrpar): [special device hosting for step]
+                    # Deliberately host `step` on CPU if both capturable and fused are off.
+                    # This is because kernel launches are costly on CUDA and XLA.
+                    state["step"] = (
+                        torch.zeros(
+                            (),
+                            dtype=_get_scalar_dtype(is_fused=group["adamw_fused"]),
+                            device=p.device,
+                        )
+                        if group["capturable"] or group["adamw_fused"]
+                        else torch.tensor(0.0, dtype=_get_scalar_dtype())
+                    )
+                    # Exponential moving average of gradient values
+                    state["exp_avg"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
+                    # Exponential moving average of squared gradient values
+                    state["exp_avg_sq"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
+                    if group["adamw_amsgrad"]:
+                        # Maintains max of all exp. moving avg. of sq. grad. values
+                        state["max_exp_avg_sq"] = torch.zeros_like(
+                            p, memory_format=torch.preserve_format
+                        )
+
+                exp_avgs.append(state["exp_avg"])
+                exp_avg_sqs.append(state["exp_avg_sq"])
+
+                if group["adamw_amsgrad"]:
+                    max_exp_avg_sqs.append(state["max_exp_avg_sq"])
+                if group["differentiable"] and state["step"].requires_grad:
+                    raise RuntimeError(
+                        "`requires_grad` is not supported for `step` in differentiable mode"
+                    )
+
+                # Foreach without capturable does not support a tensor lr
+                if (
+                    group["adamw_foreach"]
+                    and torch.is_tensor(group["lr"])
+                    and not group["capturable"]
+                ):
+                    raise RuntimeError(
+                        "lr as a Tensor is not supported for capturable=False and foreach=True"
+                    )
+
+                state_steps.append(state["step"])
+        return has_complex
+
+    def _torch_adamw_step(self, group: dict):
+        assert not group["use_muon"]
+
+        params_with_grad: list[Tensor] = []
+        grads: list[Tensor] = []
+        exp_avgs: list[Tensor] = []
+        exp_avg_sqs: list[Tensor] = []
+        max_exp_avg_sqs: list[Tensor] = []
+        state_steps: list[Tensor] = []
+        beta1, beta2 = group["adamw_betas"]
+
+        has_complex = self._torch_adamw_init_group(
+            group,
+            params_with_grad,
+            grads,
+            exp_avgs,
+            exp_avg_sqs,
+            max_exp_avg_sqs,
+            state_steps,
+        )
+
+        adam(
+            params_with_grad,
+            grads,
+            exp_avgs,
+            exp_avg_sqs,
+            max_exp_avg_sqs,
+            state_steps,
+            amsgrad=group["adamw_amsgrad"],
+            has_complex=has_complex,
+            beta1=beta1,
+            beta2=beta2,
+            lr=group["lr"],
+            weight_decay=group["adamw_wd"],
+            eps=group["adamw_eps"],
+            maximize=group["maximize"],
+            foreach=group["adamw_foreach"],
+            capturable=group["capturable"],
+            differentiable=group["differentiable"],
+            fused=group["adamw_fused"],
+            grad_scale=getattr(self, "grad_scale", None),
+            found_inf=getattr(self, "found_inf", None),
+            decoupled_weight_decay=group["decoupled_weight_decay"],
+        )
+
+    @_use_grad_for_differentiable
     def step(self, closure=None):
+        """Perform a single optimization step.
+
+        Args:
+            closure (Callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            ############################
+            #           Muon           #
+            ############################
+            if group["use_muon"]:
+                self._muon_step(group)
+
+            # TODO: add DDP support !!
+            # check the original implementation: https://github.com/KellerJordan/Muon/blob/master/muon.py
+
+            ############################
+            #       AdamW backup       #
+            ############################
+            else:
+                # self._adamw_step(group)
+                self._torch_adamw_step(group)
+
+        return loss
+
+    # old implementation, kept for reference
+    def __step(self, closure=None):
         """Perform a single optimization step.
 
         Args:
@@ -300,7 +611,6 @@ class Muon(torch.optim.Optimizer):
             # check the original implementation: https://github.com/KellerJordan/Muon/blob/master/muon.py
 
             params = [p for p in group["params"] if self.state[p]["use_muon"]]
-            # import pdb; pdb.set_trace()
             lr = group["lr"]
             wd = group["wd"]
             momentum = group["momentum"]
@@ -396,7 +706,7 @@ class Muon(torch.optim.Optimizer):
     @classmethod
     def clear_muon_adamw_params(
         cls,
-        named_params: Iterable | dict,
+        named_params: Iterable | dict[str, torch.nn.Parameter],
         ignored_keys_for_muon: tuple | list = ("embed_tokens", "lm_head"),
     ):
         # # ndim <= 2 in muon optimization
@@ -421,9 +731,11 @@ class Muon(torch.optim.Optimizer):
 
         for name, p in named_params:
             if p.requires_grad:
+                # conv, linear weights, and other 2D+ parameters
                 if p.ndim >= 2 and name not in ignored_keys_for_muon:
                     muon_params.append(p)
                     logger.debug(f"Muon params: {name} - shaped: {p.shape}")
+                # bias, norm weights, embeddings, lm heads (for nlp tasks), and other 1D parameters
                 else:
                     adamw_params.append(p)
                     logger.debug(f"AdamW params: {name} - shaped: {p.shape}")
@@ -434,8 +746,15 @@ class Muon(torch.optim.Optimizer):
 
 
 if __name__ == "__main__":
-    net = torch.nn.Linear(32, 32, bias=False).cuda()
-    optimizer = Muon(muon_params=list(net.parameters()), lr=0.01, use_cuda_kernel=True)
+    net = torch.nn.Linear(32, 32, bias=True).cuda()
+    muon_params, adamw_params = Muon.clear_muon_adamw_params(net.named_parameters())
+    optimizer = Muon(
+        muon_params=muon_params,
+        adamw_params=adamw_params,
+        lr=0.01,
+        adamw_wd=0.0,
+        use_cuda_kernel=True,
+    )
 
     from tqdm import trange
 

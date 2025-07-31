@@ -555,6 +555,7 @@ class CosmosHyperspectralTokenizerTrainer:
             level=level.lower(),
             warn_once=warn_once,
             only_rank_zero=only_rank_zero,
+            stack_level=2,
             **kwargs,
         )
 
@@ -996,7 +997,6 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
-
         (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
             self.tokenizer_sched, self.disc_sched
         )
@@ -1200,14 +1200,14 @@ class CosmosHyperspectralTokenizerTrainer:
         # else:
         if mode == "dec":
             if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(
+                w = self.accelerator.unwrap_model(  # type: ignore
                     self.tokenizer_decoder
                 ).decoder.get_last_layer()
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
             if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(
+                w = self.accelerator.unwrap_model(  # type: ignore
                     self.tokenizer_encoder
                 ).encoder.conv_out.weight
             else:
@@ -1345,7 +1345,6 @@ class CosmosHyperspectralTokenizerTrainer:
             else [self.tokenizer]
         )
         _accum_models.append(self.vq_loss_fn.discriminator)
-        # import ipdb; ipdb.set_trace()
 
         with self.accelerator.accumulate(*_accum_models):
             # with torch.autograd.set_detect_anomaly(True):
@@ -1388,7 +1387,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
-            else:
+            else:  # > normal AE training pipeline
                 out_d = self.forward_tokenizer(x)  # no augmentation
                 # train tokenizer and discriminator
                 tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
@@ -2081,6 +2080,7 @@ if __name__ == "__main__":
     from src.utilities.train_utils.cli import get_cli_cfg_isolate_with_hydra_cfg
 
     # change the config name in cli
+
     _configs, cli_args = get_cli_cfg_isolate_with_hydra_cfg(
         _configs_dict,
         cli_default_dict={
@@ -2090,13 +2090,13 @@ if __name__ == "__main__":
     )
 
     log_print(
-        "\n"
+        "<green>\n"
         + "=" * 60
         + "\n"
         + f"[Config]: {_configs}\n"
         + "-" * 40
         + "\n\n"
-        + "Start Running , Good Luck!",
+        + "Start Running , Good Luck!</>",
         only_rank_zero=True,
     )
 

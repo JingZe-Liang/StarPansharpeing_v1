@@ -1,6 +1,7 @@
 import io
 import json
 import warnings
+from re import S
 from typing import Any, Dict, Literal, cast
 
 import numpy as np
@@ -26,9 +27,11 @@ def py_obj_to_jsonl(metadata: dict):
     return buffer.getvalue()
 
 
-def rgb_codec_io(img, format="jpeg", **kwargs):
+def rgb_codec_io(img: np.ndarray, format="jpeg", **kwargs):
     buffer = io.BytesIO()
-    assert img.ndim == 3 and img.shape[-1] == 3, "Image must be RGB"
+    assert img.ndim in (2, 3), "Image must be 2D (grayscale) or 3D (color) array"
+    if img.ndim == 3:
+        assert img.shape[-1] in (1, 3), "Image must be RGB or gray"
     assert img.dtype == np.uint8, "Image must be of type uint8"
     Image.fromarray(img).save(buffer, format=format, **kwargs)
 
@@ -340,7 +343,13 @@ def is_rgb_file(file_path: str) -> bool:
 
 
 def is_text_file(file_path: str) -> bool:
-    return file_path.lower().endswith((".caption", ".txt", ".img_name"))
+    return file_path.lower().endswith(
+        (".caption", ".txt", ".img_name", ".caption.json")
+    )
+
+
+def is_encoded_file(file_path: str) -> bool:
+    return file_path.lower().endswith((".safetensors", ".npy", ".npz"))
 
 
 def is_config_file(file_path: str) -> bool:
@@ -429,7 +438,6 @@ def wids_image_decode(
         return sample
 
     _img_flag = False
-
     _keys = list(sample.keys())
     for key in _keys:
         if key.startswith("__"):
@@ -441,10 +449,10 @@ def wids_image_decode(
         elif is_rgb_file(key):
             sample[key] = img_decode_io(sample.pop(key).getvalue())
             _img_flag = True
-        elif is_text_file(key):
-            sample[key] = string_decode_io(sample.pop(key).getvalue())
-        else:
-            raise ValueError(f"Unsupported file type for {key}")
+        # elif is_text_file(key):
+        #     sample[key] = string_decode_io(sample.pop(key).getvalue())
+        # else:
+        #     raise ValueError(f"Unsupported file type for {key}")
 
     if _img_flag and process_img_keys is not None:
         if isinstance(process_img_keys, str):
@@ -468,19 +476,36 @@ def wids_image_decode(
 def wids_latent_decode(sample: dict[str, Any]):
     # three types of latents: npz, safetensors, and npy
 
-    if ".latents.npz" in sample:
-        sample["latents"] = npz_decode_io(sample[".latents.npz"].getvalue())
-        del sample[".latents.npz"]
+    call_fns = {
+        "npz": npz_decode_io,
+        "safetensors": safetensors_decode_io,
+        "npy": npy_codec_io,
+    }
 
-    if ".latents.safetensors" in sample:
-        sample["latents"] = safetensors_decode_io(
-            sample[".latents.safetensors"].getvalue()
-        )
-        del sample[".latents.safetensors"]
+    keys = list(sample.keys())
+    for k in keys:
+        if is_encoded_file(k):
+            name_ck = k.split(".")
+            assert len(name_ck) == 2, (
+                f"Invalid key format: {k}, should be name.extension"
+            )
+            name, ck = name_ck
+            latent = call_fns[ck](sample.pop(k).getvalue())
+            sample[name] = latent
 
-    if ".latents.npy" in sample:
-        sample["latents"] = npy_codec_io(sample[".latents.npy"].getvalue())
-        del sample[".latents.npy"]
+    # if ".latents.npz" in sample:
+    #     sample["latents"] = npz_decode_io(sample[".latents.npz"].getvalue())
+    #     del sample[".latents.npz"]
+
+    # if ".latents.safetensors" in sample:
+    #     sample["latents"] = safetensors_decode_io(
+    #         sample[".latents.safetensors"].getvalue()
+    #     )
+    #     del sample[".latents.safetensors"]
+
+    # if ".latents.npy" in sample:
+    #     sample["latents"] = npy_codec_io(sample[".latents.npy"].getvalue())
+    #     del sample[".latents.npy"]
 
     return sample
 

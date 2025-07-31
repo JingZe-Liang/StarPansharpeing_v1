@@ -75,7 +75,6 @@ def remove_key_in_tar(tar_path: str, key: str):
     pattern = re.compile(key)
     tmp_path = tar_path + ".tmp"
 
-    # breakpoint()
     with tarfile.open(tar_path, "r") as tar, tarfile.open(tmp_path, "w") as out_tar:
         for member in (tbar := tqdm(tar, desc="Filtering tar members")):
             if not pattern.search(member.name):
@@ -85,7 +84,6 @@ def remove_key_in_tar(tar_path: str, key: str):
             else:
                 tbar.set_description(f"Skipping {member.name}")
     # Replace original tar file
-    import os
 
     ans = input("Press Enter to replace original tar file [y/n]: ")
     if ans.lower() != "y":
@@ -222,23 +220,37 @@ def extract_tar_files_safe(tar_path=None, tar=None, close_tar=True):
 
 
 def flatten_dir_into_one_tar(
-    file_dir: str | list,
     tar_path: str,
+    file_dir: str | list | None = None,
+    files: list | None = None,
     save_arch_name=False,
-    img_ext: str = ".tiff",
+    img_ext: str | list[str] = "tif",
     file_type="img",
     compress=True,
+    img_call_fn=lambda x: x,  # default no-op function
+    is_rgb=False,
 ):
-    if isinstance(file_dir, (str, Path)):
-        file_dir = [file_dir]
+    from src.data.codecs import rgb_codec_io, tiff_codec_io
 
-    for file_d in file_dir:
-        assert Path(file_d).is_dir(), f"{file_dir} is not a directory."
-    assert tar_path.endswith(".tar"), "The tar_path must end with .tar"
+    if file_dir:
+        if isinstance(file_dir, (str, Path)):
+            file_dir = [file_dir]
+        if isinstance(img_ext, str):
+            img_ext = [img_ext]
 
-    files = []
-    for file_d in file_dir:
-        files.extend(list(Path(file_d).rglob(f"*{img_ext}")))
+        for file_d in file_dir:
+            assert Path(file_d).is_dir(), f"{file_dir} is not a directory."
+        assert tar_path.endswith(".tar"), "The tar_path must end with .tar"
+
+        files = []
+        for file_d in file_dir:
+            for ext in img_ext:
+                files.extend(list(Path(file_d).rglob(f"*{ext}")))
+    elif files:
+        assert len(files) > 0, "Length of files should > 0"
+    else:
+        raise ValueError(f"files or file dir should be provided.")
+
     log_print(f"Found {len(files)} files")
     tar_file_writer = tarfile.TarFile(tar_path, "w")
 
@@ -266,21 +278,28 @@ def flatten_dir_into_one_tar(
                 # prev_name = file.name
                 name = file.with_name(f"{idx:06d}-{file.name}").as_posix()
 
-            name = name.replace(f".{img_ext}", f".{file_type}.{img_ext}")
             if not compress:
+                # add img_type
+                parts = name.split(".")
+                name = "_".join(parts[:-1]) + ".img" + "." + parts[-1]
                 tar_file_writer.add(file, arcname=name)
+
+                tbar.set_description(f"Add {name}")
             else:
                 # read in
-                from src.data.codecs import rgb_codec_io, tiff_codec_io
+                name = name.replace(f".{img_ext}", f".{file_type}.tiff")
 
-                if "rgb" in img_ext:
+                if is_rgb:
                     PIL.Image.MAX_IMAGE_PIXELS = None  # Disable PIL's image size limit
                     img = np.array(PIL.Image.open(file))
-                    # img = imread(file)
                 else:
+                    assert file.as_posix().endswith(("tif", "tiff"))
                     img = tifffile.imread(file)  # [h, w, c]
+
                 if img.shape[-1] > img.shape[0]:  # [c, h, w]
                     img = img.transpose(1, 2, 0)
+
+                img = img_call_fn(img)
 
                 if "tif" in img_ext:
                     buf = tiff_codec_io(
@@ -299,7 +318,8 @@ def flatten_dir_into_one_tar(
                 tarinfo.size = len(buf)
                 tar_file_writer.addfile(tarinfo, fileobj=io.BytesIO(buf))
 
-            tbar.set_description(f"Add {name}, shaped {tuple(img.shape)}")
+                tbar.set_description(f"Add {name}, shaped {tuple(img.shape)}")
+
     except Exception as e:
         log_print(
             f"Error occurred while writing to tar file: {e} handling file {file}",
@@ -451,9 +471,52 @@ if __name__ == "__main__":
     #         ).glob("**/POST-event")
     #     ),
     # ]
+    # p_lst = [
+    #     list(
+    #         Path("data/Multispectral-Spacenet-series/SN6_buildings").glob(
+    #             "**/SAR-Intensity"
+    #         )
+    #     )
+    # ]
+
+    path = "data/SkyDiffusion"
+    img_paths = []
+    for ext in ("jpg", "jpeg", "png"):
+        img_paths.extend(list(Path(path).glob(f"**/*.{ext}")))
+    # p_lst = [img_paths]
+
+    # from skimage.filters import median
+    import cv2
+    import torch
+    from kornia.filters import median_blur
+    from scipy.ndimage import median_filter
+    from skimage.restoration import denoise_tv_chambolle
+
+    def lee_filter(img, size=5):
+        img = img.astype(np.float32)
+        mean = cv2.boxFilter(img, -1, (size, size))
+        mean_sqr = cv2.boxFilter(img**2, -1, (size, size))
+        var = mean_sqr - mean**2
+        var_noise = np.mean(var)
+        weights = var / (var + var_noise + 1e-8)
+        return mean + weights * (img - mean)
+
+    def img_call_fn(x):
+        # Normalize the image to [0, 255] and convert to uint8
+        x = (x - x.min()) / (x.max() - x.min())
+        # Apply filter
+        # x = denoise_tv_chambolle(x, channel_axis=-1, weight=0.1)
+        # x = lee_filter(x, size=5)
+        x = median_blur(torch.as_tensor(x).permute(-1, 0, 1)[None], 5)
+        x = x.squeeze(0).permute(1, 2, 0).numpy()
+        x = (x * 255).astype(np.uint8)
+
+        return x
+
+    # img_call_fn = lambda x: median_filter(((x - x.min()) / (x.max() - x.min()) * 255).astype(np.uint8), size=5)
 
     # > FMoW dataset
-    p_lst = ["/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"]
+    # p_lst = ["/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"]
 
     log_print("------------------- Start ! ----------------------")
 
@@ -461,6 +524,17 @@ if __name__ == "__main__":
     # for p in p_lst:
     #     print(p)
     # print("-" * 30)
+
+    base_dir = Path("data/SkyDiffusion")
+    tar_path = base_dir / "0000.tar"
+    flatten_dir_into_one_tar(
+        tar_path=tar_path,
+        files=img_paths,
+        compress=False,
+        save_arch_name=False,
+    )
+
+    exit(0)
 
     for p_list in [p_lst]:
         for i, p in enumerate(p_lst):
@@ -473,10 +547,10 @@ if __name__ == "__main__":
             # time.sleep(10)
 
             pp = Path(p) if isinstance(p, (str, Path)) else Path(p[0])
-            # base_dir = Path("/HardDisk/ZiHanCao/datasets/Multispectral-Spacenet-series")
-            base_dir = Path(
-                "/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"
-            )
+            base_dir = Path("data/Multispectral-Spacenet-series")
+            # base_dir = Path(
+            #     "/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"
+            # )
             rel_name1 = pp.relative_to(base_dir)
             if len(rel_name1.parts) > 0:
                 rel_name1 = rel_name1.parts[0]
@@ -492,9 +566,10 @@ if __name__ == "__main__":
                 file_dir=p,
                 tar_path=tar_path.as_posix(),
                 save_arch_name=False,
-                img_ext="_rgb.jpg",  # "tif",
+                img_ext="tif",  # "_rgb.jpg",  # "tif",
                 file_type="img",
                 compress=True,
+                # img_call_fn=img_call_fn,
             )
 
     # path = "data/BigEarthNet_S2/conditions_resumed/BigEarthNet_data_0000.tar"

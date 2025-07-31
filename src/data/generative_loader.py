@@ -110,7 +110,8 @@ def get_generative_dataloaders(
 from src.data.panshap_loader import MultimodalityDataloader
 
 
-class GenerativeMMDataloader(MultimodalityDataloader): ...
+class GenerativeMMDataloader(MultimodalityDataloader):
+    def after_getitem(self, sample: dict): ...
 
 
 # * --- Entry function --- #

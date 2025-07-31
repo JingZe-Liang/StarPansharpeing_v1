@@ -3,7 +3,9 @@ import io
 import os
 import shutil
 import tarfile
+import tempfile
 import threading
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -23,6 +25,7 @@ from pyarrow.parquet import ParquetFile
 
 # rich tqdm
 from rich.progress import track
+from tqdm import tqdm
 
 from src.data.codecs import py_obj_to_jsonl, rgb_codec_io, tiff_codec_io
 from src.utilities.logging.print import _console
@@ -42,6 +45,25 @@ def get_dir_size(path):
             file_path = root / file
             total += file_path.stat().st_size
     return total
+
+
+def flush_buffer(buf: dict[Path, list]):
+    if not buf:
+        return
+
+    for key, (img_bytes, meta_bytes) in buf.items():
+        img_path = key.with_suffix(".img.tiff")
+        meta_path = key.with_suffix(".metadata.jsonl")
+
+        try:
+            with open(img_path, "wb") as f_img, open(meta_path, "wb") as f_meta:
+                f_img.write(img_bytes)
+                f_meta.write(meta_bytes)
+        except IOError as e:
+            logger.error(f"Failed to write files for {key}: {e}")
+            raise
+
+    buf.clear()
 
 
 # read parquet file into a Dataset
@@ -69,9 +91,7 @@ def parquet_reader_duckdb(parquet_file):
 def parquet_reader_pyarrow(parquet_file):
     table = pq.read_table(parquet_file, use_threads=True, memory_map=True)
 
-    def inner():
-        nonlocal table
-
+    def inner(table):
         for tile_i in range(table.num_rows):
             pyd = table.slice(tile_i, 1).to_pydict()
             # keys: rgb, 1m
@@ -81,7 +101,7 @@ def parquet_reader_pyarrow(parquet_file):
 
             yield pyd
 
-    return table.num_rows, inner()
+    return table.num_rows, inner(table)
 
 
 def reading_parquet_file_neon(parquet_file):
@@ -93,6 +113,7 @@ def reading_parquet_file_neon(parquet_file):
     name = name.replace(".", "-")
     tile_n = len(ds)
     for tile_i, sample in enumerate(ds):
+        sample = cast(dict, sample)  # type: ignore
         rgb = np.array(sample["rgb"]).astype(np.uint8)
         hsi = np.array(sample["1m"]).astype(np.uint8)  # 255. max, also to uint8
         metadata = sample["metadata"]
@@ -287,10 +308,16 @@ def parquet_to_webdataset_async(
 
     # 1. 展开 / 收集文件列表
     if isinstance(parquet_dir, str):
-        files = list(Path(parquet_dir).glob("*.parquet"))
+        files = list(Path(parquet_dir).rglob("*.parquet"))
     else:
         files = [Path(p) for p in parquet_dir]
     files = natsort.natsorted(files, key=lambda x: x.name)
+
+    # check the files exist
+    for f in files:
+        if not f.exists():
+            logger.warning(f"File {f} does not exist, removing from list")
+            files.remove(f)
     logger.info(f"Found {len(files)} parquet files")
 
     # 2. 按线程数切片
@@ -320,15 +347,33 @@ def parquet_to_webdataset_async(
             else:
                 Path(output_root).mkdir(parents=True, exist_ok=True)
 
+                # buffer
+                buffer_size = 20
+                buffer = {}
+
+                # tmp_tar = Path(output_root, f"thread_{thread_idx}.tmp.tar")
                 for f in file_list:
                     for sample in reading_fn(str(f)):
                         pair_name = Path(output_root, sample["__key__"])
-                        img_name = pair_name.with_suffix(".img.tiff")
-                        metadata_name = pair_name.with_suffix(".metadata.jsonl")
-                        with open(img_name, "wb") as img_file:
-                            img_file.write(sample["img.tiff"])
-                        with open(metadata_name, "wb") as meta_file:
-                            meta_file.write(sample["metadata.jsonl"])
+                        # * write to buffer
+                        buffer[pair_name] = (
+                            sample["img.tiff"],
+                            sample["metadata.jsonl"],
+                        )
+                        if len(buffer) >= buffer_size:
+                            flush_buffer(buffer)
+                            logger.info(f"Thread id: {thread_idx}: flushing buffer...")
+
+                        # * write per file
+                        # img_name = pair_name.with_suffix(".img.tiff")
+                        # metadata_name = pair_name.with_suffix(".metadata.jsonl")
+                        # with open(img_name, "wb") as img_file:
+                        #     img_file.write(sample["img.tiff"])
+                        # with open(metadata_name, "wb") as meta_file:
+                        #     meta_file.write(sample["metadata.jsonl"])
+
+                # last buffer
+                flush_buffer(buffer)
 
             logger.info(
                 f"Thread {thread_idx} finished, processed {len(file_list)} files"
@@ -470,6 +515,31 @@ def shards_tar_merged(
                         )
 
 
+def shards_file_to_tar(shards_dir: str | Path, tar_path: str | Path):
+    """
+    将目录下的所有文件合并成一个 tar 文件。
+    """
+    shards_dir = Path(shards_dir)
+    tar_path = Path(tar_path)
+
+    if not shards_dir.exists():
+        raise FileNotFoundError(f"Directory {shards_dir} does not exist")
+
+    if not shards_dir.is_dir():
+        raise NotADirectoryError(f"{shards_dir} is not a directory")
+
+    # read
+    files = list(Path(shards_dir).rglob("*"))
+    print(f"Found {len(files)} files in {shards_dir}")
+    # sort
+    files = natsort.natsorted(files, key=lambda f: f.stem)
+
+    with tarfile.open(tar_path, "w") as out_tar:
+        for file in tqdm(files, desc="Adding files to tar", total=len(files)):
+            # logger.info(f"Adding {file} to {tar_path}")
+            out_tar.add(file, arcname=file.name)
+
+
 if __name__ == "__main__":
     # path = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/EarthView/data/train-00000-of-00607.parquet"
     # dataset = parquet_to_webdataset(path)
@@ -489,13 +559,18 @@ if __name__ == "__main__":
     #     "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/conditions/tmp"
     # )
     # exit(0)
+    shards_file_to_tar(
+        "data/EarthView/hyper_images/satellogic/shard3",
+        "data/EarthView/hyper_images/satellogic/shard3.tar",
+    )
+    exit(0)
 
     import os
 
     import braceexpand
 
     # path = "data/EarthView/data/train-{00349..00606}-of-00607.parquet"
-    path = "data/EarthView/satellogic/train-{02395..04000}-of-07863.parquet"
+    path = "data/EarthView/satellogic/train-{4810..06000}-of-07863.parquet"
     paths = list(braceexpand.braceexpand(path))
 
     reading_fns = {
@@ -512,7 +587,7 @@ if __name__ == "__main__":
 
     parquet_to_webdataset_async(
         paths,
-        output_root="data/EarthView/hyper_images/satellogic/shard2",
+        output_root="data/EarthView/hyper_images/satellogic/shard3",
         n_threads=3,  # type: ignore
         dataset_name="satellogic",
         to_wds=False,

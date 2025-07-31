@@ -1,4 +1,3 @@
-from glob import glob
 from pathlib import Path
 
 import hydra
@@ -26,7 +25,7 @@ __all__ = [
 def register_new_resolvers():
     new_solvers = {
         "eval": lambda x: eval(x),
-        "glob": lambda x: ListConfig([str(p) for p in Path().glob(x)]),
+        "glob": lambda x: ListConfig([str(p) for p in Path().rglob(x)]),
         "function": lambda x: hydra.utils.get_method(x),
         "class": lambda x: hydra.utils.get_class(x),
         "list": lambda x: list(x),

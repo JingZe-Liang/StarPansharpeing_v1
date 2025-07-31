@@ -3,7 +3,7 @@ import re
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence, cast
 
 import accelerate
 import braceexpand
@@ -259,7 +259,7 @@ def get_hyperspectral_dataloaders(
     img_key: str
     | list[str] = "auto",  # image key in the sample dictionary, default is "img"
     tgt_key: str | list[str] | None = None,
-    keys_to_remove: str | re.Pattern | list[str] | None = None,
+    keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
     undecoded_filtered: bool = True,
     constraint_size: int
@@ -369,7 +369,9 @@ def get_hyperspectral_dataloaders(
         )
         # only search one key as the tgt_key, it will remove other keys if you have multiple image keys
         dataset = dataset.map(
-            partial(search_one_key_not_dunder, key=tgt_key, random_one=random_one_key)
+            partial(
+                search_one_key_not_dunder, out_key=tgt_key, random_one=random_one_key
+            )
         )
     elif isinstance(img_key, (str, tuple, list)) and (
         isinstance(tgt_key, (str, tuple, list))
@@ -1311,25 +1313,29 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     for i, (p_lst, loader_kwargs, loader_type) in enumerate(
         zip(paths, rep_loader_kwargs, loader_types)
     ):
+        # one group of datasets that have the same channel
         p_lst: list[str] | str
-        # webdataset or wids loader
+
+        # > webdataset or wids loader
         if loader_type in ("webdataset", "wids"):
             # assertions
             assert isinstance(p_lst, (list, tuple)), (
                 f"paths should be a list of lists, but got {type(p_lst)}"
             )
             assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
-            if len(p_lst) == 1:
-                p_lst = p_lst[0]
-                assert isinstance(p_lst, str), (
-                    f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
+
+            # if len(p_lst) == 1:
+            #     p_lst = p_lst[0]
+            #     assert isinstance(
+            #         p_lst, str
+            #     ), f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
+            # else:
+
+            p_lst = list(flatten_nested_list(p_lst))  # type: ignore
+            for p in p_lst:
+                assert isinstance(p, str), (
+                    f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
                 )
-            else:
-                p_lst = list(flatten_nested_list(p_lst))
-                for p in p_lst:
-                    assert isinstance(p, str), (
-                        f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
-                    )
 
             # resample must be false
             if not shuffle_loaders:
@@ -1364,7 +1370,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 )
             datasets.append(dataset)
             dataloaders.append(dataloader)
-        # folder loader
+        # > folder loader
         elif loader_type == "folder":
             log_print("Using folder loader")
             assert isinstance(paths, str), f"paths should be a string, but got paths"
@@ -1372,7 +1378,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
         else:
             raise ValueError(f"Unsupported loader type: {loader_type}")
 
-    # prepare for curriculum
+    # > prepare for curriculum
     if curriculum_type is not None:
         assert curriculum_kwargs is not None, (
             f"curriculum_kwargs must be provided if {curriculum_type=}."
@@ -1392,7 +1398,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             "warning",
         )
 
-    # prepare chained unified dataloader
+    # > prepare chained unified dataloader
     dataloader = chained_dataloaders(
         dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
     )
@@ -1446,7 +1452,7 @@ if __name__ == "__main__":
         #     "data/DIOR_RSVG_Dataset/hyper_images/DIOR_RSVG_3_bands-px_800-RGB-jp2k-80-0000.tar",
         #     "data/InriaAerialLabelingDataset/hyper_images/InriaAerialLabelingDataset-3_bands-px_512-RGB-jp2k-80-0000.tar",
         #     "data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-0000.tar",
-        #     "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar",
+        # "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar",
         #     "data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar",
         #     "data/RSCaptions/hyper_images/RSCaptionCollection-hyper_images-0000.tar",
         #     "data/RSCaptions/hyper_images/RSCaptionCollection-RSICD-0000.tar",
@@ -1486,15 +1492,20 @@ if __name__ == "__main__":
         #     "data/QuickBird/conditions/QuickBird-4_bands-px_256-MSI-0000.tar",
         #     "data/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar",
         #     "data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar",
-        #     "data/EarthView/hyper_images/neon/neon-{0000..0013}.tar",
         # ]
+        # ["data/EarthView/hyper_images/satellogic/shard1.tar"]
+        ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
+        # ["data/Multispectral-Spacenet-series/05_SN6_buildings_PS-RGB.tar"]
+        # ["data/Multispectral-Spacenet-series/00_SN1_buildings_3band.tar"],
+        # ["data/Multispectral-Spacenet-series/02_SN7_buildings_images.tar"]
+        # ["data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"]
         # ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
         # ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
-        ["data/MUSLI/hyper_images/shardindex.json"]
+        # ["data/MUSLI/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 2
+    test_batch_size = 8
     test_num_workers = 2
     test_shuffle_size = -1
 
@@ -1504,7 +1515,7 @@ if __name__ == "__main__":
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
         to_neg_1_1=True,
-        transform_prob=1.0,
+        transform_prob=0.0,
         random_apply=(1, 2),
         pin_memory=False,
         prefetch_factor=2,
@@ -1524,8 +1535,9 @@ if __name__ == "__main__":
         #     "resize_before_transform": 64,
         #     "resample": False,
         # },
-        {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
-        # {'img_key': 'img', 'resize_before_transform': 256},
+        # {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
+        {"img_key": ["rgb"], "resize_before_transform": 512},
+        # {"img_key": ["img"], "keys_to_remove": ["metadata"]}
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},
         # {"permute": False},
@@ -1589,6 +1601,7 @@ if __name__ == "__main__":
     # for i, sample in enumerate((tbar := tqdm(test_loader))):
 
     test_loader = iter(test_loader)
+    tbar = tqdm()
     while True:
         try:
             sample = next(test_loader)
@@ -1599,7 +1612,9 @@ if __name__ == "__main__":
             continue
 
         # print(sample.keys(), sample["segmentation"].shape)
-        print(sample.keys())
+        # print(sample.keys())
+
+        tbar.update(1)
         # continue
 
         # img = sample["segmentation"]

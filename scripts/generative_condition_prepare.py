@@ -14,69 +14,31 @@ from natsort import natsorted
 from PIL import Image
 from tqdm import tqdm
 
+from src.data.codecs import rgb_codec_io, safetensors_codec_io
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
+from src.stage2.generative.tools.condition_prepare import (
+    prepare_condition_from_webdataset,
+)
 from src.utilities.logging import log_print
 
 warnings.filterwarnings("ignore", module="torch.utils.checkpoint")
 
 
-def webdataset_conditions_prepare(
-    datasets: wds.WebDataset | list,
-    base_dir: str,
-    tar_name: str,
-    nums=None,
-    conditions: Union[str, List[str]] = "all",
-    rgb_channels: list[int] | None = None,
-    device="cuda",
-    to_pil: bool = True,
-    save_original_rgb: bool = True,
+def prepare_fn(
+    datasets,
+    nums,
+    conditions,
+    rgb_channels,
+    relative_data_dir,
+    sink_man,
+    resume_from: str | None = None,
+    save_original_rgb: bool = False,
+    to_pil: bool = False,
     condition_save_format: Literal["png", "jpg", "safetensors"] = "png",
     caption_save_format: Literal["txt", "json"] = "json",
-    resume_from: str | None = None,
-    relative_data_dir: str = "conditions",
     save_attn_mask: bool = False,
 ):
-    """
-    Process webdataset to generate condition images and captions.
-
-    Args:
-        ds (wds.WebDataset): Input webdataset containing hyperspectral images
-        base_dir (str): Base directory for saving output
-        tar_name (str): Name of the output tar file
-        tar_rel_path (str): Relative path for the tar file
-        conditions (str or list): Conditions to generate ("all" or list of specific conditions)
-        rgb_channels (list[int], optional): RGB channels to extract from hyperspectral data
-        device (str): Device for processing ("cuda" or "cpu")
-        to_pil (bool): Whether to convert outputs to PIL images
-        save_original_rgb (bool): Whether to save the original RGB image
-        condition_save_format (str): Format for saving condition images
-        caption_save_format (str): Format for saving captions
-    """
-
-    # lazy load
-    from src.data.codecs import safetensors_codec_io
-    from src.data.tar_utils import TarSinkManager
-    from src.stage2.generative.tools.condition_prepare import (
-        prepare_condition_from_webdataset,
-    )
-
-    log_print(f"Starting condition preparation for dataset: {tar_name}")
-    log_print(f"Output directory: {base_dir}")
-    log_print(f"Conditions: {conditions}")
-    log_print(f"RGB channels: {rgb_channels}")
-    log_print(f"Device: {device}")
-    torch.cuda.set_device(device)  # Set the device for torch operations
-
     total_n = 0
-    sink_man = TarSinkManager(base_dir)
-
-    if not isinstance(datasets, list):
-        datasets = [datasets]
-
-    if nums is None:
-        nums = [None] * len(datasets)
-
-    nums = cast(list[int | None], nums)
     for ds, num in zip_longest(datasets, nums):
         # Wrap the condition preparation generator with tqdm for progress tracking
         condition_generator = prepare_condition_from_webdataset(
@@ -187,25 +149,37 @@ def webdataset_conditions_prepare(
                             )
                         output_sample[saved_name] = safetensors_codec_io(saved)
 
+                # * image conditions
                 else:
-                    if isinstance(condition_output, np.ndarray):
+                    if isinstance(condition_output, np.ndarray) and to_pil:
                         condition_output = Image.fromarray(condition_output)
 
                     # Handle image conditions
                     if condition_name != "segmentation":
-                        condition_output = condition_output.convert("L")
+                        if to_pil:
+                            condition_output = condition_output.convert("L")
+                        else:
+                            condition_output = Image.fromarray(
+                                condition_output
+                            ).convert("L")
+                            condition_output = np.array(condition_output)
 
                     if condition_save_format == "png":
-                        if isinstance(condition_output, Image.Image):
-                            output_sample[f"{condition_name}.png"] = condition_output
-                        else:
-                            log_print(
-                                f"Unsupported condition output type for {condition_name}: {type(condition_output)}",
-                                level="warning",
-                            )
+                        output_sample[f"{condition_name}.png"] = (
+                            condition_output
+                            if isinstance(condition_output, Image.Image)
+                            else Image.fromarray(condition_output)
+                        )
                     elif condition_save_format == "jpg":
                         if isinstance(condition_output, Image.Image):
-                            output_sample[f"{condition_name}.jpg"] = condition_output
+                            # compression jpeg quality
+                            output_sample[f"{condition_name}.jpg"] = rgb_codec_io(
+                                img=np.array(condition_output)
+                                if isinstance(condition_output, Image.Image)
+                                else condition_output,
+                                format="jpeg",
+                                quality=80,  # Default JPEG quality
+                            )
 
                     # elif condition_save_format == "safetensors":
                     #     if isinstance(condition_output, Image.Image):
@@ -244,14 +218,89 @@ def webdataset_conditions_prepare(
             # log_print(f"{total_n} samples written to {base_dir}/{tar_rel_path}")
         progress_bar.close()
 
-    # Always close the sink manager
-    sink_man.close_all()
+    return total_n
+
+
+def webdataset_conditions_prepare(
+    datasets: wds.WebDataset | list,
+    base_dir: str,
+    tar_name: str,
+    nums=None,
+    conditions: Union[str, List[str]] = "all",
+    rgb_channels: list[int] | None = None,
+    device="cuda",
+    to_pil: bool = True,
+    save_original_rgb: bool = True,
+    condition_save_format: Literal["png", "jpg", "safetensors"] = "png",
+    caption_save_format: Literal["txt", "json"] = "json",
+    resume_from: str | None = None,
+    relative_data_dir: str = "conditions",
+    save_attn_mask: bool = False,
+):
+    """
+    Process webdataset to generate condition images and captions.
+
+    Args:
+        ds (wds.WebDataset): Input webdataset containing hyperspectral images
+        base_dir (str): Base directory for saving output
+        tar_name (str): Name of the output tar file
+        tar_rel_path (str): Relative path for the tar file
+        conditions (str or list): Conditions to generate ("all" or list of specific conditions)
+        rgb_channels (list[int], optional): RGB channels to extract from hyperspectral data
+        device (str): Device for processing ("cuda" or "cpu")
+        to_pil (bool): Whether to convert outputs to PIL images
+        save_original_rgb (bool): Whether to save the original RGB image
+        condition_save_format (str): Format for saving condition images
+        caption_save_format (str): Format for saving captions
+    """
+
+    # lazy load
+    from src.data.tar_utils import TarSinkManager
+
+    log_print(f"Starting condition preparation for dataset: {tar_name}")
+    log_print(f"Output directory: {base_dir}")
+    log_print(f"Conditions: {conditions}")
+    log_print(f"RGB channels: {rgb_channels}")
+    log_print(f"Device: {device}")
+    torch.cuda.set_device(device)  # Set the device for torch operations
+
+    sink_man = TarSinkManager(base_dir)
+
+    if not isinstance(datasets, list):
+        datasets = [datasets]
+
+    if nums is None:
+        nums = [None] * len(datasets)
+
+    nums = cast(list[int | None], nums)
+    total_n = 0
+    # > do the condition preparation
+    try:
+        total_n = prepare_fn(
+            datasets=datasets,
+            nums=nums,
+            conditions=conditions,
+            rgb_channels=rgb_channels,
+            relative_data_dir=relative_data_dir,
+            sink_man=sink_man,
+            resume_from=resume_from,
+            save_original_rgb=save_original_rgb,
+            to_pil=to_pil,
+            condition_save_format=condition_save_format,
+            caption_save_format=caption_save_format,
+            save_attn_mask=save_attn_mask,
+        )
+    except Exception as e:
+        log_print(f"Error: {e}", level="critical")
+    finally:
+        log_print(f"Closing all sinks ...")
+        sink_man.close_all()
 
     log_print(f"Finished processing.")
     return total_n
 
 
-# --- Main entry with Hydra support --- #
+# * --- Main entry with Hydra support --- #
 
 import hydra
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -440,6 +489,7 @@ def main_with_args():
 
 
 # * --- utilities --- #
+
 from tarfile import TarFile
 
 import natsort

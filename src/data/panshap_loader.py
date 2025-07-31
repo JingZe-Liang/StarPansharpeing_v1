@@ -1,8 +1,10 @@
 import math
 import sys
 from functools import partial
+from itertools import zip_longest
+from operator import call
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 import numpy as np
 import torch
@@ -36,7 +38,12 @@ from src.data.wids_samplers import (
 )
 from src.utilities.logging import log_print
 
-type ModalityName = str
+type ModalityName = (
+    str
+    | Literal[
+        "pixel_image", "latent_image", "condition_image", "condition_latent", "captions"
+    ]
+)
 type IndexFilePath = str | Path
 import hashlib
 
@@ -183,6 +190,7 @@ class MultimodalityDataloader:
     def __init__(
         self,
         wds_paths: dict[ModalityName, IndexFilePath],
+        codecs: dict[ModalityName, Callable] | None = None,
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
@@ -197,38 +205,63 @@ class MultimodalityDataloader:
         self.return_nested_dict = return_nested_dict  # remove the '__any_key' keys
         self.extracted_keys = extracted_keys
 
+        # default codecs
+        self.default_codecs_mapping = {
+            "pixel_image": partial(
+                wids_image_decode,
+                to_neg_1_1=to_neg_1_1,
+                permute=permute,
+                resize=None,
+                process_img_keys="ALL",
+            ),  # type: ignore
+            "latent_image": wids_latent_decode,
+            "condition_image": partial(
+                wids_image_decode,
+                to_neg_1_1=to_neg_1_1,
+                permute=permute,
+                resize=None,
+                process_img_keys="ALL",
+            ),  # type: ignore
+            "condition_latent": wids_latent_decode,
+            "captions": wids_caption_embed_decode,
+        }
+
         # loader kwargs
         self.batch_size = None
         self.num_workers = None
         self.shuffle_size = None
         self.drop_last = None
-        self.total_len = -1
 
+        # hook before init datasets
+        self.before_init_datasets()
+
+        self.total_len = -1
         if extracted_keys is not None:
             assert len(extracted_keys) == len(wds_paths), (
                 "extracted_keys must have the same length as wds_paths"
             )
 
-        for name, p in self.wds_paths.items():
+        for (name, p), codec_fn in zip_longest(
+            self.wds_paths.items(), codecs if codecs is not None else []
+        ):
+            # decode functions
+            decode_fn = codec_fn or self.default_codecs_mapping.get(name, None)
+            if isinstance(decode_fn, (list, tuple)):
+                transformations = [*decode_fn, wids_remove_none_keys]
+            elif decode_fn is not None:
+                transformations = [decode_fn, wids_remove_none_keys]
+            else:
+                transformations = [wids_remove_none_keys]
+            log_print(f"[wids dataset]: {name}")
+
             self.mm_names.append(name)
             ds = wids.ShardListDataset(
                 p,
                 localname=partial(local_name_fn, prefix=wids_local_name_prefix),
-                transformations=[
-                    # image decoder ===
-                    partial(
-                        wids_image_decode,
-                        to_neg_1_1=to_neg_1_1,
-                        permute=permute,
-                        resize=None,
-                        process_img_keys="ALL",
-                    ),  # type: ignore
-                    # latents, caption decoders ===
-                    wids_latent_decode,
-                    wids_caption_embed_decode,
-                    wids_remove_none_keys,
-                ],
+                transformations=transformations,  # type: ignore
             )
+
+            # check length of multimodal datasets
             if self.total_len == -1:
                 self.total_len = len(ds)
             else:
@@ -238,6 +271,9 @@ class MultimodalityDataloader:
                 )
             self.datasets[name] = ds
 
+        # hook after init datasets
+        self.datasets = self.after_init_datasets(self.datasets)
+
     def __len__(self):
         len_f = self.total_len / getattr(self, "batch_size", 1)
         return (
@@ -246,21 +282,27 @@ class MultimodalityDataloader:
 
     def __getitem__(self, index):
         modality_sample: dict[ModalityName | str, Any] = {}
+        # modality_sample = getattr(self, "before_getitem", lambda init_sample: init_sample)(modality_sample)
+
         for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
-            if isinstance(sample, dict):  # * default in this case
+            if isinstance(sample, dict):
                 if self.return_nested_dict is not None and not self.return_nested_dict:
                     modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
                 elif self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
                     modality_sample.update(self.extract_keys(sample, ext_key, None))
-                else:
+                else:  # <- default in this case
                     modality_sample.update(self.extract_without_extension(sample))
             else:
                 modality_sample[name] = {"default": sample}
 
+        # hook after getitem
+        modality_sample = self.after_getitem(modality_sample)
+
         return modality_sample
 
+    # * --- Getitem utilities --- #
     def extract_key_for_non_nested_dict(self, subsample: dict):
         content_not_dunder = [x for x in subsample.keys() if not x.startswith("__")]
 
@@ -357,6 +399,7 @@ class MultimodalityDataloader:
 
         return sampler
 
+    # * --- Create loader interface --- #
     @classmethod
     def create_loader(
         cls,
@@ -410,6 +453,23 @@ class MultimodalityDataloader:
         # dataloader = dataloader.with_length(10_000)
 
         return dataset, dataloader
+
+    # * --- Hooks --- #
+    def before_init_datasets(self):
+        """Hook before initializing datasets."""
+        pass
+
+    def after_init_datasets(self, datasets: dict[ModalityName, wids.ShardListDataset]):
+        """Hook after initializing datasets."""
+        return self.datasets
+
+    def before_getitem(self, init_sample: dict):
+        """Hook before getting an item from the dataset."""
+        return init_sample
+
+    def after_getitem(self, sample: dict):
+        """Hook after getting an item from the dataset."""
+        return sample
 
 
 # * --- Multi-modal Webdataset --- #
@@ -514,6 +574,8 @@ def get_mm_chained_loaders(
             wds_paths=path_dict,
             **loader_kwargs,
         )
+        datasets.append(dataset)
+        loaders.append(loader)
 
         # > curriculums fn
         if curriculum_type is not None:
@@ -558,11 +620,12 @@ def __test_wids_mm_loaders(*args):
         # {
         #     "hyper_images": "data/DCF_2020/hyper_images/shardindex.json",
         #     # "latents": "data/MMSeg_YREB/latents/shardindex.json",
-        #     "conditions": "data/DCF_2020/conditions/shardindex.json",
+        #     "conditions" "data/DCF_2020/conditions/shardindex.json",
         # },
         {
-            "conditions": "data/DCF_2020/conditions/shardindex.json",
-            "img": "data/DCF_2020/hyper_images/shardindex.json",
+            "captions": "data/DCF_2020/condition_captions/indexshard.json",
+            "condition_image": "data/DCF_2020/conditions/shardindex.json",
+            "pixel_image": "data/DCF_2020/hyper_images/shardindex.json",
         },
         batch_size=2,
         num_workers=0,

@@ -47,19 +47,20 @@ data:
   # data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar
   # data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
   # ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
+  ${eval:"[str(p) for p in Path('data/miniFrance/hyper_images').glob('*.tar')]"}
 
 output:
-  output_dir: "data/RSCaptions"
+  output_dir: "data/miniFrance"
   tar_name: "hyperspectral_conditions"
 
 loader:
   img_key: auto
   tgt_key: img
   permute: true
-  num_workers: 2
+  num_workers: 0
 
 processor:
-  conditions: ["caption"] #["hed", "segmentation", "sketch", "mlsd"] # 生成这些条件
+  conditions: ["hed", "segmentation", "sketch", "mlsd"] # 生成这些条件
   rgb_channels: #[2, 1, 0] #[2, 1, 0] #[74, 42, 10] #[3, 2, 1] #[4, 3, 2] #[3, 2, 1] #[9, 6, 3] # 选择接近红、绿、蓝的波段（根据你的数据调整）
   device: "cuda:1"
   to_pil: true
@@ -67,6 +68,6 @@ processor:
   condition_save_format: "jpg" # 条件图像保存为PNG格式
   caption_save_format: "json" # 描述保存为文本文件
   resume_from: #S2_tiff_jp2k_80_S2A_MSIL2A_20170617T113321_N9999_R080_T29UPU_30_45
-  relative_data_dir: condition_captions
+  relative_data_dir: conditions
   count_tar_num: false
   save_attn_mask: false

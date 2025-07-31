@@ -122,41 +122,35 @@ def de_structure_tar(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     return result
 
 
-def remove_keys(keys_to_remove: str | re.Pattern | list[str]):
-    if isinstance(keys_to_remove, list):
-        p = keys_to_remove
-    elif isinstance(keys_to_remove, str):
-        if keys_to_remove.startswith("re:"):
-            p = re.compile(keys_to_remove[3:])
-        else:
-            p = [keys_to_remove]
-    elif isinstance(keys_to_remove, re.Pattern):
-        p = keys_to_remove
-    else:
-        raise TypeError("Unsupported type for keys_to_remove")
+def remove_keys(keys_to_remove: str | list[str]):
+    if isinstance(keys_to_remove, str):
+        keys_to_remove = [keys_to_remove]
+
+    p: list[re.Pattern] = []
+    for k in keys_to_remove:
+        p.append(re.compile(k))
 
     def inner(sample: dict):
-        if isinstance(p, list):
-            for k in p:
-                _v = sample.pop(k, None)
-                # if _v is None:
-                #     log_print(
-                #         "Key not found: {} at url {} for remove list {}".format(k, sample["__url__"], p),
-                #         "warning",
-                #     )
-        else:  # re.Pattern
-            for k in list(sample.keys()):
-                if p.match(k):
+        keys = list(sample.keys())
+        for k in keys:
+            for p_re in p:
+                if p_re.match(k):
                     del sample[k]
+                    break  # del the key and then jump to the next re pattern
+
         return sample
 
     return inner
 
 
 def search_one_key_not_dunder(
-    sample: dict[str, LoadedData], key: str | types.SimpleNamespace, random_one=False
+    sample: dict[str, LoadedData],
+    out_key: str | types.SimpleNamespace,
+    random_one=False,
 ):
     _not_dunder_keys: list[str] = []
+    # most dataset has 'img' key and 'img_content' for RS5M
+    _default_img_search_keys = ("img", "img_content")
     new_sample = {}
 
     for k in sample.keys():
@@ -166,11 +160,20 @@ def search_one_key_not_dunder(
             new_sample[k] = sample[k]
 
     if not random_one:
-        assert len(_not_dunder_keys) == 1, (
-            'Expected exactly one key not starting with "__", but found: '
-            + str(_not_dunder_keys)
-        )
-        ch_key = _not_dunder_keys[0]
+        # if the key is in the default keys
+        _searched_flag = False
+        for dk in _default_img_search_keys:
+            if dk in _not_dunder_keys:
+                _searched_flag = True
+                ch_key = dk
+
+        # else not in default keys, then assert only one key not starting with "__"
+        if not _searched_flag:
+            assert len(_not_dunder_keys) == 1, (
+                'Expected exactly one key not starting with "__", but found: '
+                + str(_not_dunder_keys)
+            )
+            ch_key = _not_dunder_keys[0]
     else:
         if len(_not_dunder_keys) < 1:
             raise ValueError(
@@ -179,7 +182,7 @@ def search_one_key_not_dunder(
             )
         ch_key = random.choice(_not_dunder_keys)
 
-    new_sample[key] = sample[ch_key]
+    new_sample[out_key] = sample[ch_key]
 
     return new_sample
 
@@ -923,7 +926,7 @@ def get_wids_index_json_info(path: str):
     return index_info, n
 
 
-def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs: dict):
+def expand_paths_and_correct_loader_kwargs(paths: str | list, loader_kwargs: dict):
     # Ensure that the number of workers is not greater than the number of shards
     if isinstance(paths, str):
         if paths.endswith(".json"):  # is indexed wids json file

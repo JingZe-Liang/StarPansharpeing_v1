@@ -1,4 +1,5 @@
 import inspect
+import random
 import warnings
 from collections import OrderedDict, namedtuple
 from functools import partial
@@ -229,16 +230,23 @@ class DecoderSequential(nn.Module):
 
 
 class ContinuousImageTokenizer(nn.Module):
+    # FSDP attribution
     _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
+
+    # training for feature distillation
     _hook_for_repa: bool = False
     _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _hook_feature: torch.Tensor | None = None
     _proj_for_vf: bool = False
-    _vf_on_z_or_module: Literal["z", "module"] = (
-        "module"  # vf loss on z or module output
-    )
+    # vf loss on z or module output
+    _vf_on_z_or_module: Literal["z", "module"] = "module"
     _dino_feature_dim: int = 768  # [768, 1024]
 
+    # scaling factor for evaluation
+    scaling_factor: torch.Tensor | None = None
+    shift_factor: torch.Tensor | None = None
+
+    # state
     z: torch.Tensor | None = None  # the latent z
 
     @function_config_to_basic_types
@@ -257,6 +265,9 @@ class ContinuousImageTokenizer(nn.Module):
         self._vf_on_z_or_module = kwargs.pop(
             "vf_on_z_or_module", self._vf_on_z_or_module
         )
+        self.latent_noise_prob = kwargs.pop("latent_noise_prob", 0.0)
+        self.use_latent_denoise = self.latent_noise_prob > 0.0
+
         assert not (self._hook_for_repa and self._proj_for_vf), (
             "repa and vf losses should not be used at the same time"
         )
@@ -276,13 +287,13 @@ class ContinuousImageTokenizer(nn.Module):
         if kwargs.get("attn_type") in ("none", None):
             self._no_split_modules.remove("AttnBlock")
 
+        # > quantizer
         self.quantizer_type = kwargs.pop("quantizer_type", None)
         assert self.quantizer_type in [
             "kl",
             "bsq",
             None,
         ], "quantizer_type should be bsq or kl"
-
         if self.quantizer_type == "kl":
             if z_factor != 2:
                 log_print(
@@ -337,6 +348,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         self.register_buffer("dummy_param", torch.tensor(0))
 
+        # > Encoder and Decoder
         # pretrained encoder and decoder
         if loading_type == "nvidia":
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
@@ -510,6 +522,17 @@ class ContinuousImageTokenizer(nn.Module):
                     f"block_name {block_name} not supported, only res_block and res_moe are supported"
                 )
 
+    def _latent_noising(self, h: torch.Tensor):
+        if random.random() > self.latent_noise_prob:
+            return h
+
+        # interpolated noising
+        bs = h.size(0)
+        t = torch.randn((bs,)).to(h).view(-1, 1, 1, 1)
+        h_noise = t * torch.randn_like(h) * (1 - t) * h
+
+        return h_noise
+
     def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
         h = self.encoder(x)
 
@@ -542,9 +565,16 @@ class ContinuousImageTokenizer(nn.Module):
 
             return h, kl_loss, loss_breakdown
 
+        # z augmentions
         if self.use_channel_drop:
             h = self.channel_drop(h)
+        if self.use_latent_denoise and self.training:
+            # latent noising and then to _vf_proj (vf decoder)
+            h = self._latent_noising(h)
 
+        # TODO: add additional cross-attention to convert the 2D latent to 1D latent
+
+        # save latent
         self.z = h if hasattr(self, "_vf_proj") else None  # save latent z for vf loss
 
         return h
@@ -918,7 +948,7 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": True,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-07-04_20-41-12_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors",
+        "uni_tokenizer_path": "runs/stage1_cosmos/2025-07-31_10-39-41_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_2/model.safetensors",
         "loading_type": "pretrained",  # "pretrained",
         "hook_for_repa": False,
         "block_name": "res_block",  # res_block, res_moe

@@ -10,7 +10,6 @@ from accelerate.state import AcceleratorState, PartialState
 from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
-from pytorch_wavelets import DWTForward
 
 from src.utilities.config_utils import function_config_to_basic_types
 
@@ -246,7 +245,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         img_is_neg1_to_1: bool = True,
         perceptual_options: dict = {},
         # generator loss
-        reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "l1",
+        reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "mse",
         reconstruction_weight: float = 1.0,
         gen_loss_weight: float | None = None,
         # quantizer losses
@@ -310,6 +309,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * if is dwt reocn loss
         if self.reconstruction_loss_type == "dwt":
+            from pytorch_wavelets import DWTForward
+
             self.dwt = DWTForward(
                 J=1, mode="zero", wave="haar"
             ).to(  # DWT decomposition, simplest haar transform

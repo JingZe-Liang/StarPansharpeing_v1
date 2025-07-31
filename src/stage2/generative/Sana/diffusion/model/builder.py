@@ -107,9 +107,37 @@ def get_vae(name, model_path, device="cuda"):
         )
         dc_ae = AutoencoderDC.from_pretrained(model_path).to(device).eval()
         return dc_ae
+
+    # > remote sensing cosmos AE
+    elif "cosmos_RS" in name:
+        print(colored(f"[Cosmos RS] Loading model from {model_path}", attrs=["bold"]))
+        from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
+
+        cosmos_ae = ContinuousImageTokenizer(
+            z_channels=16,
+            z_factor=1,
+            loading_type="pretrained",
+            latent_noise_prob=0.0,
+            act_checkpoint=False,
+            hook_for_repa=False,
+            proj_for_vf=False,
+            latent_channels=16,
+            attn_type="none",  # no attention!
+            padding_mode="reflect",
+            uni_tokenizer_path=model_path,
+        )
+
+        return cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
     else:
         print("error load vae")
         exit()
+
+
+def match_dim(x: torch.Tensor):
+    if x.numel() > 1 and x.ndim == 1:
+        # channel scaling
+        x = x[None].view(-1, -1, 1, 1)
+    return x
 
 
 def vae_encode(name, vae, images, sample_posterior, device):
@@ -132,13 +160,31 @@ def vae_encode(name, vae, images, sample_posterior, device):
         )
         z = ae.encode(images.to(device))[0]
         z = z * scaling_factor
+
+    # > remote sensing cosmos AE
+    elif "cosmos_RS" in name:
+        ae = vae
+        images = images.to(device, torch.bfloat16)
+        scaling_factor = torch.as_tensor(ae.scaling_factor).to(images)
+        shift_factor = torch.as_tensor(ae.shift_factor).to(images)
+
+        scaling_factor, shift_factor = map(match_dim, (scaling_factor, shift_factor))
+        assert (
+            scaling_factor is not None and shift_factor is not None
+        ), "scaling_factor and shift_factor must be set for cosmos_RS, please check the class attribution"
+
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            z = ae.encode(images)
+        if isinstance(z, tuple):
+            z = z[0]
+        z = (z - shift_factor.to(z)) * scaling_factor.to(z)
     else:
         print("error load vae")
         exit()
     return z
 
 
-def vae_decode(name, vae, latent):
+def vae_decode(name, vae, latent, **kwargs):
     if name == "sdxl" or name == "sd3":
         latent = (latent.detach() / vae.config.scaling_factor) + vae.config.shift_factor
         samples = vae.decode(latent).sample
@@ -171,6 +217,24 @@ def vae_decode(name, vae, latent):
             )
             ae.enable_tiling(tile_sample_min_height=1024, tile_sample_min_width=1024)
             samples = ae.decode(latent / scaling_factor, return_dict=False)[0]
+
+    elif "cosmos_RS" in name:
+        ae = vae
+        scaling_factor = torch.as_tensor(ae.scaling_factor).to(latent)
+        shift_factor = torch.as_tensor(ae.shift_factor).to(latent)
+
+        scaling_factor, shift_factor = map(match_dim, (scaling_factor, shift_factor))
+        assert (
+            scaling_factor is not None and shift_factor is not None
+        ), "scaling_factor and shift_factor must be set for cosmos_RS, please check the class attribution"
+
+        with torch.autocast(device_type=latent.device, dtype=torch.bfloat16):
+            shape = kwargs["input_shape"]  # [b,c,h,w]
+            img = ae.decode(latent, shape)
+        if isinstance(img, tuple):
+            img = img[0]
+        samples = (img / scaling_factor.to(img)) + shift_factor.to(img)
+
     else:
         print("error load vae")
         exit()
