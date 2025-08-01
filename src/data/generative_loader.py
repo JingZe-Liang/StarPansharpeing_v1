@@ -1,10 +1,10 @@
-import sys
 from functools import partial
-from typing import Literal, Sequence
+from typing import Literal, Sequence, cast
 
 import numpy as np
 import torch
 import webdataset as wds
+from torch import Tensor
 
 from src.data.codecs import (
     img_decode_io,
@@ -111,15 +111,72 @@ from src.data.panshap_loader import MultimodalityDataloader
 
 
 class GenerativeMMDataloader(MultimodalityDataloader):
-    def after_getitem(self, sample: dict): ...
+    max_length = 300
+
+    """
+    additional kwargs:
+        stack_cond_latent: bool
+            If True, stack the condition latents into a single tensor.
+            If False, return a list of condition latents.
+    """
+
+    def before_init_datasets(self):
+        assert self.return_classed_dict, (
+            "GenerativeMMDataloader requires return_classed_dict=True"
+        )
+
+    def get_y_mask(self, sample: dict) -> Tensor:
+        valid_length = sample["valid_length"]  # (1,)
+        # to mask
+        mask = torch.arange(self.max_length, device=valid_length.device) < valid_length
+
+        return mask.float()
+
+    def after_getitem(
+        self, sample: dict
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, str | Tensor | int]]:
+        # sana train loader compatibility
+        # [latent or images, encoded text, text mask, data_info: control_signal]
+
+        # captions
+        y_lc = sample["captions"]["caption_feature"]
+        y_text = sample["captions"]["caption"]
+        y_mask_l = sample["captions"]["attention_mask"]  # self.get_y_mask(sample)
+        data_info = {
+            "y_text": y_text,
+            "valid_length": sample["captions"]["valid_length"],
+        }
+
+        # latent image
+        if "latent_image" in sample:
+            latent_chw = torch.as_tensor(sample["image_latent"])
+        else:
+            latent_chw = torch.as_tensor(sample["pixel_image"])
+
+        # conditions images or latents
+        if "condition_latent" in sample:
+            cond_latent_chw = [torch.as_tensor(x) for x in sample["condition_latent"]]
+            if self.other_kwargs.get("stack_cond_latent", False):
+                latent_chw = torch.stack(
+                    [latent.squeeze(0) for latent in cond_latent_chw],
+                    dim=0,
+                )
+            data_info["control_signal"] = cond_latent_chw
+        elif "condition_image" in sample:
+            cond_img_chw = sample["condition_image"]
+            data_info["control_signal"] = cond_img_chw  # list of Tensor
+        else:
+            raise RuntimeError("No condition image or latent provided")
+
+        return latent_chw, y_lc, y_mask_l, data_info
 
 
 # * --- Entry function --- #
 
 
 @function_config_to_basic_types
-def get_hyperspectral_img_loaders_with_different_backends_v2(
-    paths: str | list[str] | list[list[str]],
+def get_multimodal_loaders_with_different_backends_v2(
+    paths: str | list[str] | list[list[str]] | list[dict[str, str]],
     loader_type: str | None = None,
     # curriculums
     curriculum_type: str | None = None,
@@ -180,10 +237,12 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
 
     # clear the kwargs
     # 1. paths is a list of list of string
-    if isinstance(paths, list) and isinstance(paths[0], Sequence):
+    if isinstance(paths, list) and isinstance(paths[0], (Sequence, dict)):
         log_print(
-            "input paths contains list of lists, we will chain the dataloader with each loader"
+            "input paths contains list of lists or dicts, we will chain the dataloader with each loader"
         )
+
+        # > preprare loader kwargs
         if rep_loader_kwargs is not None:  # every loader kwargs
             log_print(f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug")
             assert isinstance(rep_loader_kwargs, list), (
@@ -193,7 +252,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 f"rep_loader_kwargs should be the same length as paths, "
                 f"but got {len(rep_loader_kwargs)} and {len(paths)}"
             )
-        elif basic_kwargs is not None:
+        elif basic_kwargs is not None:  # basic_kwargs + changed_kwargs_by_loader
             log_print("basic_kwargs is provided", "debug")
             if changed_kwargs_by_loader is None:
                 changed_kwargs_by_loader = [{}] * len(paths)
@@ -220,15 +279,19 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
         for i in range(len(rep_loader_kwargs)):
             kwg_ldt = rep_loader_kwargs[i].pop("loader_type", "webdataset")
             loader_types.append(kwg_ldt if loader_type is None else loader_type)
+
     # 2. paths is a list of strings
-    elif isinstance(paths, (list, tuple)) and any(isinstance(p, str) for p in paths):
+    elif isinstance(paths, (list, tuple)) and any(
+        isinstance(p, (str, dict)) for p in paths
+    ):
         raise NotImplementedError(
             "paths is a list of strings, please use a list of lists of strings instead. For example: "
-            "paths=[data1/{0000..0002}.tar, [data2/{0000..0002}.tar, data2/0003.tar]] should be "
-            "paths=[[data1/{0000..0002}.tar], [data2/{0000..0002}.tar, data2/0003.tar]]"
+            "paths=[data1/{0000..0002}.tar, [data2/{0000..0002}.tar, data2/0003.tar], {'c1': wids_path1}] should be "
+            "paths=[[data1/{0000..0002}.tar], [data2/{0000..0002}.tar, data2/0003.tar], {'c1': wids_path1}]"
         )
+
     # 3. paths is a string
-    else:
+    elif isinstance(paths, str):
         log_print("input paths is a string, use the loader_kwargs", "debug")
         if len(loader_kwargs) != 0:
             assert basic_kwargs is None and changed_kwargs_by_loader is None, (
@@ -248,6 +311,10 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
         kwg_ldt = rep_loader_kwargs[0].pop("loader_type", "webdataset")
         loader_types.append(kwg_ldt if loader_type is None else loader_type)
 
+    else:
+        args = locals()
+        raise ValueError(f"input kwargs error: {args}")
+
     # * --- build datasets and dataloaders --- #
     datasets = []
     dataloaders = []
@@ -256,23 +323,21 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     for i, (p_lst, loader_kwargs, loader_type) in enumerate(
         zip(paths, rep_loader_kwargs, loader_types)
     ):
-        p_lst: list[str] | str
+        p_lst: str | list[str] | dict[str, str]
         # webdataset or wids loader
         if loader_type in ("webdataset", "wids"):
             # assertions
-            assert isinstance(p_lst, (list, tuple)), (
-                f"paths should be a list of lists, but got {type(p_lst)}"
+            assert isinstance(p_lst, (list, tuple, dict)), (
+                f"paths should be a list of lists or dict, but got {type(p_lst)}"
             )
             assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
-            if len(p_lst) == 1:
+
+            if len(p_lst) == 1 and isinstance(p_lst[0], str):
                 p_lst = p_lst[0]
-                assert isinstance(p_lst, str), (
-                    f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
-                )
-            else:
+            elif isinstance(p_lst, (list, tuple)):
                 for p in p_lst:
                     assert isinstance(p, str), (
-                        f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
+                        f"paths should be a list of strings or dicts, but got {type(p)} for paths {p_lst}"
                     )
 
             # resample must be false
@@ -288,21 +353,14 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             )
 
             if loader_type == "webdataset":
-                log_print("Using webdataset loader")
+                p_lst = cast(str | list[str], p_lst)
                 dataset, dataloader = get_generative_dataloaders(p_lst, **loader_kwargs)
-            # elif loader_type == "wids":
-            #     log_print("Using wids loader")
-            #     assert (
-            #         isinstance(p_lst, list) and len(p_lst) == 1
-            #     ), "must contain only one json file"
-            #     p_lst = p_lst[0]
-            #     assert (
-            #         isinstance(p_lst, str) and p_lst.endswith(".json")
-            #     ), f"wids loader expects a single json file as index_file, but got {p_lst}"
-            #     dataset, dataloader = get_hyperspectral_wids_dataloaders(
-            #         index_file=p_lst,
-            #         **loader_kwargs,
-            #     )
+            elif loader_type == "wids":
+                p_lst = cast(dict, p_lst)
+                dataset, dataloader = GenerativeMMDataloader.create_loader(
+                    p_lst,  # type: ignore
+                    **loader_kwargs,
+                )
             else:
                 raise ValueError(f"loader_type {loader_type} is not supported")
             datasets.append(dataset)
@@ -320,10 +378,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
         assert curriculum_kwargs is not None, (
             f"curriculum_kwargs must be provided if {curriculum_type=}."
         )
-        curriculum_fn = get_curriculum_fn(  # type: ignore
-            c_type=curriculum_type,
-            **curriculum_kwargs,
-        )
+        curriculum_fn = get_curriculum_fn(c_type=curriculum_type, **curriculum_kwargs)  # type: ignore
     else:
         curriculum_fn = None
 
@@ -354,22 +409,20 @@ if __name__ == "__main__":
     main_kwargs = {
         "batch_size": 8,
         "num_workers": 0,
+        "return_classed_dict": True,
     }
-    loader_kwargs = [{}, {}]
-    paths = [
-        [
-            "data/MMSeg_YREB/[latents,pansharpening_pairs]/MMSeg_YREB_train_part-12_bands-MSI-0000.tar",
-        ],
-        [
-            "data/MMSeg_YREB/[latents,pansharpening_pairs]/MMSeg_YREB_train_part-12_bands-MSI-0001.tar",
-        ],
+    wids_paths = [
+        {
+            "captions": "data/DCF_2020/condition_captions/indexshard.json",
+            "condition_image": "data/DCF_2020/conditions/shardindex.json",
+            "pixel_image": "data/DCF_2020/hyper_images/shardindex.json",
+        },
     ]
-    _, loader = get_hyperspectral_img_loaders_with_different_backends_v2(
-        paths,
-        loader_type="webdataset",
+    _, loader = get_multimodal_loaders_with_different_backends_v2(
+        wids_paths,
+        loader_type="wids",
         basic_kwargs=main_kwargs,
-        changed_kwargs_by_loader=loader_kwargs,
     )
 
     for sample in loader:
-        print(sample.keys())
+        print(sample)

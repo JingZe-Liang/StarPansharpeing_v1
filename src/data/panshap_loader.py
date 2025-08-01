@@ -1,5 +1,5 @@
+import hashlib
 import math
-import sys
 from functools import partial
 from itertools import zip_longest
 from operator import call
@@ -38,14 +38,19 @@ from src.data.wids_samplers import (
 )
 from src.utilities.logging import log_print
 
-type ModalityName = (
-    str
-    | Literal[
-        "pixel_image", "latent_image", "condition_image", "condition_latent", "captions"
-    ]
-)
+type ModalityPrefixedName = Literal[
+    "pixel_image",
+    "condition_image",
+    "pansharpening_image",
+    "denoising_image",
+    "image_latent",
+    "condition_latent",
+    "pansharpening_latent",
+    "denoising_latent",
+    "captions",
+]
+type ModalityName = str | ModalityPrefixedName
 type IndexFilePath = str | Path
-import hashlib
 
 loader_seed = int(
     hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16
@@ -194,35 +199,40 @@ class MultimodalityDataloader:
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
-        return_nested_dict: bool | None = None,
+        return_classed_dict: bool | None = None,
         extracted_keys: list[list[tuple[str, str]]]
         | None = None,  # num_of_modalities[extracted_keys[(in_key, out_key)]]
+        **kwargs,
     ):
         # get wids datasets
         self.wds_paths = wds_paths
         self.datasets = {}
         self.mm_names = []
-        self.return_nested_dict = return_nested_dict  # remove the '__any_key' keys
+        self.return_classed_dict = return_classed_dict  # remove the '__any_key' keys
         self.extracted_keys = extracted_keys
 
         # default codecs
+        _img_fn = partial(
+            wids_image_decode,
+            to_neg_1_1=to_neg_1_1,
+            permute=permute,
+            resize=None,
+            process_img_keys="ALL",
+        )
         self.default_codecs_mapping = {
-            "pixel_image": partial(
-                wids_image_decode,
-                to_neg_1_1=to_neg_1_1,
-                permute=permute,
-                resize=None,
-                process_img_keys="ALL",
-            ),  # type: ignore
-            "latent_image": wids_latent_decode,
-            "condition_image": partial(
-                wids_image_decode,
-                to_neg_1_1=to_neg_1_1,
-                permute=permute,
-                resize=None,
-                process_img_keys="ALL",
-            ),  # type: ignore
+            # | hyperspectral images or pairs ==================
+            "pixel_image": _img_fn,
+            "condition_image": _img_fn,
+            "pansharpening_image": _img_fn,
+            "denoising_image": _img_fn,
+            # | images, conditions or downstream latents =======
+            "image_latent": wids_latent_decode,
             "condition_latent": wids_latent_decode,
+            "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
+            "denoising_latent": partial(
+                wids_latent_decode, return_dict=True
+            ),  # if gt is in, return_dict=True
+            # | language captions and its embeddings ============
             "captions": wids_caption_embed_decode,
         }
 
@@ -231,6 +241,7 @@ class MultimodalityDataloader:
         self.num_workers = None
         self.shuffle_size = None
         self.drop_last = None
+        self.other_kwargs = kwargs
 
         # hook before init datasets
         self.before_init_datasets()
@@ -284,10 +295,21 @@ class MultimodalityDataloader:
         modality_sample: dict[ModalityName | str, Any] = {}
         # modality_sample = getattr(self, "before_getitem", lambda init_sample: init_sample)(modality_sample)
 
+        __check_sample_key = None
         for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
+            # sample key
+            if __check_sample_key is None:
+                __check_sample_key = sample["__key__"]
+            else:
+                assert __check_sample_key == sample["__key__"], (
+                    f"All samples must have the same key, "
+                    f"but got {__check_sample_key} and {sample['__key__']} for modality {name}"
+                )
+
+            # convert the sample into a flat dict
             if isinstance(sample, dict):
-                if self.return_nested_dict is not None and not self.return_nested_dict:
+                if self.return_classed_dict is not None and self.return_classed_dict:
                     modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
                 elif self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
@@ -303,7 +325,7 @@ class MultimodalityDataloader:
         return modality_sample
 
     # * --- Getitem utilities --- #
-    def extract_key_for_non_nested_dict(self, subsample: dict):
+    def extract_key_for_non_nested_dict(self, subsample: dict, without_extension=True):
         content_not_dunder = [x for x in subsample.keys() if not x.startswith("__")]
 
         if len(content_not_dunder) == 1:  # modality_name: Tensor
@@ -311,7 +333,10 @@ class MultimodalityDataloader:
         else:  # modality_name: {"img": Tensor, 'img2': Tensor, ...}
             subsample_f = {}
             for name in content_not_dunder:
-                subsample_f[name] = subsample[name]
+                new_name = (
+                    Path(name).stem.rsplit(".", 1)[-1] if without_extension else name
+                )
+                subsample_f[new_name] = subsample[name]
 
         return subsample_f
 
@@ -407,14 +432,13 @@ class MultimodalityDataloader:
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
-        return_nested_dict: bool | None = None,
+        return_classed_dict: bool | None = None,
         extracted_keys: list[list[tuple[str, str]]] | None = None,
         batch_size: int = 32,
         num_workers: int = 1,
         shuffle_size: int = 100,
         drop_last: bool = False,
-        resample: bool = True,
-        **__discarded_kwargs,
+        **kwargs,
     ):
         dataset = cls(
             wds_paths,
@@ -422,7 +446,8 @@ class MultimodalityDataloader:
             permute=permute,
             wids_local_name_prefix=wids_local_name_prefix,
             extracted_keys=extracted_keys,
-            return_nested_dict=return_nested_dict,
+            return_classed_dict=return_classed_dict,
+            **kwargs,
         )
 
         # dataloader
@@ -629,6 +654,7 @@ def __test_wids_mm_loaders(*args):
         },
         batch_size=2,
         num_workers=0,
+        return_classed_dict=True,
         # extracted_keys=[
         #     # [("img", "img")],
         #     # [("latents.hrms_latent", "hrms_latent")],

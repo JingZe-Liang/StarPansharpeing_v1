@@ -36,6 +36,7 @@ train_paths:
 
   #> rgb dataset
   - - data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar # large Segmentation unified dataset
+    - data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar
     - data/SkyDiffusion/0000.tar
     - ${glob:"data/RS5M/**/*.tar"}
     - data/TEOChatlas/train/GeoChat_Instruct_images{1..2}.tar

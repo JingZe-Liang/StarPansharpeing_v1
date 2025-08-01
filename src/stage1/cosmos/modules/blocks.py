@@ -1718,10 +1718,12 @@ class ResnetBlock(nn.Module):
                 )
         else:
             self.nin_shortcut = nn.Identity()
+
         self.act_checkpoint = kwargs.get("act_checkpoint", False)
         self.use_residual_factor = use_residual_factor
         if use_residual_factor:
             self.residual_factor = nn.Parameter(torch.ones(1, out_channels, 1, 1))
+
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
 

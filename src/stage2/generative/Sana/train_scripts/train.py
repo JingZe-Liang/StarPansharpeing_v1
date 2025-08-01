@@ -31,39 +31,58 @@ from typing import Callable, cast
 warnings.filterwarnings("ignore")  # ignore warning
 import sys
 
-sys.path.append("src/stage2/generative/Sana")
+sys.path.append("src/stage2/generative/Sana")  # add Sana to path
 
 import numpy as np
 import pyrallis
 import torch
 from accelerate import Accelerator, InitProcessGroupKwargs, skip_first_batches
-from diffusion import DPMS, FlowEuler, Scheduler
-from diffusion.data.builder import build_dataloader, build_dataset
-from diffusion.data.wids import DistributedRangedSampler
-from diffusion.model.builder import (
+from PIL import Image
+from termcolor import colored
+
+from src.stage2.generative.Sana.diffusion import DPMS, FlowEuler, Scheduler
+from src.stage2.generative.Sana.diffusion.data.builder import (
+    build_dataloader,
+    build_dataset,
+)
+from src.stage2.generative.Sana.diffusion.data.wids import DistributedRangedSampler
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
     vae_encode,
 )
-from diffusion.model.model_growth_utils import ModelGrowthInitializer
-from diffusion.model.respace import compute_density_for_timestep_sampling
-from diffusion.model.utils import get_weight_dtype
-from diffusion.utils.checkpoint import load_checkpoint, save_checkpoint
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.data_sampler import AspectRatioBatchSampler
-from diffusion.utils.dist_utils import flush, get_world_size
-from diffusion.utils.logger import LogBuffer, get_root_logger
-from diffusion.utils.lr_scheduler import build_lr_scheduler
-from diffusion.utils.misc import (
+from src.stage2.generative.Sana.diffusion.model.model_growth_utils import (
+    ModelGrowthInitializer,
+)
+from src.stage2.generative.Sana.diffusion.model.respace import (
+    compute_density_for_timestep_sampling,
+)
+from src.stage2.generative.Sana.diffusion.model.utils import get_weight_dtype
+from src.stage2.generative.Sana.diffusion.utils.checkpoint import (
+    load_checkpoint,
+    save_checkpoint,
+)
+from src.stage2.generative.Sana.diffusion.utils.config import (
+    SanaConfig,
+    model_init_config,
+)
+from src.stage2.generative.Sana.diffusion.utils.data_sampler import (
+    AspectRatioBatchSampler,
+)
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import flush, get_world_size
+from src.stage2.generative.Sana.diffusion.utils.logger import LogBuffer, get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.lr_scheduler import build_lr_scheduler
+from src.stage2.generative.Sana.diffusion.utils.misc import (
     DebugUnderflowOverflow,
     init_random_seed,
     set_random_seed,
 )
-from diffusion.utils.optimizer import auto_scale_lr, build_optimizer
-from PIL import Image
-from termcolor import colored
+from src.stage2.generative.Sana.diffusion.utils.optimizer import (
+    auto_scale_lr,
+    build_optimizer,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -452,7 +471,7 @@ def train(
                             truncation=True,
                             return_tensors="pt",
                         ).to(accelerator.device)
-                        y = text_encoder( # type: ignore
+                        y = text_encoder(  # type: ignore
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
                         )[0][:, None]  # bs, 1, N, C

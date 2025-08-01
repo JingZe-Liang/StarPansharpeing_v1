@@ -844,6 +844,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     read_transpose: bool = True,  # [c, h, w] needs transpose
     read_fn_kwargs: dict = {},
     tqdm_or_not: bool = True,
+    delete_file: bool = False,
 ):
     if dataset_root is not None:
         if isinstance(dataset_root, (str, Path)):
@@ -888,10 +889,12 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 rescale="clamp",  # default rescale method
                 force_save_dtype=force_save_dtype,
             )
+            if delete_file:
+                Path(msi_file).unlink(missing_ok=True)
 
             if tqdm_or_not:
                 tbar.set_description(
-                    f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}"
+                    f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}, {delete_file=}"
                 )
 
     logger.info(f"webdataset written to {webdataset_pattern}")

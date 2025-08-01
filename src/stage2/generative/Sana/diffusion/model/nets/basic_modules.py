@@ -17,11 +17,11 @@
 # This file is modified from https://github.com/PixArt-alpha/PixArt-sigma
 import torch
 import torch.nn as nn
-from timm.models.vision_transformer import Mlp
+from timm.layers.mlp import Mlp as timmMLP
 
-from diffusion.model.act import build_act, get_act_name
-from diffusion.model.norms import build_norm, get_norm_name
-from diffusion.model.utils import get_same_padding, val2tuple
+from src.stage2.generative.Sana.diffusion.model.act import build_act, get_act_name
+from src.stage2.generative.Sana.diffusion.model.norms import build_norm, get_norm_name
+from src.stage2.generative.Sana.diffusion.model.utils import get_same_padding, val2tuple
 
 
 class ConvLayer(nn.Module):
@@ -33,7 +33,7 @@ class ConvLayer(nn.Module):
         stride=1,
         dilation=1,
         groups=1,
-        padding: int or None = None,
+        padding: int | None = None,
         use_bias=False,
         dropout=0.0,
         norm="bn2d",
@@ -189,7 +189,7 @@ class MBConvPreGLU(nn.Module):
         stride=1,
         mid_dim=None,
         expand=6,
-        padding: int or None = None,
+        padding: int | None = None,
         use_bias=False,
         norm=(None, None, "ln2d"),
         act=("silu", "silu", None),
@@ -268,7 +268,7 @@ class MBConvPreGLU(nn.Module):
         return _str
 
 
-class DWMlp(Mlp):
+class DWMlp(timmMLP):
     """MLP as used in Vision Transformer, MLP-Mixer and related networks"""
 
     def __init__(
@@ -326,7 +326,7 @@ class DWMlp(Mlp):
         return x
 
 
-class Mlp(Mlp):
+class Mlp(timmMLP):
     """MLP as used in Vision Transformer, MLP-Mixer and related networks"""
 
     def __init__(

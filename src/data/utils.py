@@ -23,7 +23,7 @@ from src.utilities.train_utils.state import StepsCounter
 from ..utilities.logging.print import log_print
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
-SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
+SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData] | tuple
 
 
 def flatten_nested_list(lst):
@@ -150,7 +150,7 @@ def search_one_key_not_dunder(
 ):
     _not_dunder_keys: list[str] = []
     # most dataset has 'img' key and 'img_content' for RS5M
-    _default_img_search_keys = ("img", "img_content")
+    _default_img_search_keys = ("img", "img_content", "rgb")
     new_sample = {}
 
     for k in sample.keys():
@@ -825,7 +825,8 @@ def chained_dataloaders(
 
                 try:
                     sample = next(iters[idx])
-                    sample["__loader_idx__"] = idx
+                    if isinstance(sample, dict):
+                        sample["__loader_idx__"] = idx
                     break  # Successfully got sample
                 except StopIteration:
                     if infinit:
@@ -979,7 +980,7 @@ def expand_paths_and_correct_loader_kwargs(paths: str | list, loader_kwargs: dic
 
 # multimodal version of expand_paths_and_correct_loader_kwargs
 def expand_paths_and_correct_loader_kwargs_mm(
-    paths: str | list[str], loader_kwargs: dict
+    paths: str | list[str] | dict[str, str], loader_kwargs: dict
 ):
     # Ensure that the number of workers is not greater than the number of shards
     if isinstance(paths, str):
@@ -1008,6 +1009,15 @@ def expand_paths_and_correct_loader_kwargs_mm(
             lst_p = list(braceexpand.braceexpand(mm_p))
             mm_paths.extend(lst_p)
         _len = len(mm_paths) // n_modalities
+    elif isinstance(paths, dict):
+        mm_paths = list(paths.values())
+        n_modalities = len(mm_paths)
+        # assert all files have equal number of shards
+        wids_files: list[dict] = [json.load(open(p, "r")) for p in mm_paths]
+        get_n_shards = lambda json_file: len(json_file["shardlist"])
+        total_shards = set(get_n_shards(wf) for wf in wids_files)
+        assert len(total_shards) == 1, "all files must have equal number of shards"
+        _len = total_shards.pop()
     else:
         raise ValueError(
             f"paths should be a string or a list of strings, but got {type(paths)}"
@@ -1015,6 +1025,7 @@ def expand_paths_and_correct_loader_kwargs_mm(
 
     assert _len > 0, f"paths should not be empty, but got {paths}"
 
+    # assert tar files exist
     for p in mm_paths:
         # assert tar file exists
         assert os.path.exists(p), f"tar file or wids json file {p} does not exist"

@@ -153,7 +153,7 @@ def make_block_fn(
                 norm_type=norm_type,
                 use_dico_cca=False,
                 act_type=("gelu", "gelu"),
-                nin_shortcut_norm=False,
+                nin_shortcut_norm=True,
                 **kwargs,
             )
 

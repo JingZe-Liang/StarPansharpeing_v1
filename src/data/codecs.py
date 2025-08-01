@@ -1,8 +1,8 @@
 import io
 import json
 import warnings
-from re import S
-from typing import Any, Dict, Literal, cast
+from functools import partial
+from typing import Any, Dict, Literal, assert_type, cast
 
 import numpy as np
 import scipy.io
@@ -437,6 +437,7 @@ def wids_image_decode(
 
         return sample
 
+    # breakpoint()
     _img_flag = False
     _keys = list(sample.keys())
     for key in _keys:
@@ -473,12 +474,12 @@ def wids_image_decode(
     return sample
 
 
-def wids_latent_decode(sample: dict[str, Any]):
+def wids_latent_decode(sample: dict[str, Any], return_dict=False):
     # three types of latents: npz, safetensors, and npy
 
     call_fns = {
         "npz": npz_decode_io,
-        "safetensors": safetensors_decode_io,
+        "safetensors": partial(safetensors_decode_io, return_dict=return_dict),
         "npy": npy_codec_io,
     }
 
@@ -490,22 +491,8 @@ def wids_latent_decode(sample: dict[str, Any]):
                 f"Invalid key format: {k}, should be name.extension"
             )
             name, ck = name_ck
-            latent = call_fns[ck](sample.pop(k).getvalue())
+            latent = call_fns[ck](sample.pop(k).getvalue())  # may raise KeyError
             sample[name] = latent
-
-    # if ".latents.npz" in sample:
-    #     sample["latents"] = npz_decode_io(sample[".latents.npz"].getvalue())
-    #     del sample[".latents.npz"]
-
-    # if ".latents.safetensors" in sample:
-    #     sample["latents"] = safetensors_decode_io(
-    #         sample[".latents.safetensors"].getvalue()
-    #     )
-    #     del sample[".latents.safetensors"]
-
-    # if ".latents.npy" in sample:
-    #     sample["latents"] = npy_codec_io(sample[".latents.npy"].getvalue())
-    #     del sample[".latents.npy"]
 
     return sample
 
@@ -516,30 +503,50 @@ def wids_caption_embed_decode(
     # decode caption (str), valid_length (int), and caption_feature (torch.Tensor), and
     # attention_mask (torch.Tensor, optional)
 
-    if ".caption.json" in sample:
-        caption = json_decode_io(sample.pop(".caption.json").getvalue())
-        assert caption is not None, "Caption JSON decoding failed."
+    _keys = list(sample.keys())
 
-        sample["caption"] = caption["caption"]
-        sample["valid_length"] = int(caption["valid_length"])
+    # has captions and caption features
+    caption_json_key: str | None = None
+    features_key: str | None = None
+    for k in _keys:
+        if "caption" in k and k.endswith((".json", ".txt")):
+            caption_json_key = k
+        elif "features" in k and k.endswith(".safetensors"):
+            features_key = k
 
-    if ".features.safetensors" in sample:
-        name = ".features.safetensors"
-    elif ".features_and_mask.safetensors" in sample:
-        name = ".features_and_mask.safetensors"
+    assert caption_json_key is not None or features_key is not None, (
+        "Sample must contain either caption JSON or features key."
+    )
+    caption_json_key = cast(str, caption_json_key)
+    features_key = cast(str, features_key)
+
+    # caption text
+    caption = json_decode_io(sample.pop(caption_json_key).getvalue())
+    assert caption is not None, "Caption JSON decoding failed."
+    sample["caption"] = caption["caption"]
+    sample["valid_length"] = int(caption["valid_length"])
+
+    # features and mask
+    embeds = safetensors_decode_io(
+        sample.pop(features_key).getvalue(), return_dict=True
+    )
+    embeds = cast(Dict[str, torch.Tensor], embeds)
+    # pad right
+    cap_f = embeds["caption_feature"].squeeze(0)  # [n, d]
+    if cap_f.shape[0] < max_length:
+        cap_f_pad = torch.nn.functional.pad(
+            cap_f, (0, 0, 0, max_length - cap_f.shape[0]), value=0.0
+        )
     else:
-        name = None
+        cap_f_pad = cap_f[:, :max_length]
+    sample["caption_feature"] = cap_f_pad  # bfloat16
 
-    if name is not None:
-        embeds = safetensors_decode_io(sample.pop(name).getvalue(), return_dict=True)
-        embeds = cast(Dict[str, torch.Tensor], embeds)
-        sample["caption_feature"] = embeds["caption_feature"]  # bfloat16
-        if "attention_mask" in embeds:
-            sample["attention_mask"] = embeds["attention_mask"].float()
-        else:
-            vl = sample["valid_length"]
-            attn_mask = torch.zeros((max_length,), dtype=torch.float32)
-            attn_mask[:vl] = 1.0
-            sample["attention_mask"] = attn_mask
+    if "attention_mask" in embeds:
+        sample["attention_mask"] = embeds["attention_mask"].float()  # [max_length,]
+    else:
+        vl = sample["valid_length"]
+        attn_mask = torch.zeros((max_length,), dtype=torch.float32)
+        attn_mask[:vl] = 1.0  # effective token is 1 in mask
+        sample["attention_mask"] = attn_mask
 
     return sample
