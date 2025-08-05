@@ -35,7 +35,7 @@ def batch2time(x: torch.Tensor, batch_size: int) -> torch.Tensor:
     return rearrange(x, "(b t) c h w -> b c t h w", b=batch_size)
 
 
-def space2batch(x: torch.Tensor) -> tuple[torch.Tensor, int]:
+def space2batch(x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     batch_size, height = x.shape[0], x.shape[-2]
     return rearrange(x, "b c t h w -> (b h w) c t"), batch_size, height
 

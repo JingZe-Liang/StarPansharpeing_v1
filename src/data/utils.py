@@ -87,22 +87,45 @@ def remove_meta_data(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     return sample
 
 
-def may_repeat_channels(img: torch.Tensor, rep_channels: int = 3) -> torch.Tensor:
+def check_img_channel(
+    sample: dict[str, torch.Tensor],
+    expect_channels: int = 3,
+    img_key: str | list[str] = "img",
+):
     # img: (1, H, W), (H, W), (C, H, W)
-    if img.ndim == 2:
-        img = img[None].repeat(rep_channels, 1, 1)
-    elif img.ndim == 3:
-        if img.shape[0] == 1:
-            img = img.repeat(rep_channels, 1, 1)
-        elif img.shape[0] != rep_channels:
+
+    def inner(sample, k):
+        img = sample[k]
+        if img.ndim == 2:
+            img = img[None].repeat(expect_channels, 1, 1)
+        elif img.ndim == 3:
+            if img.shape[0] == 1:
+                img = img.repeat(expect_channels, 1, 1)
+            elif img.shape[0] > expect_channels:
+                img = img[:expect_channels]
+            elif img.shape[0] == expect_channels:
+                pass  # <- expected channels, do nothing
+            else:
+                log_print(
+                    f"sample image key {k} got shape {tuple(img.shape)}, "
+                    f"expect channels {expect_channels}, skip this sample.",
+                    "warning",
+                )
+                img = None
+        else:
             raise ValueError(
-                f"Expected img to have {rep_channels} channels, but got {img.shape[0]} channels."
+                f"Unsupported number of dimensions for img: {img.ndim}. Expected 2 or 3."
             )
-    else:
-        raise ValueError(
-            f"Unsupported number of dimensions for img: {img.ndim}. Expected 2 or 3."
-        )
-    return img
+
+        return img
+
+    img_key = [img_key] if isinstance(img_key, str) else img_key
+    for k in img_key:
+        img = inner(sample, k)
+        if img is None:
+            return None
+        sample[k] = img
+    return sample
 
 
 def _check_dots(s: str):
@@ -620,9 +643,7 @@ def large_image_resizer_clipper(
     else:
         raise ValueError(f"op_for_large {op_for_large} not supported")
 
-    def sample_mapper(sample: dict):
-        nonlocal img_key
-
+    def sample_mapper(sample: dict, img_key=img_key):
         if img_key is None:
             img_key = not_dunder_keys(sample)
 
@@ -907,7 +928,7 @@ def generate_wds_config_modify_only_some_kwgs(
     return cfgs
 
 
-def get_wids_index_json_info(path: str):
+def get_wids_index_json_info(path: str) -> tuple[list[dict], int]:
     assert path.endswith(".json"), (
         f"wids json file should end with .json, but got {path}"
     )
@@ -927,41 +948,58 @@ def get_wids_index_json_info(path: str):
     return index_info, n
 
 
-def expand_paths_and_correct_loader_kwargs(paths: str | list, loader_kwargs: dict):
+def expand_paths_and_correct_loader_kwargs(
+    load_type: str, paths: str | list, loader_kwargs: dict
+):
     # Ensure that the number of workers is not greater than the number of shards
-    if isinstance(paths, str):
-        if paths.endswith(".json"):  # is indexed wids json file
-            _, _len = get_wids_index_json_info(paths)
+    if load_type == "wids":
+        if isinstance(paths, str):
             paths = [paths]
+
+        if isinstance(paths, (tuple, list)):
+            _len = 0
+            for p in paths:
+                assert isinstance(p, str) and p.endswith(".json"), (
+                    "'paths' should be a list of strings that are wids json files, "
+                    f"but got {type(p)} with value {p}"
+                )
+                _, len_i = get_wids_index_json_info(p)
+                _len += len_i
+            path_exp = paths
         else:
+            raise ValueError(
+                f"'paths' should be a string or list of stirng that is json files but got {paths}"
+            )
+
+    else:  # webdataset
+        if isinstance(paths, str):
             paths = list(braceexpand.braceexpand(paths))
             _len = len(paths)
-    elif isinstance(paths, (list, tuple)):
-        path_exp = []
-        for p in paths:
-            assert isinstance(p, str), (
-                "'paths' should be a list of strings or a string that can be expanded"
-                f"list of {type(p)} is not allowed."
+        elif isinstance(paths, (list, tuple)):
+            path_exp = []
+            for p in paths:
+                assert isinstance(p, str), (
+                    "'paths' should be a list of strings or a string that can be expanded"
+                    f"list of {type(p)} is not allowed."
+                )
+                assert not p.endswith(".json"), (
+                    "list of paths contains multiple wids json files or "
+                    "combination of tar file path and wids json file path, "
+                    "please use a list of lists of strings instead. "
+                    "If you want to use wids json dataset, "
+                    "please use a single json file as index_file."
+                )
+                lst_p = list(braceexpand.braceexpand(p))
+                path_exp.extend(lst_p)
+        else:
+            raise ValueError(
+                f"paths should be a string or a list of strings, but got {type(paths)}"
             )
-            assert not p.endswith(".json"), (
-                "list of paths contains multiple wids json files or "
-                "combination of tar file path and wids json file path, "
-                "please use a list of lists of strings instead. "
-                "If you want to use wids json dataset, "
-                "please use a single json file as index_file."
-            )
-            lst_p = list(braceexpand.braceexpand(p))
-            path_exp.extend(lst_p)
         _len = len(path_exp)
-        paths = path_exp
-    else:
-        raise ValueError(
-            f"paths should be a string or a list of strings, but got {type(paths)}"
-        )
 
     assert _len > 0, f"paths should not be empty, but got {paths}"
 
-    for p in paths:
+    for p in path_exp:
         # assert tar file exists
         assert os.path.exists(p), f"tar file or wids json file {p} does not exist"
 
@@ -975,7 +1013,7 @@ def expand_paths_and_correct_loader_kwargs(paths: str | list, loader_kwargs: dic
             level="debug",
         )
 
-    return paths, loader_kwargs
+    return path_exp, loader_kwargs
 
 
 # multimodal version of expand_paths_and_correct_loader_kwargs

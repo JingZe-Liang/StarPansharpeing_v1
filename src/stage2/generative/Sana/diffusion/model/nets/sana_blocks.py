@@ -24,13 +24,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from timm.models.vision_transformer import Attention as Attention_
-from timm.models.vision_transformer import Mlp
+from timm.layers.attention import Attention as Attention_
+from timm.layers.mlp import Mlp
 from transformers import AutoModelForCausalLM
 
-from diffusion.model.norms import RMSNorm
-from diffusion.model.utils import get_same_padding, to_2tuple
-from diffusion.utils.import_utils import is_xformers_available
+from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
+from src.stage2.generative.Sana.diffusion.model.utils import get_same_padding, to_2tuple
+from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+    is_xformers_available,
+)
 
 _xformers_available = (
     False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()

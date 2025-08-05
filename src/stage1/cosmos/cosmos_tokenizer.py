@@ -5,7 +5,7 @@ from collections import OrderedDict, namedtuple
 from functools import partial
 from itertools import chain
 from pathlib import Path
-from typing import Callable, Literal, NamedTuple, Sequence, override
+from typing import Callable, Literal, NamedTuple, Sequence, no_type_check, override
 
 import numpy as np
 import torch
@@ -22,6 +22,7 @@ from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
 
+type LoraName = str
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
@@ -56,43 +57,46 @@ def _list_or_num_mult(x: list | int | float, factor: int):
     return [i * factor for i in x]
 
 
+# * --- Latent augmentation --- #
+
+
 class NestChannelDrop(nn.Module):
     def __init__(
         self,
         learnable: bool = False,
-        drop_type: str = "uniform_4",
-        max_channels: int = 12,  # MMSeg dataset
-        img_size: tuple[int] | int = 256,
+        drop_type: str | list[int] = "uniform_4",
+        max_channels: int = 16,
         drop_prob: float = 0.5,
     ):
         super().__init__()
         self.learnable = learnable
         self.max_channels = max_channels
-        self.img_size = _to_two_tuple(img_size)
         self.drop_prob = drop_prob
 
-        drop_type, args = drop_type.lower().split("_")
-        self.drop_type = drop_type
-        if drop_type == "exp":
-            self.sample_kwargs = {"lambda": float(args)}
-        elif drop_type == "uniform":
-            assert args.isdigit(), "args should be an int"
-            self.sample_kwargs = {"low": int(args)}
-        else:
-            raise ValueError(
-                f"drop_type {drop_type} not supported, only exp and uniform are supported"
+        if isinstance(drop_type, str):
+            drop_type, args = drop_type.lower().split("_")
+            self.drop_type = drop_type
+            if drop_type == "exp":
+                self.sample_kwargs = {"lambda": float(args)}
+            elif drop_type == "uniform":
+                assert args.isdigit(), "args should be an int"
+                self.sample_kwargs = {"low": int(args)}
+            else:
+                raise ValueError(
+                    f"drop_type {drop_type} not supported, only exp and uniform are supported"
+                )
+        else:  # list
+            self.drop_list = drop_type
+            assert max(self.drop_list) < self.max_channels, (
+                f"max_channels {self.max_channels} should be larger than the max of drop_list {max(self.drop_list)}"
             )
+            self.drop_type = "prefixed"
+        log_print(
+            f"[NestChannelDrop]: drop_type={self.drop_type}, max_channels={self.max_channels}, drop_prob={self.drop_prob}"
+        )
 
-        if self.learnable:
-            self.dropped_x = nn.Parameter(torch.zeros(1, 1, *self.img_size))
-            self.dropped_x.data.normal_(0, 0.2)
-        else:
-            self.register_buffer(
-                "dropped_x", torch.zeros(1, 1, *self.img_size), persistent=False
-            )
-
-        self.register_buffer(
-            "channel_arange", torch.arange(self.max_channels), persistent=False
+        self.channel_arange = nn.Buffer(
+            torch.arange(self.max_channels, dtype=torch.int32), persistent=False
         )
 
     def exponential_sampling(self, lambda_val, size=1):
@@ -107,10 +111,27 @@ class NestChannelDrop(nn.Module):
     def uniform_sampling(self, low: int, size: int = 1):
         # (bs, 1)
         k = torch.randint(low=low, high=self.max_channels, size=(size, 1))
-
         return k
 
-    def forward(self, z, inference_channels: int | None = None):
+    def prefixed_sampling(self, size: int = 1):
+        drop_list = self.drop_list
+        leave_channels = np.random.choice(drop_list, size=size, replace=True)
+        return torch.as_tensor(leave_channels).unsqueeze(-1)
+
+    def forward(
+        self, z, inference_channels: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+        """
+        Apply channel drop to the input tensor.
+
+        Args:
+            z: Input tensor of shape (bs, c, h, w)
+            inference_channels: Number of channels to keep during inference
+
+        Returns:
+            If applying channel drop: tuple of (z, mask) where mask is the channel mask
+            If not applying channel drop: z tensor only
+        """
         if (self.training and np.random.random() > self.drop_prob) or (
             not self.training and inference_channels is None
         ):
@@ -128,6 +149,8 @@ class NestChannelDrop(nn.Module):
             leave_channels = self.exponential_sampling(size=bs, **self.sample_kwargs)
         elif self.drop_type == "uniform":
             leave_channels = self.uniform_sampling(size=bs, **self.sample_kwargs)
+        elif self.drop_type == "prefixed":
+            leave_channels = self.prefixed_sampling(size=bs)
         else:
             raise ValueError(
                 f"drop_type {self.drop_type} not supported, only exp and uniform are supported"
@@ -136,26 +159,31 @@ class NestChannelDrop(nn.Module):
         # drop channels
 
         # 1. expand the cached empty z
-        if self.dropped_x.shape[-2:] != z.shape[-2:]:
-            if self.learnable:
-                z_empty = nn.functional.interpolate(
-                    self.dropped_x,
-                    size=z.shape[-2:],
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                z_empty = z_empty.expand(bs, -1, -1, -1)
-            else:
-                z_empty = torch.zeros_like(z)
-        else:
-            z_empty = self.dropped_x.expand(bs, -1, -1, -1)
+        # if self.dropped_x.shape[-2:] != z.shape[-2:]:
+        #     if self.learnable:
+        #         z_empty = nn.functional.interpolate(
+        #             self.dropped_x,
+        #             size=z.shape[-2:],
+        #             mode="bilinear",
+        #             align_corners=False,
+        #         )
+        #         z_empty = z_empty.expand(bs, -1, -1, -1)
+        #     else:
+        #         z_empty = torch.zeros_like(z)
+        # else:
+        #     z_empty = self.dropped_x.expand(bs, -1, -1, -1)
+        z_zeros = torch.zeros_like(z)
 
         # 2. drop channels
-        _channels = self.channel_arange[None].expand(bs, -1)  # type: ignore
-        _cond = _channels < leave_channels.to(_channels)
-        z = torch.where(_cond.unsqueeze(-1).unsqueeze(-1).expand_as(z), z, z_empty)
+        channels = self.channel_arange[None].expand(bs, -1)  # type: ignore
+        cond = channels < leave_channels.to(channels)
+        mask = cond.unsqueeze(-1).unsqueeze(-1).expand_as(z)  # (bs, c, h, w)
+        z = torch.where(mask, z, z_zeros)
 
-        return z
+        return z, mask
+
+
+# * --- Network utilities --- #
 
 
 class MultiInputSequential(nn.Sequential):
@@ -229,17 +257,20 @@ class DecoderSequential(nn.Module):
             raise ValueError("input should be a tuple of length larger than 1")
 
 
+# * --- Tokenizer main --- #
+
+
 class ContinuousImageTokenizer(nn.Module):
     # FSDP attribution
     _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
 
     # training for feature distillation
-    _hook_for_repa: bool = False
-    _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
-    _hook_feature: torch.Tensor | None = None
-    _proj_for_vf: bool = False
+    _use_repa_loss: bool = False
+    _use_vf_loss: bool = False
+
     # vf loss on z or module output
     _vf_on_z_or_module: Literal["z", "module"] = "module"
+    _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _dino_feature_dim: int = 768  # [768, 1024]
 
     # scaling factor for evaluation
@@ -247,6 +278,7 @@ class ContinuousImageTokenizer(nn.Module):
     shift_factor: torch.Tensor | None = None
 
     # state
+    _hook_feature: torch.Tensor | None = None
     z: torch.Tensor | None = None  # the latent z
 
     @function_config_to_basic_types
@@ -259,8 +291,8 @@ class ContinuousImageTokenizer(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
-        self._hook_for_repa = kwargs.pop("hook_for_repa", False)
-        self._proj_for_vf = kwargs.pop("proj_for_vf", False)
+        self._use_repa_loss = kwargs.pop("use_repa_loss", False)
+        self._use_vf_loss = kwargs.pop("use_vf_loss", False)
         self._hook_module = kwargs.pop("hook_module", self._hook_module)
         self._vf_on_z_or_module = kwargs.pop(
             "vf_on_z_or_module", self._vf_on_z_or_module
@@ -268,14 +300,20 @@ class ContinuousImageTokenizer(nn.Module):
         self.latent_noise_prob = kwargs.pop("latent_noise_prob", 0.0)
         self.use_latent_denoise = self.latent_noise_prob > 0.0
 
-        assert not (self._hook_for_repa and self._proj_for_vf), (
+        # > repa or vf projectors
+        assert not (self._use_repa_loss and self._use_vf_loss), (
             "repa and vf losses should not be used at the same time"
         )
-        if self._hook_for_repa:
-            self._repa_proj = build_mlp(
-                512, self._dino_feature_dim, self._dino_feature_dim
-            )
-        if self._proj_for_vf:
+        if self._use_repa_loss:
+            if self._vf_on_z_or_module == "module":
+                self._repa_proj = build_mlp(
+                    512, self._dino_feature_dim, self._dino_feature_dim
+                )
+            else:
+                self._repa_proj = build_mlp(
+                    latent_channels, self._dino_feature_dim, self._dino_feature_dim
+                )
+        if self._use_vf_loss:
             if self._vf_on_z_or_module == "z":
                 self._vf_proj = build_mlp(
                     latent_channels, self._dino_feature_dim, self._dino_feature_dim
@@ -417,26 +455,14 @@ class ContinuousImageTokenizer(nn.Module):
             log_print(f"use channel drop: {kwargs['channel_drop_config']}")
 
         # register repa hook
-        if self._hook_for_repa or self._vf_on_z_or_module == "module":
+        if self._vf_on_z_or_module == "module" and (
+            self._use_vf_loss or self._use_repa_loss
+        ):
             self.register_feature_hook()
 
         num_parameters = sum(param.numel() for param in self.parameters())
         log_print(f"model={self.name}, num_parameters={num_parameters:,}")
         log_print(f"z_channels={z_channels}, latent_channels={self.latent_channels}.")
-
-    #     if loading_type is None:
-    #         self.apply(self.init_weights)
-    #         log_print('<red>initialize</> weights done.')
-
-    # def init_weights(self,m):
-    #     if isinstance(m, nn.Conv2d):
-    #         nn.init.kaiming_normal_(m.weight, mode='fan_out')
-    #         if m.bias is not None:
-    #             nn.init.constant_(m.bias, 0)
-    #     elif isinstance(m, nn.Linear):
-    #         nn.init.trunc_normal_(m.weight, std=0.02)
-    #         if m.bias is not None:
-    #             nn.init.constant_(m.bias, 0)
 
     def encoder_jit(self, encoder, quant_conv):
         return nn.Sequential(
@@ -450,15 +476,6 @@ class ContinuousImageTokenizer(nn.Module):
         )
 
     def decoder_jit(self, decoder, post_quant_conv):
-        # return nn.Sequential(
-        #     OrderedDict(
-        #         [
-        #             ("post_quant_conv", post_quant_conv),
-        #             ("decoder", decoder),
-        #         ]
-        #     )
-        # )
-
         return DecoderSequential(post_quant_conv, decoder)
 
     def register_feature_hook(self):
@@ -474,7 +491,17 @@ class ContinuousImageTokenizer(nn.Module):
     def get_repa_feature(self):
         # only one feature
         if hasattr(self, "_repa_proj"):
-            return self._repa_proj(self._hook_feature)
+            if self._vf_on_z_or_module == "z":
+                # project on latent
+                assert self.z is not None, "z should be set before get_vf_feature"
+                return self._repa_proj(self.z)
+            elif self._vf_on_z_or_module == "module":
+                return self._repa_proj(self._hook_feature)
+                # proj on block out
+            else:
+                raise ValueError(
+                    f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
+                )
 
         return None
 
@@ -522,14 +549,23 @@ class ContinuousImageTokenizer(nn.Module):
                     f"block_name {block_name} not supported, only res_block and res_moe are supported"
                 )
 
-    def _latent_noising(self, h: torch.Tensor):
+    def _latent_noising(self, h: torch.Tensor, mask: torch.Tensor | None = None):
+        # mask: 1 means the channel is dropped, 0 means the channel is not dropped
+
         if random.random() > self.latent_noise_prob:
             return h
 
         # interpolated noising
         bs = h.size(0)
         t = torch.randn((bs,)).to(h).view(-1, 1, 1, 1)
-        h_noise = t * torch.randn_like(h) * (1 - t) * h
+        noise = torch.randn_like(h)
+        # mask out the dropped channels
+        if mask is not None:
+            assert mask.shape[1] == h.shape[1], (
+                "mask and h should have the same channel number"
+            )
+            noise = torch.where(mask, noise, torch.zeros_like(noise))
+        h_noise = t * noise + (1 - t) * h
 
         return h_noise
 
@@ -566,16 +602,21 @@ class ContinuousImageTokenizer(nn.Module):
             return h, kl_loss, loss_breakdown
 
         # z augmentions
-        if self.use_channel_drop:
-            h = self.channel_drop(h)
-        if self.use_latent_denoise and self.training:
-            # latent noising and then to _vf_proj (vf decoder)
-            h = self._latent_noising(h)
+        if self.training:
+            mask = None
+            if self.use_channel_drop:
+                h, mask = self.channel_drop(h)
+            if self.use_latent_denoise:
+                # latent noising and then to _vf_proj (vf decoder)
+                h = self._latent_noising(h, mask)
 
         # TODO: add additional cross-attention to convert the 2D latent to 1D latent
 
         # save latent
-        self.z = h if hasattr(self, "_vf_proj") else None  # save latent z for vf loss
+        if hasattr(self, "_vf_proj") or hasattr(self, "_repa_proj"):
+            self.z = h  # save latent z for repa or vf loss
+        else:
+            self.z = None
 
         return h
 
@@ -878,6 +919,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return add_tgt_modules
 
+    @no_type_check
     def register_layer_output_hooks(self):
         self._per_layer_norms = {}
         self._next_call_norm_flag = False
@@ -918,9 +960,6 @@ class ContinuousImageTokenizer(nn.Module):
             self._per_layer_norms = {}
 
         return norms
-
-    # lora layer utilities
-    type LoraName = str
 
     def loras_loading(self, lora_weights: dict[LoraName, Path | str]): ...
 

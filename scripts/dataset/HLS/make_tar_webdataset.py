@@ -705,6 +705,7 @@ def clip_img_to_webdataset(
     rescale: str = "clamp",
     force_save_dtype: str | np.dtype = "auto",
     add_global_index: bool = False,
+    assert_channel_n: int | None = None,
 ):
     def slide_image_and_save(img, img_name):
         if process_img_type == "clip":
@@ -813,6 +814,12 @@ def clip_img_to_webdataset(
     if img is None:
         logger.warning(f"Failed to read image from {img_path}, skipping.")
         return None, None, None
+    if assert_channel_n is not None:
+        if img.shape[-1] != assert_channel_n:
+            logger.warning(
+                f"Image {img_path} has {img.shape[-1]} channels, expected {assert_channel_n} channels."
+            )
+            return None, None, None
 
     if Path(img_path).suffix.lower() in [".mp4"] and isinstance(img, list):
         # is video
@@ -845,6 +852,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     read_fn_kwargs: dict = {},
     tqdm_or_not: bool = True,
     delete_file: bool = False,
+    channel_n: int | None = None,  # assert the channel number of the image
 ):
     if dataset_root is not None:
         if isinstance(dataset_root, (str, Path)):
@@ -888,6 +896,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 save_kwargs=save_kwargs,
                 rescale="clamp",  # default rescale method
                 force_save_dtype=force_save_dtype,
+                assert_channel_n=channel_n,
             )
             if delete_file:
                 Path(msi_file).unlink(missing_ok=True)
@@ -965,6 +974,13 @@ def mp_tarfile_rearrange(tarfile_dir: str | Path):
 
 
 if __name__ == "__main__":
+    # log file
+    from src.utilities.logging import set_logger_file
+
+    set_logger_file(
+        "data/Multispectral-FMow-full/not_4bands.warning.log", "warning", add_time=False
+    )
+
     _mp = False
 
     func_kwargs = {
@@ -973,7 +989,7 @@ if __name__ == "__main__":
         "img_stride": (1024, 1024),
         "img_resize": 1024,
         "save_kwargs": {
-            "tiff_compression_type": "jpeg",
+            "tiff_compression_type": "jpeg2000",
             "tiff_jpg_irreversible": True,
             "jpeg_quality": 80,
         },
@@ -1080,13 +1096,28 @@ if __name__ == "__main__":
         # all_msi_files_s = list(glob.glob("data/AerialVG/images/*"))
         # webdataset_pts = "data/AerialVG/hyper_images/AerialVG-3_bands-RGB-%04d.tar"
 
-        # FMoW
+        # FMoW rgb
+        # all_msi_files_s = list(
+        #     Path(
+        #         "/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"
+        #     ).glob("**/*_rgb.jpg")
+        # )
+        # webdataset_pts = "data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-%04d.tar"
+
+        # Fmow full
         all_msi_files_s = list(
-            Path(
-                "/HardDisk/ZiHanCao/datasets/Multispectral-fMoW-Data-multispectral-RGB"
-            ).glob("**/*_rgb.jpg")
+            Path("data/Multispectral-FMow-full/train").rglob("**/*.tif")
         )
-        webdataset_pts = "data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-%04d.tar"
+        webdataset_pts = "data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-%04d.tar"
+        func_kwargs.update(
+            {
+                "channel_n": 8,
+                "save_backend": "tiff",
+                "process_img_type": "clip_resize",
+                "img_clip_size": (1024, 1024),
+                "img_stride": (1024, 1024),
+            }
+        )
 
         # Inria Aeiral images
         # path = "data/YuZhongDataset/InriaAerialLabelingDataset/AerialImageDataset"

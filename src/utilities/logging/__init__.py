@@ -1,2 +1,2 @@
 from .functions import once
-from .print import log_print, set_logger_file
+from .print import logger, log_print, set_logger_file

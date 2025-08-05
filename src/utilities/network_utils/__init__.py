@@ -7,5 +7,5 @@ from .network_loading import (
     remap_peft_model_state_dict,
 )
 from .pack import one_d_to_two_d, two_d_to_one_d
-from .perf_utils import func_mem_wrapper, func_speed_wrapper
+from .perf_utils import func_mem_wrapper, func_speed_wrapper, timer
 from .shaping import reshape_wrapper

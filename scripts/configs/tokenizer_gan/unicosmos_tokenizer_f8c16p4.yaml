@@ -59,14 +59,14 @@ vq_loss:
 
 tokenizer:
   # repa
-  hook_for_repa: true
+  use_repa_loss: true
+  use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
-  proj_for_vf: false
-  vf_on_z_or_module: module
+  vf_on_z_or_module: z #module
 
   # loading
-  uni_tokenizer_path: #runs/stage1_cosmos/2025-06-15_17-11-45_cosmos_f8c16p4_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
-  loading_type: #pretrained
+  uni_tokenizer_path: runs/stage1_cosmos/2025-07-31_20-13-17_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
+  loading_type: pretrained
 
   # blocks
   enc_moe: false
@@ -89,18 +89,17 @@ tokenizer:
   z_channels: 16
 
   # augmentations
-  latent_noise_prob: 0.0
+  latent_noise_prob: 0.2
   use_channel_drop: false
 
   # train
   act_checkpoint: true
 
-  # channel_drop_config:
-  #   learnable: false
-  #   drop_type: uniform_4
-  #   max_channels: 16
-  #   img_size: 32
-  #   drop_prob: 1.0
+  channel_drop_config:
+    learnable: false
+    drop_type: ${list:[4, 8, 12]}
+    max_channels: 16
+    drop_prob: 0.5
 
   ## downsample and upsample
   # downsample_type: ConvPixelUnshuffle
@@ -125,15 +124,16 @@ train:
   save_every: 1000
   seperate_enc_dec: false
   resume_path: #runs/stage1_cosmos/2025-07-31_15-18-10_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_7
-  ema_load_path: runs/stage1_cosmos/2025-07-22_00-16-10_cosmos_f8c16p1_unified_hyperspectral_uni/ema
+  ema_load_path: #runs/stage1_cosmos/2025-07-31_20-13-17_cosmos_f8c16p1_unified_hyperspectral_uni/ema
   compile_model: false
   only_load_tokenizer: false
 
   # augmentations
-  aug_pipeline_train_obj: #decoder_deg
+  aug_pipeline_train_obj: decoder_deg
   aug_pipeline:
-    # _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
-    # p: 0.1
+    _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    p: 0.1
+    use_torch: true
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

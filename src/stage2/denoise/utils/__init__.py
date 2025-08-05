@@ -17,3 +17,14 @@ from .add_noise import (
     AddNoiseInpainting as AddNoiseInpainting_CHW_np,
     AddNoiseComplex as AddNoiseComplex_CHW_np,
 )
+
+# torch classes
+from .add_noise_torch import (
+    AddNoiseBlindTorch,
+    AddNoiseDeadlineTorch,
+    AddNoiseInpaintingTorch,
+    AddNoiseImpulseTorch,
+    AddNoiseNoniidTorch,
+    AddNoiseStripeTorch,
+    get_default_noise_transformation,
+)

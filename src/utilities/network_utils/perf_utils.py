@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 
 import torch
 from tqdm import trange
@@ -54,3 +55,11 @@ def func_speed_wrapper(test_num=100):
         return wrapper
 
     return inner_func_wrapper
+
+
+@contextmanager
+def timer():
+    start_time = time.perf_counter()
+    yield
+    end_time = time.perf_counter()
+    print(f"Execution time: {end_time - start_time:.6f} seconds")

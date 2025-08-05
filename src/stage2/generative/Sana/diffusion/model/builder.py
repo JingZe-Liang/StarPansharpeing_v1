@@ -27,8 +27,8 @@ from transformers import (
 )
 from transformers import logging as transformers_logging
 
-from diffusion.model.dc_ae.efficientvit.ae_model_zoo import DCAE_HF
-from diffusion.model.utils import set_fp32_attention, set_grad_checkpoint
+from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import DCAE_HF
+from src.stage2.generative.Sana.diffusion.model.utils import set_fp32_attention, set_grad_checkpoint
 
 MODELS = Registry("models")
 

@@ -203,6 +203,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                 "Loss metrics must be provided for the first initialization of LossMetricTracker."
             )
 
+        self.loss_metrics_values: dict[str, float | None]
+        self.loss_metrics_tracked: dict[str, list[float] | None]
+
         if not hasattr(self, "loss_metrics_values"):
             self.loss_metrics_values = {}
         if not hasattr(self, "loss_metrics_tracked"):

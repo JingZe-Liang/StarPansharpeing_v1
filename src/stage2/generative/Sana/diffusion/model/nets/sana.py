@@ -22,9 +22,13 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 
-from diffusion.model.builder import MODELS
-from diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, Mlp
-from diffusion.model.nets.sana_blocks import (
+from src.stage2.generative.Sana.diffusion.model.builder import MODELS
+from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import (
+    DWMlp,
+    GLUMBConv,
+    Mlp,
+)
+from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -32,19 +36,25 @@ from diffusion.model.nets.sana_blocks import (
     MultiHeadCrossAttention,
     MultiHeadCrossVallinaAttention,
     PatchEmbed,
+    RopePosEmbed,
     T2IFinalLayer,
     TimestepEmbedder,
     t2i_modulate,
 )
-from diffusion.model.norms import RMSNorm
-from diffusion.model.utils import auto_grad_checkpoint, to_2tuple
-from diffusion.utils.dist_utils import get_rank
-from diffusion.utils.import_utils import is_triton_module_available
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
+from src.stage2.generative.Sana.diffusion.model.utils import (
+    auto_grad_checkpoint,
+    to_2tuple,
+)
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import get_rank
+from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+    is_triton_module_available,
+)
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from diffusion.model.nets.fastlinear.modules import (
+    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
     )
 
@@ -247,6 +257,7 @@ class Sana(nn.Module):
             kernel_size=kernel_size,
             bias=True,
         )
+        self.num_patches = self.x_embedder.num_patches
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.cfg_embedder = None
         if cfg_embed:
@@ -399,11 +410,13 @@ class Sana(nn.Module):
         self.apply(_basic_init)
 
         if self.use_pe:
+            # breakpoint()
             if self.pos_embed_type == "sincos":
                 # Initialize (and freeze) pos_embed by sin-cos embedding:
                 pos_embed = get_2d_sincos_pos_embed(
                     self.pos_embed.shape[-1],
-                    int(self.x_embedder.num_patches**0.5),
+                    # int(self.x_embedder.num_patches**0.5),
+                    int(self.num_patches**0.5),
                     pe_interpolation=self.pe_interpolation,
                     base_size=self.base_size,
                 )

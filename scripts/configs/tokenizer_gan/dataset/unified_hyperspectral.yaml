@@ -13,8 +13,10 @@ train_paths:
   - - data_local/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
   - - data_local/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
   - - ${glob:"data/MMOT/hyper_images/*.tar"} # MMOT, ? bands
+
   # 8 bands
-  - - data_local/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-{0000..0069}.tar
+    - data_local/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
     - data_local/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
     - data_local/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
     - data/Multispectral-Spacenet-series/01_SN1_buildings_8band.tar
@@ -22,8 +24,10 @@ train_paths:
     - data/Multispectral-Spacenet-series/02_SN2_buildings_PS-MS.tar
     - data/Multispectral-Spacenet-series/03_SN3_roads_PS-MS.tar
     - data/Multispectral-Spacenet-series/05_SN5_roads_PS-MS.tar
+
   # 4 bands
-  - - data_local/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+  - - data/Multispectral-FMow-full/hyper_images_4bands/FMoW-4_bands-px_1024-RGB-jp2k-80-{0000..0001}.tar
+    - data_local/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
     - data_local/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
     - data_local/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
     - data/Multispectral-Spacenet-series/00_SN4_buildings_PS-RGBNIR.tar
@@ -219,16 +223,16 @@ train_loader:
   curriculum_kwargs:
     total_steps: 500_000 #${training.max_steps}
     start_prob:
-      - 0.8 # BigEarthNet_S2
+      - 2.0 # BigEarthNet_S2
       - 0.3 # TUM
       - 0.2 # MMSeg_YREB
       - 0.3 # DFC_2020
       - 1.2 # MMOT
-      - 1.2 # WorldView3, WorldView2, DCF-2019, Spacenet
-      - 1.2 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
+      - 3.0 # WorldView3, WorldView2, DCF-2019, Spacenet
+      - 3.0 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
       - 0.3 # OHS, 32 bands
-      - 0.1 # Houston, 50 bands
-      - 2.8 # RGB images
+      - 0.3 # Houston, 50 bands
+      - 3.2 # RGB images
       - 1.4 # HyperGlobal450k EO1
       - 1.4 # HyperGlobal450k GF5
       - 1.4 # hyspecnet11k
@@ -240,25 +244,25 @@ train_loader:
       - 2.2 # satellogic
       # - 0.2 # MUSLI
     end_prob:
-      - 0.8 # BigEarthNet_S2
+      - 1.2 # BigEarthNet_S2
       - 0.4 # TUM
       - 0.4 # MMSeg_YREB
       - 0.4 # DFC_2020
       - 0.4 # MMOT
-      - 0.4 # WorldView3, WorldView2, DCF-2019, Spacenet
-      - 0.4 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
+      - 1.5 # WorldView3, WorldView2, DCF-2019, Spacenet
+      - 1.5 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
       - 0.4 # OHS
       - 0.4 # Houston
-      - 0.8 # RGB images
-      - 0.6 # HyperGlobal450k EO1
-      - 0.6 # HyperGlobal450k GF5
-      - 0.8 # hyspecnet11k
+      - 1.5 # RGB images
+      - 0.4 # HyperGlobal450k EO1
+      - 0.4 # HyperGlobal450k GF5
+      - 0.5 # hyspecnet11k
       - 0.4 # DryadHyper
       - 0.4 # MDAS-HySpex
       - 0.4 # MDAS-EeteS
-      - 0.6 # conditions
-      - 0.6 # neon
-      - 0.8 # satellogic
+      - 0.4 # conditions
+      - 0.4 # neon
+      - 0.5 # satellogic
       # - 0.2
 
 val_loader:

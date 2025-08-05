@@ -26,7 +26,7 @@ __re_config_logger = True
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
-logger.level("INFO", icon="➡️", color="<light-black>")
+logger.level("INFO", icon="⭐", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
@@ -90,7 +90,10 @@ if __re_config_logger:
 
 
 def set_logger_file(
-    file: str | Path | None = None, level: LogLevel = "debug", add_time: bool = True
+    file: str | Path | None = None,
+    level: LogLevel = "debug",
+    add_time: bool = True,
+    mode="w",
 ) -> None:
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
@@ -128,8 +131,9 @@ def set_logger_file(
         rotation="10 MB",
         backtrace=True,
         colorize=False,
+        mode=mode,
     )
-    log_print("Set logger to log to file: {file} with level {level}")
+    log_print(f"Set logger to log to file: {file} with level {level}")
 
 
 def is_rank_zero() -> bool:

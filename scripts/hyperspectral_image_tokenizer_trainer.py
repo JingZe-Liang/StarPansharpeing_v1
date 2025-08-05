@@ -381,6 +381,7 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.train_cfg.log.run_comment is not None:
             log_file = Path(log_file.as_posix() + "_" + self.train_cfg.log.run_comment)
         log_file = log_file / "log.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
@@ -1115,16 +1116,16 @@ class CosmosHyperspectralTokenizerTrainer:
         # repa or vf feature
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
         if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
-            _unwrap_tok, "_hook_for_repa", False
+            _unwrap_tok, "_use_repa_loss", False
         ):
-            repa_feature = _unwrap_tok.get_repa_feature()
+            repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
             assert repa_feature is not None, "repa_feature is None"
             out_d["repa_feature"] = repa_feature
 
         elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
-            _unwrap_tok, "_vf_proj", False
+            _unwrap_tok, "_use_vf_loss", False
         ):
-            vf_feature = _unwrap_tok.get_vf_feature()
+            vf_feature = _unwrap_tok.get_vf_feature()  # type: ignore
             assert vf_feature is not None, "vf_feature is None"
             out_d["vf_feature"] = vf_feature
 

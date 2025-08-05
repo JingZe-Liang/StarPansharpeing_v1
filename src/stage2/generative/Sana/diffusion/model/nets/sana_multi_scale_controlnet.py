@@ -21,12 +21,15 @@ import torch
 import torch.nn as nn
 from torch.nn import Linear, Module, init
 
-from diffusion.model.builder import MODELS
-from diffusion.model.nets.sana import get_2d_sincos_pos_embed
-from diffusion.model.nets.sana_blocks import RopePosEmbed
-from diffusion.model.nets.sana_multi_scale import SanaMS, SanaMSBlock
-from diffusion.model.utils import auto_grad_checkpoint
-from diffusion.utils.import_utils import (
+from src.stage2.generative.Sana.diffusion.model.builder import MODELS
+from src.stage2.generative.Sana.diffusion.model.nets.sana import get_2d_sincos_pos_embed
+from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import RopePosEmbed
+from src.stage2.generative.Sana.diffusion.model.nets.sana_multi_scale import (
+    SanaMS,
+    SanaMSBlock,
+)
+from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
+from src.stage2.generative.Sana.diffusion.utils.import_utils import (
     is_triton_module_available,
     is_xformers_available,
 )
@@ -87,7 +90,7 @@ class ControlSanaMSBlock(Module):
         return control_signal, control_signal_skip
 
 
-@MODELS.register_module()
+@MODELS.register_module(force=True)
 class SanaMSControlNet(SanaMS):
     """
     Sana with ControlNet
@@ -357,15 +360,39 @@ class SanaMSControlNet(SanaMS):
 #################################################################################
 
 
-@MODELS.register_module()
+# @MODELS.register_module()
 def SanaMSControlNet_600M_P1_D28(**kwargs):
     return SanaMSControlNet(
         depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs
     )
 
 
-@MODELS.register_module()
+# @MODELS.register_module()
 def SanaMSControlNet_1600M_P1_D20(**kwargs):
     return SanaMSControlNet(
         depth=20, hidden_size=2240, patch_size=1, num_heads=20, **kwargs
     )
+
+
+if __name__ == "__main__":
+    device = "cuda:1"
+    torch.cuda.set_device(device)
+
+    # model
+    model = SanaMSControlNet_600M_P1_D28(
+        input_size=32,
+        in_channels=16,
+    )
+    model.to(device)
+
+    inputs = torch.randn(1, 16, 32, 32).to(device)
+    timestep = torch.tensor([0.0]).to(device)
+    data_info = {
+        "control_signal": torch.randn(1, 16, 32, 32).to(device),
+    }
+    cap = torch.randn(1, 1, 300, 4096).to(device)
+    mask = None
+
+    # forward
+    output = model(inputs, timestep, cap, mask, data_info)
+    print(output.shape)

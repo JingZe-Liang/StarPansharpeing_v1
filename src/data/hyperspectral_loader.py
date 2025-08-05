@@ -43,6 +43,7 @@ from src.data.codecs import (
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     chained_dataloaders,
+    check_img_channel,
     de_structure_tar,
     expand_paths_and_correct_loader_kwargs,
     extract_modality_names,
@@ -53,7 +54,6 @@ from src.data.utils import (
     get_wids_index_json_info,
     large_image_resizer_clipper,
     loop_apply_filters,
-    may_repeat_channels,
     norm_img,
     remove_dot_and_extensions,
     remove_extension,
@@ -256,17 +256,16 @@ def get_hyperspectral_dataloaders(
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,
-    img_key: str
-    | list[str] = "auto",  # image key in the sample dictionary, default is "img"
+    # image key in the sample dictionary
+    img_key: str | list[str] = "auto",
     tgt_key: str | list[str] | None = None,
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
     undecoded_filtered: bool = True,
-    constraint_size: int
-    | tuple[int, int]
-    | None = None,  # int for minimal_size; tuple for (min, max)
-    resize_before_transform: int
-    | None = None,  # resize to the same size before transformation and batching
+    # int for minimal_size; tuple for (min, max)
+    constraint_size: int | tuple[int, int] | None = None,
+    # resize to the same size before transformation and batching
+    resize_before_transform: int | None = None,
     hyper_transforms_lst: tuple[str, ...] | None = (
         "grayscale",
         "channel_shuffle",
@@ -281,8 +280,7 @@ def get_hyperspectral_dataloaders(
     prefetch_factor: int | None = 6,
     pin_memory: bool = False,
     shuffle_within_workers: bool = False,
-    check_channels: bool = False,
-    channels: int | None = None,
+    check_channels_n: int | None = None,
     is_structured_tar: bool = False,
     remove_meta_data: bool = False,
     repeat_n: int = 1,
@@ -298,10 +296,30 @@ def get_hyperspectral_dataloaders(
         num_workers (int): Number of worker processes for data loading
         shuffle_size (int, optional): Buffer size for shuffling data. Defaults to 100.
         to_neg_1_1 (bool, optional): Whether to normalize data to [-1,1] range. Defaults to True.
-        hyper_transforms_lst (tuple[str] | None, optional): List of data augmentation operations. Defaults to ("grayscale","channel_shuffle","rotation","cutmix","horizontal_flip","vertical_flip").
-        transform_prob (tuple[float] | float, optional): Probability for each augmentation operation. Defaults to 0.2.
-        random_apply (int | tuple[int], optional): Number of random augmentations to apply. Defaults to 1.
+        permute (bool, optional): Whether to permute tensor dimensions. Defaults to True.
+        check_nan (bool, optional): Whether to check for NaN values in data. Defaults to False.
+        img_key (str | list[str], optional): Image key(s) in the sample dictionary. Defaults to "auto".
+        tgt_key (str | list[str] | None, optional): Target key(s) for image data. Defaults to None.
+        keys_to_remove (str | list[str] | None, optional): Keys to remove from samples. Defaults to None.
+        random_one_key (bool, optional): Whether to randomly select one key when img_key="auto". Defaults to False.
+        undecoded_filtered (bool, optional): Whether to filter undecoded images. Defaults to True.
+        constraint_size (int | tuple[int, int] | None, optional): Size constraints for images (min or (min, max)). Defaults to None.
+        resize_before_transform (int | None, optional): Resize images to this size before transformation. Defaults to None.
+        hyper_transforms_lst (tuple[str, ...] | None, optional): List of data augmentation operations.
+            Defaults to ("grayscale", "channel_shuffle", "rotation", "cutmix", "horizontal_flip", "vertical_flip").
+        transform_prob (float, optional): Probability for each augmentation operation. Defaults to 0.0.
+        random_apply (int | tuple[int, int], optional): Number of random augmentations to apply. Defaults to 1.
         resample (bool, optional): Whether to allow data resampling. Defaults to True.
+        prefetch_factor (int | None, optional): Number of batches prefetched by each worker. Defaults to 6.
+        pin_memory (bool, optional): Whether to use pinned memory for data loading. Defaults to False.
+        shuffle_within_workers (bool, optional): Whether to shuffle data within workers. Defaults to False.
+        check_channels_n (int | None, optional): Expected number of channels to check. Defaults to None.
+        is_structured_tar (bool, optional): Whether the tar files are structured. Defaults to False.
+        remove_meta_data (bool, optional): Whether to remove metadata from samples. Defaults to False.
+        repeat_n (int, optional): Number of times to repeat the dataset. Defaults to 1.
+        timeout (int, optional): Timeout for data loading operations in seconds. Defaults to 300.
+        epoch_len (int, optional): Length of an epoch. Defaults to 0.
+        persistent_workers (bool, optional): Whether to keep workers alive between epochs. Defaults to True.
 
     Returns:
         tuple[wds.WebDataset, wds.WebLoader]: Returns a tuple containing the WebDataset object and its corresponding dataloader
@@ -416,12 +434,11 @@ def get_hyperspectral_dataloaders(
     )
 
     # channel check
-    if check_channels:
-        assert channels is not None, (
-            "channels must be specified if check_channels is True"
-        )
-        dataset = dataset.map_dict(
-            img=partial(may_repeat_channels, rep_channels=channels)
+    if check_channels_n is not None:
+        dataset = dataset.map(
+            partial(
+                check_img_channel, expect_channels=check_channels_n, img_key=tgt_key
+            )
         )
 
     # resize
@@ -805,6 +822,14 @@ def get_hyperspectral_wids_dataloaders(
     filter_out_none: bool = True,
     **__discard_kwargs,  # discard other kwargs
 ):
+    if isinstance(index_file, (list, tuple)):
+        index_infos: list[dict] = []
+        for p in index_file:
+            assert os.path.exists(p), f"Index file {p} does not exist"
+            index_info, _ = get_wids_index_json_info(p)
+            index_infos.extend(index_info)
+        index_file = index_infos
+
     dataset = wids.ShardListDataset(
         index_file,
         localname=lambda x: f"{wids_local_name_prefix}/{x}"
@@ -1324,13 +1349,6 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             )
             assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
 
-            # if len(p_lst) == 1:
-            #     p_lst = p_lst[0]
-            #     assert isinstance(
-            #         p_lst, str
-            #     ), f"paths should be a list of strings, but got {type(p_lst)} for paths {p_lst}"
-            # else:
-
             p_lst = list(flatten_nested_list(p_lst))  # type: ignore
             for p in p_lst:
                 assert isinstance(p, str), (
@@ -1343,13 +1361,14 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             loader_kwargs["epoch_len"] = -1
 
             p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
-                p_lst, loader_kwargs
+                loader_type, p_lst, loader_kwargs
             )
             log_print(
                 f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n"
                 + "-" * 30
             )
 
+            # construct webdataset/wids datasets and dataloaders
             if loader_type == "webdataset":
                 log_print("Using webdataset loader")
                 dataset, dataloader = get_hyperspectral_dataloaders(
@@ -1357,19 +1376,19 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 )
             elif loader_type == "wids":
                 log_print("Using wids loader")
-                assert isinstance(p_lst, list) and len(p_lst) == 1, (
-                    "must contain only one json file"
-                )
-                p_lst = p_lst[0]
-                assert isinstance(p_lst, str) and p_lst.endswith(".json"), (
-                    f"wids loader expects a single json file as index_file, but got {p_lst}"
-                )
+                if isinstance(p_lst, list) and len(p_lst) == 1:
+                    p_lst = p_lst[0]
+
                 dataset, dataloader = get_hyperspectral_wids_dataloaders(
                     index_file=p_lst,
                     **loader_kwargs,
                 )
+            else:
+                raise ValueError(f"loader_type {loader_type} is not supported")
+
             datasets.append(dataset)
             dataloaders.append(dataloader)
+
         # > folder loader
         elif loader_type == "folder":
             log_print("Using folder loader")
@@ -1494,23 +1513,28 @@ if __name__ == "__main__":
         #     "data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar",
         # ]
         # ["data/EarthView/hyper_images/satellogic/shard1.tar"]
-        ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
+        # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"],
         # ["data/Multispectral-Spacenet-series/05_SN6_buildings_PS-RGB.tar"]
         # ["data/Multispectral-Spacenet-series/00_SN1_buildings_3band.tar"],
         # ["data/Multispectral-Spacenet-series/02_SN7_buildings_images.tar"]
         # ["data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"]
         # ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
-        # ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar"]
+        # [
+        #     ["data/RS5M/train/pub11-train-0006.tar"],
+        #     ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-0021.tar"],
+        # ]
+        # ["data/HyperGlobal/hyper_images/HyperGlobal-GF5-bands-px_64_0002.tar"]
+        ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
     ]
     test_batch_size = 8
-    test_num_workers = 2
+    test_num_workers = 0
     test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type=None,
+        loader_type="wids",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1521,9 +1545,8 @@ if __name__ == "__main__":
         prefetch_factor=2,
         remove_meta_data=False,
         resize_before_transform=512,
-        shuffle_within_workers=False,
+        shuffle_within_workers=True,
         resample=True,
-        check_channels=False,
     )
     changed_kwargs = [
         # {"img_key": ["hsi", "rgb"]},
@@ -1536,10 +1559,11 @@ if __name__ == "__main__":
         #     "resample": False,
         # },
         # {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
-        {"img_key": ["rgb"], "resize_before_transform": 512},
+        # {"img_key": "auto", "resize_before_transform": 512, "check_channels_n": 3},
         # {"img_key": ["img"], "keys_to_remove": ["metadata"]}
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},
+        {"img_key": "auto", "tgt_key": "img"}
         # {"permute": False},
         # {
         #     "loader_type": "wids",
