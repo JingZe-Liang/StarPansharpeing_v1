@@ -3,6 +3,7 @@ from functools import partial, wraps
 from inspect import isclass
 from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
 
+import lazy_loader
 import numpy as np
 import torch
 import torch._dynamo
@@ -11,10 +12,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
-from natten import na2d
 from timm.layers.drop import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
+
+natten = lazy_loader.load("natten")
+
 
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE

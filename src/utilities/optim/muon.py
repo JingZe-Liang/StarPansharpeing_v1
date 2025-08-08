@@ -533,13 +533,13 @@ class Muon(torch.optim.Optimizer):
             state_steps,
         )
 
-        adam(
-            params_with_grad,
-            grads,
-            exp_avgs,
-            exp_avg_sqs,
-            max_exp_avg_sqs,
-            state_steps,
+        adam_inputs = dict(
+            params=params_with_grad,
+            grads=grads,
+            exp_avgs=exp_avgs,
+            exp_avg_sqs=exp_avg_sqs,
+            max_exp_avg_sqs=max_exp_avg_sqs,
+            state_steps=state_steps,
             amsgrad=group["adamw_amsgrad"],
             has_complex=has_complex,
             beta1=beta1,
@@ -554,8 +554,13 @@ class Muon(torch.optim.Optimizer):
             fused=group["adamw_fused"],
             grad_scale=getattr(self, "grad_scale", None),
             found_inf=getattr(self, "found_inf", None),
-            decoupled_weight_decay=group["decoupled_weight_decay"],
         )
+
+        if torch.__version__ >= "2.7.0":
+            # torch 2.7.0+ supports decoupled weight decay in adam
+            adam_inputs["decoupled_weight_decay"] = group["decoupled_weight_decay"]
+
+        adam(**adam_inputs)
 
     @_use_grad_for_differentiable
     def step(self, closure=None):
