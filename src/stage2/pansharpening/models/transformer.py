@@ -4,16 +4,52 @@ from typing import Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from flash_attn.ops.rms_norm import RMSNorm as RMSNormFlash
 from timm.layers.attention import Attention as Attention_
 from timm.layers.drop import DropPath
-from timm.layers.mlp import Mlp as Mlp_
+from timm.layers.mlp import SwiGLU as SwiGLUMLP_
 from timm.layers.patch_embed import PatchEmbed
 
 from src.stage2.pansharpening.models.rope import (
     RotaryPositionEmbeddingPytorchV2,
     get_2d_sincos_pos_embed,
 )
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+
+    def forward(self, x):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L, C]
+        """
+        return self._norm(x.float()).type_as(x) * self.weight
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, alpha: float = 1.702, limit: float = 7.0):
+        super().__init__()
+        self.alpha = alpha
+        self.limit = limit
+
+    def forward(self, x_glu, x_linear):
+        alpha, limit = self.alpha, self.limit
+        # x_glu, x_linear = x[..., ::2], x[..., 1::2]
+        # Clamp the input values
+        x_glu = x_glu.clamp(min=None, max=limit)
+        x_linear = x_linear.clamp(min=-limit, max=limit)
+        out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+        # Note we add an extra bias of 1 to the linear layer
+        return out_glu * (x_linear + 1)
 
 
 class Attention(Attention_):
@@ -85,24 +121,23 @@ class Attention(Attention_):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        if torch.get_autocast_gpu_dtype() == torch.float16:
+        if torch.get_autocast_dtype("cuda") == torch.float16:
             x = x.clip(-65504, 65504)
 
         return x
 
 
-class ClipMlp(Mlp_):
+class ClipMlp(SwiGLUMLP_):
     def __init__(
         self,
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer=functools.partial(nn.GELU, approximate="tanh"),
-        norm_layer=nn.LayerNorm,
+        act_layer=SwiGLU,
+        norm_layer=None,
         bias=True,
         drop=0.0,
-        use_conv=False,
-        clip_val: float = 8.0,
+        mlp_bias=True,
     ):
         super().__init__(
             in_features,
@@ -112,14 +147,25 @@ class ClipMlp(Mlp_):
             norm_layer,
             bias,
             drop,
-            use_conv,
         )
-        self.clip_val = clip_val
+        self.mlp_bias = (
+            nn.Parameter(torch.zeros(self.fc2.weight.shape[0])) if mlp_bias else None
+        )
 
     def forward(self, x):
-        return (
-            super().forward(x).clip(-self.clip_val, self.clip_val)
-        )  # taken from openai OSSA
+        x_gate = self.fc1_g(x)
+        x = self.fc1_x(x)
+        if isinstance(self.act, SwiGLU):
+            x = self.act(x_gate, x)
+        else:
+            x = self.act(x_gate) * x
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        if self.mlp_bias is not None:
+            x += self.mlp_bias
+        x = self.drop2(x)
+        return x
 
 
 class AttenionBlock(nn.Module):
@@ -134,7 +180,7 @@ class AttenionBlock(nn.Module):
         attn_drop=0.0,
         drop_path=0.0,
         norm_layer=nn.LayerNorm,
-        act_layer=functools.partial(nn.GELU, approximate="tanh"),
+        act_layer=nn.SiLU,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -168,18 +214,19 @@ class AttenionBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
+        in_dim: int,
         dim,
         depth,
         num_heads,
         mlp_ratio=4.0,
         drop=0.0,
         drop_path=0.0,
-        input_size=32,
+        input_size: int = 32,
         patch_size=2,
         out_channels=16,
         pos_embed_type="sincos",
         norm_layer=functools.partial(RMSNormFlash, eps=1e-6),
-        act_layer=functools.partial(nn.GELU, approximate="tanh"),
+        act_layer=SwiGLU,
     ):
         super().__init__()
 
@@ -191,12 +238,12 @@ class Transformer(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=input_size,
             patch_size=patch_size,
-            in_chans=dim,
+            in_chans=in_dim,
             embed_dim=dim // self._n_modalities,
             bias=True,
             strict_img_size=False,
         )
-        self.fuse_stem = nn.Linear(dim, dim)
+        self.fuse_stem = nn.Linear(dim // self._n_modalities * self._n_modalities, dim)
         self.base_size = input_size // self.patch_size
         self.pe_interpolation = 1.0
         self.out_channels = out_channels
@@ -225,6 +272,10 @@ class Transformer(nn.Module):
                 )
             )
         self.layers = nn.ModuleList(layers)
+        self.head = nn.Sequential(
+            norm_layer(dim),
+            nn.Linear(dim, out_channels * patch_size**2, bias=True),
+        )
 
         # positional embedding
         self.pos_embed_type = pos_embed_type
@@ -320,12 +371,16 @@ class Transformer(nn.Module):
         h = w = int(x.shape[1] ** 0.5)
         assert h * w == x.shape[1]
 
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = torch.einsum("nhwpqc->nchpwq", x)
-        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
-        return imgs
+        x = rearrange(
+            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
+        )
 
-    def forward(self, latents: tuple):
+        # x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
+        # x = torch.einsum("nhwpqc->nchpwq", x)
+        # imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        return x
+
+    def forward(self, latents: tuple | list):
         # patch embedding
         ys = []
         for latent in latents:
@@ -344,7 +399,10 @@ class Transformer(nn.Module):
 
         # blocks
         for layer in self.layers:
-            y = layer(y, mask=None, rope=pe)
+            y = layer(y, mask=None, pe=pe)
+
+        # head
+        y = self.head(y)
 
         # unpatchify
         out = self.unpatchify(y)
@@ -364,3 +422,30 @@ class Transformer(nn.Module):
         # patch embedding
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+
+if __name__ == "__main__":
+    device = "cuda:1"
+    torch.cuda.set_device(device)
+    # x = torch.randn(1, 768, 128).to(device)
+
+    # rmsnorm = RMSNorm(dim=128)
+    # print(rmsnorm(x).shape)
+
+    # attn = Attention(128, 8, qk_norm=RMSNormFlash).to(device)
+    # print(attn(x).shape)
+
+    # mlp = ClipMlp(
+    #     in_features=128,
+    #     hidden_features=256,
+    #     out_features=128,
+    #     norm_layer=RMSNormFlash,
+    # ).to(device)
+    # print(mlp(x).shape)
+
+    model = Transformer(
+        16, 128, 4, 8, pos_embed_type="rope", norm_layer=RMSNormFlash, input_size=32
+    ).to(device)
+    x = torch.randn(1, 16, 64, 64).to(device)
+    out = model((x, x))
+    print(out.shape)  # Expected shape: (1, 16, 32, 32)

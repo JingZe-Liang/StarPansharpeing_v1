@@ -3,7 +3,7 @@ import json
 import math
 import os
 import sys
-from typing import Callable, Literal, cast
+from typing import Callable, Literal, cast, no_type_check
 
 import cv2
 import numpy as np
@@ -96,6 +96,7 @@ class UnifiedAnnotator:
         if self._del:
             self.init_annotator(self.annotation, device)
 
+    @no_type_check
     def __call__(self, image: np.ndarray | str) -> np.ndarray | str:
         """
         Processes an image to generate a condition map.

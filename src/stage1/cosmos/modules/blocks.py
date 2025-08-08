@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
 from natten import na2d
-from timm.layers import DropPath
+from timm.layers.drop import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 
@@ -69,8 +69,6 @@ else:
 
 
 # utilities
-
-
 def get_same_padding(
     kernel_size: Union[int, tuple[int, ...]],
 ):

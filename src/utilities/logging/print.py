@@ -3,14 +3,12 @@ import sys
 from contextlib import ContextDecorator
 from functools import wraps
 from pathlib import Path
-from typing import Literal
+from typing import Any, Callable, Literal
 
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger
 from rich.console import Console
-
-from .functions import once
 
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
@@ -30,6 +28,27 @@ logger.level("INFO", icon="⭐", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
+
+
+def once(func: Callable[..., Any]) -> Callable[..., Any]:
+    """
+    Decorator to ensure a function is only executed once.
+    """
+    has_run = False
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal has_run
+        is_auto = kwargs.pop("auto", True)
+        if not has_run or not is_auto:
+            has_run = True
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+def default(x, val):
+    return x if x is not None else val
 
 
 # Setup console
@@ -59,7 +78,13 @@ def print_custom_markup(text: str):
 
 
 @once
-def configure_logger(sink=None, level="debug", auto=True):
+def configure_logger(
+    sink=None,
+    level="debug",
+    filter=None,
+    removed=True,
+    auto=True,  # reserved for once decorator
+):
     global __re_config_logger, _console
 
     __re_config_logger = False
@@ -70,7 +95,8 @@ def configure_logger(sink=None, level="debug", auto=True):
     elif sink is None:
         sink = sys.stderr
 
-    logger.remove()
+    if removed:
+        logger.remove()
     logger.add(
         sink,
         level=level.upper(),
@@ -78,11 +104,13 @@ def configure_logger(sink=None, level="debug", auto=True):
         colorize=True,
         format=(
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
+            "<green>{extra}</green> "
             "- <level>{message}</level>"
         ),
+        filter=filter,
     )
-    logger.debug("Logger reconfigured")
+    # logger.debug("Logger reconfigured", re_config=True)
 
 
 if __re_config_logger:
@@ -94,6 +122,7 @@ def set_logger_file(
     level: LogLevel = "debug",
     add_time: bool = True,
     mode="w",
+    filter=None,
 ) -> None:
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
@@ -132,6 +161,7 @@ def set_logger_file(
         backtrace=True,
         colorize=False,
         mode=mode,
+        filter=filter,
     )
     log_print(f"Set logger to log to file: {file} with level {level}")
 
@@ -158,6 +188,16 @@ def get_dist_rank() -> tuple[bool, int]:
     )
 
 
+def format_extra(record):
+    if len(record["extra"]) == 0:
+        record["extra"] = ""
+        return record
+
+    extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
+    record["extra"] = f" [{extras}]"
+    return record
+
+
 @beartype
 def log_print(
     msg: str,
@@ -167,7 +207,12 @@ def log_print(
     warn_once_pattern: str | None = None,
     once: bool = False,
     stack_level: int = 1,
-    **kwargs,
+    opt_record: bool = False,
+    opt_lazy: bool = False,
+    opt_raw: bool = False,
+    patch_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
+    **other_context,
 ) -> None:
     """
     Logs a message using loguru, optionally only on rank 0,
@@ -204,14 +249,31 @@ def log_print(
                 return
             __warn_once_set.add(msg)
 
-    logger_with_correct_depth = logger.opt(depth=stack_level + 1, colors=True)
+    if patch_fn is None:
+        # e.g., patch_fn = lambda record: r.update({"extra": {"user": "user_id"}})
+        # patch_fn = lambda r: r.update({"extra": ""})
+        patch_fn = format_extra
+
+    logger_patched = logger.patch(patch_fn)
+
+    logger_with_correct_depth = logger_patched.opt(
+        depth=stack_level + 1,
+        colors=True,
+        record=opt_record,
+        lazy=opt_lazy,
+        raw=opt_raw,
+    )
     log_fn = getattr(logger_with_correct_depth, level)
 
+    if context is None:
+        context = {}
+    context.update(other_context)
+
     if only_rank_zero:
-        log_fn(msg, **kwargs)
+        log_fn(msg, **context)
     else:
         rank: int = dist.get_rank() if dist.is_initialized() else 0
-        log_fn(f"[Rank {rank}] | {msg}", **kwargs)
+        log_fn(f"[Rank {rank}] | {msg}", **context)
 
 
 class catch_any(ContextDecorator):
@@ -251,12 +313,7 @@ class catch_any(ContextDecorator):
 
 
 if __name__ == "__main__":
-    logger.info("this is a log")
-    from rich.progress import track
+    with logger.contextualize(user="test_user"):
+        log_print("Hello, World!")
 
-    for i in track(range(10), description="Processing...", console=_console):
-        log_print(
-            f"This is a warning once message at step {i}",
-            warn_once_pattern=r".* at step \d+",
-            level="warning",
-        )
+    log_print("This is a debug message", level="debug")

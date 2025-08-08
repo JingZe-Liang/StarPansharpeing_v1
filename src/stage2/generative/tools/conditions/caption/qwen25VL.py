@@ -1,21 +1,22 @@
-import array
+import asyncio
 import base64
 import io
 import os
+import platform
 import sys
 
 import numpy as np
+import toml
 import torch
+from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletion
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, TextStreamer
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
 
-from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import (
-    gemma2_caption_encode,
-)
-
 setattr(Qwen2_5_VLVisionAttention, "is_causal", False)
+type InputImageType = str | np.ndarray | Image.Image
 
 max_tokens = 300
 default_prompt = f"""
@@ -32,10 +33,14 @@ Do not include any personal opinions or subjective views.
 """
 
 
-def array_img_to_base64(img: np.ndarray) -> str:
+def img_to_base64(img: np.ndarray | str) -> str:
     """
     Convert a numpy array image to base64 string.
     """
+    if isinstance(img, str):
+        with open(img, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
+
     assert (
         img.ndim == 3 and img.dtype == np.uint8
     ), "Image must be a 3D numpy array with dtype uint8."
@@ -77,6 +82,10 @@ def get_qwen25vl_model(
     # model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     #     "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
     # )
+
+    from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import (
+        gemma2_caption_encode,
+    )
 
     # We recommend enabling flash_attention_2 for better acceleration and memory saving, especially in multi-image and video scenarios.
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -175,13 +184,86 @@ def get_qwen25vl_model(
     return model, process_img
 
 
+def get_qwen25vl_max_api(max_current_tasks=5):
+    client = AsyncOpenAI(
+        api_key=toml.load("env.toml")["DASHSCOPE_API_KEY"],
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    async def image_captioning(img):
+        # Encode image to base64
+        base64_image = img_to_base64(img)
+
+        response = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            },
+                        },
+                        {"type": "text", "text": default_prompt},
+                    ],
+                }
+            ],
+            model="qwen-vl-plus",
+            extra_body={"enable_thinking": False},
+        )
+        # print(response.choices[0].message.content)
+        return response.choices[0].message.content
+
+    semaphore = asyncio.Semaphore(max_current_tasks)
+
+    async def limited_image_captioning(img):
+        async with semaphore:  # 获取信号量
+            return await image_captioning(img)
+
+    async def captioning_async_main(images) -> list[ChatCompletion]:
+        # 创建任务列表，但受信号量限制
+        tasks = [limited_image_captioning(image) for image in images]
+        results = await asyncio.gather(*tasks)
+        return results
+
+    def process_img(img: InputImageType):
+        if isinstance(img, np.ndarray):
+            img = array_img_to_pil(img)
+        elif isinstance(img, str):
+            assert os.path.exists(img), f"Image path {img} does not exist."
+        else:
+            raise ValueError(f"Invalid image path: {img}")
+
+        # FIXME: async, but single image here
+        results = asyncio.run(
+            captioning_async_main([img] if not isinstance(img, (tuple, list)) else img)
+        )
+
+        out = []
+        for res in results:
+            if res:
+                out.append(res)
+            else:
+                out.append(None)
+
+        if len(out) == 1:
+            return out[0]
+        else:
+            return out
+
+    return process_img
+
+
 if __name__ == "__main__":
-    _, inferencer = get_qwen25vl_model()
-    import PIL.Image as Image
+    # _, inferencer = get_qwen25vl_model()
+    # import PIL.Image as Image
 
-    # Example usage
-    img_path = "data/TEOChatlas/eval/External_images/AID/airport_37.jpg"
-    img = Image.open(img_path).convert("RGB")
-    img = np.array(img)
+    # # Example usage
+    # img_path = "data/TEOChatlas/eval/External_images/AID/airport_37.jpg"
+    # img = Image.open(img_path).convert("RGB")
+    # img = np.array(img)
 
-    print(inferencer(img_path))
+    # print(inferencer(img_path))
+
+    get_qwen25vl_max_api()

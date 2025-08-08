@@ -61,7 +61,6 @@ def is_odd(n: int) -> bool:
 
 
 def nonlinearity(x, mp=False):
-    # return x * torch.sigmoid(x)
     if mp:
         return torch.nn.functional.silu(x) / 0.596
     return torch.nn.functional.silu(x)
@@ -88,28 +87,37 @@ class RMSNorm2d(torch.nn.Module):
         eps: float = 1e-5,
         elementwise_affine: bool = True,
         bias: bool = True,
+        scale: float | None = None,
     ) -> None:
         super().__init__()
         self.num_features = num_features
         self.eps = eps
         self.elementwise_affine = elementwise_affine
+        self.use_bias = bias
+
         if self.elementwise_affine:
             self.weight = torch.nn.parameter.Parameter(torch.ones(self.num_features))
             if bias:
                 self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_features))
             else:
-                self.register_parameter("bias", None)
+                self.bias = 0.0
         else:
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
+            self.weight = 1.0
+            self.bias = 0.0
+
+        self.scale = scale if scale is not None else num_features**0.5
 
     @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = (
-            x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
-        ).to(x.dtype)
-        if self.elementwise_affine:
-            x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        x = torch.nn.functional.normalize(x, dim=1, eps=self.eps)
+        w = self.weight.view(1, -1, 1, 1) if self.elementwise_affine else 1
+        b = (
+            self.bias.view(1, -1, 1, 1)
+            if (self.elementwise_affine and self.use_bias)
+            else 0.0
+        )
+        x = x * self.scale * w + b
+
         return x
 
 

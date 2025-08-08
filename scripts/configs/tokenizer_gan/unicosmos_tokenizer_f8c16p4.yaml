@@ -96,7 +96,6 @@ tokenizer:
   act_checkpoint: true
 
   channel_drop_config:
-    learnable: false
     drop_type: ${list:[4, 8, 12]}
     max_channels: 16
     drop_prob: 0.5

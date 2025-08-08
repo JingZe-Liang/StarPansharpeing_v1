@@ -63,13 +63,11 @@ def _list_or_num_mult(x: list | int | float, factor: int):
 class NestChannelDrop(nn.Module):
     def __init__(
         self,
-        learnable: bool = False,
         drop_type: str | list[int] = "uniform_4",
         max_channels: int = 16,
         drop_prob: float = 0.5,
     ):
         super().__init__()
-        self.learnable = learnable
         self.max_channels = max_channels
         self.drop_prob = drop_prob
 
@@ -424,7 +422,7 @@ class ContinuousImageTokenizer(nn.Module):
                     "it will be removed"
                 )
                 quant_conv = nn.Sequential(
-                    Normalize(z_factor * z_channels, norm_type="rms_triton"),
+                    Normalize(z_factor * z_channels, norm_type="gn"),
                     torch.nn.Conv2d(
                         z_factor * z_channels, z_factor * latent_channels, 1
                     ),

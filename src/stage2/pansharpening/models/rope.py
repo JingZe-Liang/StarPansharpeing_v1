@@ -209,6 +209,7 @@ def _rotate_half_te(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+@torch.autocast(enabled=False, device_type="cuda")
 def _apply_rotary_pos_emb_te(
     t: torch.Tensor,
     cos_freqs: torch.Tensor,
@@ -382,6 +383,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         scale_factors = (1 - smooth_mask) / self.scale + smooth_mask
         return scale_factors
 
+    @torch.autocast(enabled=False, device_type="cuda")
     def get_inv_freq(self, device: torch.device) -> None:
         """Get the inverse frequency."""
         if self.rope_dim == "1D":
@@ -606,6 +608,7 @@ to_1tuple = _ntuple(1)
 to_2tuple = _ntuple(2)
 
 
+@torch.autocast(enabled=False, device_type="cuda")
 def get_2d_sincos_pos_embed(
     embed_dim,
     grid_size: tuple[int, int] | int,
