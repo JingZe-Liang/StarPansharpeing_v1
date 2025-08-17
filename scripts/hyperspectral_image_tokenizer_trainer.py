@@ -1548,6 +1548,7 @@ class CosmosHyperspectralTokenizerTrainer:
             ):  # and self.accelerator.sync_gradients:
                 self.log_msg("[Train]: start validation ...")
                 self.val_loop()
+                torch.cuda.empty_cache()
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True

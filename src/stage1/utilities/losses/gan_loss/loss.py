@@ -327,7 +327,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         vf_loss_weight: float | None = None,
         vf_loss_options: dict = {},
         # gram loss
-        gram_loss_weight: float = 1.0,
+        gram_loss_weight: float | None = None,
         gram_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
@@ -428,6 +428,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * repa loss
         self.repa_loss_weight = repa_loss_weight
         self.use_repa = False
+        # breakpoint()
         if repa_loss_weight is not None and repa_loss_weight > 0:
             self.use_repa = True
             if (

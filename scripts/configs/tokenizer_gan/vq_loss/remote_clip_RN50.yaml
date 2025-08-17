@@ -7,11 +7,13 @@ disc_in_channels: ${dataset.channels}
 # perceptual
 perceptual_weight: 0.1
 perceptual_options:
+  use_group: true
   percep_model: remote_clip_RN50
-  rgb_channels: mean
-  # perceptual_groups_to_select: 0.5
+  # rgb_channels: mean
+  num_groups_to_select: 0.5
   img_size: 224
-  perceptual_loss_on_logits: false
+  compute_on_logits: false
+  img_is_neg1_to_1: true
   clip_model_ckpt_path: src/stage1/utilities/losses/remote_clip_v2/checkpoint/RemoteCLIP-RN50.pt
 # ssim loss
 ssim_weight: 0.1

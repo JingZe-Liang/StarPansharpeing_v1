@@ -25,20 +25,20 @@ dataset:
   loader_type: webdataset
   shuffle_within_workers: false
   dataset_names_to_bs:
-    MMSeg_YREB: 24
+    MMSeg_YREB: 16
     DCF_2019: 7
     DFC_2020: 18
     GID_GF2: 12
     Houston: 7
-    DryadHyper: 16
+    DryadHyper: 5
     MUSLI: 1
-    OHS: 6
-    WV3: 6
-    QB: 16
-    GF1: 16
-    IKONOS: 16
+    OHS: 5
+    WV3: 5
+    QB: 5
+    GF1: 5
+    IKONOS: 5
 
-  transform_prob: 0.5
+  transform_prob: 0.0
 
 accelerator:
   gradient_accumulation_plugin:
@@ -88,6 +88,8 @@ tokenizer:
     drop_prob: 0.5
 
 vq_loss:
+  # perceptual loss
+  perceptual_weight: 0.05
   repa_loss_weight: 0.0
   repa_loss_options:
     c_dim_first: true
@@ -217,4 +219,4 @@ train:
 
 val:
   val_duration: 1000
-  max_val_iters: 200 # val only `max_val_iters` batches
+  max_val_iters: 10 # val only `max_val_iters` batches

@@ -480,7 +480,7 @@ class PansharpeningTrainer:
             heavyball.utils.compile_mode = None
 
             self.log_msg(
-                f"use heavyball optimizer, it will compile the optimizer, "
+                "use heavyball optimizer, it will compile the optimizer, "
                 "for efficience testing the scripts, disable the compilation."
             )
 

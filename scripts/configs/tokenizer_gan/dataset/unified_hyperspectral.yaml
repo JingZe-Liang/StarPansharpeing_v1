@@ -122,30 +122,30 @@ val_paths:
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 16 # BigEarthNet_S2
+  - batch_size: 14 # BigEarthNet_S2
     permute: false
   - batch_size: 12 # TUM_128
     num_workers: 0
-  - batch_size: 16 # MMSeg_YREB
+  - batch_size: 14 # MMSeg_YREB
     num_workers: 0
-  - batch_size: 16 # DFC_2020
+  - batch_size: 14 # DFC_2020
     num_workers: 0
   - batch_size: 4 # MMOT
     resize_before_transform: 512
     img_key: [npy]
     tgt_key: [img]
     keys_to_remove: [txt]
-  - batch_size: 5 # WorldView3, WorldView2
+  - batch_size: 4 # WorldView3, WorldView2
     num_workers: 0
     resize_before_transform: 512
-  - batch_size: 5 # QuickBird, WorldView4, IKONOS
+  - batch_size: 4 # QuickBird, WorldView4, IKONOS
     num_workers: 0
     resize_before_transform: 512
-  - batch_size: 5 # OHS
+  - batch_size: 4 # OHS
     num_workers: 0
-  - batch_size: 5 # Houston
+  - batch_size: 4 # Houston
     num_workers: 0
-  - batch_size: 5 # RGB, RS5M-512 pixel
+  - batch_size: 4 # RGB, RS5M-512 pixel
     img_key: auto
     tgt_key: img
     constraint_size: 65536
@@ -153,17 +153,17 @@ train_changed_kwargs_by_loader:
     num_workers: 2
     shuffle_within_workers: true
     shuffle_size: 100
-  - batch_size: 16 # HyperGlobal EO1
-  - batch_size: 16 # HyperGlobal GF5
+  - batch_size: 14 # HyperGlobal EO1
+  - batch_size: 14 # HyperGlobal GF5
   - batch_size: 8 # hyspecnet11k
     num_workers: 0
   - batch_size: 4 # DryadHyper
     num_workers: 0
-  - batch_size: 5 # MDAS-HySpex
+  - batch_size: 4 # MDAS-HySpex
     num_workers: 0
-  - batch_size: 5 # MDAS-EeteS
+  - batch_size: 4 # MDAS-EeteS
     num_workers: 0
-  - batch_size: 5 # conditions
+  - batch_size: 4 # conditions
     resize_before_transform: 512
     img_key: [mlsd, sketch, hed, segmentation]
     keys_to_remove: [rgb.*]
@@ -171,7 +171,7 @@ train_changed_kwargs_by_loader:
     img_key: [hsi] # [hsi, rgb]
     tgt_key: [img]
     keys_to_remove: [rgb.*, metadata.jsonl]
-  - batch_size: 5 # satellogic
+  - batch_size: 4 # satellogic
     resize_before_transform: 512
     img_key: [img]
     keys_to_remove: [metadata.jsonl]

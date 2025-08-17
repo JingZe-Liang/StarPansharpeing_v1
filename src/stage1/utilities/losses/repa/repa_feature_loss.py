@@ -93,7 +93,7 @@ def next_divisble_of_y(x, y):
 
 def load_repa_dino_v3_model(
     weight_path: str | Path | None = None,
-    model_name: str | None = None,
+    model_name: str | None = "dinov3_vitl16",
     pretrained_on="satellite",
     compile=False,
 ) -> torch.nn.Module | torch._dynamo.OptimizedModule:
@@ -370,7 +370,7 @@ class REPALoss(torch.nn.Module):
                 rgb_channels = _rgb_chan_select.tolist()
                 img = img[:, rgb_channels]
             elif (
-                not isinstance(self.rgb_channels, Sequence)
+                not isinstance(self.rgb_channels, (list, tuple))
                 and self.rgb_channels.startswith("random")
                 and self.rgb_channels != "random"
             ):
@@ -405,7 +405,9 @@ class REPALoss(torch.nn.Module):
                 rgb_channels = self.rgb_channels
                 img = img[:, rgb_channels]
 
-        assert img.shape[1] == 3, "img must be rgb images"
+        assert img.shape[1] == 3, (
+            f"img must be rgb images but got image shaped as {img.shape}"
+        )
 
         # resize images
         _interp_kwargs = {"input": img, "mode": "bicubic", "align_corners": False}
