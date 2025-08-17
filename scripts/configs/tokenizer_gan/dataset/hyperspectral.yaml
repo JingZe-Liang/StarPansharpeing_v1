@@ -173,8 +173,7 @@ train_loader:
     prefetch_factor: ${dataset.prefetch_factor}
     shuffle_within_workers: ${dataset.shuffle_within_workers}
     resample: true
-    # check_channels: true
-    # channels: ${dataset.channels}
+    check_channels_n: ${dataset.channels}
 
   # for the lora training wv3, gf2, qb, IKONOS
   # changed_kwargs_by_loader:
@@ -192,6 +191,7 @@ val_loader:
     prefetch_factor: null #${dataset.prefetch_factor}
     shuffle_within_workers: false #${dataset.shuffle_within_workers}
     resample: true
+    check_channels_n: ${dataset.channels}
   # changed_kwargs_by_loader:
   #   - batch_size: 8
   #   - batch_size: 8

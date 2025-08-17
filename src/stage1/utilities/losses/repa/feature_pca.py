@@ -1,14 +1,11 @@
 import einops
 import torch
 from loguru import logger
+from sklearn.decomposition import PCA as PCA_sk
 
 
-def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
-    from cuml.decomposition import PCA as cuML_PCA
-
+def shape_to_1d(img_feat: torch.Tensor, pca_k: int):
     assert img_feat.ndim in (3, 4), "must be 1d vit or 2d cnn features"
-    assert img_feat.is_cuda, "img_feat must be on GPU"
-
     _shape = img_feat.shape
     if len(_shape) == 3:
         c = _shape[-1]  # [bs, l, c]
@@ -25,6 +22,30 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
             w=_shape[3],
         )
 
+    return data, _back_kwargs
+
+
+def feature_pca_sk(img_feat: torch.Tensor, pca_k: int = 3):
+    """
+    Perform PCA dimension reduction on image features using scikit-learn
+    """
+
+    data, _back_kwargs = shape_to_1d(img_feat, pca_k)
+
+    # pca in numpy
+    data = data.detach().cpu().numpy()
+    pca = PCA_sk(n_components=pca_k, whiten=True)
+    pca_data = pca.fit_transform(data)
+    pca_data = einops.rearrange(pca_data, **_back_kwargs)
+
+    return torch.as_tensor(pca_data).to(img_feat.device)
+
+
+def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
+    from cuml.decomposition import PCA as cuML_PCA
+
+    assert img_feat.is_cuda, "img_feat must be on GPU"
+    data, _back_kwargs = shape_to_1d(img_feat, pca_k)
     pca = cuML_PCA(n_components=pca_k)
 
     projected_data = pca.fit_transform(data)

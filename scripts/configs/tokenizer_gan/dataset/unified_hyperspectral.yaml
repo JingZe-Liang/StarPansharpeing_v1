@@ -142,6 +142,7 @@ train_changed_kwargs_by_loader:
     num_workers: 0
     resize_before_transform: 512
   - batch_size: 5 # OHS
+    num_workers: 0
   - batch_size: 5 # Houston
     num_workers: 0
   - batch_size: 5 # RGB, RS5M-512 pixel
@@ -214,7 +215,7 @@ train_loader:
   paths: ${dataset.train_paths}
   basic_kwargs:
     shuffle_size: -1
-    num_workers: 1
+    num_workers: 2
     resample: true
     prefetch_factor: 4
     shuffle_within_workers: true

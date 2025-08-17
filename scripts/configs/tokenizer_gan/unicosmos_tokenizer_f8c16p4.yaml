@@ -17,12 +17,15 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-# accelerator:
-#   gradient_accumulation_plugin:
-#     _target_: accelerate.utils.GradientAccumulationPlugin
-#     num_steps: 3
+accelerator:
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
 
 vq_loss:
+  # perceptual loss
+  perceptual_weight: 0.05
+  # repa loss
   repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
@@ -30,6 +33,8 @@ vq_loss:
     rgb_channels: mean
     img_resize: 224 # null for no resize
     dino_img_size: 224
+    dino_name: "dinov3_vitl16"
+  # vf loss
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
@@ -39,8 +44,20 @@ vq_loss:
     dino_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
+    dino_name: "dinov3_vitl16"
+  # gram loss
+  gram_loss_weight: 0.1
+  gram_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 224 # null for no resize
+    dino_img_size: 224
+    dino_name: "dinov3_vitl16"
+  # quantizer loss
   quantizer_type:
   quantizer_options:
+  # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
   disc_ndf: 128
   disc_num_layers: 3
@@ -65,8 +82,8 @@ tokenizer:
   vf_on_z_or_module: z #module
 
   # loading
-  uni_tokenizer_path: runs/stage1_cosmos/2025-07-31_20-13-17_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
-  loading_type: pretrained
+  uni_tokenizer_path: #runs/stage1_cosmos/2025-07-31_20-13-17_cosmos_f8c16p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
 
   # blocks
   enc_moe: false
@@ -89,7 +106,7 @@ tokenizer:
   z_channels: 16
 
   # augmentations
-  latent_noise_prob: 0.2
+  latent_noise_prob: 0.0
   use_channel_drop: false
 
   # train
@@ -97,14 +114,8 @@ tokenizer:
 
   channel_drop_config:
     drop_type: ${list:[4, 8, 12]}
-    max_channels: 16
+    max_channels: ${tokenizer.latent_channels}
     drop_prob: 0.5
-
-  ## downsample and upsample
-  # downsample_type: ConvPixelUnshuffle
-  # downsample_shortcut: averaging
-  # upsample_type: ConvPixelShuffle
-  # upsample_shortcut: duplicating
 
 ema:
   beta: 0.999
@@ -114,25 +125,25 @@ ema:
 train:
   tokenizer_name: uni_cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}
   proj_dir: runs/stage1_cosmos
-  finetune_strategy: finetune_all # dcae_refine_decoder_head
-  max_grad_norm: 0.03
+  finetune_strategy: decoder_only # finetune_all # dcae_refine_decoder_head
+  max_grad_norm: 0.3
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 500_000
   save_every: 1000
-  seperate_enc_dec: false
-  resume_path: #runs/stage1_cosmos/2025-07-31_15-18-10_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_7
-  ema_load_path: #runs/stage1_cosmos/2025-07-31_20-13-17_cosmos_f8c16p1_unified_hyperspectral_uni/ema
+  resume_path:
+  ema_load_path: runs/stage1_cosmos/2025-08-13_19-15-12_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
+  seperate_enc_dec: false
 
   # augmentations
-  aug_pipeline_train_obj: decoder_deg
+  aug_pipeline_train_obj: #decoder_deg
   aug_pipeline:
-    _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
-    p: 0.1
-    use_torch: true
+    # _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    # p: 0.1
+    # use_torch: true
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -203,7 +214,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}_uni
+    run_comment: cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}_latent_noise=${tokenizer.latent_noise_prob}_channel_drop=${tokenizer.use_channel_drop}
     log_with_time: True
     visualize_every: 500
     log_every: 10

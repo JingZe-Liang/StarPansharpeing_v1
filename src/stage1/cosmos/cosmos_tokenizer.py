@@ -2,13 +2,21 @@ import inspect
 import random
 import warnings
 from collections import OrderedDict, namedtuple
+from contextlib import contextmanager
 from functools import partial
 from itertools import chain
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Sequence, no_type_check, override
 
+import accelerate
 import numpy as np
 import torch
+from peft import (
+    LoraConfig,
+    get_peft_config,
+    get_peft_model,
+    set_peft_model_state_dict,
+)
 from torch import Tensor, nn
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
@@ -22,7 +30,6 @@ from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
 
-type LoraName = str
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
@@ -35,16 +42,6 @@ def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
         nn.SiLU(),
         ln_cls(projector_dim, z_dim),
     )
-
-
-def _to_two_tuple(x):
-    if isinstance(x, int):
-        return (x, x)
-    elif isinstance(x, tuple):
-        assert len(x) == 2, "x should be a tuple of length 2"
-        return x
-    else:
-        raise ValueError("x should be an int or a tuple of length 2")
 
 
 def _list_or_num_mult(x: list | int | float, factor: int):
@@ -295,6 +292,7 @@ class ContinuousImageTokenizer(nn.Module):
         self._vf_on_z_or_module = kwargs.pop(
             "vf_on_z_or_module", self._vf_on_z_or_module
         )
+        self._dino_feature_dim = kwargs.pop("dino_feature_dim", 768)
         self.latent_noise_prob = kwargs.pop("latent_noise_prob", 0.0)
         self.use_latent_denoise = self.latent_noise_prob > 0.0
 
@@ -305,7 +303,9 @@ class ContinuousImageTokenizer(nn.Module):
         if self._use_repa_loss:
             if self._vf_on_z_or_module == "module":
                 self._repa_proj = build_mlp(
-                    512, self._dino_feature_dim, self._dino_feature_dim
+                    512,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
                 )
             else:
                 self._repa_proj = build_mlp(
@@ -318,8 +318,12 @@ class ContinuousImageTokenizer(nn.Module):
                 )
             else:
                 self._vf_proj = build_mlp(
-                    512, self._dino_feature_dim, self._dino_feature_dim
+                    512,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
                 )
+
+        # > FSDP wrapper module
         if kwargs.get("attn_type") in ("none", None):
             self._no_split_modules.remove("AttnBlock")
 
@@ -368,12 +372,12 @@ class ContinuousImageTokenizer(nn.Module):
         self.name = kwargs.get("name", "ContinuousImageTokenizer")
         self.latent_channels = latent_channels
 
-        self.in_channels_after_patcher = _list_or_num_mult(
-            kwargs["in_channels"], kwargs["patch_size"] ** 2
-        )
-        self.out_channels_after_patcher = _list_or_num_mult(
-            kwargs["out_channels"], kwargs["patch_size"] ** 2
-        )
+        self.in_channels_after_patcher = (
+            np.array(kwargs["in_channels"]) * kwargs["patch_size"] ** 2
+        ).tolist()
+        self.out_channels_after_patcher = (
+            np.array(kwargs["out_channels"] * kwargs["patch_size"] ** 2)
+        ).tolist()
 
         # NOTE: encoder and decoder maybe separated, e.g., NVIDIA pretrained tokenizer, or
         # trained on hyperspectral images before
@@ -485,6 +489,8 @@ class ContinuousImageTokenizer(nn.Module):
             f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook"
         )
 
+    # * --- model feature alignment --- #
+
     @torch.autocast("cuda", torch.bfloat16)
     def get_repa_feature(self):
         # only one feature
@@ -494,8 +500,8 @@ class ContinuousImageTokenizer(nn.Module):
                 assert self.z is not None, "z should be set before get_vf_feature"
                 return self._repa_proj(self.z)
             elif self._vf_on_z_or_module == "module":
-                return self._repa_proj(self._hook_feature)
                 # proj on block out
+                return self._repa_proj(self._hook_feature)
             else:
                 raise ValueError(
                     f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
@@ -511,14 +517,16 @@ class ContinuousImageTokenizer(nn.Module):
                 assert self.z is not None, "z should be set before get_vf_feature"
                 return self._vf_proj(self.z)
             elif self._vf_on_z_or_module == "module":
-                return self._vf_proj(self._hook_feature)
                 # proj on block out
+                return self._vf_proj(self._hook_feature)
             else:
                 raise ValueError(
                     f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
                 )
 
         return None
+
+    # * --- GAN training loss utils --- #
 
     def get_last_layer(self):
         # get decoder last layer weight for discriminator loss
@@ -547,6 +555,8 @@ class ContinuousImageTokenizer(nn.Module):
                     f"block_name {block_name} not supported, only res_block and res_moe are supported"
                 )
 
+    # * --- latent structure shaping --- #
+
     def _latent_noising(self, h: torch.Tensor, mask: torch.Tensor | None = None):
         # mask: 1 means the channel is dropped, 0 means the channel is not dropped
 
@@ -566,6 +576,8 @@ class ContinuousImageTokenizer(nn.Module):
         h_noise = t * noise + (1 - t) * h
 
         return h_noise
+
+    # * --- AE encode and decode --- #
 
     def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
         h = self.encoder(x)
@@ -595,7 +607,7 @@ class ContinuousImageTokenizer(nn.Module):
             )
 
             if self.use_channel_drop:
-                h = self.channel_drop(h)
+                h, _ = self.channel_drop(h)
 
             return h, kl_loss, loss_breakdown
 
@@ -603,7 +615,11 @@ class ContinuousImageTokenizer(nn.Module):
         if self.training:
             mask = None
             if self.use_channel_drop:
-                h, mask = self.channel_drop(h)
+                channel_drop_result = self.channel_drop(h)
+                if isinstance(channel_drop_result, tuple):
+                    h, mask = channel_drop_result
+                else:
+                    h = channel_drop_result
             if self.use_latent_denoise:
                 # latent noising and then to _vf_proj (vf decoder)
                 h = self._latent_noising(h, mask)
@@ -638,6 +654,8 @@ class ContinuousImageTokenizer(nn.Module):
         dec = self.decode(latent, input.shape)
 
         return dec
+
+    # * --- checkpoint loding --- #
 
     def load_pretrained(
         self,
@@ -868,55 +886,6 @@ class ContinuousImageTokenizer(nn.Module):
                     "warning",
                 )
 
-    def peft_first_last_convs_module_names(self, add_norms: bool = False):
-        module_to_save_layers = [
-            # convs
-            "encoder.encoder.conv_in",
-            (
-                "decoder.decoder.conv_out"
-                if not self.decoder.decoder._wrap_fsdp_last_layer
-                else "decoder.decoder.conv_out.wrap_mod"
-            ),
-            # quant convs need to be fully finetuned
-            # "encoder.quant_conv",
-            # "decoder.quant_conv",
-        ]
-
-        # convolution and normalization layers
-        for name, module in self.named_modules():
-            if "norm" in name and (not isinstance(module, nn.Identity)) and add_norms:
-                module_to_save_layers.append(name)
-                log_print(
-                    f"[Cosmos Tokenizer]: add norm {name} to fully finetune", "debug"
-                )
-
-        # projections for repa or vf losses
-        if self._hook_for_repa:
-            module_to_save_layers.append("_repa_proj")
-        if self._proj_for_vf:
-            module_to_save_layers.append("_vf_proj")
-
-        return module_to_save_layers
-
-    def additional_peft_target_modules(self):
-        add_tgt_modules = []
-        for name, module in self.named_modules():
-            if (
-                (not name.startswith("_"))
-                and isinstance(module, (nn.Conv2d, nn.Linear))
-                and name
-                not in (
-                    "encoder.encoder.conv_in",
-                    "decoder.decoder.conv_out",
-                    # "encoder.quant_conv",
-                    # "decoder.quant_conv",
-                )
-            ):
-                add_tgt_modules.append(name)
-                log_print(f"[Cosmos Tokenizer]: add {name} to lora finetune", "debug")
-
-        return add_tgt_modules
-
     @no_type_check
     def register_layer_output_hooks(self):
         self._per_layer_norms = {}
@@ -959,9 +928,222 @@ class ContinuousImageTokenizer(nn.Module):
 
         return norms
 
-    def loras_loading(self, lora_weights: dict[LoraName, Path | str]): ...
+    # * --- lora functions --- #
 
-    def change_lora(self, lora_name: str): ...
+    def peft_first_last_convs_module_names(self, add_norms: bool = False):
+        module_to_save_layers = [
+            # convs
+            "encoder.encoder.conv_in",
+            (
+                "decoder.decoder.conv_out"
+                if not self.decoder.decoder._wrap_fsdp_last_layer
+                else "decoder.decoder.conv_out.wrap_mod"
+            ),
+            # quant convs need to be fully finetuned
+            # "encoder.quant_conv",
+            # "decoder.quant_conv",
+        ]
+
+        # convolution and normalization layers
+        for name, module in self.named_modules():
+            if "norm" in name and (not isinstance(module, nn.Identity)) and add_norms:
+                module_to_save_layers.append(name)
+                log_print(
+                    f"[Cosmos Tokenizer]: add norm {name} to fully finetune", "debug"
+                )
+
+        # projections for repa or vf losses
+        if hasattr(self, "_repa_proj"):
+            module_to_save_layers.append("_repa_proj")
+        if hasattr(self, "_vf_proj"):
+            module_to_save_layers.append("_vf_proj")
+
+        return module_to_save_layers
+
+    def additional_peft_target_modules(self):
+        add_tgt_modules = []
+        for name, module in self.named_modules():
+            if (
+                (not name.startswith("_"))
+                and isinstance(module, (nn.Conv2d, nn.Linear))
+                and name
+                not in (
+                    "encoder.encoder.conv_in",
+                    "decoder.decoder.conv_out",
+                )
+            ):
+                add_tgt_modules.append(name)
+                log_print(f"[Cosmos Tokenizer]: add {name} to lora finetune", "debug")
+
+        return add_tgt_modules
+
+
+class TokenizerLoRAMixin(nn.Module):
+    def __init__(
+        self,
+        tokenizer: nn.Module,
+        lora_weights: dict[str, str | Path],
+        lora_cfg: dict | LoraConfig,
+    ):
+        super().__init__()
+        self._tokenizer = None
+
+        self.encode: Callable
+        self.decode: Callable
+        self.forward: Callable
+
+        self.tokenizer = tokenizer
+
+        # lora loading
+        self.lora_loading(lora_cfg, lora_weights)
+
+    @property
+    def tokenizer(self):
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, model):
+        self._tokenizer = model
+        # has encode, decode, forward attrs
+        attrs = ["encode", "decode", "forward", "to", "cuda", "cpu"]
+        for attr in attrs:
+            assert hasattr(self.tokenizer, attr), f"Tokenizer must has method {attr}"
+            # set method for encode and decode
+            setattr(self, attr, getattr(self.tokenizer, attr))
+
+    @property
+    def peft_config(self):
+        return self.model_peft.peft_config
+
+    def lora_loading(
+        self,
+        lora_cfg: dict | LoraConfig,
+        lora_weights: dict[str, Path | str],
+        strict=False,
+    ):
+        if isinstance(lora_cfg, dict):
+            peft_cfg = get_peft_config(lora_cfg)
+        else:
+            peft_cfg = lora_cfg
+        assert isinstance(peft_cfg, LoraConfig), (
+            "peft_cfg must be an instance of LoraConfig"
+        )
+
+        # lora modules
+        peft_cfg.target_modules = (
+            list(peft_cfg.target_modules) if peft_cfg.target_modules is not None else []
+        )
+        peft_cfg.target_modules += getattr(
+            self.tokenizer, "additional_peft_target_modules", list
+        )()
+        # re-trained modules
+        peft_cfg.modules_to_save = (
+            list(peft_cfg.modules_to_save)
+            if peft_cfg.modules_to_save is not None
+            else []
+        )
+        peft_cfg.modules_to_save += getattr(
+            self.tokenizer, "peft_first_last_convs_module_names", list
+        )()
+        log_print(
+            f"------------------ LoRA config: -----------------------\n"
+            f"LoRA modules:\n {peft_cfg.target_modules}\n"
+            f"Retrained modules:\n {peft_cfg.modules_to_save}\n"
+            "--------------------------------------------------------",
+            "debug",
+        )
+
+        self.model_peft = getattr(
+            self, "model_peft", get_peft_model(self.tokenizer, peft_config=peft_cfg)
+        )
+        for adapter_name, sd_path in lora_weights.items():
+            sd_path = Path(sd_path)
+            if sd_path.with_suffix(".safetensors") or sd_path.with_suffix(".pt"):
+                sd = accelerate.utils.load_state_dict(str(sd_path))
+                self.model_peft.add_adapter(
+                    adapter_name=adapter_name,
+                    peft_config=peft_cfg,
+                    low_cpu_mem_usage=False,
+                )
+                loaded_result = set_peft_model_state_dict(
+                    self.model_peft,
+                    sd,
+                    adapter_name=adapter_name,
+                    ignore_mismatched_sizes=strict,
+                    low_cpu_mem_usage=False,
+                )
+            elif sd_path.is_dir():
+                self.model_peft.load_adapter(
+                    model_id=str(sd_path),
+                    adapter_name=adapter_name,
+                    is_trainable=False,
+                )
+            else:
+                raise ValueError(f"Unsupported LoRA loading path: {sd_path}")
+            log_print(
+                f"Loaded LoRA adaptor: {adapter_name}, load results: {loaded_result}"
+            )
+
+        self._tokenizer = self.model_peft.get_base_model()  # avoid rebind
+
+    def change_lora(
+        self, lora_name: str, merge=False, no_change_action: str = "warning"
+    ):
+        if lora_name in self.peft_config:
+            self.model_peft.set_adapter(lora_name)
+            log_print(f"Successfully switched to LoRA adapter: {lora_name}")
+        else:
+            available_adapters = list(self.peft_config.keys())
+            string = f"Adapter '{lora_name}' not found. Available adapters: {available_adapters}"
+            if no_change_action == "warning":
+                log_print(string, "warning")
+                return
+            elif no_change_action == "fallback":
+                self._disable_lora()
+                log_print(
+                    f"Can not change lora {lora_name}, fall back to no lora base model."
+                )
+            elif no_change_action in ("error", "raise"):
+                raise ValueError(string)
+            else:
+                raise ValueError(f"Can not handle no_change_action: {no_change_action}")
+        if merge and lora_name in self.peft_config:
+            self.merge_lora_weights()
+
+    def merge_lora_weights(self):
+        self.model_peft = self.model_peft.merge_and_unload()
+        self.tokenizer = self.model_peft
+
+    def merge_specific_lora(self, adapter_name: str | None = None):
+        if adapter_name:
+            self.change_lora(adapter_name)
+        self.model_peft = self.model_peft.merge_and_unload()
+        log_print(f"Merged LoRA weights: {self.model_peft.active_adapter}")
+        self.tokenizer = self.model_peft
+
+    @contextmanager
+    def disable_lora(self):
+        """Context manager to temporarily disable LoRA adapters."""
+        try:
+            self._disable_lora()
+            yield
+        except AttributeError:
+            yield
+        finally:
+            try:
+                self._enable_lora()
+            except AttributeError:
+                pass
+
+    def _disable_lora(self):
+        if hasattr(self.model_peft, "disable_adapter"):
+            self.model_peft.disable_adapter()
+        elif hasattr(self.model_peft.base_model, "disable_adapter_layers"):
+            self.model_peft.base_model.disable_adapter_layers()
+
+    def _enable_lora(self):
+        if hasattr(self.model_peft.base_model, "enable_adapter_layers"):
+            self.model_peft.base_model.enable_adapter_layers()
 
 
 if __name__ == "__main__":

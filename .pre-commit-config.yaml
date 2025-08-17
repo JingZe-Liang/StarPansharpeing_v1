@@ -4,9 +4,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions|src/stage2/generative/models/modules/deformable_attn/ops)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions|src/stage2/generative/models/modules/deformable_attn/ops|src/stage1/utilities/losses/dinov3)
       - id: ruff-format
-        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions|src/stage2/generative/models/modules/deformable_attn/ops)
+        exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions|src/stage2/generative/models/modules/deformable_attn/ops|src/stage1/utilities/losses/dinov3)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0 # Use a specific tag or commit hash, check for latest version
     hooks:

@@ -1,7 +1,9 @@
 import math
+import sys
 import warnings
 from functools import partial
-from typing import Literal, Sequence
+from pathlib import Path
+from typing import Literal, Sequence, cast
 
 import timm
 import torch
@@ -9,17 +11,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState
 from einops import rearrange
-from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Shard
 from torch.utils.file_baton import FileBaton
+from torchvision.transforms import Normalize
 
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
+DINOV3_TO_NUM_LAYERS = {
+    "dinov3_vits16": 12,
+    "dinov3_vits16plus": 12,
+    "dinov3_vitb16": 12,
+    "dinov3_vitl16": 24,
+    "dinov3_vith16plus": 32,
+    "dinov3_vit7b16": 40,
+}
 
-def interpolate_features_2d(x: Tensor, tgt_size: tuple[int] | torch.Size):
+
+def interpolate_features_2d(x: Tensor, tgt_size: tuple[int, ...] | torch.Size):
     B, D, H, W = x.shape
     H_tgt, W_tgt = tgt_size
 
@@ -80,50 +91,179 @@ def next_divisble_of_y(x, y):
     return math.ceil(x / y) * y
 
 
-def load_repa_encoder(dino_type: str):
-    if dino_type == "timm":
+def load_repa_dino_v3_model(
+    weight_path: str | Path | None = None,
+    model_name: str | None = None,
+    pretrained_on="satellite",
+    compile=False,
+) -> torch.nn.Module | torch._dynamo.OptimizedModule:
+    """
+    import torch
+
+    REPO_DIR = <PATH/TO/A/LOCAL/DIRECTORY/WHERE/THE/DINOV3/REPO/WAS/CLONED>
+
+    # DINOv3 ViT models pretrained on web images
+    dinov3_vits16 = torch.hub.load(REPO_DIR, 'dinov3_vits16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vits16plus = torch.hub.load(REPO_DIR, 'dinov3_vits16plus', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vitb16 = torch.hub.load(REPO_DIR, 'dinov3_vitb16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vith16plus = torch.hub.load(REPO_DIR, 'dinov3_vith16plus', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+
+    # DINOv3 ConvNeXt models pretrained on web images
+    dinov3_convnext_tiny = torch.hub.load(REPO_DIR, 'dinov3_convnext_tiny', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_convnext_small = torch.hub.load(REPO_DIR, 'dinov3_convnext_small', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_convnext_base = torch.hub.load(REPO_DIR, 'dinov3_convnext_base', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_convnext_large = torch.hub.load(REPO_DIR, 'dinov3_convnext_large', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+
+    # DINOv3 ViT models pretrained on satellite imagery
+    dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+    dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
+
+    The pretrained weights are placed as follows:
+
+    src/stage1/utilities/losses/dinov3/weights
+    ├── remote_sensing_image_pretrained_SAT_493M
+    │   ├── dinov3_vit7b16_pretrain_sat493m-a6675841.pth
+    │   └── dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth
+    └── web_image_pretrained_lvd
+        ├── dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth
+        ├── dinov3_convnext_large_pretrain_lvd1689m-61fa432d.pth
+        ├── dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth
+        ├── dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
+        ├── dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+        ├── dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth
+        ├── dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+        ├── dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+        ├── dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+        └── download_dinov3_weights.py
+    """
+    repo_dir = Path(__file__).parents[1] / "dinov3"
+    assert repo_dir.exists(), (
+        f"DINOv3 repo directory {repo_dir} does not exist. Please git clone from https://github.com/facebookresearch/dinov3"
+    )
+
+    if model_name is None and weight_path is not None:
+        stem = Path(weight_path).stem
+        model_name = "_".join(stem.split("_", 2))
+    elif weight_path is None and model_name is not None:
+        model_type_dir = {
+            "web": "web_image_pretrained_lvd",
+            "satellite": "remote_sensing_image_pretrained_SAT_493M",
+        }[pretrained_on]
+        weight_dir = repo_dir / "weights" / model_type_dir
+        # search the weight path
+        paths = list(weight_dir.rglob("*.pth"))
+        for p in paths:
+            if model_name in p.stem:
+                weight_path = str(p)
+                break
+    elif weight_path is None and model_name is None:
+        raise ValueError("Either model_name or weight_path must be specified.")
+
+    assert weight_path is not None
+    log_print(
+        f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path} "
+    )
+    assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
+    sys.path.append(str(repo_dir))
+    dino_model = torch.hub.load(
+        repo_dir, model_name, source="local", weights=weight_path
+    )
+    if compile:
+        dino_model = torch.compile(dino_model, mode="reduce-overhead")
+        log_print("[Dino v3 model]: compiled model done")
+    return dino_model
+
+
+def load_repa_dino_v2_model(
+    load_from: str = "torch",
+    model_name: str = "dinov2_vitb14",
+    weight_path: str | None = None,
+    compile=False,
+) -> torch.nn.Module:
+    # This is Dino v2 models
+    if load_from == "timm":
         model = timm.create_model(
-            "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
+            model_name,  # "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
             pretrained=True,
             dynamic_img_size=True,
         )
-    elif dino_type == "torch":
-        model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")  # type: ignore
+    elif load_from == "torch":  # vit base
+        # TODO: add the local weight path
+        model = torch.hub.load("facebookresearch/dinov2", model_name)
+        model = cast(nn.Module, model)
     else:
-        raise ValueError(f"Unknown dino type {dino_type}, must be 'torch' or 'timm'.")
-
+        raise ValueError(
+            f"Unknown model loading source {load_from}, must be 'torch' or 'timm'."
+        )
+    if compile:
+        model = torch.compile(model)
+        log_print(f"[Dino v2 model]: compiled model done")
     return model
+
+
+def load_repa_encoder(
+    model_name: str = "dinov2_vitb14",
+    weight_path: str | Path | None = None,
+    load_from="torch",
+    version: int = 2,
+    dino_v3_pretrained_on: str = "satellite",
+    compile=True,
+):
+    if version == 2:
+        return load_repa_dino_v2_model(load_from, model_name, weight_path, compile)
+    elif version == 3:
+        return load_repa_dino_v3_model(
+            weight_path,
+            model_name,
+            pretrained_on=dino_v3_pretrained_on,
+            compile=compile,
+        )
+    else:
+        raise ValueError(f"Unknown Dino version {version}")
 
 
 class REPALoss(torch.nn.Module):
     @function_config_to_basic_types
     def __init__(
         self,
+        repa_encoder: nn.Module | None = None,
         c_dim_first=False,
         build_proj=False,
         img_is_neg1_1=True,
-        rgb_channels: list | Literal["random"] | str | None = None,
+        rgb_channels: list | Literal["random", "mean"] | str | None = None,
         img_resize: Literal["dino"] | tuple | None = "dino",
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
         dino_type: str = "torch",  # [torch, timm]
+        dino_name="dinov3_vitl16",
+        dino_version: int = 3,
+        dino_pretrained_path: str | None = None,
+        dino_pretrained_on: str | None = "satellite",
     ):
-        """Align the tokenizer/model feature with DINO v2 pretrained model feature.
+        """Align the tokenizer/model feature with DINO pretrained model feature.
 
         Args:
-            c_dim_first (bool, optional): is 2d or 1d features. Defaults to False.
-            build_proj (bool, optional): building projection in this loss class (not recommended). Defaults to False.
-            img_is_neg1_1 (bool, optional): is image value ranging (-1, 1). Defaults to True.
-            rgb_channels (list | str, optional): rgb channel indices or `random` selected from hyperspectral images. Defaults to None.
-            img_resize (str | tuple | None, optional): input image will be resized into . Defaults to "dino".
-            dino_fixed_bs (int | None, optional): batch size for dino forward. Defaults to None.
-            dino_img_size (int, optional): dino image size. Defaults to 224.
+            c_dim_first (bool, optional): Whether features are 2D (True) or 1D (False). Defaults to False.
+            build_proj (bool, optional): Whether to build projection in this loss class (not recommended). Defaults to False.
+            img_is_neg1_1 (bool, optional): Whether image values range from (-1, 1). Defaults to True.
+            rgb_channels (list | Literal["random"] | str | None, optional): RGB channel indices or "random"/"mean" selection from hyperspectral images. Defaults to None.
+            img_resize (Literal["dino"] | tuple | None, optional): Input image resize strategy. Defaults to "dino".
+            dino_fixed_bs (int | None, optional): Batch size for DINO forward pass. Defaults to None.
+            dino_img_size (int, optional): DINO image size. Defaults to 224.
+            dtype (torch.dtype, optional): Data type for the DINO encoder. Defaults to torch.bfloat16.
+            dino_type (str, optional): DINO model type ("torch" or "timm"). Defaults to "torch".
+            dino_name (str, optional): DINO model name. Defaults to None.
+            dino_version (int, optional): DINO version (2 or 3). Defaults to 3.
+            dino_pretrained_path (str | None, optional): Path to DINO pretrained weights. Defaults to None.
+            dino_pretrained_on (str | None, optional): Pretraining dataset ("satellite" or "web"). Defaults to None.
         """
         super().__init__()
         self.rgb_channels = rgb_channels
         self.img_resize = img_resize
-        if isinstance(img_resize, Sequence):
+        if isinstance(img_resize, (tuple, list)):
             assert img_resize[0] % 14 == 0 and img_resize[1] % 14 == 0, (
                 "img_size[0] must be divisible by patch size"
             )
@@ -143,33 +283,43 @@ class REPALoss(torch.nn.Module):
 
         # encoder
         self.dino_type = dino_type
-        baton = FileBaton(
-            "/tmp/repa_model_reading.lock"
-        )  # Use a file baton to ensure single process access
-
-        # load repa encoder in multiprocessing context
-        if baton.try_acquire():
-            try:
-                self.repa_encoder = load_repa_encoder(self.dino_type)
-            finally:
-                baton.release()
+        if repa_encoder is not None:
+            self.repa_encoder = repa_encoder
         else:
-            baton.wait()
-            self.repa_encoder = load_repa_encoder(self.dino_type)
+            baton = FileBaton(
+                "/tmp/repa_model_loading.lock"
+            )  # Use a file baton to ensure single process access
+            # load repa encoder in multiprocessing context
+            if dino_version == 3:
+                self.dino_type = "torch"
+            load_kwargs = dict(
+                model_name=dino_name,
+                weight_path=dino_pretrained_path,
+                load_from=dino_type,
+                version=dino_version,
+                dino_v3_pretrained_on=dino_pretrained_on,
+            )
+            if baton.try_acquire():
+                try:
+                    self.repa_encoder = load_repa_encoder(**load_kwargs)
+                finally:
+                    baton.release()
+            else:
+                baton.wait()
+                self.repa_encoder = load_repa_encoder(**load_kwargs)
+            self.repa_encoder.image_size = dino_img_size
+            self.repa_encoder = self.repa_encoder.to(dtype)
+            self.repa_encoder.requires_grad_(False)
+            self.repa_encoder.eval()
 
         log_print("[REPA Loss]: load pretrained dino visual foundation model done")
-        self.repa_encoder.image_size = dino_img_size
-        self.repa_encoder = self.repa_encoder.to(dtype)
-
-        self.repa_encoder.requires_grad_(False)
-        self.repa_encoder.eval()
-
         self.c_dim_first = c_dim_first
         if c_dim_first:
             self.interp_feat = interpolate_features_2d
         else:
             self.interp_feat = interpolate_features_1d
 
+        # mlp projection to aligh the dim
         self.build_proj = build_proj
         if build_proj:
             self.projector = build_mlp(
@@ -178,20 +328,16 @@ class REPALoss(torch.nn.Module):
                 self.repa_encoder.embed_dim,
                 is_1d=not c_dim_first,
             )
-            logger.warning(
+            log_print(
                 "build repa loss in loss class, remember to optimize the projector, "
-                "or match to repa dim in model forward"
+                "or match to repa dim in model forward",
+                "warning",
             )
         else:
             self.projector = nn.Identity()
 
         self.img_is_neg1_1 = img_is_neg1_1
-        self.register_buffer(
-            "dino_mean", torch.as_tensor(IMAGENET_DEFAULT_MEAN, dtype=torch.float)
-        )
-        self.register_buffer(
-            "dino_std", torch.as_tensor(IMAGENET_DEFAULT_STD, dtype=torch.float)
-        )
+        self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
     def __repr__(self):
         return (
@@ -210,9 +356,7 @@ class REPALoss(torch.nn.Module):
         assert img.ndim == 4 and img.shape[1] == 3, (
             "img dim must be 4d and have 3 channels"
         )
-        img = (img - self.dino_mean[None, :, None, None]) / self.dino_std[
-            None, :, None, None
-        ]
+        img = self.normalize(img)
 
         return img
 
@@ -298,8 +442,8 @@ class REPALoss(torch.nn.Module):
                     ]  # (bs, 256, 768)
                 else:  # distill for cnn 2d features
                     img_feats = self.repa_encoder.get_intermediate_layers(  # type: ignore
-                        img, 1, reshape=True, norm=True
-                    )[0]  # last layer feature
+                        img, n=1, reshape=True, norm=True
+                    )[0]  # the last layer feature
             elif self.dino_type == "timm":
                 b, c, h, w = img.shape
                 assert h % 16 == 0 and w % 16 == 0, "image size must be divisible by 16"
@@ -332,7 +476,7 @@ class REPALoss(torch.nn.Module):
 
         return img_feats
 
-    def _repa_loss(self, img_feat: Tensor, model_feat: Tensor):
+    def repa_loss(self, img_feat: Tensor, model_feat: Tensor):
         # [bs, l, c] or [bs, c, h, w]
         # 1. interpolate: image feature -> dino feature size
         _tgt_sz = img_feat.shape[-2:] if self.c_dim_first else img_feat.shape[-2]
@@ -359,8 +503,10 @@ class REPALoss(torch.nn.Module):
         model_feat = norm_feature(model_feat, dim=dim)
 
         assert img_feat.shape == model_feat.shape, (
-            "img_feat and model_feat must have the same shape to compute the repa loss"
+            "img_feat and model_feat must have the same shape to compute the repa loss, "
+            f"but got {tuple(img_feat.shape)} and {tuple(model_feat.shape)}"
         )
+
         repa_loss = -torch.sum(img_feat * model_feat, dim=dim)
 
         # repa_loss = (
@@ -368,6 +514,23 @@ class REPALoss(torch.nn.Module):
         #     / img_feat.shape[0]
         # )
         return repa_loss.mean()
+
+    def forward(self, img: Tensor, feature: Tensor):
+        img_feat = self._encode_img(img).detach()
+        repa_loss = self.repa_loss(img_feat, feature)
+        return repa_loss
+
+    def named_parameters(self, *args, **kwargs):
+        if self.build_proj:
+            return self.projector.named_parameters(*args, **kwargs)
+        else:
+            return []
+
+    def parameters(self, *args, **kwargs):
+        if self.build_proj:
+            return self.projector.parameters(*args, **kwargs)
+        else:
+            return []
 
     def _to_dtensor(self, img: Tensor):
         to_dt = False
@@ -382,27 +545,11 @@ class REPALoss(torch.nn.Module):
 
         return img
 
-    def forward(self, img: Tensor, features: Tensor):
-        img_feat = self._encode_img(img).detach()
-        repa_loss = self._repa_loss(img_feat, features)
-        return repa_loss
-
-    def named_parameters(self):
-        if self.build_proj:
-            return self.projector.named_parameters()
-        else:
-            return []
-
-    def parameters(self):
-        if self.build_proj:
-            return self.projector.parameters()
-        else:
-            return []
-
 
 class VFLoss(REPALoss):
     def __init__(
         self,
+        repa_encoder=None,
         distmat_margin: float = 0.25,
         cos_margin: float = 0.5,
         distmat_weight: float = 1.0,
@@ -417,11 +564,26 @@ class VFLoss(REPALoss):
         dtype: torch.dtype = torch.bfloat16,
         vf_weight: float = 1.0,
     ):
-        """
-        visual foundation model loss for tokenizer feature alignment.
+        """Visual foundation model loss for tokenizer feature alignment.
+
+        Args:
+            distmat_margin (float, optional): Margin for distance matrix loss. Defaults to 0.25.
+            cos_margin (float, optional): Margin for cosine similarity loss. Defaults to 0.5.
+            distmat_weight (float, optional): Weight for distance matrix loss. Defaults to 1.0.
+            cos_weight (float, optional): Weight for cosine similarity loss. Defaults to 1.0.
+            c_dim_first (bool, optional): Whether features are 2D (True) or 1D (False). Defaults to False.
+            build_proj (bool, optional): Whether to build projection in this loss class (not recommended). Defaults to False.
+            img_is_neg1_1 (bool, optional): Whether image values range from (-1, 1). Defaults to True.
+            rgb_channels (list | Literal["random"] | str | None, optional): RGB channel indices or "random"/"mean" selection from hyperspectral images. Defaults to None.
+            img_resize (Literal["dino"] | tuple | None, optional): Input image resize strategy. Defaults to "dino".
+            dino_fixed_bs (int | None, optional): Batch size for DINO forward pass. Defaults to None.
+            dino_img_size (int, optional): DINO image size. Defaults to 224.
+            dtype (torch.dtype, optional): Data type for the DINO encoder. Defaults to torch.bfloat16.
+            vf_weight (float, optional): Weight for visual foundation loss. Defaults to 1.0.
         """
 
         super().__init__(
+            repa_encoder,
             c_dim_first,
             build_proj,
             img_is_neg1_1,
@@ -437,7 +599,7 @@ class VFLoss(REPALoss):
         self.cos_weight = cos_weight
         self.vf_weight = vf_weight
 
-        logger.debug(repr(self))
+        log_print(repr(self), "debug")
 
     def __repr__(self):
         return "VFLoss: " + (
@@ -481,13 +643,13 @@ class VFLoss(REPALoss):
 
         return vf_loss
 
-    def forward(self, z, img, nll_loss=None, last_layer=None):
+    def forward(self, img, feature, nll_loss=None, last_layer=None):
         """
         Forward pass for the visual foundation model loss.
 
         Args:
             z (Tensor): The main feature tensor.
-            aux_feature (Tensor): The auxiliary feature tensor.
+            img (Tensor): The input image tensor.
             nll_loss (Tensor, optional): The negative log-likelihood loss. Defaults to None.
             last_layer (Tensor, optional): The last layer of the encoder for gradient calculation. Defaults to None.
 
@@ -498,16 +660,16 @@ class VFLoss(REPALoss):
         aux_feature = self._encode_img(img).detach()
 
         # iterpolate features
-        _tgt_sz = z.shape[-2:] if self.c_dim_first else z.shape[-2]
+        _tgt_sz = feature.shape[-2:] if self.c_dim_first else feature.shape[-2]
         aux_feature = self.interp_feat(aux_feature, _tgt_sz)
 
-        z = self.projector(z)
-        assert z.shape == aux_feature.shape, (
-            "z and aux_feature must have the same shape to compute the repa loss"
+        feature = self.projector(feature)
+        assert feature.shape == aux_feature.shape, (
+            "features and aux_feature must have the same shape to compute the repa loss"
         )
 
         # loss
-        vf_loss = self.vf_loss(z, aux_feature)
+        vf_loss = self.vf_loss(feature, aux_feature)
 
         # weighted
         vf_weight = self.calculate_adaptive_weight_vf(nll_loss, vf_loss, last_layer)
@@ -515,14 +677,194 @@ class VFLoss(REPALoss):
         return vf_loss * vf_weight
 
 
-if __name__ == "__main__":
-    # Example usage
-    # loss_fn = REPALoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True).cuda()
-    # img = torch.randn(2, 3, 224, 224).cuda()
-    # features = torch.randn(2, 768, 28, 28).cuda()
-    # loss = loss_fn(img, features)
-    # print("Loss:", loss.item())
+class LatentGramLoss(REPALoss):
+    def __init__(
+        self,
+        repa_encoder=None,
+        apply_norm=True,
+        img_level=True,
+        remove_neg=True,
+        remove_only_teacher_neg=False,
+        weight: float = 1.0,
+        **repa_init_kwargs,
+    ):
+        super().__init__(repa_encoder, **repa_init_kwargs)
+        # Loss
+        self.mse_loss = torch.nn.MSELoss()
 
+        # Parameters
+        self.apply_norm = apply_norm
+        self.remove_neg = remove_neg
+        self.remove_only_teacher_neg = remove_only_teacher_neg
+        self.img_level = img_level
+        self.weight = weight
+
+        if self.remove_neg or self.remove_only_teacher_neg:
+            assert self.remove_neg != self.remove_only_teacher_neg
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(\n"
+            "  apply_norm={self.apply_norm},\n"
+            "  remove_neg={self.remove_neg},\n"
+            "  remove_only_teacher_neg={self.remove_only_teacher_neg},\n"
+            "  img_level={self.img_level},\n"
+            "  weight={self.weight}\n"
+            ")"
+        )
+
+    def calculate_adaptive_weight(self, nll_loss, loss, last_layer=None):
+        if last_layer is not None and nll_loss is not None:
+            nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
+            loss_grads = torch.autograd.grad(loss, last_layer, retain_graph=True)[0]
+
+            g_weight = torch.norm(nll_grads) / (torch.norm(loss_grads) + 1e-4)
+            g_weight = torch.clamp(g_weight, 0.0, 1e8).detach()
+            g_weight = g_weight * self.weight
+        else:
+            g_weight = self.weight
+
+        return g_weight
+
+    def gram_loss(self, output_feats, target_feats, img_level=True):
+        """Compute the MSE loss between the gram matrix of the input and target features.
+
+        Args:
+            output_feats: Pytorch tensor (B, N, dim) or (B*N, dim) if img_level == False
+            target_feats: Pytorch tensor (B, N, dim) or (B*N, dim) if img_level == False
+            img_level: bool, if true gram computed at the image level only else over the entire batch
+        Returns:
+            loss: scalar
+        """
+
+        # Dimensions of the tensor should be (B, N, dim)
+        if img_level:
+            assert len(target_feats.shape) == 3 and len(output_feats.shape) == 3
+
+        # Float casting
+        output_feats = output_feats.float()
+        target_feats = target_feats.float()
+
+        # SSL correlation
+        if self.apply_norm:
+            target_feats = F.normalize(target_feats, dim=-1)
+
+        if not img_level and len(target_feats.shape) == 3:
+            # Flatten (B, N, D) into  (B*N, D)
+            target_feats = target_feats.flatten(0, 1)
+
+        # Compute similarities
+        # [B, N, D] x [B, N, D] -> [B, N, N] or [B*N, D] x [B*N, D] -> [B*N, B*N]
+        target_sim = torch.matmul(target_feats, target_feats.transpose(-1, -2))
+
+        # Patch correlation
+        if self.apply_norm:
+            output_feats = F.normalize(output_feats, dim=-1)
+
+        if not img_level and len(output_feats.shape) == 3:
+            # Flatten (B, N, D) into  (B*N, D)
+            output_feats = output_feats.flatten(0, 1)
+
+        # Compute similarities
+        student_sim = torch.matmul(output_feats, output_feats.transpose(-1, -2))
+
+        if self.remove_neg:
+            target_sim[target_sim < 0] = 0.0
+            student_sim[student_sim < 0] = 0.0
+
+        elif self.remove_only_teacher_neg:
+            # Remove only the negative sim values of the teacher
+            target_sim[target_sim < 0] = 0.0
+            student_sim[(student_sim < 0) & (target_sim < 0)] = 0.0
+
+        return self.mse_loss(student_sim, target_sim)
+
+    def to_1d_seq(self, x):
+        if x.ndim == 4:
+            x = rearrange(x, "b c h w -> b (h w) c")
+        return x
+
+    def forward(self, img, feature, nll_loss=None, last_layer=None):
+        # encode
+        aux_feature = self._encode_img(img).detach()
+
+        # iterpolate features
+        _tgt_sz = feature.shape[-2:] if self.c_dim_first else feature.shape[-2]
+        aux_feature = self.interp_feat(aux_feature, _tgt_sz)
+
+        feature = self.projector(feature)
+        assert feature.shape == aux_feature.shape, (
+            "z and aux_feature must have the same shape to compute the repa loss"
+        )
+
+        # Gram loss
+        feature, aux_feature = map(self.to_1d_seq, (feature, aux_feature))
+        gram_loss = self.gram_loss(feature, aux_feature, img_level=self.img_level)
+        g_weight = self.calculate_adaptive_weight(nll_loss, gram_loss, last_layer)
+
+        return gram_loss * g_weight
+
+
+# * --- Test --- * #
+
+
+def test_dinov3_pca():
+    # Load the dino v3 model
+    model_name = "dinov3_vitl16"
+    model = load_repa_dino_v3_model(
+        # "src/stage1/utilities/losses/dinov3/weights/remote_sensing_image_pretrained_SAT_493M/dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth",
+        model_name=model_name,
+        pretrained_on="satellite",
+    )
+    log_print("load model done.")
+    model.eval()
+    model = model.cuda().to(torch.bfloat16)
+    model.requires_grad_(False)
+
+    import numpy as np
+    import PIL.Image
+
+    img = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/YuZhongDataset/LoveDA/Train/Rural/images_png/157.png"
+    img = PIL.Image.open(img)
+
+    x = torch.as_tensor(np.array(img), dtype=torch.float32)
+    x = x.permute(2, 0, 1)[None] / 255.0
+    # norm using imagenet mean and std
+    from torchvision.transforms import Normalize
+
+    norm = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+    x = norm(x)
+    log_print(x.shape)
+
+    x = x.cuda().to(torch.bfloat16)
+    with torch.inference_mode() and torch.autocast("cuda", torch.bfloat16):
+        y = model.get_intermediate_layers(  # type: ignore
+            x, n=1, reshape=True, norm=True
+        )[0]  # the last layer feature
+        log_print(y.shape)
+
+    # pca
+    from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
+
+    pca_img = feature_pca_sk(y, 3)
+    # save pca img
+    pca_img = pca_img.cpu().numpy()[0].transpose(1, 2, 0)
+    pca_img = pca_img - pca_img.min()
+    pca_img = pca_img / pca_img.max()
+    PIL.Image.fromarray((pca_img * 255).astype(np.uint8)).save(
+        f"pca_img_{model_name}.png"
+    )
+
+
+def test_repa_loss():
+    loss_fn = REPALoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True).cuda()
+    img = torch.randn(2, 3, 224, 224).cuda()
+    features = torch.randn(2, 768, 28, 28).cuda()
+    loss = loss_fn(img, features)
+    print("Loss:", loss.item())
+
+
+def test_vf_loss():
     loss_fn = (
         VFLoss(
             distmat_margin=0.1,
@@ -544,5 +886,24 @@ if __name__ == "__main__":
     img = torch.randn(2, 3, 224, 224).to(dtype).cuda()
     z = torch.randn(2, 768, 32, 32).to(dtype).cuda()
     with torch.autocast("cuda", dtype):
-        loss = loss_fn(z, img)
+        loss = loss_fn(img, z)
     print("VFLoss:", loss.item())
+
+
+def test_gram_loss():
+    from tqdm import trange
+
+    loss_fn = LatentGramLoss(
+        c_dim_first=True, build_proj=False, img_is_neg1_1=True, rgb_channels="mean"
+    )
+    loss_fn = loss_fn.to(torch.bfloat16).cuda()
+    img = torch.randn(2, 3, 224, 224).cuda()
+    feature = torch.randn(2, 1024, 28, 28).cuda()
+    with torch.autocast("cuda", torch.bfloat16):
+        for _ in trange(100):
+            gram_loss = loss_fn(img, feature)
+            # print(f"{gram_loss=}")
+
+
+if __name__ == "__main__":
+    test_gram_loss()

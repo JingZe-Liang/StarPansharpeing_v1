@@ -1,4 +1,5 @@
 from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.optim import Optimizer
 
 
 def to_dist(x, from_local=False, **meta):
@@ -41,3 +42,11 @@ def local_op(x, fn, keep_sharded=False):
     if meta is not None:
         x = to_dist(x, from_local=keep_sharded, **meta)
     return x
+
+
+def get_optimizer_lr(optimizer: Optimizer) -> list[float]:
+    param_g = optimizer.param_groups
+    lr_groups = []
+    for grp in param_g:
+        lr_groups.append(grp["lr"])
+    return lr_groups

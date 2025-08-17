@@ -10,6 +10,7 @@ from timm.layers.attention import Attention as Attention_
 from timm.layers.drop import DropPath
 from timm.layers.mlp import SwiGLU as SwiGLUMLP_
 from timm.layers.patch_embed import PatchEmbed
+from torch import Tensor
 
 from src.stage2.pansharpening.models.rope import (
     RotaryPositionEmbeddingPytorchV2,
@@ -227,6 +228,7 @@ class Transformer(nn.Module):
         pos_embed_type="sincos",
         norm_layer=functools.partial(RMSNormFlash, eps=1e-6),
         act_layer=SwiGLU,
+        feature_layer_ids: list[int] | None = None,
     ):
         super().__init__()
 
@@ -248,6 +250,11 @@ class Transformer(nn.Module):
         self.pe_interpolation = 1.0
         self.out_channels = out_channels
         self.num_heads = num_heads
+        self.feature_layer_ids = feature_layer_ids
+        if feature_layer_ids:
+            assert max(feature_layer_ids) < depth, (
+                "max feature_layer_id must be less than depth"
+            )
 
         # layers
         layers = []
@@ -293,6 +300,7 @@ class Transformer(nn.Module):
         seq_len = self.num_patches
 
         if self.pos_embed_type == "sincos":
+            self.pos_embed: nn.Buffer
             self.register_buffer("pos_embed", torch.zeros(1, self.num_patches, dim))
             # sincos
             pos_embed = get_2d_sincos_pos_embed(
@@ -341,7 +349,6 @@ class Transformer(nn.Module):
                 )
                 self.pos_embed = nn.Buffer(
                     data=torch.from_numpy(pos_embed).float()[None],
-                    requires_grad=False,
                     persistent=False,
                 )
             return self.pos_embed
@@ -374,13 +381,10 @@ class Transformer(nn.Module):
         x = rearrange(
             x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
         )
-
-        # x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        # x = torch.einsum("nhwpqc->nchpwq", x)
-        # imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return x
 
-    def forward(self, latents: tuple | list):
+    def forward(self, ms_latent, pan_latent) -> Tensor | tuple[Tensor, list[Tensor]]:
+        latents = (ms_latent, pan_latent)
         # patch embedding
         ys = []
         for latent in latents:
@@ -398,16 +402,21 @@ class Transformer(nn.Module):
             pe = None
 
         # blocks
-        for layer in self.layers:
+        features = []
+        for i, layer in enumerate(self.layers):
             y = layer(y, mask=None, pe=pe)
+            if self.feature_layer_ids is not None and i in self.feature_layer_ids:
+                features.append(y)
 
         # head
         y = self.head(y)
 
         # unpatchify
         out = self.unpatchify(y)
-
-        return out
+        if len(features) == 0:
+            return out
+        else:
+            return out, features
 
     def init_weights(self):
         # Initialize transformer layers

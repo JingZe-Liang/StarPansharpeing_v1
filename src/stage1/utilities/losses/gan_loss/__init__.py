@@ -1,4 +1,4 @@
-from .hyperspectral_percep_loss import LIPIPSHyperpspectral
+from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
 from .logit_laplace_loss import LogitLaplaceLoss
 from .loss import (
     DinoDiscV2,

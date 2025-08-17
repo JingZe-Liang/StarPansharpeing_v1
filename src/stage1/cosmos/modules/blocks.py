@@ -17,8 +17,6 @@ from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 
 natten = lazy_loader.load("natten")
-
-
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
@@ -32,6 +30,7 @@ from .utils import (
     val2tuple,
 )
 
+# * --- Blocks compilations --- * #
 compile_forward_fn = True
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
@@ -72,17 +71,18 @@ else:
 
 
 # utilities
-def get_same_padding(
-    kernel_size: Union[int, tuple[int, ...]],
-):
+def get_same_padding(kernel_size: int | tuple[int, ...]):
     if isinstance(kernel_size, tuple):
         return tuple([get_same_padding(ks) for ks in kernel_size])
-    else:
+    elif isinstance(kernel_size, int):
         assert kernel_size % 2 > 0, "kernel size should be odd number"
         return kernel_size // 2
+    else:
+        raise ValueError(f"kernel_size should be int or tuple, got {type(kernel_size)}")
 
 
 # * --- Activation Functions --- #
+
 
 # register activation function here
 REGISTERED_ACT_DICT: dict[str, type | partial] = {
@@ -94,7 +94,7 @@ REGISTERED_ACT_DICT: dict[str, type | partial] = {
 }
 
 
-def build_act(name: str, **kwargs) -> Optional[nn.Module]:
+def build_act(name: str | None, **kwargs) -> Optional[nn.Module]:
     if name in REGISTERED_ACT_DICT:
         act_cls = REGISTERED_ACT_DICT[name]
         kwargs = extract_needed_kwargs(kwargs, act_cls)
@@ -118,7 +118,7 @@ class ConvLayer(nn.Module):
         use_bias: bool = False,
         dropout: float = 0,
         norm: str = "bn2d",
-        act_func: str = "relu",
+        act_func: str | None = "relu",
         padding_mode: str = "zeros",
     ) -> None:
         super().__init__()
@@ -386,7 +386,7 @@ class AttnBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         fn = self.forward_fn_math if not self.sdpa else self.forward_fn_sdpa
         if self.act_checkpoint:
-            return checkpoint(fn, x, use_reentrant=True)
+            return checkpoint(fn, x, use_reentrant=False)
         return fn(x)
 
 
@@ -593,13 +593,15 @@ class NattenAttention(nn.Module):
         self.dilation = dilation
 
         self.act_checkpoint = act_checkpoint
+        assert natten is not None, "Please install natten to use attention"
 
     def forward(self, x):
         qkv = self.qkv(self.norm(x))  # [bs, c, h, w]
         qkv = rearrange(qkv, "b (qkv h c) x y -> qkv b x y h c", qkv=3, h=self.heads)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        out = na2d(  # [bs, x, y, h, c]
+        # [bs, x, y, h, c]
+        out = natten.na2d(  # type: ignore
             q,
             k,
             v,
@@ -763,7 +765,6 @@ class PixelUnshuffleChannelAveragingDownSampleLayer(nn.Module):
         in_channels: int,
         out_channels: int,
         factor: int,
-        # group_size: int,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -1407,7 +1408,7 @@ class MoE2DBlock(nn.Module):
     def forward(self, x):
         x = x.contiguous()
         if self.training and self.act_checkpoint:
-            return checkpoint(self._forward_fn, x, use_reentrant=True)
+            return checkpoint(self._forward_fn, x, use_reentrant=False)
         return self._forward_fn(x)
 
 
@@ -1501,11 +1502,7 @@ class ResnetBlockMoE2D(nn.Module):
 
 
 class DiCoCompactChannelAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        conv_cls: nn.Module = nn.Conv2d,
-    ):
+    def __init__(self, in_channels: int, conv_cls=nn.Conv2d):
         super().__init__()
         self.in_channels = in_channels
         self.global_avg = nn.AdaptiveAvgPool2d(1)
@@ -1650,7 +1647,7 @@ class DiCoBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, use_reentrant=True)
+            return checkpoint(self.forward_fn, x, use_reentrant=False)
 
         return self.forward_fn(x)
 
@@ -1762,10 +1759,8 @@ class ResnetBlock(nn.Module):
         # slots, t not used, compacted with ResnetBlockSlotsInjected
         # torch.compiler.cudagraph_mark_step_begin()
         if self.act_checkpoint and self.training:
-            return checkpoint(
-                self.forward_fn, x, use_reentrant=True
-            )  # .clone()  # type: ignore
-        return self.forward_fn(x)  # .clone()
+            return checkpoint(self.forward_fn, x, use_reentrant=False)
+        return self.forward_fn(x)
 
 
 class ResnetBlockSlotsInjected(ResnetBlock):
@@ -1841,7 +1836,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         self, x: torch.Tensor, slots: torch.Tensor, t: torch.Tensor
     ) -> torch.Tensor:
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, slots, t, use_reentrant=True)  # type: ignore
+            return checkpoint(self.forward_fn, x, slots, t, use_reentrant=False)  # type: ignore
         return self.forward_fn(x, slots, t)
 
 
@@ -1910,7 +1905,7 @@ class ConvNeXtBlock(nn.Module):
 
     def forward(self, x):
         if self.act_checkpoint and self.training:
-            return checkpoint(self.forward_fn, x, use_reentrant=True)  # type: ignore
+            return checkpoint(self.forward_fn, x, use_reentrant=False)  # type: ignore
         return self.forward_fn(x)
 
 

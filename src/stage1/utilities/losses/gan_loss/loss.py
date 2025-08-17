@@ -22,8 +22,8 @@ from ..model import (
     StyleGANDiscriminator,
     no_weight_gradients,
 )
-from ..repa import REPALoss, VFLoss
-from .hyperspectral_percep_loss import LIPIPSHyperpspectral
+from ..repa import LatentGramLoss, REPALoss, VFLoss
+from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
 
 # * --- utilities --- #
 
@@ -209,6 +209,82 @@ def r3gan_g_loss(logits_fake, logits_real, scale=1):
 
 
 class VQLPIPSWithDiscriminator(nn.Module):
+    """VQ-GAN loss function combining multiple loss components for training generative models.
+
+    This loss function combines reconstruction loss, perceptual loss, adversarial loss with discriminator,
+    quantization losses, and optional REPA/VF losses for feature alignment. It supports various
+    discriminator architectures and loss types.
+
+    The loss function operates in two phases:
+    1. Generator update (optimizer_idx=0): Computes reconstruction, perceptual, adversarial generator,
+       quantization, and optional REPA/VF losses
+    2. Discriminator update (optimizer_idx=1): Computes adversarial discriminator loss with optional
+       regularization
+
+    Args:
+        # Discriminator parameters
+        disc_start_for_g (int): Global step to start using discriminator for generator updates. Defaults to 0.
+        disc_start_for_d (int): Global step to start training discriminator. Defaults to 0.
+        disc_factor (float): Weight factor for discriminator loss. Defaults to 1.0.
+        disc_weight (float): Weight for discriminator component in total loss. Defaults to 1.0.
+        disc_reg_freq (int): Frequency of discriminator regularization. Defaults to 0.
+        disc_reg_type (str): Type of regularization ("r1" or other). Defaults to "r1".
+        disc_reg_r1 (float): R1 regularization weight. Defaults to 10.
+        disc_reg_gamma (float): Gamma parameter for regularization. Defaults to 10.
+
+        # Discriminator network configuration
+        disc_network_type (str): Type of discriminator ("patchgan", "patchgan_v2", "stylegan", "stylegan3d", "r3gan"). Defaults to "patchgan".
+        disc_input_size (int): Input size for discriminator. Defaults to 256.
+        disc_in_channels (int): Number of input channels. Defaults to 3.
+        disc_num_layers (int): Number of layers in discriminator. Defaults to 3.
+        use_actnorm (bool): Whether to use activation normalization. Defaults to False.
+        disc_norm_type (str): Normalization type ("bn2d", etc.). Defaults to "bn2d".
+        disc_spectral_norm (bool): Whether to use spectral normalization. Defaults to False.
+        disc_conditional (bool): Whether discriminator is conditional. Defaults to False.
+        disc_ndf (int): Number of discriminator feature channels. Defaults to 64.
+        disc_loss (str): Type of GAN loss ("hinge", "vanilla", "non_saturate", "relative"). Defaults to "hinge".
+        force_disc_loss_hinge (bool): Force use of hinge loss (from maskbit paper). Defaults to False.
+
+        # Quantizer losses
+        quantizer_options (dict | None): Options for quantizer loss computation. Defaults to None.
+
+        # Perceptual loss parameters
+        perceptual_weight (float): Weight for perceptual loss. Defaults to 1.0.
+        perceptual_type (str | None): Type of perceptual model ("resnet", etc.). Defaults to "resnet".
+        perceptual_groups_to_select (int | float | None): Number of channel groups for perceptual loss. Defaults to None.
+        perceptual_loss_on_logits (bool): Whether to compute perceptual loss on logits. Defaults to False.
+        gram_model (str | None): Model for Gram matrix computation. Defaults to "vgg".
+        gram_loss_weight (float): Weight for Gram matrix loss. Defaults to 1.0.
+        img_is_neg1_to_1 (bool): Whether input images are in range [-1, 1]. Defaults to True.
+        perceptual_options (dict): Additional options for perceptual loss. Defaults to {}.
+
+        # Generator loss parameters
+        reconstruction_loss_type (Literal["l1", "mse", "dwt"] | None): Type of reconstruction loss. Defaults to "mse".
+        reconstruction_weight (float): Weight for reconstruction loss. Defaults to 1.0.
+        gen_loss_weight (float | None): Fixed weight for generator loss. If None, adaptive weight is computed. Defaults to None.
+
+        # Quantizer type
+        quantizer_type (str | None): Type of quantizer ("lfq", "bsq", "vq", "vq_advance", "kl", None). Defaults to None.
+
+        # REPA loss parameters
+        repa_loss_weight (float | None): Weight for REPA loss. If None or 0, REPA loss is disabled. Defaults to None.
+        repa_loss_options (dict): Options for REPA loss. Defaults to {}.
+
+        # Visual Foundation loss parameters
+        vf_loss_weight (float | None): Weight for Visual Foundation loss. If None or 0, VF loss is disabled. Defaults to None.
+        vf_loss_options (dict): Options for VF loss. Defaults to {}.
+
+        # Other losses
+        lecam_loss_weight (float | None): Weight for LeCAM regularization. Defaults to None.
+        ssim_weight (float): Weight for SSIM loss. Defaults to 0.1.
+
+        # Video parameters
+        num_frames (int): Number of frames for video data. Defaults to 1.
+
+        # Diffusion slots
+        force_not_use_recon_loss (bool): Whether to disable reconstruction loss (for diffusion slots). Defaults to False.
+    """
+
     @function_config_to_basic_types
     def __init__(
         self,
@@ -237,12 +313,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
         quantizer_options: dict | None = None,
         # perceptual loss
         perceptual_weight: float = 1.0,
-        perceptual_type: str | None = "resnet",
-        perceptual_groups_to_select: int | float | None = None,  # group on all channels
-        perceptual_loss_on_logits: bool = False,
-        gram_model: str | None = "vgg",
-        gram_loss_weight: float = 1.0,
-        img_is_neg1_to_1: bool = True,
         perceptual_options: dict = {},
         # generator loss
         reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "mse",
@@ -256,6 +326,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # vf loss
         vf_loss_weight: float | None = None,
         vf_loss_options: dict = {},
+        # gram loss
+        gram_loss_weight: float = 1.0,
+        gram_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
         ssim_weight: float = 0.1,
@@ -346,19 +419,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * perceptual loss
         self.use_perceptual_loss = False
-        if perceptual_weight > 0 and perceptual_type is not None:
+        perceptual_model = perceptual_options.get("percep_model")
+        if perceptual_weight > 0 and perceptual_model is not None:
             self.use_perceptual_loss = True
-            self.perceptual_loss = LIPIPSHyperpspectral(
-                perceptual_type,
-                group_size=3,
-                num_groups_to_select=perceptual_groups_to_select,
-                padding_mode="repeat",
-                compute_on_logits=perceptual_loss_on_logits,
-                img_is_neg1_to_1=img_is_neg1_to_1,
-                gram_loss_weight=gram_loss_weight,
-                use_gram_model=gram_model,
-                **perceptual_options,
-            ).cuda()
+            self.perceptual_loss = LPIPSHyperpspectralLoss(**perceptual_options).cuda()
         self.perceptual_weight = perceptual_weight
 
         # * repa loss
@@ -366,6 +430,14 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.use_repa = False
         if repa_loss_weight is not None and repa_loss_weight > 0:
             self.use_repa = True
+            if (
+                self.use_perceptual_loss
+                and repa_loss_options["dino_name"] == perceptual_model
+            ):
+                logger.info(
+                    f"Perceptual loss shares the same model with REPA: {repa_loss_options['dino_name']}"
+                )
+                repa_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.repa_loss = REPALoss(**repa_loss_options).cuda()
             logger.info(f"[repa loss]: {self.repa_loss}")
             logger.info(f"[vq loss]: repa loss used, weighted {self.repa_loss_weight}")
@@ -378,8 +450,37 @@ class VQLPIPSWithDiscriminator(nn.Module):
             assert not self.use_repa, (
                 "repa loss and vf loss can not be used at the same time"
             )
+            if (
+                self.use_perceptual_loss
+                and vf_loss_options["dino_name"] == perceptual_model
+            ):
+                logger.info(
+                    f"Perceptual loss shares the same model with VF loss: {vf_loss_options['dino_name']}"
+                )
+                vf_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.vf_loss = VFLoss(**vf_loss_options).cuda()
             logger.info(f"[vq loss]: vf loss used, weighted {self.vf_loss_weight}")
+
+        # * gram loss
+        self.gram_loss_weight = gram_loss_weight
+        self.use_gram = False
+        if gram_loss_weight is not None and gram_loss_weight > 0:
+            self.use_gram = True
+            repa_encoder = None
+            if (
+                self.use_repa
+                and repa_loss_options["dino_name"] == gram_loss_options["dino_name"]
+            ):
+                gram_loss_options["repa_encoder"] = self.repa_loss.repa_encoder
+                repa_encoder = self.repa_loss.repa_encoder
+            elif (
+                self.use_vf
+                and vf_loss_options["dino_name"] == gram_loss_options["dino_name"]
+            ):
+                repa_encoder = self.vf_loss.repa_encoder
+            gram_loss_options["repa_encoder"] = repa_encoder
+            self.gram_loss = LatentGramLoss(**gram_loss_options).cuda()
+            logger.info(f"[vq loss]: gram loss used, weighted {self.gram_loss_weight}")
 
         # * LeCAM ema loss
         self.gen_loss_weight = gen_loss_weight
@@ -394,7 +495,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 n_layers=disc_num_layers,
                 use_actnorm=use_actnorm,
                 ndf=disc_ndf,
-                use_bn=disc_norm_type == "bn2d",
+                norm_type=disc_norm_type,
             )
             # spectral norm
             if disc_spectral_norm:
@@ -548,15 +649,34 @@ class VQLPIPSWithDiscriminator(nn.Module):
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
     ):
-        """
-        Forward pass of the model.
+        """Forward pass of the VQ-GAN loss function.
 
-        outputs:
-            1. dict of loss: when optimizer_idx=0, generator part
-                outdict has key `gen_loss` and `q_loss`;
-                when optimizer_idx=1, discriminator part
-                outdict has key `disc_loss`
-            2. logs: dict[str, Tensor], logs for logging the generator and discriminator
+        This method computes different loss components based on the optimizer index:
+        - When optimizer_idx=0: Computes generator losses (reconstruction, perceptual, adversarial, quantization, REPA/VF)
+        - When optimizer_idx=1: Computes discriminator losses (adversarial with optional regularization)
+
+        Args:
+            inputs (torch.Tensor): Ground truth input images of shape [B, C, H, W] or [B, C, T, H, W] for video.
+            reconstructions (torch.Tensor): Reconstructed images from the generator of same shape as inputs.
+            optimizer_idx (int): Index indicating which optimizer is being used (0 for generator, 1 for discriminator).
+            global_step (int): Current global training step for scheduling losses.
+            q_loss_breakdown (NamedTuple | Dict | None): Breakdown of quantization losses from the quantizer.
+            q_loss_total (torch.Tensor | None): Total quantization loss value.
+            outer_recon_loss (torch.Tensor | None): External reconstruction loss (used when force_not_use_recon_loss=True).
+            last_layer (nn.Parameter | torch.Tensor | None): Last layer of the generator for adaptive weight computation.
+            enc_last_layer (nn.Parameter | None): Last layer of the encoder for VF loss adaptive weight computation.
+            cond (torch.Tensor | None): Conditional input for conditional GANs.
+            tokenizer_feat (torch.Tensor | None): Tokenizer features for REPA or VF loss computation.
+            split (str): Data split identifier (train/val/test). Defaults to "train".
+            add_prefix (bool): Whether to add prefix to log keys. Defaults to False.
+
+        Returns:
+            tuple: When optimizer_idx=0 (generator):
+                - dict: Loss dictionary with keys 'gen_loss' and 'q_loss'
+                - dict: Log dictionary with loss components for logging
+            tuple: When optimizer_idx=1 (discriminator):
+                - dict: Loss dictionary with key 'disc_loss'
+                - dict: Log dictionary with loss components for logging
         """
         if split != "train":
             # not use `split`
@@ -647,7 +767,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss = self.zero
         logs = {}
 
-        # q loss enlarge
+        # < q loss enlarge
         def _enlarge_codebook_loss_fn(codebook_loss):
             cb_enlarge_r = self.quantizer_options["codebook_enlarge_ratio"]
             codebook_enlarge_steps = self.quantizer_options["codebook_enlarge_steps"]
@@ -665,7 +785,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
             return scale_codebook_loss
 
-        # * vector quantization ===============
+        # > vector quantization ===============
         if self.quantizer_type == "vq":
             codebook_loss = q_loss_breakdown.codebook_loss
             scale_codebook_loss = _enlarge_codebook_loss_fn(codebook_loss)
@@ -683,7 +803,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
             maybe_in_dict_update(q_loss_breakdown, ["H"], logs)
 
-        # * vq with codebook diversity loss, orthogonal reg loss, codebook optimization loss ====
+        # > vq with codebook diversity loss, orthogonal reg loss, codebook optimization loss ====
         elif self.quantizer_type == "vq_advance":
             q_loss = q_loss_total * self.quantizer_options["quantizer_loss_weight"]
             logs = {
@@ -694,7 +814,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "learn_code_opt_loss": q_loss_breakdown.inplace_optimize,
             }
 
-        # * lfq or bsq ===============
+        # > lfq or bsq ===============
         elif self.quantizer_type in ("lfq", "bsq"):
             q_loss = q_loss_total * self.quantizer_options["quantizer_loss_weight"]
             cb_enlarge_r = self.quantizer_options["codebook_enlarge_ratio"]
@@ -769,7 +889,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
 
         logger.info(
-            f"[VQ fn loss]: quantizer options: {self.quantizer_options}"
+            f"[VQ fn loss]: quantizer options: {self.quantizer_options}, "
             f"for quantizer type: {self.quantizer_type}"
         )
 
@@ -965,11 +1085,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         p_loss = self.zero
         gram_loss = self.zero
         if self.use_perceptual_loss:
-            p_loss_dict = self.perceptual_loss(inputs, reconstructions)
-            percep_loss_ = p_loss_dict["perceptual_loss"]
-            gram_loss_ = p_loss_dict["gram_loss"]
-            p_loss = percep_loss_ * self.perceptual_weight
-            gram_loss = gram_loss_ * self.perceptual_weight
+            percep_loss = self.perceptual_loss(inputs, reconstructions)
+            p_loss = percep_loss * self.perceptual_weight
             nll_loss = nll_loss + p_loss + gram_loss
         nll_loss = torch.mean(nll_loss)
 
@@ -983,8 +1100,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * vf loss
         vf_loss = self.zero
         if self.use_vf:
-            vf_loss = self.vf_loss(tokenizer_feat, inputs, nll_loss, enc_last_layer)
+            vf_loss = self.vf_loss(inputs, tokenizer_feat, nll_loss, enc_last_layer)
             vf_loss = vf_loss * self.vf_loss_weight  # vf weight is 0.1 by default
+
+        # * gram loss
+        if self.use_gram:
+            gram_loss = self.gram_loss(inputs, tokenizer_feat, nll_loss, enc_last_layer)
+            gram_loss = gram_loss * self.gram_loss_weight
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(

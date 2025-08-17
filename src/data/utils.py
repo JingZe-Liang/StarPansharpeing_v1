@@ -210,7 +210,7 @@ def search_one_key_not_dunder(
     return new_sample
 
 
-def filter_undecoded(sample, key: str | list[str] | None):
+def filter_undecoded(sample, key: str | list[str] | None = None):
     if key is None:
         # check all keys
         for k, v in sample.items():

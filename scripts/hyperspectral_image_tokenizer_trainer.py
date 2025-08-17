@@ -3,9 +3,10 @@ import random
 import sys
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, Sequence, cast, no_type_check
 
 import accelerate
 import colored_traceback
@@ -26,6 +27,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
@@ -38,18 +40,15 @@ from src.data.hyperspectral_loader import (
     get_hyperspectral_img_loaders_with_different_backends,
 )
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-
-# from src.stage1.LeanVAE.LeanVAE.models.autoencoder import LeanVAE2D
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
+from src.stage1.utilities.train.network import (
+    get_model_learnable_params,
+    get_parameters_encoder_frozen,
+)
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import log_print
+from src.utilities.logging import log_print, set_logger_file
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
-
-## TODO:
-# 1. add diffusion, rectify flow, or inductive moumentumn matching to the decoder
-# 2. add BSQ or LFQ to discretize
-# 3. add rectify flow for continuous latents; maskbit or maskgit for discrete latents
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -87,7 +86,7 @@ class CosmosHyperspectralTokenizerTrainer:
         )
 
         if _dpsp_plugin is not None:
-            self.accelerator.deepspeed_plugin.deepspeed_config[
+            self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
@@ -95,7 +94,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self._is_ds = _dpsp_plugin is not None
         if self._is_ds:
             self.log_msg("[Deepspeed]: using deepspeed plugin")
-            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][
+            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][  # type: ignore
                 "stage"
             ] in [2, 3]
 
@@ -289,9 +288,6 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-            # self.tokenizer: (
-            #     VITVQModel | VITBSQModel | CosmosTokenizer | DCAE | LeanVAE2D
-            # )
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = (
                 getattr(self.tokenizer, "quantizer", None) is not None
@@ -381,7 +377,7 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.train_cfg.log.run_comment is not None:
             log_file = Path(log_file.as_posix() + "_" + self.train_cfg.log.run_comment)
         log_file = log_file / "log.log"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
+        # log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
@@ -404,7 +400,7 @@ class CosmosHyperspectralTokenizerTrainer:
         )
         log_format_in_cmd = (
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
             "- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
@@ -429,7 +425,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 colorize=False,
             )
         self.logger.add(
-            sys.stdout,
+            sys.stderr,
             format=log_format_in_cmd,
             level=os.getenv("SHELL_LOG_LEVEL", "DEBUG"),
             backtrace=True,
@@ -448,7 +444,7 @@ class CosmosHyperspectralTokenizerTrainer:
             cfg_cp_path.parent.mkdir(parents=True, exist_ok=True)
             with open(cfg_cp_path, "w") as f:
                 f.write(yaml_cfg)
-            self.logger.info(f"[Cfg]: configuration saved to {cfg_cp_path}")
+            self.logger.info(f"[cfg]: configuration saved to {cfg_cp_path}")
 
         # accelerate project configuration
         self.proj_dir = log_dir
@@ -594,7 +590,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 "when dealing with different hyperspectral dataset"
             )
         if hasattr(self.tokenizer, "additional_peft_target_modules"):
-            additional_tgt_modules = self.tokenizer.additional_peft_target_modules()
+            additional_tgt_modules = self.tokenizer.additional_peft_target_modules()  # type: ignore
             peft_cfg.target_modules += list(additional_tgt_modules)
 
         self.log_msg(
@@ -606,16 +602,17 @@ class CosmosHyperspectralTokenizerTrainer:
             )
 
         self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer")
+        adapter_name = getattr(self.dataset_cfg, "used", "default")
         self.tokenizer_peft_wrapped = get_peft_model(
             self.tokenizer,
             peft_config=peft_cfg,
-            adapter_name="default",  # dataset name ?
+            adapter_name=adapter_name,  # dataset name ?
             low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
         )
         self.log_msg(self.tokenizer_peft_wrapped.print_trainable_parameters())
 
         # base model to train
-        self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
+        self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()  # type: ignore
 
     def _get_tokenizer_params(self, for_optimizer=False, with_name: bool = False):
         # key to params
@@ -800,34 +797,26 @@ class CosmosHyperspectralTokenizerTrainer:
                     f"[Optimizer]: finetune strategy: {self.train_cfg.finetune_strategy}"
                 )
             else:
-                if not self._is_peft_tuning:
-                    if with_name:
-                        params = dict(self.tokenizer.named_parameters())
-                    else:
-                        params = list(self.tokenizer.parameters())
-                    self.log_msg(f"[Optimizer]: finetune all params")
+                if self.train_cfg.finetune_strategy == "decoder_only":
+                    self.log_msg("Only decoder parameters are tunable.")
+                    params = get_parameters_encoder_frozen(
+                        model=self.tokenizer,
+                        with_name=with_name,
+                    )
+                # peft will handle the learnable parameters
+                elif self.train_cfg.finetune_strategy in ("finetune_all", "peft"):
+                    self.log_msg("All parameters are trainable")
+                    params = get_model_learnable_params(
+                        self.tokenizer, with_name=with_name
+                    )
                 else:
-                    if with_name:
-                        params = dict()
-                        for n, p in self.tokenizer.named_parameters():
-                            if p.requires_grad:
-                                params[n] = p
-                    else:
-                        params = [
-                            p
-                            for n, p in self.tokenizer.named_parameters()
-                            if p.requires_grad
-                        ]
+                    raise ValueError(
+                        f"Unknown training/finetuning strategy {self.train_cfg.finetune_strategy}"
+                    )
 
-                    # TODO: buggy to compute the perceptage of the learnabel params
-                    # _len_params_tuned = len(params)
-                    # _len_all_params = len(list(self.tokenizer.parameters()))
-                    # self.log_msg(
-                    #     f"[Optimizer]: peft tuning, {_len_params_tuned / _len_all_params * 100}% of all params to train"
-                    # )
-
-            # * add with quantizer params
+            # add with quantizer params
             if self.sep_enc_dec:
+                assert isinstance(params, list)
                 params += quant_params
         else:
             raise NotImplementedError(f"not implemented")
@@ -851,7 +840,7 @@ class CosmosHyperspectralTokenizerTrainer:
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
-            def _optimizer_creater(optimizer_cfg, params_getter):
+            def _optimizer_creater(optimizer_cfg, params_getter: Callable):
                 if "get_muon_optimizer" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
@@ -1002,47 +991,43 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer_sched, self.disc_sched
         )
 
-        # repa
-        if self.vq_loss_fn.use_repa and self.accelerator.is_fsdp2:
-            self.log_msg("prepare repa encoder for FSDP2", level="WARNING")
-
-            self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = [
-                "NestedTensorBlock"
-            ]
-            self.vq_loss_fn.repa_loss.repa_encoder.dtype = torch.float32
-            self.vq_loss_fn.repa_loss.repa_encoder, _ = self.accelerator.prepare(
-                self.vq_loss_fn.repa_loss.repa_encoder,
-                torch.optim.AdamW(
-                    self.vq_loss_fn.repa_loss.repa_encoder.parameters()
-                ),  # dummy optimizer
+        def _fake_prepare(model, no_split_modules, dtype=torch.float32):
+            model._no_split_modules = no_split_modules
+            model.dtype = dtype
+            # dummy optimizer for accelerate, will not train dino encoder
+            # since accelerate need to prepare model and optimizer for FSDP2 at the same time
+            model_prepared, _ = self.accelerator.prepare(
+                model, torch.optim.AdamW(model.parameters())
             )
-            for p in self.vq_loss_fn.repa_loss.repa_encoder.parameters():
+            for p in model.parameters():
                 if isinstance(p, DTensor):
                     p._local_tensor = p._local_tensor.to(self.device)
-
+            # pop out the repa encoder
             self.accelerator._models.pop(-1)
             self.accelerator._optimizers.pop(-1)
+            return model_prepared
 
-        # vf loss
-        if self.vq_loss_fn.use_vf and self.accelerator.is_fsdp2:
-            self.log_msg("prepare vf encoder for FSDP2", level="WARNING")
+        if self.accelerator.is_fsdp2:
+            # repa loss
+            if self.vq_loss_fn.use_repa:
+                self.log_msg("prepare repa encoder for FSDP2", level="WARNING")
+                self.vq_loss_fn.repa_loss.repa_encoder = _fake_prepare(
+                    self.vq_loss_fn.repa_loss.repa_encoder, ["NestedTensorBlock"]
+                )
 
-            self.vq_loss_fn.repa_loss.repa_encoder._no_split_modules = [
-                "NestedTensorBlock"
-            ]
-            self.vq_loss_fn.repa_loss.repa_encoder.dtype = self.dtype  # torch.float32
-            self.vq_loss_fn.repa_loss.repa_encoder, _ = self.accelerator.prepare(
-                self.vq_loss_fn.repa_loss.repa_encoder,
-                torch.optim.AdamW(
-                    self.vq_loss_fn.repa_loss.repa_encoder.parameters()
-                ),  # dummy optimizer
-            )
-            for p in self.vq_loss_fn.repa_loss.repa_encoder.parameters():
-                if isinstance(p, DTensor):
-                    p._local_tensor = p._local_tensor.to(self.device)
+            # vf loss
+            if self.vq_loss_fn.use_vf:
+                self.log_msg("prepare vf encoder for FSDP2", level="WARNING")
+                self.vq_loss_fn.vf_loss.repa_encoder = _fake_prepare(
+                    self.vq_loss_fn.vf_loss.repa_encoder, ["NestedTensorBlock"]
+                )
 
-            self.accelerator._models.pop(-1)
-            self.accelerator._optimizers.pop(-1)
+            # gram loss
+            if self.vq_loss_fn.use_gram:
+                self.log_msg("prepare gram encoder for FSDP2", level="WARNING")
+                self.vq_loss_fn.gram_loss.gram_encoder = _fake_prepare(
+                    self.vq_loss_fn.gram_loss.gram_encoder, ["NestedTensorBlock"]
+                )
 
     def step_train_state(self):
         self.train_state.update("train")
@@ -1150,7 +1135,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # loss
         with self.accelerator.autocast():
-            disc_train_loss_d, log_disc = self.vq_loss_fn.forward(
+            # self.vq_loss_fn.forward
+            disc_train_loss_d, log_disc = self.vq_loss_fn(
                 inputs=x,
                 reconstructions=out_d["recon"],
                 q_loss_total=out_d.get("q_loss", None),
@@ -1185,30 +1171,22 @@ class CosmosHyperspectralTokenizerTrainer:
         return self.get_global_step("train")
 
     def may_freeze(self, model, freeze=True):
-        for p in model.parameters():
-            p.requires_grad = not freeze
+        # for p in model.parameters():
+        #     p.requires_grad = not freeze
+        model.requires_grad_(not freeze)
 
+    @no_type_check
     def get_last_layer(self, use_ema: bool = False, mode="dec"):
-        # if use_ema:
-        #     if self.sep_enc_dec:
-        #         w = self.accelerator.unwrap_model(
-        #             self.ema_decoder
-        #         ).ema_model.get_last_layer()
-        #     else:
-        #         w = self.accelerator.unwrap_model(
-        #             self.ema_tokenizer
-        #         ).ema_model.get_last_layer()
-        # else:
         if mode == "dec":
             if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(  # type: ignore
+                w = self.accelerator.unwrap_model(
                     self.tokenizer_decoder
                 ).decoder.get_last_layer()
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
             if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(  # type: ignore
+                w = self.accelerator.unwrap_model(
                     self.tokenizer_encoder
                 ).encoder.conv_out.weight
             else:
@@ -1770,13 +1748,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 ema_path / "quantizer",
             )
 
-        self.log_msg(f"[Ckpt]: save ema at {ema_path}")
+        self.log_msg(f"[ckpt]: save ema at {ema_path}")
 
     def load_from_ema_or_lora(self, ema_path: str | Path, strict: bool = False):
-        ##! FIXME: if is loaded after FSDP2 shard, it won't work
-
-        ema_path = Path(ema_path)  # type: ignore
-
+        ema_path = Path(ema_path)
         if self.sep_enc_dec:
             if self._is_fsdp:
                 raise NotImplementedError(
@@ -1841,10 +1816,6 @@ class CosmosHyperspectralTokenizerTrainer:
                         )
 
                         # ensure there is model/pytorch_model_fsdp.bin file
-                        from copy import deepcopy
-
-                        from torch.distributed.fsdp import StateDictType
-
                         _fsdp_plugin_cp = deepcopy(self.accelerator.state.fsdp_plugin)
                         _fsdp_plugin_cp.state_dict_type = StateDictType.FULL_STATE_DICT
                         loaded_res = load_fsdp_model(
@@ -1853,7 +1824,7 @@ class CosmosHyperspectralTokenizerTrainer:
                             self.tokenizer_peft_wrapped,
                             ema_path.as_posix(),
                             model_index=0,
-                            adapter_only=True,  # Warn: loading from shard only-lora-layer weights does not work.
+                            adapter_only=True,  # warn: loading from shard only-lora-layer weights does not work.
                         )
 
                     self.log_msg(
@@ -1863,6 +1834,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
                     # is refer
                     # NOTE: forcing to get the base model, not sure if this is referencing the same model
+                    assert self.tokenizer_peft_wrapped is not None, (
+                        "tokenizer_peft_wrapped is None"
+                    )
                     self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
 
                 # TODO: test it, this will not work
@@ -1937,17 +1911,6 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg(
             f"[Load EMA]: clear the accelerator registrations and re-prepare training"
         )
-
-        # Remove this
-
-        # self.accelerator._models = []
-        # self.accelerator._optimizers = []
-        # self.accelerator._schedulers = []
-        # self.prepare_for_training()
-
-        # self.log_msg(
-        #     f"[EMA]: load ema weights to online models from {ema_path}, {strict=}"
-        # )
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")

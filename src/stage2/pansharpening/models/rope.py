@@ -63,7 +63,7 @@ class RopePosEmbed(nn.Module):
 
 def get_1d_rotary_pos_embed(
     dim: int,
-    pos: Union[np.ndarray, int],
+    pos: np.ndarray | int | torch.Tensor,
     theta: float = 10000.0,
     use_real=False,
     linear_factor=1.0,
@@ -104,6 +104,7 @@ def get_1d_rotary_pos_embed(
         pos = torch.arange(pos)
     if isinstance(pos, np.ndarray):
         pos = torch.from_numpy(pos)  # type: ignore  # [S]
+    assert torch.is_tensor(pos), f"pos must be a tensor, got {type(pos)}"
 
     theta = theta * ntk_factor
     freqs = (

@@ -3,7 +3,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Literal, Sequence, cast
+from typing import Callable, Literal, Sequence, cast
 
 import accelerate
 import colored_traceback
@@ -31,6 +31,7 @@ from utilities.network_utils.Dtensor import safe_dtensor_operation
 colored_traceback.add_hook()
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
@@ -112,6 +113,7 @@ class PansharpeningTrainer:
         self.prepare_ema_models()
 
         # loss
+        self.pansp_loss: AmotizedPixelLoss | nn.L1Loss | Callable
         if hasattr(self.train_cfg, "pansharpening_loss"):
             self.pansp_loss = hydra.utils.instantiate(self.train_cfg.pansharpening_loss)
         else:
@@ -710,6 +712,7 @@ class PansharpeningTrainer:
             self.accelerator.backward(sr_loss)
             self.gradient_check(self.pansp_model)
             self.pansp_optim.step()
+            self.pansp_sched.step()
 
             # ema update
             self.ema_update(mode="pansharpening")
@@ -894,6 +897,7 @@ class PansharpeningTrainer:
         for batch in self.val_dataloader:
             yield batch
 
+    @torch.no_grad()
     def val_step(self, batch: dict):
         if not self.online_tokenize:
             lrms_latent = self.forward_tokenizer(batch["lrms"])["latent"]

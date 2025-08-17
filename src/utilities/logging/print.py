@@ -10,16 +10,18 @@ from beartype import beartype
 from loguru import logger
 from rich.console import Console
 
+from .functions import default, once
+
 # Define a type hint for allowed log levels
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 __warn_once_set = set()
 __warn_once_pattern_set = set()
 
-__setup_console = (
-    False  # rich console, when use this, the markup shold be [ ] not loguru < >.
-)
+# Rich console, when use this, the markup shold be [ ] not loguru < >.
+__setup_console = False
 _console = None
 
+# Configure the logger
 __re_config_logger = True
 
 # Set the level
@@ -28,27 +30,6 @@ logger.level("INFO", icon="⭐", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
-
-
-def once(func: Callable[..., Any]) -> Callable[..., Any]:
-    """
-    Decorator to ensure a function is only executed once.
-    """
-    has_run = False
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        nonlocal has_run
-        is_auto = kwargs.pop("auto", True)
-        if not has_run or not is_auto:
-            has_run = True
-            return func(*args, **kwargs)
-
-    return wrapper
-
-
-def default(x, val):
-    return x if x is not None else val
 
 
 # Setup console
@@ -97,10 +78,10 @@ def configure_logger(
 
     if removed:
         logger.remove()
-    logger.add(
+    handler = logger.add(
         sink,
         level=level.upper(),
-        enqueue=True,
+        enqueue=False,
         colorize=True,
         format=(
             "{time:HH:mm:ss} "
@@ -111,6 +92,8 @@ def configure_logger(
         filter=filter,
     )
     # logger.debug("Logger reconfigured", re_config=True)
+
+    return handler
 
 
 if __re_config_logger:
@@ -123,7 +106,7 @@ def set_logger_file(
     add_time: bool = True,
     mode="w",
     filter=None,
-) -> None:
+):
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
         "- <level>[{level}]</level> "
@@ -152,7 +135,7 @@ def set_logger_file(
 
     Path(file).parent.mkdir(parents=True, exist_ok=True)
 
-    logger.add(
+    handler = logger.add(
         file,
         format=log_format_in_file,
         level=level.upper(),
@@ -163,7 +146,12 @@ def set_logger_file(
         mode=mode,
         filter=filter,
     )
-    log_print(f"Set logger to log to file: {file} with level {level}")
+    log_print(
+        f"Set logger to log to file: {file} with level {level}, handler id: {handler}",
+        level="info",
+    )
+
+    return handler
 
 
 def is_rank_zero() -> bool:
@@ -200,7 +188,7 @@ def format_extra(record):
 
 @beartype
 def log_print(
-    msg: str,
+    msg: str | Any,
     level: LogLevel = "info",
     only_rank_zero: bool = True,
     warn_once: bool = False,  # deprecated
@@ -233,6 +221,11 @@ def log_print(
         return
 
     log_once = once or warn_once
+    if not isinstance(msg, str):
+        try:
+            msg = str(msg)
+        except Exception as e:
+            raise RuntimeError(f"Can not cast log message into a string: {e}") from e
 
     if log_once or warn_once_pattern is not None:
         level = "warning" if warn_once else level

@@ -4,6 +4,8 @@ from functools import partial, wraps
 
 import torch
 import torch.nn as nn
+from timm.layers.create_norm import create_norm_layer
+from timm.layers.create_norm_act import create_norm_act_layer
 
 from src.utilities.logging import log_print
 
@@ -142,6 +144,7 @@ class DiffBandsInputConvIn(nn.Module):
         band_lst: list[int],
         hidden_dim: int,
         basic_module: str = "conv_norm_act",
+        use_timm=False,
     ):
         super().__init__()
 
@@ -154,17 +157,31 @@ class DiffBandsInputConvIn(nn.Module):
             def basic_module_fn(
                 in_channels, out_channels, kernel_size, stride, padding
             ):
-                return nn.Sequential(
+                if use_timm:
+                    norm_act = create_norm_act_layer(
+                        "layernorm2d",
+                        out_channels,
+                        act_layer=nn.LeakyReLU(negative_slope=0.2),
+                    )
+                else:
+                    norm_act = (
+                        nn.GroupNorm(32, out_channels, eps=1e-6),
+                        nn.LeakyReLU(negative_slope=0.2),
+                    )
+
+                layer = [
                     nn.Conv2d(
                         in_channels,
                         out_channels,
                         kernel_size=kernel_size,
                         stride=stride,
                         padding=padding,
-                    ),
-                    nn.GroupNorm(32, out_channels, eps=1e-6),
-                    nn.LeakyReLU(negative_slope=0.2),
-                )
+                    )
+                ]
+                layer += norm_act if isinstance(norm_act, Sequence) else [norm_act]
+                return nn.Sequential(*layer)
+        else:
+            raise ValueError(f"basic_module {basic_module} is not supported")
 
         kw = 4
         padw = 1
@@ -179,8 +196,10 @@ class DiffBandsInputConvIn(nn.Module):
                 padding=padw,
             )
 
-            log_print(f"[Disc] set conv to hidden module and buffer for channel {c}")
-        log_print(f"[Disc] diffbands input convs: {self.in_modules}")
+            log_print(
+                f"[Disc] set conv to hidden module and buffer for channel {c}", "debug"
+            )
+        # log_print(f"[Disc] diffbands input convs: {self.in_modules}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
@@ -214,7 +233,8 @@ class NLayerDiscriminator(nn.Module):
         ndf=64,
         n_layers=3,
         use_actnorm=False,
-        use_bn: bool = True,
+        # use_bn: bool = True,
+        norm_type="bn2d",
     ):
         """Construct a PatchGAN discriminator
         Parameters:
@@ -226,8 +246,16 @@ class NLayerDiscriminator(nn.Module):
         super(NLayerDiscriminator, self).__init__()
         if not use_actnorm:
             # Zihan Note: GroupNorm underperforms than BatchNorm
-            if use_bn:
-                norm_layer = nn.BatchNorm2d
+            if norm_type != "gn":
+                _mapping = {
+                    "bn2d": "batchnorm2d",
+                    "ln2d": "layernorm2d",
+                    "rmsnorm2d": "rmsnorm2d",
+                }
+                norm_type = _mapping.get(norm_type, norm_type)
+                norm_layer = lambda c: create_norm_layer(
+                    layer_name=norm_type, num_features=c
+                )
             else:
                 norm_layer = lambda c: nn.GroupNorm(32, c)
         else:
@@ -246,7 +274,7 @@ class NLayerDiscriminator(nn.Module):
             f"ndf={ndf}, "
             f"n_layers={n_layers}, "
             f"use_actnorm={use_actnorm}, "
-            f"use_bn={use_bn}, "
+            f"norm_type={norm_type}, "
             f"use_bias={use_bias}"
         )
 

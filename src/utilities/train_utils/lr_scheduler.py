@@ -101,6 +101,9 @@ def get_cosine_schedule_reduced_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
+# * --- test --- #
+
+
 def __plot_lr_schedule():
     import matplotlib.pyplot as plt
 

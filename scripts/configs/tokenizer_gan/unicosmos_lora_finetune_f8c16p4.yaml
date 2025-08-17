@@ -18,8 +18,8 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: DryadHyper
-  prefetch_factor:
+  used: WV3
+  prefetch_factor: 2
   num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
@@ -33,7 +33,7 @@ dataset:
     DryadHyper: 16
     MUSLI: 1
     OHS: 6
-    WV3: 16
+    WV3: 6
     QB: 16
     GF1: 16
     IKONOS: 16
@@ -42,69 +42,85 @@ dataset:
 
 accelerator:
   gradient_accumulation_plugin:
-    num_steps: 2
+    num_steps: 1
 
 tokenizer:
-  hook_for_repa: false
-  proj_for_vf: false
+  # repa
+  use_repa_loss: false
+  use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
-  vf_on_z_or_module: module
+  vf_on_z_or_module: z
 
-  act_checkpoint: false
-  uni_tokenizer_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors
+  # loading
+  uni_tokenizer_path: runs/stage1_cosmos/2025-08-14_00-52-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
   loading_type: pretrained
-  use_channel_drop: false
+
+  # blocks
   enc_moe: false
   dec_moe: false
   norm_type: gn
   norm_groups: 32
   block_name: res_block
-  patch_method: haar
+  moe_token_mixer_type: res_block
   hidden_factor: 4
-  patch_size: 4
+  use_residual_factor: false
+
+  # others
+  patch_method: haar
+  patch_size: 1
   attn_type: none
-  padding_mode: reflect # for boundary?
+  padding_mode: reflect
+
+  # latents
   latent_channels: 16
+  z_channels: 16
 
-  # channel_drop_config:
-  #   learnable: false
-  #   drop_type: uniform_4
-  #   max_channels: 16
-  #   img_size: 32
-  #   drop_prob: 1.0
+  # augmentations
+  latent_noise_prob: 0.0
+  use_channel_drop: false
 
-  ## downsample and upsample
-  downsample_type: ConvPixelUnshuffle
-  downsample_shortcut: averaging
-  upsample_type: ConvPixelShuffle
-  upsample_shortcut: duplicating
+  # train
+  act_checkpoint: true
+
+  channel_drop_config:
+    drop_type: ${list:[4, 8, 12]}
+    max_channels: ${tokenizer.latent_channels}
+    drop_prob: 0.5
 
 vq_loss:
-  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
-  disc_ndf: 128
-  use_actnorm: false
-  disc_norm_type: bn # gn or bn? works with patchgan_v2
-  disc_start_for_g: 0
-  disc_start_for_d: 0
-  disc_loss: relative
-  ssim_weight: 0.2
-  disc_weight: 0.8
-  repa_loss_weight: #1.5
-  vf_loss_weight:
+  repa_loss_weight: 0.0
   repa_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: random
-    img_resize:
+    rgb_channels: mean
+    img_resize: 224 # null for no resize
     dino_img_size: 224
+  vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
-    rgb_channels: ${dataset.rgb_channels}
+    rgb_channels: mean #${dataset.rgb_channels}
     img_resize: 224
     dino_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
+  quantizer_type:
+  quantizer_options:
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_ndf: 128
+  disc_num_layers: 3
+  use_actnorm: false
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_start_for_g: 0
+  disc_start_for_d: 0
+  disc_loss: relative
+  ssim_weight: 0.04
+  disc_weight: 0.1
+  reconstruction_loss_type: mse
+  # r1, r2 loss seems not necessary
+  # disc_reg_gamma: 1
+  # disc_reg_type: r1r2
+  # disc_reg_freq: 2
 
 ema:
   beta: 0.995
@@ -119,6 +135,7 @@ peft:
   use_dora: false
   use_rslora: false
   target_modules:
+    # [placeholder, add in tokenizer class]
     # - conv1
     # - conv2
     # - q
@@ -127,6 +144,7 @@ peft:
     # - proj_out
   lora_dropout: 0
   modules_to_save:
+    # [placeholder, add in tokenizer class]
     # - encoder.encoder.conv_in
     # - decoder.decoder.conv_out
     # - _repa_proj
@@ -134,7 +152,7 @@ peft:
     # - decoder.quant_conv
 
 train:
-  tokenizer_name: cosmos_uni
+  tokenizer_name: cosmos_lora
   proj_dir: runs/stage1_cosmos_lora/
   finetune_strategy: peft
   max_grad_norm: 0.03
@@ -145,7 +163,7 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: #runs/stage1_cosmos_lora/2025-05-29_23-50-53_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/ema
+  ema_load_path:
   only_load_tokenizer: false
   save_peft_ckpts: true
   grad_check: false
@@ -156,34 +174,20 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: true
     _target_: torch.optim.AdamW
     _partial_: true
     lr: 1.0e-4
     weight_decay: 1.0e-4
     eps: 1.0e-8
-    betas: [0.9, 0.95]
+    betas: [0.9, 0.995]
 
   disc_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 3.0e-8
-    # ns_diff_abc: true
-    # ns_norm: true
     _target_: torch.optim.AdamW
     _partial_: true
     lr: 1.0e-4
     weight_decay: 1.0e-4
     eps: 1.0e-8
-    betas: [0.0, 0.95]
+    betas: [0.9, 0.995]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -193,9 +197,6 @@ train:
     num_cycles: 1
     reduced_factor: 2
     min_lr: 1.0e-5
-    # _target_: transformers.optimization.get_constant_schedule_with_warmup
-    # _partial_: true
-    # num_warmup_steps: 1000
 
   disc_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -205,13 +206,10 @@ train:
     num_cycles: 1
     reduced_factor: 2
     min_lr: 1.0e-5
-    # _target_: transformers.optimization.get_constant_schedule_with_warmup
-    # _partial_: true
-    # num_warmup_steps: 1000
 
   log:
-    run_comment: lora_fintune_f8c16p4_${dataset.used}_uni_pretrained-adam_opt
-    log_with_time: True
+    run_comment: cosmos_lora_ft_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}
+    log_with_time: true
     visualize_every: 200
     log_every: 10
 
@@ -219,4 +217,4 @@ train:
 
 val:
   val_duration: 1000
-  max_val_iters: 40 # val only `max_val_iters` batches
+  max_val_iters: 200 # val only `max_val_iters` batches

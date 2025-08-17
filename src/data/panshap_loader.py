@@ -220,19 +220,19 @@ class MultimodalityDataloader:
             process_img_keys="ALL",
         )
         self.default_codecs_mapping = {
-            # | hyperspectral images or pairs ==================
+            # < hyperspectral images or pairs ==================
             "pixel_image": _img_fn,
             "condition_image": _img_fn,
             "pansharpening_image": _img_fn,
             "denoising_image": _img_fn,
-            # | images, conditions or downstream latents =======
+            # < images, conditions or downstream latents =======
             "image_latent": wids_latent_decode,
             "condition_latent": wids_latent_decode,
             "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
             "denoising_latent": partial(
                 wids_latent_decode, return_dict=True
             ),  # if gt is in, return_dict=True
-            # | language captions and its embeddings ============
+            # < language captions and its embeddings ============
             "captions": wids_caption_embed_decode,
         }
 

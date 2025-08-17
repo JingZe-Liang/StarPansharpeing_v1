@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Modified from the wids package to create a json indexing file that
 supports access the any index sample in sharded .tar files.
@@ -149,11 +150,15 @@ def main_create(args):
         nsamples = wids.compute_num_samples(downloaded)
         filesize = os.stat(downloaded).st_size
         # only save the name
-        fname = Path(fname).name
-        files.append(
-            dict(url=fname, md5sum=md5sum, nsamples=nsamples, filesize=filesize)
-        )
+        file_name = Path(fname).name
+        try:
+            rel_path = Path(fname).parent.relative_to(Path(args.output).parent)
+            url = (rel_path / file_name).as_posix()
+        except ValueError:
+            url = Path(file_name).absolute().as_posix()
+        files.append(dict(url=url, md5sum=md5sum, nsamples=nsamples, filesize=filesize))
 
+        print("url:", url)
         print("md5sum:", md5sum)
         print("nsamples:", nsamples)
         print(f"{nsamples} samples, {format_with_suffix(filesize)} bytes")

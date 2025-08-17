@@ -44,7 +44,7 @@ if __name__ == "__main__":
         quantizer_options={"quantizer_loss_weight": 0.1},
         # perceptual loss
         perceptual_weight=0.0,
-        perceptual_type=None,
+        perceptual_model=None,
         # generator loss
         reconstruction_weight=1.0,
         gen_loss_weight=1.0,

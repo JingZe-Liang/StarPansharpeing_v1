@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=6.0", "ruff>=0.11"]
+dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0"]
 
 [project.scripts]
 wids-index = "data.wids_index:main"
@@ -70,3 +70,29 @@ convention = "numpy"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
+
+[tool.mypy]
+files = ["src", "scripts"]
+follow_imports = "skip"
+warn_return_any = false
+warn_unused_configs = true
+python_version = "3.12"
+allow_untyped_globals = true
+
+[[tool.mypy.overrides]]
+module = ["timm.*", "einops.*", "torch.*", "transformers.*", "loguru.*", "typer.*", "omegaconf.*", "accelerate.*"]
+ignore_missing_imports = true
+
+[tool.ty.rules]
+index-out-of-bounds = "error"
+unused-ignore-comment = "ignore"
+redundant-cast = "ignore"
+possibly-unbound-attribute = "error"
+possibly-unbound-import = "error"
+
+# [tool.ty.environment]
+# root = ["./src", "./scripts"]
+
+[tool.ty.src]
+include = ["src", "scripts"]
+exclude = ["data", "data_local", "tmp", "**/__pycache__/**"]

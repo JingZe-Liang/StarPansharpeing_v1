@@ -113,11 +113,7 @@ class FusionNet(nn.Module):
             self.res1, self.res2, self.res3, self.res4
         )
 
-        # init_weights(self.backbone, self.conv1, self.conv3)   # state initialization, important!
-        # self.apply(init_weights)
-
         self.is_classifier = is_classifier
-        # (bs, latent_c, h, w) --> backbone --- if_is_classifier --> classifier_head --> (bs, h, w, latent_c, 2) for bsq
         if is_classifier:
             self.classifier = nn.Conv2d(
                 channel, spectral_num * 2, kernel_size=3, stride=1, padding=1, bias=True

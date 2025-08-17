@@ -1,4 +1,5 @@
-from typing import Any, Callable, TypedDict, no_type_check
+import functools
+from typing import Any, Callable, Literal, TypedDict, no_type_check
 
 import torch
 from torch import Tensor, nn
@@ -34,6 +35,15 @@ def amotizing_call_model(
 # *==============================================================
 
 
+type AmotizedType = (
+    Literal[
+        "pixel_to_pixel_fusion",
+        "latent_to_pixel_fusion",
+        "one_model_conditioning",
+    ]
+    | str
+)
+
 ModelOutput = TypedDict(
     "ModelOutput",
     {
@@ -44,7 +54,7 @@ ModelOutput = TypedDict(
 )
 
 
-class AmotizedModel(nn.Module):
+class AmotizedModelMixin(nn.Module):
     """
     # Amotized model
 
@@ -74,7 +84,7 @@ class AmotizedModel(nn.Module):
         pixel_model: Module,
         amotized_model: Module,
         decoder_fn: Module | Callable[[Tensor], Tensor],
-        amotize_type: str,
+        amotize_type: AmotizedType,
         backward_decoder: bool = False,
         learn_decoder: bool = False,
     ):
@@ -92,7 +102,7 @@ class AmotizedModel(nn.Module):
             )
 
         # amotizing type check
-        if (
+        if not (
             self.amotize_type
             in (
                 "pixel_to_pixel_fusion",
@@ -188,3 +198,120 @@ class AmotizedModel(nn.Module):
             return self.one_model_conditioning_forward(pixel_in, latent_in)
         else:
             raise ValueError(f"Unknown amotize_type: {self.amotize_type}")
+
+
+# * --- Instances --- #
+
+from src.stage2.pansharpening.models.transformer import Transformer
+from src.stage2.pansharpening.models.vitamin_conv import (
+    ConvCfg,
+    VitaminCfg,
+    VitaminModel,
+)
+
+
+def vitamin_transformer_amotized_in_pixel_small(
+    ms_chan: int, pan_chan: int, latent_chan: int, decoder_fn
+):
+    latent_model = Transformer(
+        in_dim=latent_chan,
+        dim=256,
+        depth=8,
+        num_heads=8,
+        mlp_ratio=4,
+        drop=0.0,
+        patch_size=2,
+        out_channels=256,
+    )
+
+    conv_cfg = ConvCfg(
+        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
+    )
+    vitamin_cfg = VitaminCfg(
+        stem_width=32,
+        embed_dim=[64, 192, 192],
+        depths=[2, 2, 2],
+        ms_channel=ms_chan,
+        pan_channel=pan_chan,
+        condition_channel=256,
+        use_residual=True,
+        conv_cfg=conv_cfg,
+    )
+
+    pixel_model = VitaminModel(vitamin_cfg)
+
+    amotized_model = AmotizedModelMixin(
+        decoder_fn=decoder_fn,
+        amotize_type="latent_to_pixel_fusion",
+        amotized_model=latent_model,
+        backward_decoder=False,
+        learn_decoder=False,
+        pixel_model=pixel_model,
+    )
+
+    return amotized_model
+
+
+ALL_AMOTIZED_MODELS = {
+    "transformer_vitamin_latent_to_pixel_small": vitamin_transformer_amotized_in_pixel_small,
+}
+
+if __name__ == "__main__":
+    from src.stage2.pansharpening.models.transformer import Transformer
+    from src.stage2.pansharpening.models.vitamin_conv import (
+        ConvCfg,
+        VitaminCfg,
+        VitaminModel,
+    )
+
+    device = "cuda:1"
+    torch.cuda.set_device(device)
+
+    transformer = Transformer(
+        in_dim=16,
+        dim=256,
+        depth=8,
+        num_heads=8,
+        mlp_ratio=4,
+        drop=0.0,
+        patch_size=2,
+        out_channels=256,
+    ).cuda()
+
+    conv_cfg = ConvCfg(
+        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
+    )
+    vitamin_cfg = VitaminCfg(
+        stem_width=32,
+        embed_dim=[64, 192, 192],
+        depths=[2, 2, 2],
+        pan_channel=1,
+        ms_channel=8,
+        condition_channel=256,
+        use_residual=True,
+        conv_cfg=conv_cfg,
+    )
+    vitamin_model = VitaminModel(vitamin_cfg).cuda()
+
+    bs = 2
+    ms_latent = torch.randn(bs, 16, 32, 32).cuda()
+    pan_latent = torch.randn(bs, 16, 32, 32).cuda()
+    ms = torch.randn(bs, 8, 256, 256).cuda()
+    pan = torch.randn(bs, 1, 256, 256).cuda()
+
+    amotized_model = AmotizedModelMixin(
+        decoder_fn=lambda x: x,  # Dummy decoder
+        amotize_type="latent_to_pixel_fusion",
+        amotized_model=transformer,
+        backward_decoder=False,
+        learn_decoder=False,
+        pixel_model=vitamin_model,
+    ).cuda()
+
+    y = amotized_model(pixel_in=(ms, pan), latent_in=(ms_latent, pan_latent))
+    print(y["pixel_out"].shape)
+
+    # Parameters
+    from fvcore.nn import FlopCountAnalysis, parameter_count_table
+
+    print(parameter_count_table(amotized_model, max_depth=3))

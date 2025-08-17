@@ -328,42 +328,24 @@ class Encoder(nn.Module):
             padding_mode=padding_mode,
         )
 
-    #     self.apply(self.weight_init)
-    #     log_print(f"[Decoder]: weight init")
-
-    # def weight_init(self, m):
-    #     if isinstance(m, (nn.Conv2d, nn.Linear)):
-    #         # torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-    #         torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
-    #         if hasattr(m, "bias") and m.bias is not None:
-    #             torch.nn.init.zeros_(m.bias)
-    #     elif isinstance(m, nn.GroupNorm):
-    #         torch.nn.init.ones_(m.weight)
-    #         if hasattr(m, "bias") and m.bias is not None:
-    #             torch.nn.init.zeros_(m.bias)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patcher(x)
 
         # downsampling
-        hs = [self.conv_in(x)]
+        # hs = [self.conv_in(x)]
+        h = self.conv_in(x)
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1])
-                # log_print(
-                #     f"[encoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
-                # )
+                # h = self.down[i_level].block[i_block](hs[-1])
+                h = self.down[i_level].block[i_block](h)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
-                hs.append(h)
+                # hs.append(h)
             if i_level < self.num_downsamples:
-                hs.append(self.down[i_level].downsample(hs[-1]))
-                # log_print(
-                #     f"[decoder] level {i_level} downsample, norm={h.norm().item()}, max={h.abs().max()}"
-                # )
-
+                # hs.append(self.down[i_level].downsample(hs[-1]))
+                h = self.down[i_level].downsample(h)
         # middle
-        h = hs[-1]
+        # h = hs[-1]
         h = self.mid.block_1(h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
@@ -549,20 +531,6 @@ class Decoder(nn.Module):
         else:
             self.conv_out = conv_out
 
-        # self.apply(self.weight_init)
-        # log_print(f"[Decoder]: weight init")
-
-    # def weight_init(self, m):
-    #     if isinstance(m, (nn.Conv2d, nn.Linear)):
-    #         # torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-    #         torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
-    #         if hasattr(m, "bias") and m.bias is not None:
-    #             torch.nn.init.zeros_(m.bias)
-    #     elif isinstance(m, nn.GroupNorm):
-    #         torch.nn.init.ones_(m.weight)
-    #         if hasattr(m, "bias") and m.bias is not None:
-    #             torch.nn.init.zeros_(m.bias)
-
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         h = self.conv_in(z)
 
@@ -578,14 +546,8 @@ class Decoder(nn.Module):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
-                # log_print(
-                #     f"[decoder] level {i_level} block {i_block}, norm={h.norm().item()}, max={h.abs().max()}"
-                # )
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
-                # log_print(
-                #     f"[decoder] level {i_level} upsample, norm={h.norm().item()}, max={h.abs().max()}"
-                # )
 
         h = self.norm_out(h)
         h = nonlinearity(h)

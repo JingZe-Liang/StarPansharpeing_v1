@@ -1,13 +1,22 @@
 import copy
 from typing import Literal
 
+import numpy as np
 import open_clip
 import torch as th
 import torch.nn as nn
 from loguru import logger
 from lpips import LPIPS
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import models
 from torchvision.models.feature_extraction import create_feature_extractor
+from torchvision.transforms import Normalize
+
+from src.stage1.utilities.losses.repa.repa_feature_loss import (
+    DINOV3_TO_NUM_LAYERS,
+    load_repa_dino_v3_model,
+)
+from src.utilities.logging.functions import print_shape_if_raise
 
 
 class Norm(nn.Module):
@@ -31,161 +40,130 @@ class WrappedClipVisual(nn.Module):
         return x
 
 
-class LIPIPSHyperpspectral(nn.Module):
-    """A perceptual loss module for hyperspectral images that groups channels and computes LPIPS loss.
+# Perceptual model creation
 
-    This loss function extends traditional perceptual loss to handle hyperspectral images by:
-    1. Grouping spectral channels into groups of fixed size
-    2. Randomly selecting a subset of groups (optional)
-    3. Computing perceptual loss for each group independently
-    4. Averaging the losses across groups
 
-    Args:
-        model_type (Literal["vgg", "lpips-vgg", "resnet", "convnext_s"]):
-            Backbone model type for feature extraction.
-        group_size (int): Number of channels per group. Default: 3.
-        num_groups_to_select (int, optional): Number of groups to randomly select.
-            If None, uses all groups. Can also be float (0-1) for percentage.
-        padding_mode (Literal["zero", "repeat"]): How to pad channels to make
-            divisible by group_size. Default: "zero".
-        compute_on_logits (bool): Whether to compute loss on final logits or
-            intermediate features. Default: True.
-        img_is_neg1_to_1 (bool): Whether input images are in [-1,1] range
-            (True) or [0,1] range (False). Default: False.
-    """
-
-    def __init__(
-        self,
-        model_type: Literal[
-            "vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"
-        ]
-        | str,
-        group_size: int = 3,
-        num_groups_to_select: int | float | None = None,
-        padding_mode: Literal["zero", "repeat"] = "zero",
-        compute_on_logits: bool = True,
-        img_is_neg1_to_1: bool = True,
-        use_gram_model: str | None = "vgg",
-        gram_loss_weight: float = 1.0,
-        **kwargs,
-    ):
-        super().__init__()
-        self.model_type = model_type
-        self.group_size = group_size
-        self.num_groups_to_select = num_groups_to_select
-        self.padding_mode = padding_mode
-        self.compute_on_logits = compute_on_logits
-        self.use_lpips_vgg = model_type[:5] == "lpips"
-        self.img_is_neg1_to_1 = img_is_neg1_to_1
-        self.use_gram_loss = use_gram_model is not None
-        self.use_gram_model = use_gram_model
-        self.gram_loss_weight = gram_loss_weight
-        logger.info(
-            f"[LPIPS Hyperspectral]: using {model_type} model for extracting features for LPIPS loss, "
-            f"{self.use_gram_model} for Gram loss",
+def create_peceptual_model(
+    model_type: str, compute_on_logits, use_lpips_vgg, **model_kwargs
+):
+    if model_type in ("vgg", "lpips-vgg"):
+        assert not compute_on_logits, "LPIPS-VGG does not support computing on logits"
+        if use_lpips_vgg:
+            model = LPIPS(net="vgg").eval()
+        else:
+            model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+            return_nodes = {"features.20": "features", "classifier.6": "logits"}
+    elif model_type == "resnet":
+        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        return_nodes = {
+            "layer1": "features_1",
+            "layer2": "features_2",
+            "layer4": "features_4",
+            "fc": "logits",
+        }
+    elif model_type == "convnext_s":
+        model = models.convnext_small(
+            weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1
+        )
+        return_nodes = {
+            "features.1": "features_1",
+            "features.3": "features_2",
+            "features.4": "features_4",
+            "classifier": "logits",
+        }
+    elif model_type == "remote_clip_RN50":
+        assert "clip_model_ckpt_path" in model_kwargs, (
+            "clip_model_ckpt_path must be specified for remote_clip_RN50"
         )
 
-        # Initialize backbone model
-        self.model = self._make_perceptual_model(
-            model_type,
-            self.compute_on_logits,
-            self.use_lpips_vgg,
-            **kwargs,
-        )
+        # Zihan note: this is a bit nasty, because it load the
+        # whole clip model (with ununsed text model) but anyway, it is simple and works fine
 
-        # Gram loss
-        if self.use_gram_loss:
-            if (
-                self.use_gram_model == model_type
-            ):  # gram model is same as perceptual model
-                self.gram_model = self.model
-
-            else:
-                self.gram_model = self._make_perceptual_model(
-                    self.use_gram_model, False, False, **kwargs
-                )
-
-        self.assertions()
-
-        # Freeze model parameters
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-        # Normalization parameters
-        self.register_buffer(
-            "mean", th.Tensor([0.485, 0.456, 0.406])[None, :, None, None]
-        )
-        self.register_buffer(
-            "std", th.Tensor([0.229, 0.224, 0.225])[None, :, None, None]
-        )
-        self.register_buffer("zero", th.tensor(0.0), persistent=False)
-
-    def _make_perceptual_model(
-        self,
-        model_type: str,
-        compute_on_logits: bool,
-        use_lpips_vgg: bool,
-        **kwargs,
-    ):
-        if model_type in ("vgg", "lpips-vgg"):
-            assert not compute_on_logits, (
-                "LPIPS-VGG does not support computing on logits"
-            )
-            if self.use_lpips_vgg:
-                model = LPIPS(net="vgg").eval()
-            else:
-                model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
-                return_nodes = {"features.20": "features", "classifier.6": "logits"}
-        elif model_type == "resnet":
-            model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-            return_nodes = {
-                "layer1": "features_1",
-                "layer2": "features_2",
-                "layer4": "features_4",
-                "fc": "logits",
-            }
-        elif model_type == "convnext_s":
-            model = models.convnext_small(
-                weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1
-            )
-            return_nodes = {
-                "features.1": "features_1",
-                "features.3": "features_2",
-                "features.4": "features_4",
-                "classifier": "logits",
-            }
-        elif model_type == "remote_clip_RN50":
-            assert "clip_model_ckpt_path" in kwargs, (
-                "clip_model_ckpt_path must be specified for remote_clip_RN50"
-            )
-
-            # Zihan note: this is a bit nasty, because it load the
-            # whole clip model (with ununsed text model) but anyway, it is simple and works fine
-
+        with th.device("cpu"):
             clip, *_ = open_clip.create_model_and_transforms("RN50")
-            clip.load_state_dict(th.load(kwargs["clip_model_ckpt_path"]))
+            clip.load_state_dict(th.load(model_kwargs["clip_model_ckpt_path"]))
             visual = copy.deepcopy(clip.visual).eval()
             del clip
 
-            model = WrappedClipVisual(visual)
+        model = WrappedClipVisual(visual)
 
-            return_nodes = {
-                "body.layer1": "features_1",
-                "body.layer2": "features_2",
-                "body.layer4": "features_3",
-                "final_norm": "logits",
-            }
+        return_nodes = {
+            "body.layer1": "features_1",
+            "body.layer2": "features_2",
+            "body.layer4": "features_3",
+            "final_norm": "logits",
+        }
+    elif model_type[:6] == "dinov3":
+        model = load_repa_dino_v3_model(
+            model_name=model_type, pretrained_on="satellite"
+        )
+    else:
+        raise NotImplementedError(
+            f"Unsupported model type: {model_type}. "
+            "Currently supported types are: vgg, lpips-vgg, resnet, "
+            "convnext_s, remote_clip_RN50"
+        )
+
+    if not compute_on_logits and not use_lpips_vgg and model_type[:6] != "dinov3":
+        model = create_feature_extractor(model, return_nodes=return_nodes)
+
+    return model
+
+
+class HyperspectralFeatureLoss:
+    def __init__(
+        self,
+        use_group: bool = False,
+        # rgb options
+        rgb_channels: list | Literal["random"] | str | None = None,
+        # group options
+        group_size: int = 3,
+        num_groups_to_select: int | float | None = None,
+        padding_mode: Literal["zero", "repeat"] = "zero",
+        # image options
+        img_is_neg1_1=True,
+        img_size: int = 224,
+    ):
+        super().__init__()
+        self.use_group = use_group
+        self.rgb_channels = rgb_channels
+        self.group_size = group_size
+        self.num_groups_to_select = num_groups_to_select
+        self.padding_mode = padding_mode
+        self.img_is_neg1_1 = img_is_neg1_1
+        self.img_size = img_size
+
+        # Normalization
+        self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+
+        # Check on grouping
+        assert self.padding_mode in ["zero", "repeat"]
+        if isinstance(self.num_groups_to_select, float):
+            assert 0 < self.num_groups_to_select <= 1.0, (
+                "num_groups_to_select must be between 0 and 1"
+            )
+        elif isinstance(self.num_groups_to_select, int):
+            assert self.num_groups_to_select > 0, (
+                "num_groups_to_select must be greater than 0"
+            )
         else:
-            raise NotImplementedError(
-                f"Unsupported model type: {model_type}. "
-                "Currently supported types are: vgg, lpips-vgg, resnet, "
-                "convnext_s, remote_clip_RN50"
+            assert self.num_groups_to_select is None, (
+                f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
             )
 
-        if not compute_on_logits and not use_lpips_vgg:
-            model = create_feature_extractor(model, return_nodes=return_nodes)
-
-        return model
+        # Check on rgb channels
+        if self.rgb_channels is not None:
+            if isinstance(self.rgb_channels, str):
+                assert self.rgb_channels in (
+                    "random",
+                    "mean",
+                ), "rgb_channels must be randomly selected"
+            elif isinstance(self.rgb_channels, (list, tuple)):
+                assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
+            else:
+                raise TypeError(
+                    f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}"
+                )
 
     def _pad_channels(self, x: th.Tensor) -> th.Tensor:
         """Pad input tensor channels to make them divisible by group_size.
@@ -241,6 +219,150 @@ class LIPIPSHyperpspectral(nn.Module):
 
         return x_selected
 
+    def _rgb_select(self, img: th.Tensor):
+        if self.rgb_channels is not None and img.shape[1] > 3:
+            assert img.shape[1] >= 3, "img must be hyperspectral images"
+            if self.rgb_channels == "random":
+                _rgb_chan_select = th.randperm(img.shape[1])[:3]
+                rgb_channels = _rgb_chan_select.tolist()
+                img = img[:, rgb_channels]
+            elif (
+                not isinstance(self.rgb_channels, (list, tuple))
+                and self.rgb_channels.startswith("random")
+                and self.rgb_channels != "random"
+            ):
+                # e.g., random_5_12, means select 3 of channels from 5 to 12 channel index
+                _lft_idx = self.rgb_channels.split("_")[1]
+                _rgt_idx = self.rgb_channels.split("_")[2]
+
+                _lft_idx = int(_lft_idx)
+                _rgt_idx = int(_rgt_idx)
+
+                assert _lft_idx < _rgt_idx, (
+                    "rgb_channels must be in the range of [lft, rgt)"
+                )
+                assert _rgt_idx < img.shape[1], (
+                    "rgb_channels must be in the range of [lft, rgt)"
+                )
+                _rgb_chan_select = th.randperm(_rgt_idx - _lft_idx)[:3] + _lft_idx
+                rgb_channels = th.tensor(
+                    [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
+                )
+                img = img[:, rgb_channels]
+            elif self.rgb_channels == "mean":
+                # mean three splitted bands
+                c = img.shape[1]
+                c_3 = c // 3
+                # list(range(c))[::3]
+                bands = [
+                    img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
+                ]
+                img = th.stack(bands, dim=1)
+            else:
+                rgb_channels = self.rgb_channels
+                img = img[:, rgb_channels]
+
+        assert img.shape[1] == 3, "img must be rgb images"
+        return img
+
+    @print_shape_if_raise
+    def get_img_rgb(self, x: th.Tensor):
+        if self.img_is_neg1_1:
+            x = (x + 1) / 2
+
+        # Interpolation
+        x = th.nn.functional.interpolate(x, size=self.img_size, mode="bilinear")
+
+        if self.use_group:
+            # Group channels
+            x = self._pad_channels(x)
+            x = self._group_select(x)  # (bs, n_grps, grp_size, h, w)
+        else:
+            x = self._rgb_select(x).unsqueeze(1)  # (bs, 1, 3, h, w)
+
+        return x
+
+
+type PerceptionModelChoices = Literal[
+    "vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"
+]
+
+
+class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
+    """A perceptual loss module for hyperspectral images that groups channels and computes LPIPS loss.
+
+    This loss function extends traditional perceptual loss to handle hyperspectral images by:
+    1. Grouping spectral channels into groups of fixed size
+    2. Randomly selecting a subset of groups (optional)
+    3. Computing perceptual loss for each group independently
+    4. Averaging the losses across groups
+
+    Args:
+        model_type (Literal["vgg", "lpips-vgg", "resnet", "convnext_s"]):
+            Backbone model type for feature extraction.
+        group_size (int): Number of channels per group. Default: 3.
+        num_groups_to_select (int, optional): Number of groups to randomly select.
+            If None, uses all groups. Can also be float (0-1) for percentage.
+        padding_mode (Literal["zero", "repeat"]): How to pad channels to make
+            divisible by group_size. Default: "zero".
+        compute_on_logits (bool): Whether to compute loss on final logits or
+            intermediate features. Default: True.
+        img_is_neg1_to_1 (bool): Whether input images are in [-1,1] range
+            (True) or [0,1] range (False). Default: False.
+    """
+
+    def __init__(
+        self,
+        percep_model: PerceptionModelChoices | str | nn.Module,
+        use_group=False,
+        rgb_channels: list | Literal["random", "mean"] | str | None = None,
+        group_size: int = 3,
+        num_groups_to_select: int | float | None = None,
+        padding_mode: Literal["zero", "repeat"] = "repeat",
+        compute_on_logits: bool = True,
+        img_is_neg1_to_1: bool = True,
+        img_size: int = 224,
+        **kwargs,
+    ):
+        super().__init__()
+        HyperspectralFeatureLoss.__init__(
+            self,
+            use_group,
+            rgb_channels,
+            group_size,
+            num_groups_to_select,
+            padding_mode,
+            img_is_neg1_to_1,
+            img_size=img_size,
+        )
+
+        self.compute_on_logits = compute_on_logits
+        self.use_lpips_vgg = (
+            percep_model[:5] == "lpips" if isinstance(percep_model, str) else False
+        )
+
+        # Initialize backbone model
+        if isinstance(percep_model, nn.Module):
+            self.percep_model_name = percep_model.__class__.__name__
+            self.percep_model = percep_model
+        else:
+            self.percep_model_name = percep_model
+            self.percep_model = create_peceptual_model(
+                percep_model,
+                self.compute_on_logits,
+                self.use_lpips_vgg,
+                **kwargs,
+            )
+
+        logger.info(
+            f"[LPIPS Hyperspectral]: using {percep_model.__class__.__name__} model for extracting features for LPIPS loss"
+        )
+
+        self.assertions()
+
+        # Freeze model parameters
+        self.percep_model.requires_grad_(False)
+
     def _compute_gram_matrix(self, feature_maps: th.Tensor) -> th.Tensor:
         b, c, h, w = feature_maps.size()
         features = feature_maps.view(b, c, h * w)
@@ -260,87 +382,52 @@ class LIPIPSHyperpspectral(nn.Module):
 
         # Directly use LPIPS vgg network to compute loss
         if self.use_lpips_vgg:
-            loss = self.model(input, target)
+            loss = self.percep_model(input, target)
             return loss
 
         # Forward pass
-        features_input = self.model(input)
+        features_input = self.percep_model(input)
         with th.no_grad():
-            features_target = self.model(target)
+            features_target = self.percep_model(target)
 
         # Compute loss
         if self.compute_on_logits:
             # Only on the last logits
             return th.nn.functional.mse_loss(features_input, features_target)
         else:
-            loss_layers = 0.0
-            for (name, inp_feat), (_, tgt_feat) in zip(
+            loss_layers = th.zeros(1).to(input.device)
+            for (_, inp_feat), (_, tgt_feat) in zip(
                 features_input.items(), features_target.items()
             ):
                 loss_layers += th.nn.functional.mse_loss(inp_feat, tgt_feat)
-                # loss_layers += th.nn.functional.mse_loss(
-                #     features_input["features"], features_target["features"]
-                # )
-                # loss += th.nn.functional.mse_loss(
-                #     features_input["logits"], features_target["logits"]
-                # )
             return loss_layers / len(features_input)
 
-    def _compute_gram_loss(
-        self, input: th.Tensor, target: th.Tensor
-    ) -> th.Tensor | float:
-        """Compute Gram matrix loss between input and target feature maps.
+    def forward_perceptual_model(self, x) -> dict[str, th.Tensor]:
+        # 4 layers as default
+        model_name = self.percep_model_name
+        # is dino model
+        if model_name[:6] == "dinov3" or model_name == "DinoVisionTransformer":
+            n_layers_take = 4
+            total_layers = DINOV3_TO_NUM_LAYERS.get(model_name, None)
+            if total_layers is None:
+                n = -1
+            else:
+                n = list(np.linspace(0, total_layers, num=n_layers_take))
+            if hasattr(self.percep_model, "get_intermediate_layers"):
+                feats = self.percep_model.get_intermediate_layers(  # type: ignore
+                    x, n=n, reshape=True, norm=True
+                )
+                feats = {str(idx): feat for idx, feat in zip(range(len(feats)), feats)}
+            else:
+                raise RuntimeError(
+                    f"Dino v3 model must has method get_intermediate_layers to take features"
+                )
+            return feats
+        # vgg-like model that has feature hook
+        else:
+            return self.percep_model(x)
 
-        Args:
-            input: Input image tensor [B, C, H, W]
-            target: Target image tensor [B, C, H, W]
-
-        Returns:
-            Combined Gram matrix loss from all selected layers
-        """
-        if not self.use_gram_loss:
-            return self.zero
-
-        # Get features from both images
-        input_features = self.gram_model(input)
-        with th.no_grad():
-            target_features = self.gram_model(target)
-
-        gram_loss = 0.0
-        # Compute Gram loss for each feature layer
-        for layer_name in input_features.keys():
-            if layer_name == "logits":
-                continue
-
-            # Compute Gram matrices
-            input_gram = self._compute_gram_matrix(input_features[layer_name])
-            target_gram = self._compute_gram_matrix(target_features[layer_name])
-
-            # Add MSE between Gram matrices
-            gram_loss += th.nn.functional.mse_loss(input_gram, target_gram)
-
-        return gram_loss / len(input_features)  # Average over layers
-
-    def _preprare_for_percep_model(self, input, target):
-        # Resize to 224x224 for pretrained models
-        input = th.nn.functional.interpolate(
-            input, size=224, mode="bilinear", align_corners=True
-        )
-        target = th.nn.functional.interpolate(
-            target, size=224, mode="bilinear", align_corners=True
-        )
-
-        # Normalize
-        if self.img_is_neg1_to_1:
-            # to [0, 1]
-            input = (input + 1) / 2
-            target = (target + 1) / 2
-        input = (input - self.mean) / self.std
-        target = (target - self.mean) / self.std
-
-        return input, target
-
-    def forward(self, input: th.Tensor, target: th.Tensor) -> th.Tensor:
+    def forward(self, input: th.Tensor, target: th.Tensor):
         """Compute the hyperspectral perceptual loss between input and target.
 
         Args:
@@ -357,37 +444,22 @@ class LIPIPSHyperpspectral(nn.Module):
         assert input.dim() == 4 and target.dim() == 4
         assert input.shape == target.shape
 
-        # Pad channels if needed
-        input_padded = self._pad_channels(input)
-        target_padded = self._pad_channels(target)
-
-        # Group and select channels
-        input_groups = self._group_select(input_padded)
-        target_groups = self._group_select(target_padded)
+        # To RGB or groups of RGB images
+        input_groups = self.get_img_rgb(input)
+        target_groups = self.get_img_rgb(target)
 
         # Compute loss for each group
         percep_loss = 0.0
-        gram_loss = 0.0
         num_groups = input_groups.size(1)
 
         for i in range(num_groups):
             # Prepare for model
-            input_, target_ = self._preprare_for_percep_model(
-                input_groups[:, i], target_groups[:, i]
-            )
-
+            input_, target_ = input_groups[:, i], target_groups[:, i]
+            input_, target_ = map(self.normalize, (input_, target_))
             percep_loss_ = self._compute_percep_loss(input_, target_)
-            gram_loss_ = (
-                self._compute_gram_loss(input_, target_) * self.gram_loss_weight
-            )
-
             percep_loss += percep_loss_
-            gram_loss += gram_loss_
 
-        return {
-            "perceptual_loss": percep_loss / num_groups,
-            "gram_loss": gram_loss / num_groups,
-        }
+        return percep_loss / num_groups
 
     def assertions(self):
         """Validate configuration parameters.
@@ -396,41 +468,28 @@ class LIPIPSHyperpspectral(nn.Module):
             AssertionError: If any configuration is invalid
             TypeError: If num_groups_to_select has invalid type
         """
-        assert self.padding_mode in ["zero", "repeat"]
         if self.use_lpips_vgg:
             assert self.model_type in (
                 "vgg",
                 "lpips-vgg",
             ), "LPIPS VGG is only supported for VGG model type"
 
-        if isinstance(self.num_groups_to_select, float):
-            assert 0 < self.num_groups_to_select <= 1.0, (
-                "num_groups_to_select must be between 0 and 1"
-            )
-        elif isinstance(self.num_groups_to_select, int):
-            assert self.num_groups_to_select > 0, (
-                "num_groups_to_select must be greater than 0"
-            )
-        else:
-            assert self.num_groups_to_select is None, (
-                f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
-            )
-
     def __repr__(self):
         return (
             f"{self.__class__.__name__}("
-            f"model_type={self.model_type}, "
+            f"model_type={self.percep_model_name}, "
+            f"rgb_channels={self.rgb_channels}, "
             f"group_size={self.group_size}, "
             f"num_groups_to_select={self.num_groups_to_select}, "
             f"padding_mode={self.padding_mode}, "
             f"compute_on_logits={self.compute_on_logits}, "
             f"use_lpips_vgg={self.use_lpips_vgg}, "
-            f"img_is_neg1_to_1={self.img_is_neg1_to_1}"
-            f"grad_model={self.use_gram_model}"
-            f")"
+            f"img_is_neg1_to_1={self.img_is_neg1_1}"
+            ")"
         )
 
 
+# * --- test --- * #
 def test_hyperspectral_perceptual_loss():
     # 基本测试配置
     base_test_cases = [
@@ -487,7 +546,7 @@ def test_hyperspectral_perceptual_loss():
         try:
             # 初始化损失函数 (添加Gram相关参数)
             loss_fn = LIPIPSHyperpspectral(
-                model_type=config.get("model_type", "vgg"),
+                percep_model=config.get("model_type", "vgg"),
                 group_size=config.get("group_size", 3),
                 num_groups_to_select=config.get("num_groups_to_select", 2),
                 padding_mode=config.get("padding_mode", "repeat"),
@@ -532,7 +591,7 @@ def test_hyperspectral_perceptual_loss():
     # 特殊测试：空输入检查
     print("\nTesting empty input handling...")
     try:
-        loss_fn = LIPIPSHyperpspectral(model_type="vgg").cuda()
+        loss_fn = LIPIPSHyperpspectral(percep_model="vgg").cuda()
         empty_input = th.zeros(0, 3, 256, 256).cuda()
         loss_fn(empty_input, empty_input)
         print("Empty input test passed (should have raised an assertion)")
