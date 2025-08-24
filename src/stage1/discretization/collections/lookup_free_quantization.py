@@ -229,8 +229,10 @@ class LFQ(Module):
 
         # codes
 
-        all_codes = torch.arange(codebook_size)
-        bits = ((all_codes[..., None].int() & self.mask) != 0).float()
+        all_codes = torch.arange(codebook_size)  # 2 ** codebook_dim
+        bits = (
+            (all_codes[..., None].int() & self.mask) != 0
+        ).float()  # [codebook_size, codebook_dim]
         codebook = self.bits_to_codes(bits)
 
         self.register_buffer("codebook", codebook.float(), persistent=False)
@@ -461,7 +463,7 @@ class LFQ(Module):
             x = unpack_one(x, ps, "b * d")
             x = rearrange(x, "b ... d -> b d ...")
 
-            indices = unpack_one(indices, ps, "b * c")
+            indices = unpack_one(indices, ps, "b * c")  # [b, h, w, c]
 
         # whether to remove single codebook dim
 
@@ -492,29 +494,30 @@ class LFQ(Module):
         )
 
 
-if __name__ == "__main__":
-    torch.cuda.set_device(1)
-    bsq = LFQ(
-        dim=12,
-        commitment_loss_weight=0.0,
-        num_codebooks=1,
-        spherical=False,
+# * --- Test --- * #
+from src.utilities.network_utils.perf_utils import get_memory_info
+
+
+def test_lfq():
+    quantizer = LFQ(
+        codebook_size=2 ** (32 // 4),  # codebook size, must be a power of 2
+        dim=32,  # this is the input feature dimension, defaults to log2(codebook_size) if not defined
         channel_first=True,
-        experimental_softplus_entropy_loss=False,
-    ).cuda()
-
-    z = torch.randn(32, 12, 32, 32).cuda()
-    z = F.normalize(z, dim=1)
-
-    zq, loss, loss_breakdown = bsq(z, return_loss_breakdown=True)
-    print(zq.shape)
-    print(loss)
-    print(
-        loss_breakdown.per_sample_entropy,
-        loss_breakdown.batch_entropy,
-        loss_breakdown.commitment,
+        num_codebooks=4,
     )
-    import time
 
-    time.sleep(20)
-    print(torch.cuda.memory_summary(device=torch.device("cuda:1")))
+    image_feats = torch.randn(2, 32, 128, 128)
+
+    get_memory_info()
+    quantized, aux_loss, loss_bkd = quantizer(
+        image_feats, inv_temperature=100.0, return_loss_breakdown=True
+    )  # you may want to experiment with temperature
+    indices = loss_bkd.indices
+    get_memory_info()
+
+    assert image_feats.shape == quantized.shape
+    assert (quantized == quantizer.indices_to_codes(indices)).all()
+
+
+if __name__ == "__main__":
+    test_lfq()

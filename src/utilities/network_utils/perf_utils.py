@@ -1,8 +1,20 @@
 import time
 from contextlib import contextmanager
 
+import psutil
 import torch
 from tqdm import trange
+
+
+def get_memory_info():
+    memory = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+
+    print("-" * 30, "CPU Memory Info", "-" * 30)
+    print(f"Used Mem: [{memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f}]GB")
+    print(f"Mem usage: {memory.percent}%")
+    print(f"Swap Mem: [{swap.used / (1024**3):.2f}/{swap.total / (1024**3):.2f}]GB")
+    print("-" * 75)
 
 
 def func_mem_wrapper(device):
