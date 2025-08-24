@@ -73,3 +73,7 @@
 [submodule "src/stage2/generative/shortcut_pytorch"]
     path = src/stage2/generative/shortcut_pytorch
     url = https://github.com/smileyenot983/shortcut_pytorch
+
+[submodule "src/stage1/MoEs/mixture_of_recursions"]
+    path = src/stage1/MoEs/mixture_of_recursions
+    url = https://github.com/raymin0223/mixture_of_recursions

@@ -2,7 +2,7 @@ import einops
 import torch.nn as nn
 
 
-class BSQPansharpeningLoss(nn.Module):
+class BinaryQuantizedSRLoss(nn.Module):
     def __init__(self, class_dim_take_out: bool = True):
         super().__init__()
         self.class_dim_take_out = class_dim_take_out
@@ -26,8 +26,6 @@ class BSQPansharpeningLoss(nn.Module):
             ignore_index=-1,
         )
 
-        loss_dict = {
-            "loss": loss,
-        }
+        loss_dict = {"loss": loss}
 
         return loss, loss_dict

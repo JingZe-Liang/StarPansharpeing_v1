@@ -1,24 +1,29 @@
+import inspect
 import math
 import random
 from functools import partial
 from math import exp
-from typing import Callable, Sequence, Union
+from typing import Callable, Mapping, Sequence, Text, Tuple, Union
 
 import kornia
+import lazy_loader
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deepinv.loss import TVLoss
+from einops import rearrange
 from kornia.filters import laplacian, spatial_gradient
+from kornia.losses import SSIMLoss as K_SSIMLoss
 from torch import Tensor
 from torch.autograd import Variable
 
-from ....utilities.logging import logger
+deepinv_loss = lazy_loader.load("deepinv.loss")
+
+from src.utilities.logging import logger
 
 # *==============================================================
 # * Multi-task Gradient Normalization Scale
-#  Ref: taken from Simo Ryu's trick for multi-task learning, thanks.
+# * Ref: taken from Simo Ryu's trick for multi-task learning, thanks.
 # *==============================================================
 
 
@@ -47,6 +52,8 @@ def grad_norm(x):
 # * All fusion (pansharpening, VIF, MIF, MFF, MEF losses)
 # *==============================================================
 
+# * --- Utilities --- * #
+
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor(
@@ -58,49 +65,28 @@ def gaussian(window_size, sigma):
     return gauss / gauss.sum()
 
 
-class MaxGradientLoss(torch.nn.Module):
-    def __init__(self, mean_batch=True) -> None:
-        super().__init__()
-        self.register_buffer(
-            "x_sobel_kernel",
-            torch.FloatTensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).expand(1, 1, 3, 3),
-        )
-        self.register_buffer(
-            "y_sobel_kernel",
-            torch.FloatTensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).expand(1, 1, 3, 3),
-        )
-        self.mean_batch = mean_batch
+def gradient(input):
+    filter1 = nn.Conv2d(
+        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
+    )
+    filter2 = nn.Conv2d(
+        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
+    )
+    filter1.weight.data = (
+        torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
+        .reshape(1, 1, 3, 3)
+        .to(input.device)
+    )
+    filter2.weight.data = (
+        torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]])
+        .reshape(1, 1, 3, 3)
+        .to(input.device)
+    )
 
-    def forward(self, fuse, ir, vis):
-        c = fuse.size(1)
-
-        fuse_grad_x = F.conv2d(fuse, self.x_sobel_kernel, padding=1, groups=c)
-        fuse_grad_y = F.conv2d(fuse, self.y_sobel_kernel, padding=1, groups=c)
-
-        ir_grad_x = F.conv2d(ir, self.x_sobel_kernel, padding=1, groups=c)
-        ir_grad_y = F.conv2d(ir, self.y_sobel_kernel, padding=1, groups=c)
-
-        vis_grad_x = F.conv2d(vis, self.x_sobel_kernel, padding=1, groups=c)
-        vis_grad_y = F.conv2d(vis, self.y_sobel_kernel, padding=1, groups=c)
-
-        max_grad_x = torch.maximum(ir_grad_x, vis_grad_x)
-        max_grad_y = torch.maximum(ir_grad_y, vis_grad_y)
-
-        if self.mean_batch:
-            max_gradient_loss = (
-                F.l1_loss(fuse_grad_x, max_grad_x) + F.l1_loss(fuse_grad_y, max_grad_y)
-            ) / 2
-        else:
-            x_loss_b = F.l1_loss(fuse_grad_x, max_grad_x, reduction="none").mean(
-                dim=(1, 2, 3)
-            )
-            y_loss_b = F.l1_loss(fuse_grad_y, max_grad_y, reduction="none").mean(
-                dim=(1, 2, 3)
-            )
-
-            max_gradient_loss = (x_loss_b + y_loss_b) / 2
-
-        return max_gradient_loss
+    g1 = filter1(input)
+    g2 = filter2(input)
+    image_gradient = torch.abs(g1) + torch.abs(g2)
+    return image_gradient
 
 
 def create_window(window_size, channel, sigma=1.5):
@@ -153,67 +139,141 @@ def sf(f1, kernel_radius=5):
     return 1 - f1_sf
 
 
-class HybridSSIMSF(torch.nn.Module):
-    def __init__(self, channel, weighted_r=(1.0, 5e-2, 6e-4, 25e-5)) -> None:
-        super().__init__()
-        self.weighted_r = weighted_r
+def elementwise_charbonnier_loss(
+    input: Tensor, target: Tensor, eps: float = 1e-3
+) -> Tensor:
+    """Apply element-wise weight and reduce loss between a pair of input and
+    target.
+    """
+    return torch.sqrt((input - target) ** 2 + (eps * eps))
 
-    def forward(self, fuse, gt):
-        # fuse: [b, 1, h, w]
-        vi = gt[:, 0:1]  # [b, 1, h, w]
-        ir = gt[:, 1:]  # [b, 1, h, w]
 
-        _ssim_f_ir = ssim_loss_ir(fuse, ir)
-        _ssim_f_vi = ssim_loss_vi(fuse, vi)
-        _sf_f_ir = sf_loss_ir(fuse, ir)
-        _sf_f_vi = sf_loss_vi(fuse, vi)
+def parse_fusion_gt(gt: "Tensor | tuple[Tensor] | list[Tensor]"):
+    # TODO: consider the vis is RGB
+    if isinstance(gt, Tensor):
+        if gt.size(1) == 4:
+            ir, vi = gt[:, 3:], gt[:, :3]
+        elif gt.size(1) == 2:
+            ir, vi = gt[:, 1:], gt[:, 0:1]
+    elif isinstance(gt, (tuple, list)):
+        ir, vi = gt[1], gt[0]
+    else:
+        raise ValueError("gt must be a tensor or a tuple or a list")
 
-        ssim_f_ir = self.weighted_r[0] * _ssim_f_ir
-        ssim_f_vi = self.weighted_r[1] * _ssim_f_vi
-        sf_f_ir = self.weighted_r[2] * _sf_f_ir
-        sf_f_vi = self.weighted_r[3] * _sf_f_vi
+    return ir, vi
 
-        loss_dict = dict(
-            ssim_f_ir=ssim_f_ir,
-            ssim_f_vi=ssim_f_vi,
-            sf_f_ir=sf_f_ir,
-            sf_f_vi=sf_f_vi,
+
+def inspect_func_kwargs(func: Callable, arg_dict: dict | None = None):
+    if arg_dict is None:
+        arg_dict = {}
+    sig = inspect.signature(func)
+    in_func_kwargs = {}
+    _has_var_keywords = False
+
+    for name, param in sig.parameters.items():
+        if (
+            (name not in arg_dict or name == "self")
+            and param.kind
+            in [  # to explicitly avoid func is class.__init__ and enforce `self` is provided by __new__ and do not need exists in arg_dict
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ]
+        ):
+            if param.default is not inspect.Parameter.empty:
+                in_func_kwargs[name] = param.default
+                logger.debug(
+                    f'keyword {name} is not provided, use default value "{param.default}"'
+                )
+            else:
+                raise ValueError(
+                    f"keyword {name} is not provided and no default value is set (raised by inspect._empty)"
+                )
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:  # if func has **kwargs
+            _has_var_keywords = True
+        else:
+            in_func_kwargs[name] = arg_dict.pop(name)
+
+    if not _has_var_keywords:
+        if len(arg_dict) > 0:
+            logger.warning(
+                f"init function {func.__name__} got unused key words {arg_dict}"
+            )
+        return in_func_kwargs, arg_dict
+    else:
+        in_func_kwargs.update(arg_dict)
+        return in_func_kwargs, dict()
+
+
+def init_cls_with_kwargs(cls: type, arg_dict: dict):
+    # class with __init__ or a callable function
+    if hasattr(cls, "__init__") or inspect.isfunction(cls) or inspect.isclass(cls):
+        kwargs, remained_kwargs = inspect_func_kwargs(cls, arg_dict)
+    elif hasattr(cls, "__new__"):
+        # support singleton pattern
+        raise NotImplementedError("singleton pattern is not supported yet")
+    else:
+        raise ValueError(
+            f"cls {cls} should have __init__ or __new__ method with kwargs {arg_dict}"
         )
 
-        loss = ssim_f_ir + ssim_f_vi + sf_f_ir + sf_f_vi
-        return loss, loss_dict
+    return cls(**kwargs), remained_kwargs
 
 
-class HybridSSIMMCI(torch.nn.Module):
-    def __init__(self, channel, weight_r=(1.0, 1.0, 1.0)) -> None:
-        super().__init__()
-        self.ssim = SSIMLoss(channel=channel)
-        self.mci_loss = mci_loss
-        self.weight_r = weight_r
-
-    def forward(self, fuse, gt):
-        # fuse: [b, 1, h, w]
-        vi = gt[:, 0:1]  # [b, 1, h, w]
-        ir = gt[:, 1:]  # [b, 1, h, w]
-
-        _ssim_f_ir = self.weight_r[0] * self.ssim(fuse, ir)
-        _ssim_f_vi = self.weight_r[1] * self.ssim(fuse, vi)
-        _mci_loss = self.weight_r[2] * self.mci_loss(fuse, gt)
-
-        loss = _ssim_f_ir + _ssim_f_vi + _mci_loss
-
-        loss_dict = dict(
-            ssim_f_ir=_ssim_f_ir,
-            ssim_f_vi=_ssim_f_vi,
-            mci_loss=_mci_loss,
+class LossWarpper(torch.nn.Module):
+    def __init__(
+        self,
+        weighted_ratio=(1.0, 1.0),
+        **losses: "dict[str, torch.nn.Module | Callable]",
+    ):
+        super(LossWarpper, self).__init__()
+        self.names = []
+        assert len(weighted_ratio) == len(losses.keys()), (
+            "`weighted_ratio` must be the same length as `losses`"
         )
+        self.weighted_ratio = weighted_ratio
+        for k, v in losses.items():
+            self.names.append(k)
+            setattr(self, k, v)
 
-        return loss, loss_dict
+    def forward(self, pred, gt) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        loss = 0.0
+        d_loss = {}
+        for i, n in enumerate(self.names):
+            l = getattr(self, n)(pred, gt) * self.weighted_ratio[i]
+            if l.numel() != 1:
+                l = l.nanmean()
+            loss += l
+            d_loss[n] = l
+        return loss, d_loss
 
 
-################### SSIM Loss (different implementations) ##############
+class TorchLossWrapper(torch.nn.Module):
+    def __init__(
+        self,
+        weight_ratio: Union[tuple[float], list[float]],
+        **loss: torch.nn.Module | Callable,
+    ) -> None:
+        super().__init__()
+        self.key = list(loss.keys())
+        self.loss = list(loss.values())
+        self.weight_ratio = weight_ratio
 
-from kornia.losses import SSIMLoss as K_SSIMLoss
+        assert len(weight_ratio) == len(loss.keys())
+
+    def forward(self, pred, gt):
+        loss_total = 0.0
+        loss_d = {}
+        for i, l in enumerate(self.loss):
+            loss_i = l(pred, gt) * self.weight_ratio[i]
+            loss_total = loss_total + loss_i
+
+            k = self.key[i]
+            loss_d[k] = loss_i
+
+        return loss_total, loss_d
+
+
+# * --- SSIM Loss (different implementations) --- * #
 
 
 class SSIMLoss(torch.nn.Module):
@@ -293,55 +353,6 @@ class SSIMLoss(torch.nn.Module):
             return ssim_map.mean(1).mean(1).mean(1)
 
 
-def get_ssim_loss(implem_by: str = "kornia", **ssim_kwargs):
-    """
-    get ssim loss by different implementations
-
-    Args:
-        implem_by: str, 'kornia' or 'torch'
-        ssim_kwargs: dict, parameters for ssim loss
-
-    Init SSIMLoss Kwargs:
-        - kornia:
-            window_size: int
-            max_val: float = 1.0
-            eps: float = 1e-12
-            reduction: str = "mean"
-            padding: str = "same"
-        - torch:
-            win_size: int = 11
-            win_sigma: float = 1.5
-            data_range: int = 1
-            size_average: bool = True
-            channel: int = 3
-
-    Examples:
-        >>> get_ssim_loss(
-        ...     implem_by="kornia",
-        ...     window_size=11,
-        ...     max_val=1.0,
-        ...     eps=1e-12,
-        ...     reduction="mean",
-        ...     padding="same",
-        ... )
-        >>> get_ssim_loss(
-        ...     implem_by="torch",
-        ...     win_size=11,
-        ...     win_sigma=1.5,
-        ...     data_range=1,
-        ...     size_average=True,
-        ...     channel=3,
-        ... )
-    """
-    if implem_by == "kornia":
-        ssim_kwargs.pop("channel", None)
-        return K_SSIMLoss(**ssim_kwargs)
-    elif implem_by == "torch":
-        return SSIMLoss(**ssim_kwargs)
-    else:
-        raise ValueError(f"Invalid implementation choice: {implem_by}")
-
-
 class HybridL1SSIM(torch.nn.Module):
     def __init__(
         self,
@@ -381,6 +392,64 @@ class HybridCharbonnierSSIM(torch.nn.Module):
         return (loss,)
 
 
+class HybridL1L2(nn.Module):
+    def __init__(self, cof=10.0):
+        super(HybridL1L2, self).__init__()
+        self.l1 = nn.L1Loss()
+        self.l2 = nn.MSELoss()
+        self.cof = cof
+
+    def forward(self, pred, gt):
+        return self.l1(pred, gt) / self.cof + self.l2(pred, gt)
+
+
+class SAMLoss(torch.nn.Module):
+    def __init__(self, size_average=False):
+        super(SAMLoss, self).__init__()
+
+    def forward(self, img_out, img_base):
+        if img_base.ndimension() == 5:
+            img_base = img_base[:, 0, ...]
+        if img_out.ndimension() == 5:
+            img_out = img_out[:, 0, ...]
+
+        sum1 = torch.sum(img_base * img_out, 1)
+        sum2 = torch.sum(img_base * img_base, 1)
+        sum3 = torch.sum(img_out * img_out, 1)
+
+        t = (sum2 * sum3) ** 0.5
+        numlocal = torch.gt(t, 0)
+        num = torch.sum(numlocal)
+
+        t = sum1 / t
+        angle = torch.acos(t)
+        sumangle = torch.where(
+            torch.isnan(angle), torch.full_like(angle, 0), angle
+        ).sum()
+
+        if num == 0:
+            averangle = sumangle
+        else:
+            averangle = sumangle / num
+
+        SAM = averangle * 180 / 3.14159256
+        return SAM
+
+
+class CharbonnierLoss(torch.nn.Module):
+    def __init__(self, eps=1e-3) -> None:
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, img1, img2) -> Tensor:
+        return elementwise_charbonnier_loss(img1, img2, eps=self.eps).mean()
+
+
+# *==============================================================
+# * Image Fusion (no GT tasks) losses
+# *==============================================================
+
+
 class HybridMCGMCI(torch.nn.Module):
     def __init__(self, weight_r=(1.0, 1.0)) -> None:
         super().__init__()
@@ -400,102 +469,107 @@ class HybridMCGMCI(torch.nn.Module):
         return mcg_loss + mci_loss, loss_dict
 
 
-def gradient(input):
-    filter1 = nn.Conv2d(
-        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
-    )
-    filter2 = nn.Conv2d(
-        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
-    )
-    filter1.weight.data = (
-        torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
-        .reshape(1, 1, 3, 3)
-        .to(input.device)
-    )
-    filter2.weight.data = (
-        torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]])
-        .reshape(1, 1, 3, 3)
-        .to(input.device)
-    )
-
-    g1 = filter1(input)
-    g2 = filter2(input)
-    image_gradient = torch.abs(g1) + torch.abs(g2)
-    return image_gradient
-
-
-class LossWarpper(torch.nn.Module):
-    def __init__(
-        self,
-        weighted_ratio=(1.0, 1.0),
-        **losses: "dict[str, torch.nn.Module | Callable]",
-    ):
-        super(LossWarpper, self).__init__()
-        self.names = []
-        assert len(weighted_ratio) == len(losses.keys()), (
-            "`weighted_ratio` must be the same length as `losses`"
-        )
-        self.weighted_ratio = weighted_ratio
-        for k, v in losses.items():
-            self.names.append(k)
-            setattr(self, k, v)
-
-    def forward(self, pred, gt) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        loss = 0.0
-        d_loss = {}
-        for i, n in enumerate(self.names):
-            l = getattr(self, n)(pred, gt) * self.weighted_ratio[i]
-            if l.numel() != 1:
-                l = l.nanmean()
-            loss += l
-            d_loss[n] = l
-        return loss, d_loss
-
-
-class TorchLossWrapper(torch.nn.Module):
-    def __init__(
-        self,
-        weight_ratio: Union[tuple[float], list[float]],
-        **loss: torch.nn.Module | Callable,
-    ) -> None:
+class HybridSSIMSF(torch.nn.Module):
+    def __init__(self, channel, weighted_r=(1.0, 5e-2, 6e-4, 25e-5)) -> None:
         super().__init__()
-        self.key = list(loss.keys())
-        self.loss = list(loss.values())
-        self.weight_ratio = weight_ratio
+        self.weighted_r = weighted_r
 
-        assert len(weight_ratio) == len(loss.keys())
+    def forward(self, fuse, gt):
+        # fuse: [b, 1, h, w]
+        vi = gt[:, 0:1]  # [b, 1, h, w]
+        ir = gt[:, 1:]  # [b, 1, h, w]
 
-    def forward(self, pred, gt):
-        loss_total = 0.0
-        loss_d = {}
-        for i, l in enumerate(self.loss):
-            loss_i = l(pred, gt) * self.weight_ratio[i]
-            loss_total = loss_total + loss_i
+        _ssim_f_ir = ssim_loss_ir(fuse, ir)
+        _ssim_f_vi = ssim_loss_vi(fuse, vi)
+        _sf_f_ir = sf_loss_ir(fuse, ir)
+        _sf_f_vi = sf_loss_vi(fuse, vi)
 
-            k = self.key[i]
-            loss_d[k] = loss_i
+        ssim_f_ir = self.weighted_r[0] * _ssim_f_ir
+        ssim_f_vi = self.weighted_r[1] * _ssim_f_vi
+        sf_f_ir = self.weighted_r[2] * _sf_f_ir
+        sf_f_vi = self.weighted_r[3] * _sf_f_vi
 
-        return loss_total, loss_d
+        loss_dict = dict(
+            ssim_f_ir=ssim_f_ir,
+            ssim_f_vi=ssim_f_vi,
+            sf_f_ir=sf_f_ir,
+            sf_f_vi=sf_f_vi,
+        )
+
+        loss = ssim_f_ir + ssim_f_vi + sf_f_ir + sf_f_vi
+        return loss, loss_dict
 
 
-def elementwise_charbonnier_loss(
-    input: Tensor, target: Tensor, eps: float = 1e-3
-) -> Tensor:
-    """Apply element-wise weight and reduce loss between a pair of input and
-    target.
-    """
-    return torch.sqrt((input - target) ** 2 + (eps * eps))
+class HybridSSIMMCI(torch.nn.Module):
+    def __init__(self, channel, weight_r=(1.0, 1.0, 1.0)) -> None:
+        super().__init__()
+        self.ssim = SSIMLoss(channel=channel)
+        self.mci_loss = mci_loss
+        self.weight_r = weight_r
+
+    def forward(self, fuse, gt):
+        # fuse: [b, 1, h, w]
+        vi = gt[:, 0:1]  # [b, 1, h, w]
+        ir = gt[:, 1:]  # [b, 1, h, w]
+
+        _ssim_f_ir = self.weight_r[0] * self.ssim(fuse, ir)
+        _ssim_f_vi = self.weight_r[1] * self.ssim(fuse, vi)
+        _mci_loss = self.weight_r[2] * self.mci_loss(fuse, gt)
+
+        loss = _ssim_f_ir + _ssim_f_vi + _mci_loss
+
+        loss_dict = dict(
+            ssim_f_ir=_ssim_f_ir,
+            ssim_f_vi=_ssim_f_vi,
+            mci_loss=_mci_loss,
+        )
+
+        return loss, loss_dict
 
 
-class HybridL1L2(nn.Module):
-    def __init__(self, cof=10.0):
-        super(HybridL1L2, self).__init__()
-        self.l1 = nn.L1Loss()
-        self.l2 = nn.MSELoss()
-        self.cof = cof
+class MaxGradientLoss(torch.nn.Module):
+    def __init__(self, mean_batch=True) -> None:
+        super().__init__()
+        self.register_buffer(
+            "x_sobel_kernel",
+            torch.FloatTensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).expand(1, 1, 3, 3),
+        )
+        self.register_buffer(
+            "y_sobel_kernel",
+            torch.FloatTensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).expand(1, 1, 3, 3),
+        )
+        self.mean_batch = mean_batch
 
-    def forward(self, pred, gt):
-        return self.l1(pred, gt) / self.cof + self.l2(pred, gt)
+    def forward(self, fuse, ir, vis):
+        c = fuse.size(1)
+
+        fuse_grad_x = F.conv2d(fuse, self.x_sobel_kernel, padding=1, groups=c)
+        fuse_grad_y = F.conv2d(fuse, self.y_sobel_kernel, padding=1, groups=c)
+
+        ir_grad_x = F.conv2d(ir, self.x_sobel_kernel, padding=1, groups=c)
+        ir_grad_y = F.conv2d(ir, self.y_sobel_kernel, padding=1, groups=c)
+
+        vis_grad_x = F.conv2d(vis, self.x_sobel_kernel, padding=1, groups=c)
+        vis_grad_y = F.conv2d(vis, self.y_sobel_kernel, padding=1, groups=c)
+
+        max_grad_x = torch.maximum(ir_grad_x, vis_grad_x)
+        max_grad_y = torch.maximum(ir_grad_y, vis_grad_y)
+
+        if self.mean_batch:
+            max_gradient_loss = (
+                F.l1_loss(fuse_grad_x, max_grad_x) + F.l1_loss(fuse_grad_y, max_grad_y)
+            ) / 2
+        else:
+            x_loss_b = F.l1_loss(fuse_grad_x, max_grad_x, reduction="none").mean(
+                dim=(1, 2, 3)
+            )
+            y_loss_b = F.l1_loss(fuse_grad_y, max_grad_y, reduction="none").mean(
+                dim=(1, 2, 3)
+            )
+
+            max_gradient_loss = (x_loss_b + y_loss_b) / 2
+
+        return max_gradient_loss
 
 
 class RMILoss(nn.Module):
@@ -619,15 +693,6 @@ class RMILoss(nn.Module):
         return torch.logdet(x)
 
 
-class CharbonnierLoss(torch.nn.Module):
-    def __init__(self, eps=1e-3) -> None:
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, img1, img2) -> Tensor:
-        return elementwise_charbonnier_loss(img1, img2, eps=self.eps).mean()
-
-
 class HybridSSIMRMIFuse(nn.Module):
     def __init__(self, weight_ratio=(1.0, 1.0), ssim_channel=1):
         super().__init__()
@@ -686,22 +751,9 @@ class HybridPIALoss(nn.Module):
         return l1_int + l1_aux + l1_grad + percep_loss, loss_d
 
 
-def parse_fusion_gt(gt: "Tensor | tuple[Tensor] | list[Tensor]"):
-    # TODO: consider the vis is RGB
-    if isinstance(gt, Tensor):
-        if gt.size(1) == 4:
-            ir, vi = gt[:, 3:], gt[:, :3]
-        elif gt.size(1) == 2:
-            ir, vi = gt[:, 1:], gt[:, 0:1]
-    elif isinstance(gt, (tuple, list)):
-        ir, vi = gt[1], gt[0]
-    else:
-        raise ValueError("gt must be a tensor or a tuple or a list")
-
-    return ir, vi
+# * --- U2Fusion loss --- * #
 
 
-# U2Fusion dynamic loss weight
 class U2FusionLoss(nn.Module):
     def __init__(
         self, loss_weights: tuple[float, float, float] = (5.0, 2.0, 10.0)
@@ -898,7 +950,7 @@ class L_Intensity(nn.Module):
         return Loss_intensity
 
 
-# SwinFusion loss
+# * --- SwinFusion loss --- * #
 
 
 class SwinFusionLoss(nn.Module):
@@ -941,7 +993,7 @@ class CDDFusionLoss(nn.Module):
         return l1_loss + dct_loss + mcg_loss, loss_d
 
 
-### psfusion loss
+# * --- PSFusion loss --- * #
 
 
 class CorrelationLoss(nn.Module):
@@ -967,9 +1019,7 @@ class CorrelationLoss(nn.Module):
         return 1.0 / (cc + self.eps)
 
 
-# * ==========================================================
-# * DRMF fusion loss
-# * ==========================================================
+# * --- DRMF fusion loss --- #
 
 
 def RGB2YCrCb(rgb_image):
@@ -1600,7 +1650,7 @@ class DRMFFusionLoss(nn.Module):
         return loss_fusion, loss
 
 
-## EMMA stage two fusion training loss
+# * --- EMMA stage two fusion training loss --- #
 
 
 class EMMAFusionLoss(nn.Module):
@@ -1819,7 +1869,7 @@ class EMMAFusionLoss(nn.Module):
         return data1
 
 
-# ============================== FILM loss ==============================
+# * --- FILM loss --- * #
 
 
 class LpLssimLossweight(nn.Module):
@@ -2037,9 +2087,6 @@ class FILMFusionLoss(nn.Module):
 
 
 # * ---  MaskGiT and Next Token Prediction Loss --- #
-from typing import Mapping, Text, Tuple
-
-from einops import rearrange
 
 
 class MLMLoss(torch.nn.Module):
@@ -2093,7 +2140,58 @@ class ARLoss(torch.nn.Module):
         return loss, {"loss": loss, "correct_tokens": correct_tokens.mean()}
 
 
-# * --- loss function getter --- #
+# *==============================================================
+# * Loss function entrypoint
+# *==============================================================
+
+
+def get_ssim_loss(implem_by: str = "kornia", **ssim_kwargs):
+    """
+    get ssim loss by different implementations
+
+    Args:
+        implem_by: str, 'kornia' or 'torch'
+        ssim_kwargs: dict, parameters for ssim loss
+
+    Init SSIMLoss Kwargs:
+        - kornia:
+            window_size: int
+            max_val: float = 1.0
+            eps: float = 1e-12
+            reduction: str = "mean"
+            padding: str = "same"
+        - torch:
+            win_size: int = 11
+            win_sigma: float = 1.5
+            data_range: int = 1
+            size_average: bool = True
+            channel: int = 3
+
+    Examples:
+        >>> get_ssim_loss(
+        ...     implem_by="kornia",
+        ...     window_size=11,
+        ...     max_val=1.0,
+        ...     eps=1e-12,
+        ...     reduction="mean",
+        ...     padding="same",
+        ... )
+        >>> get_ssim_loss(
+        ...     implem_by="torch",
+        ...     win_size=11,
+        ...     win_sigma=1.5,
+        ...     data_range=1,
+        ...     size_average=True,
+        ...     channel=3,
+        ... )
+    """
+    if implem_by == "kornia":
+        ssim_kwargs.pop("channel", None)
+        return K_SSIMLoss(**ssim_kwargs)
+    elif implem_by == "torch":
+        return SSIMLoss(**ssim_kwargs)
+    else:
+        raise ValueError(f"Invalid implementation choice: {implem_by}")
 
 
 def get_emma_fusion_loss(
@@ -2128,7 +2226,6 @@ def get_emma_fusion_loss(
 def get_loss(loss_type, channel=31, **kwargs):
     """
     get loss function by name
-
     """
 
     if loss_type == "mse":
@@ -2141,6 +2238,8 @@ def get_loss(loss_type, channel=31, **kwargs):
         criterion = TorchLossWrapper((1.0,), smooth_l1=nn.SmoothL1Loss())
     elif loss_type == "l1ssim":
         criterion, _ = init_cls_with_kwargs(HybridL1SSIM, kwargs)
+    elif loss_type == "l1sam":
+        criterion = TorchLossWrapper((1.0, 1.0), l1=nn.L1Loss(), sam=SAMLoss())
     elif loss_type == "ssimrmi_fuse":
         criterion = HybridSSIMRMIFuse(weight_ratio=(1, 1), ssim_channel=channel)
     elif loss_type == "pia_fuse":
@@ -2173,62 +2272,3 @@ def get_loss(loss_type, channel=31, **kwargs):
     else:
         raise NotImplementedError(f"loss {loss_type} is not implemented")
     return criterion
-
-
-import inspect
-
-
-def inspect_func_kwargs(func: Callable, arg_dict: dict | None = None):
-    if arg_dict is None:
-        arg_dict = {}
-    sig = inspect.signature(func)
-    in_func_kwargs = {}
-    _has_var_keywords = False
-
-    for name, param in sig.parameters.items():
-        if (
-            (name not in arg_dict or name == "self")
-            and param.kind
-            in [  # to explicitly avoid func is class.__init__ and enforce `self` is provided by __new__ and do not need exists in arg_dict
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            ]
-        ):
-            if param.default is not inspect.Parameter.empty:
-                in_func_kwargs[name] = param.default
-                logger.debug(
-                    f'keyword {name} is not provided, use default value "{param.default}"'
-                )
-            else:
-                raise ValueError(
-                    f"keyword {name} is not provided and no default value is set (raised by inspect._empty)"
-                )
-        elif param.kind == inspect.Parameter.VAR_KEYWORD:  # if func has **kwargs
-            _has_var_keywords = True
-        else:
-            in_func_kwargs[name] = arg_dict.pop(name)
-
-    if not _has_var_keywords:
-        if len(arg_dict) > 0:
-            logger.warning(
-                f"init function {func.__name__} got unused key words {arg_dict}"
-            )
-        return in_func_kwargs, arg_dict
-    else:
-        in_func_kwargs.update(arg_dict)
-        return in_func_kwargs, dict()
-
-
-def init_cls_with_kwargs(cls: type, arg_dict: dict):
-    # class with __init__ or a callable function
-    if hasattr(cls, "__init__") or inspect.isfunction(cls) or inspect.isclass(cls):
-        kwargs, remained_kwargs = inspect_func_kwargs(cls, arg_dict)
-    elif hasattr(cls, "__new__"):
-        # support singleton pattern
-        raise NotImplementedError("singleton pattern is not supported yet")
-    else:
-        raise ValueError(
-            f"cls {cls} should have __init__ or __new__ method with kwargs {arg_dict}"
-        )
-
-    return cls(**kwargs), remained_kwargs

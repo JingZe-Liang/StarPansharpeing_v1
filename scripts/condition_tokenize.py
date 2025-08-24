@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Union
 
 import hydra
-import numpy as np
 import torch
 import torch.compiler
 import torch.nn as nn
