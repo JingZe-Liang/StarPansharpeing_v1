@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, cast
 
 import accelerate
-import colored_traceback
 import hydra
 import numpy as np
 import PIL.Image as Image
@@ -26,10 +25,6 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
 
-from utilities.network_utils.Dtensor import safe_dtensor_operation
-
-colored_traceback.add_hook()
-
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
@@ -37,6 +32,7 @@ from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
 from src.utilities.network_utils import load_peft_model_checkpoint
+from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
 
 

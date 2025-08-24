@@ -152,6 +152,9 @@ src/stage2/generative/tools/conditions/caption/weights/*
 src/stage2/generative/tools/conditions/ckpts
 src/stage1/utilities/losses/dinov3/weights/*
 src/stage1/utilities/losses/dinov3/weights
+src/stage1/sana_dcae/pretrained/*
+src/stage1/sana_dcae/pretrained
+src/stage2/generative/tools/conditions/caption/Qwen25_VL
 CLAUDE.local.md
 
 compressed_output/

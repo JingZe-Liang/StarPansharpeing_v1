@@ -1,0 +1,75 @@
+[submodule "src/stage1/WeTok"]
+    path = src/stage1/WeTok
+    url = https://github.com/zhuangshaobin/WeTok
+
+[submodule "src/stage1/perception_models"]
+    path = src/stage1/perception_models
+    url = https://github.com/facebookresearch/perception_models
+
+[submodule "src/stage1/lora/LoRA-Pro"]
+    path = src/stage1/lora/LoRA-Pro
+    url = https://github.com/mrflogs/LoRA-Pro
+
+[submodule "src/stage1/discretization/bsq-vit"]
+    path = src/stage1/discretization/bsq-vit
+    url = https://github.com/zhaoyue-zephyrus/bsq-vit
+
+[submodule "src/stage1/discretization/vector-quantize-pytorch"]
+    path = src/stage1/discretization/vector-quantize-pytorch
+    url = https://github.com/lucidrains/vector-quantize-pytorch
+
+[submodule "src/stage1/discretization/LightningDiT"]
+    path = src/stage1/discretization/LightningDiT
+    url = https://github.com/hustvl/LightningDiT
+
+[submodule "src/stage2/denoise/HyperSIGMA"]
+    path = src/stage2/denoise/HyperSIGMA
+    url = https://github.com/WHU-Sigma/HyperSIGMA
+
+[submodule "src/stage2/generative/HSIGene"]
+    path = src/stage2/generative/HSIGene
+    url = https://github.com/LiPang/HSIGene
+
+[submodule "src/stage2/generative/maskbit"]
+    path = src/stage2/generative/maskbit
+    url = https://github.com/markweberdev/maskbit
+
+[submodule "src/stage2/generative/MeanFlow"]
+    path = src/stage2/generative/MeanFlow
+    url = https://github.com/haidog-yaqub/MeanFlow
+
+[submodule "src/stage2/generative/modified-shortcut-models-pytorch"]
+    path = src/stage2/generative/modified-shortcut-models-pytorch
+    url = https://github.com/yukara-ikemiya/modified-shortcut-models-pytorch
+
+[submodule "src/stage2/generative/integrate-the-integrator"]
+    path = src/stage2/generative/integrate-the-integrator
+    url = https://github.com/lodestone-rock/integrate-the-integrator
+
+[submodule "src/stage1/MoEs/Mixture-of-Transformers"]
+    path = src/stage1/MoEs/Mixture-of-Transformers
+    url = https://github.com/facebookresearch/Mixture-of-Transformers.git
+
+[submodule "src/stage1/MoEs/MoBA"]
+    path = src/stage1/MoEs/MoBA
+    url = https://github.com/MoonshotAI/MoBA
+
+[submodule "src/stage1/one_d_tokenizer/D-AR"]
+    path = src/stage1/one_d_tokenizer/D-AR
+    url = https://github.com/showlab/D-AR
+
+[submodule "src/stage1/one_d_tokenizer/GigaTok"]
+    path = src/stage1/one_d_tokenizer/GigaTok
+    url = https://github.com/SilentView/GigaTok
+
+[submodule "src/stage1/one_d_tokenizer/SelftokTokenizer"]
+    path = src/stage1/one_d_tokenizer/SelftokTokenizer
+    url = https://github.com/selftok-team/SelftokTokenizer
+
+[submodule "src/stage1/one_d_tokenizer/titok"]
+    path = src/stage1/one_d_tokenizer/titok
+    url = https://github.com/bytedance/1d-tokenizer.git
+
+[submodule "src/stage2/generative/shortcut_pytorch"]
+    path = src/stage2/generative/shortcut_pytorch
+    url = https://github.com/smileyenot983/shortcut_pytorch
