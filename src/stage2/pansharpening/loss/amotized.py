@@ -43,12 +43,19 @@ class AmotizedPixelLoss(nn.Module):
 
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
-        _to_out_tensor_detached = lambda x: x.detach() if torch.is_tensor(x) else 0.0
+        _to_out_tensor_detached = (
+            lambda x: x.detach()
+            if torch.is_tensor(x)
+            else torch.tensor(0.0).to(pred_latent)
+        )
+        latent_loss, pixel_loss, pixel_from_latent = map(
+            _to_out_tensor_detached, [latent_loss, sr_pixel_loss, sr_pixel_loss2]
+        )
 
         loss_dict = {
-            "latent_loss": _to_out_tensor_detached(latent_loss),
-            "sr_pixel_loss": _to_out_tensor_detached(sr_pixel_loss),
-            "sr_pixel_from_latent": _to_out_tensor_detached(sr_pixel_loss2),
+            "latent_loss": latent_loss,
+            "pixel_loss": pixel_loss,
+            "pixel_from_latent": pixel_from_latent,
             "total_loss": loss,
         }
 

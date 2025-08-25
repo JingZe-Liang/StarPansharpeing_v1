@@ -36,10 +36,10 @@ def register_new_resolvers():
         if not OmegaConf.has_resolver(name):
             OmegaConf.register_new_resolver(name, resolver, replace=True)
 
-    log_print(
-        "[Omegaconf]: Registered new resolvers: eval, function, class, list, tuple",
-        "info",
-    )
+    # log_print(
+    #     "[Omegaconf]: Registered new resolvers: eval, function, class, list, tuple",
+    #     "info",
+    # )
 
 
 register_new_resolvers()

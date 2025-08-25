@@ -1,3 +1,4 @@
+import inspect
 import re
 import sys
 from contextlib import ContextDecorator
@@ -303,6 +304,70 @@ class catch_any(ContextDecorator):
                 return logger.catch(func)(*args, **kwargs)
 
         return wrapped
+
+
+def print_info_if_raise(ret_all_stacks_info=False):
+    def _print_info(name, x, var_type: str):
+        if hasattr(x, "shape"):
+            log_print(
+                f"[{var_type}] <yellow>{name}</> typed: <green>{type(x)}</>, shaped: <blue>{x.shape}</>"
+                + f", device: {x.device}"
+                if hasattr(x, "device")
+                else "",
+            )
+        elif isinstance(x, (list, tuple)):
+            for i, xi in enumerate(x):
+                _print_info(f"{name}[{i}]", xi, var_type)
+        elif isinstance(x, dict):
+            for n, xi in x.items():
+                _print_info(f"{name}['{n}']", xi, var_type)
+        elif name in ("cls", "self"):
+            vars_from_class = vars(x)
+            for k, v in vars_from_class.items():
+                _print_info(f"{name}.{k}", v, var_type)
+        else:
+            log_print(
+                f"[{var_type}] <yellow>{name}</> typed: <green>{type(x)}</>, var is <blue>{x}</>",
+            )
+
+    def inner(func):
+        def inner_(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if not is_rank_zero():
+                    return
+
+                _code_ctx = "            return func(*args, **kwargs)\n"
+                for stack_i, trace in enumerate(reversed(inspect.trace())):
+                    frame = trace[0]
+
+                    # Trace to the current frame
+                    if trace.code_context[0] == _code_ctx or (
+                        not ret_all_stacks_info and stack_i > 0
+                    ):
+                        break
+
+                    # Print all variables
+                    local_vars = frame.f_locals
+                    use_vars = {
+                        k: v for k, v in local_vars.items() if not k.startswith("__")
+                    }
+
+                    log_print("=" * 30 + f" [stack index: {stack_i} ] " + "=" * 30)
+                    log_print(
+                        f"file: {frame.f_code.co_filename}:{frame.f_lineno}",
+                    )
+                    log_print(f"Error occurred in {func.__name__}, local vars:")
+                    for name, var in use_vars.items():
+                        _print_info(name, var, "local var")
+                    log_print("=" * 60 + "\n")
+
+                raise RuntimeError from e
+
+        return inner_
+
+    return inner
 
 
 if __name__ == "__main__":

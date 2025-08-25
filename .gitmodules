@@ -77,3 +77,6 @@
 [submodule "src/stage1/MoEs/mixture_of_recursions"]
     path = src/stage1/MoEs/mixture_of_recursions
     url = https://github.com/raymin0223/mixture_of_recursions
+[submodule "src/utilities/optim/dion"]
+	path = src/utilities/optim/dion
+	url = git@github.com:microsoft/dion.git
