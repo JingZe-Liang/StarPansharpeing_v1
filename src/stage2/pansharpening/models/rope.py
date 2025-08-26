@@ -299,7 +299,12 @@ class RotaryPositionEmbedding(torch.nn.Module):
         self.latent_shape = latent_shape
         self.original_latent_shape = original_latent_shape
         self.pad_to_multiple_of = pad_to_multiple_of
-        self.get_inv_freq(torch.device(torch.cuda.current_device()))
+        self.device = (
+            torch.device(torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        self.get_inv_freq(self.device)
 
     def get_mscale(self, scale: float = 1.0) -> float:
         """Get the magnitude scaling factor for YaRN."""
@@ -328,7 +333,9 @@ class RotaryPositionEmbedding(torch.nn.Module):
         self,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the spatial frequencies for the latent tensor."""
-        self.seq = torch.arange(self.max_seq_len_cached, dtype=torch.float).cuda()
+        self.seq = torch.arange(self.max_seq_len_cached, dtype=torch.float).to(
+            self.device
+        )
         if self.rope_dim == "1D":
             emb = torch.einsum("i,j->ij", self.seq, self.inv_freq)
 

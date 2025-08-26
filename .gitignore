@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_Store
 
 # C extensions
 *.so
@@ -156,6 +157,7 @@ src/stage1/sana_dcae/pretrained/*
 src/stage1/sana_dcae/pretrained
 src/stage2/generative/tools/conditions/caption/Qwen25_VL
 CLAUDE.local.md
+.claude/
 
 compressed_output/
 env.toml

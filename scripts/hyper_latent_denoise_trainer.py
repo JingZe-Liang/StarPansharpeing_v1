@@ -223,9 +223,8 @@ class DenoisingTrainer:
                 )
 
             # quantizer in the tokenizer, not handled by this trainer
-            self.use_quantizer = hasattr(
-                self.tokenizer, "quantizer"
-            )  # vq, bsq, fsq, kl
+            # vq, bsq, fsq, kl
+            self.use_quantizer = hasattr(self.tokenizer, "quantizer")
             self.quantizer = None
             self.log_msg(
                 f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
@@ -1032,7 +1031,7 @@ class DenoisingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_fusionnet"
+_key = "cosmos_f8c16p4_fusionnet"  # vq, bsq, fsq, kl
 _configs = {
     # cosmos tokenizer, simple denoising
     "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",

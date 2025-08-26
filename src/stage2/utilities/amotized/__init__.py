@@ -1,0 +1,1 @@
+from .amotized_model_wrapper import AmotizedModelMixin

@@ -2,11 +2,9 @@ import hashlib
 import math
 from functools import partial
 from itertools import zip_longest
-from operator import call
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
-import numpy as np
 import torch
 import webdataset as wds
 import wids
@@ -488,11 +486,11 @@ class MultimodalityDataloader:
         """Hook after initializing datasets."""
         return self.datasets
 
-    def before_getitem(self, init_sample: dict):
+    def before_getitem(self, init_sample: dict) -> Any:
         """Hook before getting an item from the dataset."""
         return init_sample
 
-    def after_getitem(self, sample: dict):
+    def after_getitem(self, sample: dict) -> Any:
         """Hook after getting an item from the dataset."""
         return sample
 
@@ -581,6 +579,7 @@ def get_mm_chained_loaders(
     # > loop index file and create loaders
     datasets = []
     loaders = []
+    curriculum_fn = None
     for i, (path_dict, per_loader_options) in enumerate(
         zip(paths, changed_kwargs_by_loader)
     ):
@@ -615,8 +614,6 @@ def get_mm_chained_loaders(
                 f"use {curriculum_type} curriculum learning with kwargs: {curriculum_kwargs} for loader {path_dict}",
                 "debug",
             )
-        else:
-            curriculum_fn = None
 
     # > chain dataloaders
     assert len(datasets) > 0 and len(loaders) > 0, (
