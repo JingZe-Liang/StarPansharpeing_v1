@@ -2,15 +2,19 @@ import torch
 from bitsandbytes.optim import (
     LAMB,
     AdamW8bit,
-    AdEMAMix8bit,
+    # AdEMAMix8bit,
     LAMB8bit,
     PagedAdamW8bit,
-    PagedAdEMAMix8bit,
+    # PagedAdEMAMix8bit,
     RMSprop8bit,
 )
 
 # CAME optimizer: SANA
 from .came import CAME
+
+# Distributional optimizers from Dino
+from .dion.dion import Dion, DionMixedPrecisionConfig, DionReference, DionSimple
+from .dion.dion import Muon as MuonAll2All
 
 # FSDP optimizers: https://github.com/ethansmith2000/fsdp_optimizers/tree/main
 from .kron import Kron
@@ -30,10 +34,10 @@ torch.serialization.add_safe_globals(
     [
         LAMB,
         AdamW8bit,
-        AdEMAMix8bit,
+        # AdEMAMix8bit,
         LAMB8bit,
         PagedAdamW8bit,
-        PagedAdEMAMix8bit,
+        # PagedAdEMAMix8bit,
         RMSprop8bit,
         Kron,
         KronMars,
@@ -45,10 +49,15 @@ torch.serialization.add_safe_globals(
         CAME8BitWrapper,
         CAMEWrapper,
         Lion,
+        Dion,
+        DionReference,
+        DionSimple,
+        MuonAll2All,
     ]
 )
 
 
+# Muon optimizer parameters getter
 from typing import Iterable
 
 

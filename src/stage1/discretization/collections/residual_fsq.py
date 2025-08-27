@@ -11,7 +11,7 @@ from torch import nn
 from torch.amp import autocast
 from torch.nn import Module
 
-from .finite_scalar_quantization import FSQ
+from src.stage1.discretization.collections.finite_scalar_quantization import FSQ
 
 # helper functions
 
@@ -280,6 +280,12 @@ class ResidualFSQ(Module):
 
         return (*ret, all_codes)
 
+    def indices_to_codes(self, indices_stack: torch.Tensor) -> torch.Tensor:
+        quantized_out = 0
+        for layer, indices in zip(self.layers, indices_stack.transpose(0, 1)):
+            quantized_out += layer.indices_to_codes(indices)
+        return quantized_out
+
 
 # grouped residual fsq
 
@@ -352,3 +358,32 @@ class GroupedResidualFSQ(Module):
 
         ret = (quantized, all_indices, *maybe_all_codes)
         return ret
+
+
+# * --- Test --- * #
+
+
+def test_rfsq():
+    quantizer = ResidualFSQ(
+        levels=[8, 8, 8, 5, 5, 5],
+        num_quantizers=4,
+        dim=6,
+        is_channel_first=True,
+        num_codebooks=1,
+    )
+
+    x = torch.randn(2, 6, 32, 32)
+    quantized, indices = quantizer(x)
+    print("Quantized shape:", quantized.shape)
+    print("Indices shape:", indices.shape)
+
+    indices = rearrange(indices, "b q ... -> b (...) q")
+    # codes = quantizer.get_codes_from_indices(indices)
+    codes = quantizer.get_output_from_indices(indices)
+
+    # codes = quantizer.indices_to_codes(indices)
+    print("Codes shape:", codes.shape)
+
+
+if __name__ == "__main__":
+    test_rfsq()

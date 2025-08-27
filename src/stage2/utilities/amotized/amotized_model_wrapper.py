@@ -256,7 +256,10 @@ ALL_AMOTIZED_MODELS = {
     "transformer_vitamin_latent_to_pixel_small": vitamin_transformer_amotized_in_pixel_small,
 }
 
-if __name__ == "__main__":
+# * --- Test --- * #
+
+
+def test_amotized_pansharpening_model():
     from src.stage2.pansharpening.models.transformer import Transformer
     from src.stage2.pansharpening.models.vitamin_conv import (
         ConvCfg,
@@ -315,3 +318,7 @@ if __name__ == "__main__":
     from fvcore.nn import FlopCountAnalysis, parameter_count_table
 
     print(parameter_count_table(amotized_model, max_depth=3))
+
+
+if __name__ == "__main__":
+    test_amotized_model()

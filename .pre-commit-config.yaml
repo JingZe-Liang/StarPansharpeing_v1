@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: "v0.11.13"
+    rev: "v0.12.10"
     hooks:
       - id: ruff
         args: [--fix]
@@ -8,7 +8,7 @@ repos:
       - id: ruff-format
         exclude: ^(docs/|tests/|src/stage2/generative/maskbit|src/stage1/LeanVAE|src/stage1/one_d_tokenizer/|src/stage1/unitok|src/stage2/generative/tools/conditions|src/stage2/generative/models/modules/deformable_attn/ops|src/stage1/utilities/losses/dinov3)
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0 # Use a specific tag or commit hash, check for latest version
+    rev: v6.0.0 # Use a specific tag or commit hash, check for latest version
     hooks:
       - id: check-added-large-files # Checks for files larger than 5MB by default
         args: ["--maxkb=10240"] # Optional: Set max size to 10MB (10240 KB)

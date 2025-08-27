@@ -5,14 +5,16 @@ Code adapted from Jax version in Appendix A.1
 
 from __future__ import annotations
 
+import random
 from contextlib import nullcontext
 from functools import partial, wraps
 from typing import List, Tuple
 
 import einx
 import torch
+import torch.nn as nn
 from einops import pack, rearrange, unpack
-from torch import int32, nn
+from torch import Tensor, int32, tensor
 from torch.amp import autocast
 from torch.nn import Module
 
@@ -52,12 +54,13 @@ def unpack_one(t, ps, pattern):
 
 
 def round_ste(z):
-    """Round with straight through gradients."""
+    """round with straight through gradients."""
     zhat = z.round()
     return z + (zhat - z).detach()
 
 
 def floor_ste(z):
+    """floor with straight through gradients."""
     zhat = z.floor()
     return z + (zhat - z).detach()
 
@@ -68,25 +71,28 @@ def floor_ste(z):
 class FSQ(Module):
     def __init__(
         self,
-        levels: List[int],
+        levels: list[int] | tuple[int, ...],
         dim: int | None = None,
         num_codebooks=1,
         keep_num_codebooks_dim: bool | None = None,
         scale: float | None = None,
-        allowed_dtypes: Tuple[torch.dtype, ...] = (torch.float32, torch.float64),
-        channel_first: bool = False,
-        projection_has_bias: bool = True,
+        allowed_dtypes: tuple[torch.dtype, ...] = (torch.float32, torch.float64),
+        channel_first=False,
+        projection_has_bias=True,
         return_indices=True,
         force_quantization_f32=True,
-        preserve_symmetry: bool = False,
+        preserve_symmetry=False,
         noise_dropout=0.0,
     ):
         super().__init__()
 
-        _levels = torch.tensor(levels, dtype=int32)
+        if isinstance(levels, tuple):
+            levels = list(levels)
+
+        _levels = tensor(levels, dtype=int32)
         self.register_buffer("_levels", _levels, persistent=False)
 
-        _basis = torch.cumprod(torch.tensor([1] + levels[:-1]), dim=0, dtype=int32)
+        _basis = torch.cumprod(tensor([1] + levels[:-1]), dim=0, dtype=int32)
         self.register_buffer("_basis", _basis, persistent=False)
 
         self.scale = scale
@@ -124,6 +130,7 @@ class FSQ(Module):
         self.has_projections = has_projections
 
         self.return_indices = return_indices
+
         if return_indices:
             self.codebook_size = self._levels.prod().item()
             implicit_codebook = self._indices_to_codes(torch.arange(self.codebook_size))
@@ -134,68 +141,61 @@ class FSQ(Module):
         self.allowed_dtypes = allowed_dtypes
         self.force_quantization_f32 = force_quantization_f32
 
-    def bound(self, z, eps: float = 1e-3):
+    def bound(self, z, eps=1e-3):
         """Bound `z`, an array of shape (..., d)."""
         half_l = (self._levels - 1) * (1 + eps) / 2
         offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
         shift = (offset / half_l).atanh()
-        return (z + shift).tanh() * half_l - offset
+        bounded_z = (z + shift).tanh() * half_l - offset
+        half_width = self._levels // 2
+        return round_ste(bounded_z) / half_width
 
     # symmetry-preserving and noise-approximated quantization, section 3.2 in https://arxiv.org/abs/2411.19842
 
     def symmetry_preserving_bound(self, z):
-        """
-        QL(x) = 2 / (L - 1) * [(L - 1) * (tanh(x) + 1) / 2 + 0.5] - 1
-        """
+        """QL(x) = 2 / (L - 1) * [(L - 1) * (tanh(x) + 1) / 2 + 0.5] - 1"""
         levels_minus_1 = self._levels - 1
         scale = 2.0 / levels_minus_1
-        bracket = (levels_minus_1 * (torch.tanh(z) + 1) / 2.0) + 0.5
+        bracket = (levels_minus_1 * (z.tanh() + 1) / 2.0) + 0.5
         bracket = floor_ste(bracket)
         return scale * bracket - 1.0
 
     def quantize(self, z):
         """Quantizes z, returns quantized zhat, same shape as z."""
 
-        preserve_symmetry = self.preserve_symmetry
-        half_width = self._levels // 2
+        shape, device, noise_dropout, preserve_symmetry = (
+            z.shape[0],
+            z.device,
+            self.noise_dropout,
+            self.preserve_symmetry,
+        )
+        bound_fn = self.symmetry_preserving_bound if preserve_symmetry else self.bound
 
-        if preserve_symmetry:
-            quantized = round_ste(self.symmetry_preserving_bound(z)) / half_width
-        else:
-            quantized = round_ste(self.bound(z)) / half_width
-
-        if not self.training:
-            return quantized
-
-        batch, device, noise_dropout = z.shape[0], z.device, self.noise_dropout
-        unquantized = z
-
-        # determine where to quantize elementwise
-
-        quantize_mask = torch.bernoulli(
-            torch.full((batch,), noise_dropout, device=device)
-        ).bool()
-
-        quantized = einx.where("b, b ..., b ...", quantize_mask, unquantized, quantized)
+        bounded_z = bound_fn(z)
 
         # determine where to add a random offset elementwise
+        # if using noise dropout
 
-        offset_mask = torch.bernoulli(
-            torch.full((batch,), noise_dropout, device=device)
-        ).bool()
+        if not self.training or noise_dropout == 0.0:
+            return bounded_z
 
-        offset = (torch.rand_like(z) - 0.5) / half_width
-        quantized = einx.where(
-            "b, b ..., b ...", offset_mask, unquantized + offset, quantized
-        )
+        offset_mask = torch.bernoulli(torch.full_like(bounded_z, noise_dropout)).bool()
+        offset = torch.rand_like(bounded_z) - 0.5
+        bounded_z = torch.where(offset_mask, bounded_z + offset, bounded_z)
 
-        return quantized
+        return bounded_z
 
     def _scale_and_shift(self, zhat_normalized):
+        if self.preserve_symmetry:
+            return (zhat_normalized + 1.0) / (2.0 / (self._levels - 1))
+
         half_width = self._levels // 2
         return (zhat_normalized * half_width) + half_width
 
     def _scale_and_shift_inverse(self, zhat):
+        if self.preserve_symmetry:
+            return zhat * (2.0 / (self._levels - 1)) - 1.0
+
         half_width = self._levels // 2
         return (zhat - half_width) / half_width
 
@@ -204,17 +204,17 @@ class FSQ(Module):
         codes = self._scale_and_shift_inverse(level_indices)
         return codes
 
-    def codes_to_indices(self, zhat):
-        """Converts a `code` to an index in the codebook."""
-        assert zhat.shape[-1] == self.codebook_dim
-        zhat = self._scale_and_shift(zhat)
-        return (zhat * self._basis).sum(dim=-1).to(int32)
-
     def indices_to_level_indices(self, indices):
         """Converts indices to indices at each level, perhaps needed for a transformer with factorized embeddings"""
         indices = rearrange(indices, "... -> ... 1")
         codes_non_centered = (indices // self._basis) % self._levels
         return codes_non_centered
+
+    def codes_to_indices(self, zhat):
+        """Converts a `code` to an index in the codebook."""
+        assert zhat.shape[-1] == self.codebook_dim
+        zhat = self._scale_and_shift(zhat)
+        return (zhat * self._basis).sum(dim=-1).round().to(int32)
 
     def indices_to_codes(self, indices):
         """Inverse of `codes_to_indices`."""
@@ -304,3 +304,30 @@ class FSQ(Module):
         # return quantized output and indices
 
         return out, indices
+
+
+# * --- Test --- * #
+
+
+def test_fsq():
+    quantizer = FSQ(
+        levels=[8, 8, 8, 5, 5, 5],
+        dim=36,
+        num_codebooks=6,
+        channel_first=True,
+    )
+
+    x = torch.randn(2, 36, 32, 32)
+
+    out, indices = quantizer(x)
+    print("Output shape:", out.shape)
+    print("Indices shape:", indices.shape)
+
+    # indices to codes
+    codes = quantizer.indices_to_codes(indices)
+    print("Codes shape:", codes.shape)
+    assert (codes == out).all()
+
+
+if __name__ == "__main__":
+    test_fsq()

@@ -18,9 +18,8 @@ from kornia.augmentation import (
     Resize,
 )
 
+from src.utilities.logging.print import log_print
 from src.utilities.train_utils.state import StepsCounter
-
-from ..utilities.logging.print import log_print
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
 SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData] | tuple
@@ -975,7 +974,8 @@ def expand_paths_and_correct_loader_kwargs(
         if isinstance(paths, str):
             paths = list(braceexpand.braceexpand(paths))
             _len = len(paths)
-        elif isinstance(paths, (list, tuple)):
+
+        if isinstance(paths, (list, tuple)):
             path_exp = []
             for p in paths:
                 assert isinstance(p, str), (

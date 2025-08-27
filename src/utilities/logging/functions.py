@@ -2,6 +2,7 @@ import inspect
 from functools import wraps
 from typing import Any, Callable
 
+import torch
 from loguru import logger
 
 
@@ -26,37 +27,22 @@ def default(x, val):
     return x if x is not None else val
 
 
-def print_shape_if_raise(func):
-    def _print_shape(name, x, var_type: str):
-        if hasattr(x, "shape"):
-            logger.error(f"{var_type} {name} typed: {type(x)}, shaped: {x.shape}")
-        elif isinstance(x, (list, tuple)):
-            for i, xi in enumerate(x):
-                _print_shape(f"{name}[{i}]", xi, var_type)
-        elif name in ("cls", "self"):
-            pass
+def dict_round_to_list_str(d: dict, n_round: int = 3, select: list[str] | None = None):
+    strings = []
+    for k, v in d.items():
+        if select is not None and k not in select:
+            continue
+
+        if isinstance(v, (float, torch.Tensor)):
+            if torch.is_tensor(v):
+                if v.numel() > 1:
+                    logger.warning(f'logs has non-scalar tensor "{k}", skip it')
+                    continue
+                v = v.item()
+            strings.append(f"{k}: {v:.{n_round}f}")
         else:
-            logger.error(f"{var_type} {name} typed: {type(x)}, var is {x}")
-
-    def inner(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            # bind the args and kwargs to get the var name
-            sig = inspect.signature(func)
-            bound = sig.bind(*args, **kwargs)
-            inspect_args = bound.arguments
-            inspect_kwargs = bound.kwargs
-
-            for name, var in inspect_args.items():
-                _print_shape(name, var, "Arg")
-
-            for name, var in inspect_kwargs.items():
-                _print_shape(name, var, "Kwarg")
-
-            raise RuntimeError from e
-
-    return inner
+            strings.append(f"{k}: {v}")
+    return strings
 
 
 # * --- test --- * #
@@ -65,7 +51,19 @@ def print_shape_if_raise(func):
 def test_print_with_raise():
     import torch as th
 
-    @print_shape_if_raise
+    class A:
+        cls_var = "a"
+
+        def __init__(self) -> None:
+            self.a = [1, 2]
+            self.t = torch.tensor([1, 3])
+
+        @print_info_if_raise
+        def may_raise_fn(self, b):
+            if b != 3:
+                raise ValueError
+
+    @print_info_if_raise
     def _test_func(a: th.Tensor, b: tuple[th.Tensor, ...], c: int):
         if a.shape[0] != 1:
             raise ValueError
@@ -82,6 +80,10 @@ def test_print_with_raise():
 
     _test_func(a, b, c)
     print("case 1 passed")
+
+    aa = A()
+    aa.may_raise_fn(3)
+    aa.may_raise_fn(4)  # should raise
 
     _test_func(a, b, 4)  # should raise
 

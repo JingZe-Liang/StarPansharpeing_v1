@@ -9,7 +9,7 @@ import torch
 import torch.distributed as distributed
 import torch.nn.functional as F
 from einops import pack, rearrange, reduce, repeat, unpack
-from torch import einsum, nn
+from torch import Tensor, einsum, is_tensor, nn
 from torch.amp import autocast
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -39,6 +39,13 @@ def safe_div(num, den, eps=1e-6):
     return num / den.clamp(min=eps)
 
 
+def append_dims_to(t, ndims):
+    assert t.ndim <= ndims
+    append_ndims = ndims - t.ndim
+    shape = t.shape
+    return t.reshape(*shape, *((1,) * append_ndims))
+
+
 def Sequential(*modules):
     modules = [*filter(exists, modules)]
     if len(modules) == 0:
@@ -49,13 +56,13 @@ def Sequential(*modules):
     return nn.Sequential(*modules)
 
 
-def cdist(x, y):
+def cdist(x, y, eps=1e-8):
     x2 = reduce(x**2, "b n d -> b n", "sum")
     y2 = reduce(y**2, "b n d -> b n", "sum")
     xy = einsum("b i d, b j d -> b i j", x, y) * -2
     return (
         (rearrange(x2, "b i -> b i 1") + rearrange(y2, "b j -> b 1 j") + xy)
-        .clamp(min=0)
+        .clamp(min=eps)
         .sqrt()
     )
 
@@ -68,13 +75,32 @@ def entropy(prob, eps=1e-5):
     return (-prob * log(prob, eps=eps)).sum(dim=-1)
 
 
-def ema_inplace(old, new, decay):
-    is_mps = str(old.device).startswith("mps:")
-
-    if not is_mps:
-        old.lerp_(new, 1 - decay)
+def accum_grad_(t, grad):
+    if exists(t.grad):
+        t.grad.add_(grad)
     else:
-        old.mul_(decay).add_(new * (1 - decay))
+        t.grad = grad.clone().detach()
+
+
+def ema_inplace(old, new, decay, weight=None):
+    # if old.grad is populated, add it to new and set it to None
+
+    if exists(old.grad):
+        new.add_(old.grad)
+        old.grad = None
+
+    # take care of custom weighting
+
+    weight = default(weight, 1.0)
+
+    if is_tensor(weight):
+        if weight.ndim == 1:
+            weight = rearrange(weight, "c -> 1 c")
+
+        assert weight.ndim == 2 and weight.shape == old.shape[:2]
+        weight = append_dims_to(weight, old.ndim)
+
+    old.data.lerp_(new, (1.0 - decay) * weight)
 
 
 def pack_one(t, pattern):
@@ -163,11 +189,19 @@ def sample_multinomial(total_count, probs):
     remainder = probs.new_ones(())
     sample = torch.empty_like(probs, dtype=torch.long)
 
-    for i, p in enumerate(probs):
-        s = torch.binomial(total_count, p / remainder)
+    num_probs = len(probs)
+
+    for i, prob in enumerate(probs):
+        is_last = i == (num_probs - 1)
+
+        s = (
+            torch.binomial(total_count, prob / remainder)
+            if not is_last
+            else total_count
+        )
         sample[i] = s
         total_count -= s
-        remainder -= p
+        remainder -= prob
 
     assert total_count == 0, f"invalid total count {total_count}"
 
@@ -445,9 +479,9 @@ class EuclideanCodebook(Module):
 
         embed_sum = embed * rearrange(cluster_size, "... -> ... 1")
 
-        self.embed.data.copy_(embed)
         self.embed_avg.data.copy_(embed_sum)
         self.cluster_size.data.copy_(cluster_size)
+        self.update_ema()
         self.initted.data.copy_(torch.Tensor([True]))
 
     @torch.jit.ignore
@@ -576,6 +610,8 @@ class EuclideanCodebook(Module):
         mask=None,
         freeze_codebook=False,
         codebook_transform_fn: Callable | None = None,
+        ema_update_weight: Tensor | Callable | None = None,
+        accum_ema_update=False,
     ):
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
@@ -585,7 +621,7 @@ class EuclideanCodebook(Module):
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
 
-        x.dtype
+        dtype = x.dtype
         flatten, unpack_one = pack_one(x, "h * d")
 
         if exists(mask):
@@ -601,18 +637,16 @@ class EuclideanCodebook(Module):
         if self.affine_param:
             self.update_affine(flatten, self.embed, mask=mask)
 
-        # affine params
+        # get maybe learnable codes
+        embed = self.embed if self.learnable_codebook else self.embed.detach()
 
+        # affine params
         if self.affine_param:
             codebook_std = self.codebook_variance.clamp(min=1e-5).sqrt()
             batch_std = self.batch_variance.clamp(min=1e-5).sqrt()
             embed = (embed - self.codebook_mean) * (
                 batch_std / codebook_std
             ) + self.batch_mean
-
-        # get maybe learnable codes
-
-        embed = self.embed if self.learnable_codebook else self.embed.detach()
 
         # handle maybe implicit neural codebook
         # and calculate distance
@@ -649,11 +683,22 @@ class EuclideanCodebook(Module):
 
         else:
             if exists(codebook_transform_fn):
-                quantize = einx.get_at(
-                    "h b n [c] d, h b n -> h b n d", transformed_embed, embed_ind
+                # quantize = einx.get_at('h b n [c] d, h b n -> h b n d', transformed_embed, embed_ind)
+
+                repeated_embed_ind = repeat(
+                    embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1]
                 )
+                quantize = transformed_embed.gather(-2, repeated_embed_ind)
+                quantize = rearrange(quantize, "h b n 1 d -> h b n d")
+
             else:
-                quantize = einx.get_at("h [c] d, h b n -> h b n d", embed, embed_ind)
+                # quantize = einx.get_at('h [c] d, h b n -> h b n d', embed, embed_ind)
+
+                repeated_embed = repeat(embed, "h c d -> h b c d", b=embed_ind.shape[1])
+                repeated_embed_ind = repeat(
+                    embed_ind, "h b n -> h b n d", d=embed.shape[-1]
+                )
+                quantize = repeated_embed.gather(-2, repeated_embed_ind)
 
         if self.training and self.ema_update and not freeze_codebook:
             if self.affine_param:
@@ -665,19 +710,27 @@ class EuclideanCodebook(Module):
                 embed_onehot[~mask] = 0.0
 
             cluster_size = embed_onehot.sum(dim=1)
-
             self.all_reduce_fn(cluster_size)
-            ema_inplace(self.cluster_size.data, cluster_size, self.decay)
 
             embed_sum = einsum("h n d, h n c -> h c d", flatten, embed_onehot)
             embed_sum = embed_sum.contiguous()
             self.all_reduce_fn(embed_sum)
 
-            ema_inplace(self.embed_avg.data, embed_sum, self.decay)
+            if callable(ema_update_weight):
+                ema_update_weight = ema_update_weight(embed_sum, cluster_size)
 
-            if not self.manual_ema_update:
-                self.update_ema()
-                self.expire_codes_(x)
+            if accum_ema_update:
+                accum_grad_(self.cluster_size, cluster_size)
+                accum_grad_(self.embed_avg, embed_sum)
+            else:
+                ema_inplace(
+                    self.cluster_size, cluster_size, self.decay, ema_update_weight
+                )
+                ema_inplace(self.embed_avg, embed_sum, self.decay, ema_update_weight)
+
+                if not self.manual_ema_update:
+                    self.update_ema()
+                    self.expire_codes_(x)
 
         if needs_codebook_dim:
             quantize, embed_ind = map(
@@ -781,9 +834,9 @@ class CosineSimCodebook(Module):
 
         embed_sum = embed * rearrange(cluster_size, "... -> ... 1")
 
-        self.embed.data.copy_(embed)
         self.embed_avg.data.copy_(embed_sum)
         self.cluster_size.data.copy_(cluster_size)
+        self.update_ema()
         self.initted.data.copy_(torch.Tensor([True]))
 
     def replace(self, batch_samples, batch_mask):
@@ -829,6 +882,8 @@ class CosineSimCodebook(Module):
         mask=None,
         freeze_codebook=False,
         codebook_transform_fn: Callable | None = None,
+        ema_update_weight: Tensor | None = None,
+        accum_ema_update=False,
     ):
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
@@ -838,7 +893,7 @@ class CosineSimCodebook(Module):
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
 
-        x.dtype
+        dtype = x.dtype
 
         flatten, unpack_one = pack_one(x, "h * d")
 
@@ -886,11 +941,22 @@ class CosineSimCodebook(Module):
 
         else:
             if exists(codebook_transform_fn):
-                quantize = einx.get_at(
-                    "h b n [c] d, h b n -> h b n d", transformed_embed, embed_ind
+                # quantize = einx.get_at('h b n [c] d, h b n -> h b n d', transformed_embed, embed_ind)
+
+                repeated_embed_ind = repeat(
+                    embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1]
                 )
+                quantize = transformed_embed.gather(-2, repeated_embed_ind)
+                quantize = rearrange(quantize, "h b n 1 d -> h b n d")
+
             else:
-                quantize = einx.get_at("h [c] d, h b n -> h b n d", embed, embed_ind)
+                # quantize = einx.get_at('h [c] d, h b n -> h b n d', embed, embed_ind)
+
+                repeated_embed = repeat(embed, "h c d -> h b c d", b=embed_ind.shape[1])
+                repeated_embed_ind = repeat(
+                    embed_ind, "h b n -> h b n d", d=embed.shape[-1]
+                )
+                quantize = repeated_embed.gather(-2, repeated_embed_ind)
 
         if self.training and self.ema_update and not freeze_codebook:
             if exists(mask):
@@ -899,17 +965,23 @@ class CosineSimCodebook(Module):
             bins = embed_onehot.sum(dim=1)
             self.all_reduce_fn(bins)
 
-            ema_inplace(self.cluster_size.data, bins, self.decay)
-
             embed_sum = einsum("h n d, h n c -> h c d", flatten, embed_onehot)
             embed_sum = embed_sum.contiguous()
             self.all_reduce_fn(embed_sum)
 
-            ema_inplace(self.embed_avg.data, embed_sum, self.decay)
+            if callable(ema_update_weight):
+                ema_update_weight = ema_update_weight(embed_sum, bins)
 
-            if not self.manual_ema_update:
-                self.update_ema()
-                self.expire_codes_(x)
+            if accum_ema_update:
+                accum_grad_(self.cluster_size, bins)
+                accum_grad_(self.embed_avg, embed_sum)
+            else:
+                ema_inplace(self.cluster_size, bins, self.decay, ema_update_weight)
+                ema_inplace(self.embed_avg, embed_sum, self.decay, ema_update_weight)
+
+                if not self.manual_ema_update:
+                    self.update_ema()
+                    self.expire_codes_(x)
 
         if needs_codebook_dim:
             quantize, embed_ind = map(
@@ -925,12 +997,10 @@ class CosineSimCodebook(Module):
 LossBreakdown = namedtuple(
     "LossBreakdown",
     [
-        "total_loss",
         "commitment",
         "codebook_diversity",
         "orthogonal_reg",
         "inplace_optimize",
-        "embed_ind",
     ],
 )
 
@@ -1104,6 +1174,9 @@ class VectorQuantize(Module):
         # for variable lengthed sequences, whether to take care of masking out the padding to 0 (or return the original input)
         self.return_zeros_for_masked_padding = return_zeros_for_masked_padding
 
+        # whether to freeze the codebook, can be overridden on forward
+        self.freeze_codebook = freeze_codebook
+
     @property
     def codebook(self):
         codebook = self._codebook.embed
@@ -1172,11 +1245,17 @@ class VectorQuantize(Module):
         mask=None,
         lens=None,
         sample_codebook_temp=None,
-        freeze_codebook=False,
-        return_loss_breakdown=True,
+        freeze_codebook=None,
+        return_loss_breakdown=False,
         codebook_transform_fn: Callable | None = None,
+        ema_update_weight: Tensor | None = None,
+        accum_ema_update=False,
     ):
         orig_input, input_requires_grad = x, x.requires_grad
+
+        # freezing codebook
+
+        freeze_codebook = default(freeze_codebook, self.freeze_codebook)
 
         # handle masking, either passed in as `mask` or `lens`
 
@@ -1234,6 +1313,8 @@ class VectorQuantize(Module):
             mask=mask,
             freeze_codebook=freeze_codebook,
             codebook_transform_fn=codebook_transform_fn,
+            ema_update_weight=ema_update_weight,
+            accum_ema_update=accum_ema_update,
         )
 
         # quantize
@@ -1459,44 +1540,10 @@ class VectorQuantize(Module):
             return quantize, embed_ind, loss
 
         loss_breakdown = LossBreakdown(
-            loss,
             commit_loss,
             codebook_diversity_loss,
             orthogonal_reg_loss,
             inplace_optimize_loss,
-            embed_ind,
         )
 
-        return quantize, loss, loss_breakdown
-
-
-if __name__ == "__main__":
-    # test codebook
-    codebook = VectorQuantize(
-        dim=8,
-        codebook_size=4096,
-        heads=1,
-        use_cosine_sim=False,
-        channel_last=False,
-        stochastic_sample_codes=True,
-        learnable_codebook=True,
-        straight_through=False,
-        rotation_trick=True,
-        ema_update=False,
-        accept_image_fmap=True,
-        codebook_diversity_loss_weight=0.0,
-        codebook_diversity_temperature=100.0,
-        orthogonal_reg_weight=0.0,
-        layernorm_after_project_in=False,
-        commitment_weight=0.25,
-        manual_in_place_optimizer_update=True,
-    ).cuda()
-
-    print(list(codebook.parameters())[0].shape)
-    x = torch.randn(1, 8, 32, 32).cuda()
-
-    quantized, loss, loss_bd = codebook(x, return_loss_breakdown=True)
-
-    print(quantized.shape)
-    print(loss)
-    print(loss_bd)
+        return quantize, embed_ind, loss, loss_breakdown

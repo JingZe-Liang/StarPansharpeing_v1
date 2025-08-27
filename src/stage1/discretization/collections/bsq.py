@@ -318,7 +318,7 @@ if __name__ == "__main__":
         inv_temperature=1.0,
         cb_entropy_compute="group",
         input_format="bchw",
-        group_size=1,
+        group_size=9,
     )
     latent_q = bsq(latent)
     print(latent_q)

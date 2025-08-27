@@ -23,6 +23,7 @@ import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
 from src.stage1.cosmos.modules.utils import Normalize
+from src.stage1.discretization.collections import FSQ
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
@@ -30,6 +31,7 @@ from src.stage1.discretization.collections.kl_continuous import (
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
+from stage2.utilities import loss
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
@@ -330,11 +332,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # > quantizer
         self.quantizer_type = kwargs.pop("quantizer_type", None)
-        assert self.quantizer_type in [
-            "kl",
-            "bsq",
-            None,
-        ], "quantizer_type should be bsq or kl"
+        self.random_quant = kwargs.pop("random_quant", 0.0)
         if self.quantizer_type == "kl":
             if z_factor != 2:
                 log_print(
@@ -358,11 +356,24 @@ class ContinuousImageTokenizer(nn.Module):
                 persample_entropy_compute="analytical",
                 group_size=1,  # group_size must affect the GPU mem (compared with LFQ), f8z36g36
             )
+        elif self.quantizer_type == "fsq":
+            self.quantizer = FSQ(
+                levels=kwargs.pop("fsq_levels", [8, 8, 8, 5, 5, 5]),
+                dim=latent_channels,
+                num_codebooks=kwargs.pop("fsq_num_codebooks", 6),
+                channel_first=True,
+            )
+        elif self.quantizer_type is None:
+            self.quantizer = None
+        else:
+            raise ValueError("quantizer type should be one of [kl, bsq, fsq, None]")
+
         if self.quantizer_type is not None:
             log_print(f"Using quantizer: {self.quantizer.__class__.__name__}")
         else:
-            log_print(f"use no quantizer or kl, just AE to reconstruct")
+            log_print(f"use no quantizer or VAE, the tokenizer is only an AutoEncoder")
 
+        # > Tokenizer configs
         tokenizer_cfg = dict(
             z_channels=z_channels,
             z_factor=z_factor,
@@ -581,39 +592,70 @@ class ContinuousImageTokenizer(nn.Module):
 
     # * --- AE encode and decode --- #
 
-    def encode(self, x) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
-        h = self.encoder(x)
+    def _use_quantizer(self, use_quantizer=None):
+        if self.quantizer_type is None:
+            return False
 
-        if self.quantizer_type == "bsq":
-            # here must be l2-normed
-            h = nn.functional.normalize(h, dim=1)
-            self.z = h if hasattr(self, "_vf_proj") else None
+        if self.training and self.random_quant > 0.0:
+            # Random select to use quantizer or not
+            return self.random_quant > random.random()
+        elif use_quantizer is None:
+            return True
+        else:
+            # Or decided by the input arg
+            return use_quantizer
 
-            # TODO: bsq not supported channel drop
-            self.quantizer: BSQ
-            hq, bsq_loss, loss_breakdown = self.quantizer(h)
+    def apply_quantizer(self, h, use_quantizer=None):
+        _use_quantizer = self._use_quantizer(use_quantizer)
+        self._training_latent_cache(h, _use_quantizer)
 
-            return hq, bsq_loss, loss_breakdown
+        # Quantization
+        if _use_quantizer:
+            if self.quantizer_type == "bsq":
+                self.quantizer: BSQ
 
-        elif self.quantizer_type == "kl":
-            self.z = h if hasattr(self, "_vf_proj") else None
-            m_, logvar_ = h.chunk(2, dim=1)
-            posterior = self.quantizer((m_, logvar_))
-            kl_loss = posterior.kl()
-            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-            h = posterior.sample()
-            loss_breakdown = KLLossBreakDown(
-                posterior=posterior,
-                mean=m_,
-                logvar=logvar_,
-            )
+                # here must be l2-normed
+                h = nn.functional.normalize(h, dim=1)
+                # TODO: bsq not supported channel drop
+                hq, bsq_loss, loss_breakdown = self.quantizer(h)
 
-            if self.use_channel_drop:
-                h, _ = self.channel_drop(h)
+                return hq, bsq_loss, loss_breakdown
 
-            return h, kl_loss, loss_breakdown
+            elif self.quantizer_type == "kl":
+                m_, logvar_ = h.chunk(2, dim=1)
+                posterior = self.quantizer((m_, logvar_))
+                kl_loss = posterior.kl()
+                kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+                h = posterior.sample()
+                loss_breakdown = KLLossBreakDown(
+                    posterior=posterior,
+                    mean=m_,
+                    logvar=logvar_,
+                )
 
-        # z augmentions
+                if self.use_channel_drop:
+                    h, _ = self.channel_drop(h)
+
+                return h, kl_loss, loss_breakdown
+
+            elif self.quantizer_type == "fsq":
+                self.quantizer: FSQ
+
+                # dummy loss
+                fsq_loss = torch.tensor(0.0).to(h)
+                loss_breakdown = {"fsq_loss": fsq_loss}
+                hq, indices = self.quantizer(h)
+
+                return hq, fsq_loss, loss_breakdown
+
+            else:
+                raise RuntimeError("can not reach here")
+
+        # autoencoder
+        else:
+            return h
+
+    def z_aug(self, h):
         if self.training:
             mask = None
             if self.use_channel_drop:
@@ -626,23 +668,45 @@ class ContinuousImageTokenizer(nn.Module):
                 # latent noising and then to _vf_proj (vf decoder)
                 h = self._latent_noising(h, mask)
 
+        return h
+
+    def _training_latent_cache(self, h: Tensor, use_quantizer: bool):
+        # not use_quantizer, save the unquantized latent
+        if self.training:
+            # Save latent if is AE
+            if hasattr(self, "_vf_proj") or hasattr(self, "_repa_proj"):
+                self.z = h  # save latent z for repa or vf loss
+            else:
+                self.z = None
+
+    def encode(
+        self, x, use_quantizer=None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
+        # Encoder
+        h = self.encoder(x)
         # TODO: add additional cross-attention to convert the 2D latent to 1D latent
 
-        # save latent
-        if hasattr(self, "_vf_proj") or hasattr(self, "_repa_proj"):
-            self.z = h  # save latent z for repa or vf loss
+        # Quantization
+        ret = self.apply_quantizer(h, use_quantizer)
+        if isinstance(ret, tuple):
+            return ret
         else:
-            self.z = None
+            h = ret
+
+        # z augmentions
+        h = self.z_aug(h)
 
         return h
 
-    def decode(self, z: torch.Tensor | Sequence, inp_shape: torch.Size):
+    def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size):
+        # Break down input z losses
         q_loss = loss_breakdown = None
-        if self.quantizer_type is not None and isinstance(z, Sequence):
+        if self.quantizer_type is not None and isinstance(z, (tuple, list)):
             z, q_loss, loss_breakdown = z
         else:
             assert torch.is_tensor(z), "z should be the (quantized) latent"
 
+        # Decoder
         dec = self.decoder(z, inp_shape[1])  # [b, c, h, w]
 
         if self.quantizer_type is not None:
@@ -707,8 +771,6 @@ class ContinuousImageTokenizer(nn.Module):
         # * --- load pretrained uni-tokenizer or separate encoder and decoder --- #
 
         else:
-            import accelerate
-
             if uni_tokenizer_path != "":
                 log_print(
                     f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model"

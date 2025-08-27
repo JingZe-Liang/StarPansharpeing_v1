@@ -90,15 +90,15 @@ class SwiGLU(nn.Module):
 # ACT2CLS["polynorm"] = PolyNorm
 # ACT2FN = ClassInstantier(ACT2CLS)
 
-create_act._ACT_FN_DEFAULT["poly_norm"] = PolyNorm  # type: ignore
-create_act._ACT_FN_ME["poly_norm"] = PolyNorm  # type: ignore
+create_act._ACT_FN_DEFAULT["poly_norm"] = PolyNorm
+create_act._ACT_FN_ME["poly_norm"] = PolyNorm
 
 
 class LayerScale(nn.Module):
     def __init__(
         self,
         dim: int,
-        init_values: float | Tensor = 1e-5,
+        init_values: Union[float, Tensor] = 1e-5,
         inplace: bool = False,
         device=None,
     ) -> None:
@@ -291,8 +291,8 @@ class Transformer(nn.Module):
         patch_size=2,
         out_channels=16,
         pos_embed_type="sincos",
-        norm_layer=functools.partial(RMSNorm, eps=1e-6),
-        mlp_norm_layer=functools.partial(RMSNorm, eps=1e-6),
+        norm_layer=functools.partial(RMSNormFlash, eps=1e-6),
+        mlp_norm_layer=functools.partial(RMSNormFlash, eps=1e-6),
         act_layer=SwiGLU,
         feature_layer_ids: list[int] | None = None,
     ):
@@ -364,7 +364,7 @@ class Transformer(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def setup_pe(self, dim, rope_options: dict | None = None):
+    def setup_pe(self, dim, rope_options: dict = {}):
         seq_len = self.num_patches
 
         if self.pos_embed_type == "sincos":
@@ -379,18 +379,18 @@ class Transformer(nn.Module):
             )
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         elif self.pos_embed_type == "rope":
-            if rope_options is None:
+            if len(rope_options) == 0:
                 self.rope_options = {
                     "dim": dim // self.num_heads,
                     "rope_dim": "2D",
-                    "beta_fast": 4,
-                    "beta_slow": 1,
-                    "rope_theta": 10000,
-                    "apply_yarn": True,
-                    "scale": 1.0,
+                    "beta_fast": rope_options.pop("beta_fast", 4),
+                    "beta_slow": rope_options.pop("beta_slow", 1),
+                    "rope_theta": rope_options.pop("rope_base", 10000),
+                    "apply_yarn": rope_options.pop("apply_yarn", True),
+                    "scale": rope_options.pop("rope_scale", 1.0),
                     "original_latent_shape": (self.base_size, self.base_size),
                 }
-            self.rope = RotaryPositionEmbeddingPytorchV2(  # ty: ignore error[missing-argument]
+            self.rope = RotaryPositionEmbeddingPytorchV2(
                 seq_len=seq_len,
                 latent_shape=(self.base_size, self.base_size),
                 # does not changed
@@ -451,11 +451,7 @@ class Transformer(nn.Module):
         )
         return x
 
-    def forward(
-        self,
-        ms_latent: Float[Tensor, "b c h w"],
-        pan_latent: Float[Tensor, "b c h w"],
-    ) -> Tensor | tuple[Tensor, list[Tensor]]:
+    def forward(self, ms_latent, pan_latent) -> Tensor | tuple[Tensor, list[Tensor]]:
         latents = (ms_latent, pan_latent)
         # patch embedding
         ys = []
@@ -506,8 +502,8 @@ class Transformer(nn.Module):
 
 
 if __name__ == "__main__":
-    device = "cpu"
-    # torch.cuda.set_device(device)
+    device = "cuda:1"
+    torch.cuda.set_device(device)
     # x = torch.randn(1, 768, 128).to(device)
 
     # rmsnorm = RMSNorm(dim=128)
@@ -525,8 +521,8 @@ if __name__ == "__main__":
     # print(mlp(x).shape)
 
     model = Transformer(
-        16, 128, 4, 8, pos_embed_type="rope", norm_layer=RMSNorm, input_size=32
+        16, 128, 4, 8, pos_embed_type="rope", norm_layer=RMSNormFlash, input_size=32
     ).to(device)
     x = torch.randn(1, 16, 64, 64).to(device)
-    out = model(x, x)
+    out = model((x, x))
     print(out.shape)  # Expected shape: (1, 16, 32, 32)

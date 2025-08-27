@@ -2,6 +2,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from .basic_loss import get_loss
 
@@ -10,7 +11,7 @@ class AmotizedPixelLoss(nn.Module):
     def __init__(
         self,
         pixel_loss_type: str,
-        amotized_loss: Callable,
+        amotized_loss: Callable[[Tensor, Tensor], Tensor],
         pixel_loss_kwargs: dict = {},
         factors: tuple = (1.0, 1.0),
     ):
@@ -45,12 +46,19 @@ class AmotizedPixelLoss(nn.Module):
 
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
-        _to_out_tensor_detached = lambda x: x.detach() if torch.is_tensor(x) else 0.0
+        _to_out_tensor_detached = (
+            lambda x: x.detach()
+            if torch.is_tensor(x)
+            else torch.tensor(0.0).to(pred_latent)
+        )
+        latent_loss, pixel_loss, pixel_from_latent = map(
+            _to_out_tensor_detached, [latent_loss, sr_pixel_loss, sr_pixel_loss2]
+        )
 
         loss_dict = {
-            "latent_loss": _to_out_tensor_detached(latent_loss),
-            "sr_pixel_loss": _to_out_tensor_detached(sr_pixel_loss),
-            "sr_pixel_from_latent": _to_out_tensor_detached(sr_pixel_loss2),
+            "latent_loss": latent_loss,
+            "pixel_loss": pixel_loss,
+            "pixel_from_latent": pixel_from_latent,
             "total_loss": loss,
         }
 

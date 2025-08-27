@@ -138,6 +138,36 @@ class TritonRMSNorm2d(torch.nn.LayerNorm):
         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 
+class AdaptiveGroupNorm(nn.Module):
+    def __init__(self, cond_chan, in_chan, num_groups=32, eps=1e-6):
+        super().__init__()
+        self.gn = nn.GroupNorm(
+            num_groups=num_groups, num_channels=in_chan, eps=eps, affine=False
+        )
+        self.gamma = nn.Linear(cond_chan, in_chan)
+        self.beta = nn.Linear(cond_chan, in_chan)
+        self.eps = eps
+
+    def forward(self, x, z: torch.Tensor):
+        B, C, _, _ = x.shape
+        fz = rearrange(z, "b c ... -> b c (...)")
+        # calcuate var for scale
+        scale = fz
+        scale = scale.var(dim=-1) + self.eps  # not unbias
+        scale = scale.sqrt()
+        scale = self.gamma(scale).view(B, C, 1, 1)
+
+        # calculate mean for bias
+        bias = fz
+        bias = bias.mean(dim=-1)
+        bias = self.beta(bias).view(B, C, 1, 1)
+
+        x = self.gn(x)
+        x = scale * x + bias
+
+        return x
+
+
 def unit_magnitude_normalize(x, dim=None, eps=1e-4):
     if dim is None:
         dim = list(range(1, x.ndim))

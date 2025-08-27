@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +68,10 @@ from src.data.utils import (
 )
 from src.data.utils import remove_meta_data as remove_meta_data_fn
 from src.data.wids_samplers import IndexFilteredDistributedSampler, IndexFilteredSampler
+from src.stage2.denoise.utils.noise_adder import (
+    UniHSINoiseAdderKornia,
+    get_tokenizer_trainer_noise_adder,
+)
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.train_utils.state import StepsCounter
@@ -183,9 +188,9 @@ def hyper_transform(
         keepdim=True,
     )
 
-    def dict_mapper(sample):
-        sample = op_seq(sample)
-        return sample
+    def dict_mapper(x):
+        x = op_seq(x)
+        return x
 
     return dict_mapper
 
@@ -274,7 +279,9 @@ def get_hyperspectral_dataloaders(
         "horizontal_flip",
         "vertical_flip",
     ),
+    hyper_degradation_lst: str | list[str] | None = None,
     transform_prob: float = 0.0,
+    degradation_prob: float = 0.0,
     random_apply: int | tuple[int, int] = 1,
     resample: bool = True,
     prefetch_factor: int | None = 6,
@@ -334,6 +341,7 @@ def get_hyperspectral_dataloaders(
         log_print(
             f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
         )
+    use_deg = hyper_degradation_lst is not None and degradation_prob > 0
 
     dataset = wds.WebDataset(
         wds_paths,
@@ -352,6 +360,11 @@ def get_hyperspectral_dataloaders(
 
     # de-structure tar files
     if is_structured_tar:
+        warnings.warn(
+            "The 'is_structured_tar' parameter is deprecated and will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # says we only need the images, so we just the flatten the tar file
         log_print(f"[HyperWebdataset]: the tar file is structured tar, de-structure it")
         dataset = dataset.map(de_structure_tar)
@@ -451,6 +464,7 @@ def get_hyperspectral_dataloaders(
             )
         )
 
+    # re-batched
     if shuffle_within_workers:
         dataset = dataset.batched(
             batch_size, collation_fn=collate_fn_for_dict
@@ -460,6 +474,7 @@ def get_hyperspectral_dataloaders(
     if use_transf:
         dataset = dataset.map_dict(**{k: transform for k in tgt_key})  # type: ignore
 
+    # Dataloader
     dataloader = wds.WebLoader(
         dataset,
         batch_size=batch_size if not shuffle_within_workers else None,
@@ -473,6 +488,22 @@ def get_hyperspectral_dataloaders(
         generator=loader_generator,
         shuffle=False,
     )
+
+    # Data augmentation on batch
+    # 1. Hyperspectral denoising task
+    # we can also init the hyper-nosing pipeline in trainer, check 'self.aug_pipe' in 'CosmosHyperspectralTokenizerTrainer'
+    if use_deg:
+        deg_pipe = lambda x: x
+        if hyper_degradation_lst == "all":
+            deg_pipe = get_tokenizer_trainer_noise_adder(p=degradation_prob)
+        elif hyper_degradation_lst is not None:
+            deg_pipe = UniHSINoiseAdderKornia(
+                noise_type=hyper_degradation_lst,
+                p=degradation_prob,
+                same_on_batch=True,
+                is_neg_1_1=True,
+            )
+        dataloader.map_dict(**{k: deg_pipe for k in tgt_key})
 
     if epoch_len > 0:
         _world_size = (

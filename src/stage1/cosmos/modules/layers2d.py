@@ -569,14 +569,100 @@ class Decoder(nn.Module):
 
 # *==============================================================
 # * Generative Decoder
-# taken from wetok: https://github.com/zhuangshaobin/WeTok
 # *==============================================================
+from src.stage1.cosmos.modules.utils import AdaptiveGroupNorm
 
 
-class GenerativeDecoder(nn.Module):
+class GenerativeDecoder(Decoder):
     def __init__(
         self,
-    ): ...
+        out_channels: int | list[int],
+        channels: int,
+        channels_mult: list[int],
+        num_res_blocks: int,
+        attn_resolutions: list[int],
+        dropout: float,
+        resolution: int,
+        z_channels: int,
+        spatial_compression: int,
+        act_checkpoint: bool = False,
+        use_residual_factor: bool = False,
+        upsample_type: Literal[
+            "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
+        ] = "RepeatConv",
+        upsample_shortcut: Literal["duplicating"] | None = None,
+        conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
+        attn_type: str = "attn_vanilla",
+        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        moe_n_experts: int = 4,
+        moe_n_selected: int = 1,
+        moe_n_shared_experts: int = 1,
+        hidden_factor: int = 2,
+        moe_type: Literal["tc", "ec", "tc+ec"] = "tc",
+        moe_token_mixer_type: Literal["res_block", "dico_block"] = "res_block",
+        padding_mode: str = "zeros",
+        norm_type: str = "gn",
+        norm_groups: int = 32,
+        patch_size: int = 4,
+        patch_method: str = "haar",
+        resample_norm_keep: bool = False,
+        **ignore_kwargs,
+    ):
+        kwargs = locals()
+        _ignore_kwargs = kwargs.pop("ignore_kwargs", {})
+        kwargs.update(_ignore_kwargs)
+
+        super().__init__(**kwargs)
+        # First conv_in should be [z, noise]
+        self.conv_in = torch.nn.Conv2d(
+            z_channels * 2,
+            block_in,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            padding_mode=padding_mode,
+        )
+
+        # Code conditioning blocks
+        block_in = channels * channels_mult[self.num_resolutions - 1]
+        self.cond_layers = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            block_out = channels * channels_mult[i_level]
+            adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
+            self.cond_layers.append(adap_gn)
+
+    def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
+        cond = z.clone()
+
+        noise = torch.rand_like(z)
+        z = torch.cat([z, noise], dim=1)
+        h = self.conv_in(z)
+
+        # middle
+        h = self.mid.block_1(h)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h)
+
+        # upsampling
+        for i_level in reversed(range(self.num_resolutions)):
+            h = self.cond_layers[i_level](h, cond)
+            for i_block in range(self.num_res_blocks + 1):
+                h = self.up[i_level].block[i_block](h)
+                if len(self.up[i_level].attn) > 0:
+                    h = self.up[i_level].attn[i_block](h)
+            if i_level >= (self.num_resolutions - self.num_upsamples):
+                h = self.up[i_level].upsample(h)
+
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        if not self.use_diffbands_input:
+            conv_out_h = (h,)
+        else:
+            assert out_channels is not None, "out_channels should be provided"
+            conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
+        h = self.conv_out(*conv_out_h)
+        h = self.unpatcher(h)
+        return h
 
 
 # *==============================================================

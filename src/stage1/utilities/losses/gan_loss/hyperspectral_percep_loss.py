@@ -16,7 +16,6 @@ from src.stage1.utilities.losses.repa.repa_feature_loss import (
     DINOV3_TO_NUM_LAYERS,
     load_repa_dino_v3_model,
 )
-from src.utilities.logging.functions import print_shape_if_raise
 
 
 class Norm(nn.Module):
@@ -265,7 +264,6 @@ class HyperspectralFeatureLoss:
         assert img.shape[1] == 3, "img must be rgb images"
         return img
 
-    @print_shape_if_raise
     def get_img_rgb(self, x: th.Tensor):
         if self.img_is_neg1_1:
             x = (x + 1) / 2

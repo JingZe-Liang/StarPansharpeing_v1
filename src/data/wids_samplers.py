@@ -173,7 +173,6 @@ def DistributedIndexFilteredSampler(
     drop_last: bool | None = None,
     chunksize: int = 1000000,
 ) -> IndexFilteredDistributedSampler:
-    """工厂函数，与 WIDS 的 DistributedChunkedSampler 保持一致的接口"""
     return IndexFilteredDistributedSampler(
         dataset,
         valid_indices=valid_indices,

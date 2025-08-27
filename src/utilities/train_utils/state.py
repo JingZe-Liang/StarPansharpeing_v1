@@ -1,8 +1,17 @@
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
-import numpy as np
+import accelerate
 import torch
+import torch.distributed as dist
+from torchmetrics.aggregation import (
+    MaxMetric,
+    MeanMetric,
+    MinMetric,
+    RunningMean,
+    RunningSum,
+)
+from torchmetrics.metric import Metric
 
 from src.utilities.logging.print import log_print
 
@@ -569,7 +578,121 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             )
 
 
+# * --- Utilities --- * #
+
+
+def metrics_sync(
+    metrics: Mapping[str, Metric | torch.Tensor | float | list[float]],
+    output_tensor_dict=False,
+    reduce_op: str = "AVG",
+    **metric_fn_kwargs,
+):
+    # Create a new dictionary to store synced metrics to avoid modifying the input
+    synced_metrics = {}
+
+    for name, metric in metrics.items():
+        assert isinstance(metric, (Metric, torch.Tensor)), (
+            f"Expected Metric or Tensor for {name}, got {type(metric)}"
+        )
+        if isinstance(metric, Metric):
+            synced_metrics[name] = metric
+        else:
+            op2metric_cls = {
+                "AVG": MeanMetric,
+                "MAX": MaxMetric,
+                "MIN": MinMetric,
+                "RUN_MEAN": RunningMean,
+                "RUN_SUM": RunningSum,
+            }
+            device = metric.device if isinstance(metric, torch.Tensor) else "cpu"
+            metric_ = op2metric_cls[reduce_op](**metric_fn_kwargs).to(device)
+            metric_.update(torch.as_tensor(metric).to(device))
+            synced_metrics[name] = metric_
+
+    if not output_tensor_dict:
+        return synced_metrics
+
+    output_dict = {}
+    for name, metric in synced_metrics.items():
+        if isinstance(metric, Metric):
+            # will be sync in compute
+            output_dict[name] = metric.compute()
+        else:
+            raise RuntimeError(f"Expected Metric type for {name}, got {type(metric)}")
+
+    return output_dict
+
+
+def dict_tensor_sync(
+    metrics: dict[str, torch.Tensor | float],
+    use_reduce=True,  # be sure that all should be Tensor
+    *,
+    reduce_op: dist.ReduceOp | None | str = "AVG",
+):
+    def _reduce_syn():
+        str2reduce_op = {
+            "AVG": dist.ReduceOp.AVG,
+            "SUM": dist.ReduceOp.SUM,
+            "MAX": dist.ReduceOp.MAX,
+            "MIN": dist.ReduceOp.MIN,
+        }
+        synced_metrics = {}
+        for name, value in metrics.items():
+            tensor_ = torch.as_tensor(value).clone().detach()
+            # Ensure tensor is of type float for reduction operations
+            if tensor_.dtype not in (
+                torch.float32,
+                torch.float64,
+                torch.bfloat16,
+                torch.float16,
+            ):
+                tensor_ = tensor_.float()
+            op = str2reduce_op[reduce_op] if isinstance(reduce_op, str) else reduce_op
+            assert op is not None, "Expected a valid reduce operation"
+            dist.all_reduce(tensor_, op=op)
+            synced_metrics[name] = tensor_
+        return synced_metrics
+
+    def _reduce_obj_syn():
+        lst_metrics: list[dict] = [None] * dist.get_world_size()  # type: ignore
+        dist.all_gather_object(lst_metrics, metrics)
+        if reduce_op == "AVG":
+            return {
+                name: sum(d[name] for d in lst_metrics) / len(lst_metrics)
+                for name in lst_metrics[0]
+            }
+        elif reduce_op == "MAX":
+            return {name: max(d[name] for d in lst_metrics) for name in lst_metrics[0]}
+        elif reduce_op == "MIN":
+            return {name: min(d[name] for d in lst_metrics) for name in lst_metrics[0]}
+        else:
+            raise ValueError(f"Unknown reduce operation: {reduce_op}")
+
+    if dist.is_initialized():
+        # Create a new dictionary to store synced metrics to avoid modifying the input
+        if use_reduce:
+            return _reduce_syn()
+        else:
+            return _reduce_obj_syn()
+
+    return metrics
+
+
 # * --- test --- #
+
+
+def _test_metrics_sync(rank):
+    # 0, 1 -> 0.5
+    # 1, 2 -> 1.5
+    metrics = {"a": torch.tensor(rank), "b": torch.tensor(rank + 1)}
+    print(metrics_sync(metrics, output_tensor_dict=True))
+
+
+def _test_dict_tensor_sync(rank):
+    a = torch.tensor(float(rank))
+    b = torch.tensor(float(rank + 1))
+    metrics = {"a": a, "b": b}
+    print(dict_tensor_sync(metrics, use_reduce=True))
 
 
 def _test_track_mp_sync(rank: int):
@@ -595,13 +718,15 @@ def _test_track_mp_sync(rank: int):
 
 
 if __name__ == "__main__":
-    import os
-
-    import accelerate
-    import torch
-    import torch.distributed as dist
-
     accelerator = accelerate.Accelerator()
     rank = accelerator.process_index
     print("Rank:", rank)
-    _test_track_mp_sync(rank)
+
+    ## > Test 1: _test_track_mp_sync, must start in __main__
+    # _test_track_mp_sync(rank)
+
+    ## > Test 2: _test_metrics_sync
+    # _test_metrics_sync(rank)
+
+    ## > Test 3: _test_dict_tensor_sync
+    _test_dict_tensor_sync(rank)
