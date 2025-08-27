@@ -30,9 +30,9 @@ def endmember_tv_loss(end_members: EndMember):
 
 @beartype
 class UnmixingLoss(torch.nn.Module):
-    def __init__(self, weights: list[float] | tuple[float, ...]):
+    def __init__(self, weights: list[float] | tuple[float, ...] | None = None):
         super().__init__()
-        self.weights = weights
+        self.weights = weights if weights is not None else [1.0, 0.35, 0.1]
 
     def forward(
         self,

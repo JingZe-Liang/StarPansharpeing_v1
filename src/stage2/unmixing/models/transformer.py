@@ -284,12 +284,15 @@ class Transformer(nn.Module):
         dim,
         depth,
         num_heads,
+        with_raw_img=False,
         mlp_ratio=4.0,
         drop=0.0,
         drop_path=0.0,
         input_size: int = 32,
         patch_size=2,
         out_channels=16,
+        raw_img_size=None,
+        raw_img_chans=None,
         pos_embed_type="sincos",
         norm_layer=functools.partial(nn.LayerNorm, eps=1e-6),
         mlp_norm_layer=functools.partial(nn.LayerNorm, eps=1e-6),
@@ -302,16 +305,28 @@ class Transformer(nn.Module):
         self.patch_size = patch_size
         self.input_size = input_size
         self.num_patches = (input_size // patch_size) ** 2
-        self._n_modalities = 2
+        self._n_modalities = 1
+        self.with_raw_img = with_raw_img
         self.patch_embed = PatchEmbed(
             img_size=input_size,
             patch_size=patch_size,
             in_chans=in_dim,
-            embed_dim=dim // self._n_modalities,
+            embed_dim=dim,
             bias=True,
             strict_img_size=False,
         )
-        self.fuse_stem = nn.Linear(dim // self._n_modalities * self._n_modalities, dim)
+        if self.with_raw_img:
+            assert raw_img_size is not None
+            assert raw_img_chans is not None
+            self.raw_img_patcher = PatchEmbed(
+                img_size=raw_img_size,
+                patch_size=16,
+                in_chans=raw_img_chans,
+                embed_dim=dim,
+                bias=True,
+                strict_img_size=False,
+            )
+        # self.fuse_stem = nn.Linear(dim // self._n_modalities * self._n_modalities, dim)
         self.base_size = input_size // self.patch_size
         self.pe_interpolation = 1.0
         self.out_channels = out_channels
@@ -451,29 +466,33 @@ class Transformer(nn.Module):
         )
         return x
 
-    def forward(self, noisy_latent) -> Tensor | tuple[Tensor, list[Tensor]]:
-        latents = (ms_latent, pan_latent)
+    def forward(
+        self,
+        noisy_latent,
+        hyper_img=None,
+        *,
+        feature_layer_ids: list[int] | None = None,
+    ) -> Tensor | tuple[Tensor, list[Tensor]]:
         # patch embedding
-        ys = []
-        for latent in latents:
-            y = self.patch_embed(latent)
-            ys.append(y)
+        y = self.patch_embed(noisy_latent)
+        if self.with_raw_img:
+            assert hyper_img is not None
+            y2 = self.raw_img_patcher(hyper_img)
+            y = torch.cat([y, y2], dim=1)  # [bs, s1 + s2, c]
 
-        # fuse all latent
-        y = self.fuse_stem(torch.cat(ys, dim=-1))
-
-        # pe
-        pe = self.get_pe(latents[0])
+        # positional embedding
+        pe = self.get_pe(noisy_latent)
         if self.pos_embed_type == "sincos":
             assert torch.is_tensor(pe), "Positional embedding must be a tensor."
             y = y + pe.to(y)
             pe = None
 
         # blocks
+        feature_layer_ids_ = self.feature_layer_ids or feature_layer_ids
         features = []
         for i, layer in enumerate(self.layers):
             y = layer(y, mask=None, pe=pe)
-            if self.feature_layer_ids is not None and i in self.feature_layer_ids:
+            if feature_layer_ids_ is not None and i in feature_layer_ids_:
                 features.append(y)
 
         # head
