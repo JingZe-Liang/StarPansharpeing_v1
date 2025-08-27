@@ -7,10 +7,7 @@ import imageio
 import numpy as np
 import tifffile
 from PIL import Image
-
-# 设置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class HyperspectralJPEG2000Compressor:

@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0"]
+dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0", "ty>=0.0.1"]
 
 [project.scripts]
 wids-index = "data.wids_index:main"

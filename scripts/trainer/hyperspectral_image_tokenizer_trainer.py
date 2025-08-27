@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, cast, no_type_check
 
 import accelerate
-import colored_traceback
+import accelerate.utils
 import hydra
 import numpy as np
 import PIL.Image as Image
@@ -19,7 +19,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from ema_pytorch import EMA
 from fvcore.nn import parameter_count_table
 from kornia.utils.image import make_grid, tensor_to_image
@@ -32,8 +32,6 @@ from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-
-colored_traceback.add_hook()
 
 from src.data.hyperspectral_loader import (
     get_hyperspectral_dataloaders,
@@ -174,6 +172,9 @@ class CosmosHyperspectralTokenizerTrainer:
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = (
             self.get_optimizer_lr_scheduler()
         )
+        # The last layer weight must require grad
+        self._ensure_last_layer_requires_grad()
+
         # EMA models and accelerator prepare
         self.prepare_for_training()
         self.prepare_ema_models()
@@ -205,6 +206,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # clear GPU memory
         torch.cuda.empty_cache()
+
+    def _ensure_last_layer_requires_grad(self):
+        # Call after the optimizer is initialized
+        if self._is_peft_tuning:
+            last_layer = self.tokenizer.decoder.decoder.conv_out
+            for w in last_layer.parameters():
+                w.requires_grad_(True)
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
@@ -571,6 +579,8 @@ class CosmosHyperspectralTokenizerTrainer:
         ), "Deepspeed PEFT tuning supports not implemented yet"
 
         peft_cfg: LoraConfig = hydra.utils.instantiate(self.cfg.peft)
+
+        # LoRA configured peft modules and additional modules
         peft_cfg.target_modules = (
             list(peft_cfg.target_modules) if peft_cfg.target_modules is not None else []
         )
@@ -580,18 +590,22 @@ class CosmosHyperspectralTokenizerTrainer:
             else []
         )
 
-        # add conv in/conv out modules, and additional lora target modules
-        if hasattr(self.tokenizer, "peft_first_last_convs_module_names"):
-            peft_cfg.modules_to_save += (
-                self.tokenizer.peft_first_last_convs_module_names()
+        # Add conv in/conv out modules, and additional lora target modules
+        if hasattr(self.tokenizer, "peft_fully_finetune_modules"):
+            peft_cfg.modules_to_save += self.tokenizer.peft_fully_finetune_modules(
+                add_norms=self.train_cfg.add_norms,
+                conv_stem_reinit=self.train_cfg.conv_in_out_reinit,
             )  # type: ignore
             self.log_msg(
                 "[PEFT]: use tokenizer defined input and output convs for tuning on different input/output channels"
                 "when dealing with different hyperspectral dataset"
             )
-        if hasattr(self.tokenizer, "additional_peft_target_modules"):
-            additional_tgt_modules = self.tokenizer.additional_peft_target_modules()  # type: ignore
-            peft_cfg.target_modules += list(additional_tgt_modules)
+        if hasattr(self.tokenizer, "peft_lora_modules"):
+            tgt_lora_modules = self.tokenizer.peft_lora_modules(
+                conv_stem_reinit=self.train_cfg.conv_in_out_reinit,
+                conv_stem_chan=self.dataset_cfg.dataset_channel,
+            )  # type: ignore
+            peft_cfg.target_modules += list(tgt_lora_modules)
 
         self.log_msg(
             f"[PEFT]: use tokenizer defined lora target modules: {peft_cfg.target_modules} for tuning"
@@ -601,7 +615,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 f"[PEFT]: fully finetuning modules (except lora layers) are {peft_cfg.modules_to_save}"
             )
 
-        self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer")
+        self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer... \n\n")
         adapter_name = getattr(self.dataset_cfg, "used", "default")
         self.tokenizer_peft_wrapped = get_peft_model(
             self.tokenizer,
@@ -1185,6 +1199,8 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
+            if not self.vq_loss_fn.use_gram and not self.vq_loss_fn.use_vf:
+                return None
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(
                     self.tokenizer_encoder
@@ -1193,6 +1209,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
 
         w = safe_dtensor_operation(w, prefer_full=True)
+        if not w.requires_grad:
+            # assert self._is_peft_tuning, f'the last layer weight may not requires_grad only if seted by PEFT'
+            raise ValueError("The last layer weight must be enabled requires_grad")
+
         return w
 
     def gradient_check(self, model: nn.Module):
@@ -1989,18 +2009,6 @@ class CosmosHyperspectralTokenizerTrainer:
                 f"ema_load_path must be specified when finetune_strategy is {self.train_cfg.finetune_strategy}"
             )
 
-        # test
-
-        # save_path = self.accelerator.save_state()
-        # self.log_msg(f"save state into {save_path}", only_rank_zero=False)
-        # self.accelerator.wait_for_everyone()
-
-        # # try to load
-        # self.accelerator.load_state(input_dir=save_path)
-        # self.log_msg(f"loaded state from {save_path}", only_rank_zero=False)
-
-        # exit(0)
-
         if self.train_cfg.resume_path is not None:
             self.resume(self.train_cfg.resume_path)
         elif self.train_cfg.ema_load_path is not None:
@@ -2042,39 +2050,39 @@ _configs_dict = {
 
 
 if __name__ == "__main__":
-    from src.utilities.train_utils.cli import get_cli_cfg_isolate_with_hydra_cfg
+    from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
 
     # change the config name in cli
+    cli_default_dict = {
+        "config_name": _key,
+        "only_rank_zero_catch": True,
+    }
 
-    _configs, cli_args = get_cli_cfg_isolate_with_hydra_cfg(
-        _configs_dict,
-        cli_default_dict={
-            "config_name": _key,
-            "only_rank_zero_catch": True,
-        },
-    )
+    chosen_cfg, cli_args = argsparse_cli_args(_configs_dict, cli_default_dict)
 
+    if is_rank_zero := PartialState().is_main_process:
+        print_colored_banner("HyperTokenizer")
     log_print(
         "<green>\n"
         + "=" * 60
         + "\n"
-        + f"[Config]: {_configs}\n"
-        + "-" * 40
-        + "\n\n"
-        + "Start Running , Good Luck!</>",
-        only_rank_zero=True,
+        + f"[Config]: {chosen_cfg}\n"
+        + "\n"
+        + "Start Running , Good Luck!\n"
+        + "=" * 60
+        + "</>",
+        only_rank_zero=False,
     )
 
     # Main function
-
     @hydra.main(
-        config_path="configs/tokenizer_gan",
-        config_name=_configs,
+        config_path="../configs/tokenizer_gan",
+        config_name=chosen_cfg,
         version_base=None,
     )
     def main(cfg):
         if cli_args.only_rank_zero_catch:
-            catcher = logger.catch if PartialState().is_main_process else nullcontext
+            catcher = logger.catch if is_rank_zero else nullcontext
         else:
             catcher = logger.catch
 

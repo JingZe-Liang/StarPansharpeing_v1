@@ -142,11 +142,14 @@ OHS_train:
 OHS_val:
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0012..0015}.tar
 
+# if is lora -------------
+channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+# ------------------------
 train_name: ${dataset.used}_train
 val_name: ${dataset.used}_val
 wds_path_train: ${dataset[${dataset.train_name}]}
 wds_path_val: ${dataset[${dataset.val_name}]}
-channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
+dataset_channel: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
 batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
 batch_size_val: 8
 rgb_channels: ${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
@@ -173,27 +176,15 @@ train_loader:
     prefetch_factor: ${dataset.prefetch_factor}
     shuffle_within_workers: ${dataset.shuffle_within_workers}
     resample: true
-    check_channels_n: ${dataset.channels}
-
-  # for the lora training wv3, gf2, qb, IKONOS
-  # changed_kwargs_by_loader:
-  #   - batch_size: 12
-  #   - batch_size: 6
-  #     channels: ${dataset.channels}
-  #     check_channels: true
+    check_channels_n: ${dataset.dataset_channel}
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
   paths: ${dataset.wds_path_val}
   basic_kwargs:
     batch_size: ${dataset.batch_size_val}
-    num_workers: 0 #${dataset.num_workers}
-    prefetch_factor: null #${dataset.prefetch_factor}
-    shuffle_within_workers: false #${dataset.shuffle_within_workers}
+    num_workers: 0
+    prefetch_factor: null
+    shuffle_within_workers: false
     resample: true
-    check_channels_n: ${dataset.channels}
-  # changed_kwargs_by_loader:
-  #   - batch_size: 8
-  #   - batch_size: 8
-  #     channels: ${dataset.channels}
-  #     check_channels: true
+    check_channels_n: ${dataset.dataset_channel}

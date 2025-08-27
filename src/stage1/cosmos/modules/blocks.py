@@ -20,17 +20,18 @@ natten = lazy_loader.load("natten")
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
+from src.utilities.network_utils import null_decorator_no_any_kwgs
 
 from .utils import (
     Normalize,
     extract_needed_kwargs,
-    gelu_nonlinear,
     nonlinearity,
     unit_magnitude_normalize,
     val2tuple,
 )
 
 # * --- Blocks compilations --- * #
+
 compile_forward_fn = True
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
@@ -50,27 +51,15 @@ if compile_forward_fn:
     )
     log_print("will compile the forward function and disable donated buffer", "debug")
     torch._functorch.config.donated_buffer = False  # for adaptive weighting
-    torch._dynamo.config.cache_size_limit = 20
+    torch._dynamo.config.cache_size_limit = 1_000  # larger cache size
 else:
-
-    def _null_decorator(**any_kwargs):
-        def _inner_decorator(func):
-            return func
-
-        return _inner_decorator
-
-    def _null_decorator_no_any_kwgs(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    _compile_decorator = _null_decorator_no_any_kwgs
+    _compile_decorator = null_decorator_no_any_kwgs
     log_print("not compile the forward function", "debug")
 
 
-# utilities
+# * --- Utilities --- #
+
+
 def get_same_padding(kernel_size: int | tuple[int, ...]):
     if isinstance(kernel_size, tuple):
         return tuple([get_same_padding(ks) for ks in kernel_size])
@@ -96,6 +85,7 @@ REGISTERED_ACT_DICT: dict[str, type | partial] = {
 
 def build_act(name: str | None, **kwargs) -> Optional[nn.Module]:
     if name in REGISTERED_ACT_DICT:
+        assert name is not None
         act_cls = REGISTERED_ACT_DICT[name]
         kwargs = extract_needed_kwargs(kwargs, act_cls)
         return act_cls(**kwargs)
@@ -202,16 +192,16 @@ class MPConv(nn.Conv2d):
         return self._conv_forward(x, w, self.bias)
 
 
-# * --- Residaul block builder --- #
+# * --- Residual block builder --- #
 
 
 class ResidualBlock(nn.Module):
     def __init__(
         self,
-        main: Optional[nn.Module],
-        shortcut: Optional[nn.Module],
+        main: nn.Module,
+        shortcut: nn.Module,
         post_act=None,
-        pre_norm: Optional[nn.Module] = None,
+        pre_norm=None,
     ):
         super().__init__()
 
@@ -991,7 +981,7 @@ def build_downsample_block(
     return block
 
 
-# * --- ffns --- #
+# * --- FFNs --- #
 
 
 class GLUFeedForward(nn.Module):

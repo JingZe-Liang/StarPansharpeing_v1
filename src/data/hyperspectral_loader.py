@@ -514,6 +514,7 @@ def get_fast_test_hyperspectral_data(
         "WV4",
         "IKONOS",
         "RS5M",
+        "BigEarthNetS2",
     ] = "DCF",
     batch_size: int = 1,
 ):
@@ -534,6 +535,22 @@ def get_fast_test_hyperspectral_data(
         "BigEarthNetS2": "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
     }[data_type]
 
+    if "BigEarthNetS2" != data_type:
+        permute = True
+    else:
+        permute = False  # BigEarthNet images are already permuted
+
+    other_kwargs = {}
+    if data_type == "RS5M":
+        other_kwargs.update(
+            {
+                "img_key": "auto",
+                "tgt_key": "img",
+                "constraint_size": 65536,
+                "resize_before_transform": 512,
+            }
+        )
+
     _, dataloader = get_hyperspectral_dataloaders(
         wds_paths,
         batch_size=batch_size,
@@ -544,12 +561,9 @@ def get_fast_test_hyperspectral_data(
         shuffle_within_workers=False,
         remove_meta_data=False,
         prefetch_factor=None,
+        permute=permute,
         resample=False,
-        permute=True
-        if "BigEarthNet" != data_type
-        else False,  # BigEarthNet images are already permuted
-        img_key="img_content" if "RS5M" == data_type else "img",
-        # resize_before_transform=512 if "RS5M" == data_type else None,
+        **other_kwargs,
     )
 
     return dataloader

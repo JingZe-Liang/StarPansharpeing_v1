@@ -28,12 +28,15 @@ class AmotizedPixelLoss(nn.Module):
         pred_sr_from_latent=None,
         sr2=None,
     ):
+        # 1. loss on latent of sr and gt
         latent_loss = self.amotized_loss(pred_latent, sr_latent) * self.factors[0]
 
+        # 2. pixel loss on sr (e.g., dircectly predicted sr pixels) and gt
         sr_pixel_loss = 0.0
         if pred_sr is not None and sr is not None:
             sr_pixel_loss = self.pixel_loss(pred_sr, sr) * self.factors[1]
 
+        # 3. pixel loss on tokenizer decoded sr and gt, may backward from the de-tokenizer
         sr_pixel_loss2 = 0.0
         if pred_sr_from_latent is not None and sr2 is not None:
             sr_pixel_loss2 += (

@@ -24,6 +24,8 @@ dataset:
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
+  # For loading the pretrained multi-channels head
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -52,7 +54,7 @@ tokenizer:
   vf_on_z_or_module: z
 
   # loading
-  uni_tokenizer_path: runs/stage1_cosmos/2025-08-14_00-52-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
   loading_type: pretrained
 
   # blocks
@@ -132,7 +134,7 @@ ema:
 peft:
   _target_: peft.LoraConfig
   peft_type: lora
-  r: 16
+  r: 32
   lora_alpha: 8
   use_dora: false
   use_rslora: false
@@ -164,32 +166,56 @@ train:
   max_steps: 350_000
   save_every: 500
   seperate_enc_dec: false
-  resume_path:
-  ema_load_path:
   only_load_tokenizer: false
-  save_peft_ckpts: true
   grad_check: false
   compile_model: false
+  # LoRA related
+  conv_in_out_reinit: false
+  add_norms: true
+  save_peft_ckpts: true
+  # Train states
+  resume_path:
+  ema_load_path:
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 1.0e-4
-    weight_decay: 1.0e-4
-    eps: 1.0e-8
-    betas: [0.9, 0.995]
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.5e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.9, 0.995]
 
   disc_optimizer:
-    _target_: torch.optim.AdamW
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 1.0e-4
-    weight_decay: 1.0e-4
-    eps: 1.0e-8
-    betas: [0.9, 0.995]
+    lr: 2.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.5e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.9, 0.995]
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -210,7 +236,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_lora_ft_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}
+    run_comment: cosmos_lora=${peft.peft_type}_r=${peft.r}_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}
     log_with_time: true
     visualize_every: 200
     log_every: 10

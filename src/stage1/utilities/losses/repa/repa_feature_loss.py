@@ -91,6 +91,40 @@ def next_divisble_of_y(x, y):
     return math.ceil(x / y) * y
 
 
+def load_perception_model(
+    weight_path: str,
+    model_name: str = "PE-Core-L14-336",
+    pretrained_on: Literal["core", "llm", "spatial"] = "core",
+    compile=False,
+):
+    """
+    Perception Encoder: https://github.com/facebookresearch/perception_models
+    """
+
+    import src.stage1.perception_models.core.vision_encoder.pe as pe
+
+    visual_available_cfgs = pe.VisionTransformer.available_configs()
+    assert model_name in visual_available_cfgs, (
+        f"Model {model_name} not available. Available models are {visual_available_cfgs}"
+    )
+    assert weight_path is not None, (
+        "weight path should not be None when loading the perception encoder model"
+    )
+
+    # Load the model
+    cfg = pe.PE_VISION_CONFIG[model_name]
+    model = pe.VisionTransformer.from_config(
+        cfg, pretrained=True, checkpoint_path=weight_path
+    )
+    log_print(f"[PE Model]: Load model {model_name} with config {cfg}")
+
+    if compile:
+        model = torch.compile(model, mode="reduce-overhead")
+        log_print("[PE model]: Model compiled with reduce-overhead")
+
+    return model
+
+
 def load_repa_dino_v3_model(
     weight_path: str | Path | None = None,
     model_name: str | None = "dinov3_vitl16",
@@ -147,6 +181,7 @@ def load_repa_dino_v3_model(
         stem = Path(weight_path).stem
         model_name = "_".join(stem.split("_", 2))
     elif weight_path is None and model_name is not None:
+        # breakpoint()
         model_type_dir = {
             "web": "web_image_pretrained_lvd",
             "satellite": "remote_sensing_image_pretrained_SAT_493M",
@@ -158,10 +193,13 @@ def load_repa_dino_v3_model(
             if model_name in p.stem:
                 weight_path = str(p)
                 break
+        assert weight_path is not None, (
+            f"can not find weight {model_name=} at {weight_dir}"
+        )
     elif weight_path is None and model_name is None:
         raise ValueError("Either model_name or weight_path must be specified.")
 
-    assert weight_path is not None
+    assert weight_path is not None, f"{weight_path=} does not exists"
     log_print(
         f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path} "
     )
@@ -207,7 +245,7 @@ def load_repa_encoder(
     model_name: str = "dinov2_vitb14",
     weight_path: str | Path | None = None,
     load_from="torch",
-    version: int = 2,
+    version: int | str = 2,
     dino_v3_pretrained_on: str = "satellite",
     compile=True,
 ):
@@ -220,8 +258,14 @@ def load_repa_encoder(
             pretrained_on=dino_v3_pretrained_on,
             compile=compile,
         )
+    elif version == "pe":
+        return load_perception_model(
+            weight_path,
+            model_name,
+            compile=compile,
+        )
     else:
-        raise ValueError(f"Unknown Dino version {version}")
+        raise ValueError(f"Unknown DINO/PE version {version}")
 
 
 class REPALoss(torch.nn.Module):
@@ -802,7 +846,9 @@ class LatentGramLoss(REPALoss):
         # Gram loss
         feature, aux_feature = map(self.to_1d_seq, (feature, aux_feature))
         gram_loss = self.gram_loss(feature, aux_feature, img_level=self.img_level)
-        g_weight = self.calculate_adaptive_weight(nll_loss, gram_loss, last_layer)
+        g_weight = (
+            1.0  # self.calculate_adaptive_weight(nll_loss, gram_loss, last_layer)
+        )
 
         return gram_loss * g_weight
 

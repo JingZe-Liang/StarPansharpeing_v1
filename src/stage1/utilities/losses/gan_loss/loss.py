@@ -768,7 +768,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss = self.zero
         logs = {}
 
-        # < q loss enlarge
+        # q loss enlarge
         def _enlarge_codebook_loss_fn(codebook_loss):
             cb_enlarge_r = self.quantizer_options["codebook_enlarge_ratio"]
             codebook_enlarge_steps = self.quantizer_options["codebook_enlarge_steps"]
@@ -846,12 +846,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "per_sample_entropy": q_loss_breakdown.per_sample_entropy,
                 }
 
-        # * kl =============
+        # > kl =============
         elif self.quantizer_type == "kl":
             q_loss = q_loss_total * self.quantizer_options["kl_weight"]
-            logs = {
-                "kl_loss": q_loss,
-            }
+            logs = {"kl_loss": q_loss}
 
         return q_loss, logs
 

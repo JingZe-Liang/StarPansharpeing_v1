@@ -1,6 +1,7 @@
 from copy import deepcopy
 from typing import Any, Literal
 
+import numpy as np
 import torch
 
 from src.utilities.logging.print import log_print
@@ -220,7 +221,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         self._initialized = True
 
     def add_value(self, name: str, value: float, ema: float = 1.0):
-        if not isinstance(value, float):
+        if isinstance(value, (np.ndarray, torch.Tensor)):
+            value = value.item()
+        elif not isinstance(value, float):
             raise ValueError(f"Expected float for {name}, got {type(value)}")
 
         if (
@@ -238,6 +241,13 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             raise ValueError(f"Expected float or list for {name}, got {type(value)}")
         elif isinstance(value, float):
             value = [value]
+        elif isinstance(value, (np.ndarray, torch.Tensor)):
+            assert value.ndim == 1, (
+                f"{name=} with {value} should be 1-d array or tensor"
+            )
+            if torch.is_tensor(value):
+                value = value.detach().cpu().numpy()
+            value = value.tolist()
 
         if name not in self.loss_metrics_tracked:
             self.loss_metrics_tracked[name] = value
@@ -481,11 +491,12 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         instance_name: str | int | None = None,
         overwrite_instance_use_sync: bool = False,
     ):
+        # Get the existing instance
         instance: LossMetricTracker = cls(
             __force_new_instance__=False, __instance_name__=instance_name
-        )  # Get the existing instance
+        )
 
-        # sync
+        # Sync
         if hasattr(torch, "distributed") and torch.distributed.is_initialized():
             instance_cp = deepcopy(instance)
             ins_lst: list[LossMetricTracker] = [
@@ -532,7 +543,6 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                 cls._instances[instance_name] = instance_cp
                 log_print(
                     f"LossMetricTracker instance {instance_name} synchronized and overwritten.",
-                    "info",
                 )
             return instance_cp
         else:

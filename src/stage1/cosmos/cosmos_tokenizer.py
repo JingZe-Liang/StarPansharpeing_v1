@@ -19,6 +19,7 @@ from peft import (
 )
 from torch import Tensor, nn
 
+import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
 from src.stage1.cosmos.modules.utils import Normalize
@@ -371,6 +372,7 @@ class ContinuousImageTokenizer(nn.Module):
         self.loading_type = loading_type
         self.name = kwargs.get("name", "ContinuousImageTokenizer")
         self.latent_channels = latent_channels
+        self.norm_in_quant_conv = kwargs.get("norm_in_quant_conv", False)
 
         self.in_channels_after_patcher = (
             np.array(kwargs["in_channels"]) * kwargs["patch_size"] ** 2
@@ -393,7 +395,7 @@ class ContinuousImageTokenizer(nn.Module):
         if loading_type == "nvidia":
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
             # pretrained model from NVIDIA cosmos tokenizer
-            assert not kwargs.get("norm_in_quant_conv", False), (
+            assert not self.norm_in_quant_conv, (
                 "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
             )
 
@@ -420,7 +422,7 @@ class ContinuousImageTokenizer(nn.Module):
             decoder = Decoder(z_channels=z_channels, **kwargs)
 
             # quant_conv and post_quant_conv
-            if kwargs.get("norm_in_quant_conv", False):
+            if self.norm_in_quant_conv:
                 warnings.warn(
                     '"norm_in_quant_conv" is not supported for pretrained settings and not recommended to use'
                     "it will be removed"
@@ -649,7 +651,8 @@ class ContinuousImageTokenizer(nn.Module):
             return dec
 
     def forward(self, input: torch.Tensor):
-        torch.compiler.cudagraph_mark_step_begin()
+        if cosmos_block.compile_forward_fn:
+            torch.compiler.cudagraph_mark_step_begin()
         latent = self.encode(input)
         dec = self.decode(latent, input.shape)
 
@@ -928,29 +931,32 @@ class ContinuousImageTokenizer(nn.Module):
 
         return norms
 
-    # * --- lora functions --- #
+    # * --- lora-related methods --- #
 
-    def peft_first_last_convs_module_names(self, add_norms: bool = False):
-        module_to_save_layers = [
-            # convs
-            "encoder.encoder.conv_in",
-            (
-                "decoder.decoder.conv_out"
-                if not self.decoder.decoder._wrap_fsdp_last_layer
-                else "decoder.decoder.conv_out.wrap_mod"
-            ),
-            # quant convs need to be fully finetuned
-            # "encoder.quant_conv",
-            # "decoder.quant_conv",
-        ]
+    def peft_fully_finetune_modules(
+        self, add_norms: bool = False, conv_stem_reinit=False
+    ) -> list[str]:
+        """
+        PEFT fully finetuned modules (no LoRA A and B).
+        """
+        module_to_save_layers = []
 
-        # convolution and normalization layers
-        for name, module in self.named_modules():
-            if "norm" in name and (not isinstance(module, nn.Identity)) and add_norms:
-                module_to_save_layers.append(name)
-                log_print(
-                    f"[Cosmos Tokenizer]: add norm {name} to fully finetune", "debug"
-                )
+        # conv in and conv out
+        # first conv: diff-bands convs or nn.Conv2d
+        if conv_stem_reinit:  # if reinit, the the conv stem is just an nn.Conv2d
+            module_to_save_layers = ["encoder.encoder.conv_in"]
+            if not self.decoder.decoder._wrap_fsdp_last_layer:
+                _conv_out_name = "decoder.decoder.conv_out"
+            else:
+                _conv_out_name = "decoder.decoder.conv_out.wrap_mod"
+            module_to_save_layers.append(_conv_out_name)
+            log_print(
+                f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune"
+            )
+
+        # backbone normalization layers
+        if add_norms:
+            module_to_save_layers += ["norm", "norm1", "norm2", "norm_out"]
 
         # projections for repa or vf losses
         if hasattr(self, "_repa_proj"):
@@ -960,20 +966,40 @@ class ContinuousImageTokenizer(nn.Module):
 
         return module_to_save_layers
 
-    def additional_peft_target_modules(self):
+    def peft_lora_modules(
+        self, conv_stem_reinit=False, conv_stem_chan: int | None = None
+    ) -> list[str]:
+        """
+        PEFT LoRA modules (with LoRA A and B)
+        """
         add_tgt_modules = []
-        for name, module in self.named_modules():
-            if (
-                (not name.startswith("_"))
-                and isinstance(module, (nn.Conv2d, nn.Linear))
-                and name
-                not in (
-                    "encoder.encoder.conv_in",
-                    "decoder.decoder.conv_out",
-                )
-            ):
-                add_tgt_modules.append(name)
-                log_print(f"[Cosmos Tokenizer]: add {name} to lora finetune", "debug")
+
+        # If the Conv stem is not reinit, use the pretrained weights,
+        # it should be added with the lora weights
+        if not conv_stem_reinit:
+            assert conv_stem_chan is not None, (
+                f"conv_stem_chan must be specified when conv_stem_reinit is False"
+            )
+
+            # Only add the corresponding stem_channel convs when the conv_in and conv_out
+            # are multi-bands conv module.
+            add_tgt_modules = [f"in_modules.conv_in_{conv_stem_chan}"]
+            if not self.decoder.decoder._wrap_fsdp_last_layer:
+                _conv_out_name = f"in_modules.conv_out_{conv_stem_chan}"
+            else:
+                _conv_out_name = f"wrap_mod.conv_out_{conv_stem_chan}"
+            add_tgt_modules.append(_conv_out_name)
+
+        # Backbone convs
+        add_tgt_modules += [
+            "nin_shortcut.1",
+            "conv",
+            "conv1",
+            "conv2",
+            "quant_conv",
+            "encoder.encoder.conv_out",
+        ]
+        # TODO: add attention q, k, v, proj_out
 
         return add_tgt_modules
 
@@ -1042,9 +1068,7 @@ class TokenizerLoRAMixin(nn.Module):
             if peft_cfg.modules_to_save is not None
             else []
         )
-        peft_cfg.modules_to_save += getattr(
-            self.tokenizer, "peft_first_last_convs_module_names", list
-        )()
+        peft_cfg.modules_to_save += getattr(self.tokenizer, "peft_modules", list)()
         log_print(
             f"------------------ LoRA config: -----------------------\n"
             f"LoRA modules:\n {peft_cfg.target_modules}\n"
@@ -1146,7 +1170,41 @@ class TokenizerLoRAMixin(nn.Module):
             self.model_peft.base_model.enable_adapter_layers()
 
 
-if __name__ == "__main__":
+# * --- test --- * #
+
+from src.utilities.logging import catch_any
+
+
+@catch_any()
+def test_tokenizer_fb(
+    is_lora=False,
+    count_params=False,
+    real_data: str | None = None,
+    use_optim=False,
+    device="cuda:1",
+    base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
+    lora_ckpt: str | None = None,
+    check_grad=False,
+    show_mem_usage=False,
+    save_pca_vis=False,
+    pca_type: str = "proj",
+    other_model_kwargs: dict | None = None,
+    idx_of_dl: int = 12,
+):
+    from contextlib import nullcontext
+
+    from fvcore.nn import parameter_count_table
+    from PIL import Image
+    from torchmetrics.aggregation import MeanMetric
+    from torchmetrics.image import PeakSignalNoiseRatio
+    from tqdm import trange
+
+    from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
+    from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
+    from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
+
+    torch.cuda.set_device(device)
+
     config = {
         "attn_resolutions": [32],
         "channels": 128,
@@ -1167,8 +1225,8 @@ if __name__ == "__main__":
         "encoder": "Default",
         "decoder": "Default",
         "act_checkpoint": True,
-        "uni_tokenizer_path": "runs/stage1_cosmos/2025-07-31_10-39-41_cosmos_f8c16p1_unified_hyperspectral_uni/checkpoints/checkpoint_2/model.safetensors",
-        "loading_type": "pretrained",  # "pretrained",
+        "uni_tokenizer_path": base_model_ckpt,
+        "loading_type": "pretrained" if Path(base_model_ckpt).exists() else None,
         "hook_for_repa": False,
         "block_name": "res_block",  # res_block, res_moe
         "quantizer_type": None,
@@ -1178,104 +1236,107 @@ if __name__ == "__main__":
         "norm_type": "gn",
         "norm_groups": 32,
         "attn_type": "none",
+        # repa
+        "use_repa_loss": True,
+        "use_vf_loss": False,
+        "vf_on_z_or_module": "z",
+        "dino_feature_dim": 1024,
     }
-    torch.cuda.set_device(1)
+    if other_model_kwargs:
+        config.update(other_model_kwargs)
     tokenizer = ContinuousImageTokenizer(**config).cuda()
-    # tokenizer = torch.compile(tokenizer)
-
-    # load lora layers
-    # from src.utilities.network_utils import load_peft_model_checkpoint
-
-    # peft_cfg, tokenizer = load_peft_model_checkpoint(
-    #     tokenizer,
-    #     "runs/stage1_cosmos_lora/2025-05-30_01-34-59_lora_fintune_f8c16p4_MMSeg_YREB_uni_pretrained/peft_ckpt",
-    # )
-    # tokenize = tokenizer.to("cuda", torch.bfloat16)
-    # tokenizer.eval()
-    # log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
-
-    # peft modules
-    # log_print(str(tokenizer.peft_first_last_convs_module_names()))
-    # log_print(str(tokenizer.additional_peft_target_modules()))
-    # tokenizer.get_last_enc_layer()
-
-    # from fvcore.nn import parameter_count_table
-
-    # print(parameter_count_table(tokenizer))
-
-    # x = torch.randn(1, 12, 256, 256).to("cuda", torch.bfloat16)
-    # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type="RS5M")
-    # dl_iter = iter(dl)
-    # tokenizer = tokenizer.eval().to(torch.bfloat16)
-    # x = torch.randn(1, 3, 1024, 1024, dtype=torch.bfloat16).cuda()
-    # opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
-    from PIL import Image
-    from torchmetrics.image import PeakSignalNoiseRatio
-
-    from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
-
     tokenizer = tokenizer.eval().to(torch.bfloat16)
-    # x = Image.open(
-    #     "data/BigEarthNet_S2/conditions/conditions/tmp/S2_tiff_jp2k_80_S2A_MSIL2A_20170613T101031_N9999_R022_T34VER_51_64.hed.png"
-    # ).convert("RGB")
-    # x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
-    # x = x / 255.0
-    # x = x * 2 - 1  # normalize to [-1, 1]
 
-    dl = get_fast_test_hyperspectral_data("DCF")
-    x = next(iter(dl))["img"]
+    if is_lora:
+        # load lora layers
+        assert lora_ckpt is not None
+        peft_cfg, tokenizer = load_peft_model_checkpoint(tokenizer, lora_ckpt)
+        tokenizer = tokenizer.to("cuda", torch.bfloat16)
+        tokenizer.eval()
+        log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
+
+        # peft modules
+        log_print(str(tokenizer.peft_fully_finetune_modules()))
+        log_print(str(tokenizer.peft_lora_modules()))
+        log_print(tokenizer.get_last_enc_layer())
+
+    if count_params:
+        log_print(parameter_count_table(tokenizer))
+
+    if real_data is not None:
+        if Path(real_data).exists():
+            # only support RGB image
+            x = Image.open(real_data).convert("RGB")
+            x = (
+                torch.from_numpy(np.array(x))
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .float()
+                .cuda()
+            )
+            x = x / 255.0
+            x = x * 2 - 1  # normalize to [-1, 1]
+        else:
+            dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)
+            for _ in trange(idx_of_dl + 1):
+                x = next(iter(dl))["img"]
+    else:
+        x = torch.randn(1, 12, 256, 256).to("cuda", torch.bfloat16)
     x = x.to(torch.bfloat16).cuda()
 
-    # from src.utilities.optim import get_muon_optimizer
-
-    # opt = get_muon_optimizer(
-    #     tokenizer.named_parameters(),
-    #     lr=1e-4,
-    #     weight_decay=0.1,
-    # )
-
-    from torchmetrics.aggregation import MeanMetric
-
-    from src.utilities.logging.print import catch_any
+    if use_optim:
+        opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
     metric = MeanMetric().cuda()
-    with torch.autocast("cuda", torch.bfloat16):
-        for i in range(20):
-            # x = next(dl_iter)["img"].cuda().to(torch.bfloat16)
-            with torch.no_grad():
-                y = tokenizer(x)
-            # yy = ((y[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
-            # xx = ((x[0, [2, 1, 0]].permute(1, 2, 0).float() + 1) / 2).cpu().numpy()
+    ctx = torch.no_grad if (use_optim or check_grad) else torch.enable_grad
+    mem_ctx = mem_context(device) if show_mem_usage else nullcontext()
+    with torch.autocast("cuda", torch.bfloat16) and ctx():
+        with mem_ctx:
+            y = tokenizer(x)
+            log_print(y.shape)
 
             # psnr
-            # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-            # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-            # print(f"PSNR: {psnr_val}")
-            # print(y.shape)
+            if real_data:
+                psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+                psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
+                log_print(f"PSNR: {psnr_val}")
+                metric.update(psnr_val)
 
-            print(y.shape)
-            # opt.zero_grad()
-            # y.mean().backward()
-            # opt.step()
+            if use_optim:
+                opt.zero_grad()
+                y.mean().backward()
+                opt.step()
 
-            import time
+            if check_grad:
+                for n, p in tokenizer.named_parameters():
+                    if p.grad is None:
+                        print(f"{n} grad is None")
 
-            time.sleep(2)
+        if metric.update_count >= 1:
+            log_print(metric.compute())
 
-            # grads
-            # for n, p in tokenizer.named_parameters():
-            #     if p.grad is None:
-            #         print(f"{n} grad is None")
+    if save_pca_vis:
+        if pca_type == "proj":
+            feat = tokenizer.get_repa_feature()
+        else:
+            with torch.no_grad():
+                feat = tokenizer.encode(x)
+                if isinstance(feat, tuple):
+                    feat = feat[0]
+        assert feat is not None, "repa feature should not be None"
+        feat_pca = feature_pca_sk(feat.float())
+        # norm
+        feat_pca = (feat_pca - feat_pca.min()) / (feat_pca.max() - feat_pca.min())
+        feat_pca = (feat_pca * 255.0).to(torch.uint8).detach().cpu().numpy()[0]
+        feat_pca = feat_pca.transpose(1, 2, 0)
+        Image.fromarray(feat_pca).save(f"tmp/repa_feature_pca_{pca_type}.png")
+        log_print(f"Save PCA visualization to tmp/repa_feature_pca_{pca_type}.png")
 
-            # opt.zero_grad()
-            # y.mean().backward()
-            # opt.step()
-            # metric.update(psnr_val)
 
-        # print(metric.compute())
-
-        # feat = tokenizer.get_repa_feature()
-        # psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
-        # psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-        # logging.debug(y.shape)
-        # logging.debug(psnr_val)
+if __name__ == "__main__":
+    test_tokenizer_fb(
+        real_data="RS5M",
+        save_pca_vis=True,
+        pca_type="z",
+        idx_of_dl=12,
+    )

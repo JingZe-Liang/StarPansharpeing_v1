@@ -568,6 +568,18 @@ class Decoder(nn.Module):
 
 
 # *==============================================================
+# * Generative Decoder
+# taken from wetok: https://github.com/zhuangshaobin/WeTok
+# *==============================================================
+
+
+class GenerativeDecoder(nn.Module):
+    def __init__(
+        self,
+    ): ...
+
+
+# *==============================================================
 # * Decoder Diffusion version
 # *==============================================================
 

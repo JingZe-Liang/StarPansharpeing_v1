@@ -1,11 +1,53 @@
+import argparse
 import sys
 
+from loguru import logger
 from omegaconf import OmegaConf
+from rich_argparse import RichHelpFormatter
 
 CLI_DEFAUTL_DICT = {
     "config_name": None,
     "only_rank_zero_catch": True,
 }
+
+
+def argsparse_cli_args(
+    exp_config_dict: dict[str, str], cli_default_dict: dict = CLI_DEFAUTL_DICT
+):
+    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
+    config_name_parser = parser.add_argument_group(
+        "Configuration Names",
+        description="Determine which config to be used to launch the experiment",
+    )
+
+    config_name_parser.add_argument(
+        "--config_name",
+        "-c",
+        type=str,
+        default=None,
+        help=f"Available config names: {list(exp_config_dict.keys())}",
+    )
+    config_name_parser.add_argument(
+        "--only_rank_zero_catch",
+        "-zc",
+        action="store_false",
+        default=True,
+        help="Only catch exceptions on rank zero",
+    )
+
+    cli_args, unknown = parser.parse_known_args()
+    config_name = cli_args.config_name or cli_default_dict["config_name"]
+    hydra_config_path = exp_config_dict.get(config_name)
+
+    # refactor the sys.argv
+    script_name = sys.argv[0]
+    sys.argv = [script_name] + unknown
+
+    if hydra_config_path is None:
+        logger.error(f"Unknown config name: {config_name}")
+        sys.exit(1)
+
+    return hydra_config_path, cli_args
 
 
 def get_cli_cfg_isolate_with_hydra_cfg(
@@ -136,3 +178,15 @@ def get_cli_cfg_isolate_with_hydra_cfg(
     hydra_cfg_name = exp_config_dict[str(cli_args.config_name)]
 
     return hydra_cfg_name, cli_args
+
+
+from pyfiglet import figlet_format
+from rich.console import Console
+from rich.text import Text
+
+
+def print_colored_banner(text: str, font: str = "slant", color: str = "bold magenta"):
+    ascii_art = figlet_format(text, font=font)
+    console = Console()
+    styled_text = Text(ascii_art, style=color)
+    console.print(styled_text, width=400)

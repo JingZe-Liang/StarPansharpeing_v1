@@ -631,7 +631,7 @@ def comp_conditions_hyper_images_names(
         # else:
         #     print(f"Match: Tar name {tname} matches group name {gname}")
 
-    print(">>> Comparison completed.")
+    print(">>> Comparison completed.\n")
 
 
 def re_tar_from_dir(

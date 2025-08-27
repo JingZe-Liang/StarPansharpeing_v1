@@ -1,5 +1,5 @@
 """
-Deepseek MoE implemtation
+Deepseek MoE implementation
 
 Author: Deepseek team, Zihan Cao
 Date: 2025-01-26
@@ -9,7 +9,9 @@ License: MIT Linsence
 ---------------------------------------------------------
 
 Copyright (c) Deepseek, 2025
-Copyright (c) ZihanCao, University of Electronic Science and Technology of China (UESTC), Mathematical School
+Copyright (c) ZihanCao,
+    University of Electronic Science and Technology of China (UESTC),
+    Mathematical School
 """
 
 import math

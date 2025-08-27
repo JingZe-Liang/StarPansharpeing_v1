@@ -15,12 +15,14 @@
 
 """Shared utilities for the networks module."""
 
+from collections.abc import Callable
 from functools import partial
 from inspect import Parameter, isclass, isfunction, signature
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
+import torch.nn as nn
 from einops import pack, rearrange, unpack
 
 from .rmsnorm_triton import TritonRMSNorm2dFunc
@@ -144,6 +146,37 @@ def unit_magnitude_normalize(x, dim=None, eps=1e-4):
     return x / norm.to(x.dtype)
 
 
+class AdaptiveGroupNorm32(nn.Module):
+    def __init__(self, z_channel, in_filters, eps=1e-6):
+        super().__init__()
+        self.gn = nn.GroupNorm(
+            num_groups=32, num_channels=in_filters, eps=eps, affine=False
+        )
+        # self.lin = nn.Linear(z_channels, in_filters * 2)
+        self.gamma = nn.Linear(z_channel, in_filters)
+        self.beta = nn.Linear(z_channel, in_filters)
+        self.eps = eps
+
+    def forward(self, x, quantizer):
+        B, C, _, _ = x.shape
+        # quantizer = F.adaptive_avg_pool2d(quantizer, (1, 1))
+        # calcuate var for scale
+        scale = rearrange(quantizer, "b c h w -> b c (h w)")
+        scale = scale.var(dim=-1) + self.eps  # not unbias
+        scale = scale.sqrt()
+        scale = self.gamma(scale).view(B, C, 1, 1)
+
+        # calculate mean for bias
+        bias = rearrange(quantizer, "b c h w -> b c (h w)")
+        bias = bias.mean(dim=-1)
+        bias = self.beta(bias).view(B, C, 1, 1)
+
+        x = self.gn(x)
+        x = scale * x + bias
+
+        return x
+
+
 def Normalize(
     in_channels,
     norm_type: str
@@ -199,6 +232,9 @@ class CausalNormalize(torch.nn.Module):
             x, batch_size = time2batch(x)
             return batch2time(self.norm(x), batch_size)
         return self.norm(x)
+
+
+# * --- Utilities --- #
 
 
 def exists(v):

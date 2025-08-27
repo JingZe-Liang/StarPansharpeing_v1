@@ -155,6 +155,9 @@ class PansharpeningTrainer:
         tokenizer_name = self.train_cfg.tokenizer_name
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
         self.quantizer_type: str | None = self.train_cfg.quantizer_type
+        self.tokenizer_not_req_grad = getattr(
+            self.train_cfg, "tokenizer_not_req_grad", True
+        )
         self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
@@ -181,6 +184,9 @@ class PansharpeningTrainer:
             )
             self.tokenizer_encoder: nn.Module
             self.tokenizer_decoder: nn.Module
+            if self.tokenizer_not_req_grad:
+                self.tokenizer_encoder.requires_grad_(False)
+                self.tokenizer_decoder.requires_grad_(False)
 
             # quantizer
             if self.cfg.quantizer.quant is not None:
@@ -207,6 +213,9 @@ class PansharpeningTrainer:
             )
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
+
+            if self.tokenizer_not_req_grad:
+                self.tokenizer.requires_grad_(False)
 
             if self.train_cfg.peft_pretrained_path is not None:
                 self.log_msg(
@@ -684,6 +693,7 @@ class PansharpeningTrainer:
         lrms_tok_out: dict | None = None,
         pan_tok_out: dict | None = None,
         sr_tok_out: dict | None = None,
+        # latents (offline)
         lrms_latent: torch.Tensor | None = None,
         pan_latent: torch.Tensor | None = None,
         sr_latent: torch.Tensor | None = None,
@@ -745,6 +755,7 @@ class PansharpeningTrainer:
             sr_tok_out = self.forward_tokenizer(batch["hrms"])
 
         quality_track_n = self.train_cfg.track_metrics_duration
+        # start track after n steps
         quality_track_after = self.train_cfg.track_metrics_after
         if quality_track_n >= 0:
             ratio = self.train_cfg.pansp_ratio
@@ -952,7 +963,7 @@ class PansharpeningTrainer:
             )
 
         # track psnr and ssim
-        pan_acc_fn = AnalysisPanAcc(ratio=4, ref=True)
+        pan_acc_fn = AnalysisPanAcc(ratio=self.train_cfg.pansp_ratio, ref=True)
         loss_metrics = MeanMetric().to(device=self.device)
 
         for batch_or_idx in tbar:
@@ -979,6 +990,15 @@ class PansharpeningTrainer:
 
         pan_acc = pan_acc_fn.acc_ave
         loss_val = loss_metrics.compute()
+
+        # from src.utilities.train_utils.state import LossMetricTracker
+
+        # track = LossMetricTracker(
+        #     loss_metrics_tracked=pan_acc,
+        #     loss_metrics_values={"val_loss": loss_val.item()},
+        #     __instance_name__="val_tracker",
+        # )
+        # track = LossMetricTracker.sync_state(instance_name="val_tracker")
 
         # gather
         if self.accelerator.use_distributed:
@@ -1129,7 +1149,7 @@ _configs = {
 
 
 @hydra.main(
-    config_path="configs/pansharpening",
+    config_path="../configs/pansharpening",
     config_name=_configs,
     version_base=None,
 )

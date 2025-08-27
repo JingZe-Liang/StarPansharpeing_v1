@@ -74,8 +74,9 @@ def get_model_learnable_params(model: th.nn.Module, with_name=True):
     for n, p in model.named_parameters():
         if p.requires_grad:
             trainable_ps[n] = p
-        else:
-            log_print(f"Parameter {n} is not learnable, skip it.", "debug")
+            log_print(f"Parameter <green>{n}</> is learnable", "debug")
+        # else:
+        #     log_print(f"Parameter <green>{n}</> is not learnable, skip it.", "debug")
 
     if with_name:
         return trainable_ps

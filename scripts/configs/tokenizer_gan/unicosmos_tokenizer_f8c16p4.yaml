@@ -20,7 +20,7 @@ defaults:
 accelerator:
   gradient_accumulation_plugin:
     _target_: accelerate.utils.GradientAccumulationPlugin
-    num_steps: 1
+    num_steps: 2
 
 vq_loss:
   # perceptual loss
@@ -31,8 +31,8 @@ vq_loss:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
-    img_resize: 224 # null for no resize
-    dino_img_size: 224
+    img_resize: 512 # null for no resize
+    dino_img_size: 512
     dino_name: "dinov3_vitl16"
   # vf loss
   vf_loss_weight:
@@ -40,19 +40,19 @@ vq_loss:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
-    img_resize: 224
-    dino_img_size: 224
+    img_resize: 384
+    dino_img_size: 384
     distmat_margin: 0.25
     cos_margin: 0.5
     dino_name: "dinov3_vitl16"
   # gram loss
-  gram_loss_weight: 0.1
+  gram_loss_weight:
   gram_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
-    img_resize: 224 # null for no resize
-    dino_img_size: 224
+    img_resize: 384 # null for no resize
+    dino_img_size: 384
     dino_name: "dinov3_vitl16"
   # quantizer loss
   quantizer_type:
@@ -107,8 +107,8 @@ tokenizer:
   z_channels: 16
 
   # augmentations
-  latent_noise_prob: 0.5
-  use_channel_drop: true
+  latent_noise_prob: 0.0
+  use_channel_drop: false
 
   # train
   act_checkpoint: true
@@ -127,13 +127,13 @@ train:
   tokenizer_name: uni_cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}
   proj_dir: runs/stage1_cosmos
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 0.3
+  max_grad_norm: 0.08
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 500_000
   save_every: 1000
-  resume_path:
+  resume_path: #runs/stage1_cosmos/2025-08-18_22-17-53_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/checkpoints/checkpoint_5
   ema_load_path: #runs/stage1_cosmos/2025-08-14_00-52-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
@@ -161,10 +161,9 @@ train:
     momentum: 0.9
     adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     adamw_wd: 0.
-
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 2.0e-4
+    # lr: 1.0e-4
     # weight_decay: 1.0e-4
     # eps: 1.0e-8
     # betas: [0.5, 0.95]
@@ -181,38 +180,37 @@ train:
     momentum: 0.9
     adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     adamw_wd: 0.
-
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 2.0e-4
+    # lr: 1.0e-4
     # weight_decay: 1.0e-4
     # eps: 1.0e-8
     # betas: [0.0, 0.9] #[0.9, 0.95]
     # foreach: true
 
   tokenizer_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-    _partial_: true
-    num_warmup_steps: 1000
-    num_training_steps: ${train.max_steps}
-    num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
-    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000
+    # num_training_steps: ${train.max_steps}
+    # num_cycles: 1
+    # reduced_factor: 2
+    # min_lr: 1.0e-5
+    _target_: transformers.optimization.get_constant_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
 
   disc_sched:
-    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-    _partial_: true
-    num_warmup_steps: 1000
-    num_training_steps: ${train.max_steps}
-    num_cycles: 1
-    reduced_factor: 2
-    min_lr: 1.0e-5
-    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000
+    # num_training_steps: ${train.max_steps}
+    # num_cycles: 1
+    # reduced_factor: 2
+    # min_lr: 1.0e-5
+    _target_: transformers.optimization.get_constant_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
 
   log:
     run_comment: cosmos_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}_latent_noise=${tokenizer.latent_noise_prob}_channel_drop=${tokenizer.use_channel_drop}

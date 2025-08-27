@@ -47,10 +47,11 @@ data:
   # data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0000..0064}.tar
   # data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
   # ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
-  ${eval:"[str(p) for p in Path('data/miniFrance/hyper_images').glob('*.tar')]"}
+  # ${eval:"[str(p) for p in Path('data/miniFrance/hyper_images').glob('*.tar')]"}
+  data/DOTA_v1/hyper_images/DOTA_v1-3_bands-px_1024-{0000..0001}.tar
 
 output:
-  output_dir: "data/miniFrance"
+  output_dir: "data/DOTA_v1"
   tar_name: "hyperspectral_conditions"
 
 loader:

@@ -266,7 +266,7 @@ def log_print(
         log_fn(msg, **context)
     else:
         rank: int = dist.get_rank() if dist.is_initialized() else 0
-        log_fn(f"[Rank {rank}] | {msg}", **context)
+        log_fn(msg, rank=rank, **context)
 
 
 class catch_any(ContextDecorator):

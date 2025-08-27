@@ -8,20 +8,13 @@ from timm.layers.create_norm import create_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer
 
 from src.utilities.logging import log_print
+from src.utilities.network_utils import null_decorator_no_any_kwgs
 
 compile_forward_fn = False
 if compile_forward_fn:
     _compile_decorator = torch.compile
 else:
-
-    def _null_decorator_no_any_kwgs(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    _compile_decorator = _null_decorator_no_any_kwgs
+    _compile_decorator = null_decorator_no_any_kwgs
 
 
 class ActNorm(nn.Module):
