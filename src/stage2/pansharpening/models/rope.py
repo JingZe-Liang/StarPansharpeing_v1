@@ -329,9 +329,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
 
         return self.freqs
 
-    def compute_freqs(
-        self,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compute_freqs(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the spatial frequencies for the latent tensor."""
         self.seq = torch.arange(self.max_seq_len_cached, dtype=torch.float).to(
             self.device

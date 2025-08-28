@@ -307,6 +307,9 @@ class Transformer(nn.Module):
         self.num_patches = (input_size // patch_size) ** 2
         self._n_modalities = 1
         self.with_raw_img = with_raw_img
+        self.raw_img_size = raw_img_size
+        self.raw_img_chans = raw_img_chans
+        self.raw_patch_size = 16
         self.patch_embed = PatchEmbed(
             img_size=input_size,
             patch_size=patch_size,
@@ -318,9 +321,10 @@ class Transformer(nn.Module):
         if self.with_raw_img:
             assert raw_img_size is not None
             assert raw_img_chans is not None
+            assert self.pos_embed_type == "sincos"
             self.raw_img_patcher = PatchEmbed(
                 img_size=raw_img_size,
-                patch_size=16,
+                patch_size=self.raw_patch_size,
                 in_chans=raw_img_chans,
                 embed_dim=dim,
                 bias=True,
@@ -379,30 +383,48 @@ class Transformer(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def setup_pe(self, dim, rope_options: dict = {}):
+    def setup_pe(self, dim, rope_options: dict | None = None):
         seq_len = self.num_patches
+        if self.with_raw_img:
+            raw_img_patches = self.raw_img_patcher.num_patches
 
         if self.pos_embed_type == "sincos":
-            self.pos_embed: nn.Buffer
-            self.register_buffer("pos_embed", torch.zeros(1, self.num_patches, dim))
+            self.pos_embed_latent: nn.Buffer
+            self.register_buffer(
+                "pos_embed_latent", torch.zeros(1, self.num_patches, dim)
+            )
             # sincos
             pos_embed = get_2d_sincos_pos_embed(
-                self.pos_embed.shape[-1],
+                self.pos_embed_latent.shape[-1],
                 int(seq_len**0.5),
                 pe_interpolation=self.pe_interpolation,
                 base_size=self.base_size,
             )
-            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+            self.pos_embed_latent.data.copy_(
+                torch.from_numpy(pos_embed).float().unsqueeze(0)
+            )
+            if self.with_raw_img:
+                pos_embed_raw = get_2d_sincos_pos_embed(
+                    dim,
+                    int(raw_img_patches**0.5),
+                    pe_interpolation=self.pe_interpolation,
+                    base_size=self.raw_img_size // self.patch_size,
+                )
+                self.pos_embed_raw: nn.Buffer
+                self.register_buffer(
+                    "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
+                )
+
         elif self.pos_embed_type == "rope":
-            if len(rope_options) == 0:
+            if rope_options is None:
                 self.rope_options = {
                     "dim": dim // self.num_heads,
                     "rope_dim": "2D",
-                    "beta_fast": rope_options.pop("beta_fast", 4),
-                    "beta_slow": rope_options.pop("beta_slow", 1),
-                    "rope_theta": rope_options.pop("rope_base", 10000),
-                    "apply_yarn": rope_options.pop("apply_yarn", True),
-                    "scale": rope_options.pop("rope_scale", 1.0),
+                    "beta_fast": 4,
+                    "beta_slow": 1,
+                    "rope_theta": 10000,
+                    "apply_yarn": True,
+                    "scale": 1.0,
                     "original_latent_shape": (self.base_size, self.base_size),
                 }
             self.rope = RotaryPositionEmbeddingPytorchV2(
@@ -417,27 +439,39 @@ class Transformer(nn.Module):
                 "Supported types are 'sincos' and 'rope'."
             )
 
-    def get_pe(self, img: torch.Tensor):
+    def get_pe(self, hw: tuple | torch.Size, img_type=None):
+        h, w = hw
         if self.pos_embed_type == "sincos":
-            if self.pos_embed.shape[1] != img.shape[-2] * img.shape[-1]:
+            if img_type == "raw":
+                assert self.with_raw_img
+                pe = self.pos_embed_raw
+                name = "pos_embed_raw"
+                base_size = self.raw_img_size // self.raw_patch_size
+                ps = self.raw_patch_size
+            else:
+                pe = self.pos_embed_latent
+                name = "pos_embed_latent"
+                base_size = self.base_size
+                ps = self.patch_size
+
+            if pe.shape[1] != h * w:
                 # re-init the pos_embed
-                pos_embed = get_2d_sincos_pos_embed(
-                    self.pos_embed.shape[-1],
-                    (
-                        img.shape[-2] // self.patch_size,
-                        img.shape[-1] // self.patch_size,
-                    ),
+                pe = get_2d_sincos_pos_embed(
+                    pe.shape[-1],
+                    (h // ps, w // ps),
                     pe_interpolation=self.pe_interpolation,
-                    base_size=self.base_size,
+                    base_size=base_size,
                 )
-                self.pos_embed = nn.Buffer(
-                    data=torch.from_numpy(pos_embed).float()[None],
-                    persistent=False,
+                self.register_buffer(
+                    name, torch.from_numpy(pe).float().unsqueeze(0), persistent=False
                 )
-            return self.pos_embed
+            return pe
+
         elif self.pos_embed_type == "rope":
-            assert img.ndim == 4, "Image tensor must be 4D (N, C, H, W)"
-            ph, pw = img.shape[-2] // self.patch_size, img.shape[-1] // self.patch_size
+            # TODO: add multi-modal-rope
+            # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
+
+            ph, pw = h // self.patch_size, w // self.patch_size
             seq_len_x = ph * pw
             pre_rope_seq_len = self.rope.cos_cached.shape[1]
             if seq_len_x > pre_rope_seq_len:
@@ -445,6 +479,7 @@ class Transformer(nn.Module):
                 self.rope_options["latent_shape"] = (ph, pw)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
+
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "
@@ -468,24 +503,31 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        noisy_latent,
-        hyper_img=None,
+        noisy_latent: Float[Tensor, "b c_latent h w"],
+        hyper_img: Float[Tensor, "b c_hyper H W"] | None = None,
         *,
         feature_layer_ids: list[int] | None = None,
     ) -> Tensor | tuple[Tensor, list[Tensor]]:
         # patch embedding
         y = self.patch_embed(noisy_latent)
-        if self.with_raw_img:
-            assert hyper_img is not None
-            y2 = self.raw_img_patcher(hyper_img)
-            y = torch.cat([y, y2], dim=1)  # [bs, s1 + s2, c]
 
         # positional embedding
-        pe = self.get_pe(noisy_latent)
+        pe = self.get_pe(noisy_latent.shape[-2:])
         if self.pos_embed_type == "sincos":
             assert torch.is_tensor(pe), "Positional embedding must be a tensor."
             y = y + pe.to(y)
             pe = None
+
+        if self.with_raw_img:
+            assert hyper_img is not None
+            y2 = self.raw_img_patcher(hyper_img)
+
+            if self.pos_embed_type == "sincos":
+                pe2 = self.get_pe(hyper_img.shape[-2:], img_type="raw")
+                assert torch.is_tensor(pe2), "Positional embedding must be a tensor."
+                y2 = y2 + pe2.to(y2)
+
+            y = torch.cat([y, y2], dim=1)  # [bs, s1 + s2, c]
 
         # blocks
         feature_layer_ids_ = self.feature_layer_ids or feature_layer_ids
@@ -496,10 +538,12 @@ class Transformer(nn.Module):
                 features.append(y)
 
         # head
+        y = y[:, : y.size(1)]
         y = self.head(y)
 
         # unpatchify
         out = self.unpatchify(y)
+
         if len(features) == 0:
             return out
         else:
