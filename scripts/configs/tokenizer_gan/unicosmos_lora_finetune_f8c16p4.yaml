@@ -18,14 +18,14 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: WV3
+  used: WDC
   prefetch_factor: 2
   num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
   # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 191]}
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -39,6 +39,7 @@ dataset:
     QB: 5
     GF1: 5
     IKONOS: 5
+    WDC: 16
 
   transform_prob: 0.0
 
@@ -48,10 +49,11 @@ accelerator:
 
 tokenizer:
   # repa
-  use_repa_loss: false
+  use_repa_loss: true
   use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
   vf_on_z_or_module: z
+  dino_feature_dim: 1024
 
   # loading
   uni_tokenizer_path: runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
@@ -92,13 +94,14 @@ tokenizer:
 vq_loss:
   # perceptual loss
   perceptual_weight: 0.05
-  repa_loss_weight: 0.0
+  repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
-    img_resize: 224 # null for no resize
-    dino_img_size: 224
+    img_resize: 512 # null for no resize
+    dino_img_size: 512
+    dino_name: "dinov3_vitl16"
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
@@ -108,6 +111,7 @@ vq_loss:
     dino_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
+    dino_name: "dinov3_vitl16"
   quantizer_type:
   quantizer_options:
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
@@ -170,12 +174,11 @@ train:
   grad_check: false
   compile_model: false
   # LoRA related
-  conv_in_out_reinit: false
+  conv_in_out_reinit: true
   add_norms: true
-  save_peft_ckpts: true
-  # Train states
+  save_peft_ckpts: trueqe
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage1_cosmos_lora/2025-08-29_19-17-31_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC/adapter_model.safetensors
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

@@ -1,11 +1,42 @@
 import math
 from itertools import repeat as repeat_iter
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union, cast
+from math import ceil, floor
+from functools import reduce
+from operator import mul
+from typing import (
+    Callable,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import numpy as np
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import pack, rearrange, repeat, unpack
+from torch import Size, Tensor, tensor
+from torch.nn import ModuleList
+
+__all__ = [
+    "RopePosEmbed",
+    "ContinuousAxialPositionalEmbedding",
+    "get_1d_rotary_pos_embed",
+    "apply_rotary_emb",
+    "RotaryPositionEmbedding",
+    "RotaryPositionEmbeddingPytorchV2",
+    "get_2d_sincos_pos_embed",
+    "get_2d_sincos_pos_embed_from_grid",
+    "get_1d_sincos_pos_embed_from_grid",
+    "LearnablePosAxisEmbedding",
+    "AxialPositionalEmbedding",
+    "AxialPositionalEmbedding2D",
+    "LearnablePosAxisEmbedding2D",
+]
 
 # * --- RoPE from Sana and Flux1.dev --- #
 
@@ -684,6 +715,532 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
+
+
+# * --- Axes PE --- #
+
+
+# * --- Learnable DiT per-layer positional embedding --- * #
+# adapted from Cosmos world model (diffusion model)
+
+from einops import repeat
+from torch.nn.init import trunc_normal_
+
+
+def normalize(
+    x: torch.Tensor, dim: Optional[list[int]] = None, eps: float = 0
+) -> torch.Tensor:
+    """
+    Normalizes the input tensor along specified dimensions such that the average square norm of elements is adjusted.
+
+    Args:
+        x (torch.Tensor): The input tensor to normalize.
+        dim (list, optional): The dimensions over which to normalize. If None, normalizes over all dimensions except the first.
+        eps (float, optional): A small constant to ensure numerical stability during division.
+
+    Returns:
+        torch.Tensor: The normalized tensor.
+    """
+    if dim is None:
+        dim = list(range(1, x.ndim))
+    norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
+    norm = torch.add(eps, norm, alpha=np.sqrt(norm.numel() / x.numel()))
+    return x / norm.to(x.dtype)
+
+
+def repeat_at_rest_dims(x: torch.Tensor, insert_dim: int, rest_lens: list[int]):
+    # when insert_dim=0, rest_lens=[128, 128]
+    # x: [t, d] -> [t, h, w, d] (e.g., [32, 512] -> [32, 128, 128, 512])
+
+    non_d_dims = len(rest_lens) + 1
+    for i in range(non_d_dims):
+        if i != insert_dim:
+            x = x.unsqueeze(i)
+
+    expand_shape = []
+    for i in range(non_d_dims):
+        if i != insert_dim:
+            expand_shape.append(rest_lens[i - 1])
+        else:
+            expand_shape.append(-1)
+
+    return x.expand(*expand_shape, -1)
+
+
+class LearnablePosAxisEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        seq_len: list[int],
+        interpolation: Literal["crop", "downsample"] = "crop",
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.interpolation = interpolation
+        self.ndim = len(seq_len)
+        self.pos_embed_n_dims = nn.ParameterList(
+            [nn.Parameter(torch.zeros(seq_len[i], dim)) for i in range(self.ndim)]
+        )
+        self.eps = eps
+
+        # trunc normal init
+        for i in range(self.ndim):
+            trunc_normal_(self.pos_embed_n_dims[i], std=0.02)
+
+    def forward(self, axials: tuple[int, ...]):
+        # x: [b, *ndims, d]
+
+        ndim_context = len(axials)
+        assert len(self.pos_embed_n_dims) == ndim_context, (
+            f"len(self.pos_embed) must be equal to ndim_context, but got {len(self.pos_embed_n_dims)=} and {ndim_context=}"
+        )
+
+        # interpolate
+        if self.interpolation == "crop":
+            pos_embed = torch.zeros(
+                1,
+            )  ## FIXME: get the shape of pos_embed
+            for i in range(self.ndim):
+                len_i = x.shape[i + 1]
+                embed_i = self.pos_embed_n_dims[i][:len_i]  # [len_i, d]
+                # repeat at the rest of context dims
+                embed_i = repeat_at_rest_dims(embed_i, i, axials.pop(i))
+                pos_embed = pos_embed + embed_i
+        elif self.interpolation == "downsample":
+            pos_embed = [
+                self.pos_embed_n_dims[i][:: x.shape[i + 1]] for i in range(ndim_context)
+            ]
+        else:
+            raise ValueError(f"Unknown interpolation method: {self.interpolation}")
+
+        return normalize(pos_embed, dim=-1, eps=self.eps)
+
+
+# helper functions
+
+
+def exists(v):
+    return v is not None
+
+
+class AxialPositionalEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim,
+        axial_shape: tuple[int, ...],
+        axial_dims: tuple[int, ...] | None = None,
+    ):
+        super().__init__()
+
+        self.dim = dim
+        self.shape = axial_shape
+        self.max_seq_len = reduce(mul, axial_shape, 1)
+
+        self.summed = not exists(axial_dims)
+        axial_dims = ((dim,) * len(axial_shape)) if self.summed else axial_dims
+
+        assert len(self.shape) == len(axial_dims), (
+            "number of axial dimensions must equal the number of dimensions in the shape"
+        )
+        assert self.summed or not self.summed and sum(axial_dims) == dim, (
+            f"axial dimensions must sum up to the target dimension {dim}"
+        )
+
+        self.weights = nn.ParameterList([])
+
+        for ind, (shape, axial_dim) in enumerate(zip(self.shape, axial_dims)):
+            ax_shape = [1] * len(self.shape)
+            ax_shape[ind] = shape
+            ax_shape = (1, *ax_shape, axial_dim)  # [1, h, w, d]
+            ax_emb = nn.Parameter(
+                torch.zeros(ax_shape)
+            )  # in the original implementation, they use normal_(0, 1)
+            ax_emb = nn.init.trunc_normal_(ax_emb, std=0.02)
+            self.weights.append(ax_emb)
+
+    def forward(self, x):
+        batch, seq_len, _ = x.shape
+        assert seq_len <= self.max_seq_len, (
+            f"Sequence length ({seq_len}) must be less than the maximum sequence length allowed ({self.max_seq_len})"
+        )
+
+        embs = []
+
+        for ax_emb in self.weights:
+            axial_dim = ax_emb.shape[-1]
+            expand_shape = (batch, *self.shape, axial_dim)
+            emb = ax_emb.expand(expand_shape).reshape(
+                batch, self.max_seq_len, axial_dim
+            )
+            embs.append(emb)
+
+        pos_emb = sum(embs) if self.summed else torch.cat(embs, dim=-1)
+
+        return pos_emb[:, :seq_len].to(x)
+
+
+# wrapper for images
+
+
+class AxialPositionalEmbedding2D(nn.Module):
+    def __init__(
+        self,
+        dim,
+        axial_shape: tuple[int, ...],
+        axial_dims: tuple[int, ...] | None = None,
+    ):
+        super().__init__()
+        assert len(axial_shape) == 2, "Axial shape must have 2 dimensions for images"
+        self.pos_emb = AxialPositionalEmbedding(dim, axial_shape, axial_dims)
+
+    def forward(self, img):
+        img = rearrange(img, "b c h w -> b h w c")
+        img, packed_shape = pack([img], "b * c")
+
+        pos_emb = self.pos_emb(img)
+
+        (pos_emb,) = unpack(pos_emb, packed_shape, "b * c")
+        pos_emb = rearrange(pos_emb, "b h w c -> b c h w")
+        return pos_emb
+
+
+# * --- learnable factorized axisal positional embedding --- * #
+
+
+class LearnablePosAxisEmbedding2D(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        seq_len: list[int, int],
+        factorize: bool = True,
+        interpolation: Literal["crop", "interpolate"] = "crop",
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.interpolation = interpolation
+        self.factorize = factorize
+        assert interpolation in ["crop", "interpolate"], (
+            "Unknown interpolation method, only support `crop` or `interpolate`"
+        )
+        assert len(seq_len) == 2, "seq_len must be a list of 2 integers"
+        self.max_h, self.max_w = seq_len
+        if factorize:
+            self.pos_embed_h = nn.Parameter(torch.zeros(dim, self.max_h))
+            self.pos_embed_w = nn.Parameter(torch.zeros(dim, self.max_w))
+            # trunc normal init
+            trunc_normal_(self.pos_embed_h, std=0.02)
+            trunc_normal_(self.pos_embed_w, std=0.02)
+        else:
+            self.pos_embed = nn.Parameter(torch.zeros(1, dim, self.max_h, self.max_w))
+            trunc_normal_(self.pos_embed, std=0.02)
+        self.eps = eps
+
+    def forward_factorize(self, hw: tuple[int, int]):
+        h, w = hw
+
+        # interpolate
+        _force_to_interp = h > self.max_h or w > self.max_w
+        if self.interpolation == "crop" and not _force_to_interp:
+            assert h <= self.max_h and w <= self.max_w, (
+                "input height and width must be less than or equal to the positional embedding height and width"
+            )
+            pos_embed_h = self.pos_embed_h[:, :h]
+            pos_embed_w = self.pos_embed_w[:, :w]
+            # repeat
+            embed = repeat(pos_embed_h, "d h -> b d h w", b=1, w=w) + repeat(
+                pos_embed_w, "d w -> b d h w", b=1, h=h
+            )
+        elif self.interpolation == "interpolate" or _force_to_interp:
+            _interp_fn = lambda x: torch.nn.functional.interpolate(
+                x, size=(h, w), mode="bilinear", align_corners=True
+            )
+            embed = _interp_fn(
+                repeat(self.pos_embed_h, "d h -> b d h w", b=1, w=w)
+            ) + _interp_fn(repeat(self.pos_embed_w, "d w -> b d h w", b=1, h=h))
+        else:
+            raise ValueError(
+                f"Unknown interpolation method: {self.interpolation}, "
+                "or input height and width must be less than or equal to the positional embedding height and width"
+            )
+
+        # normalize
+        embed = normalize(embed, dim=1, eps=self.eps)
+
+        return embed
+
+    def forward_non_factorize(self, hw: tuple[int, int]):
+        h, w = hw
+
+        if self.interpolation == "crop":
+            pos_embed = self.pos_embed[:, :h, :w]
+        elif self.interpolation == "interpolate":
+            self.pos_embed
+            pos_embed = torch.nn.functional.interpolate(
+                self.pos_embed, size=(h, w), mode="bilinear"
+            )
+
+        return normalize(pos_embed, dim=-1)
+
+    def forward(self, axial_dim: tuple[int, ...], flatten: bool = True):
+        if self.factorize:
+            pe = self.forward_factorize(axial_dim)
+        else:
+            pe = self.forward_non_factorize(axial_dim)
+
+        if flatten:
+            pe = rearrange(pe, "b d h w -> b (h w) d")
+
+        return normalize(pe, dim=-1)
+
+
+# * --- Continous MLP learnable factorized positional embedding --- * #
+
+# mlp - continuously parameterizing each axial position
+
+
+def MLP(dim_in, dim_out, depth=2, expansion=2):
+    curr_dim = dim_in
+    dim_hidden = int(expansion * max(dim_in, dim_out))
+
+    layers = []
+
+    for _ in range(depth):
+        layers.append(nn.Linear(curr_dim, dim_hidden))
+        layers.append(nn.SiLU())
+
+        curr_dim = dim_hidden
+
+    layers.append(nn.Linear(curr_dim, dim_out))
+    return nn.Sequential(*layers)
+
+
+# main class
+
+
+class ContinuousAxialPositionalEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim,
+        axials: tuple[int, ...] | None = None,
+        num_axial_dims: int | None = None,
+        mlp_depth: int = 2,
+        mlp_expansion: int = 2.0,
+        interp_type: str = "linear",
+    ):
+        """
+        ## Usage
+
+        >>> import torch
+        >>> from axial_positional_embedding import (
+        ...     ContinuousAxialPositionalEmbedding,
+        ... )
+        >>> pos_emb = ContinuousAxialPositionalEmbedding(
+        >>>     dim = 512,
+        >>>     num_axial_dims = 3
+        >>> )
+        >>> tokens = torch.randn(
+        ...     1,
+        ...     8,
+        ...     16,
+        ...     32,
+        ...     512,
+        ... )  # say a video with 8 frames, 16 x 32 image dimension
+        >>> axial_pos_emb = pos_emb(
+        ...     (8, 16, 32)
+        ... )  # pass in the size from above
+        >>> tokens = (
+        ...     axial_pos_emb
+        ...     + tokens
+        ... )  # add positional embedding to token embeddings
+        """
+        super().__init__()
+        if exists(axials):
+            self.num_axial_dims = len(axials)
+        elif exists(num_axial_dims):
+            self.num_axial_dims = num_axial_dims
+        else:
+            raise ValueError(
+                "either axials or num_axial_dims can not be None at the same time"
+            )
+
+        # mlps for each axial dimension
+        self.mlps = ModuleList(
+            [
+                MLP(1, dim, depth=mlp_depth, expansion=mlp_expansion)
+                for _ in range(self.num_axial_dims)
+            ]
+        )
+        # dummy buffer for device and dtype
+        self.register_buffer("dummy", tensor(0), persistent=False)
+
+        # max sequence length
+        self.interp_type = interp_type
+        max_seq_len = axials
+        if max_seq_len is not None:
+            assert len(max_seq_len) == self.num_axial_dims, (
+                "max_seq_len must have the same length as the number of axial dimensions"
+            )
+            self.register_buffer(
+                "max_seq_len", torch.tensor(max_seq_len)
+            )  # may affect EMA
+            # self.max_seq_len = max_seq_len
+        else:
+            self.max_seq_len = None
+
+    @property
+    def device(self):
+        return self.dummy.device
+
+    @property
+    def dtype(self):
+        return next(self.mlps.parameters()).dtype
+
+    def combine_factorized(
+        self,
+        axial_embeds: list[Tensor],
+        axial_dims: tuple[int, ...] | None = None,
+        flatten=False,
+    ):
+        if not exists(axial_dims):
+            axial_dims = tuple(axial_embed.shape[0] for axial_embed in axial_embeds)
+
+        assert len(axial_dims) == len(axial_embeds)
+
+        axial_embeds = [
+            axial_embed[:axial_dim]
+            for axial_embed, axial_dim in zip(axial_embeds, axial_dims)
+        ]
+
+        axial_embed, *rest_axial_embeds = axial_embeds
+
+        for rest_axial_embed in rest_axial_embeds:
+            axial_embed = axial_embed[..., None, :] + rest_axial_embed
+
+        assert axial_embed.shape[:-1] == axial_dims
+
+        if flatten:
+            axial_embed = rearrange(axial_embed, "... d -> (...) d")
+
+        return axial_embed
+
+    def maybe_derive_outer_dim(
+        self, max_seq_len, axial_dims: Tensor | Size | tuple[int, ...]
+    ):
+        ndims = self.num_axial_dims
+        assert len(axial_dims) in (ndims, ndims - 1)
+
+        if len(axial_dims) == ndims:
+            return axial_dims
+
+        stride = reduce(mul, (*axial_dims,))
+
+        outer_dim = ceil(max_seq_len / stride)
+        return (outer_dim, *axial_dims)
+
+    def forward_with_seq_len(
+        self,
+        seq_len: int,
+        axial_dims: Tensor | Size | tuple[int, ...] = (),
+        *,
+        factorized: list[Tensor] | None = None,
+        return_factorized=False,
+    ):
+        if not exists(factorized):
+            axial_dims = self.maybe_derive_outer_dim(seq_len, axial_dims)
+            factorized = self.forward(axial_dims, return_factorized=True)
+
+        axial_embeds = self.combine_factorized(factorized, flatten=True)
+
+        axial_embeds = axial_embeds[:seq_len]
+
+        if not return_factorized:
+            return axial_embeds
+
+        return axial_embeds, factorized
+
+    def forward_with_pos(
+        self,
+        pos: Tensor,
+        axial_dims: Tensor | Size | tuple[int, ...] = (),
+    ):
+        assert pos.dtype in (torch.int, torch.long)
+
+        max_pos = pos.amax().item() + 1
+        axial_dims = self.maybe_derive_outer_dim(max_pos, axial_dims)
+        indices = torch.unravel_index(pos, axial_dims)
+
+        axial_embed = 0.0
+
+        for mlp, axial_index in zip(self.mlps, indices):
+            axial_index = rearrange(axial_index, "... -> ... 1")
+            axial_embed = axial_embed + mlp(axial_index.to(self.dtype))
+
+        return axial_embed
+
+    def make_seq_len_for_mlp(self, axial_dim: int, dim_i: int):
+        max_seq_len = self.max_seq_len[dim_i] if self.max_seq_len is not None else None
+
+        if (
+            max_seq_len is None
+            or self.interp_type == "unchange"
+            or axial_dim <= max_seq_len
+        ):
+            embed = torch.arange(axial_dim, device=self.device, dtype=self.dtype)
+        elif axial_dim > max_seq_len:
+            if self.interp_type == "linear":
+                embed = torch.linspace(
+                    0,
+                    max_seq_len - 1,
+                    steps=axial_dim,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown interpolation type: {self.interp_type}, only support `linear`"
+                )
+        else:
+            raise NotImplementedError(
+                "max_seq_len = {} and interp_type = {}".format(
+                    max_seq_len, self.interp_type
+                )
+            )
+
+        assert embed.shape[0] == axial_dim, (
+            "axial dim must be equal to the length of the embedding, not got {} and {}".format(
+                axial_dim, embed.shape[0]
+            )
+        )
+
+        return embed
+
+    def forward(
+        self,
+        axial_dims: Tensor | Size | tuple[int, ...] | None = None,
+        return_factorized=False,  # whether to return list[Tensor] of factorized axial positional embeddings
+        flatten=True,  # whether to flatten axial dims
+        align_batch_size=True,  # whether to repeat the batch size
+    ):
+        axial_embeds = []
+
+        for i, (mlp, axial_dim) in enumerate(zip(self.mlps, axial_dims)):
+            seq = self.make_seq_len_for_mlp(axial_dim, i)
+            axial_embed = mlp(rearrange(seq, "n -> n 1"))
+
+            axial_embeds.append(axial_embed)
+
+        if return_factorized:
+            assert not flatten
+
+            # needed for Transfusion
+            return axial_embeds
+
+        axial_embed = self.combine_factorized(axial_embeds, flatten=flatten)
+
+        if align_batch_size:
+            axial_embed = axial_embed.unsqueeze(0)
+
+        return axial_embed
 
 
 if __name__ == "__main__":

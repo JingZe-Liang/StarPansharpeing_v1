@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import numpy as np
 import torch
@@ -271,9 +271,39 @@ class TransformationMixedTorch(object):
         return f"TransformationMixedTorch(noise_bank={noise_adder_repr}, num_channels={self.num_channels})"
 
 
-def get_default_noise_transformation(trans_type: str, trans_kwags: dict = {}):
-    if trans_type != "complex":
-        if len(trans_kwags) > 0:
+type PredefinedNoiseType = (
+    Literal["complex", "complex_hypersigma", "blind_gaussian_hypersigma"] | str
+)
+
+
+def get_default_noise_transformation(
+    trans_type: PredefinedNoiseType,
+    trans_kwags: dict | None = None,
+):
+    if trans_type == "complex":
+        mixed_noiser = TransformationMixedTorch(
+            [
+                AddNoiseStripeTorch(0.05, 0.15),
+                AddNoiseDeadlineTorch(0.05, 0.15),
+                AddNoiseImpulseTorch([0.1, 0.3, 0.5, 0.7]),
+            ],
+            [1 / 3, 1 / 3, 1 / 3],
+        )
+    elif trans_type == "complex_hypersigma":
+        # config from HyperSIGMA code
+        mixed_noiser = TransformationMixedTorch(
+            noise_bank=[
+                AddNoiseImpulseTorch(amounts=[0.1, 0.3, 0.5, 0.7]),
+                AddNoiseImpulseTorch(amounts=[0.1, 0.3, 0.5, 0.7]),
+                AddNoiseStripeTorch(),
+                AddNoiseDeadlineTorch(),
+            ],
+            num_channels=[1 / 3, 1 / 3, 1 / 3, 1 / 3],
+        )
+    elif trans_type == "blind_gaussian_hypersigma":
+        mixed_noiser = TransformationMixedTorch([AddNoiseBlindTorch(10, 70)], [1.0])
+    else:
+        if trans_kwags is not None:
             cfg = trans_kwags
         else:
             cfg = noisers_default_kwargs.get(trans_type, None)
@@ -284,15 +314,6 @@ def get_default_noise_transformation(trans_type: str, trans_kwags: dict = {}):
             [trans_type],
             noise_bank_cfg=[cfg],
             num_channels=[num_bands],
-        )
-    else:
-        mixed_noiser = TransformationMixedTorch(
-            [
-                AddNoiseStripeTorch(0.05, 0.15),
-                AddNoiseDeadlineTorch(0.05, 0.15),
-                AddNoiseImpulseTorch([0.1, 0.3, 0.5, 0.7]),
-            ],
-            [1 / 3, 1 / 3, 1 / 3],
         )
 
     return mixed_noiser

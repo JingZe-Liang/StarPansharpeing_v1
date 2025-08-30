@@ -1569,17 +1569,18 @@ if __name__ == "__main__":
         #     ["data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-0021.tar"],
         # ]
         # ["data/HyperGlobal/hyper_images/HyperGlobal-GF5-bands-px_64_0002.tar"]
-        ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
+        # ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
+        ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 8
+    test_batch_size = 1
     test_num_workers = 0
     test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type="wids",
+        loader_type="webdataset",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1589,8 +1590,8 @@ if __name__ == "__main__":
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=512,
-        shuffle_within_workers=True,
+        resize_before_transform=None,
+        shuffle_within_workers=False,
         resample=True,
     )
     changed_kwargs = [
@@ -1671,6 +1672,10 @@ if __name__ == "__main__":
 
     test_loader = iter(test_loader)
     tbar = tqdm()
+    import matplotlib.pyplot as plt
+    import PIL.Image
+
+    i = 0
     while True:
         try:
             sample = next(test_loader)
@@ -1682,6 +1687,15 @@ if __name__ == "__main__":
 
         # print(sample.keys(), sample["segmentation"].shape)
         # print(sample.keys())
+
+        img = sample["img"]
+        img = img[0].permute(1, 2, 0)[..., [32, 18, 9]]
+        img = (img * 255.0).to(torch.uint8)
+        img = img.cpu().numpy()
+        PIL.Image.fromarray(img).save(
+            f"/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/WDC/patch_{i}.jpg"
+        )
+        i += 1
 
         tbar.update(1)
         # continue

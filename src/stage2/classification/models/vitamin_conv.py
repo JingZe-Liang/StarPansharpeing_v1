@@ -128,7 +128,66 @@ class Stem(nn.Module):
         return x
 
 
-class MbConvStages(nn.Module):
+class MbConvSeqentialCond(nn.Module):
+    def __init__(
+        self,
+        in_chans: int,
+        embed_dim: list[int],
+        depths: list[int],
+        cond_width: int,
+        out_chans: int | None = None,
+        stride: int = 1,
+        drop_path: float = 0.0,
+        kernel_size: int = 3,
+        norm_layer: str = "layernorm2d",
+        norm_eps: float = 1e-6,
+        act_layer: str = "gelu",
+        expand_ratio: float = 4.0,
+        **kwargs,
+    ):
+        stages = {}
+        self.num_stages = len(embed_dim)
+        for s, dim in enumerate(embed_dim):  # stage
+            stage_in_chs = embed_dim[s - 1] if s > 0 else in_chans
+            blocks = [
+                MbConvLNBlock(
+                    in_chs=stage_in_chs if d == 0 else dim,
+                    out_chs=dim,
+                    cond_chs=cond_width,
+                    stride=stride,  # 2 if d == 0 else 1,
+                    drop_path=drop_path,
+                    norm_layer=norm_layer,
+                    norm_eps=norm_eps,
+                    act_layer=act_layer,
+                    expand_ratio=expand_ratio,
+                )
+                for d in range(depths[s])
+            ]
+            stages[f"stage_{s}"] = nn.ModuleList(blocks)
+        self.stages = nn.ModuleDict(stages)
+        if out_chans:
+            self.out_conv = nn.Conv2d(embed_dim[-1], out_chans, kernel_size=1)
+        else:
+            self.out_conv = nn.Identity()
+
+    def forward(self, x, cond):
+        # interpolate the condition
+        cond = th.nn.functional.interpolate(
+            cond, size=x.shape[2:], mode="bilinear", align_corners=False
+        )
+
+        # stages
+        for stage in self.stages.values():
+            for block in stage:
+                if self.grad_checkpointing and self.training:
+                    x = checkpoint(block, x, cond, use_reentrant=False)
+                else:
+                    x = block(x, cond)
+
+        return self.out_conv(x)
+
+
+class MbConvStagesCond(nn.Module):
     """MobileConv for stage 1 and stage 2 of ViTamin"""
 
     def __init__(
@@ -230,15 +289,16 @@ class VitaminModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        patchers = nn.ModuleDict()
-        patchers["noisy_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
-        patchers["condition_conv"] = nn.Sequential(
+        self.patchers = nn.ModuleDict()
+        self.patchers["noisy_conv"] = create_conv3x3_same(
+            cfg.input_channel, cfg.stem_width
+        )
+        self.patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
         )
-        self.patchers = patchers
 
-        self.stages = MbConvStages(
+        self.stages = MbConvStagesCond(
             cfg.stem_width,
             cfg.stem_width,
             cfg.embed_dim,

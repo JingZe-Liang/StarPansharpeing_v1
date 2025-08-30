@@ -1,7 +1,8 @@
 import einops
 import torch
-from loguru import logger
 from sklearn.decomposition import PCA as PCA_sk
+
+from src.utilities.logging import log
 
 
 def shape_to_1d(img_feat: torch.Tensor, pca_k: int):
@@ -56,10 +57,10 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
 
     img_feats_reduced = einops.rearrange(img_feats_reduced_flat, **_back_kwargs)
 
-    logger.debug(f"Original shape: {img_feat.shape}")
-    logger.debug(f"Reshaped for cuML PCA: {data.shape}")
-    logger.debug(f"Projected data shape (cuML): {projected_data.shape}")
-    logger.debug(f"Reduced features shape (PyTorch tensor): {img_feats_reduced.shape}")
+    log(f"Original shape: {img_feat.shape}")
+    log(f"Reshaped for cuML PCA: {data.shape}")
+    log(f"Projected data shape (cuML): {projected_data.shape}")
+    log(f"Reduced features shape (PyTorch tensor): {img_feats_reduced.shape}")
 
     return img_feats_reduced
 
@@ -142,8 +143,9 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     # )
 
     if N_samples > c:
-        logger.warning(
-            f"Number of samples ({N_samples}) is greater than feature dimension ({c}). PCA may be more stable with fewer samples."
+        log(
+            f"Number of samples ({N_samples}) is greater than feature dimension ({c}). PCA may be more stable with fewer samples.",
+            warn_once=True,
         )
 
     # --- PyTorch Manual PCA Steps (on CUDA) ---
@@ -184,13 +186,13 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     img_feats_reduced = einops.rearrange(projected_data, **_back_kwargs)
 
     # Add print statements for verification (optional)
-    logger.debug(f"Original shape: {img_feat.shape}")
-    logger.debug(f"Reshaped for PCA: {data.shape}")
-    logger.debug(f"Centered data shape: {centered_data.shape}")
+    # logger.debug(f"Original shape: {img_feat.shape}")
+    # logger.debug(f"Reshaped for PCA: {data.shape}")
+    # logger.debug(f"Centered data shape: {centered_data.shape}")
     # print(f"U shape: {U.shape}, S shape: {S.shape}, Vh shape: {Vh.shape}") # Optional detailed prints
-    logger.debug(f"Principal components matrix shape: {principal_components.shape}")
-    logger.debug(f"Projected data shape (flat): {projected_data.shape}")
-    logger.debug(f"Reduced features shape (reshaped): {img_feats_reduced.shape}")
+    # logger.debug(f"Principal components matrix shape: {principal_components.shape}")
+    # logger.debug(f"Projected data shape (flat): {projected_data.shape}")
+    # logger.debug(f"Reduced features shape (reshaped): {img_feats_reduced.shape}")
 
     return img_feats_reduced
 
@@ -200,36 +202,36 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
 if __name__ == "__main__":
     # Make sure CUDA is available
     if not torch.cuda.is_available():
-        logger.debug("CUDA is not available. Cannot run CUDA PCA example.")
+        log("CUDA is not available. Cannot run CUDA PCA example.")
     else:
         device = torch.device("cuda")
-        logger.debug(f"Using device: {device}")
+        log(f"Using device: {device}")
 
         # Example 1: Simulate 3D ViT features [bs, l, c]
         bs_vit, l_vit, c_vit = 4, 256, 768
         pca_k_vit = 64
-        logger.debug("\n--- Testing 3D ViT-like Features ---")
+        log("\n--- Testing 3D ViT-like Features ---")
         vit_features = torch.randn(
             bs_vit, l_vit, c_vit, device=device, dtype=torch.float32
         )
 
-        logger.debug("Running PCA with PyTorch manual SVD...")
+        log("Running PCA with PyTorch manual SVD...")
         reduced_vit_features_torch = feature_pca_torch(vit_features, pca_k=pca_k_vit)
-        logger.debug(f"Final reduced shape (torch): {reduced_vit_features_torch.shape}")
+        log(f"Final reduced shape (torch): {reduced_vit_features_torch.shape}")
         assert reduced_vit_features_torch.shape == (bs_vit, l_vit, pca_k_vit)
         assert reduced_vit_features_torch.device == device
 
         # Example 2: Simulate 4D CNN features [bs, c, h, w]
         bs_cnn, c_cnn, h_cnn, w_cnn = 2, 512, 14, 14
         pca_k_cnn = 32
-        logger.debug("\n--- Testing 4D CNN-like Features ---")
+        log("\n--- Testing 4D CNN-like Features ---")
         cnn_features = torch.randn(
             bs_cnn, c_cnn, h_cnn, w_cnn, device=device, dtype=torch.float32
         )
 
-        logger.debug("Running PCA with PyTorch manual SVD...")
+        log("Running PCA with PyTorch manual SVD...")
         reduced_cnn_features_torch = feature_pca_torch(cnn_features, pca_k=pca_k_cnn)
-        logger.debug(f"Final reduced shape (torch): {reduced_cnn_features_torch.shape}")
+        log(f"Final reduced shape (torch): {reduced_cnn_features_torch.shape}")
         assert reduced_cnn_features_torch.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
         assert reduced_cnn_features_torch.device == device
 
@@ -237,7 +239,7 @@ if __name__ == "__main__":
         try:
             from cuml.decomposition import PCA as cuML_PCA
 
-            logger.debug("\n--- Testing with cuML PCA (for comparison) ---")
+            log("\n--- Testing with cuML PCA (for comparison) ---")
 
             def feature_pca_cuml2(img_feat: torch.Tensor, pca_k: int):
                 assert img_feat.ndim in (3, 4), "must be 1d vit or 2d cnn features"
@@ -275,18 +277,14 @@ if __name__ == "__main__":
                 )
                 return img_feats_reduced
 
-            logger.debug("Running PCA with cuML...")
+            log("Running PCA with cuML...")
             reduced_vit_features_cuml = feature_pca_cuml2(vit_features, pca_k=pca_k_vit)
-            logger.debug(
-                f"Final reduced shape (cuML): {reduced_vit_features_cuml.shape}"
-            )
+            log(f"Final reduced shape (cuML): {reduced_vit_features_cuml.shape}")
             assert reduced_vit_features_cuml.shape == (bs_vit, l_vit, pca_k_vit)
             assert reduced_vit_features_cuml.device == device
 
             reduced_cnn_features_cuml = feature_pca_cuml2(cnn_features, pca_k=pca_k_cnn)
-            logger.debug(
-                f"Final reduced shape (cuML): {reduced_cnn_features_cuml.shape}"
-            )
+            log(f"Final reduced shape (cuML): {reduced_cnn_features_cuml.shape}")
             assert reduced_cnn_features_cuml.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
             assert reduced_cnn_features_cuml.device == device
 
@@ -297,6 +295,6 @@ if __name__ == "__main__":
             # after aligning their signs (as PCA components are directionally ambiguous).
 
         except ImportError:
-            logger.debug("\ncuML not installed. Skipping cuML comparison.")
+            log("\ncuML not installed. Skipping cuML comparison.")
         except Exception as e:
-            logger.debug(f"\nError during cuML comparison: {e}. Skipping.")
+            log(f"\nError during cuML comparison: {e}. Skipping.")

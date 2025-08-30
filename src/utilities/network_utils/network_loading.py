@@ -410,7 +410,7 @@ def load_peft_model_checkpoint(
     return peft_config, peft_model
 
 
-# * --- LORA weights loading entry --- #
+# * --- LoRA weights loading entry --- #
 
 
 @function_config_to_basic_types

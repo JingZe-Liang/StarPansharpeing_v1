@@ -158,6 +158,7 @@ src/stage1/sana_dcae/pretrained/*
 src/stage1/sana_dcae/pretrained
 src/stage2/generative/tools/conditions/caption/Qwen25_VL
 CLAUDE.local.md
+QWEN.md
 .claude/
 
 compressed_output/

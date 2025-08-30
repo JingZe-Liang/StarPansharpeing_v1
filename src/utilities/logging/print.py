@@ -270,6 +270,18 @@ def log_print(
         log_fn(msg, rank=rank, **context)
 
 
+def log(*msg, sep=",", **kwargs):
+    msg_str = ""
+    for i, m in enumerate(msg):
+        msg_str = msg_str + m
+        if i != len(msg) - 1:
+            msg_str = msg_str + sep
+
+    kwargs.setdefault("stack_level", 2)
+
+    log_print(msg_str, **kwargs)
+
+
 class catch_any(ContextDecorator):
     """
     A context manager and decorator that catches any exception raised within its scope or the decorated function,

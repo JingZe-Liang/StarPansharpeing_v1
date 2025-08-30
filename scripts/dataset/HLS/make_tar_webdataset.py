@@ -310,6 +310,7 @@ def resize_img(
 
     # to batch
     img = torch.as_tensor(img) if isinstance(img, np.ndarray) else img
+    img = cast(torch.Tensor, img)
     img, shape_inverse = to_batched(img, is_hwc=is_hwc)
     if background_is_all_zero(img[0], norm=True, is_hwc=is_hwc):
         logger.warning("Image is all zero, skipping resizing.")
@@ -318,13 +319,13 @@ def resize_img(
     dtype = img.dtype
 
     shape = img.shape
-    logger.debug(f"resize image from {shape} to {size}")
+    logger.info(f"resize image from {shape} to {size}")
 
     # resize
     img = torch.nn.functional.interpolate(
         img.float(),
         size=(size, size) if isinstance(size, int) else size,
-        mode="bilinear",
+        mode="bicubic",
         align_corners=False,
     ).to(dtype)
     img = shape_inverse(img)
@@ -335,9 +336,9 @@ def resize_img(
 
 def resize_or_clip_img(
     img: np.ndarray | torch.Tensor,
-    resize_size,
     patch_size,
     stride,
+    resize_before: tuple[int, int] | int | None = None,
     pad_type="resize",
     is_hwc: bool = True,
 ):
@@ -346,17 +347,11 @@ def resize_or_clip_img(
     else:
         h, w = img.shape[-2:]
 
+    if resize_before:
+        img = resize_img(img, resize_before, is_hwc=is_hwc)
+
     h_max = w_max = 1024
-    # if h > h_max and w > w_max:
-    #     ratio = w / h
-    #     if 3 / 4 < ratio < 4 / 3:
-    #         # resize
-    #         yield from resize_img(img, resize_size, is_hwc)
-    #     else:
-    #         # clip
-    #         yield from sliding_window(
-    #             img, patch_size, stride, pad_type=pad_type, is_hwc=is_hwc
-    #         )
+
     if h > h_max or w > w_max:
         # clip
         yield from sliding_window(
@@ -695,7 +690,7 @@ def clip_img_to_webdataset(
     img_path: str | Path,
     img_clip_size: tuple[int, int] = (512, 512),
     img_stride: tuple[int, int] = (512, 512),
-    img_resize: int = 512,
+    img_resize: int | None = None,
     save_backend: str = "tiff",
     transpose: bool = True,
     read_fn_kwargs: dict = {},
@@ -717,6 +712,7 @@ def clip_img_to_webdataset(
                 is_hwc=transpose,
             )
         elif process_img_type == "resize":
+            assert img_resize is not None
             slide_g = resize_img(
                 img,
                 size=img_resize,
@@ -725,9 +721,9 @@ def clip_img_to_webdataset(
         elif process_img_type == "clip_resize":
             slide_g = resize_or_clip_img(
                 img,
-                img_resize,
                 img_clip_size,
                 img_stride,
+                resize_before=img_resize,
                 pad_type="resize",
                 is_hwc=transpose,
             )
@@ -806,11 +802,7 @@ def clip_img_to_webdataset(
         return n_patches, img.shape, patch.shape
 
     img_name = Path(img_path).stem
-    img = read_image(
-        img_path,
-        verbose=False,
-        **read_fn_kwargs,
-    )
+    img = read_image(img_path, verbose=False, **read_fn_kwargs)
     if img is None:
         logger.warning(f"Failed to read image from {img_path}, skipping.")
         return None, None, None
@@ -839,7 +831,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     msi_files: list[str | Path] | Iterable | None = None,
     img_clip_size: tuple[int, int] = (512, 512),
     img_stride: tuple[int, int] = (512, 512),
-    img_resize: int = 512,
+    img_resize: int | None = None,
     process_img_type: Literal["clip", "resize", "clip_resize", None] = "clip",
     save_backend: Literal[
         "tiff", "jpeg", "png", "npy", "safetensors", "webdataset"
@@ -847,6 +839,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     max_size: int = 4 * 1024 * 1024 * 1024,
     force_save_dtype: str | np.dtype = "auto",
     save_kwargs: dict = {"jpg_quality": 90},
+    add_global_index: bool = False,
     glob_pattern: str | list[str] = ["*.tif", "*.tiff"],
     read_transpose: bool = True,  # [c, h, w] needs transpose
     read_fn_kwargs: dict = {},
@@ -897,6 +890,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 rescale="clamp",  # default rescale method
                 force_save_dtype=force_save_dtype,
                 assert_channel_n=channel_n,
+                add_global_index=add_global_index,
             )
             if delete_file:
                 Path(msi_file).unlink(missing_ok=True)
@@ -977,9 +971,7 @@ if __name__ == "__main__":
     # log file
     from src.utilities.logging import set_logger_file
 
-    set_logger_file(
-        "data/Multispectral-FMow-full/not_4bands.warning.log", "warning", add_time=False
-    )
+    set_logger_file("data/WDC/run.log", "debug", add_time=False)
 
     _mp = False
 
@@ -1105,19 +1097,63 @@ if __name__ == "__main__":
         # webdataset_pts = "data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-%04d.tar"
 
         # Fmow full
-        all_msi_files_s = list(
-            Path("data/Multispectral-FMow-full/train").rglob("**/*.tif")
+        # all_msi_files_s = list(
+        #     Path("data/Multispectral-FMow-full/train").rglob("**/*.tif")
+        # )
+        # webdataset_pts = "data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-%04d.tar"
+        # func_kwargs.update(
+        #     {
+        #         "channel_n": 8,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip_resize",
+        #         "img_clip_size": (1024, 1024),
+        #         "img_stride": (1024, 1024),
+        #     }
+        # )
+
+        # WDC
+        all_msi_files_s = ["/HardDisk/ZiHanCao/datasets/HISI/Washington_DC_mall/dc.tif"]
+        webdataset_pts = (
+            "data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-%04d.tar"
         )
-        webdataset_pts = "data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-%04d.tar"
         func_kwargs.update(
             {
-                "channel_n": 8,
+                # "channel_n": 191,
                 "save_backend": "tiff",
-                "process_img_type": "clip_resize",
-                "img_clip_size": (1024, 1024),
-                "img_stride": (1024, 1024),
+                "process_img_type": "clip",
+                "img_clip_size": (192, 192),
+                "img_stride": (192, 192),
+                "save_backend": "tiff",
+                "save_kwargs": {
+                    "tiff_compression_type": "zlib",
+                },
+                "read_transpose": False,
             }
         )
+
+        # WDC2
+        # all_msi_files_s = list(
+        #     Path(
+        #         "data/HyperSigmaDenoising/dataset/HyperSIGMA_denoising/Testing/Cases"
+        #     ).rglob("*.mat")
+        # )
+        # webdataset_pts = (
+        #     "data/WDC/hyper_images/Washington_DC_mall-Cases-191_bands-px_192-%04d.tar"
+        # )
+        # func_kwargs.update(
+        #     {
+        #         # "channel_n": 191,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "resize",
+        #         "img_resize": (192, 192),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "zlib",
+        #         },
+        #         "read_transpose": False,
+        #         "add_global_index": True,
+        #     }
+        # )
 
         # Inria Aeiral images
         # path = "data/YuZhongDataset/InriaAerialLabelingDataset/AerialImageDataset"

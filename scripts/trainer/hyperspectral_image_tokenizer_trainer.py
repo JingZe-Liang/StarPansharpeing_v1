@@ -289,13 +289,35 @@ class CosmosHyperspectralTokenizerTrainer:
                     )
                 )
 
-        # the encoder and decoder is one class
+        # < the encoder and decoder is one class
         else:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
             self.norm_z = False  # in the model, not in trainer
-            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
+
+            # LoRA channel append in tokenizer channels
+            # if (
+            #     self.train_cfg.finetune_strategy == "peft"
+            #     and self.train_cfg.conv_in_out_reinit
+            # ):
+            #     lora_dataset_chan = self.dataset_cfg.dataset_channel
+            #     if lora_dataset_chan not in self.tokenizer_cfg.in_channels:
+            #         self.tokenizer_cfg.in_channels += [lora_dataset_chan]
+            #         self.tokenizer_cfg.out_channels += [lora_dataset_chan]
+            #         self.log_msg(
+            #             f"LoRA additional channel needs reinit the convs: {self.tokenizer_cfg.in_channels}"
+            #         )
+            #         breakpoint()
+            #     else:
+            #         self.log_msg(
+            #             f"LoRA channel {lora_dataset_chan} already exists in tokenizer channels configuration: {self.tokenizer_cfg}",
+            #             "warning",
+            #         )
+
+            # Init tokenizer model
+            self.tokenizer = hydra.utils.instantiate(self.tokenizer_cfg)
+
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = (
                 getattr(self.tokenizer, "quantizer", None) is not None
@@ -1799,10 +1821,9 @@ class CosmosHyperspectralTokenizerTrainer:
                     _assume_path = ema_path / "model"
                     # we are working on loading the peft model (only lora layers)
                     if self._is_fsdp:
+                        # depend on if there is a full state dict
                         if not getattr(self.train_cfg, "load_weight_shard", True):
-                            _not_shard_weights = (
-                                "model" in _assume_path.as_posix()
-                            )  # depend on if there is a full state dict
+                            _not_shard_weights = "model" in _assume_path.as_posix()
                         else:
                             _not_shard_weights = False  # shard loaded
                     else:
@@ -1811,7 +1832,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     self.log_msg(
                         "loading peft checkpoint into model", only_rank_zero=False
                     )
-                    if not _not_shard_weights:  # is shard weights
+                    if _not_shard_weights:  # is shard weights
                         if self._is_fsdp:
                             loaded_res = load_fsdp_model(
                                 self.accelerator.state.fsdp_plugin,
@@ -1825,7 +1846,9 @@ class CosmosHyperspectralTokenizerTrainer:
                             loaded_res = set_peft_model_state_dict(
                                 self.tokenizer_peft_wrapped,
                                 accelerate.utils.load_state_dict(ema_path.as_posix()),
-                                adapter_name="default",
+                                adapter_name=getattr(
+                                    self.dataset_cfg, "used", "default"
+                                ),
                                 ignore_mismatched_sizes=strict,
                                 low_cpu_mem_usage=False,
                             )
@@ -2018,7 +2041,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "unicosmos_lora_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor, Shard
 from torch.utils.file_baton import FileBaton
 from torchvision.transforms import Normalize
 
+from src.stage1.utilities.losses.repa.feature_pca import feature_pca_torch
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
@@ -445,6 +446,9 @@ class REPALoss(torch.nn.Module):
                     img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
                 ]
                 img = torch.stack(bands, dim=1)
+            elif self.rgb_channels == "pca":
+                assert img.ndim == 4
+                img = feature_pca_torch(img, 3)
             else:
                 rgb_channels = self.rgb_channels
                 img = img[:, rgb_channels]

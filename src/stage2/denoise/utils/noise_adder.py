@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from src.stage2.denoise.utils.add_noise import (
+    AddNoiseBlindv1,
     AddNoiseComplex,
     AddNoiseDeadline,
     AddNoiseImpulse,
@@ -11,13 +12,16 @@ from src.stage2.denoise.utils.add_noise import (
     AddNoiseNoniid,
     AddNoiseStripe,
 )
-
-# TODO: add torch wrapper for these noise models using torch.
-from src.stage2.denoise.utils.add_noise_torch import get_default_noise_transformation
+from src.stage2.denoise.utils.add_noise_torch import (
+    PredefinedNoiseType,
+    get_default_noise_transformation,
+)
 
 
 class UniHSINoiseAdder:
-    def __init__(self, noise_type: str | list[str] = "complex", use_torch=True):
+    def __init__(
+        self, noise_type: PredefinedNoiseType = "complex", use_torch: bool = True
+    ):
         self.use_torch = use_torch
         self.noise_models = []
         if isinstance(noise_type, str):
@@ -37,6 +41,9 @@ class UniHSINoiseAdder:
                 elif nt == "noniid":
                     sigmas = [30, 50, 70, 90]
                     self.noise_models.append(AddNoiseNoniid(sigmas))
+                elif nt == "blind_gaussian":
+                    sigmas = (10, 70)
+                    self.noise_models.append(AddNoiseBlindv1(*sigmas))
                 elif nt == "stripe":
                     self.noise_models.append(AddNoiseStripe())
                 else:
@@ -116,9 +123,11 @@ class UniHSINoiseAdderKornia(IntensityAugmentationBase2D):
         same_on_batch: bool = False,
         keepdim: bool = True,
         use_torch=True,
+        clip_value=False,
     ):
         super().__init__(p=p, same_on_batch=same_on_batch, keepdim=keepdim)
         self.is_neg_1_1 = is_neg_1_1
+        self.clip_value = clip_value
         self.noise_adder = UniHSINoiseAdder(noise_type=noise_type, use_torch=use_torch)
 
     def apply_transform(self, input: torch.Tensor, params, flags, transform=None):
@@ -142,9 +151,10 @@ class UniHSINoiseAdderKornia(IntensityAugmentationBase2D):
 
         # Convert input to numpy and apply noise
         noisy_img = self.noise_adder(input)
-        noisy_img_th = (
-            torch.as_tensor(noisy_img).to(device=input.device, dtype=dtype).clip(0, 1)
-        )
+        noisy_img_th = torch.as_tensor(noisy_img).to(device=input.device, dtype=dtype)
+        if self.clip_value:
+            noisy_img_th.clamp_(0, 1)
+        noisy_img_th.unsqueeze_(0)  # ensure batch dim
 
         if self.is_neg_1_1:
             # back to (-1, 1)

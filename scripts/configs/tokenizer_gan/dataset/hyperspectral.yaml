@@ -15,6 +15,7 @@ dataset_names_to_bs:
   WV3: 32
   QB: 12
   GF1: 16
+  WDC: 16
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -29,6 +30,7 @@ dataset_names_to_n_channels:
   QB: 4
   GF1: 4
   IKONOS: 4
+  WDC: 191
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -44,6 +46,7 @@ dataset_names_to_rgb_channels:
   QB: ${list:[2, 1, 0]}
   GF1: ${list:[2, 1, 0]}
   IKONOS: ${list:[2, 1, 0]}
+  WDC: ${list:[19, 13, 8]}
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -59,6 +62,13 @@ dataset_names_to_img_size:
   QB: 512
   GF1: 512
   IKONOS: 512
+  WDC: 160
+
+WDC_train:
+  - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
+
+WDC_val:
+  - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
 
 MMSeg_YREB_train:
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar

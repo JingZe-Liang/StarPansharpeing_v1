@@ -698,7 +698,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return h
 
-    def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size):
+    def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size, clamp=False):
         # Break down input z losses
         q_loss = loss_breakdown = None
         if self.quantizer_type is not None and isinstance(z, (tuple, list)):
@@ -708,6 +708,8 @@ class ContinuousImageTokenizer(nn.Module):
 
         # Decoder
         dec = self.decoder(z, inp_shape[1])  # [b, c, h, w]
+        if clamp:
+            dec = dec.clamp(-1, 1)
 
         if self.quantizer_type is not None:
             return dec, q_loss, loss_breakdown
@@ -1251,7 +1253,11 @@ def test_tokenizer_fb(
     save_pca_vis=False,
     pca_type: str = "proj",
     other_model_kwargs: dict | None = None,
-    idx_of_dl: int = 12,
+    idx_of_dl: int = 1,
+    save_img_dir: str | None = None,
+    rgb_chans: list[int] = [4, 2, 0],
+    dtype=torch.bfloat16,
+    upscale: int = 1,
 ):
     from contextlib import nullcontext
 
@@ -1259,7 +1265,8 @@ def test_tokenizer_fb(
     from PIL import Image
     from torchmetrics.aggregation import MeanMetric
     from torchmetrics.image import PeakSignalNoiseRatio
-    from tqdm import trange
+    from torchvision.utils import make_grid
+    from tqdm import tqdm, trange
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
@@ -1307,20 +1314,20 @@ def test_tokenizer_fb(
     if other_model_kwargs:
         config.update(other_model_kwargs)
     tokenizer = ContinuousImageTokenizer(**config).cuda()
-    tokenizer = tokenizer.eval().to(torch.bfloat16)
+    tokenizer = tokenizer.eval().to(dtype)
 
     if is_lora:
         # load lora layers
         assert lora_ckpt is not None
         peft_cfg, tokenizer = load_peft_model_checkpoint(tokenizer, lora_ckpt)
-        tokenizer = tokenizer.to("cuda", torch.bfloat16)
+        tokenizer = tokenizer.to("cuda", dtype)
         tokenizer.eval()
         log_print("Loaded peft model checkpoint. PEFT config: \n" + str(peft_cfg))
 
         # peft modules
-        log_print(str(tokenizer.peft_fully_finetune_modules()))
-        log_print(str(tokenizer.peft_lora_modules()))
-        log_print(tokenizer.get_last_enc_layer())
+        # log_print(str(tokenizer.peft_fully_finetune_modules()))
+        # log_print(str(tokenizer.peft_lora_modules()))
+        # log_print(tokenizer.get_last_enc_layer())
 
     if count_params:
         log_print(parameter_count_table(tokenizer))
@@ -1340,22 +1347,45 @@ def test_tokenizer_fb(
             x = x * 2 - 1  # normalize to [-1, 1]
         else:
             dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)
-            for _ in trange(idx_of_dl + 1):
-                x = next(iter(dl))["img"]
+            for i, sample in enumerate(tqdm(dl, desc="Get sample ...")):
+                if i >= idx_of_dl:
+                    break
+                x = sample["img"]
     else:
-        x = torch.randn(1, 12, 256, 256).to("cuda", torch.bfloat16)
-    x = x.to(torch.bfloat16).cuda()
+        x = torch.randn(1, 12, 256, 256).to("cuda", dtype)
+    x = x.to(dtype).cuda()
+    if upscale != 1:
+        x = torch.nn.functional.interpolate(
+            x, scale_factor=upscale, align_corners=True, mode="bicubic"
+        )
 
     if use_optim:
         opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
     metric = MeanMetric().cuda()
-    ctx = torch.no_grad if (use_optim or check_grad) else torch.enable_grad
+    ctx = torch.no_grad if not (use_optim or check_grad) else torch.enable_grad
     mem_ctx = mem_context(device) if show_mem_usage else nullcontext()
-    with torch.autocast("cuda", torch.bfloat16) and ctx():
+    with torch.autocast("cuda", dtype) and ctx():
         with mem_ctx:
             y = tokenizer(x)
+            y.clamp_(-1, 1)
             log_print(y.shape)
+
+            # save reconstruction
+            if save_img_dir is not None:
+
+                def plot_img(img, path):
+                    y_grid = make_grid(img.float(), nrow=1, padding=2)
+                    y_grid = (
+                        y_grid[rgb_chans].permute(1, 2, 0).detach().cpu().numpy()
+                    )  # [h, w, 3]
+                    y_grid = (y_grid + 1) / 2
+                    y_grid = (y_grid * 255.0).astype(np.uint8)
+                    Image.fromarray(y_grid).save(path)
+                    log_print("save reconstruction image")
+
+                plot_img(y, Path(save_img_dir) / f"recon_{real_data}.png")
+                plot_img(x, Path(save_img_dir) / f"gt_{real_data}.png")
 
             # psnr
             if real_data:
@@ -1396,9 +1426,24 @@ def test_tokenizer_fb(
 
 
 if __name__ == "__main__":
+    # test_tokenizer_fb(
+    #     real_data="RS5M",
+    #     save_pca_vis=True,
+    #     pca_type="z",
+    #     idx_of_dl=12,
+    # )
+
+    # Test lora
     test_tokenizer_fb(
-        real_data="RS5M",
+        base_model_ckpt="runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
+        real_data="WV3",
         save_pca_vis=True,
         pca_type="z",
-        idx_of_dl=12,
+        idx_of_dl=16,
+        is_lora=True,
+        lora_ckpt="runs/stage1_cosmos_lora/2025-08-28_23-17-54_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
+        save_img_dir="tmp",
+        rgb_chans=[2, 1, 0],  # RGB
+        dtype=torch.float32,
+        upscale=4,
     )

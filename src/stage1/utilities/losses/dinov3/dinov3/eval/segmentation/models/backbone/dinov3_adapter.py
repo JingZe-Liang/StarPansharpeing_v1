@@ -4,15 +4,14 @@
 # the terms of the DINOv3 License Agreement.
 
 import math
+from functools import partial
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 
-from functools import partial
-
-from dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
+from ..utils.ms_deform_attn import MSDeformAttn
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
