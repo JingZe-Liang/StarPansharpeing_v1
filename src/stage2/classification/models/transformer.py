@@ -136,7 +136,7 @@ class NatAttention(nn.Module):
         num_heads=8,
         qkv_bias=True,
         qk_norm: nn.Module | None = None,
-        norm_layer=None,
+        norm_layer: type[nn.Module] | None = None,
         proj_bias: bool = True,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
@@ -155,11 +155,11 @@ class NatAttention(nn.Module):
 
         self.qkv = nn.Conv2d(dim, dim * 3, 3, 1, 1, groups=dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.norm = norm_layer(dim) if scale_norm else nn.Identity()
+        self.norm = norm_layer(dim) if scale_norm and norm_layer else nn.Identity()
         self.proj = nn.Conv2d(dim, dim, 1, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        if qk_norm:
+        if qk_norm and norm_layer:
             self.q_norm = norm_layer(self.head_dim)
             self.k_norm = norm_layer(self.head_dim)
         else:
@@ -296,8 +296,8 @@ class SwiGLU(nn.Module):
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer=nn.SiLU,
-        norm_layer=None,
+        act_layer: type[nn.Module] = nn.SiLU,
+        norm_layer: type[nn.Module] | None = None,
         bias=True,
         drop=0.0,
         use_conv=False,
@@ -305,8 +305,8 @@ class SwiGLU(nn.Module):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        bias = to_2tuple(bias)
-        drop_probs = to_2tuple(drop)
+        bias: tuple[int, int] = to_2tuple(bias)
+        drop_probs: tuple[int, int] = to_2tuple(drop)
         self.use_conv = use_conv
 
         linear_layer = (

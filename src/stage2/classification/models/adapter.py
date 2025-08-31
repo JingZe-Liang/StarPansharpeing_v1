@@ -15,7 +15,7 @@ from src.stage1.utilities.losses.dinov3.dinov3.eval.segmentation.models.backbone
 from src.stage1.utilities.losses.dinov3.dinov3.models.vision_transformer import (
     DinoVisionTransformer,
 )
-from src.stage2.classification.models.vitmin_conv import MbConvSeqentialCond
+from src.stage2.classification.models.vitamin_conv import MbConvSeqentialCond
 
 
 class GatedChannelSelection(nn.Module):
@@ -102,10 +102,10 @@ class DepthwiseSeparableConv(nn.Module):
         stride: int = 1,
         padding: int = 1,
         bias: bool = False,
-        norm: type[nn.Module] = nn.BatchNorm2d,
-        act: type[nn.Module] = nn.ReLU,
-        norm_kwargs: dict = None,
-        act_kwargs: dict = None,
+        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        act: type[nn.Module] | str = nn.ReLU,
+        norm_kwargs: dict | None = None,
+        act_kwargs: dict | None = None,
         inplace=False,
     ):
         super().__init__()
@@ -137,8 +137,8 @@ class SharedBasisProjector(nn.Module):
         out_ch_list: List[int],
         norm: Type[nn.Module] = nn.BatchNorm2d,
         act: Type[nn.Module] = nn.ReLU,
-        norm_kwargs: dict = None,
-        act_kwargs: dict = None,
+        norm_kwargs: dict | None = None,
+        act_kwargs: dict | None = None,
         bias: bool = False,
     ):
         super().__init__()
@@ -172,11 +172,11 @@ class FAPM(nn.Module):
         self,
         in_ch: int,
         inner_ch: int,
-        out_ch_list: List[int],
-        norm: Type[nn.Module] = nn.BatchNorm2d,
-        act: Type[nn.Module] = nn.ReLU,
-        norm_kwargs: dict = None,
-        act_kwargs: dict = None,
+        out_ch_list: list[int],
+        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        act: type[nn.Module] | str = nn.ReLU,
+        norm_kwargs: dict | None = None,
+        act_kwargs: dict | None = None,
         bias: bool = False,
     ):
         super().__init__()
@@ -294,16 +294,16 @@ class DINOv3EncoderAdapter(nn.Module):
     def __init__(
         self,
         dinov3_adapter: DINOv3_Adapter,
-        target_channels: List[int],
+        target_channels: list[int],
         adapter_type: str = "default",
         rank: int = 256,
         conv_op=nn.Conv2d,
-        norm_op: Union[None, Type[nn.Module]] = nn.BatchNorm2d,
-        norm_op_kwargs: dict = None,
+        norm_op: Union[None, Type[nn.Module], str] = nn.BatchNorm2d,
+        norm_op_kwargs: dict | None = None,
         dropout_op=None,
-        dropout_op_kwargs: dict = None,
-        nonlin: Union[None, Type[torch.nn.Module]] = nn.ReLU,
-        nonlin_kwargs: dict = None,
+        dropout_op_kwargs: dict | None = None,
+        nonlin: Union[None, Type[torch.nn.Module], str] = nn.ReLU,
+        nonlin_kwargs: dict | None = None,
         conv_bias: bool = False,
     ):
         super().__init__()
@@ -343,15 +343,8 @@ class DINOv3EncoderAdapter(nn.Module):
         self.strides = [[2, 2]] * len(target_channels)
         self.kernel_sizes = [[3, 3]] * len(target_channels)
 
-    def forward(self, x: Float[Tensor, "b c h w"]) -> list[Tensor]:
-        B, C, H, W = x.shape
-        if C == 1:
-            x = x.repeat(1, 3, 1, 1)
-        elif C != 3:
-            if C < 3:
-                x = x.repeat(1, 3 // C + (1 if 3 % C != 0 else 0), 1, 1)[:, :3, :, :]
-            else:
-                x = x[:, :3, :, :]
+    def forward(self, x: Float[Tensor, "b 3 h w"]) -> list[Tensor]:
+        H, W = x.shape[-2:]
         feats = self.dinov3_adapter(x)
         keys = ["1", "2", "3", "4"]
         x_list = [feats[k] for k in keys]
@@ -376,16 +369,18 @@ class UNetDecoder(nn.Module):
         self,
         encoder: DINOv3EncoderAdapter,
         num_classes: int,
-        n_conv_per_stage: Union[int, Tuple[int, ...], List[int]],
-        deep_supervision,
+        latent_width: int | None = None,
+        n_conv_per_stage: int | list[int] = 2,
+        depths_per_stage: int | list[int] = 2,
         nonlin_first: bool = False,
-        norm_op: Type[nn.Module] = None,
-        norm_op_kwargs: dict = None,
+        norm_op: Union[Type[nn.Module], str, None] = None,
+        norm_op_kwargs: Union[dict, None] = None,
         dropout_op=None,
-        dropout_op_kwargs: dict = None,
-        nonlin: Type[torch.nn.Module] = None,
-        nonlin_kwargs: dict = None,
-        conv_bias: bool = None,
+        dropout_op_kwargs: dict | None = None,
+        nonlin: Union[Type[torch.nn.Module], None] = None,
+        nonlin_kwargs: dict | None = None,
+        conv_bias: Union[bool, None] = None,
+        deep_supervision: bool = False,
     ):
         """
         This class needs the skips of the encoder as input in its forward.
@@ -409,7 +404,9 @@ class UNetDecoder(nn.Module):
         n_stages_encoder = len(encoder.output_channels)
         if isinstance(n_conv_per_stage, int):
             n_conv_per_stage = [n_conv_per_stage] * (n_stages_encoder - 1)
-        assert len(n_conv_per_stage) == n_stages_encoder - 1, (
+        if isinstance(depths_per_stage, int):
+            depths_per_stage = [depths_per_stage] * (n_stages_encoder - 1)
+        assert len(n_conv_per_stage) == len(depths_per_stage) == n_stages_encoder - 1, (
             "n_conv_per_stage must have as many entries as we have "
             "resolution stages - 1 (n_stages in encoder - 1), "
             "here: %d" % n_stages_encoder
@@ -441,13 +438,6 @@ class UNetDecoder(nn.Module):
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
             transpconvs.append(
-                # transpconv_op(
-                #     input_features_below,
-                #     input_features_skip,
-                #     stride_for_transpconv,
-                #     stride_for_transpconv,
-                #     bias=conv_bias,
-                # )
                 nn.ConvTranspose2d(
                     input_features_below,
                     input_features_skip,
@@ -458,28 +448,13 @@ class UNetDecoder(nn.Module):
             )
             # input features to conv is 2x input_features_skip (concat input_features_skip with transpconv output)
             stages.append(
-                # StackedConvBlocks(
-                #     n_conv_per_stage[s - 1],
-                #     encoder.conv_op,
-                #     2 * input_features_skip,
-                #     input_features_skip,
-                #     encoder.kernel_sizes[-(s + 1)],
-                #     1,
-                #     conv_bias,
-                #     norm_op,
-                #     norm_op_kwargs,
-                #     dropout_op,
-                #     dropout_op_kwargs,
-                #     nonlin,
-                #     nonlin_kwargs,
-                #     nonlin_first,
-                # )
                 MbConvSeqentialCond(
-                    in_chs=2 * input_features_skip,
-                    cond_width=None,
+                    in_chans=2 * input_features_skip,
+                    cond_width=latent_width,
+                    out_chans=input_features_skip,
                     # only 1 stage
-                    embed_dim=[2 * input_features_skip],
-                    depths=[n_conv_per_stage[s - 1]],
+                    embed_dim=[2 * input_features_skip] * depths_per_stage[s - 1],
+                    depths=[n_conv_per_stage[s - 1]] * depths_per_stage[s - 1],
                     norm_layer=norm_op,
                     act_layer=nonlin,
                     expand_ratio=1,
@@ -497,7 +472,11 @@ class UNetDecoder(nn.Module):
         self.transpconvs = nn.ModuleList(transpconvs)
         self.seg_layers = nn.ModuleList(seg_layers)
 
-    def forward(self, skips: list[Float[Tensor, "b c h w"]]):
+    def forward(
+        self,
+        skips: list[Float[Tensor, "b c h w"]],
+        cond: Float[Tensor, "b latent_ch h w"] | None = None,
+    ):
         """
         we expect to get the skips in the order they were computed, so the bottleneck should be the last entry
         :param skips:
@@ -509,7 +488,7 @@ class UNetDecoder(nn.Module):
         for s in range(len(self.stages)):
             x = self.transpconvs[s](lres_input)
             x = torch.cat((x, skips[-(s + 2)]), 1)
-            x = self.stages[s](x)
+            x = self.stages[s](x, cond)
             if self.deep_supervision:
                 seg_outputs.append(self.seg_layers[s](x))
             elif s == (len(self.stages) - 1):

@@ -4,19 +4,19 @@
 # the terms of the DINOv3 License Agreement.
 
 # Copyright (c) Facebook, Inc. and its affiliates.
-import numpy as np
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch import nn
+from torch.amp import autocast
 from torch.nn import functional as F
 from torch.nn.init import normal_
-from torch.amp import autocast
 
-from dinov3.eval.segmentation.models.utils.batch_norm import get_norm
-from dinov3.eval.segmentation.models.utils.position_encoding import PositionEmbeddingSine
-from dinov3.eval.segmentation.models.utils.transformer import _get_clones, _get_activation_fn
-from dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
+from ..utils.batch_norm import get_norm
+from ..utils.ms_deform_attn import MSDeformAttn
+from ..utils.position_encoding import PositionEmbeddingSine
+from ..utils.transformer import _get_activation_fn, _get_clones
 
 
 def c2_xavier_fill(module: nn.Module) -> None:

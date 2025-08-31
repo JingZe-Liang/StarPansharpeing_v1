@@ -299,7 +299,7 @@ class ContinuousImageTokenizer(nn.Module):
         self.latent_noise_prob = kwargs.pop("latent_noise_prob", 0.0)
         self.use_latent_denoise = self.latent_noise_prob > 0.0
 
-        # > repa or vf projectors
+        # < repa or vf projectors
         assert not (self._use_repa_loss and self._use_vf_loss), (
             "repa and vf losses should not be used at the same time"
         )
@@ -326,13 +326,14 @@ class ContinuousImageTokenizer(nn.Module):
                     self._dino_feature_dim,
                 )
 
-        # > FSDP wrapper module
+        # < FSDP wrapper module
         if kwargs.get("attn_type") in ("none", None):
             self._no_split_modules.remove("AttnBlock")
 
-        # > quantizer
+        # < quantizer
         self.quantizer_type = kwargs.pop("quantizer_type", None)
         self.random_quant = kwargs.pop("random_quant", 0.0)
+        self.quantizer: BSQ | FSQ | None
         if self.quantizer_type == "kl":
             if z_factor != 2:
                 log_print(
@@ -373,7 +374,7 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             log_print(f"use no quantizer or VAE, the tokenizer is only an AutoEncoder")
 
-        # > Tokenizer configs
+        # < Tokenizer configs
         tokenizer_cfg = dict(
             z_channels=z_channels,
             z_factor=z_factor,
@@ -401,7 +402,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         self.register_buffer("dummy_param", torch.tensor(0))
 
-        # > Encoder and Decoder
+        # < Encoder and Decoder
         # pretrained encoder and decoder
         if loading_type == "nvidia":
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
@@ -612,8 +613,6 @@ class ContinuousImageTokenizer(nn.Module):
         # Quantization
         if _use_quantizer:
             if self.quantizer_type == "bsq":
-                self.quantizer: BSQ
-
                 # here must be l2-normed
                 h = nn.functional.normalize(h, dim=1)
                 # TODO: bsq not supported channel drop
@@ -639,8 +638,6 @@ class ContinuousImageTokenizer(nn.Module):
                 return h, kl_loss, loss_breakdown
 
             elif self.quantizer_type == "fsq":
-                self.quantizer: FSQ
-
                 # dummy loss
                 fsq_loss = torch.tensor(0.0).to(h)
                 loss_breakdown = {"fsq_loss": fsq_loss}

@@ -129,7 +129,7 @@ def load_perception_model(
 def load_repa_dino_v3_model(
     weight_path: str | Path | None = None,
     model_name: str | None = "dinov3_vitl16",
-    pretrained_on="satellite",
+    pretrained_on: Literal["satellite", "web"] = "satellite",
     compile=False,
 ) -> torch.nn.Module | torch._dynamo.OptimizedModule:
     """
@@ -182,16 +182,17 @@ def load_repa_dino_v3_model(
         stem = Path(weight_path).stem
         model_name = "_".join(stem.split("_", 2))
     elif weight_path is None and model_name is not None:
-        # breakpoint()
         model_type_dir = {
             "web": "web_image_pretrained_lvd",
             "satellite": "remote_sensing_image_pretrained_SAT_493M",
         }[pretrained_on]
         weight_dir = repo_dir / "weights" / model_type_dir
         # search the weight path
-        paths = list(weight_dir.rglob("*.pth"))
+        paths = weight_dir.rglob("*.pth")
         for p in paths:
-            if model_name in p.stem:
+            # avoid 'dinov3_vits16' and 'dinov3_vits16plus'
+            search_name = model_name + "_pretrain"
+            if search_name in p.stem:
                 weight_path = str(p)
                 break
         assert weight_path is not None, (

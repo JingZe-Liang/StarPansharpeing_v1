@@ -7,8 +7,8 @@
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch.nn import functional as F
 from torch.nn import BatchNorm2d
+from torch.nn import functional as F
 
 import dinov3.distributed as distributed
 

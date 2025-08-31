@@ -29,7 +29,7 @@ class MbConvLNBlock(nn.Module):
         self,
         in_chs: int,
         out_chs: int,
-        cond_chs: int,
+        cond_chs: int | None,
         stride: int = 1,
         drop_path: float = 0.0,
         kernel_size: int = 3,
@@ -69,14 +69,16 @@ class MbConvLNBlock(nn.Module):
         self.act2 = create_act_layer(act_layer, inplace=True)
         self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=True)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.cond_conv_kxk = create_conv2d(
-            cond_chs, mid_chs, 3, stride=1, padding=1, bias=True
+        self.cond_conv_kxk = (
+            create_conv2d(cond_chs, mid_chs, 3, stride=1, padding=1, bias=True)
+            if cond_chs
+            else nn.Identity()
         )
 
     def init_weights(self, scheme=""):
         named_apply(partial(_init_conv, scheme=scheme), self)
 
-    def forward(self, x, cond):
+    def forward(self, x, cond=None):
         shortcut = self.shortcut(x)
 
         x = self.pre_norm(x)
@@ -87,8 +89,10 @@ class MbConvLNBlock(nn.Module):
         x = self.act1(x)
 
         # (strided) depthwise 3x3 conv & act
-        cond = self.cond_conv_kxk(cond)
-        x = self.conv2_kxk(x) + cond
+        x = self.conv2_kxk(x)
+        if cond is not None:
+            cond = self.cond_conv_kxk(cond)
+            x = x + cond
         x = self.act2(x)
 
         # 1x1 linear projection to output width
@@ -134,7 +138,7 @@ class MbConvSeqentialCond(nn.Module):
         in_chans: int,
         embed_dim: list[int],
         depths: list[int],
-        cond_width: int,
+        cond_width: int | None,
         out_chans: int | None = None,
         stride: int = 1,
         drop_path: float = 0.0,
@@ -145,6 +149,9 @@ class MbConvSeqentialCond(nn.Module):
         expand_ratio: float = 4.0,
         **kwargs,
     ):
+        super().__init__()
+        self.grad_checkpointing = False
+
         stages = {}
         self.num_stages = len(embed_dim)
         for s, dim in enumerate(embed_dim):  # stage
@@ -170,11 +177,12 @@ class MbConvSeqentialCond(nn.Module):
         else:
             self.out_conv = nn.Identity()
 
-    def forward(self, x, cond):
+    def forward(self, x, cond=None):
         # interpolate the condition
-        cond = th.nn.functional.interpolate(
-            cond, size=x.shape[2:], mode="bilinear", align_corners=False
-        )
+        if cond is not None:
+            cond = th.nn.functional.interpolate(
+                cond, size=x.shape[2:], mode="bilinear", align_corners=False
+            )
 
         # stages
         for stage in self.stages.values():

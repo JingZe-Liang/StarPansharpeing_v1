@@ -1,4 +1,5 @@
 from .compile import null_decorator, null_decorator_no_any_kwgs
+from .dataclass_config_compact import register_network_init
 from .Dtensor import get_tensor_info, safe_dtensor_operation, to_full_tensor
 from .network_loading import (
     load_diffbands_tokenizer_then_peft_lora,

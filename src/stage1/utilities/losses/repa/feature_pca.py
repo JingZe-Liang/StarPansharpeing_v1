@@ -65,6 +65,7 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
     return img_feats_reduced
 
 
+@torch.no_grad()
 def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     """
     Perform PCA dimension reduction on image features using PyTorch's SVD on CUDA.
@@ -197,9 +198,28 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     return img_feats_reduced
 
 
+# * --- Test --- #
+
+
+def test_speed_torch_version():
+    import time
+
+    from tqdm import trange
+
+    a = torch.randn(2, 128, 256, 256).cuda()
+    t1 = time.time()
+    for _ in trange(100):
+        _ = feature_pca_torch(a, pca_k=3)
+    t2 = time.time()
+    print(f"Time taken: {(t2 - t1) / 100:.2f} s")
+
+
 # --- Example Usage (Requires CUDA enabled PyTorch and einops) ---
 
 if __name__ == "__main__":
+    test_speed_torch_version()
+    exit(0)
+
     # Make sure CUDA is available
     if not torch.cuda.is_available():
         log("CUDA is not available. Cannot run CUDA PCA example.")
