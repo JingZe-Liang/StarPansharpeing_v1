@@ -383,7 +383,7 @@ def load_peft_model_checkpoint(
         merge_and_unload (bool): Whether to merge and unload the PEFT model.
 
     Returns:
-        base_m
+        base_model: The base model after loading the checkpoint.
         tuple: A tuple containing the PeftConfig and the merged PeftModel or nn.Module.
     """
     if base_model_pretrained_path:

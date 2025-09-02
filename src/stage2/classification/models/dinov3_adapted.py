@@ -1,11 +1,9 @@
-import pydoc
 import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.utils.flop_counter
 from jaxtyping import Float
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
@@ -29,13 +27,6 @@ from src.utilities.config_utils import (
 )
 from src.utilities.logging import log
 
-# DINOv3_MODEL_FACTORIES = {
-#     "dinounet_s": dinov3_vits16,
-#     "dinounet_b": dinov3_vitb16,
-#     "dinounet_l": dinov3_vitl16,
-#     "dinounet_7b": dinov3_vit7b16,
-# }
-
 DINOv3_INTERACTION_INDEXES = {
     "dinov3_vits16": [2, 5, 8, 11],
     "dinov3_vitb16": [2, 5, 8, 11],
@@ -44,12 +35,6 @@ DINOv3_INTERACTION_INDEXES = {
 }
 
 
-# DINOv3_MODEL_INFO = {
-#     "dinounet_s": {"embed_dim": 384, "depth": 12, "num_heads": 6, "params": "~22M"},
-#     "dinounet_b": {"embed_dim": 768, "depth": 12, "num_heads": 12, "params": "~86M"},
-#     "dinounet_l": {"embed_dim": 1024, "depth": 24, "num_heads": 16, "params": "~300M"},
-#     "dinounet_7b": {"embed_dim": 4096, "depth": 40, "num_heads": 32, "params": "~7B"},
-# }
 # * --- Configurations --- #
 
 
@@ -152,18 +137,8 @@ class DinoUNet(nn.Module):
 
         # Get model information
         model_name = cfg.dino.model_name
-        # if model_name not in DINOv3_MODEL_INFO:
-        #     raise ValueError(f"Unknown model: {model_name}")
-
-        # model_info = DINOv3_MODEL_INFO[model_name]
         interaction_indexes = DINOv3_INTERACTION_INDEXES[model_name]
-
         log(f"Creating DINOv3 encoder: {model_name}")
-        # log(f"   Embedding dimension: {model_info['embed_dim']}")
-        # log(f"   Model depth: {model_info['depth']}")
-        # log(f"   Number of attention heads: {model_info['num_heads']}")
-        # log(f"   Parameter count: {model_info['params']}")
-        # log(f"   Interaction layer indices: {interaction_indexes}")
 
         # Load DINOv3 backbone
         dinov3_backbone = load_dino_v3_model(
@@ -281,6 +256,9 @@ def test_cfg():
     # to dataclass
     d2 = dataclass_from_dict(DinoUnetConfig, dd)
     print(d2)
+
+
+# * --- Test --- #
 
 
 def test_model():

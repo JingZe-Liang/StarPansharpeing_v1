@@ -38,7 +38,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
         learn_decoder: bool = False,
     ):
         assert decoder_fn is not None
-        assert hasattr(self.end_member_model, "get_endmember")
+        assert hasattr(end_member_model, "get_endmember")
 
         super().__init__(
             pixel_model,

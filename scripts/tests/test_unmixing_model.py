@@ -31,7 +31,8 @@ def main():
     latent = torch.randn(1, 16, 32, 32)
 
     output = model(x, latent)
-    print(output.shape)
+    print(output["abunds"].shape)
+    print(output["recon"].shape)
 
 
 if __name__ == "__main__":
