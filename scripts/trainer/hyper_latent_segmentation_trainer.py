@@ -31,7 +31,7 @@ heavyball = lazy_loader.load("heavyball")
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
-from src.stage2.unmixing.loss import UnmixingLoss
+from src.stage2.pansharpening.metrics import AnalysisPanAcc
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
@@ -41,7 +41,7 @@ from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 
 
-class UnmixingTrainer:
+class DenoisingTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.tokenizer_cfg = cfg.tokenizer
@@ -600,10 +600,9 @@ class UnmixingTrainer:
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
-        assert mode in (
-            "train",
-            "val",
-        ), "Only train and val modes are supported for now."
+        assert mode in ("train", "val"), (
+            "Only train and val modes are supported for now."
+        )
 
         return self.train_state[mode]
 
@@ -1032,15 +1031,15 @@ class UnmixingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_dino_unmixing"  # vq, bsq, fsq, kl
+_key = "cosmos_f8c16p4_fusionnet"  # vq, bsq, fsq, kl
 _configs = {
     # cosmos tokenizer, simple denoising
-    "cosmos_f8c16p4_dino_unmixing": "cosmos_f8c16p4_dino_unmixing",
+    "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",
 }[_key]
 
 
 @hydra.main(
-    config_path="configs/unmixing",
+    config_path="configs/denoising",
     config_name=_configs,
     version_base=None,
 )
@@ -1048,7 +1047,7 @@ def main(cfg):
     catcher = logger.catch if PartialState().is_main_process else nullcontext
 
     with catcher():
-        trainer = UnmixingTrainer(cfg)
+        trainer = DenoisingTrainer(cfg)
         trainer.run()
 
 

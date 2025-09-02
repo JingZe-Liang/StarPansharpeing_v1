@@ -6,6 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import torch as th
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger
@@ -270,7 +271,7 @@ def log_print(
         log_fn(msg, rank=rank, **context)
 
 
-def log(*msg, sep=",", **kwargs):
+def log(*msg, sep="", **kwargs):
     msg_str = ""
     for i, m in enumerate(msg):
         msg_str = msg_str + m

@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.utils.flop_counter
 from jaxtyping import Float
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
@@ -293,6 +294,13 @@ def test_model():
     cond = torch.randn(1, 16, 32, 32)
     output = model(x, cond)
     print(output.shape)
+
+    from torch.utils.flop_counter import FlopCounterMode
+
+    flop_counter = FlopCounterMode(display=True)
+    with flop_counter:
+        output = model(x, cond)
+    print(flop_counter.get_total_flops() / 1024 / 1024 / 1024, "GFlops")
 
 
 if __name__ == "__main__":

@@ -204,7 +204,7 @@ class ConvCfg:
     pool_type: str = "avg2"
     downsample_pool_type: str = "avg2"
     act_layer: str = "gelu"  # stem & stage 1234
-    norm_layer: str = ""
+    norm_layer: str = "layernorm2d"
     norm_eps: float = 1e-5
     down_shortcut: bool = True
     mlp: str = "mlp"
@@ -212,10 +212,11 @@ class ConvCfg:
 
 @dataclass
 class VitaminCfg:
-    stem_width: int
-    embed_dim: list[int]
-    depths: list[int]
+    stem_width: int = 32
+    embed_dim: list[int] = field(default_factory=lambda: [64, 192, 192])
+    depths: list[int] = field(default_factory=lambda: [2, 2, 2])
     input_channel: int = 8
+    output_channel: int = 8
     condition_channel: int = 256
     use_residual: bool = False
     conv_cfg: ConvCfg = field(default_factory=ConvCfg)
@@ -231,7 +232,7 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         patchers = nn.ModuleDict()
-        patchers["noisy_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
+        patchers["img_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
@@ -246,10 +247,10 @@ class VitaminModel(nn.Module):
             cond_width=cfg.condition_channel,
             **asdict(cfg.conv_cfg),
         )
-        self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.input_channel)
+        self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.output_channel)
 
-    def forward(self, noisy, cond):
-        x = self.patchers["noisy_conv"](noisy)
+    def forward(self, img, cond):
+        x = self.patchers["img_conv"](img)
         cond = self.patchers["condition_conv"](cond)
 
         # stages
@@ -257,7 +258,7 @@ class VitaminModel(nn.Module):
         x = self.out_conv(x)
 
         if self.cfg.use_residual:
-            x = x + noisy
+            x = x + img
 
         return x
 

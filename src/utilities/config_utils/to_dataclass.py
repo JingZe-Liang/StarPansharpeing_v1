@@ -1,5 +1,5 @@
 import inspect
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from omegaconf import OmegaConf
 from typing_extensions import deprecated
@@ -7,28 +7,24 @@ from typing_extensions import deprecated
 T = TypeVar("T")
 
 
-def dataclass_from_dict(cls_or_ins: type[T] | T, data: dict, strict: bool = True) -> T:
+def dataclass_from_dict(cls: type[T], data: dict, strict: bool = True) -> T:
     """
     Converts a dictionary to a dataclass instance, recursively for nested structures.
     """
-    if type(cls_or_ins) is type:
-        ins = cls_or_ins()
-    else:
-        ins = cls_or_ins
-    base = OmegaConf.structured(ins)
+    base = OmegaConf.structured(cls)
     OmegaConf.set_struct(base, strict)
     override = OmegaConf.create(data)
-    return OmegaConf.to_object(OmegaConf.merge(base, override))
+    return OmegaConf.to_object(OmegaConf.merge(base, override))  # type: ignore
 
 
-def dataclass_to_dict(dataclass_instance) -> dict:
+def dataclass_to_dict(dataclass_instance: T) -> dict[str, Any]:
     """
     Converts a dataclass instance to a dictionary, recursively for nested structures.
     """
     if isinstance(dataclass_instance, dict):
         return dataclass_instance
 
-    return OmegaConf.to_container(
+    return OmegaConf.to_container(  # type: ignore
         OmegaConf.structured(dataclass_instance), resolve=True
     )
 

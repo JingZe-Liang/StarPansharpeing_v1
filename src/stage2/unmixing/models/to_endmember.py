@@ -1,20 +1,41 @@
+from dataclasses import MISSING, dataclass, field
+from typing import Any
+
 import torch
 import torch.nn as nn
 
 
+@dataclass
+class ToEndMemberConfig:
+    num_endmember: int
+    channels: int
+    init_value: Any
+    kernel: int = 1
+    module_type: str = "conv"
+    apply_relu: bool = True
+
+
 class ToEndMemberConv(nn.Module):
-    def __init__(self, num_endmember: int, channels: int, kernel: int, init_value=None):
+    def __init__(
+        self,
+        num_endmember: int,
+        channels: int,
+        kernel: int,
+        init_value=None,
+        apply_relu=False,
+        **kwargs,
+    ):
         super(ToEndMemberConv, self).__init__()
         padding = kernel // 2
         self.decoder = nn.Conv2d(
-            in_channels=num_endmember,
-            out_channels=channels,
+            in_channels=channels,
+            out_channels=num_endmember,
             kernel_size=kernel,
             stride=1,
             padding=padding,
             bias=False,
         )
-        self.relu = nn.ReLU()
+        self.apply_relu = apply_relu
         if init_value is not None:
             assert kernel == 1
             init_value.squeeze_(0)
@@ -22,7 +43,9 @@ class ToEndMemberConv(nn.Module):
             self.decoder.weight.data = init_value[..., None, None]
 
     def forward(self, code):
-        code = self.relu(self.decoder(code))  # [bs, c_in, h, w] -> [bs, c_out, h, w]
+        code = self.decoder(code)  # [bs, c_in, h, w] -> [bs, c_out, h, w]
+        if self.apply_relu:
+            code = torch.nn.functional.relu(code)
         return code
 
     def get_endmember(self):
@@ -31,9 +54,17 @@ class ToEndMemberConv(nn.Module):
 
 
 class ToEndMemberParameter(nn.Module):
-    def __init__(self, num_endmember: int, channels: int, init_value=None):
+    def __init__(
+        self,
+        num_endmember: int,
+        channels: int,
+        init_value=None,
+        apply_relu=False,
+        **kwargs,
+    ):
         super(ToEndMemberParameter, self).__init__()
         self.endmember = nn.Parameter(torch.randn(channels, num_endmember))
+        self.apply_relu = apply_relu
 
         # init
         if init_value is not None:
@@ -49,6 +80,8 @@ class ToEndMemberParameter(nn.Module):
 
     def forward(self, code):
         code = torch.einsum("bchw,dc->bdhw", code, self.endmember)
+        if self.apply_relu:
+            code = torch.relu(code)
         return code
 
     def get_endmember(self):

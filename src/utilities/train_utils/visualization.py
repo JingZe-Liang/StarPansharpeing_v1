@@ -4,12 +4,13 @@ import beartype
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from jaxtyping import Float32, Int, UInt
+from jaxtyping import Float, Float32, Int, UInt
 from matplotlib.cm import get_cmap
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from numpy.typing import NDArray
 from PIL import Image
 from torch import Tensor
+from torchvision.utils import make_grid
 
 RGB_CHANNELS_BY_BANDS = {
     4: [2, 1, 0],
@@ -25,6 +26,8 @@ RGB_CHANNELS_BY_BANDS = {
     202: "mean",  # [39, 32, 16],
     224: "mean",  # [39, 32, 16],
     242: "mean",  # [66, 40, 13],
+    256: "mean",  # Xiongan
+    270: "mean",
     368: "mean",  # [74, 42, 10],
     369: "mean",
     438: "mean",  # [62, 33, 19],
@@ -123,7 +126,7 @@ def get_coco_colors():
     return COCO_CATEGORIES / 255.0
 
 
-def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | None = None):
+def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None):
     global RGB_CHANNELS_BY_BANDS
 
     c = img.shape[1]
@@ -146,6 +149,66 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | None = None):
         )
 
     return rgb_img
+
+
+type HyperImageType = Float[Tensor, "b c h w"] | Float[NDArray, "h w c"]
+
+
+@beartype.beartype
+def visualize_hyperspectral_image(
+    img: HyperImageType,
+    to_pil=False,
+    norm=True,
+    rgb_channels: list[int] | str | None = None,
+    nrows: int = 1,
+    to_grid=False,
+    to_uint8=True,
+) -> Float[NDArray, "h w c"] | list[Image.Image] | Image.Image:
+    """Visualize a hyperspectral image by converting it to RGB format.
+
+    Args:
+        img: Hyperspectral image tensor or array of shape (b, c, h, w) or (h, w, c).
+        to_pil: Whether to convert the output to PIL Image format. Defaults to False.
+        norm: Whether to normalize the image to [0, 1] range. Defaults to True.
+        rgb_channels: Indices of channels to use for RGB visualization. If None, uses default RGB channels.
+        nrows: Number of rows when creating a grid of images. Defaults to 1.
+        to_grid: Whether to arrange images in a grid. Defaults to False.
+        to_uint8: Whether to convert output to uint8 format. Defaults to True.
+
+    Returns:
+        If to_pil is True, returns PIL Image or list of PIL Images.
+        If to_pil is False, returns numpy array of shape (h, w, 3).
+        When returning a grid, returns a single image with multiple rows.
+    """
+    if isinstance(img, np.ndarray):
+        assert img.ndim == 3, f"Invalid image shape: {img.shape}. Expected (h, w, c)."
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)  # (1, c, h, w)
+    else:
+        assert img.ndim == 4, (
+            f"Invalid image shape: {img.shape}. Expected (b, c, h, w)."
+        )
+        img = img.detach()
+
+    rgb_img = get_rgb_image(img, rgb_channels)  # (b, 3, h, w)
+    if norm:
+        rgb_img = (rgb_img - rgb_img.min()) / (rgb_img.max() - rgb_img.min())
+        rgb_img = torch.clamp(rgb_img, 0, 1)
+
+    if to_grid:
+        rgb_img = make_grid(rgb_img, nrow=nrows)  # (c, h, w)
+
+    if to_pil:
+        rgb_img = rgb_img.mul(255).to(torch.uint8).cpu()
+        pil_imgs = [
+            Image.fromarray(im.permute(1, 2, 0).numpy(), mode="RGB") for im in rgb_img
+        ]
+        return pil_imgs[0] if len(pil_imgs) == 1 else pil_imgs
+    else:
+        rgb_img = rgb_img.permute(1, 2, 0)  # (h, w, c)
+        if to_uint8:
+            rgb_img = rgb_img.mul(255).to(torch.uint8)
+        rgb_img = rgb_img.numpy()
+        return rgb_img
 
 
 type GTMapType = (

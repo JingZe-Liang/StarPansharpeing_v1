@@ -31,6 +31,8 @@ dataset_names_to_n_channels:
   GF1: 4
   IKONOS: 4
   WDC: 191
+  Xiongan: 256
+  WHU_Hi: 270
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -47,6 +49,7 @@ dataset_names_to_rgb_channels:
   GF1: ${list:[2, 1, 0]}
   IKONOS: ${list:[2, 1, 0]}
   WDC: ${list:[19, 13, 8]}
+  Xiongan: ${list:[29, 19, 9]}
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -63,6 +66,8 @@ dataset_names_to_img_size:
   GF1: 512
   IKONOS: 512
   WDC: 160
+  Xiongan: 256
+  WHU_Hi: 256
 
 WDC_train:
   - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
@@ -151,6 +156,18 @@ OHS_train:
 
 OHS_val:
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0012..0015}.tar
+
+Xiongan_train:
+  - - data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar
+
+Xiongan_val:
+  - - data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar
+
+WHU_Hi_train:
+  - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
+
+WHU_Hi_val:
+  - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
 
 # if is lora -------------
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}

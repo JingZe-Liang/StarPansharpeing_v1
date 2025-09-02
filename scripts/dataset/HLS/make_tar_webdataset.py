@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Iterable, Literal, cast
 
 import einops
+import h5py
 import natsort
 import numpy as np
+import rasterio
 import safetensors
 import safetensors.torch
 import tifffile
@@ -18,7 +20,7 @@ from scipy.io import loadmat
 from torchvision.io import read_video
 from tqdm import tqdm
 
-from src.utilities.logging.print import configure_logger, logger
+from src.utilities.logging.print import catch_any, configure_logger, log, logger
 
 Image.MAX_IMAGE_PIXELS = None  # disable the warning for large images
 
@@ -413,32 +415,56 @@ def read_image(
     img_path: str | Path,
     *,
     mat_load_key="I",
-    verbose=True,
+    verbose=False,
     tiff_read_mode="array",
     tiff_bands_seperated: bool = False,
     force_to_dtype: np.dtype | None = None,
+    bands_name: list[str] | None = BANDS_NAME,
+    mat_ret_all=False,
 ):
     if isinstance(img_path, str):
         img_path = Path(img_path)
 
     if verbose:
-        logger.info("reading image from: {}", img_path.as_posix())
+        log("reading image from: {}", img_path.as_posix())
 
     if img_path.suffix == ".mat":
         try:
             d = loadmat(img_path)
-            key_ = list(d.keys())[-1]
-            img = d[key_]
-        except NotImplementedError as e:
-            logger.warning(
+            if not mat_ret_all:
+                key_ = list(d.keys())[-1]
+                img = d[key_]
+                return img
+            else:
+                d_ret = {k: v for k, v in d.items() if not k.startswith("__")}
+                return d_ret
+        except Exception as e:
+            log(
                 f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
-                "read using h5py."
+                "read using h5py.",
+                level="warning",
             )
-            import h5py
 
             with h5py.File(img_path, "r") as f:
-                key_ = list(f.keys())[-1]
-                img = f[key_][:]
+                if not mat_ret_all:
+                    key_ = list(f.keys())[-1]
+                    img = f[key_][:]
+                    return img
+                else:
+                    d_ret = {k: v[:] for k, v in f.items()}
+                    return d_ret
+    elif img_path.suffix.lower() == ".img":
+        with rasterio.open(img_path) as dataset:
+            bands = dataset.count
+            img = np.zeros(
+                (dataset.height, dataset.width, bands), dtype=dataset.dtypes[0]
+            )
+            for i in range(bands):
+                img[..., i] = dataset.read(i + 1)
+
+        log(f"Read image {img_path=} using rasterio done")
+        return img
+
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
         try:
             img = np.array(Image.open(img_path))
@@ -446,7 +472,7 @@ def read_image(
             if img.ndim == 2 and img_path.suffix.lower() == ".png":
                 img = img[..., None]
         except Exception as e:
-            logger.warning(f"Failed to load image from: {img_path.as_posix()}. {e}")
+            log(f"Failed to load image from: {img_path.as_posix()}. {e}", "warning")
             return None
     elif img_path.suffix == ".npy":
         img = np.load(img_path)
@@ -457,12 +483,15 @@ def read_image(
         )  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
         uni_tif_paths = []
 
-        for band_name in BANDS_NAME:
+        assert bands_name is not None, (
+            "bands_name should be provided when tiff_bands_seperated is True"
+        )
+        for band_name in bands_name:
             parts = basic_name.split(".")  # replace B01 with band_name
             name = ".".join(parts[:-2]) + "." + band_name + ".tif"
             band_path = img_path.parent / name
             if not band_path.exists():
-                logger.warning(f"band {band_name} not found in: {img_path}")
+                log(f"band {band_name} not found in: {img_path}", "warning")
                 return None
             uni_tif_paths.append(band_path)
         # read all bands
@@ -471,7 +500,7 @@ def read_image(
             try:
                 img = tifffile.imread(p)
             except Exception as e:
-                logger.warning(f"failed to load image from: {p}. {e}")
+                log(f"failed to load image from: {p}. {e}", level="warning")
                 return None
             img = np.clip(img, 0, None)
             bands_imgs.append(img)
@@ -486,7 +515,10 @@ def read_image(
                 else tif.asarray()
             )
         except Exception as e:
-            logger.warning(f"failed to load image from: {img_path.as_posix()}. {e}")
+            log(
+                f"failed to load image from: {img_path.as_posix()}. {e}",
+                level="warning",
+            )
             return None
     elif img_path.suffix.lower() in [".mp4"]:
         from torchvision.io import video_reader
@@ -503,7 +535,7 @@ def read_image(
                 frames.append(data)
 
             if pts > 60:
-                logger.warning("the frames are too many, stop reading")
+                log("the frames are too many, stop reading", level="warning")
         return frames
     else:
         raise ValueError(f"Unsupported image format: {img_path.suffix}")
@@ -513,9 +545,10 @@ def read_image(
             assert isinstance(img, np.ndarray), "img must be a numpy array"
             img = img.astype(force_to_dtype)
         except Exception as e:
-            logger.warning(
+            log(
                 f"Failed to convert image to {force_to_dtype} dtype: {e}. "
-                "Please check the image data type and the target dtype."
+                "Please check the image data type and the target dtype.",
+                level="warning",
             )
 
     return img
@@ -586,8 +619,7 @@ def to_suitable_dtype_img(
         global _dtype_max_dtypes, _dtype_max_vals, _numpy_dtype_to_tensor
 
         for dt, max_val in zip(_dtype_max_dtypes, _dtype_max_vals):
-            if img_max <= max_val:
-                # logger.info(f"dtype fit determined as {dt}")
+            if int(img_max) <= max_val:
                 return dt
 
         raise ValueError(f"Image max value {img_max} is too large to fit any dtype")
@@ -824,7 +856,7 @@ def clip_img_to_webdataset(
     return n_patch, shape, p_shape
 
 
-@logger.catch(reraise=True)
+@catch_any()
 def loop_dataset_tif_MSI_images_to_webdataset(
     webdataset_pattern: str,
     dataset_root: str | Path | list[str | Path] | None = None,
@@ -1112,24 +1144,24 @@ if __name__ == "__main__":
         # )
 
         # WDC
-        all_msi_files_s = ["/HardDisk/ZiHanCao/datasets/HISI/Washington_DC_mall/dc.tif"]
-        webdataset_pts = (
-            "data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-%04d.tar"
-        )
-        func_kwargs.update(
-            {
-                # "channel_n": 191,
-                "save_backend": "tiff",
-                "process_img_type": "clip",
-                "img_clip_size": (192, 192),
-                "img_stride": (192, 192),
-                "save_backend": "tiff",
-                "save_kwargs": {
-                    "tiff_compression_type": "zlib",
-                },
-                "read_transpose": False,
-            }
-        )
+        # all_msi_files_s = ["/HardDisk/ZiHanCao/datasets/HISI/Washington_DC_mall/dc.tif"]
+        # webdataset_pts = (
+        #     "data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-%04d.tar"
+        # )
+        # func_kwargs.update(
+        #     {
+        #         # "channel_n": 191,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip",
+        #         "img_clip_size": (192, 192),
+        #         "img_stride": (192, 192),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "zlib",
+        #         },
+        #         "read_transpose": False,
+        #     }
+        # )
 
         # WDC2
         # all_msi_files_s = list(
@@ -1151,6 +1183,71 @@ if __name__ == "__main__":
         #             "tiff_compression_type": "zlib",
         #         },
         #         "read_transpose": False,
+        #         "add_global_index": True,
+        #     }
+        # )
+
+        # Classification collections
+        all_msi_files_s = [
+            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HanChuan.mat",
+            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HongHu.mat",
+            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_LongKou.mat",
+        ]
+        webdataset_pts = "data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-xxxbands-px_256-%04d.tar"
+        func_kwargs.update(
+            {
+                # "channel_n": 191,
+                "save_backend": "tiff",
+                "process_img_type": "clip",
+                "img_clip_size": (256, 256),
+                "img_stride": (256, 256),
+                "save_backend": "tiff",
+                "save_kwargs": {
+                    "tiff_compression_type": "zlib",
+                },
+                # "read_transpose": False,
+            }
+        )
+
+        # Detection collections
+        # path = Path("data/Downstreams/ChangeDetection/mat_2")
+        # all_msi_files_s = list(path.rglob("**/mat/*.mat"))
+        # print(*all_msi_files_s, sep="\n")
+        # webdataset_pts = "data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-%04d.tar"
+        # func_kwargs.update(
+        #     {
+        #         "channel_n": 242,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip",
+        #         "img_clip_size": (128, 128),
+        #         "img_stride": (128, 128),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "zlib",
+        #         },
+        #         "read_transpose": True,
+        #         "add_global_index": True,
+        #     }
+        # )
+
+        # Xiongan dataset
+        # all_msi_files_s = [
+        #     "data/Downstreams/ClassificationCollection/XiongAn/XiongAn.img"
+        # ]
+        # webdataset_pts = "data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-%04d.tar"
+        # func_kwargs.update(
+        #     {
+        #         "channel_n": 256,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip",
+        #         "img_clip_size": (256, 256),
+        #         "img_stride": (256, 256),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "jpeg2000",
+        #             "tiff_jpg_irreversible": True,
+        #             "jpeg_quality": 85,
+        #         },
         #         "add_global_index": True,
         #     }
         # )

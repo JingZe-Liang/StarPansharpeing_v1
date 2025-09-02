@@ -1,17 +1,19 @@
+import dataclasses
 import functools
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import natten
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from einops import pack, rearrange, unpack
 from jaxtyping import Array, Float
 from timm.layers import create_act, create_norm, get_act_layer, get_norm_layer
 
 # Attention, MLP
 from timm.layers.attention import Attention as Attention_
-from timm.layers.create_conv2d import create_conv2d
 from timm.layers.drop import DropPath
 from timm.layers.helpers import to_2tuple
 from timm.layers.mlp import SwiGLU as SwiGLUMLP_
@@ -19,7 +21,7 @@ from timm.layers.patch_embed import PatchEmbed
 from torch import Tensor
 from transformers.activations import ACT2CLS, ACT2FN, ClassInstantier
 
-from src.stage2.pansharpening.models.rope import (
+from .rope import (
     RotaryPositionEmbeddingPytorchV2,
     get_2d_sincos_pos_embed,
 )
@@ -99,11 +101,17 @@ class SwiGLUAct(nn.Module):
 
 # Norm registration
 
-# ACT2CLS["polynorm"] = PolyNorm
-# ACT2FN = ClassInstantier(ACT2CLS)
 
-create_act._ACT_FN_DEFAULT["poly_norm"] = PolyNorm
-create_act._ACT_FN_ME["poly_norm"] = PolyNorm
+def _register_new_acts():
+    new_acts = {
+        "swiglu": SwiGLUAct,
+        "poly_norm": PolyNorm,
+    }
+    create_act._ACT_LAYER_DEFAULT.update(new_acts)
+    create_act._ACT_LAYER_ME.update(new_acts)
+
+
+_register_new_acts()
 
 
 class LayerScale(nn.Module):
@@ -246,7 +254,6 @@ class Attention(Attention_):
         q, k, v = qkv.unbind(2)
         dtype = q.dtype
 
-        breakpoint()
         q = self.q_norm(q)
         k = self.k_norm(k)
 
@@ -407,6 +414,7 @@ class AttentionBlock(nn.Module):
         layer_scale_value=1e-3,
     ):
         super().__init__()
+        self.grad_checkpointing = False
         self.norm1 = norm_layer(dim)
         if attn_type == "1d":
             self.attn = Attention(
@@ -447,10 +455,38 @@ class AttentionBlock(nn.Module):
 
         self.drop_path = DropPath(drop_path)
 
-    def forward(self, x, mask=None, pe=None):
+    def forward_(self, x, mask=None, pe=None):
         x = x + self.drop_path(self.ls1(self.attn(self.norm1(x), mask=mask, rope=pe)))
         x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
         return x
+
+    def forward(self, x, mask=None, pe=None):
+        if self.grad_checkpointing:
+            return torch.utils.checkpoint.checkpoint(self.forward_, x, mask, pe)
+        else:
+            return self.forward_(x, mask, pe)
+
+
+@dataclass
+class TransformerConfig:
+    in_dim: int = 16
+    out_channels: int = 256
+    dim: int = 256
+    depth: int = 8
+    num_heads: int = 8
+    with_raw_img: bool = False
+    mlp_ratio: float = 4.0
+    drop: float = 0.0
+    drop_path: float = 0.0
+    input_size: int = 32
+    patch_size: int = 2
+    raw_img_size: Any = None
+    raw_img_chans: Any = None
+    pos_embed_type: str = "sincos"
+    norm_layer: Any = "layernorm"
+    mlp_norm_layer: Any = "layernorm"
+    act_layer: Any = "swiglu"
+    feature_layer_ids: Any = None
 
 
 class Transformer(nn.Module):
@@ -523,6 +559,7 @@ class Transformer(nn.Module):
             x.item() for x in torch.linspace(0, drop_path, depth)
         ]  # stochastic depth decay rule
         norm_layer = get_norm_layer(norm_layer)
+        mlp_norm_layer = get_norm_layer(mlp_norm_layer)
         act_layer = get_act_layer(act_layer)
         for i in range(depth):
             layers.append(
@@ -641,7 +678,7 @@ class Transformer(nn.Module):
                 self.register_buffer(
                     name, torch.from_numpy(pe).float().unsqueeze(0), persistent=False
                 )
-            return pe
+            return self.pos_embed_latent
 
         elif self.pos_embed_type == "rope":
             # TODO: add multi-modal-rope

@@ -23,6 +23,8 @@ import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
 from src.stage1.cosmos.modules.utils import Normalize
+
+# Quantiers
 from src.stage1.discretization.collections import FSQ
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.stage1.discretization.collections.kl_continuous import (
@@ -722,7 +724,7 @@ class ContinuousImageTokenizer(nn.Module):
         return dec
 
     # * --- checkpoint loding --- #
-
+    @no_type_check
     def load_pretrained(
         self,
         enc_path: str,

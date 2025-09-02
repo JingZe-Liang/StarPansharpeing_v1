@@ -32,7 +32,7 @@ def flatten_dict(d, parent_key="", sep="_"):
 
 def load_config_file[T](config_file, dataclass_cls: type[T]) -> T:
     config = OmegaConf.to_container(OmegaConf.load(config_file), resolve=True)
-    return dataclass_from_dict(dataclass_cls, config)
+    return dataclass_from_dict(dataclass_cls, config)  # type: ignore
 
 
 def dump_config(config, path, log_config=True):

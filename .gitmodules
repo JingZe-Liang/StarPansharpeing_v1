@@ -81,3 +81,7 @@
 [submodule "src/utilities/optim/dion"]
 	path = src/utilities/optim/dion
 	url = git@github.com:microsoft/dion.git
+
+[submodule "src/stage2/detections/GT-HAD"]
+	path = src/stage2/detections/GT-HAD
+	url = https://github.com/jeline0110/GT-HAD.git

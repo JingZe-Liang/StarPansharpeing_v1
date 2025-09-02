@@ -18,14 +18,14 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: WDC
+  used: Xiongan
   prefetch_factor: 2
   num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
   # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 191]}
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 256]}
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -40,6 +40,8 @@ dataset:
     GF1: 5
     IKONOS: 5
     WDC: 16
+    Xiongan: 8
+    WHU_Hi: 12
 
   transform_prob: 0.0
 
@@ -174,11 +176,11 @@ train:
   grad_check: false
   compile_model: false
   # LoRA related
-  conv_in_out_reinit: true
+  conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
   add_norms: true
-  save_peft_ckpts: trueqe
+  save_peft_ckpts: true
   resume_path:
-  ema_load_path: runs/stage1_cosmos_lora/2025-08-29_19-17-31_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC/adapter_model.safetensors
+  ema_load_path: #runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

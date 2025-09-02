@@ -25,7 +25,7 @@ https://github.com/CompVis/stable-diffusion/blob/
 
 import math
 from functools import partial
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union, no_type_check
 
 import numpy as np
 
@@ -328,6 +328,7 @@ class Encoder(nn.Module):
             padding_mode=padding_mode,
         )
 
+    @no_type_check
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patcher(x)
 
@@ -531,6 +532,7 @@ class Decoder(nn.Module):
         else:
             self.conv_out = conv_out
 
+    @no_type_check
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         h = self.conv_in(z)
 
@@ -631,6 +633,7 @@ class GenerativeDecoder(Decoder):
             adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
             self.cond_layers.append(adap_gn)
 
+    @no_type_check
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         cond = z.clone()
 

@@ -1849,7 +1849,7 @@ class CosmosHyperspectralTokenizerTrainer:
                                 adapter_name=getattr(
                                     self.dataset_cfg, "used", "default"
                                 ),
-                                ignore_mismatched_sizes=strict,
+                                ignore_mismatched_sizes=not strict,
                                 low_cpu_mem_usage=False,
                             )
 

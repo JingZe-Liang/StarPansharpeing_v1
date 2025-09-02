@@ -1,8 +1,20 @@
 import numpy as np
-import scipy.io as sio
 import torch
 from sklearn import metrics
+from sklearn.metrics import roc_auc_score, roc_curve
 from torch import Tensor
+
+
+def cal_roc_score_curve(gt_f: np.ndarray, residual_map_f: np.ndarray):
+    if gt_f.ndim > 1:
+        gt_f = gt_f.flatten()
+    if residual_map_f.ndim > 1:
+        residual_map_f = residual_map_f.flatten()
+    fpr, tpr, _ = roc_curve(gt_f, residual_map_f)
+    roc_auc = roc_auc_score(gt_f, residual_map_f)
+
+    # return dict
+    return {"fpr": fpr, "tpr": tpr, "roc_auc": roc_auc}
 
 
 def cosin_similarity(x, y):
