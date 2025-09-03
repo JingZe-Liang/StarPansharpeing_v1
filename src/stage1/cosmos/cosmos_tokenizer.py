@@ -1008,11 +1008,17 @@ class ContinuousImageTokenizer(nn.Module):
         # conv in and conv out
         # first conv: diff-bands convs or nn.Conv2d
         if conv_stem_reinit:  # if reinit, the the conv stem is just an nn.Conv2d
+            # FIXME: this will add all conv_in convs to fully finetuned, but we only need one conv to be tuned, which will result the state dict is larger
+
+            # conv_in
             module_to_save_layers = ["encoder.encoder.conv_in"]
+
+            # conv_out
             if not self.decoder.decoder._wrap_fsdp_last_layer:
                 _conv_out_name = "decoder.decoder.conv_out"
             else:
                 _conv_out_name = "decoder.decoder.conv_out.wrap_mod"
+
             module_to_save_layers.append(_conv_out_name)
             log_print(
                 f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune"
@@ -1068,260 +1074,6 @@ class ContinuousImageTokenizer(nn.Module):
         return add_tgt_modules
 
 
-# * --- Multi-Lora Mixin Model --- #
-
-from copy import deepcopy
-
-from peft import PeftMixedModel
-
-
-class TokenizerLoRAMixin(nn.Module):
-    def __init__(
-        self,
-        tokenizer: nn.Module,
-        lora_weights: dict[str, str | Path],
-        active_lora: str,
-        lora_cfg: dict
-        | LoraConfig
-        | None = None,  # Optional, since configs are in directories
-    ):
-        super().__init__()
-        self._offload_tokenizer: nn.Module = None
-        self.base_tokenizer: nn.Module = None
-        self.model_peft: PeftModel = None
-        self.current_lora: str = None
-
-        self.encode: Callable
-        self.decode: Callable
-        self.forward: Callable
-
-        # Store LoRA info for lazy loading
-        self.lora_weights = {
-            str(name): str(path) for name, path in lora_weights.items()
-        }
-        # Keep for backward compatibility, but may not be needed
-        self.lora_cfg = lora_cfg
-
-        # Initialize with base model (no LoRA)
-        self.set_base_tokenizer(tokenizer)
-
-        # Activate one lora
-        self.change_lora(active_lora, merge=False)
-
-    def set_base_tokenizer(self, model):
-        """Set the base tokenizer"""
-        assert model is not None, "model should be a nn.Module"
-        model.requires_grad_(False)
-        self._offload_tokenizer = deepcopy(model.cpu())  # offload to CPU
-        self.base_tokenizer = model.cuda()
-
-    @property
-    def actived_model(self):
-        """Return the currently active model (base or PEFT)"""
-        if self.model_peft is not None:
-            return self.model_peft
-        return self._tokenizer
-
-    @property
-    def offload_tokenizer(self):
-        return self._offload_tokenizer
-
-    @property
-    def peft_config(self):
-        if self.model_peft is not None:
-            return self.model_peft.peft_config
-        return {}
-
-    def _update_methods_from_model(self, model):
-        """Update encode/decode/forward methods from given model"""
-        attrs = ["encode", "decode", "forward", "to", "cuda", "cpu"]
-        for attr in attrs:
-            setattr(self, attr, getattr(model, attr))
-
-    def _load_single_lora(self, lora_name: str):
-        """Load a single LoRA adapter on demand"""
-        if lora_name not in self.lora_weights:
-            raise ValueError(
-                f"LoRA '{lora_name}' not found in available weights: {list(self.lora_weights.keys())}"
-            )
-        assert self.base_tokenizer is not None, "base model is None"
-
-        log_print(f"Loading LoRA '{lora_name}' from: {self.lora_weights[lora_name]}")
-
-        # Load the specific LoRA directly from directory
-        sd_path = Path(self.lora_weights[lora_name])
-        if sd_path.is_dir():
-            # Direct loading from directory - config is read automatically
-            self.model_peft = PeftModel.from_pretrained(
-                self.base_tokenizer,
-                str(sd_path),
-                adapter_name=lora_name,
-                is_trainable=False,
-            )
-            loaded_result = "Loaded from directory with auto config"
-        elif (
-            sd_path.with_suffix(".safetensors").exists()
-            or sd_path.with_suffix(".pt").exists()
-        ):
-            # Load from state dict file
-            sd = accelerate.utils.load_state_dict(str(sd_path))
-            # Try to load config from same directory
-            config_path = sd_path.parent / "adapter_config.json"
-            if config_path.exists():
-                # Use config from file
-                self.model_peft = PeftModel.from_pretrained(
-                    self.base_tokenizer,
-                    str(sd_path.parent),
-                    adapter_name=lora_name,
-                    is_trainable=False,
-                )
-                # Then load the weights
-                self.model_peft.add_adapter(
-                    adapter_name=lora_name,
-                    peft_config=self.model_peft.peft_config[lora_name],
-                    low_cpu_mem_usage=False,
-                )
-                set_peft_model_state_dict(
-                    self.model_peft,
-                    sd,
-                    adapter_name=lora_name,
-                    ignore_mismatched_sizes=False,
-                    low_cpu_mem_usage=False,
-                )
-                loaded_result = "Loaded weights with config from directory"
-            else:
-                raise ValueError(f"No config found for LoRA weights at {sd_path}")
-        else:
-            raise ValueError(f"Unsupported LoRA loading path: {sd_path}")
-
-        log_print(
-            f"Successfully loaded LoRA adapter: {lora_name}, result: {loaded_result}"
-        )
-
-        self.current_lora = lora_name
-
-        # Set the active adapter
-        self.model_peft.set_adapter(lora_name)
-
-        # Update methods to use PEFT model instead of base tokenizer
-        self._update_methods_from_model(self.model_peft)
-
-    def change_lora(
-        self, lora_name: str, merge=False, no_change_action: str = "warning"
-    ):
-        """Change to a different LoRA adapter, loading it if necessary"""
-        if lora_name == self.current_lora:
-            log_print(f"Already using LoRA adapter: {lora_name}")
-            return
-
-        if lora_name not in self.lora_weights:
-            available_adapters = list(self.lora_weights.keys())
-            string = f"Adapter '{lora_name}' not found. Available adapters: {available_adapters}"
-            if no_change_action == "warning":
-                log_print(string, "warning")
-                return
-            elif no_change_action == "fallback":
-                self._disable_lora()
-                log_print(
-                    f"Can not change lora {lora_name}, fall back to no lora base model."
-                )
-            elif no_change_action in ("error", "raise"):
-                raise ValueError(string)
-            else:
-                raise ValueError(f"Can not handle no_change_action: {no_change_action}")
-
-        # Load the new LoRA (this will replace any existing PEFT model)
-        load_res = False
-        try:
-            self._load_single_lora(lora_name)
-            load_res = True
-        except Exception as e:
-            log_print(
-                f"Change lora {lora_name} failed, try to disable the current lora {self.current_lora}. "
-                f"Then try to reload the required LoRA. "
-                f"Error: {e}",
-            )
-            self.drop_current_lora()
-            self._load_single_lora(lora_name)
-            load_res = True
-        finally:
-            if not load_res:
-                raise RuntimeError(f"Failed to load LoRA adapter: {lora_name}")
-            else:
-                log_print(f"Change LoRA adapter <green>{lora_name}</>")
-
-        if merge:
-            self.merge_lora_weights()
-
-    def merge_lora_weights(self):
-        """Merge current LoRA weights into base model"""
-        if self.model_peft is not None:
-            self.model_peft = self.model_peft.merge_and_unload()
-            # Update base tokenizer reference to the merged model
-            self._tokenizer = self.model_peft
-            self.model_peft = None
-            self.current_lora = None
-            # Update methods to use merged model
-            self._update_methods_from_model(self._tokenizer)
-            log_print("Merged current LoRA weights into base model")
-
-    def merge_specific_lora(self, adapter_name: str | None = None):
-        """Load and merge a specific LoRA adapter"""
-        if adapter_name:
-            self.change_lora(adapter_name)
-
-        if self.model_peft is not None:
-            self.model_peft = self.model_peft.merge_and_unload()
-            # Update base tokenizer reference to the merged model
-            self._tokenizer = self.model_peft
-            self.model_peft = None
-            self.current_lora = None
-            # Update methods to use merged model
-            self._update_methods_from_model(self._tokenizer)
-            log_print(f"Merged LoRA weights: {adapter_name or 'current'}")
-
-    @contextmanager
-    def disable_lora(self):
-        """Context manager to temporarily disable LoRA adapters."""
-        current_state = self.current_lora
-        try:
-            self.model_peft.disable_adapter()
-            yield
-        finally:
-            if current_state:
-                self.change_lora(current_state)
-
-    def drop_current_lora(self):
-        """Disable LoRA and revert to base model"""
-        if self.model_peft is not None:
-            # Get the base model from PEFT model
-            self.model_peft = None
-            del self.base_tokenizer
-            # torch.cuda.empty_cache()
-            self.base_tokenizer = deepcopy(self._offload_tokenizer)
-            self.base_tokenizer.to("cuda")
-            self.current_lora = None
-            # Update methods to use base model
-            self._update_methods_from_model(self.base_tokenizer)
-            log_print("Disabled LoRA, reverted to base model")
-
-    def _enable_lora(self):
-        """Re-enable current LoRA if exists"""
-        if self.current_lora:
-            self._load_single_lora(self.current_lora)
-
-    def get_available_loras(self) -> list[str]:
-        """Get list of available LoRA adapters"""
-        return list(self.lora_weights.keys())
-
-    def get_current_lora(self) -> str | None:
-        """Get currently active LoRA adapter"""
-        return self.current_lora
-
-    def get_base_model(self):
-        return self.base_tokenizer
-
-
 # * --- test --- * #
 
 from src.utilities.logging import catch_any
@@ -1336,6 +1088,7 @@ def test_tokenizer_fb(
     device="cuda:1",
     base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
     lora_ckpt: str | list[str] | None = None,
+    lora_changes_chans: list[int] | None = None,
     active_lora_name: str | None = None,
     check_grad=False,
     show_mem_usage=False,
@@ -1359,6 +1112,7 @@ def test_tokenizer_fb(
     from tqdm import tqdm, trange
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
+    from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
@@ -1372,7 +1126,22 @@ def test_tokenizer_fb(
         "in_channels": [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368],
         "spatial_compression": 8,
         "num_res_blocks": 2,
-        "out_channels": [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368],
+        "out_channels": [
+            3,
+            4,
+            8,
+            10,
+            12,
+            13,
+            32,
+            50,
+            150,
+            175,
+            202,
+            224,
+            242,
+            368,
+        ],
         "resolution": 1024,
         "patch_size": 1,
         "patch_method": "haar",
@@ -1422,10 +1191,13 @@ def test_tokenizer_fb(
         tokenizer_mixin = TokenizerLoRAMixin(
             tokenizer=tokenizer,
             lora_weights=lora_weights,
+            lora_hyper_chans=lora_changes_chans,
             active_lora=active_lora_name,
             lora_cfg=None,  # Use configs from directories
         )
-        tokenizer = tokenizer_mixin.base_tokenizer
+        # get base model
+        # tokenizer = tokenizer_mixin.base_tokenizer
+        tokenizer = tokenizer_mixin
 
         # ! mixed adapter loaded may fail, because the module_save is different
         # tokenizer_peft = None
@@ -1447,14 +1219,15 @@ def test_tokenizer_fb(
         log_print(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
 
         # Activate specified LoRA if provided
-        if active_lora_name:
-            try:
-                tokenizer_mixin.change_lora("IKONOS")
-                tokenizer_mixin.change_lora(active_lora_name)
-                log_print(f"Activated LoRA: {tokenizer_mixin.get_current_lora()}")
-            except Exception as e:
-                log_print(f"Failed to activate LoRA {active_lora_name}: {e}")
-                log_print("Using base model without LoRA")
+        # if active_lora_name:
+        #     try:
+        #         tokenizer_mixin.change_lora("IKONOS")
+        #         tokenizer_mixin.change_lora(active_lora_name)
+        #         log_print(f"Activated LoRA: {tokenizer_mixin.get_current_lora()}")
+        #     except Exception as e:
+        #         raise RuntimeError(
+        #             f"[TokenizerTest]: Failed to activate LoRA '{active_lora_name}'"
+        #         )
 
     if count_params:
         log_print(parameter_count_table(tokenizer))
@@ -1563,7 +1336,7 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_fb(
         base_model_ckpt="runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="WV3",
+        real_data="Xiongan",
         save_pca_vis=True,
         pca_type="z",
         idx_of_dl=16,
@@ -1572,10 +1345,17 @@ if __name__ == "__main__":
             "runs/stage1_cosmos_lora/2025-08-28_23-17-54_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
             "runs/stage1_cosmos_lora/2025-08-29_19-28-44_cosmos_lora=lora_r=32_f8c16p1_IKONOS/peft_ckpt/IKONOS",
             "runs/stage1_cosmos_lora/2025-08-29_22-23-28_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC",
+            "runs/stage1_cosmos_lora/2025-09-02_18-36-19_cosmos_lora=lora_r=32_f8c16p1_Xiongan/peft_ckpt/Xiongan",
         ],
+        lora_changes_chans={
+            "WV3": 8,
+            "IKONOS": 4,
+            "WDC": 191,
+            "Xiongan": 256,
+        },
         save_img_dir="tmp",
-        rgb_chans=[2, 1, 0],  # RGB
-        dtype=torch.float32,
-        upscale=4,
-        active_lora_name="WV3",
+        rgb_chans=[49, 39, 29],  # RGB
+        dtype=torch.bfloat16,
+        upscale=1,
+        active_lora_name="Xiongan",
     )

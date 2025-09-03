@@ -1,5 +1,6 @@
 from typing import Callable
 
+import lazy_loader
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +8,15 @@ from einops import rearrange
 from jaxtyping import Array, Float
 from timm.layers.attention import Attention as Attention_
 from torch import Tensor
+
+natten = lazy_loader.load("natten")
+
+
+def _float16_clip_value(x):
+    if torch.get_autocast_dtype("cuda") == torch.float16:
+        x = x.clip(-65504, 65504)
+
+    return x
 
 
 class NatAttention(nn.Module):
@@ -18,7 +28,7 @@ class NatAttention(nn.Module):
         dilation=2,
         num_heads=8,
         qkv_bias=True,
-        qk_norm: nn.Module | None = None,
+        qk_norm: type[nn.Module] | None = None,
         norm_layer=None,
         proj_bias: bool = True,
         attn_drop: float = 0.0,
@@ -38,13 +48,15 @@ class NatAttention(nn.Module):
 
         self.qkv = nn.Conv2d(dim, dim * 3, 3, 1, 1, groups=dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.norm = norm_layer(dim) if scale_norm else nn.Identity()
+        self.norm = (
+            norm_layer(dim) if scale_norm and norm_layer is not None else nn.Identity()
+        )
         self.proj = nn.Conv2d(dim, dim, 1, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        if qk_norm:
-            self.q_norm = norm_layer(self.head_dim)
-            self.k_norm = norm_layer(self.head_dim)
+        if qk_norm is not None:
+            self.q_norm = qk_norm(self.head_dim)
+            self.k_norm = qk_norm(self.head_dim)
         else:
             self.q_norm = self.k_norm = nn.Identity()
 
@@ -78,7 +90,7 @@ class NatAttention(nn.Module):
 
         q, k = self._apply_rope(q, k, rope)
 
-        x = natten.na2d(  # (bs, h, w, nh, hd)
+        x = natten.na2d(  # (bs, h, w, nh, hd)  # type: ignore
             q,
             k,
             v,
@@ -94,8 +106,7 @@ class NatAttention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        if torch.get_autocast_dtype("cuda") == torch.float16:
-            x = x.clip(-65504, 65504)
+        x = _float16_clip_value(x)
 
         return x
 
@@ -106,7 +117,7 @@ class Attention(Attention_):
         dim,
         num_heads=8,
         qkv_bias=True,
-        qk_norm: nn.Module | None = None,
+        qk_norm: type[nn.Module] | None = None,
         **block_kwargs,
     ):
         super().__init__(
@@ -161,7 +172,6 @@ class Attention(Attention_):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        if torch.get_autocast_dtype("cuda") == torch.float16:
-            x = x.clip(-65504, 65504)
+        x = _float16_clip_value(x)
 
         return x

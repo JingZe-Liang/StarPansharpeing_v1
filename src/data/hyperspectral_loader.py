@@ -546,6 +546,7 @@ def get_fast_test_hyperspectral_data(
         "IKONOS",
         "RS5M",
         "BigEarthNetS2",
+        "Xiongan",
     ] = "DCF",
     batch_size: int = 1,
 ):
@@ -564,6 +565,7 @@ def get_fast_test_hyperspectral_data(
         "IKONOS": "data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar",
         "RS5M": "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-0010.tar",
         "BigEarthNetS2": "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
+        "Xiongan": "data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar",
     }[data_type]
 
     if "BigEarthNetS2" != data_type:

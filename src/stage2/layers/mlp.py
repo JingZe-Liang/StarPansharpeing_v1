@@ -19,7 +19,7 @@ class SwiGLU(nn.Module):
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer=nn.SiLU,
+        act_layer: type[nn.Module] = nn.SiLU,
         norm_layer=None,
         bias=True,
         drop=0.0,
@@ -28,8 +28,8 @@ class SwiGLU(nn.Module):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        bias = to_2tuple(bias)
-        drop_probs = to_2tuple(drop)
+        bias: tuple[bool, bool] = to_2tuple(bias)  # type: ignore
+        drop_probs: tuple[float, float] = to_2tuple(drop)  # type: ignore
         self.use_conv = use_conv
 
         linear_layer = (
@@ -68,7 +68,7 @@ class ClipSwiGLUMlp(SwiGLU):
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer=SwiGLUAct,
+        act_layer: type[nn.Module] = SwiGLUAct,
         norm_layer=None,
         bias=True,
         drop=0.0,

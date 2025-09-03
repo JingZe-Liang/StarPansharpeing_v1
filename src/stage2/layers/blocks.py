@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from timm.layers.drop import DropPath
 from timm.models.convnext import ConvNeXtStage
+from torch.utils.checkpoint import checkpoint
 
 from .attention import Attention, NatAttention
 from .conv import MbConvLNBlock, Stem
@@ -22,7 +23,7 @@ class AttentionBlock(nn.Module):
         kernel_size=8,
         stride=2,
         dilation=2,
-        qk_norm: nn.Module | None = None,
+        qk_norm: type[nn.Module] | None = None,
         drop=0.0,
         attn_drop=0.0,
         drop_path=0.0,
@@ -47,13 +48,13 @@ class AttentionBlock(nn.Module):
         else:
             self.attn = NatAttention(
                 dim,
-                kernel_size,
-                stride,
-                dilation,
-                num_heads,
-                qkv_bias,
-                qk_norm,
-                norm_layer,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                norm_layer=norm_layer,
                 proj_bias=True,
                 attn_drop=attn_drop,
                 proj_drop=drop,
@@ -132,19 +133,20 @@ class MbConvStages(nn.Module):
             stages[f"stage_{s}"] = nn.ModuleList(blocks)
         self.stages = nn.ModuleDict(stages)
 
-    def forward(self, x, cond):
+    def forward(self, x, cond=None):
         x = self.stem(x)
 
         # interpolate the condition
-        cond = th.nn.functional.interpolate(
-            cond, size=x.shape[2:], mode="bilinear", align_corners=False
-        )
+        if cond is not None:
+            cond = th.nn.functional.interpolate(
+                cond, size=x.shape[2:], mode="bilinear", align_corners=False
+            )
 
         # stages
         for stage in self.stages.values():
-            for block in stage:
+            for block in stage:  # type: ignore
                 if self.grad_checkpointing and self.training:
-                    x = torch.utils.checkpoint(block, x, cond, use_reentrant=False)
+                    x = checkpoint(block, x, cond, use_reentrant=False)
                 else:
                     x = block(x, cond)
 

@@ -1070,6 +1070,162 @@ class Mlp(nn.Module):
 # * --- Input and output convs with different bands images --- #
 
 
+def _create_conv_in_module(
+    basic_module: str,
+    c: int,
+    hidden_dim: int,
+    padding_mode: str,
+):
+    if basic_module == "conv":
+        module = nn.Conv2d(
+            in_channels=c,
+            out_channels=hidden_dim,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            padding_mode=padding_mode,
+        )
+    elif basic_module == "mobile":
+        module = nn.Sequential(
+            nn.Conv2d(c, hidden_dim, 1, 1, 0),
+            nn.Conv2d(
+                hidden_dim,
+                hidden_dim,
+                3,
+                1,
+                1,
+                padding_mode=padding_mode,
+                groups=hidden_dim,
+            ),
+        )
+    elif basic_module == "inv_bottleneck":
+        module = ResidualBlock(
+            GLUMBConv(
+                in_channels=c,
+                out_channels=hidden_dim,
+                kernel_size=3,
+                stride=1,
+                expand_ratio=4,
+                use_bias=True,
+                norm=(None, None, "rms_triton"),
+                act_func=("silu", "silu", None),
+            ),
+            nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1),
+        )
+    elif basic_module == "resnet":
+        module = ResnetBlock(
+            in_channels=c,
+            out_channels=hidden_dim,
+            num_groups=1,
+            dropout=0.0,
+            act_checkpoint=False,
+            padding_mode=padding_mode,
+            norm_type="gn",
+        )
+    elif basic_module == "moe":
+        module = nn.Sequential(
+            nn.Conv2d(
+                in_channels=c,
+                out_channels=hidden_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode="zeros",
+            ),
+            MoE2DBlock(
+                in_channels=hidden_dim,
+                hidden_channels=hidden_dim,
+                n_experts=4,
+                n_selected=1,
+                n_shared_experts=1,
+                moe_type="tc",
+                act_checkpoint=False,
+            ),
+            # to patcher dim
+            # nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1, padding=0),
+        )
+    else:
+        raise ValueError(f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}")
+    return module
+
+
+def _create_conv_out_module(
+    basic_module: str,
+    c: int,
+    hidden_dim: int,
+    padding_mode: str,
+):
+    if basic_module == "conv":
+        module = nn.Conv2d(
+            in_channels=hidden_dim,
+            out_channels=c,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            padding_mode=padding_mode,
+        )
+    elif basic_module == "mobile":
+        module = nn.Sequential(
+            nn.Conv2d(
+                hidden_dim,
+                hidden_dim,
+                3,
+                1,
+                1,
+                padding_mode=padding_mode,
+                groups=hidden_dim,
+            ),
+            nn.Conv2d(hidden_dim, c, 1, 1, 0),
+        )
+    elif basic_module == "inv_bottleneck":
+        module = ResidualBlock(
+            GLUMBConv(
+                in_channels=hidden_dim,
+                out_channels=c,
+                kernel_size=3,
+                stride=1,
+                expand_ratio=4,
+                use_bias=True,
+                norm=(None, None, "rms_triton"),
+                act_func=("silu", "silu", None),
+            ),
+            nn.Conv2d(hidden_dim, c, kernel_size=1, stride=1),
+        )
+    elif basic_module == "resnet":
+        module = ResnetBlock(
+            in_channels=hidden_dim,
+            out_channels=c,
+            dropout=0.0,
+            act_checkpoint=False,
+            num_groups=1,
+            norm_type="gn",
+        )
+    elif basic_module == "moe":
+        module = nn.Sequential(
+            nn.Conv2d(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode=padding_mode,
+            ),
+            MoE2DBlock(
+                in_channels=hidden_dim,
+                hidden_channels=hidden_dim,
+                n_experts=4,
+                n_selected=1,
+                n_shared_experts=1,
+                moe_type="tc",
+                act_checkpoint=False,
+            ),
+            nn.Conv2d(hidden_dim, c, kernel_size=1, stride=1, padding=0),
+        )
+    else:
+        raise ValueError(f"[DiffBandsInputConvOut] Unknown basic_module={basic_module}")
+    return module
+
+
 class DiffBandsInputConvIn(nn.Module):
     def __init__(
         self,
@@ -1080,91 +1236,56 @@ class DiffBandsInputConvIn(nn.Module):
         check_grads: bool = True,
     ):
         super().__init__()
-
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
         self.is_ddp = PartialState().use_distributed or check_grads
+        self._in_module_partial_kwargs = {
+            "basic_module": basic_module,
+            "hidden_dim": hidden_dim,
+            "padding_mode": padding_mode,
+        }
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
-            if basic_module == "conv":
-                module = nn.Conv2d(
-                    in_channels=c,
-                    out_channels=hidden_dim,
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                    padding_mode=padding_mode,
-                )
-            elif basic_module == "mobile":
-                module = nn.Sequential(
-                    nn.Conv2d(c, hidden_dim, 1, 1, 0),
-                    nn.Conv2d(
-                        hidden_dim,
-                        hidden_dim,
-                        3,
-                        1,
-                        1,
-                        padding_mode=padding_mode,
-                        groups=hidden_dim,
-                    ),
-                )
-            elif basic_module == "inv_bottleneck":
-                module = ResidualBlock(
-                    GLUMBConv(
-                        in_channels=c,
-                        out_channels=hidden_dim,
-                        kernel_size=3,
-                        stride=1,
-                        expand_ratio=4,
-                        use_bias=True,
-                        norm=(None, None, "rms_triton"),
-                        act_func=("silu", "silu", None),
-                    ),
-                    nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1),
-                )
-            elif basic_module == "resnet":
-                module = ResnetBlock(
-                    in_channels=c,
-                    out_channels=hidden_dim,
-                    num_groups=1,
-                    dropout=0.0,
-                    act_checkpoint=False,
-                    padding_mode=padding_mode,
-                    norm_type="gn",
-                )
-            elif basic_module == "moe":
-                module = nn.Sequential(
-                    nn.Conv2d(
-                        in_channels=c,
-                        out_channels=hidden_dim,
-                        kernel_size=3,
-                        stride=1,
-                        padding=1,
-                        padding_mode="zeros",
-                    ),
-                    MoE2DBlock(
-                        in_channels=hidden_dim,
-                        hidden_channels=hidden_dim,
-                        n_experts=4,
-                        n_selected=1,
-                        n_shared_experts=1,
-                        moe_type="tc",
-                        act_checkpoint=False,
-                    ),
-                    # to patcher dim
-                    # nn.Conv2d(c, hidden_dim, kernel_size=1, stride=1, padding=0),
-                )
-            else:
-                raise ValueError(
-                    f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}"
-                )
-
+            module = _create_conv_in_module(c=c, **self._in_module_partial_kwargs)
             self.in_modules["conv_in_{}".format(c)] = module
-
             log_print(
                 f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
             )
+
+    def add_or_drop_modules(
+        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
+    ):
+        """
+        Add or remove convolution modules for specific channels.
+
+        Args:
+            add_chans: List of channel numbers to add modules for
+            drop_chans: List of channel numbers to remove modules for
+        """
+        if drop_chans is not None:
+            for drop_chan in drop_chans:
+                if drop_chan in self.band_lst:
+                    # Remove module
+                    conv_key = f"conv_in_{drop_chan}"
+                    if conv_key in self.in_modules:
+                        del self.in_modules[conv_key]
+
+                    # Update band list
+                    self.band_lst = [c for c in self.band_lst if c != drop_chan]
+
+        if add_chans is not None:
+            for add_chan in add_chans:
+                if add_chan not in self.band_lst:
+                    # Add module using saved kwargs
+                    conv_key = f"conv_in_{add_chan}"
+                    self.in_modules[conv_key] = _create_conv_in_module(
+                        c=add_chan, **self._in_module_partial_kwargs
+                    )
+
+                    # Update band list
+                    self.band_lst.append(add_chan)
+                    self.band_lst.sort()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
@@ -1200,88 +1321,55 @@ class DiffBandsInputConvOut(nn.Module):
         self.hidden_dim = hidden_dim
         self.basic_module = basic_module
         self.is_ddp = PartialState().use_distributed or check_grads
+        self._out_module_partial_kwargs = {
+            "basic_module": basic_module,
+            "hidden_dim": hidden_dim,
+            "padding_mode": padding_mode,
+        }
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
-            if basic_module == "conv":
-                module = nn.Conv2d(
-                    in_channels=hidden_dim,
-                    out_channels=c,
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                    padding_mode=padding_mode,
-                )
-            elif basic_module == "mobile":
-                module = nn.Sequential(
-                    nn.Conv2d(
-                        hidden_dim,
-                        hidden_dim,
-                        3,
-                        1,
-                        1,
-                        padding_mode=padding_mode,
-                        groups=hidden_dim,
-                    ),
-                    nn.Conv2d(hidden_dim, c, 1, 1, 0),
-                )
-            elif basic_module == "inv_bottleneck":
-                module = ResidualBlock(
-                    GLUMBConv(
-                        in_channels=hidden_dim,
-                        out_channels=c,
-                        kernel_size=3,
-                        stride=1,
-                        expand_ratio=4,
-                        use_bias=True,
-                        norm=(None, None, "rms_triton"),
-                        act_func=("silu", "silu", None),
-                    ),
-                    nn.Conv2d(hidden_dim, c, kernel_size=1, stride=1, padding=0),
-                )
-            elif basic_module == "resnet":
-                module = ResnetBlock(
-                    in_channels=hidden_dim,
-                    out_channels=c,
-                    dropout=0.0,
-                    act_checkpoint=False,
-                    num_groups=1,
-                    norm_type="gn",
-                )
-            elif basic_module == "moe":
-                module = nn.Sequential(
-                    nn.Conv2d(
-                        in_channels=hidden_dim,
-                        out_channels=hidden_dim,
-                        kernel_size=3,
-                        stride=1,
-                        padding=1,
-                        padding_mode=padding_mode,
-                    ),
-                    MoE2DBlock(
-                        in_channels=hidden_dim,
-                        hidden_channels=hidden_dim,
-                        n_experts=4,
-                        n_selected=1,
-                        n_shared_experts=1,
-                        moe_type="tc",
-                        act_checkpoint=False,
-                    ),
-                    # to patcher dim
-                    nn.Conv2d(hidden_dim, c, kernel_size=1, stride=1, padding=0),
-                )
-            else:
-                raise ValueError(
-                    f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}"
-                )
-
+            module = _create_conv_out_module(c=c, **self._out_module_partial_kwargs)
             self.in_modules["conv_out_{}".format(c)] = module
-
             log_print(
                 f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}"
             )
 
         self.out_channel = None
+
+    def add_or_drop_modules(
+        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
+    ):
+        """
+        Add or remove convolution modules for specific channels.
+
+        Args:
+            add_chans: List of channel numbers to add modules for
+            drop_chans: List of channel numbers to remove modules for
+        """
+        if drop_chans is not None:
+            for drop_chan in drop_chans:
+                if drop_chan in self.band_lst:
+                    # Remove module
+                    conv_key = f"conv_out_{drop_chan}"
+                    if conv_key in self.in_modules:
+                        del self.in_modules[conv_key]
+
+                    # Update band list
+                    self.band_lst = [c for c in self.band_lst if c != drop_chan]
+
+        if add_chans is not None:
+            for add_chan in add_chans:
+                if add_chan not in self.band_lst:
+                    # Add module using saved kwargs
+                    conv_key = f"conv_out_{add_chan}"
+                    self.in_modules[conv_key] = _create_conv_out_module(
+                        c=add_chan, **self._out_module_partial_kwargs
+                    )
+
+                    # Update band list
+                    self.band_lst.append(add_chan)
+                    self.band_lst.sort()
 
     def forward(self, x: torch.Tensor, out_channel: int) -> torch.Tensor:
         self.out_channel = out_channel
