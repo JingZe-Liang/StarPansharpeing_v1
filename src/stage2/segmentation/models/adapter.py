@@ -15,7 +15,8 @@ from src.stage1.utilities.losses.dinov3.dinov3.eval.segmentation.models.backbone
 from src.stage1.utilities.losses.dinov3.dinov3.models.vision_transformer import (
     DinoVisionTransformer,
 )
-from src.stage2.classification.models.vitamin_conv import MbConvSeqentialCond
+
+from .vitamin_conv import MbConvSeqentialCond
 
 
 class GatedChannelSelection(nn.Module):

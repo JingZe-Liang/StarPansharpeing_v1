@@ -9,9 +9,9 @@ requires-python = ">=3.12, <=3.13"
 dependencies = [
     "numpy>=1.21.0",
     "torch>=2.6.0",
-    "transformers>=4.30.0",
-    "timm>=0.9.6",
-    "accelerate",
+    "transformers>=4.55.4",
+    "timm>=1.0.19",
+    "accelerate>=1.10.1",
     "torchvision",
     "matplotlib",
     "loguru",
@@ -20,6 +20,20 @@ dependencies = [
     "bitsandbytes",
     "heavyball",
     "fvcore",
+    "jaxtyping",
+    "torchmetrics",
+    "tifffile",
+    "webdataset",
+    "wids",
+    "kornia",
+    "natsort",
+    "safetensors",
+    "natten",  # Optional
+    "lazy_loader",
+    "rich_argparse",
+    "omegaconf",
+    "hydra-core",
+    "segmentation_models_pytorch",
 ]
 
 [project.optional-dependencies]

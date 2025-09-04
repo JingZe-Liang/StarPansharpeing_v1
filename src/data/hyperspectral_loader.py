@@ -1,9 +1,7 @@
 import os
-import re
 import warnings
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Literal, Sequence, cast
 
 import accelerate
@@ -1572,7 +1570,8 @@ if __name__ == "__main__":
         # ]
         # ["data/HyperGlobal/hyper_images/HyperGlobal-GF5-bands-px_64_0002.tar"]
         # ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
-        ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
+        # ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
+        ["data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
@@ -1694,9 +1693,8 @@ if __name__ == "__main__":
         img = img[0].permute(1, 2, 0)[..., [32, 18, 9]]
         img = (img * 255.0).to(torch.uint8)
         img = img.cpu().numpy()
-        PIL.Image.fromarray(img).save(
-            f"/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/WDC/patch_{i}.jpg"
-        )
+        PIL.Image.fromarray(img).save(f"data/Downstreams/UrbanUnmixing/patch_{i}.jpg")
+
         i += 1
 
         tbar.update(1)

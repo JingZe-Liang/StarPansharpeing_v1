@@ -1,4 +1,4 @@
-from .attention import Attention, NatAttention
+from .attention import Attention, NatAttention1d, NatAttention2d
 from .blocks import AttentionBlock, ConvNeXtStage, MbConvStages
 from .conv import ConvNeXtBlock, MbConvLNBlock, Stem, StridedConv
 from .layerscale import LayerScale

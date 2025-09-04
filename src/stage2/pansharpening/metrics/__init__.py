@@ -1,1 +1,1 @@
-from .metric_pansharpening import AnalysisPanAcc
+from .metric_pansharpening import AnalysisPanAcc, PansharpeningMetrics

@@ -19,6 +19,7 @@ from warnings import warn
 import numpy as np
 import torch
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from torchmetrics.aggregation import MeanMetric
 
 from src.utilities.logging import log_print
 
@@ -52,6 +53,66 @@ def dict_to_str(d, decimals=4):
     for i, (k, v) in enumerate(d.items()):
         s += func(k, v) + (", " if i < n - 1 else "")
     return s
+
+
+def normalize_to_01(x):
+    # normalize tensor to [0, 1]
+    if isinstance(x, torch.Tensor):
+        x -= x.flatten(-2).min(-1, keepdim=True)[0][..., None]
+        x /= x.flatten(-2).max(-1, keepdim=True)[0][..., None]
+    elif isinstance(x, np.ndarray):
+        x -= x.min((-2, -1), keepdims=True)
+        x /= x.max((-2, -1), keepdims=True)
+    else:
+        raise TypeError("x should be tensor or numpy array")
+
+    return x
+
+
+def psnr_one_img(img_gt, img_test):
+    """
+    calculate PSNR for one image
+    :param img_gt: ground truth image, numpy array, shape [H, W, C]
+    :param img_test: test or inference image, numpy array, shape [H, W, C]
+    :return: PSNR, float type
+    """
+    assert img_gt.shape == img_test.shape, (
+        "image 1 and image 2 should have the same size"
+    )
+    return peak_signal_noise_ratio(img_gt, img_test)
+
+
+def psnr_batch_tensor_metric(b_gt, b_pred):
+    """
+    calculate PSNR for batch tensor images
+    :param b_gt: tensor, shape [B, C, H, W]
+    :param b_test: tensor, shape [B, C, H, W]
+    :return:
+    """
+    assert b_gt.shape[0] == b_pred.shape[0]
+    bs = b_gt.shape[0]
+    psnr = 0.0
+    for gt, t in zip(b_gt, b_pred):
+        psnr += psnr_one_img(*(to_numpy(gt, t)))
+    return psnr / bs
+
+
+def ssim_one_image(img_gt, img_test, channel_axis=0):
+    assert img_gt.shape == img_test.shape, (
+        "image 1 and image 2 should have the same size"
+    )
+    return structural_similarity(
+        img_gt, img_test, channel_axis=channel_axis, data_range=1.0
+    )
+
+
+def ssim_batch_tensor_metric(b_gt, b_pred):
+    assert b_gt.shape[0] == b_pred.shape[0]
+    bs = b_gt.shape[0]
+    ssim = 0.0
+    for gt, t in zip(b_gt, b_pred):
+        ssim += ssim_one_image(*(to_numpy(gt, t)), channel_axis=0)
+    return ssim / bs
 
 
 class NonAnalysis(object):
@@ -269,7 +330,7 @@ class AnalysisPanAcc(object):
 
         return may_np_to_tensor(kwargs)
 
-    def __call__(self, *args):
+    def __call__(self, *args) -> dict:
         """
         Args:
             ref mode:
@@ -315,64 +376,45 @@ class AnalysisPanAcc(object):
         return repr_str
 
 
-def normalize_to_01(x):
-    # normalize tensor to [0, 1]
-    if isinstance(x, torch.Tensor):
-        x -= x.flatten(-2).min(-1, keepdim=True)[0][..., None]
-        x /= x.flatten(-2).max(-1, keepdim=True)[0][..., None]
-    elif isinstance(x, np.ndarray):
-        x -= x.min((-2, -1), keepdims=True)
-        x /= x.max((-2, -1), keepdims=True)
-    else:
-        raise TypeError("x should be tensor or numpy array")
+class PansharpeningMetrics(AnalysisPanAcc):
+    def __init__(self, ratio=4, ref=True, eargas_ratio=4, **unref_factory_kwargs):
+        super().__init__(ratio, ref, **unref_factory_kwargs)
 
-    return x
+        # Convert to all MeanMetric
+        self.acc_ave: dict[str, float]
+        self.acc_ave_metrics = {k: MeanMetric() for k, v in self.acc_ave.items()}
 
+    def _to_sync_metrics(self, acc: dict, weight: float | int = 1.0):
+        for (k, update_v), name in zip(acc.items(), self.acc_ave_metrics.keys()):
+            self.acc_ave_metrics[name].update(update_v, weight)
+        return self.acc_ave_metrics
 
-def psnr_one_img(img_gt, img_test):
-    """
-    calculate PSNR for one image
-    :param img_gt: ground truth image, numpy array, shape [H, W, C]
-    :param img_test: test or inference image, numpy array, shape [H, W, C]
-    :return: PSNR, float type
-    """
-    assert img_gt.shape == img_test.shape, (
-        "image 1 and image 2 should have the same size"
-    )
-    return peak_signal_noise_ratio(img_gt, img_test)
+    def _get_acc_ave(self) -> dict[str, float]:
+        acc_ave = {}
+        for k, metric in self.acc_ave_metrics.items():
+            # may synchronize across ranks and keep type as float
+            acc_ave[k] = metric.compute().item()
+        return acc_ave
 
+    def __call__(self, *inp_tensors):
+        kwargs = self._call_check_args_to_kwargs(*inp_tensors)
+        n = inp_tensors[0].shape[0]
+        device = inp_tensors[0].device
 
-def psnr_batch_tensor_metric(b_gt, b_pred):
-    """
-    calculate PSNR for batch tensor images
-    :param b_gt: tensor, shape [B, C, H, W]
-    :param b_test: tensor, shape [B, C, H, W]
-    :return:
-    """
-    assert b_gt.shape[0] == b_pred.shape[0]
-    bs = b_gt.shape[0]
-    psnr = 0.0
-    for gt, t in zip(b_gt, b_pred):
-        psnr += psnr_one_img(*(to_numpy(gt, t)))
-    return psnr / bs
+        acc_dict = self.once_batch_call(**kwargs)
+        # to tensor
+        acc_dict_th = {
+            k: torch.as_tensor(v, device=device) for k, v in acc_dict.items()
+        }
+        self.acc_ave_metrics = self._to_sync_metrics(acc_dict_th)
+        self.acc_ave = self._get_acc_ave()
+        self._call_n += n
+        return self.acc_ave
 
-
-def ssim_one_image(img_gt, img_test, channel_axis=0):
-    assert img_gt.shape == img_test.shape, (
-        "image 1 and image 2 should have the same size"
-    )
-    return structural_similarity(
-        img_gt, img_test, channel_axis=channel_axis, data_range=1.0
-    )
-
-
-def ssim_batch_tensor_metric(b_gt, b_pred):
-    assert b_gt.shape[0] == b_pred.shape[0]
-    bs = b_gt.shape[0]
-    ssim = 0.0
-    for gt, t in zip(b_gt, b_pred):
-        ssim += ssim_one_image(*(to_numpy(gt, t)), channel_axis=0)
-    return ssim / bs
+    def clear_history(self, verbose=False):
+        super().clear_history(verbose)
+        for n, metric in self.acc_ave_metrics.items():
+            metric.reset()
 
 
 if __name__ == "__main__":

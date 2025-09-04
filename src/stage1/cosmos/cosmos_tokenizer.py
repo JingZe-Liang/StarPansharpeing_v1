@@ -1113,9 +1113,11 @@ def test_tokenizer_fb(
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
     from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
+    from src.stage1.cosmos.modules import blocks
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
+    blocks.compile_forward_fn = False
     torch.cuda.set_device(device)
 
     config = {

@@ -610,12 +610,40 @@ class GenerativeDecoder(Decoder):
         resample_norm_keep: bool = False,
         **ignore_kwargs,
     ):
-        kwargs = locals()
-        _ignore_kwargs = kwargs.pop("ignore_kwargs", {})
-        kwargs.update(_ignore_kwargs)
+        super().__init__(
+            out_channels=out_channels,
+            channels=channels,
+            channels_mult=channels_mult,
+            num_res_blocks=num_res_blocks,
+            attn_resolutions=attn_resolutions,
+            dropout=dropout,
+            resolution=resolution,
+            z_channels=z_channels,
+            spatial_compression=spatial_compression,
+            act_checkpoint=act_checkpoint,
+            use_residual_factor=use_residual_factor,
+            upsample_type=upsample_type,
+            upsample_shortcut=upsample_shortcut,
+            conv_out_module=conv_out_module,
+            attn_type=attn_type,
+            block_name=block_name,
+            moe_n_experts=moe_n_experts,
+            moe_n_selected=moe_n_selected,
+            moe_n_shared_experts=moe_n_shared_experts,
+            hidden_factor=hidden_factor,
+            moe_type=moe_type,
+            moe_token_mixer_type=moe_token_mixer_type,
+            padding_mode=padding_mode,
+            norm_type=norm_type,
+            norm_groups=norm_groups,
+            patch_size=patch_size,
+            patch_method=patch_method,
+            resample_norm_keep=resample_norm_keep,
+            **ignore_kwargs,
+        )
 
-        super().__init__(**kwargs)
         # First conv_in should be [z, noise]
+        block_in = channels * channels_mult[self.num_resolutions - 1]
         self.conv_in = torch.nn.Conv2d(
             z_channels * 2,
             block_in,
@@ -626,7 +654,6 @@ class GenerativeDecoder(Decoder):
         )
 
         # Code conditioning blocks
-        block_in = channels * channels_mult[self.num_resolutions - 1]
         self.cond_layers = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block_out = channels * channels_mult[i_level]
@@ -1303,8 +1330,33 @@ if __name__ == "__main__":
         out = moe_block(x)
         print("output shape: ", out.shape)
 
+    def test_generative_decoder():
+        torch.cuda.set_device("cuda:1")
+
+        decoder = GenerativeDecoder(
+            16,
+            128,
+            [2, 4, 4],
+            2,
+            [],
+            0.0,
+            256,
+            16,
+            8,
+            False,
+            patch_size=1,
+            padding_mode="reflect",
+        ).cuda()
+
+        x = torch.randn(1, 16, 32, 32).cuda()
+        with torch.no_grad():
+            out = decoder(x)
+
+        print(out.shape)
+
     # test_auto_enc_dec()
     # test_diff_enc_dec()
-    test_multi_bands_enc_dec(True)
+    # test_multi_bands_enc_dec(True)
+    test_generative_decoder()
 
     # test_moe_layer()

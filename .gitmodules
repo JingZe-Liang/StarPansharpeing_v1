@@ -23,7 +23,7 @@
     url = https://github.com/hustvl/LightningDiT
 
 [submodule "src/stage2/denoise/HyperSIGMA"]
-    path = src/stage2/denoise/HyperSIGMA
+    path = src/stage2/HyperSIGMA
     url = https://github.com/WHU-Sigma/HyperSIGMA
 
 [submodule "src/stage2/generative/HSIGene"]

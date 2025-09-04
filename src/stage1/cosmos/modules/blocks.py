@@ -32,7 +32,7 @@ from .utils import (
 
 # * --- Blocks compilations --- * #
 
-compile_forward_fn = False
+compile_forward_fn = True
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True

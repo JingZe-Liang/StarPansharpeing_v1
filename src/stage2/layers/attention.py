@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from jaxtyping import Array, Float
+from jaxtyping import Float
 from timm.layers.attention import Attention as Attention_
 from torch import Tensor
 
@@ -19,7 +19,150 @@ def _float16_clip_value(x):
     return x
 
 
-class NatAttention(nn.Module):
+class Attention(Attention_):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=True,
+        qk_norm: type[nn.Module] | None = None,
+        **block_kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            **block_kwargs,
+        )
+
+        if qk_norm:
+            self.q_norm = qk_norm(dim)
+            self.k_norm = qk_norm(dim)
+        else:
+            self.q_norm = self.k_norm = nn.Identity()
+
+    def forward(self, x, mask=None, rope: Callable | None = None):
+        B, N, C = x.shape
+
+        qkv = self.qkv(x).reshape(B, N, 3, C)
+        q, k, v = qkv.unbind(2)
+        dtype = q.dtype
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        q = q.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+        k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+
+        # RoPE
+        if rope is not None:
+            q, k = rope(q, k)
+
+        use_fp32_attention = getattr(
+            self, "fp32_attention", False
+        )  # necessary for NAN loss
+        if use_fp32_attention:
+            q, k, v = q.float(), k.float(), v.float()
+
+        # sdpa
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        if mask is not None and mask.ndim == 2:
+            mask = (1 - mask.to(x.dtype)) * -10000.0
+            mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
+
+        x = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
+        )
+        x = x.transpose(1, 2)
+
+        x = x.view(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        x = _float16_clip_value(x)
+
+        return x
+
+
+class NatAttention1d(Attention_):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=True,
+        qk_norm: type[nn.Module] | None = None,
+        kernel_size=8,
+        stride=2,
+        dilation=2,
+        **block_kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            **block_kwargs,
+        )
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.dilation = dilation
+
+        if qk_norm:
+            self.q_norm = qk_norm(dim)
+            self.k_norm = qk_norm(dim)
+        else:
+            self.q_norm = self.k_norm = nn.Identity()
+
+    def forward(self, x, mask=None, rope: Callable | None = None):
+        B, N, C = x.shape
+
+        qkv = self.qkv(x).reshape(B, N, 3, C)
+        q, k, v = qkv.unbind(2)
+        dtype = q.dtype
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        # (bs, seq_len, nh, hd)
+        q = q.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+        k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+
+        # RoPE
+        if rope is not None:
+            q, k = rope(q, k)
+
+        use_fp32_attention = getattr(
+            self, "fp32_attention", False
+        )  # necessary for NAN loss
+        if use_fp32_attention:
+            q, k, v = q.float(), k.float(), v.float()
+
+        # sdpa
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        x = natten.na1d(  # (bs, h, w, nh, hd)  # type: ignore
+            q,
+            k,
+            v,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            dilation=self.dilation,
+            is_causal=False,
+            torch_compile=False,
+        )
+        x = x.transpose(1, 2)
+
+        x = x.view(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        x = _float16_clip_value(x)
+
+        return x
+
+
+class NatAttention2d(nn.Module):
     def __init__(
         self,
         dim,
@@ -103,72 +246,6 @@ class NatAttention(nn.Module):
 
         x = rearrange(x, "b h w nh hd -> b (nh hd) h w")
         x = self.norm(x)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-
-        x = _float16_clip_value(x)
-
-        return x
-
-
-class Attention(Attention_):
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=True,
-        qk_norm: type[nn.Module] | None = None,
-        **block_kwargs,
-    ):
-        super().__init__(
-            dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            **block_kwargs,
-        )
-
-        if qk_norm:
-            self.q_norm = qk_norm(dim)
-            self.k_norm = qk_norm(dim)
-        else:
-            self.q_norm = self.k_norm = nn.Identity()
-
-    def forward(self, x, mask=None, rope: Callable | None = None):
-        B, N, C = x.shape
-
-        qkv = self.qkv(x).reshape(B, N, 3, C)
-        q, k, v = qkv.unbind(2)
-        dtype = q.dtype
-
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        q = q.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-        k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-
-        # RoPE
-        if rope is not None:
-            q, k = rope(q, k)
-
-        use_fp32_attention = getattr(
-            self, "fp32_attention", False
-        )  # necessary for NAN loss
-        if use_fp32_attention:
-            q, k, v = q.float(), k.float(), v.float()
-
-        # sdpa
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        if mask is not None and mask.ndim == 2:
-            mask = (1 - mask.to(x.dtype)) * -10000.0
-            mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
-
-        x = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
-        )
-        x = x.transpose(1, 2)
-
-        x = x.view(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 

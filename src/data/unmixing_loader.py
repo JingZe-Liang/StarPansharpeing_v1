@@ -53,7 +53,7 @@ def get_unmixing_dataloader(
 
 
 def test_loader() -> None:
-    path = "data/UrbanUnmixing/Urban_188_em4_init.tar"
+    path = "data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"
     ds, dl = get_unmixing_dataloader(path, 1, 0)
     for sample in dl:
         # print(sample.keys())

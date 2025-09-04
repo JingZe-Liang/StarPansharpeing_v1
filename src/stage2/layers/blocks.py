@@ -6,7 +6,7 @@ from timm.layers.drop import DropPath
 from timm.models.convnext import ConvNeXtStage
 from torch.utils.checkpoint import checkpoint
 
-from .attention import Attention, NatAttention
+from .attention import Attention, NatAttention1d, NatAttention2d
 from .conv import MbConvLNBlock, Stem
 from .layerscale import LayerScale
 from .mlp import ClipSwiGLUMlp, SwiGLU
@@ -45,8 +45,21 @@ class AttentionBlock(nn.Module):
                 attn_drop=attn_drop,
                 proj_drop=drop,
             )
-        else:
-            self.attn = NatAttention(
+        elif attn_type == "nat_1d":
+            self.attn = NatAttention1d(
+                dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                norm_layer=norm_layer,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+            )
+        elif attn_type == "nat_2d":
+            self.attn = NatAttention2d(
                 dim,
                 kernel_size=kernel_size,
                 stride=stride,

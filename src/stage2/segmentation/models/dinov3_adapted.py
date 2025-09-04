@@ -16,16 +16,13 @@ from src.stage1.utilities.losses.repa import (
 from src.stage1.utilities.losses.repa.feature_pca import (
     feature_pca_torch as hyper_to_rgb_pca,
 )
-from src.stage2.classification.models.adapter import (
-    DINOv3_Adapter,
-    DINOv3EncoderAdapter,
-    UNetDecoder,
-)
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
 )
 from src.utilities.logging import log
+
+from .adapter import DINOv3_Adapter, DINOv3EncoderAdapter, UNetDecoder
 
 DINOv3_INTERACTION_INDEXES = {
     "dinov3_vits16": [2, 5, 8, 11],
@@ -212,7 +209,11 @@ class DinoUNet(nn.Module):
 
         return x
 
-    def forward(self, x: Float[Tensor, "b c h w"], cond=None):
+    def forward(
+        self,
+        x: Float[Tensor, "b c h w"],
+        cond: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
+    ):
         x = self._ensure_rgb_input(x)
         skips = self.encoder(x)
         output = self.decoder(skips, cond)

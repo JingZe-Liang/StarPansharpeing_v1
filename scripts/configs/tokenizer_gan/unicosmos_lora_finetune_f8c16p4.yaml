@@ -18,14 +18,14 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: Xiongan
+  used: CD_224
   prefetch_factor: 2
   num_workers: 3
   shuffle_size: 100
   loader_type: webdataset
   shuffle_within_workers: false
   # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 256]}
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -41,7 +41,9 @@ dataset:
     IKONOS: 5
     WDC: 16
     Xiongan: 8
-    WHU_Hi: 12
+    WHU_Hi: 6
+    CD_224: 5
+    CD_242: 5
 
   transform_prob: 0.0
 

@@ -16,6 +16,8 @@ dataset_names_to_bs:
   QB: 12
   GF1: 16
   WDC: 16
+  CD_224: 5
+  CD_242: 5
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -33,6 +35,8 @@ dataset_names_to_n_channels:
   WDC: 191
   Xiongan: 256
   WHU_Hi: 270
+  CD_224: 224
+  CD_242: 242
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -50,6 +54,9 @@ dataset_names_to_rgb_channels:
   IKONOS: ${list:[2, 1, 0]}
   WDC: ${list:[19, 13, 8]}
   Xiongan: ${list:[29, 19, 9]}
+  WHU_Hi: ${list:[29,19,9]}
+  CD_224: ${list:[49,39,29]}
+  CD_242: ${list:[49,39,29]}
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -68,6 +75,8 @@ dataset_names_to_img_size:
   WDC: 160
   Xiongan: 256
   WHU_Hi: 256
+  CD_224: 128
+  CD_242: 128
 
 WDC_train:
   - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
@@ -168,6 +177,18 @@ WHU_Hi_train:
 
 WHU_Hi_val:
   - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
+
+CD_224_train:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-224bands-px_128-0000.tar
+
+CD_224_val:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-224bands-px_128-0000.tar
+
+CD_242_train:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-0000.tar
+
+CD_242_val:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-0000.tar
 
 # if is lora -------------
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
