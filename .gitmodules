@@ -85,3 +85,11 @@
 [submodule "src/stage2/detections/GT-HAD"]
 	path = src/stage2/detections/GT-HAD
 	url = https://github.com/jeline0110/GT-HAD.git
+
+[submodule "src/stage2/unmixing/traditional/HySUPP"]
+    path = src/stage2/unmixing/traditional/HySUPP
+    url = https://github.com/BehnoodRasti/HySUPP.git
+
+[submodule "src/stage2/unmixing/traditional/Hyperspectral-Unmixing-Models"]
+    path = src/stage2/unmixing/traditional/Hyperspectral-Unmixing-Models
+    url = https://github.com/UPCGIT/Hyperspectral-Unmixing-Models.git

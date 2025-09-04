@@ -25,6 +25,8 @@ class UnmixingConfig:
     learn_decoder: bool = False
     backward_decoder: bool = False
 
+    set_grad_checkpoint: bool = False
+
 
 class LatentUnmixingModel(AmotizedModelMixin):
     def __init__(
@@ -36,6 +38,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
         amotize_type: str,
         backward_decoder: bool = False,
         learn_decoder: bool = False,
+        set_grad_checkpoint: bool = False,
     ):
         assert decoder_fn is not None
         assert hasattr(end_member_model, "get_endmember")
@@ -49,6 +52,9 @@ class LatentUnmixingModel(AmotizedModelMixin):
             learn_decoder,
         )
         self.end_member_model = end_member_model
+
+        if set_grad_checkpoint:
+            self.set_grad_checkpoint(mode=True)
 
     @override
     def latent_to_pixel_fusion_forward(self, pixel_in: tuple, latent_in: tuple):
@@ -86,6 +92,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
             end_member_model=end_member_model,
             decoder_fn=detokenizer if detokenizer is not None else lambda x: x,
             amotize_type=config.amotize_type,
+            set_grad_checkpoint=config.set_grad_checkpoint,
         )
 
     def set_grad_checkpoint(self, mode=True):

@@ -1,11 +1,12 @@
 import torch
 from beartype import beartype
 from jaxtyping import Array, Float
+from kornia.filters import laplacian
 from torch import Tensor
 
-type Image = Float[Tensor, "b c h w"]
-type EndMember = Float[Tensor, "c_out c_in"]
-type Abunds = Float[Tensor, "b c_in h w"]
+type Image = Float[Tensor, "b bands h w"]
+type EndMember = Float[Tensor, "n_endmember bands"]
+type Abunds = Float[Tensor, "b bands h w"]
 
 
 def SAD_loss(y_true: Image, y_pred: Image):
@@ -26,6 +27,36 @@ def abunds_loss(abunds: Abunds):
 
 def endmember_tv_loss(end_members: EndMember):
     return torch.abs(end_members[:, 1:] - end_members[:, :-1]).sum()
+
+
+def mini_volumn_loss(end_members: EndMember, delta: float = 1.0):
+    bands = end_members.shape[1]
+    n_endmember = end_members.shape[0]
+    edm_mean = end_members.mean(dim=1, keepdim=True)
+    loss = delta * ((end_members - edm_mean) ** 2).sum() / bands / n_endmember
+    return loss
+
+
+def sparse_loss(abunds: Abunds, alpha: float = 1.0):
+    loss = abunds.abs().sqrt().sum(dim=1).mean()
+    return alpha * loss
+
+
+def laplacian_loss(abunds1: Abunds, abunds2: Abunds):
+    lap1 = laplacian(abunds1, 3)
+    lap2 = laplacian(abunds2, 3)
+    loss = torch.nn.functional.mse_loss(lap1, lap2)
+    return loss
+
+
+_loss_registry = {
+    "sad": SAD_loss,
+    "abunds": abunds_loss,
+    "endmember_tv": endmember_tv_loss,
+    "mini_volumn": mini_volumn_loss,
+    "sparse": sparse_loss,
+    "laplacian": laplacian_loss,
+}
 
 
 @beartype

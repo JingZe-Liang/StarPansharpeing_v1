@@ -18,10 +18,10 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: CD_224
-  prefetch_factor: 2
-  num_workers: 3
-  shuffle_size: 100
+  used: MMSeg_YREB
+  prefetch_factor: 6
+  num_workers: 4
+  shuffle_size: -1
   loader_type: webdataset
   shuffle_within_workers: false
   # For loading the pretrained multi-channels head

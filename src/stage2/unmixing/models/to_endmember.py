@@ -49,7 +49,9 @@ class ToEndMemberConv(nn.Module):
         return code
 
     def get_endmember(self):
-        endmember = self.decoder.weight.data.clamp_(min=0.0)
+        endmember = self.decoder.weight.data.clamp_(
+            min=0.0
+        )  # (num_endmember, channels)
         return endmember
 
 
