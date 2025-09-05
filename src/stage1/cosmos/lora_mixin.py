@@ -31,15 +31,6 @@ def get_conv_in_out_modules(
 def in_out_chans_from_modules(
     conv_in_module: DiffBandsInputConvIn, conv_out_module: DiffBandsInputConvOut
 ):
-    # in_chans = [
-    #     int(conv_name.split("_")[-1])
-    #     for conv_name in (conv_in_module.in_modules.keys())
-    # ]
-    # out_chans = [
-    #     int(conv_name.split("_")[-1])
-    #     for conv_name in (conv_out_module.in_modules.keys())
-    # ]
-
     in_chans = conv_in_module.band_lst
     out_chans = conv_out_module.band_lst
 

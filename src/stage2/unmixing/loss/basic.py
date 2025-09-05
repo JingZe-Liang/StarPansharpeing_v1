@@ -9,6 +9,28 @@ type EndMember = Float[Tensor, "n_endmember bands"]
 type Abunds = Float[Tensor, "b bands h w"]
 
 
+def loss_apply_weights(
+    losses: list[Tensor],
+    weights: Tensor | tuple | list | None = None,
+    ret_loss_parts: bool = False,
+) -> Tensor | tuple[Tensor, tuple[Tensor, ...]]:
+    loss_stk = torch.stack(losses)
+    if weights is None:
+        return loss_stk.mean()
+
+    if isinstance(weights, (tuple, list)):
+        weights = torch.as_tensor(weights).to(loss_stk)
+
+    weighted_loss = loss_stk * weights
+    loss_out = weighted_loss.sum()
+
+    if ret_loss_parts:
+        loss_parts = weighted_loss.unbind()
+        return loss_out, loss_parts
+    else:
+        return loss_out
+
+
 def SAD_loss(y_true: Image, y_pred: Image):
     y_true = torch.nn.functional.normalize(y_true, dim=1, p=2)
     y_pred = torch.nn.functional.normalize(y_pred, dim=1, p=2)
@@ -26,7 +48,7 @@ def abunds_loss(abunds: Abunds):
 
 
 def endmember_tv_loss(end_members: EndMember):
-    return torch.abs(end_members[:, 1:] - end_members[:, :-1]).sum()
+    return (end_members[:, 1:] - end_members[:, :-1]).abs().mean()
 
 
 def mini_volumn_loss(end_members: EndMember, delta: float = 1.0):
@@ -49,7 +71,7 @@ def laplacian_loss(abunds1: Abunds, abunds2: Abunds):
     return loss
 
 
-_loss_registry = {
+_unmixing_loss_registry = {
     "sad": SAD_loss,
     "abunds": abunds_loss,
     "endmember_tv": endmember_tv_loss,
@@ -61,6 +83,8 @@ _loss_registry = {
 
 @beartype
 class UnmixingLoss(torch.nn.Module):
+    loss_names = ["sad_loss", "abunds_loss", "endmember_loss"]
+
     def __init__(self, weights: list[float] | tuple[float, ...] | None = None):
         super().__init__()
         self.weights = weights if weights is not None else [1.0, 0.35, 0.1]
@@ -72,15 +96,14 @@ class UnmixingLoss(torch.nn.Module):
         abunds: Abunds,
         end_members: EndMember,
     ):
-        # loss1 = torch.nn.functional.mse_loss(hyper_recon, hyper_in)
         sad_loss = SAD_loss(hyper_recon, hyper_in)
         abds_loss = abunds_loss(abunds)
         endmember_loss = endmember_tv_loss(end_members)
 
-        total_loss = (
-            self.weights[0] * sad_loss
-            + self.weights[1] * abds_loss
-            + self.weights[2] * endmember_loss
+        total_loss, (sad_loss, abds_loss, endmember_loss) = loss_apply_weights(
+            [sad_loss, abds_loss, endmember_loss],
+            weights=self.weights,
+            ret_loss_parts=True,
         )
 
         return total_loss, dict(
@@ -94,7 +117,7 @@ class UnmixingLoss(torch.nn.Module):
 def test_loss():
     input = torch.randn(2, 128, 64, 64)
     recon = torch.randn(2, 128, 64, 64)
-    abunds = torch.randn(2, 4, 64, 64)
+    abunds = torch.randn(2, 4, 64, 64).relu_()
     endmembers = torch.randn(128, 4)
 
     loss_fn = UnmixingLoss([1.0, 1.0, 1.0])
@@ -109,3 +132,7 @@ def test_loss():
 
     assert isinstance(total_loss, torch.Tensor)
     assert isinstance(loss_dict, dict)
+
+
+if __name__ == "__main__":
+    test_loss()

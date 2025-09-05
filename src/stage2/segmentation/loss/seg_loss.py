@@ -17,7 +17,7 @@ def loss_apply_weights(
         weights = torch.as_tensor(weights).to(loss_stk)
 
     weighted_loss = loss_stk * weights
-    loss_out = weighted_loss.sum() / weights.sum()
+    loss_out = weighted_loss.sum()
 
     if ret_loss_parts:
         loss_parts = loss_out.unbind()
@@ -27,6 +27,8 @@ def loss_apply_weights(
 
 
 class HyperSegmentationLoss(torch.nn.Module):
+    loss_names = ["dice_loss", "ce_loss"]
+
     def __init__(
         self,
         dice_mode: str = "multiclass",

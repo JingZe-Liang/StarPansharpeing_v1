@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import webdataset as wds
 from torch import Tensor
+from typing_extensions import deprecated
 
 from src.data.codecs import (
     img_decode_io,
@@ -50,6 +51,9 @@ def extract_keys(samples: dict, keys: list[str]):
 # * --- WebDataset --- #
 
 
+@deprecated(
+    "get_generative_dataloaders is deprecated, please use GenerativeMMDataloader instead"
+)
 def get_generative_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
@@ -128,7 +132,6 @@ class GenerativeMMDataloader(MultimodalityDataloader):
         valid_length = sample["valid_length"]  # (1,)
         # to mask
         mask = torch.arange(self.max_length, device=valid_length.device) < valid_length
-
         return mask.float()
 
     def after_getitem(
@@ -136,6 +139,8 @@ class GenerativeMMDataloader(MultimodalityDataloader):
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, str | Tensor | int]]:
         # sana train loader compatibility
         # [latent or images, encoded text, text mask, data_info: control_signal]
+
+        # NOTE: compactibility with SANA train loader !!
 
         # captions
         y_lc = sample["captions"]["caption_feature"]
@@ -147,14 +152,18 @@ class GenerativeMMDataloader(MultimodalityDataloader):
         }
 
         # latent image
-        if "latent_image" in sample:
+        if "image_latent" in sample:
             latent_chw = torch.as_tensor(sample["image_latent"])
         else:
             latent_chw = torch.as_tensor(sample["pixel_image"])
 
         # conditions images or latents
         if "condition_latent" in sample:
-            cond_latent_chw = [torch.as_tensor(x) for x in sample["condition_latent"]]
+            cond_latent_chw = [
+                torch.as_tensor(x)
+                for x in sample["condition_latent"]
+                if isinstance(x, np.ndarray)
+            ]
             if self.other_kwargs.get("stack_cond_latent", False):
                 latent_chw = torch.stack(
                     [latent.squeeze(0) for latent in cond_latent_chw],
@@ -241,7 +250,7 @@ def get_multimodal_loaders_with_different_backends_v2(
             "input paths contains list of lists or dicts, we will chain the dataloader with each loader"
         )
 
-        # > preprare loader kwargs
+        # < preprare loader kwargs
         if rep_loader_kwargs is not None:  # every loader kwargs
             log_print(f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug")
             assert isinstance(rep_loader_kwargs, list), (
@@ -364,13 +373,6 @@ def get_multimodal_loaders_with_different_backends_v2(
                 raise ValueError(f"loader_type {loader_type} is not supported")
             datasets.append(dataset)
             dataloaders.append(dataloader)
-        # folder loader
-        # elif loader_type == "folder":
-        #     log_print("Using folder loader")
-        #     assert isinstance(paths, str), f"paths should be a string, but got paths"
-        #     return only_hyperspectral_img_folder_dataloader(paths, **loader_kwargs)
-        # else:
-        #     raise ValueError(f"Unsupported loader type: {loader_type}")
 
     # prepare for curriculum
     if curriculum_type is not None:
@@ -416,6 +418,11 @@ if __name__ == "__main__":
             "condition_image": "data/DCF_2020/conditions/shardindex.json",
             "pixel_image": "data/DCF_2020/hyper_images/shardindex.json",
         },
+        {
+            "captions": "data/DCF_2019/condition_captions/shardindex.json",
+            "condition_latent": "data/DCF_2019/conditions/shardindex.json",
+            "pixel_image": "data/DCF_2019/hyper_images/shardindex.json",
+        },
     ]
     _, loader = get_multimodal_loaders_with_different_backends_v2(
         wids_paths,
@@ -424,4 +431,5 @@ if __name__ == "__main__":
     )
 
     for sample in loader:
-        print(sample)
+        print(sample.keys())
+        print(sample["captions"])

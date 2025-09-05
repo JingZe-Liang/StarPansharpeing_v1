@@ -1,7 +1,9 @@
+from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, cast
 
 import accelerate
+import numpy as np
 import torch
 import torch.distributed as dist
 from torchmetrics.aggregation import (
@@ -245,7 +247,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         else:
             self.loss_metrics_values[name] = value
 
-    def add_tracked(self, name: str, value: float | list[float]):
+    def add_tracked(
+        self, name: str, value: float | list[float] | np.ndarray | torch.Tensor
+    ):
         if not isinstance(value, (float, list)):
             raise ValueError(f"Expected float or list for {name}, got {type(value)}")
         elif isinstance(value, float):
@@ -257,6 +261,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             if torch.is_tensor(value):
                 value = value.detach().cpu().numpy()
             value = value.tolist()
+        value = cast(list[float], value)
 
         if name not in self.loss_metrics_tracked:
             self.loss_metrics_tracked[name] = value
@@ -584,7 +589,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
 def metrics_sync(
     metrics: Mapping[str, Metric | torch.Tensor | float | list[float]],
     output_tensor_dict=False,
-    reduce_op: str = "AVG",
+    reduce_op: Literal["AVG", "MAX", "MIN", "RUN_MEAN", "RUN_SUM"] = "AVG",
     **metric_fn_kwargs,
 ):
     # Create a new dictionary to store synced metrics to avoid modifying the input
@@ -624,7 +629,7 @@ def metrics_sync(
 
 
 def dict_tensor_sync(
-    metrics: dict[str, torch.Tensor | float],
+    metrics: Mapping[str, torch.Tensor | float],
     use_reduce=True,  # be sure that all should be Tensor
     *,
     reduce_op: dist.ReduceOp | None | str = "AVG",

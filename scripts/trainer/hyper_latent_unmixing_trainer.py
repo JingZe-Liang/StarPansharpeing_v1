@@ -1,9 +1,10 @@
 import sys
 import time
+from collections import namedtuple
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, Sequence, TypedDict, cast
 
 import accelerate
 import hydra
@@ -21,15 +22,18 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from peft import PeftModel
+from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
 from src.stage2.unmixing.loss import UnmixingLoss
+from src.stage2.unmixing.metrics import UnmixingMetrics, endmembers_visualize
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
@@ -37,8 +41,31 @@ from src.utilities.logging import dict_round_to_list_str
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
+from stage2.unmixing.models.model import LatentUnmixingModel
 
 heavyball = lazy_loader.load("heavyball")
+
+UnmixingModelOutput = namedtuple(
+    "UnmixingModelOutput",
+    [
+        "pred_latent",
+        "pred_pixel",
+        "abunds",
+        "endmembers",
+        "unmixing_loss",
+        "log_losses",
+    ],
+)
+BatchInput = TypedDict(
+    "BatchInput",
+    {
+        "img": Tensor,
+        "endmembers": Tensor,
+        "init_vca_indices": Tensor,
+        "init_vca_endmembers": Tensor,
+        "abunds": Tensor,
+    },
+)
 
 
 class UnmixingTrainer:
@@ -114,7 +141,7 @@ class UnmixingTrainer:
         self.prepare_ema_models()
 
         # loss
-        self.unmixing_loss: UnmixingLoss | Callable
+        self.unmixing_loss: UnmixingLoss
         if hasattr(self.train_cfg, "unmixing_loss"):
             self.unmixing_loss = hydra.utils.instantiate(self.train_cfg.unmixing_loss)
         else:
@@ -126,8 +153,6 @@ class UnmixingTrainer:
         self.train_state = StepsCounter(["train", "val"])
 
         # initialize unmixing metrics
-        from src.stage2.unmixing.metrics.basic import UnmixingMetrics
-
         self.unmixing_metrics = UnmixingMetrics()
 
         # clear GPU memory
@@ -209,7 +234,9 @@ class UnmixingTrainer:
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
             self.norm_z = False  # in the model, not in trainer
-            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
+            self.tokenizer: TokenizerLoRAMixin | PeftModel | nn.Module = (
+                hydra.utils.instantiate(self.cfg.tokenizer)
+            )
 
             if self.train_cfg.peft_pretrained_path is not None:
                 self.log_msg(
@@ -247,6 +274,7 @@ class UnmixingTrainer:
             self.quantizer.eval()
 
         self.log_msg("freeze the tokenizer and quantizer (if used).")
+        self._model_inited_endmembers = False
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -456,7 +484,7 @@ class UnmixingTrainer:
                 else self.model.parameters()
             )
             model_opt = _optimizer_creater(
-                self.train_cfg.denoise_optim, _get_model_params
+                self.train_cfg.unmixing_optim, _get_model_params
             )
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
@@ -467,7 +495,7 @@ class UnmixingTrainer:
             or "scheduler"
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            model_sched = hydra.utils.instantiate(self.train_cfg.denoise_sched)(
+            model_sched = hydra.utils.instantiate(self.train_cfg.unmixing_sched)(
                 optimizer=model_opt
             )
         else:
@@ -479,7 +507,7 @@ class UnmixingTrainer:
             heavyball.utils.compile_mode = None
             self.log_msg(
                 "use heavyball optimizer, it will compile the optimizer, "
-                "for efficience testing the scripts, disable the compilation."
+                "for efficiently testing the scripts, disable the compilation."
             )
 
         return model_opt, model_sched
@@ -550,8 +578,8 @@ class UnmixingTrainer:
     def step_train_state(self, mode="train"):
         self.train_state.update(mode)
 
-    def ema_update(self, mode="denoising"):
-        assert mode == "denoising"
+    def ema_update(self, mode="unmixing"):
+        assert mode == "unmixing"
         if self.no_ema:
             # not support ema when is deepspeed zero2 or zero3
             return
@@ -651,97 +679,100 @@ class UnmixingTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def forward_unmixing_model(self, img, gt, img_latent):
+    def _init_model_endmembers(self, endmembers_init: torch.Tensor):
+        # init the endmembers of the unmixing model
+        if not self._model_inited_endmembers:
+            model = self.accelerator.unwrap_model(self.model)
+            model = cast(LatentUnmixingModel, model)
+            model.init_endmembers(endmembers_init)
+            self._model_inited_endmembers = True
+            self.log_msg("initialize the endmembers of the unmixing model")
+
+    def forward_unmixing_model(
+        self, img, img_latent, abunds_gt=None, endmember_gt=None
+    ):
         with self.accelerator.autocast():
             # Forward pass through the model to get unmixing results
             model_output = self.model(img, img_latent)
 
         pred_latent = model_output.get("amotized_model_out", None)
-        recon = model_output.get("recon", None)
-        abunds = model_output.get("abunds", None)
-        end_member = model_output.get("end_member", None)
+        recon = model_output["recon"]
+        abunds = model_output["abunds"]
+        endmembers = model_output["endmembers"]
 
         # loss
         # Use UnmixingLoss with the required inputs
         loss, loss_dict = self.unmixing_loss(
-            hyper_in=gt,
+            hyper_in=img,
             hyper_recon=recon,
             abunds=abunds,
-            end_members=end_member,
+            endmembers=endmembers,
         )
 
         # Create log_losses dictionary
         log_losses = loss_dict
         log_losses["total_loss"] = loss.detach()
 
-        return pred_latent, recon, loss, log_losses, abunds, end_member
-
-    def train_denoise_step(
-        self,
-        # pixels
-        noisy,
-        gt,
-        # optional for *tok_out
-        noisy_tok_out: dict | None = None,
-        # latents
-        noisy_latent: torch.Tensor | None = None,
-    ):
-        if noisy_tok_out is not None:
-            noisy_latent = noisy_tok_out["latent"].detach()
-
-        pred_latent, pred, loss, log_losses, abunds, end_member = (
-            self.forward_unmixing_model(noisy, gt, noisy_latent)
+        return UnmixingModelOutput(
+            pred_latent=pred_latent,
+            pred_pixel=recon,
+            abunds=abunds,
+            endmembers=endmembers,
+            unmixing_loss=loss,
+            log_losses=log_losses,
         )
+
+    def train_unmixing_step(
+        self,
+        img,
+        img_latent: torch.Tensor | None = None,
+        abunds_gt: torch.Tensor | None = None,
+        endmember_gt: torch.Tensor | None = None,
+    ):
+        out = self.forward_unmixing_model(img, img_latent, abunds_gt, endmember_gt)
 
         if self.accelerator.sync_gradients:
             # backward
             self.optim.zero_grad()
-            self.accelerator.backward(loss)
+            self.accelerator.backward(out.unmixing_loss)
             self.gradient_check(self.model)
             self.optim.step()
             self.sched.step()
 
             # ema update
-            self.ema_update(mode="denoising")
+            self.ema_update(mode="unmixing")
 
-        return dict(
-            pred_latent=pred_latent,
-            pred_pixel=pred,
-            denoise_loss=loss,
-            log_losses=log_losses,
-            abunds=abunds,
-            end_member=end_member,
+        return out
+
+    def update_metrics(
+        self,
+        endmembers_pred,
+        abunds_pred,
+        endmembers_gt,
+        abunds_gt=None,
+        plot=False,
+        clear=False,
+    ):
+        if clear:
+            self.unmixing_metrics.reset()
+
+        return self.unmixing_metrics(
+            endmembers_pred,
+            endmembers_gt,
+            abunds_pred,
+            abunds_gt,
+            plot=plot,
         )
 
-    def _get_metric_fn(self, clear=False):
-        if not hasattr(self, "_psnr_fn") or clear:
-            self._psnr_fn = PeakSignalNoiseRatio(data_range=1.0)
-            self._ssim_fn = StructuralSimilarityIndexMeasure(data_range=1.0)
-
-        psnr_fn = lambda noisy, gt: self._psnr_fn(self.to_rgb(noisy), self.to_rgb(gt))
-        ssim_fn = lambda noisy, gt: self._ssim_fn(self.to_rgb(noisy), self.to_rgb(gt))
-        return psnr_fn, ssim_fn
-
-    def update_metrics(self, noisy, gt, clear=False, only_update=True):
-        psnr_fn, ssim_fn = self._get_metric_fn(clear)
-        assert psnr_fn is not None and ssim_fn is not None
-        psnr_fn(noisy, gt)
-        ssim_fn(noisy, gt)
-
     def get_metrics(self):
-        psnr_v = self._psnr_fn.compute().item()
-        ssim_v = self._ssim_fn.compute().item()
-        return {"psnr": psnr_v, "ssim": ssim_v}
+        return self.unmixing_metrics._compute_metrics()
 
-    def train_step(self, batch: dict):
-        noisy_latent = gt_latent = None
-        noisy_tok_out = gt_tok_out = None
-
+    def train_step(self, batch: BatchInput):
+        # < Latent obtaining
+        img_latent = None
         # offline latents
-        if "noisy_latent" in batch:
-            noisy_latent = batch["noisy_latent"].to(self.device, self.dtype)
-            gt_latent = batch["gt_latent"].to(self.device, self.dtype)
-
+        if "img_latent" in batch:
+            img_latent = batch["img_latent"].to(self.device, self.dtype)
         # tokenizer online
         else:
             assert self.online_tokenize and (
@@ -751,28 +782,22 @@ class UnmixingTrainer:
                     and hasattr(self, "tokenizer_decoder")
                 )
             ), "tokenizer not found for online tokenize"
-            noisy_tok_out = self.forward_tokenizer(batch["noisy"])
-            gt_tok_out = self.forward_tokenizer(batch["gt"])
+            img_latent = self.forward_tokenizer(batch["img"])["latent"]
 
+        # Init model endmembers
+        self._init_model_endmembers(batch["init_vca_endmembers"].to(self.device))
+
+        # < Unmixing training step
         with self.accelerator.accumulate(self.model):
-            # train denoising model
-            train_out = self.train_denoise_step(
-                batch["noisy"],
-                batch["gt"],
-                # online tokenized latents
-                noisy_tok_out,
-                gt_tok_out,
-                # offline latents
-                noisy_latent,
-                gt_latent,
+            train_out = self.train_unmixing_step(
+                batch["img"], img_latent, batch["abunds"], batch["endmembers"]
             )
-            pred_img = train_out["pred_pixel"]
 
         self.step_train_state()
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_losses = self.format_log(train_out["log_losses"])
+            _log_losses = self.format_log(train_out.log_losses)
 
             self.log_msg(
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
@@ -781,11 +806,10 @@ class UnmixingTrainer:
             self.log_msg(f"[Train Tok]: {_log_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", train_out["log_losses"], self.global_step)
+            self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
-            # log_loss = metrics_sync(log_loss, output_tensor_dict=True)
             log_loss = dict_tensor_sync(log_loss)
         strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
         return " - ".join(strings)
@@ -856,126 +880,59 @@ class UnmixingTrainer:
         return iterable_
 
     @torch.no_grad()
-    def val_step(self, batch: dict):
+    def val_step(self, batch: BatchInput):
         if not self.online_tokenize:
             img_latent = self.forward_tokenizer(batch["img"])["latent"]
         else:
-            img_latent = batch["img_latent"].to(self.device, self.dtype)
+            img_latent = batch.get("img_latent", None)
+            assert img_latent is not None, "img_latent must be provided in the batch"
+        img_latent = img_latent.to(self.device, self.dtype)
 
-        # forward the fusion network
-        pred_latent, pred_img, loss, log_losses, abunds, end_member = (
-            self.forward_unmixing_model(batch["noisy"], batch["gt"], img_latent)
+        # forward the unmixing network
+        out = self.forward_unmixing_model(
+            batch["img"], img_latent, batch["abunds"], batch["endmembers"]
         )
 
-        return {
-            "pred_img": pred_img,
-            "pred_latent": pred_latent,
-            "abunds": abunds,
-            "end_member": end_member,
-            "log_losses": log_losses,
-        }
+        return out
 
     def val_loop(self):
         self.model.eval()
-        # torch.cuda.empty_cache()
 
-        loss_metrics = MeanMetric().to(device=self.device)
         val_iter = self.get_val_loader_iter()
+        # Init loss dict metrics
+        loss_metrics = {k: MeanMetric() for k in self.unmixing_loss.loss_names}
+        loss_metrics_update = lambda log_losses: {
+            k: v.update(log_losses[k]) for k, v in loss_metrics.items()
+        }
+
         for batch_or_idx in val_iter:  # type: ignore
             if self.val_cfg.max_val_iters > 0:
                 batch = next(self._val_loader_iter)
             else:
                 batch = batch_or_idx
+            batch = cast(BatchInput, batch)
 
-            batch = cast(dict[str, torch.Tensor], batch)
-            gt = batch["gt"].to(self.device)
+            endmembers_gt = batch["endmembers"].to(self.device)
+            abundances_gt = batch["abunds"].to(self.device)
+
             val_out = self.val_step(batch)
 
-            pred_img_rgb = self.to_rgb(val_out["pred_img"])
-            batch_img_rgb = self.to_rgb(gt)
-
-            # l1 loss
-            loss_of_latent = nn.functional.mse_loss(pred_img_rgb, gt.to(pred_img_rgb))
-            loss_metrics.update(loss_of_latent)
+            log_losses = val_out.log_losses
+            loss_metrics_update(log_losses)
 
             # metrics
-            self.update_metrics(batch_img_rgb, pred_img_rgb)
-
-            # unmixing metrics if available
-            if (
-                val_out.get("abunds") is not None
-                and val_out.get("end_member") is not None
-            ):
-                # Update unmixing metrics
-                # Note: For full unmixing metrics evaluation, we would need ground truth
-                # endmembers and abundances from the dataset. For now, we'll just
-                # track the predicted values and log basic statistics.
-
-                # Log basic statistics about predicted abundances
-                abunds = val_out["abunds"]
-                end_members = val_out["end_member"]
-
-                # Basic abundance statistics
-                abunds_mean = abunds.mean().item()
-                abunds_std = abunds.std().item()
-                abunds_min = abunds.min().item()
-                abunds_max = abunds.max().item()
-
-                # Endmember statistics
-                endmembers_mean = end_members.mean().item()
-                endmembers_std = end_members.std().item()
-
-                # Log statistics
-                if hasattr(self, "unmixing_stats"):
-                    self.unmixing_stats["abunds_mean"].update(abunds_mean)
-                    self.unmixing_stats["abunds_std"].update(abunds_std)
-                    self.unmixing_stats["abunds_min"].update(abunds_min)
-                    self.unmixing_stats["abunds_max"].update(abunds_max)
-                    self.unmixing_stats["endmembers_mean"].update(endmembers_mean)
-                    self.unmixing_stats["endmembers_std"].update(endmembers_std)
-                else:
-                    # Initialize statistics trackers
-                    self.unmixing_stats = {
-                        "abunds_mean": MeanMetric().to(self.device),
-                        "abunds_std": MeanMetric().to(self.device),
-                        "abunds_min": MeanMetric().to(self.device),
-                        "abunds_max": MeanMetric().to(self.device),
-                        "endmembers_mean": MeanMetric().to(self.device),
-                        "endmembers_std": MeanMetric().to(self.device),
-                    }
-                    self.unmixing_stats["abunds_mean"].update(abunds_mean)
-                    self.unmixing_stats["abunds_std"].update(abunds_std)
-                    self.unmixing_stats["abunds_min"].update(abunds_min)
-                    self.unmixing_stats["abunds_max"].update(abunds_max)
-                    self.unmixing_stats["endmembers_mean"].update(endmembers_mean)
-                    self.unmixing_stats["endmembers_std"].update(endmembers_std)
-
+            self.update_metrics(
+                abunds_gt=abundances_gt,
+                endmembers_gt=endmembers_gt,
+                abunds_pred=val_out.abunds,
+                endmembers_pred=val_out.endmembers,
+            )
             self.step_train_state("val")
 
         metrics = self.get_metrics()
-        loss_val = loss_metrics.compute()
-
-        # Add unmixing statistics if available
-        unmixing_metrics = {}
-        if hasattr(self, "unmixing_stats"):
-            for stat_name, stat_metric in self.unmixing_stats.items():
-                unmixing_metrics[f"unmixing_{stat_name}"] = stat_metric.compute().item()
+        loss_val = metrics_sync(loss_metrics, output_tensor_dict=True)
 
         if self.accelerator.is_main_process:
-            _metric_str = ""
-            for k, v in metrics.items():
-                _metric_str += f"{k}: {v:.4f} - "
-
-            # Add unmixing metrics to string
-            for k, v in unmixing_metrics.items():
-                _metric_str += f"{k}: {v:.4f} - "
-
-            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.3e}")
-
-            # Log all metrics to tensorboard
-            all_metrics = {**metrics, **unmixing_metrics}
-            self.tenb_log_any("metric", all_metrics, step=self.global_step)
-
             # visualize the last val batch
             self.visualize_reconstruction(
                 batch_img_rgb,  # gt

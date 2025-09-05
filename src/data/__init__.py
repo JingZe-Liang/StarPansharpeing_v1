@@ -8,3 +8,4 @@ from .panshap_loader import (
     get_mm_chained_loaders,
     get_panshap_dataloaders,
 )
+from .window_slider import WindowSlider, create_windowed_dataloader

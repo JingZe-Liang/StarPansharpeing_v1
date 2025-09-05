@@ -289,34 +289,15 @@ class CosmosHyperspectralTokenizerTrainer:
                     )
                 )
 
-        # < the encoder and decoder is one class
+        # < the encoder and decoder is one class or lora mixin
         else:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
             )
             self.norm_z = False  # in the model, not in trainer
 
-            # LoRA channel append in tokenizer channels
-            # if (
-            #     self.train_cfg.finetune_strategy == "peft"
-            #     and self.train_cfg.conv_in_out_reinit
-            # ):
-            #     lora_dataset_chan = self.dataset_cfg.dataset_channel
-            #     if lora_dataset_chan not in self.tokenizer_cfg.in_channels:
-            #         self.tokenizer_cfg.in_channels += [lora_dataset_chan]
-            #         self.tokenizer_cfg.out_channels += [lora_dataset_chan]
-            #         self.log_msg(
-            #             f"LoRA additional channel needs reinit the convs: {self.tokenizer_cfg.in_channels}"
-            #         )
-            #         breakpoint()
-            #     else:
-            #         self.log_msg(
-            #             f"LoRA channel {lora_dataset_chan} already exists in tokenizer channels configuration: {self.tokenizer_cfg}",
-            #             "warning",
-            #         )
-
             # Init tokenizer model
-            self.tokenizer = hydra.utils.instantiate(self.tokenizer_cfg)
+            self.tokenizer: nn.Module = hydra.utils.instantiate(self.tokenizer_cfg)
 
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = (

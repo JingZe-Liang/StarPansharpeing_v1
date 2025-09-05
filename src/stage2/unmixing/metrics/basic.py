@@ -1,9 +1,9 @@
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from scipy import io as sio
+from matplotlib.figure import Figure
 from torchmetrics.aggregation import MeanMetric
 
 
@@ -44,7 +44,8 @@ class UnmixingMetrics:
         self.sad_avg: Optional[float] = None
         self.mse_avg: Optional[float] = None
 
-    def _normalize_spectra(self, spectra: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _normalize_spectra(spectra: torch.Tensor) -> torch.Tensor:
         """
         Normalize spectra to [0, 1] range using PyTorch
 
@@ -61,7 +62,8 @@ class UnmixingMetrics:
             # Multiple spectra
             return spectra / spectra.max(dim=-1, keepdim=True)[0]
 
-    def _compute_sad(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _compute_sad(y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         """
         Compute Spectral Angle Distance (SAD) between two spectra using PyTorch
 
@@ -88,8 +90,9 @@ class UnmixingMetrics:
 
         return sad
 
+    @staticmethod
     def _compute_sad_matrix(
-        self, endmembers: torch.Tensor, endmembers_gt: torch.Tensor
+        endmembers: torch.Tensor, endmembers_gt: torch.Tensor
     ) -> torch.Tensor:
         """
         Compute SAD matrix between all pairs of endmembers using PyTorch
@@ -110,20 +113,23 @@ class UnmixingMetrics:
 
         # Normalize endmembers
         for i in range(num_endmembers):
-            endmembers[i, :] = self._normalize_spectra(endmembers[i, :])
-            endmembers_gt[i, :] = self._normalize_spectra(endmembers_gt[i, :])
+            endmembers[i, :] = UnmixingMetrics._normalize_spectra(endmembers[i, :])
+            endmembers_gt[i, :] = UnmixingMetrics._normalize_spectra(
+                endmembers_gt[i, :]
+            )
 
         # Compute SAD matrix
         for i in range(num_endmembers):
             for j in range(num_endmembers):
-                sad_matrix[i, j] = self._compute_sad(
+                sad_matrix[i, j] = UnmixingMetrics._compute_sad(
                     endmembers[i, :], endmembers_gt[j, :]
                 )
 
         return sad_matrix
 
+    @staticmethod
     def _order_endmembers(
-        self, endmembers: torch.Tensor, endmembers_gt: torch.Tensor
+        endmembers: torch.Tensor, endmembers_gt: torch.Tensor
     ) -> Tuple[Dict[int, int], List[float], torch.Tensor]:
         """
         Match predicted endmembers to ground truth endmembers using PyTorch
@@ -143,7 +149,7 @@ class UnmixingMetrics:
         sad_values: List[float] = []
 
         # Compute SAD matrix
-        sad_matrix = self._compute_sad_matrix(endmembers, endmembers_gt)
+        sad_matrix = UnmixingMetrics._compute_sad_matrix(endmembers, endmembers_gt)
 
         # Find best matches
         matched_rows = 0
@@ -181,12 +187,12 @@ class UnmixingMetrics:
 
         return match_dict, sad_values, avg_sad
 
+    @staticmethod
     def _plot_endmembers(
-        self,
         endmembers: torch.Tensor,
         endmembers_gt: torch.Tensor,
         abundances: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, plt.Figure, np.ndarray]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any, np.ndarray]:
         """
         Plot predicted and ground truth endmembers with SAD values
 
@@ -200,14 +206,14 @@ class UnmixingMetrics:
                 - SAD values for matched endmembers
                 - Ordered predicted endmembers
                 - Ordered predicted abundances
-                - Matplotlib figure object
+                - Matplotlib figure object (Any type to avoid import issues)
                 - Matplotlib axes array
         """
         num_endmembers = endmembers.shape[0]
         n_cols = (num_endmembers + 1) // 2  # Number of columns in subplot grid
 
         # Match endmembers
-        match_dict, sad_values, avg_sad = self._order_endmembers(
+        match_dict, sad_values, avg_sad = UnmixingMetrics._order_endmembers(
             endmembers, endmembers_gt
         )
 
@@ -234,7 +240,7 @@ class UnmixingMetrics:
         # Compute SAD for ordered endmembers
         ordered_sad_list: List[float] = []
         for i in range(num_endmembers):
-            sad = self._compute_sad(ordered_endmembers[i], endmembers_gt[i])
+            sad = UnmixingMetrics._compute_sad(ordered_endmembers[i], endmembers_gt[i])
             ordered_sad_list.append(sad.item())
 
         ordered_sad = torch.tensor(ordered_sad_list, device=endmembers.device)
@@ -383,27 +389,27 @@ class UnmixingMetrics:
 
     def __call__(
         self,
-        endmembers: Union[torch.Tensor, np.ndarray],
-        endmembers_gt: Union[torch.Tensor, np.ndarray],
-        abundances: Union[torch.Tensor, np.ndarray],
-        abundances_gt: Optional[Union[torch.Tensor, np.ndarray]] = None,
+        endmembers: torch.Tensor | np.ndarray,
+        endmembers_gt: torch.Tensor | np.ndarray,
+        abundances: torch.Tensor | np.ndarray,
+        abundances_gt: torch.Tensor | np.ndarray | None = None,
         plot: bool = False,
-    ) -> Union[
-        Dict[str, Dict[str, float]],
-        Tuple[Dict[str, Dict[str, float]], plt.Figure, np.ndarray],
-    ]:
+    ) -> (
+        Dict[str, Dict[str, float]]
+        | Tuple[Dict[str, Dict[str, float]], Any, np.ndarray]
+    ):
         """
         Compute unmixing metrics for the given predictions
 
         Args:
-            endmembers (Union[torch.Tensor, np.ndarray]): Predicted endmembers [num_em, bands]
-            endmembers_gt (Union[torch.Tensor, np.ndarray]): Ground truth endmembers [num_em, bands]
-            abundances (Union[torch.Tensor, np.ndarray]): Predicted abundances [num_em, H, W]
-            abundances_gt (Optional[Union[torch.Tensor, np.ndarray]]): Ground truth abundances [num_em, H, W]
+            endmembers (torch.Tensor | np.ndarray): Predicted endmembers [num_em, bands]
+            endmembers_gt (torch.Tensor | np.ndarray): Ground truth endmembers [num_em, bands]
+            abundances (torch.Tensor | np.ndarray): Predicted abundances [num_em, H, W]
+            abundances_gt (torch.Tensor | np.ndarray | None): Ground truth abundances [num_em, H, W]
             plot (bool): Whether to plot endmember comparison
 
         Returns:
-            Union[Dict[str, Dict[str, float]], Tuple[Dict[str, Dict[str, float]], plt.Figure, np.ndarray]]:
+            Dict[str, Dict[str, float]] | Tuple[Dict[str, Dict[str, float]], Any, np.ndarray]:
                 - Dictionary containing SAD and MSE values
                 - If plot=True, also returns figure and axes objects
         """
@@ -512,7 +518,7 @@ class UnmixingMetrics:
 
     def save_results(self, filepath: str) -> None:
         """
-        Save current metric results to a .mat file
+        Save current metric results to a .npz file
 
         Args:
             filepath (str): Path to save the results
@@ -533,8 +539,9 @@ class UnmixingMetrics:
             save_data[f"sad_{i}"] = metrics["sad"][f"sad_{i}"]
             save_data[f"mse_{i}"] = metrics["mse"][f"mse_{i}"]
 
-        # Save to .mat file
-        sio.savemat(filepath, save_data)
+        # Save to .npz file
+        # sio.savemat(filepath, save_data)
+        np.savez(filepath, **save_data)
 
     def __str__(self) -> str:
         """
@@ -550,3 +557,7 @@ class UnmixingMetrics:
             f"UnmixingMetrics (calls={self.call_count}): "
             f"SAD_avg={self.sad_avg:.4f}, MSE_avg={self.mse_avg:.6f}"
         )
+
+
+# Alias
+endmembers_visualize = UnmixingMetrics._plot_endmembers

@@ -217,20 +217,20 @@ class MultimodalityDataloader:
             resize=None,
             process_img_keys="ALL",
         )
-        self.default_codecs_mapping = {
-            # < hyperspectral images or pairs ==================
+        self.supported_codecs_mapping = {
+            # < hyperspectral images or pairs
             "pixel_image": _img_fn,
             "condition_image": _img_fn,
             "pansharpening_image": _img_fn,
             "denoising_image": _img_fn,
-            # < images, conditions or downstream latents =======
+            # < images, conditions or downstream latents
             "image_latent": wids_latent_decode,
             "condition_latent": wids_latent_decode,
             "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
             "denoising_latent": partial(
                 wids_latent_decode, return_dict=True
             ),  # if gt is in, return_dict=True
-            # < language captions and its embeddings ============
+            # < language captions and its embeddings
             "captions": wids_caption_embed_decode,
         }
 
@@ -240,6 +240,9 @@ class MultimodalityDataloader:
         self.shuffle_size = None
         self.drop_last = None
         self.other_kwargs = kwargs
+
+        # transformations
+        self._named_transformations = {}
 
         # hook before init datasets
         self.before_init_datasets()
@@ -254,15 +257,18 @@ class MultimodalityDataloader:
             self.wds_paths.items(), codecs if codecs is not None else []
         ):
             # decode functions
-            decode_fn = codec_fn or self.default_codecs_mapping.get(name, None)
+            decode_fn = codec_fn or self.supported_codecs_mapping.get(name, None)
             if isinstance(decode_fn, (list, tuple)):
                 transformations = [*decode_fn, wids_remove_none_keys]
             elif decode_fn is not None:
                 transformations = [decode_fn, wids_remove_none_keys]
             else:
-                transformations = [wids_remove_none_keys]
+                raise ValueError(f"No codec found for {name}")
+
+            self._named_transformations[name] = transformations
             log_print(f"[wids dataset]: {name}")
 
+            # add wids dataset
             self.mm_names.append(name)
             ds = wids.ShardListDataset(
                 p,
@@ -293,16 +299,16 @@ class MultimodalityDataloader:
         modality_sample: dict[ModalityName | str, Any] = {}
         # modality_sample = getattr(self, "before_getitem", lambda init_sample: init_sample)(modality_sample)
 
-        __check_sample_key = None
+        check_sample_key = None
         for i, (name, ds) in enumerate(self.datasets.items()):
             sample = ds[index]
             # sample key
-            if __check_sample_key is None:
-                __check_sample_key = sample["__key__"]
+            if check_sample_key is None:
+                check_sample_key = sample["__key__"]
             else:
-                assert __check_sample_key == sample["__key__"], (
+                assert check_sample_key == sample["__key__"], (
                     f"All samples must have the same key, "
-                    f"but got {__check_sample_key} and {sample['__key__']} for modality {name}"
+                    f"but got {check_sample_key} and {sample['__key__']} for modality {name}"
                 )
 
             # convert the sample into a flat dict
@@ -312,7 +318,7 @@ class MultimodalityDataloader:
                 elif self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
                     modality_sample.update(self.extract_keys(sample, ext_key, None))
-                else:  # <- default in this case
+                else:
                     modality_sample.update(self.extract_without_extension(sample))
             else:
                 modality_sample[name] = {"default": sample}
@@ -565,7 +571,7 @@ def get_mm_chained_loaders(
     curriculum_type: str | None = None,
     curriculum_kwargs: dict | None = None,
 ):
-    # > assertions
+    # < 0. assertions
     assert all(isinstance(p, dict) for p in paths), (
         "paths must be a list of dictionaries, "
         "where each dictionary contains modality names as keys and index file paths as values."
@@ -576,7 +582,7 @@ def get_mm_chained_loaders(
         "changed_kwargs_by_loader must have the same length as paths"
     )
 
-    # > loop index file and create loaders
+    # < 1. loop index file and create loaders
     datasets = []
     loaders = []
     curriculum_fn = None
@@ -601,7 +607,7 @@ def get_mm_chained_loaders(
         datasets.append(dataset)
         loaders.append(loader)
 
-        # > curriculums fn
+        # < 1.1 curriculums fn
         if curriculum_type is not None:
             assert curriculum_kwargs is not None, (
                 f"curriculum_kwargs must be provided if {curriculum_type=}."
@@ -615,7 +621,7 @@ def get_mm_chained_loaders(
                 "debug",
             )
 
-    # > chain dataloaders
+    # < 2. chain dataloaders
     assert len(datasets) > 0 and len(loaders) > 0, (
         "At least one dataset and one loader must be provided."
     )

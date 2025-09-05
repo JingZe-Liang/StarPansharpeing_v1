@@ -306,7 +306,6 @@ def norm_img(
     Returns:
         function: A function that takes a sample and normalizes the image.
     """
-
     if norm_keys is None:
         norm_keys = not_dunder_keys(sample)
     elif isinstance(norm_keys, str):
