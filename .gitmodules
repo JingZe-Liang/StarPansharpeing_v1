@@ -93,3 +93,7 @@
 [submodule "src/stage2/unmixing/traditional/Hyperspectral-Unmixing-Models"]
     path = src/stage2/unmixing/traditional/Hyperspectral-Unmixing-Models
     url = https://github.com/UPCGIT/Hyperspectral-Unmixing-Models.git
+
+[submodule "src/stage2/generative/TiM"]
+    path = src/stage2/generative/TiM
+    url = https://github.com/WZDTHU/TiM.git

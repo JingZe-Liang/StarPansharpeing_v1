@@ -18,6 +18,7 @@ dataset_names_to_bs:
   WDC: 16
   CD_224: 5
   CD_242: 5
+  OSCD: 5
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -37,6 +38,7 @@ dataset_names_to_n_channels:
   WHU_Hi: 270
   CD_224: 224
   CD_242: 242
+  OSCD: 13
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -57,6 +59,7 @@ dataset_names_to_rgb_channels:
   WHU_Hi: ${list:[29,19,9]}
   CD_224: ${list:[49,39,29]}
   CD_242: ${list:[49,39,29]}
+  OSCD: ${list:[3,2,1]}
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -77,6 +80,7 @@ dataset_names_to_img_size:
   WHU_Hi: 256
   CD_224: 128
   CD_242: 128
+  OSCD: 512
 
 WDC_train:
   - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
@@ -190,6 +194,14 @@ CD_242_train:
 CD_242_val:
   - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-0000.tar
 
+OSCD_train:
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
+
+OSCD_val:
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
+
 # if is lora -------------
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 # ------------------------
@@ -225,6 +237,11 @@ train_loader:
     shuffle_within_workers: ${dataset.shuffle_within_workers}
     resample: true
     check_channels_n: ${dataset.dataset_channel}
+    quantile_img_clip: 0.99
+    per_channel_norm: true
+    random_one_key: true
+    resize_before_transform: 512
+    keys_to_remove: ["gt"]
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
@@ -236,3 +253,8 @@ val_loader:
     shuffle_within_workers: false
     resample: true
     check_channels_n: ${dataset.dataset_channel}
+    quantile_img_clip: 0.99
+    per_channel_norm: true
+    random_one_key: true
+    resize_before_transform: 512
+    keys_to_remove: ["gt"]

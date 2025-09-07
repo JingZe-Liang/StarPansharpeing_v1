@@ -60,7 +60,7 @@ class HyperSegmentationScore(nn.Module):
             f1_score=self.f1_score,
         )
 
-        self.use_aggregation = use_aggregation
+        # self.use_aggregation = use_aggregation
 
     def _update_all_metrics(self, pred, gt):
         for metric in self._all_metric_fns.values():
@@ -73,11 +73,12 @@ class HyperSegmentationScore(nn.Module):
         for metric in self._all_metric_fns.values():
             metric.reset()
 
+    def reset(self):
+        self._reset_all_metrics()
+
     def forward(self, pred: Int[Tensor, "... h w"], gt: Int[Tensor, "... h w"]):
         self._update_all_metrics(pred, gt)
         metrics = self._compute_all_metrics()
-        if not self.use_aggregation:
-            self._reset_all_metrics()
         return metrics
 
 

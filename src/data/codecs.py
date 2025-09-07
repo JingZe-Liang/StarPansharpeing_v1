@@ -176,9 +176,6 @@ def tiff_decode_io(
     Decodes TIFF formatted bytes into a NumPy array.
     Optionally reads metadata first to pre-allocate memory for the 'out' parameter.
     """
-    # import time
-    # t1 = time.perf_counter()
-
     if backend == "tifffile":
         __predefined_buf_size = 16 * 1024 * 1024
         __max_workers = 8
@@ -214,10 +211,6 @@ def tiff_decode_io(
                         buffersize=__predefined_buf_size,  # Example buffer size
                         maxworkers=__max_workers,  # Example max workers
                     )
-                # t2 = time.perf_counter()
-                # log_print(
-                #     "tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug"
-                # )
                 return output_array
             except Exception as e:
                 # Fallback to the simpler method if any error occurs during the 'out' optimization path
@@ -229,10 +222,6 @@ def tiff_decode_io(
                         buffersize=__predefined_buf_size,
                         maxworkers=__max_workers,
                     )
-                # t2 = time.perf_counter()
-                # log_print(
-                #     "tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug"
-                # )
                 return img
         else:
             # Original behavior if use_out_param is False
@@ -242,8 +231,6 @@ def tiff_decode_io(
                     buffersize=__predefined_buf_size,
                     maxworkers=__max_workers,
                 )
-            # t2 = time.perf_counter()
-            # log_print("tifffile decode time: {:.2f} seconds".format(t2 - t1), "debug")
             return img
     else:
         # use nvimgcodec backend

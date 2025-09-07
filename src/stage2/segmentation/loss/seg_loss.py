@@ -27,35 +27,42 @@ def loss_apply_weights(
 
 
 class HyperSegmentationLoss(torch.nn.Module):
-    loss_names = ["dice_loss", "ce_loss"]
+    loss_names = ["dice_loss", "ce_loss", "lovasz_loss"]
 
     def __init__(
         self,
-        dice_mode: str = "multiclass",
+        mode: str = "multiclass",
         dice_cal_classes: list[int] | None = None,
         ce_weight: list[float] | Tensor | None = None,
         ignore_index: int = -100,
         loss_weights: list[float] | None = None,
     ):
         super().__init__()
-        self.dice_loss = smp.losses.DiceLoss(
-            mode=dice_mode,
-            classes=dice_cal_classes,
-            ignore_index=ignore_index,
-        )
-
         ce_weight = torch.as_tensor(ce_weight) if ce_weight is not None else None
+
         self.cross_entropy = torch.nn.CrossEntropyLoss(
             weight=ce_weight, ignore_index=ignore_index
         )
+        self.dice_loss = smp.losses.DiceLoss(
+            mode=mode,
+            classes=dice_cal_classes,
+            ignore_index=ignore_index,
+        )
+        self.lovasz_loss = smp.losses.LovaszLoss(
+            mode=mode,
+            per_image=False,
+            ignore_index=ignore_index,
+            from_logits=True,
+        )
 
-        self.loss_weights = loss_weights or (1.0, 1.0)
+        self.loss_weights = loss_weights or (1.0, 1.0, 0.75)
         self.loss_weights = torch.as_tensor(self.loss_weights)
 
     def forward(self, pred: Float[Tensor, "b c h w"], gt: Int[Tensor, "b c h w"]):
         dice_loss = self.dice_loss(pred, gt)
         ce_loss = self.cross_entropy(pred, gt)
-        loss = loss_apply_weights([dice_loss, ce_loss], self.loss_weights)
+        lovasz_loss = self.lovasz_loss(pred, gt)
+        loss = loss_apply_weights([dice_loss, ce_loss, lovasz_loss], self.loss_weights)
 
         return loss, {"dice_loss": dice_loss, "ce_loss": ce_loss}
 

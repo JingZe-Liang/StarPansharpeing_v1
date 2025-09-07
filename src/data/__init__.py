@@ -3,7 +3,7 @@ from .hyperspectral_loader import (
     get_hyperspectral_dataloaders,
     ms_pan_dir_paired_loader,
 )
-from .panshap_loader import (
+from .multimodal_loader import (
     MultimodalityDataloader,
     get_mm_chained_loaders,
     get_panshap_dataloaders,

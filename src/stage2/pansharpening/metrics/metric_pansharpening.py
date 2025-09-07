@@ -18,7 +18,9 @@ from warnings import warn
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from torch import Tensor
 from torchmetrics.aggregation import MeanMetric
 
 from src.utilities.logging import log_print
@@ -383,6 +385,7 @@ class PansharpeningMetrics(AnalysisPanAcc):
         # Convert to all MeanMetric
         self.acc_ave: dict[str, float]
         self.acc_ave_metrics = {k: MeanMetric() for k, v in self.acc_ave.items()}
+        self._curr_acc: dict[str, Tensor] | None = None
 
     def _to_sync_metrics(self, acc: dict, weight: float | int = 1.0):
         for (k, update_v), name in zip(acc.items(), self.acc_ave_metrics.keys()):
@@ -406,6 +409,7 @@ class PansharpeningMetrics(AnalysisPanAcc):
         acc_dict_th = {
             k: torch.as_tensor(v, device=device) for k, v in acc_dict.items()
         }
+        self._curr_acc = acc_dict_th
         self.acc_ave_metrics = self._to_sync_metrics(acc_dict_th)
         self.acc_ave = self._get_acc_ave()
         self._call_n += n
@@ -417,15 +421,156 @@ class PansharpeningMetrics(AnalysisPanAcc):
             metric.reset()
 
 
+# * --- Test --- #
+
+
+def test_pansharpening_metrics():
+    """Test function for PansharpeningMetrics class"""
+
+    # Test with reference mode (reduced-resolution)
+    print("Testing with reference mode...")
+    metric_ref = PansharpeningMetrics(ratio=4, ref=True)
+
+    # Create test data
+    batch_size = 2
+    channels = 3
+    height = 64
+    width = 64
+
+    # Generate random test tensors
+    gt = torch.rand(batch_size, channels, height, width)
+    pred = torch.rand(batch_size, channels, height, width)
+
+    # Test metrics calculation
+    metrics_ref = metric_ref(gt, pred)
+    print(f"Reference mode metrics: {metrics_ref}")
+
+    # Test with AnalysisPanAcc for comparison
+    print("\nTesting with AnalysisPanAcc...")
+    analysis_ref = AnalysisPanAcc(ratio=4, ref=True)
+    metrics_analysis = analysis_ref(gt, pred)
+    print(f"AnalysisPanAcc metrics: {metrics_analysis}")
+
+    # Test batch accumulation
+    print("\nTesting batch accumulation...")
+    metric_ref.clear_history()
+
+    # Process multiple batches
+    for i in range(3):
+        batch_gt = torch.rand(1, channels, height, width)
+        batch_pred = torch.rand(1, channels, height, width)
+        _ = metric_ref(batch_gt, batch_pred)
+        print(f"Batch {i + 1}: {metric_ref._curr_acc}")
+
+    print(f"\nFinal accumulated metrics: {metric_ref.acc_ave}")
+
+    # Test clear history
+    print("\nTesting clear history...")
+    metric_ref.clear_history()
+    print(f"After clear: {metric_ref.acc_ave}")
+
+    # Test string representation
+    print("\nTesting string representation...")
+    metric_ref(gt, pred)
+    print(f"String representation: {metric_ref.print_str()}")
+    print(f"Repr: {repr(metric_ref)}")
+
+    print("\nAll tests completed successfully!")
+
+
+def test_pansharpening_metrics_multi_ranks(rank):
+    """Test function for multi-rank (distributed) pansharpening metrics"""
+
+    # Initialize distributed process group
+    torch.distributed.init_process_group(
+        backend="gloo", init_method="tcp://localhost:12355", world_size=2, rank=rank
+    )
+
+    # Set device
+    device = torch.device(f"cpu")
+
+    print(f"Rank {rank}: Starting distributed test...")
+
+    # Create metrics with distributed support
+    metric_ref = PansharpeningMetrics(ratio=4, ref=True)
+
+    # Create test data - different data for each rank
+    batch_size = 2
+    channels = 3
+    height = 64
+    width = 64
+
+    # Use different random seed for each rank
+    torch.manual_seed(42 + rank)
+
+    # Generate test tensors
+    gt = torch.rand(batch_size, channels, height, width, device=device)
+    pred = torch.rand(batch_size, channels, height, width, device=device)
+
+    print(f"Rank {rank}: Generated test data with shape {gt.shape}")
+
+    # Test metrics calculation
+    metrics_ref = metric_ref(gt, pred)
+    print(f"Rank {rank}: Reference mode metrics: {metrics_ref}")
+
+    # Test batch accumulation across ranks
+    print(f"Rank {rank}: Testing batch accumulation...")
+    metric_ref.clear_history()
+
+    # Process multiple batches
+    for i in range(3):
+        torch.manual_seed(42 + rank + i + 1)
+        batch_gt = torch.rand(1, channels, height, width, device=device)
+        batch_pred = torch.rand(1, channels, height, width, device=device)
+        current_metrics = metric_ref(batch_gt, batch_pred)
+        print(f"Rank {rank}: Batch {i + 1}: {current_metrics}")
+
+    # Synchronize across ranks
+    torch.distributed.barrier()
+
+    print(f"Rank {rank}: Final accumulated metrics: {metric_ref.acc_ave}")
+
+    # Test clear history
+    print(f"Rank {rank}: Testing clear history...")
+    metric_ref.clear_history()
+    print(f"Rank {rank}: After clear: {metric_ref.acc_ave}")
+
+    # Test with AnalysisPanAcc for comparison
+    print(f"Rank {rank}: Testing with AnalysisPanAcc...")
+    analysis_ref = AnalysisPanAcc(ratio=4, ref=True)
+    metrics_analysis = analysis_ref(gt, pred)
+    print(f"Rank {rank}: AnalysisPanAcc metrics: {metrics_analysis}")
+
+    # Final barrier
+    torch.distributed.barrier()
+
+    print(f"Rank {rank}: All tests completed successfully!")
+
+    # Clean up
+    torch.distributed.destroy_process_group()
+
+
 if __name__ == "__main__":
-    sr = torch.rand(4, 3, 256, 256)
-    ms = torch.rand(4, 3, 64, 64)
-    lms = torch.rand(4, 3, 256, 256)
-    pan = torch.rand(4, 3, 256, 256)
-    gt = torch.rand(4, 3, 256, 256)
+    # test_pansharpening_metrics()
 
-    analysis = AnalysisPanAcc(ref=False, ratio=4, default_max_value=2047)
+    # Run multi-rank test
+    print("Starting multi-rank test...")
+    mp.spawn(
+        test_pansharpening_metrics_multi_ranks,
+        args=(),
+        nprocs=2,
+        join=True,
+    )
+    print("Multi-rank test completed!")
 
-    for i in range(2):
-        analysis(sr[i : i + 2], ms[i : i + 2], lms[i : i + 2], pan[i : i + 2])
-        print(analysis.print_str())
+    # sr = torch.rand(4, 3, 256, 256)
+    # ms = torch.rand(4, 3, 64, 64)
+    # lms = torch.rand(4, 3, 256, 256)
+    # pan = torch.rand(4, 3, 256, 256)
+    # gt = torch.rand(4, 3, 256, 256)
+
+    # analysis = AnalysisPanAcc(ref=False, ratio=4, default_max_value=2047)
+
+    # for i in range(2):
+    #     analysis(sr[i : i + 2], ms[i : i + 2], lms[i : i + 2], pan[i : i + 2])
+    #     print(analysis.print_str())

@@ -14,7 +14,7 @@ from src.data.codecs import (
     safetensors_decode_io,
     tiff_decode_io,
 )
-from src.data.panshap_loader import MultimodalityDataloader
+from data.multimodal_loader import MultimodalityDataloader
 from src.data.utils import (
     chained_dataloaders,
     expand_paths_and_correct_loader_kwargs_mm,

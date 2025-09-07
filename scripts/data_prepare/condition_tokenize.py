@@ -18,7 +18,7 @@ from peft import PeftConfig
 from tqdm import tqdm
 
 from src.data.codecs import npy_codec_io, npz_codec_io, safetensors_codec_io
-from src.data.panshap_loader import MultimodalityDataloader
+from data.multimodal_loader import MultimodalityDataloader
 from src.data.tar_utils import TarSinkManager
 from src.utilities.logging import log_print, set_logger_file
 

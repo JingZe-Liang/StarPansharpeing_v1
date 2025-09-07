@@ -22,7 +22,7 @@ from src.utilities.logging.print import log_print
 from src.utilities.train_utils.state import StepsCounter
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
-SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData] | tuple
+SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
 
 
 def flatten_nested_list(lst):
@@ -295,16 +295,40 @@ def norm_img(
     check_nan: bool = False,
     on_device: bool = False,
     clip_zero: bool = True,
+    per_channel: bool = False,
+    quantile_clip: float = 1.0,
+    manual_img_max: float | None = None,
 ):
     """
-    Normalize the image to [0, 1] and optionally to [-1, 1].
+    Normalize image(s) in a sample to [0, 1] and optionally to [-1, 1].
+
+    This function processes image data in various formats (dict, np.ndarray, torch.Tensor)
+    and applies normalization, permutation, and other preprocessing operations.
+
     Args:
-        to_neg_1_1 (bool): Whether to normalize to [-1, 1].
-        norm_keys (list[str]): List of keys to normalize.
-        permute (bool): Whether to permute the image dimensions.
+        sample: Sample dictionary containing image data to normalize
+        norm_keys: Keys in the sample to normalize. Can be str, list[str], or None
+                  (default: ["img"]). If None, normalizes all non-dunder keys.
+        to_neg_1_1: Whether to normalize to [-1, 1] range instead of [0, 1] (default: True)
+        permute: Whether to permute image dimensions from (H, W, C) to (C, H, W)
+                 or (B, H, W, C) to (B, C, H, W) (default: True)
+        check_nan: Whether to replace NaN/Inf values with 0 (default: False)
+        on_device: Whether to move tensors to CUDA device (default: False)
+        clip_zero: Whether to clip negative values to 0 (default: True)
+        per_channel: Whether to normalize per-channel instead of globally (default: False)
 
     Returns:
-        function: A function that takes a sample and normalizes the image.
+        dict: The processed sample with normalized images. Returns None if image
+              dimensions are invalid (for webdataset to drop the sample).
+
+    Example:
+        >>> sample = {"img": np.array([[[0, 128], [255, 0]]])}  # HWC format
+        >>> normalized = norm_img(sample)
+        >>> # Result: img normalized to [0, 1] or [-1, 1] range
+
+    Variants:
+        Change detection shared time normalization function:
+            src/stage2/change_detection/data/oscd_loader.py:shared_times_norm_img
     """
     if norm_keys is None:
         norm_keys = not_dunder_keys(sample)
@@ -328,24 +352,15 @@ def norm_img(
 
         img = torch.as_tensor(_img, dtype=torch.float32)
         if on_device:
-            img = img.to(torch.device("cuda"), non_blocking=True)
+            img = img.cuda(non_blocking=True, memory_format=torch.contiguous_format)
         if check_nan:
             img = torch.nan_to_num(img, nan=0.0, posinf=1, neginf=0.0)
-        if clip_zero:
-            img = img.clip(min=0.0, max=None)  # clip to [0, inf)
-        _img_max = img.max()
-        if _img_max < 1e-4:
-            img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
-        else:
-            img = img / (_img_max + 1e-6)
-        if to_neg_1_1:
-            img = (img * 2 - 1).clip(-1.0, 1.0)
         if permute:
             if img.ndim == 3:
                 # (H, W, C) -> (C, H, W)
                 img = img.permute(-1, 0, 1)
             elif img.ndim == 4:
-                #  # (B, C, H, W) -> (B, C, H, W)
+                # (B, C, H, W) -> (B, C, H, W)
                 img = img.permute(0, -1, 1, 2)
             else:
                 log_print(
@@ -354,6 +369,60 @@ def norm_img(
                     warn_once=True,
                 )
                 return None  # None for webdataset means drop this sample
+
+        if clip_zero:
+            img.clip_(min=0.0, max=None)  # clip to [0, inf)
+        else:
+            # if not clip zero, then we add the min to make it positive
+            img_min = (
+                img.min() if not per_channel else img.amin(dim=(-2, -1), keepdim=True)
+            )
+            img.add_(-img_min)
+
+        # If some value in some channels are too large, clamp them to the quantile value
+        # breakpoint()
+        if manual_img_max is not None:
+            assert not per_channel, (
+                "manual_img_max and per_channel cannot be set together"
+            )
+            assert quantile_clip == 1.0, (
+                "quantile_clip and manual_img_max cannot be set together"
+            )
+            q_max = manual_img_max
+        elif quantile_clip < 1.0:
+            dim = -2 if per_channel else 0
+            # (c, h, w) -> (c, h*w)
+            # (c, h, w) -> (c*h*w,)
+            q_max = (
+                img.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
+            )  # (c, 1) or (1,)
+
+            # c, 1, 1
+            if per_channel:
+                q_max = q_max[..., None]
+            else:
+                q_max = q_max.item()
+        else:
+            q_max = None
+
+        # Per-channel normalization
+        if per_channel:
+            img_max = img.amax(dim=(-2, -1), keepdim=True)
+        else:
+            img_max = img.max()
+        if q_max is not None:
+            img_max = img_max.clip_(min=None, max=q_max)
+        _img_max = img_max.item() if img_max.ndim == 0 else img_max.max().item()
+        if _img_max < 1e-4:
+            img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
+        else:
+            img.div_(img_max + 1e-6)  # normalize to [0, 1]
+
+        # To (-1, 1) or (0, 1)
+        if to_neg_1_1:
+            img.mul_(2.0).sub_(1.0).clamp_(-1.0, 1.0)  # normalize to [-1, 1]
+        else:
+            img.clamp_(0.0, 1.0)  # normalize to [0, 1]
 
         sample[key] = img
 

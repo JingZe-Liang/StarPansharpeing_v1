@@ -61,12 +61,15 @@ exclude = [
 [tool.ruff.format]
 indent-style = "space"
 line-ending = "lf"
-docstring-code-format = true
+docstring-code-format = false
 docstring-code-line-length = 20
 
 [tool.ruff.lint]
 select = ["E501", "I", "E", "W"]
 ignore = ["E402","D103","I001","E731","E741","D202","D403","E731","E501","PLR0913","W291","E722","W293","E701"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.py" = ["D"]  # Disable all docstring-related rules
 
 [tool.ruff.lint.pylint]
 max-args = 20

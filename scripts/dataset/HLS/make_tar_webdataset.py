@@ -1188,24 +1188,43 @@ if __name__ == "__main__":
         # )
 
         # Classification collections
+        # all_msi_files_s = [
+        #     "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HanChuan.mat",
+        #     "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HongHu.mat",
+        #     "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_LongKou.mat",
+        # ]
+        # webdataset_pts = "data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-xxxbands-px_256-%04d.tar"
+        # func_kwargs.update(
+        #     {
+        #         # "channel_n": 191,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip",
+        #         "img_clip_size": (256, 256),
+        #         "img_stride": (256, 256),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "zlib",
+        #         },
+        #         # "read_transpose": False,
+        #     }
+        # )
+
         all_msi_files_s = [
-            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HanChuan.mat",
-            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_HongHu.mat",
-            "data/Downstreams/ClassificationCollection/cls/mat/WHU_Hi_LongKou.mat",
+            "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm1.mat",
+            "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm2.mat",
         ]
-        webdataset_pts = "data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-xxxbands-px_256-%04d.tar"
+        webdataset_pts = "data/Downstreams/ChangeDetection/hyper_images/CD-FarmLand-155bands-px_128-%04d.tar"
         func_kwargs.update(
             {
-                # "channel_n": 191,
+                "channel_n": 155,
                 "save_backend": "tiff",
                 "process_img_type": "clip",
-                "img_clip_size": (256, 256),
-                "img_stride": (256, 256),
+                "img_clip_size": (128, 128),
+                "img_stride": (128, 128),
                 "save_backend": "tiff",
                 "save_kwargs": {
                     "tiff_compression_type": "zlib",
                 },
-                # "read_transpose": False,
             }
         )
 

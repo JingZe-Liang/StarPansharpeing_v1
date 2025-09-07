@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, Literal, cast
 
@@ -524,7 +524,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             for name in instance.loss_metrics_values:
                 vs = []
                 for ins in ins_lst:
-                    v = ins.loss_metrics_values.get(name, None)
+                    v: float = ins.loss_metrics_values.get(name, None)
                     assert v is not None, (
                         f"Value for {name} is None in instance {ins}, this should not when syncronizing."
                     )
@@ -554,7 +554,8 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
 
             if overwrite_instance_use_sync:
                 # overwrite the instance with the synchronized instance
-                cls._instances[instance_name] = instance_cp
+                instance_key = instance_name if instance_name is not None else cls
+                cls._instances[instance_key] = instance_cp
                 log_print(
                     f"LossMetricTracker instance {instance_name} synchronized and overwritten.",
                 )
@@ -632,7 +633,7 @@ def dict_tensor_sync(
     metrics: Mapping[str, torch.Tensor | float],
     use_reduce=True,  # be sure that all should be Tensor
     *,
-    reduce_op: dist.ReduceOp | None | str = "AVG",
+    reduce_op: dist.ReduceOp | None | str | Callable[[list[dict]], dict] = "AVG",
 ):
     def _reduce_syn():
         str2reduce_op = {
@@ -652,6 +653,10 @@ def dict_tensor_sync(
                 torch.float16,
             ):
                 tensor_ = tensor_.float()
+            if isinstance(reduce_op, Callable):
+                raise ValueError(
+                    "reduce_op cannot be a Callable when use_reduce is True."
+                )
             op = str2reduce_op[reduce_op] if isinstance(reduce_op, str) else reduce_op
             assert op is not None, "Expected a valid reduce operation"
             dist.all_reduce(tensor_, op=op)
@@ -670,6 +675,8 @@ def dict_tensor_sync(
             return {name: max(d[name] for d in lst_metrics) for name in lst_metrics[0]}
         elif reduce_op == "MIN":
             return {name: min(d[name] for d in lst_metrics) for name in lst_metrics[0]}
+        elif callable(reduce_op):
+            return reduce_op(lst_metrics)
         else:
             raise ValueError(f"Unknown reduce operation: {reduce_op}")
 

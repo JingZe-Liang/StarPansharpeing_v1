@@ -259,11 +259,14 @@ def get_hyperspectral_dataloaders(
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,
+    per_channel_norm: bool = False,
     # image key in the sample dictionary
     img_key: str | list[str] = "auto",
     tgt_key: str | list[str] | None = None,
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
+    quantile_img_clip: float = 1.0,
+    manual_img_max: float | None = None,
     undecoded_filtered: bool = True,
     # int for minimal_size; tuple for (min, max)
     constraint_size: int | tuple[int, int] | None = None,
@@ -416,8 +419,6 @@ def get_hyperspectral_dataloaders(
             f"but got {type(img_key)} and {type(tgt_key)}"
         )
 
-    # if isinstance(img_key, str) and img_key != "auto":
-    #     img_key = [img_key]
     if isinstance(tgt_key, str):
         tgt_key = [tgt_key]
 
@@ -441,16 +442,18 @@ def get_hyperspectral_dataloaders(
             norm_keys=tgt_key,
             permute=permute,
             check_nan=check_nan,
+            per_channel=per_channel_norm,
+            quantile_clip=quantile_img_clip,
+            manual_img_max=manual_img_max,
         )
     )
 
     # channel check
     if check_channels_n is not None:
-        dataset = dataset.map(
-            partial(
-                check_img_channel, expect_channels=check_channels_n, img_key=tgt_key
-            )
+        check_fn = partial(
+            check_img_channel, expect_channels=check_channels_n, img_key=tgt_key
         )
+        dataset = dataset.map(check_fn)
 
     # resize
     if resize_before_transform is not None:
@@ -1571,7 +1574,8 @@ if __name__ == "__main__":
         # ["data/HyperGlobal/hyper_images/HyperGlobal-GF5-bands-px_64_0002.tar"]
         # ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
         # ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
-        ["data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"]
+        # ["data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"]
+        ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
@@ -1591,7 +1595,7 @@ if __name__ == "__main__":
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=None,
+        resize_before_transform=512,
         shuffle_within_workers=False,
         resample=True,
     )
@@ -1610,7 +1614,13 @@ if __name__ == "__main__":
         # {"img_key": ["img"], "keys_to_remove": ["metadata"]}
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},
-        {"img_key": "auto", "tgt_key": "img"}
+        {
+            # "img_key": ["img1", "img2"],
+            "tgt_key": "img",
+            "random_one_key": True,
+            "manual_img_max": 3800.0,
+            "keys_to_remove": ["gt"],
+        }
         # {"permute": False},
         # {
         #     "loader_type": "wids",
@@ -1660,8 +1670,6 @@ if __name__ == "__main__":
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=False,
         shuffle_loaders=False,
-        # curriculum_type="linear",
-        # curriculum_kwargs=curriculum_kwargs,
     )
 
     from tqdm import tqdm
@@ -1678,22 +1686,16 @@ if __name__ == "__main__":
 
     i = 0
     while True:
-        try:
-            sample = next(test_loader)
-        except StopIteration:
-            break
-        except Exception as e:
-            log_print(f"loading sample failed: {e}", level="error")
-            continue
+        sample = next(test_loader)
 
         # print(sample.keys(), sample["segmentation"].shape)
         # print(sample.keys())
 
-        img = sample["img"]
-        img = img[0].permute(1, 2, 0)[..., [32, 18, 9]]
-        img = (img * 255.0).to(torch.uint8)
-        img = img.cpu().numpy()
-        PIL.Image.fromarray(img).save(f"data/Downstreams/UrbanUnmixing/patch_{i}.jpg")
+        # img = sample["img"]
+        # img = img[0].permute(1, 2, 0)[..., [32, 18, 9]]
+        # img = (img * 255.0).to(torch.uint8)
+        # img = img.cpu().numpy()
+        # PIL.Image.fromarray(img).save(f"data/Downstreams/UrbanUnmixing/patch_{i}.jpg")
 
         i += 1
 
@@ -1855,26 +1857,3 @@ if __name__ == "__main__":
     # print(f"Batch shape: {img_tensor.shape}")
     # print(f"Range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
     # print(f"Data type: {img_tensor.dtype}")
-
-    # * get the dir safetensors dataloader
-    # path = "data/MUSLI_safetensors/safetensors"
-    # dataset, dataloader = only_hyperspectral_img_folder_dataloader(
-    #     path,
-    #     batch_size=8,
-    #     num_workers=0,
-    #     to_neg_1_1=True,
-    #     transform_prob=0.0,
-    #     # pin_memory=False,
-    #     hyper_transforms_lst=None,
-    # )
-
-    # from tqdm import tqdm
-
-    # for sample in tqdm(dataloader):
-    #     print(sample.keys())
-    #     img = sample["img"].cuda()
-    #     img = img.permute(0, -1, 1, 2).float()
-    #     img = img / img.max()
-    #     img = img * 2 - 1
-
-    #     print(img.shape)

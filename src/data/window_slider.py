@@ -216,15 +216,16 @@ class WindowSlider:
 
     @staticmethod
     def merge_windows(
-        window_results: dict[tuple[int, int, int], dict[str, Any]],
+        window_results: list[dict[str, Any]],
         merge_method: str = "average",
+        merged_keys: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Merge windowed results back to full image size.
 
         Args:
-            window_results: Dictionary containing results from all windows,
-                            keys are (batch_idx, i, j) tuples
+            window_results: List containing results from all windows,
+                            each element is a dictionary with data and window_info
             merge_method: Method for merging overlapping regions ('average', 'first', 'last')
 
         Returns:
@@ -234,7 +235,7 @@ class WindowSlider:
             return {}
 
         # Get info from first window
-        first_window = next(iter(window_results.values()))
+        first_window = window_results[0]
         window_info = first_window.get("window_info", {})
 
         if not window_info:
@@ -245,11 +246,14 @@ class WindowSlider:
         batch_size = window_info["batch_size"]
 
         # Get all data keys (excluding metadata)
-        data_keys = [
-            k
-            for k in first_window.keys()
-            if k not in ["window_info", "__key__", "__url__"]
-        ]
+        if merged_keys is None:
+            data_keys = [
+                k
+                for k in first_window.keys()
+                if k not in ["window_info", "__key__", "__url__"]
+            ]
+        else:
+            data_keys = merged_keys
 
         # Initialize merged results
         merged_results = {}
@@ -356,7 +360,7 @@ class WindowSlider:
                     )
 
             # Merge all windows
-            for (_, _, _), window_data in window_results.items():
+            for window_data in window_results:
                 if key not in window_data:
                     continue
 
