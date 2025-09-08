@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+
 from copy import deepcopy
 
 # This file is modified from https://github.com/PixArt-alpha/PixArt-sigma
@@ -374,7 +375,10 @@ def SanaMSControlNet_1600M_P1_D20(**kwargs):
     )
 
 
-if __name__ == "__main__":
+# * --- Test --- #
+
+
+def test_sana_ms_controlnet():
     device = "cuda:1"
     torch.cuda.set_device(device)
 
@@ -396,3 +400,8 @@ if __name__ == "__main__":
     # forward
     output = model(inputs, timestep, cap, mask, data_info)
     print(output.shape)
+    assert output.shape == torch.Size(1, 16, 32, 32), "output shape is incorrect"
+
+
+if __name__ == "__main__":
+    test_sana_ms_controlnet()

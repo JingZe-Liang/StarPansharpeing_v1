@@ -379,12 +379,21 @@ class AnalysisPanAcc(object):
 
 
 class PansharpeningMetrics(AnalysisPanAcc):
-    def __init__(self, ratio=4, ref=True, eargas_ratio=4, **unref_factory_kwargs):
+    def __init__(
+        self,
+        ratio=4,
+        ref=True,
+        eargas_ratio=4,
+        device: str = "cuda",
+        **unref_factory_kwargs,
+    ):
         super().__init__(ratio, ref, **unref_factory_kwargs)
 
         # Convert to all MeanMetric
         self.acc_ave: dict[str, float]
-        self.acc_ave_metrics = {k: MeanMetric() for k, v in self.acc_ave.items()}
+        self.acc_ave_metrics = {
+            k: MeanMetric().to(device) for k, v in self.acc_ave.items()
+        }
         self._curr_acc: dict[str, Tensor] | None = None
 
     def _to_sync_metrics(self, acc: dict, weight: float | int = 1.0):

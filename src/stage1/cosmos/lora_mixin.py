@@ -7,6 +7,7 @@ import accelerate
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, set_peft_model_state_dict
+from torch import Tensor
 
 from src.stage1.cosmos.modules.blocks import (
     DiffBandsInputConvIn,
@@ -14,7 +15,7 @@ from src.stage1.cosmos.modules.blocks import (
 )
 from src.utilities.logging import log_print
 
-# * --- Utilites --- #
+# * --- Network utilites --- #
 
 
 def get_conv_in_out_modules(
@@ -65,6 +66,56 @@ def change_new_conv_in_out_modules(
     conv_out_module.add_or_drop_modules(add_chans=add_chans, drop_chans=drop_chans)
 
 
+# * --- Latent utilities --- #
+
+
+def dim_match(tensor: Tensor, target: Tensor) -> Tensor:
+    if tensor.ndim == 0:
+        return tensor
+    elif tensor.ndim == 1:
+        if target.ndim == 4:  # b, c, h, w
+            return tensor.view(1, -1, 1, 1)
+        elif target.ndim == 3:  # b, l, c
+            return tensor.view(1, 1, -1)
+        else:
+            raise ValueError(f"Unsupported target ndim: {target.ndim}")
+    else:
+        raise ValueError(f"Unsupported tensor ndim: {tensor.ndim}")
+
+
+def scale_shift_latent(
+    latent: Tensor, scale: Tensor | float, shift: Tensor | float
+) -> Tensor:
+    """Scale and shift the latent tensor."""
+    if isinstance(scale, float):
+        scale = torch.as_tensor(scale, device=latent.device, dtype=latent.dtype)
+    if isinstance(shift, float):
+        shift = torch.as_tensor(shift, device=latent.device, dtype=latent.dtype)
+
+    scale = cast(Tensor, scale)
+    shift = cast(Tensor, shift)
+
+    scale = dim_match(scale, latent)
+    shift = dim_match(shift, latent)
+    latent.sub_(shift).div_(scale)
+
+    return latent
+
+
+def un_scale_shift_latent(latent, scale, shift):
+    """Un-scale and un-shift the latent tensor."""
+    if isinstance(scale, float):
+        scale = torch.as_tensor(scale, device=latent.device, dtype=latent.dtype)
+    if isinstance(shift, float):
+        shift = torch.as_tensor(shift, device=latent.device, dtype=latent.dtype)
+
+    scale = dim_match(scale, latent)
+    shift = dim_match(shift, latent)
+    latent.mul_(scale).add_(shift)
+
+    return latent
+
+
 # * --- LoRA Mixin --- #
 
 
@@ -75,6 +126,9 @@ class TokenizerLoRAMixin(nn.Module):
         lora_weights: dict[str, str | Path],
         lora_hyper_chans: dict[str, int],
         active_lora: str | None = None,
+        tokenizer_scale_shift: tuple[float, float]
+        | tuple[list[float], list[float]]
+        | None = None,
         # Optional, since configs are in directories
         lora_cfg: dict | LoraConfig | None = None,
     ):
@@ -98,6 +152,9 @@ class TokenizerLoRAMixin(nn.Module):
         self.model_peft: PeftModel | None = None
         self.current_lora: str | None = None
         self.current_lora_chan: int | None = None
+        scale_factor, shift_factor = tokenizer_scale_shift or (1.0, 0.0)
+        self.register_buffer("scale_factor", torch.as_tensor(self.scale_factor))
+        self.register_buffer("shift_factor", torch.as_tensor(self.shift_factor))
 
         self.encode: Callable
         self.decode: Callable

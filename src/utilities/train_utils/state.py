@@ -5,6 +5,7 @@ from typing import Any, Literal, cast
 import accelerate
 import numpy as np
 import torch
+from torch import Tensor
 import torch.distributed as dist
 from torchmetrics.aggregation import (
     MaxMetric,
@@ -630,7 +631,7 @@ def metrics_sync(
 
 
 def dict_tensor_sync(
-    metrics: Mapping[str, torch.Tensor | float],
+    metrics: dict[str, float] | dict[str, Tensor],
     use_reduce=True,  # be sure that all should be Tensor
     *,
     reduce_op: dist.ReduceOp | None | str | Callable[[list[dict]], dict] = "AVG",

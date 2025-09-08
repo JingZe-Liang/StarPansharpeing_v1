@@ -1,9 +1,9 @@
 from typing import TypeVar, cast
 
-import beartype
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from beartype import beartype
 from jaxtyping import Float, Float32, Int, UInt
 from matplotlib.cm import get_cmap
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
@@ -11,6 +11,39 @@ from numpy.typing import NDArray
 from PIL import Image
 from torch import Tensor
 from torchvision.utils import make_grid
+
+from ..config_utils import function_config_to_basic_types
+
+# Typing aliases
+
+type HyperImageType = Float[Tensor, "b c h w"] | Float[NDArray, "h w c"]
+
+type GTMapType = (
+    Int[NDArray, "h w"]
+    | Int[Tensor, "b c h w"]
+    | Int[Tensor, "b h w"]
+    | UInt[NDArray, "h w"]
+    | UInt[Tensor, "b c h w"]
+    | UInt[Tensor, "b h w"]
+)
+type VisGTMapType = (
+    Image.Image
+    | list[Image.Image]
+    | Float32[NDArray, "b h w"]
+    | Float32[NDArray, "h w"]
+)
+
+
+@beartype
+def choose_lightest_bands(
+    img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
+) -> list[int]:
+    mean_cs = img.mean((-3, -2, -1))  # (c,)
+    mean_cs = torch.as_tensor(mean_cs)
+    _, indices = torch.topk(mean_cs, k=3, largest=True)
+    indices = indices.tolist()
+    return indices
+
 
 RGB_CHANNELS_BY_BANDS = {
     4: [2, 1, 0],
@@ -126,6 +159,7 @@ def get_coco_colors():
     return COCO_CATEGORIES / 255.0
 
 
+@function_config_to_basic_types
 def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None):
     global RGB_CHANNELS_BY_BANDS
 
@@ -143,6 +177,9 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None
         c_3 = c // 3
         bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
         rgb_img = torch.stack(bands, dim=1)
+    elif rgb_channels == "lightest":
+        indices = choose_lightest_bands(img)
+        rgb_img = img[:, indices, :, :]
     else:
         raise ValueError(
             f"Invalid RGB channels mapping: {rgb_channels}. Expected list, tuple or 'mean'."
@@ -151,10 +188,8 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None
     return rgb_img
 
 
-type HyperImageType = Float[Tensor, "b c h w"] | Float[NDArray, "h w c"]
-
-
-@beartype.beartype
+@beartype
+@function_config_to_basic_types
 def visualize_hyperspectral_image(
     img: HyperImageType,
     to_pil=False,
@@ -211,23 +246,8 @@ def visualize_hyperspectral_image(
         return rgb_img
 
 
-type GTMapType = (
-    Int[NDArray, "h w"]
-    | Int[Tensor, "b c h w"]
-    | Int[Tensor, "b h w"]
-    | UInt[NDArray, "h w"]
-    | UInt[Tensor, "b c h w"]
-    | UInt[Tensor, "b h w"]
-)
-type VisGTMapType = (
-    Image.Image
-    | list[Image.Image]
-    | Float32[NDArray, "b h w"]
-    | Float32[NDArray, "h w"]
-)
-
-
-@beartype.beartype
+@beartype
+@function_config_to_basic_types
 def visualize_segmentation_map(
     gt_map: GTMapType,
     cmap: str = "tab20",

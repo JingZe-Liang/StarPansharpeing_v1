@@ -3,7 +3,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, NamedTuple, Sequence, cast
 
 import accelerate
 import hydra
@@ -20,16 +20,15 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
-heavyball = lazy_loader.load("heavyball")
-
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage2.denoise.metrics import DenoisingMetrics
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
 from src.utilities.config_utils import (
@@ -39,6 +38,16 @@ from src.utilities.logging import dict_round_to_list_str
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
+from src.utilities.train_utils.visualization import visualize_hyperspectral_image
+
+heavyball = lazy_loader.load("heavyball")
+
+
+class TrainDenoisingStepOutput(NamedTuple):
+    pred_latent: Tensor
+    pred_pixel: Tensor
+    denoise_loss: Tensor
+    log_losses: dict[str, Tensor]
 
 
 class DenoisingTrainer:
@@ -144,7 +153,7 @@ class DenoisingTrainer:
         else:
             self.backward_detokenizer = self.train_cfg.backward_detokenizer
 
-        pansp_name = (
+        denoising_name = (
             getattr(self.train_cfg, "denoising_name", None)
             or self.model.__class__.__name__
         )
@@ -600,9 +609,10 @@ class DenoisingTrainer:
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
-        assert mode in ("train", "val"), (
-            "Only train and val modes are supported for now."
-        )
+        assert mode in (
+            "train",
+            "val",
+        ), "Only train and val modes are supported for now."
 
         return self.train_state[mode]
 
@@ -669,7 +679,6 @@ class DenoisingTrainer:
                 loss = self.denoising_loss(
                     pred_latent, gt_latent, pred, gt, pred_from_latent, gt
                 )
-
                 if isinstance(loss, torch.Tensor):
                     log_losses = {"denoise_loss": loss.detach()}
                 elif isinstance(loss, (tuple, list)):
@@ -677,7 +686,8 @@ class DenoisingTrainer:
                 else:
                     raise NotImplementedError(f"Unknown type {type(loss)}")
 
-        return pred_latent, pred, loss, log_losses
+        out = TrainDenoisingStepOutput(pred_latent, pred, loss, log_losses)
+        return out
 
     def train_denoise_step(
         self,
@@ -695,14 +705,12 @@ class DenoisingTrainer:
             noisy_latent = noisy_tok_out["latent"].detach()
             gt_latent = gt_tok_out["latent"].detach()
 
-        pred_latent, pred, loss, log_losses = self.forward_denoising_model(
-            noisy, gt, noisy_latent, gt_latent
-        )
+        out = self.forward_denoising_model(noisy, gt, noisy_latent, gt_latent)
 
         if self.accelerator.sync_gradients:
             # backward
             self.optim.zero_grad()
-            self.accelerator.backward(loss)
+            self.accelerator.backward(out.denoise_loss)
             self.gradient_check(self.model)
             self.optim.step()
             self.sched.step()
@@ -710,32 +718,22 @@ class DenoisingTrainer:
             # ema update
             self.ema_update(mode="denoising")
 
-        return dict(
-            pred_latent=pred_latent,
-            pred_pixel=pred,
-            denoise_loss=loss,
-            log_losses=log_losses,
-        )
+        return out
 
     def _get_metric_fn(self, clear=False):
-        if not hasattr(self, "_psnr_fn") or clear:
-            self._psnr_fn = PeakSignalNoiseRatio(data_range=1.0)
-            self._ssim_fn = StructuralSimilarityIndexMeasure(data_range=1.0)
-
-        psnr_fn = lambda noisy, gt: self._psnr_fn(self.to_rgb(noisy), self.to_rgb(gt))
-        ssim_fn = lambda noisy, gt: self._ssim_fn(self.to_rgb(noisy), self.to_rgb(gt))
-        return psnr_fn, ssim_fn
+        if not hasattr(self, "_denoising_metrics"):
+            self._denoising_metrics = DenoisingMetrics().to(self.device)
+            if clear:
+                self._denoising_metrics.reset()
+        return self._denoising_metrics
 
     def update_metrics(self, noisy, gt, clear=False, only_update=True):
-        psnr_fn, ssim_fn = self._get_metric_fn(clear)
-        assert psnr_fn is not None and ssim_fn is not None
-        psnr_fn(noisy, gt)
-        ssim_fn(noisy, gt)
+        metrics_fn = self._get_metric_fn(clear)
+        metrics_fn(noisy, gt)
 
     def get_metrics(self):
-        psnr_v = self._psnr_fn.compute().item()
-        ssim_v = self._ssim_fn.compute().item()
-        return {"psnr": psnr_v, "ssim": ssim_v}
+        assert hasattr(self, "_denoising_metrics")
+        return self._denoising_metrics.compute()
 
     def train_step(self, batch: dict):
         noisy_latent = gt_latent = None
@@ -770,13 +768,12 @@ class DenoisingTrainer:
                 noisy_latent,
                 gt_latent,
             )
-            pred_img = train_out["output_sr"]
 
         self.step_train_state()
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_losses = self.format_log(train_out["log_losses"])
+            _log_losses = self.format_log(train_out.log_losses)
 
             self.log_msg(
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
@@ -785,11 +782,10 @@ class DenoisingTrainer:
             self.log_msg(f"[Train Tok]: {_log_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", train_out["log_losses"], self.global_step)
+            self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
-            # log_loss = metrics_sync(log_loss, output_tensor_dict=True)
             log_loss = dict_tensor_sync(log_loss)
         strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
         return " - ".join(strings)
@@ -964,7 +960,9 @@ class DenoisingTrainer:
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
-        return ((x + 1) / 2).clamp(0, 1).float()
+        if self.train_cfg.is_neg_1_1:
+            return ((x + 1) / 2).clamp(0, 1).float()
+        return x.clamp(0, 1).float()
 
     def visualize_reconstruction(
         self,
@@ -975,38 +973,33 @@ class DenoisingTrainer:
         only_vis_n: int | None = None,
         no_to_rgb: bool = False,
     ):
+        _only_n = only_vis_n or 16
+
+        def hyperspectral_to_rgb_fn(x):
+            x_np = visualize_hyperspectral_image(
+                x[_only_n],
+                rgb_channels=self.train_cfg.visualize_rgb_channels,
+                to_uint8=True,
+                to_grid=True,
+                nrows=4,
+            )
+            x_np = cast(np.ndarray, x_np)
+            return x_np
+
         if not no_to_rgb:
             x = self.to_rgb(x)
         if recon is not None and not no_to_rgb:
             recon = self.to_rgb(recon)
 
-        _only_n = only_vis_n or 16
-        to_img = lambda x: tensor_to_image(make_grid(x[:_only_n], n_row=4, padding=2))
-        c = x.shape[1]
-
-        def hyperspectral_to_rgb(x):
-            # is rgb or gray images
-            if c in (1, 3):
-                x_np = to_img(x)
-            else:
-                rgb_channels = to_cont(
-                    self.dataset_cfg.consts.rgb_channels
-                )  # _prefixed_rgb_channels[c]
-                x_np = to_img(x[:, rgb_channels])
-
-            return x_np
-
-        x_np = hyperspectral_to_rgb(x)
-
+        x_np = hyperspectral_to_rgb_fn(x)
         # cat original and reconstructed images
         if recon is not None:
-            recon_np = hyperspectral_to_rgb(recon)
+            recon_np = hyperspectral_to_rgb_fn(recon)
             img = np.concatenate([x_np, recon_np], axis=1)
         else:
             img = x_np
 
         # save
-        img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
             img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
@@ -1032,7 +1025,7 @@ class DenoisingTrainer:
 
 
 _key = "cosmos_f8c16p4_fusionnet"  # vq, bsq, fsq, kl
-_configs = {
+_configs_dict = {
     # cosmos tokenizer, simple denoising
     "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",
 }[_key]
@@ -1040,7 +1033,7 @@ _configs = {
 
 @hydra.main(
     config_path="configs/denoising",
-    config_name=_configs,
+    config_name=_configs_dict,
     version_base=None,
 )
 def main(cfg):

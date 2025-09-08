@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 import torch.nn as nn
 from jaxtyping import Int
@@ -12,7 +14,7 @@ class HyperSegmentationScore(nn.Module):
         n_classes: int,
         ignore_index: int | None = None,
         top_k: int = 1,
-        reduction: str = "macro",
+        reduction: Literal["micro", "macro", "weighted", "none"] | None = "macro",
         per_class: bool = False,
         include_bg: bool = False,
         use_aggregation: bool = False,
@@ -72,6 +74,12 @@ class HyperSegmentationScore(nn.Module):
     def _reset_all_metrics(self):
         for metric in self._all_metric_fns.values():
             metric.reset()
+
+    def update(self, pred, gt):
+        self._update_all_metrics(pred, gt)
+
+    def compute(self):
+        return self._compute_all_metrics()
 
     def reset(self):
         self._reset_all_metrics()

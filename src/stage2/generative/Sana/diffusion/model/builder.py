@@ -27,8 +27,13 @@ from transformers import (
 )
 from transformers import logging as transformers_logging
 
-from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import DCAE_HF
-from src.stage2.generative.Sana.diffusion.model.utils import set_fp32_attention, set_grad_checkpoint
+from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import (
+    DCAE_HF,
+)
+from src.stage2.generative.Sana.diffusion.model.utils import (
+    set_fp32_attention,
+    set_grad_checkpoint,
+)
 
 MODELS = Registry("models")
 
@@ -91,7 +96,7 @@ def get_tokenizer_and_text_encoder(name="T5", device="cuda"):
     return tokenizer, text_encoder
 
 
-def get_vae(name, model_path, device="cuda"):
+def get_vae(name, model_path, device="cuda", **kwargs):
     if name == "sdxl" or name == "sd3":
         vae = AutoencoderKL.from_pretrained(model_path).to(device).to(torch.float16)
         if name == "sdxl":
@@ -112,6 +117,7 @@ def get_vae(name, model_path, device="cuda"):
     elif "cosmos_RS" in name:
         print(colored(f"[Cosmos RS] Loading model from {model_path}", attrs=["bold"]))
         from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
+        from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
 
         cosmos_ae = ContinuousImageTokenizer(
             z_channels=16,
@@ -126,7 +132,8 @@ def get_vae(name, model_path, device="cuda"):
             padding_mode="reflect",
             uni_tokenizer_path=model_path,
         )
-
+        cosmos_ae_lora = TokenizerLoRAMixin(cosmos_ae, **kwargs)
+        cosmos_ae_lora.requires_grad_(False)
         return cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
     else:
         print("error load vae")
@@ -161,7 +168,7 @@ def vae_encode(name, vae, images, sample_posterior, device):
         z = ae.encode(images.to(device))[0]
         z = z * scaling_factor
 
-    # > remote sensing cosmos AE
+    # < remote sensing cosmos AE
     elif "cosmos_RS" in name:
         ae = vae
         images = images.to(device, torch.bfloat16)
@@ -177,7 +184,8 @@ def vae_encode(name, vae, images, sample_posterior, device):
             z = ae.encode(images)
         if isinstance(z, tuple):
             z = z[0]
-        z = (z - shift_factor.to(z)) * scaling_factor.to(z)
+        # z = (z - shift_factor.to(z)) * scaling_factor.to(z)
+        z = z.sub_(shift_factor.to(z)).div_(scaling_factor.to(z))
     else:
         print("error load vae")
         exit()
@@ -219,9 +227,8 @@ def vae_decode(name, vae, latent, **kwargs):
             samples = ae.decode(latent / scaling_factor, return_dict=False)[0]
 
     elif "cosmos_RS" in name:
-        ae = vae
-        scaling_factor = torch.as_tensor(ae.scaling_factor).to(latent)
-        shift_factor = torch.as_tensor(ae.shift_factor).to(latent)
+        scaling_factor = torch.as_tensor(vae.scaling_factor).to(latent)
+        shift_factor = torch.as_tensor(vae.shift_factor).to(latent)
 
         scaling_factor, shift_factor = map(match_dim, (scaling_factor, shift_factor))
         assert (
@@ -230,7 +237,7 @@ def vae_decode(name, vae, latent, **kwargs):
 
         with torch.autocast(device_type=latent.device, dtype=torch.bfloat16):
             shape = kwargs["input_shape"]  # [b,c,h,w]
-            img = ae.decode(latent, shape)
+            img = vae.decode(latent, shape)
         if isinstance(img, tuple):
             img = img[0]
         samples = (img / scaling_factor.to(img)) + shift_factor.to(img)

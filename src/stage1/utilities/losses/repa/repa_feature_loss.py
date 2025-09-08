@@ -5,12 +5,15 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Sequence, cast
 
+import numpy as np
 import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState
 from einops import rearrange
+from jaxtyping import Float
+from numpy.typing import NDArray
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Shard
@@ -29,6 +32,14 @@ DINOV3_TO_NUM_LAYERS = {
     "dinov3_vith16plus": 32,
     "dinov3_vit7b16": 40,
 }
+
+
+def choose_lightest_bands(img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"]):
+    mean_cs = img.mean((-3, -2, -1))  # (c,)
+    mean_cs = torch.as_tensor(mean_cs)
+    _, indices = torch.topk(mean_cs, k=3, largest=True)
+    indices = indices.tolist()
+    return indices
 
 
 def interpolate_features_2d(x: Tensor, tgt_size: tuple[int, ...] | torch.Size):
@@ -93,7 +104,7 @@ def next_divisble_of_y(x, y):
 
 
 def load_perception_model(
-    weight_path: str,
+    weight_path: str | Path,
     model_name: str = "PE-Core-L14-336",
     pretrained_on: Literal["core", "llm", "spatial"] = "core",
     compile=False,
@@ -115,7 +126,7 @@ def load_perception_model(
     # Load the model
     cfg = pe.PE_VISION_CONFIG[model_name]
     model = pe.VisionTransformer.from_config(
-        cfg, pretrained=True, checkpoint_path=weight_path
+        cfg, pretrained=True, checkpoint_path=str(weight_path)
     )
     log_print(f"[PE Model]: Load model {model_name} with config {cfg}")
 
@@ -210,8 +221,10 @@ def load_repa_dino_v3_model(
     dino_model = torch.hub.load(
         repo_dir, model_name, source="local", weights=weight_path
     )
+    dino_model = cast(nn.Module, dino_model)
     if compile:
         dino_model = torch.compile(dino_model, mode="reduce-overhead")
+        dino_model = cast(torch._dynamo.OptimizedModule, dino_model)
         log_print("[Dino v3 model]: compiled model done")
     return dino_model
 
@@ -219,7 +232,7 @@ def load_repa_dino_v3_model(
 def load_repa_dino_v2_model(
     load_from: str = "torch",
     model_name: str = "dinov2_vitb14",
-    weight_path: str | None = None,
+    weight_path: str | Path | None = None,
     compile=False,
 ) -> torch.nn.Module:
     # This is Dino v2 models
@@ -240,7 +253,7 @@ def load_repa_dino_v2_model(
     if compile:
         model = torch.compile(model)
         log_print(f"[Dino v2 model]: compiled model done")
-    return model
+    return model  # type: ignore[return-value]
 
 
 def load_repa_encoder(
@@ -248,7 +261,7 @@ def load_repa_encoder(
     weight_path: str | Path | None = None,
     load_from="torch",
     version: int | str = 2,
-    dino_v3_pretrained_on: str = "satellite",
+    dino_v3_pretrained_on: Literal["satellite", "web"] = "satellite",
     compile=True,
 ):
     if version == 2:
@@ -261,6 +274,9 @@ def load_repa_encoder(
             compile=compile,
         )
     elif version == "pe":
+        assert weight_path is not None, (
+            "weight_path should not be None when loading PE model"
+        )
         return load_perception_model(
             weight_path,
             model_name,
@@ -278,7 +294,7 @@ class REPALoss(torch.nn.Module):
         c_dim_first=False,
         build_proj=False,
         img_is_neg1_1=True,
-        rgb_channels: list | Literal["random", "mean"] | str | None = None,
+        rgb_channels: list[int] | Literal["random", "mean"] | str | None = None,
         img_resize: Literal["dino"] | tuple | None = "dino",
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
@@ -447,9 +463,12 @@ class REPALoss(torch.nn.Module):
                     img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
                 ]
                 img = torch.stack(bands, dim=1)
+            elif self.rgb_channels == "lightest":
+                bands = choose_lightest_bands(img)
+                img = img[:, bands]
             elif self.rgb_channels == "pca":
                 assert img.ndim == 4
-                img = feature_pca_torch(img, 3)
+                img: torch.Tensor = feature_pca_torch(img, 3)
             else:
                 rgb_channels = self.rgb_channels
                 img = img[:, rgb_channels]

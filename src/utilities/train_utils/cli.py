@@ -12,14 +12,17 @@ CLI_DEFAUTL_DICT = {
 
 
 def argsparse_cli_args(
-    exp_config_dict: dict[str, str], cli_default_dict: dict = CLI_DEFAUTL_DICT
+    exp_config_dict: dict[str, str],
+    cli_default_dict: dict = CLI_DEFAUTL_DICT,
+    parser: argparse.ArgumentParser | None = None,
 ):
-    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
+    if parser is None:
+        parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
+
     config_name_parser = parser.add_argument_group(
         "Configuration Names",
         description="Determine which config to be used to launch the experiment",
     )
-
     config_name_parser.add_argument(
         "--config_name",
         "-c",

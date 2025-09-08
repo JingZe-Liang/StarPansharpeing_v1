@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-from timm.layers import create_act, create_norm, get_act_layer, get_norm_layer
+from timm.layers import create_act, create_norm
+from timm.layers.create_act import get_act_layer
+from timm.layers.create_norm import get_norm_layer
 
 from src.utilities.logging import log, once
 

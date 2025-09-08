@@ -1,8 +1,9 @@
+from typing import Literal, TypedDict
+
 import numpy as np
 import torch
 from beartype import beartype
 from torch import Tensor
-from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import (
     PeakSignalNoiseRatio,
     SpectralAngleMapper,
@@ -11,16 +12,29 @@ from torchmetrics.image import (
 from torchmetrics.image.sam import SpectralAngleMapper
 from torchmetrics.regression import MeanSquaredError
 
+DenoisingMetricsOutput = TypedDict(
+    "DenoisingMetricsOutput",
+    {
+        "psnr": float,
+        "ssim": float | Tensor,
+        "sam": float,
+        "rmse": float,
+    },
+)
+
 
 @beartype
-class DenosingMetrics:
+class DenoisingMetrics(torch.nn.Module):
     def __init__(
         self,
         data_range: float = 1.0,
         sigma: float = 1.5,
         kernel_size: int = 11,
-        reduction="elementwise_mean",
+        reduction: Literal[
+            "elementwise_mean", "sum", "none", None
+        ] = "elementwise_mean",
     ):
+        super().__init__()
         self.psnr = PeakSignalNoiseRatio(data_range=data_range, reduction=reduction)
         self.ssim = StructuralSimilarityIndexMeasure(
             data_range=data_range,
@@ -37,20 +51,25 @@ class DenosingMetrics:
         self.mse.update(denoised, clean)
         self.sam.update(denoised, clean)
 
-    def __call__(self, denoised: Tensor, clean: Tensor):
+    def forward(self, denoised: Tensor, clean: Tensor):
         self.update(denoised, clean)
         return self.compute()
 
-    def compute(self):
+    def _may_to_float(self, x: Tensor) -> float | Tensor:
+        if x.numel() == 1:
+            return x.item()
+        return x
+
+    def compute(self) -> DenoisingMetricsOutput:
         mse = self.mse.compute()
         rmse = torch.sqrt(mse)
 
-        return {
-            "psnr": self.psnr.compute().item(),
-            "ssim": self.ssim.compute().item(),
-            "sam": self.sam.compute().item(),
-            "rmse": rmse.item(),
-        }
+        psnr = self.psnr.compute()
+        ssim = self.ssim.compute()  # type: ignore[arg-type]
+        sam = self.sam.compute()
+
+        psnr, ssim, rmse, sam = map(self._may_to_float, [psnr, ssim, rmse, sam])
+        return dict(psnr=psnr, ssim=ssim, rmse=rmse, sam=sam)
 
     def reset(self):
         self.psnr.reset()
@@ -69,7 +88,7 @@ def test_metrics():
     preds = torch.rand([16, 3, 16, 16], generator=gen)
     target = torch.rand([16, 3, 16, 16], generator=gen)
 
-    metrics = DenosingMetrics()
+    metrics = DenoisingMetrics()
     results = metrics(preds, target)
     print(results)
     assert isinstance(results, dict)

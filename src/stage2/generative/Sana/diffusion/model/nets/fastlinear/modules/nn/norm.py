@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import functools
 import warnings
 
 import torch
@@ -223,52 +224,65 @@ def set_norm_eps(
                 m.momentum = momentum
 
 
+_fuse_rmsnorm = False
 try:
     from apex.normalization import FusedRMSNorm as RMSNorm
-except ImportError:
-    warnings.warn("Cannot import apex RMSNorm, switch to vanilla implementation")
 
-    class RMSNorm(torch.nn.Module):
-        def __init__(self, dim: int, scale_factor=1.0, eps: float = 1e-6):
-            """
-            Initialize the RMSNorm normalization layer.
+    _fuse_rmsnorm = True
+except ImportError as e:
+    from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 
-            Args:
-                dim (int): The dimension of the input tensor.
-                eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+    RMSNorm = lambda dim, scale_factor=1.0, eps=1e-5: FlashRMSNorm(
+        dim, scale_factor=scale_factor, eps=eps
+    )
+    _fuse_rmsnorm = True
+finally:
+    if not _fuse_rmsnorm:
+        warnings.warn("Cannot import apex RMSNorm, switch to vanilla implementation")
 
-            Attributes:
-                eps (float): A small value added to the denominator for numerical stability.
-                weight (nn.Parameter): Learnable scaling parameter.
+        class RMSNorm(torch.nn.Module):
+            def __init__(self, dim: int, scale_factor=1.0, eps: float = 1e-6):
+                """
+                Initialize the RMSNorm normalization layer.
 
-            """
-            super().__init__()
-            self.eps = eps
-            self.weight = nn.Parameter(torch.ones(dim) * scale_factor)
+                Args:
+                    dim (int): The dimension of the input tensor.
+                    eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
 
-        def _norm(self, x):
-            """
-            Apply the RMSNorm normalization to the input tensor.
+                Attributes:
+                    eps (float): A small value added to the denominator for numerical stability.
+                    weight (nn.Parameter): Learnable scaling parameter.
 
-            Args:
-                x (torch.Tensor): The input tensor.
+                """
+                super().__init__()
+                self.eps = eps
+                self.weight = nn.Parameter(torch.ones(dim) * scale_factor)
 
-            Returns:
-                torch.Tensor: The normalized tensor.
+            def _norm(self, x):
+                """
+                Apply the RMSNorm normalization to the input tensor.
 
-            """
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+                Args:
+                    x (torch.Tensor): The input tensor.
 
-        def forward(self, x):
-            """
-            Forward pass through the RMSNorm layer.
+                Returns:
+                    torch.Tensor: The normalized tensor.
 
-            Args:
-                x (torch.Tensor): The input tensor.
+                """
+                return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-            Returns:
-                torch.Tensor: The output tensor after applying RMSNorm.
+            def forward(self, x):
+                """
+                Forward pass through the RMSNorm layer.
 
-            """
-            output = self._norm(x.float()).type_as(x)
-            return output * self.weight
+                Args:
+                    x (torch.Tensor): The input tensor.
+
+                Returns:
+                    torch.Tensor: The output tensor after applying RMSNorm.
+
+                """
+                output = self._norm(x.float()).type_as(x)
+                return output * self.weight
+    else:
+        print("Using fused RMSNorm")

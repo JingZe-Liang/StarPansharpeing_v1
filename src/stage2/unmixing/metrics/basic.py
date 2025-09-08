@@ -3,11 +3,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.figure import Figure
 from torchmetrics.aggregation import MeanMetric
 
 
-class UnmixingMetrics:
+class UnmixingMetrics(torch.nn.Module):
     """
     Hyperspectral Unmixing Metrics Class
 
@@ -25,7 +24,9 @@ class UnmixingMetrics:
         mse_avg (Optional[float]): Average MSE value
     """
 
-    def __init__(self, num_endmembers: Optional[int] = None) -> None:
+    def __init__(
+        self, num_endmembers: Optional[int] = None, device: str = "cuda"
+    ) -> None:
         """
         Initialize the UnmixingMetrics class
 
@@ -33,6 +34,7 @@ class UnmixingMetrics:
             num_endmembers (Optional[int]): Number of endmembers.
                                            If None, will be determined during first call.
         """
+        super().__init__()
         self.num_endmembers = num_endmembers
         self.call_count = 0
 
@@ -43,6 +45,8 @@ class UnmixingMetrics:
         # Initialize average metrics
         self.sad_avg: Optional[float] = None
         self.mse_avg: Optional[float] = None
+
+        self.device = device
 
     @staticmethod
     def _normalize_spectra(spectra: torch.Tensor) -> torch.Tensor:
@@ -328,14 +332,14 @@ class UnmixingMetrics:
         # Initialize SAD metrics
         self.sad_metrics = {}
         for i in range(num_endmembers):
-            self.sad_metrics[f"sad_{i}"] = MeanMetric()
-        self.sad_metrics["sad_avg"] = MeanMetric()
+            self.sad_metrics[f"sad_{i}"] = MeanMetric().to(self.device)
+        self.sad_metrics["sad_avg"] = MeanMetric().to(self.device)
 
         # Initialize MSE metrics
         self.mse_metrics = {}
         for i in range(num_endmembers):
-            self.mse_metrics[f"mse_{i}"] = MeanMetric()
-        self.mse_metrics["mse_avg"] = MeanMetric()
+            self.mse_metrics[f"mse_{i}"] = MeanMetric().to(self.device)
+        self.mse_metrics["mse_avg"] = MeanMetric().to(self.device)
 
         # Store number of endmembers
         self.num_endmembers = num_endmembers
@@ -387,7 +391,13 @@ class UnmixingMetrics:
 
         return {"sad": sad_values, "mse": mse_values}
 
-    def __call__(
+    def update(self, sad_values: torch.Tensor, mse_values: torch.Tensor):
+        self._update_metrics(sad_values, mse_values)
+
+    def compute(self):
+        self._compute_metrics()
+
+    def forward(
         self,
         endmembers: torch.Tensor | np.ndarray,
         endmembers_gt: torch.Tensor | np.ndarray,
@@ -429,6 +439,7 @@ class UnmixingMetrics:
             abundances_gt = torch.tensor(abundances_gt, dtype=torch.float32)
 
         # Compute SAD metrics and order endmembers
+        fig, axes = None, None
         if plot:
             sad_values, ordered_endmembers, ordered_abundances, fig, axes = (
                 self._plot_endmembers(endmembers, endmembers_gt, abundances)
@@ -484,6 +495,9 @@ class UnmixingMetrics:
         metrics = self._compute_metrics()
 
         if plot:
+            assert fig is not None and axes is not None, (
+                "Figure and axes should not be None when plot=True"
+            )
             return metrics, fig, axes
         else:
             return metrics
