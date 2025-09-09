@@ -41,6 +41,7 @@ class PolyNormAct(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.zeros(1))
         self.eps = eps
 
+    @torch.compile
     def _norm(self, x):
         return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 

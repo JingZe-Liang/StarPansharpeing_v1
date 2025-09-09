@@ -34,6 +34,7 @@ from src.data.wids_samplers import (
     IndexFilteredDistributedSampler,
     IndexFilteredSampler,
 )
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 
 type ModalityPrefixedName = Literal[
@@ -65,131 +66,11 @@ def local_name_fn(name, prefix: str | None = None):
         return f"{prefix}/{name}"
 
 
-# * --- webdataset dataloader --- #
-
-
-def get_panshap_dataloaders(
-    wds_paths: str | list[str],
-    batch_size: int,
-    num_workers: int,
-    shuffle_size: int = 100,
-    to_neg_1_1: bool = True,
-    resample: bool = True,
-    latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
-    shardshuffle: bool = True,
-):
-    if isinstance(wds_paths, str):
-        wds_paths = [wds_paths]
-
-    dataset = wds.WebDataset(
-        wds_paths,
-        resampled=resample,
-        shardshuffle=shardshuffle,
-        handler=wds.warn_and_continue,
-        nodesplitter=wds.shardlists.split_by_node,
-        workersplitter=wds.split_by_worker,
-        seed=2025,
-        verbose=True,
-        detshuffle=True if shuffle_size > 0 else False,
-    )
-
-    dataset = dataset.decode(
-        wds.handle_extension("tif tiff", tiff_decode_io),
-        wds.handle_extension("jpg png jpeg", img_decode_io),
-        wds.handle_extension("mat", mat_decode_io),
-        wds.handle_extension("safetensors", safetensors_decode_io),
-        wds.handle_extension("npz", npz_decode_io),
-        "torch",
-    )
-
-    # * --- dict mapper of images and latents ---
-
-    def img_dict_mapper_with_ext(sample: dict):
-        # keys: ['hrms', 'lrms', 'pan', 'ms', 'hrms_latent', 'lrms_latent', 'pan_latent', 'ms_latent']
-        hrms = torch.as_tensor(sample["hrms.tiff"]).float()
-        lrms = torch.as_tensor(sample["lrms.tiff"]).float()
-        pan = torch.as_tensor(sample["pan.tiff"]).float()
-
-        # normalize
-        hrms = hrms / hrms.max()
-        lrms = lrms / lrms.max()
-        pan = pan / pan.max()
-
-        if to_neg_1_1:
-            hrms = hrms * 2 - 1
-            lrms = lrms * 2 - 1
-            pan = pan * 2 - 1
-
-        # if has latents
-        if f"hrms_latents.{latent_ext}" in sample or f"hrms_latent.npy" in sample:
-            if latent_ext == "npz":
-                sample_dict = sample["latenets.npz"]
-                hrms_latent = torch.as_tensor(
-                    sample_dict["hrms_latent"], dtype=torch.float32
-                )
-                lrms_latent = torch.as_tensor(
-                    sample_dict["lrms_latent"], dtype=torch.float32
-                )
-                pan_latent = torch.as_tensor(
-                    sample_dict["pan_latent"], dtype=torch.float32
-                )
-            elif latent_ext == "safetensors":
-                sample_dict = sample["latents.safetensors"]
-                hrms_latent = sample_dict["hrms_latent"].float()
-                lrms_latent = sample_dict["lrms_latent"].float()
-                pan_latent = sample_dict["pan_latent"].float()
-            else:
-                sample_dict = sample["latents.npz"]
-                hrms_latent = torch.as_tensor(
-                    sample["hrms_latent"], dtype=torch.float32
-                )
-                lrms_latent = torch.as_tensor(
-                    sample["lrms_latent"], dtype=torch.float32
-                )
-                pan_latent = torch.as_tensor(sample["pan_latent"], dtype=torch.float32)
-
-            sample = {
-                "hrms": hrms,
-                "lrms": lrms,
-                "pan": pan,
-                "hrms_latent": hrms_latent,
-                "lrms_latent": lrms_latent,
-                "pan_latent": pan_latent,
-            }
-
-        else:
-            sample = {
-                "hrms": hrms,
-                "lrms": lrms,
-                "pan": pan,
-            }
-        return sample
-
-    dataset = dataset.map(img_dict_mapper_with_ext)
-    dataset: wds.WebDataset
-
-    # since we do not use any transforms, the batch and unbatch is useless.
-
-    dataloader = wds.WebLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        persistent_workers=True if num_workers > 0 else False,
-        prefetch_factor=None if num_workers == 0 else 6,
-        drop_last=False,
-    )
-
-    dataloader = dataloader.with_length(10_000)  # 10k pairs of the dataloader
-
-    log_print(f"[Pansharpening Dataset]: constructed the dataloader")
-
-    return dataset, dataloader
-
-
 # * --- multimodal wids dataloader --- #
 
 
 class MultimodalityDataloader:
+    @function_config_to_basic_types
     def __init__(
         self,
         wds_paths: dict[ModalityName, IndexFilePath],
@@ -210,7 +91,7 @@ class MultimodalityDataloader:
         self.extracted_keys = extracted_keys
 
         # default codecs
-        _img_fn = partial(
+        img_fn_ = partial(
             wids_image_decode,
             to_neg_1_1=to_neg_1_1,
             permute=permute,
@@ -218,21 +99,23 @@ class MultimodalityDataloader:
             process_img_keys="ALL",
         )
         self.supported_codecs_mapping = {
-            # < hyperspectral images or pairs
-            "pixel_image": _img_fn,
-            "condition_image": _img_fn,
-            "pansharpening_image": _img_fn,
-            "denoising_image": _img_fn,
-            # < images, conditions or downstream latents
+            # hyperspectral images or pairs
+            "pixel_image": img_fn_,
+            "condition_image": img_fn_,
+            "pansharpening_image": img_fn_,
+            "denoising_image": img_fn_,
+            # images, conditions or downstream latents
             "image_latent": wids_latent_decode,
             "condition_latent": wids_latent_decode,
             "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
             "denoising_latent": partial(
                 wids_latent_decode, return_dict=True
             ),  # if gt is in, return_dict=True
-            # < language captions and its embeddings
+            # language captions and its embeddings
             "captions": wids_caption_embed_decode,
         }
+        if codecs is not None:
+            self.supported_codecs_mapping.update(codecs)
 
         # loader kwargs
         self.batch_size = None
@@ -253,11 +136,9 @@ class MultimodalityDataloader:
                 "extracted_keys must have the same length as wds_paths"
             )
 
-        for (name, p), codec_fn in zip_longest(
-            self.wds_paths.items(), codecs if codecs is not None else []
-        ):
+        for name, p in self.wds_paths.items():
             # decode functions
-            decode_fn = codec_fn or self.supported_codecs_mapping.get(name, None)
+            decode_fn = self.supported_codecs_mapping.get(name, None)
             if isinstance(decode_fn, (list, tuple)):
                 transformations = [*decode_fn, wids_remove_none_keys]
             elif decode_fn is not None:
@@ -314,12 +195,14 @@ class MultimodalityDataloader:
             # convert the sample into a flat dict
             if isinstance(sample, dict):
                 if self.return_classed_dict is not None and self.return_classed_dict:
-                    modality_sample[name] = self.extract_key_for_non_nested_dict(sample)
+                    modality_sample.update(
+                        self._extract_key_for_non_nested_dict(sample, name)
+                    )
                 elif self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
-                    modality_sample.update(self.extract_keys(sample, ext_key, None))
+                    modality_sample.update(self._extract_keys(sample, ext_key, None))
                 else:
-                    modality_sample.update(self.extract_without_extension(sample))
+                    modality_sample.update(self._extract_without_extension(sample))
             else:
                 modality_sample[name] = {"default": sample}
 
@@ -329,22 +212,49 @@ class MultimodalityDataloader:
         return modality_sample
 
     # * --- Getitem utilities --- #
-    def extract_key_for_non_nested_dict(self, subsample: dict, without_extension=True):
-        content_not_dunder = [x for x in subsample.keys() if not x.startswith("__")]
+
+    def _extract_key_for_non_nested_dict(
+        self, modal_sample: dict, modality_name: str, without_extension=True
+    ) -> dict[str, Any]:
+        meta_info_keys = []
+        content_not_dunder = []
+        for x in modal_sample.keys():
+            if not x.startswith("__"):
+                content_not_dunder.append(x)
+            else:
+                meta_info_keys.append(x)
 
         if len(content_not_dunder) == 1:  # modality_name: Tensor
-            return subsample[content_not_dunder[0]]
+            modal_sample_new = {modality_name: modal_sample[content_not_dunder[0]]}
         else:  # modality_name: {"img": Tensor, 'img2': Tensor, ...}
-            subsample_f = {}
+            modal_sample_new = {}
             for name in content_not_dunder:
                 new_name = (
                     Path(name).stem.rsplit(".", 1)[-1] if without_extension else name
                 )
-                subsample_f[new_name] = subsample[name]
+                modal_sample_new[new_name] = modal_sample[name]
 
-        return subsample_f
+        # Add meta infos
+        # add modality name prefix to avoid collision
+        keys_ = None
+        shard_ = None
+        for meta_key in meta_info_keys:
+            if meta_key == "__key__":
+                keys_ = modal_sample[meta_key]
+            if meta_key == "__shard__":
+                shard_ = modal_sample[meta_key]
 
-    def extract_without_extension(self, samples: dict):
+            meta_key_new = f"__{modality_name}_{meta_key[2:]}"
+            modal_sample_new[meta_key_new] = modal_sample[meta_key]
+
+        if keys_ is not None:
+            modal_sample_new["__key__"] = keys_
+        if shard_ is not None:
+            modal_sample_new["__shard__"] = shard_
+
+        return modal_sample_new
+
+    def _extract_without_extension(self, samples: dict):
         _keys = list(samples.keys())
         for k in _keys:
             if not str(k).startswith("__"):
@@ -355,7 +265,7 @@ class MultimodalityDataloader:
 
         return samples
 
-    def extract_keys(
+    def _extract_keys(
         self,
         samples: dict,
         keys: list[tuple],
@@ -504,6 +414,7 @@ class MultimodalityDataloader:
 # * --- Multi-modal Webdataset --- #
 
 
+@function_config_to_basic_types
 def get_multimodal_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
@@ -563,6 +474,7 @@ def get_multimodal_dataloaders(
     return dataset, dataloader
 
 
+@function_config_to_basic_types
 def get_mm_chained_loaders(
     paths: list[dict[ModalityName, IndexFilePath]],
     basic_kwargs: dict | None = None,

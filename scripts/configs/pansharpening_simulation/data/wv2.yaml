@@ -1,0 +1,8 @@
+_target_: src.data.get_wids_mat_full_resolution_dataloder
+wds_paths:
+  img: data/WorldView2/pansharpening_full/MS_shardindex.json # to be img compatible with the processor
+  pan: data/WorldView2/pansharpening_full/PAN_shardindex.json
+batch_size: 2 # Example batch size
+num_workers: 1
+shuffle_size: -1
+to_neg_1_1: false

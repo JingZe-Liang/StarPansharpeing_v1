@@ -6,6 +6,9 @@ from .hyperspectral_loader import (
 from .multimodal_loader import (
     MultimodalityDataloader,
     get_mm_chained_loaders,
-    get_panshap_dataloaders,
+)
+from .pansharpening_loader import (
+    get_pansharp_lantent_dataloader,
+    get_wids_mat_full_resolution_dataloder,
 )
 from .window_slider import WindowSlider, create_windowed_dataloader

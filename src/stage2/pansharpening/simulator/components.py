@@ -3,7 +3,8 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy import signal, windows
+from scipy import signal
+from scipy.signal import windows
 from torch import nn
 
 from src.utilities.config_utils import function_config_to_basic_types
@@ -179,13 +180,14 @@ class MTFConv(nn.Module):
 
         # Apply grouped convolution (each kernel for its corresponding channel)
         padding = self.kernels.shape[-1] // 2  # Same output size
+        x = F.pad(x, (padding, padding, padding, padding), mode="circular")
 
         # Reshape kernels for grouped convolution: [out_channels=c, in_channels_per_group=1, kH, kW]
         # Kernels are already in shape [c, 1, H, W]
         y = F.conv2d(
             x,
             self.kernels,  # Shape: [c, 1, H, W]
-            padding=padding,
+            padding=0,
             groups=c,  # Apply each filter to one input channel
         )
         return y
@@ -377,7 +379,9 @@ class PansharpSimulator(nn.Module):
         )
         self.register_buffer("pan_weights", pan_weights, persistent=False)
 
-    def forward(self, hrms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, hrms: torch.Tensor, pan: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Simulates LRMS and PAN images from an HRMS image using Wald's protocol.
 
@@ -406,6 +410,12 @@ class PansharpSimulator(nn.Module):
             )
 
         bs, c, h, w = hrms.shape
+        if pan is not None:
+            pan_h, pan_w = pan.shape[-2:]
+            assert pan_h // h == self.ratio and pan_w // w == self.ratio, (
+                f"Provided PAN dimensions ({pan_h}, {pan_w}) do not match expected size based on HRMS and ratio ({h * self.ratio}, {w * self.ratio})"
+            )
+
         device = hrms.device
 
         # --- 1. Apply MTF --- (Simulates sensor's optical blurring)
@@ -422,7 +432,7 @@ class PansharpSimulator(nn.Module):
                 hrms_mtf,
                 scale_factor=1 / self.ratio,
                 mode=mode,
-                align_corners=False,
+                align_corners=True,
                 antialias=True,
             )
         else:  # Should not happen due to check in init, but as fallback
@@ -441,11 +451,28 @@ class PansharpSimulator(nn.Module):
                 level="warning",
             )
             lrms_upsampled = F.interpolate(
-                lrms_upsampled, size=(h, w), mode="bilinear", align_corners=False
+                lrms_upsampled,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=True,
+                antialias=True,
             )
 
         # --- 4. Generate PAN image --- (Weighted sum of HRMS bands)
         # Ensure pan_weights is on the same device as hrms
-        pan = torch.sum(hrms * self.pan_weights.to(device), dim=1, keepdim=True)
+        if pan is None:
+            self.pan_weights: nn.Buffer
+            pan = torch.sum(hrms * self.pan_weights.to(device), dim=1, keepdim=True)
+        else:
+            pan = pan.to(device)
+            if pan.ndim == 3:
+                pan = pan.unsqueeze(1)
+            pan = F.interpolate(
+                pan,
+                scale_factor=1 / self.ratio,
+                mode="bilinear",
+                align_corners=True,
+                antialias=True,
+            )
 
         return lrms_upsampled, pan

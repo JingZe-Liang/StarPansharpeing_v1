@@ -384,6 +384,7 @@ class UnmixingTrainer:
             "grad_norm_sum",
         ], "log_type must be one of [metric, image, grad_norm_per_param, grad_norm_sum]"
 
+        _n_params_sumed = 0
         if log_type == "metric":
             if hasattr(self, "tb_logger"):
                 self.tb_logger.log(logs, step=step)
@@ -398,7 +399,6 @@ class UnmixingTrainer:
             norms = {}
             if log_type == "grad_norm_sum":
                 norms[f"{model_cls_n}_grad_norm"] = 0
-                _n_params_sumed = 0
             for n, p in model.named_parameters():
                 if p.grad is not None:
                     # must sync grad here, `is_main_process` would cause the ranks do not sync
@@ -423,6 +423,7 @@ class UnmixingTrainer:
                         _n_params_sumed += 1
             # log
             if log_type == "grad_norm_sum":
+                assert _n_params_sumed > 0
                 norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
             if hasattr(self, "tb_logger"):
                 self.tb_logger.log(norms, step=step)

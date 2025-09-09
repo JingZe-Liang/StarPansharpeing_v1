@@ -3,7 +3,7 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, NotRequired, Sequence, TypedDict, cast
 
 import accelerate
 import hydra
@@ -34,7 +34,19 @@ from src.utilities.config_utils import (
 )
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
+from src.utilities.train_utils.dict_utils import keys_in_dict
 from src.utilities.train_utils.state import StepsCounter
+
+
+class BatchInput(TypedDict):
+    lrms: Tensor
+    pan: Tensor
+    hrms: Tensor
+    sr: Tensor
+
+    lrms_latent: NotRequired[Tensor]
+    pan_latent: NotRequired[Tensor]
+    hrms_latent: NotRequired[Tensor]
 
 
 class PansharpeningTrainer:
@@ -736,12 +748,12 @@ class PansharpeningTrainer:
         lms, pan, gt = map(to_rgb_fn, (lms, pan, gt))
         check_fn(pred_sr, gt)
 
-    def train_step(self, batch: dict):
+    def train_step(self, batch: BatchInput):
         lrms_latent = pan_latent = hrms_latent = None
         lrms_tok_out = pan_tok_out = sr_tok_out = None
 
         # offline latents
-        if "lrms_latent" in batch:
+        if keys_in_dict(["lrms_latent", "pan_latent", "hrms_latent"], batch):
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
             hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)

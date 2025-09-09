@@ -3,7 +3,7 @@ import os
 import warnings
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Callable, Dict, Literal, Union
+from typing import Any, Callable, Dict, Literal, Union, cast
 
 import hydra
 import numpy as np
@@ -14,7 +14,6 @@ import torch.nn.functional as F
 import webdataset as wds
 from omegaconf import DictConfig, OmegaConf
 from peft import PeftConfig
-from scipy.signal import windows
 from tqdm import tqdm
 
 from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
@@ -51,18 +50,26 @@ class PansharpTokenizeProcessor(nn.Module):
     def __init__(
         self,
         pansharp_simulator: PansharpSimulator,
-        tokenizer: nn.Module,
+        tokenizer: nn.Module | None = None,
         before_save_fn: Callable | None = None,
         latent_save_backend: Literal["npy", "safetensors", "npz"] = "safetensors",
     ):
         super().__init__()
         self.pansharp_simulator = pansharp_simulator
-        self.tokenizer = tokenizer
+        self.tokenizer: nn.Module | None = tokenizer
+        self.has_tokenizer = self.tokenizer is not None
+        if self.has_tokenizer:
+            assert hasattr(self.tokenizer, "encode"), (
+                "Tokenizer must have an encode method"
+            )
+            self.tokenizer.requires_grad_(False)
+            self.tokenizer.eval()
+            self.tokenizer = cast(nn.Module, self.tokenizer)
         self.before_save_fn = before_save_fn
         self.latent_save_backend = latent_save_backend
-        assert hasattr(self.tokenizer, "encode"), "Tokenizer must have an encode method"
 
-    def forward(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+    @torch.no_grad()
+    def forward(self, batch: Dict[str, Any]):
         """
         Processes a batch of data.
 
@@ -82,10 +89,13 @@ class PansharpTokenizeProcessor(nn.Module):
             log_print(
                 "Input batch missing 'img' or '__key__'. Skipping.", level="error"
             )
-            return {}
+            return None
 
         hrms = batch["img"]
         keys = batch["__key__"]  # keys should be a list/tuple of strings
+        pan = None
+        if "pan" in batch:
+            pan = batch["pan"]
 
         # Ensure hrms is a tensor
         if not isinstance(hrms, torch.Tensor):
@@ -93,7 +103,7 @@ class PansharpTokenizeProcessor(nn.Module):
                 f"Input 'img' must be a torch.Tensor, but got {type(hrms)}. Skipping batch.",
                 level="error",
             )
-            return {}
+            return None
 
         # Ensure hrms has 4 dimensions (bs, c, h, w)
         if hrms.ndim != 4:
@@ -101,45 +111,37 @@ class PansharpTokenizeProcessor(nn.Module):
                 f"Input HRMS tensor must have 4 dimensions (bs, c, h, w), but got shape {hrms.shape}. Skipping batch.",
                 level="error",
             )
-            return {}
+            return None
 
         bs, c, h, w = hrms.shape
 
-        # --- 1. Degrade HRMS using Wald's protocol ---
         try:
-            lrms, pan = self.pansharp_simulator(hrms)
+            lrms, pan = self.pansharp_simulator(hrms, pan)
         except Exception as e:
             log_print(
                 f"Error during pansharpening simulation for keys {keys}: {e}. Skipping batch.",
                 level="error",
             )
-            return {}
+            return None
 
-        # --- 2. Prepare PAN for tokenizer (repeat single channel) ---
-        pan_repeated = pan.repeat(1, c, 1, 1)  # pan_repeated: (bs, c, h, w)
-
-        # --- 3. Tokenize HRMS, LRMS, and repeated PAN ---
-        if not hasattr(self.tokenizer, "encode"):
-            raise AttributeError(
-                "The provided tokenizer objeqt does not have an 'encode' method."
-            )
-
-        with torch.no_grad():
+        if self.has_tokenizer:
+            assert pan.shape[1] == 1, "PAN image must have a single channel"
+            pan_repeated = pan.repeat(1, c, 1, 1)  # pan_repeated: (bs, c, h, w)
+            self.tokenizer: nn.Module
             hrms_latent = self.tokenizer.encode(hrms)
             lrms_latent = self.tokenizer.encode(lrms)
             pan_latent = self.tokenizer.encode(pan_repeated)
 
-        # --- 4. Prepare output dictionary for webdataset ---
-        # Output structure needs careful handling with webdataset when processing batches.
-        # TarWriter typically expects one dictionary per sample.
-        # We need to yield one dictionary per item in the batch.
-        # This processor is better suited for use with .map before batching, or
-        # the main loop needs to unpack the batch and write samples individually.
+            # if not hasattr(self.tokenizer, "encode"):
+            #     raise AttributeError(
+            #         "The provided tokenizer object does not have an 'encode' method."
+            #     )
 
         # To convert the images to target dtypes
-        hrms, lrms, pan = map(lambda x: x.cpu().numpy(), (hrms, lrms, pan))
         if self.before_save_fn is not None:
-            hrms, lrms, pan = map(self.before_save_fn, (hrms, lrms, pan))
+            hrms, lrms, pan = map(
+                self.before_save_fn, (hrms, lrms, pan)
+            )  # bs, c, h, w -> bs, h, w, c ndarray
 
         # Let's modify this to return a list of dictionaries, one per sample.
         output_list = []
@@ -147,65 +149,51 @@ class PansharpTokenizeProcessor(nn.Module):
             # * --- will save the original images or not --- #
             sample_data = {
                 "__key__": keys[i],
-                "hrms.tiff": tiff_codec_io(hrms[i], tifffile.PLANARCONFIG.SEPARATE),
-                "lrms.tiff": tiff_codec_io(lrms[i], tifffile.PLANARCONFIG.SEPARATE),
-                "pan.tiff": tiff_codec_io(
-                    pan[i], photometric=tifffile.PHOTOMETRIC.MINISBLACK
-                ),
+                "hrms.tiff": tiff_codec_io(hrms[i]),
+                "lrms.tiff": tiff_codec_io(lrms[i]),
+                "pan.tiff": tiff_codec_io(pan[i]),
             }
             # Assuming latent tensors also have a batch dimension
-            if self.latent_save_backend == "safetensors":
-                _ext = "safetensors"
-                sample_data[f"latents.{_ext}"] = safetensors_codec_io(
-                    {
-                        "hrms_latent": hrms_latent[i],
-                        "lrms_latent": lrms_latent[i],
-                        "pan_latent": pan_latent[i],
-                    }
-                )
-            elif self.latent_save_backend == "npy":
-                # numpy fn
-                codec_fn = lambda x: x.detach().cpu().numpy()
-                _ext = "npy"
-                sample_data[f"hrms_latent.{_ext}"] = codec_fn(hrms_latent[i])
-                sample_data[f"lrms_latent.{_ext}"] = codec_fn(lrms_latent[i])
-                sample_data[f"pan_latent.{_ext}"] = codec_fn(pan_latent[i])
-            elif self.latent_save_backend == "npz":
-                _ext = "npz"
-                sample_data[f"latents.{_ext}"] = npz_codec_io(
-                    {
-                        "hrms_latent": hrms_latent[i].cpu().numpy(),
-                        "lrms_latent": lrms_latent[i].cpu().numpy(),
-                        "pan_latent": pan_latent[i].cpu().numpy(),
-                    },
-                    do_compression=True,  # small enough data, no need for compression
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported latent_save_backend: {self.latent_save_backend}"
-                )
-
-            # Add any other metadata from the input batch if needed (assuming it's per-sample)
-            # for k, v in batch.items():
-            #     if k not in ['img', '__key__'] and k not in sample_data:
-            #         if isinstance(v, (list, tuple)) and len(v) == bs:
-            #              sample_data[k] = v[i]
-            #         # Handle other potential batch structures for metadata
+            if self.has_tokenizer:
+                if self.latent_save_backend == "safetensors":
+                    _ext = "safetensors"
+                    sample_data[f"latents.{_ext}"] = safetensors_codec_io(
+                        {
+                            "hrms_latent": hrms_latent[i],
+                            "lrms_latent": lrms_latent[i],
+                            "pan_latent": pan_latent[i],
+                        }
+                    )
+                elif self.latent_save_backend == "npy":
+                    # numpy fn
+                    codec_fn = lambda x: x.detach().cpu().numpy()
+                    _ext = "npy"
+                    sample_data[f"hrms_latent.{_ext}"] = codec_fn(hrms_latent[i])
+                    sample_data[f"lrms_latent.{_ext}"] = codec_fn(lrms_latent[i])
+                    sample_data[f"pan_latent.{_ext}"] = codec_fn(pan_latent[i])
+                elif self.latent_save_backend == "npz":
+                    _ext = "npz"
+                    sample_data[f"latents.{_ext}"] = npz_codec_io(
+                        {
+                            "hrms_latent": hrms_latent[i].cpu().numpy(),
+                            "lrms_latent": lrms_latent[i].cpu().numpy(),
+                            "pan_latent": pan_latent[i].cpu().numpy(),
+                        },
+                        do_compression=True,  # small enough data, no need for compression
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported latent_save_backend: {self.latent_save_backend}"
+                    )
 
             output_list.append(sample_data)
 
-        # Since the caller (main loop) expects a single dict per batch iteration,
-        # returning a list here might break the flow if not handled correctly.
-        # A better approach might be to keep the processor working on single samples
-        # and use .map before .batched in the dataloader setup.
-        # For now, returning the list, assuming the main loop will handle it.
-        # *** IMPORTANT: The main loop below needs adjustment to handle this list ***
         return output_list  # Return list of dicts
 
 
 def seperate_pansharpening_latent_pairs(
     sample: dict[str, Any], latent_ext: str = "safetensors"
-):
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Separate the latent pairs from the sample dictionary.
 
@@ -244,7 +232,7 @@ def seperate_pansharpening_latent_pairs(
 
 
 @hydra.main(
-    config_path="configs/pansharpening_simulation",
+    config_path="../configs/pansharpening_simulation",
     config_name="pan_wv3_simulation",
     version_base=None,
 )
@@ -269,52 +257,61 @@ def process_dataset(cfg: DictConfig) -> None:
         nbands=cfg.processor.nbands,  # Get nbands from data config
         pan_weight_lst=cfg.processor.pan_weights,
         downsample_type=cfg.processor.downsample_type,
+        upsample_type=cfg.processor.upsample_type,
     )
     pansharp_sim = pansharp_sim.to(device)
 
     # loading tokenizer
-    tokenizer: tuple[PeftConfig, nn.Module] | nn.Module = hydra.utils.instantiate(
-        cfg.tokenizer
-    )
-    if isinstance(tokenizer, tuple):
-        assert len(tokenizer) == 2, (
-            "Tokenizer instantiation returns a tuple, must be a PEFT config and a lora-loaded network"
+    if cfg.tokenizer is not None:
+        tokenizer: tuple[PeftConfig, nn.Module] | nn.Module | None = (
+            hydra.utils.instantiate(cfg.tokenizer)
         )
-        peft_config, tokenizer = tokenizer
-    tokenizer = tokenizer.to(device)
+        if isinstance(tokenizer, tuple):
+            assert len(tokenizer) == 2, (
+                "Tokenizer instantiation returns a tuple, must be a PEFT config and a lora-loaded network"
+            )
+            peft_config, tokenizer = tokenizer
+        tokenizer = tokenizer.to(device)
 
-    # load state dict
-    if cfg.consts.tokenizer_checkpoint_path is not None:
-        _imcompact_keys = tokenizer.load_state_dict(
-            torch.load(cfg.consts.tokenizer_checkpoint_path, map_location=device),
-            strict=False,
-        )
-        log_print(f"Imcompact keys: {_imcompact_keys}")
+        # load state dict
+        if cfg.consts.tokenizer_checkpoint_path is not None:
+            _imcompact_keys = tokenizer.load_state_dict(
+                torch.load(cfg.consts.tokenizer_checkpoint_path, map_location=device),
+                strict=False,
+            )
+            log_print(f"Imcompact keys: {_imcompact_keys}")
+        else:
+            log_print(
+                f"No checkpoint path provided for {tokenizer.__class__.__name__}\n"
+                "make sure you load checkpoint in the tokenizer"
+            )
+        tokenizer.eval()
+        tokenizer.requires_grad_(False)  # Freeze tokenizer parameters
+        log_print(f"Prepared tokenizer from {tokenizer.__class__.__name__}")
+
     else:
-        log_print(
-            f"No checkpoint path provided for {tokenizer.__class__.__name__}\n"
-            "make sure you load checkpoint in the tokenizer"
-        )
-
-    tokenizer.eval()
-    tokenizer.requires_grad_(False)  # Freeze tokenizer parameters
-    log_print(f"Prepared tokenizer from {tokenizer.__class__.__name__}")
+        tokenizer = None
+        log_print("No tokenizer provided, skipping latent generation.")
 
     def before_save_fn(
-        img: np.ndarray, const: float | None = None, dtype: np.dtype | None = None
+        img, const: float | None = None, dtype: np.dtype | None = None
     ) -> np.ndarray:
         # Convert to float32 and scale to [0, 1]
-        if cfg.data.to_neg_1_1:
+        if cfg.consts.to_neg_1_1:
             img = (img + 1) / 2
 
+        img = img.permute(0, 2, 3, 1)  # (bs, c, h, w) -> (bs, h, w, c)
+        img = img.cpu().numpy()
         img = np.clip(img, 0, 1)
+
         if const is not None and dtype is not None:
             img = (img * const).astype(dtype)
         else:
-            warnings.warn(
-                "[save fn]: const and dtype, one of them is not provided, save the img using float32"
+            log_print(
+                "[save fn]: const and dtype, one of them is not provided, save the img using float32",
+                warn_once=True,
             )
-            img = img.astype(np.float32)
+            img = img.astype("float32")
 
         return img
 
@@ -324,9 +321,6 @@ def process_dataset(cfg: DictConfig) -> None:
         before_save_fn=before_save_fn,
         latent_save_backend="npz",
     )
-    # Note: Processor itself doesn't need .to(device) unless it has its own parameters/buffers
-    # The submodules (pansharp_sim, tokenizer) are already moved.
-
     # 2. Setup WebDataset pipeline using get_hyperspectral_dataloaders
     log_print(
         f"Setting up WebDataset pipeline: {cfg.data.wds_paths} -> {cfg.output.output_dir} TAR files"
@@ -345,19 +339,11 @@ def process_dataset(cfg: DictConfig) -> None:
     count = 0
     total_samples = 0  # Keep track of total samples written
 
-    # Wrap the dataloader with tqdm for progress bar
-    # Note: If the dataloader length is unknown (common with WebDataset), tqdm might not show total.
-    # Consider adding an estimate if possible, or just let it run without total.
     try:
-        # Estimate length if possible (might not be accurate with resampled WebDataset)
-        # estimated_len = len(input_dataloader)
-        # progress_bar = tqdm(input_dataloader, total=estimated_len, desc="Processing Batches")
         progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
     except TypeError:
-        # If len() is not supported
         progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
 
-    # sinks: dict[str, wds.TarWriter] = {}
     sink_manager = TarSinkManager(output_dir)
     for batch in progress_bar:
         # Move input batch data to the correct device
@@ -372,27 +358,44 @@ def process_dataset(cfg: DictConfig) -> None:
         # Handle the output (list of sample dicts or empty dict on error)
         if isinstance(processed_output, list):
             for sample_data, tar_path in zip(
-                processed_output, batch_on_device["__url__"]
+                processed_output,
+                batch_on_device.get("__url__", batch.get("__shard__", None)),
             ):
-                name = os.path.basename(tar_path).replace(" ", "_")
+                if cfg.consts.tar_file_name is not None:
+                    name = cfg.consts.tar_file_name
+                elif tar_path is not None:
+                    name = os.path.basename(tar_path).replace(" ", "_")
+                else:
+                    name = "default.tar"
+
                 # tar_path = os.path.join(output_dir, name)
                 # output_sink = sinks.get(name, None)
                 pansharp_sink = sink_manager.get_sink(
-                    f"pansharpening_{name}", f"pansharpening_pairs/{name}"
-                )
-                latent_sink = sink_manager.get_sink(f"latent_{name}", f"latents/{name}")
-
-                # Seperate Pansharpening pairs and latents
-                pansharp_sample, latent_sample = seperate_pansharpening_latent_pairs(
-                    sample_data, processor.latent_save_backend
+                    f"pansharpening_{name}", f"pansharpening_reduced/{name}"
                 )
 
-                assert pansharp_sample is not None, "Pansharpening sample is None"
-                assert latent_sample is not None, "Latent sample is None"
+                if tokenizer is not None:
+                    latent_sink = sink_manager.get_sink(
+                        f"latent_{name}", f"pansharpening_latents/{name}"
+                    )
+
+                    # Seperate Pansharpening pairs and latents
+                    pansharp_sample, latent_sample = (
+                        seperate_pansharpening_latent_pairs(
+                            sample_data, processor.latent_save_backend
+                        )
+                    )
+
+                    assert latent_sample is not None, "Latent sample is None"
+                    assert pansharp_sample is not None, "Pansharpening sample is None"
+                else:
+                    pansharp_sample = sample_data
+                    latent_sample = None
 
                 if sample_data:  # Check if the dictionary is not empty
                     pansharp_sink.write(pansharp_sample)
-                    latent_sink.write(latent_sample)
+                    if latent_sample is not None:
+                        latent_sink.write(latent_sample)
 
                     total_samples += 1
                     count += 1  # Count samples processed in this batch run
@@ -400,7 +403,7 @@ def process_dataset(cfg: DictConfig) -> None:
             if count >= 100:
                 progress_bar.set_postfix({"samples_written": total_samples})
                 count = 0  # Reset counter for periodic update
-        elif isinstance(processed_output, dict) and not processed_output:
+        elif processed_output is None:
             # Batch processing failed entirely
             log_print(
                 f"Skipping batch due to processing error (keys: {batch.get('__key__', 'unknown')}).",

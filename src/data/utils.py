@@ -5,7 +5,7 @@ import re
 import types
 from itertools import chain, product
 from pathlib import Path
-from typing import Any, Callable, Iterable, TypeAlias, cast
+from typing import Annotated, Any, Callable, Iterable, TypeAlias, cast
 
 import braceexpand
 import numpy as np
@@ -13,16 +13,35 @@ import pandas as pd
 import scipy.special
 import torch
 import webdataset as wds
+from einops import rearrange
+from jaxtyping import Float
 from kornia.augmentation import (
     RandomResizedCrop,
     Resize,
 )
+from torch import Tensor
 
 from src.utilities.logging.print import log_print
 from src.utilities.train_utils.state import StepsCounter
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
 SampleType: TypeAlias = dict[str, dict[str, LoadedData] | LoadedData]
+
+# * --- Universal utilities --- #
+
+
+def to_tensor(x):
+    return torch.as_tensor(x, dtype=torch.float32)
+
+
+def to_numpy(x):
+    return torch.asarray(x)
+
+
+def permute_img_to_chw(x):
+    if x.ndim >= 3:
+        x = rearrange(x, "... h w c -> ... c h w")
+    return x
 
 
 def flatten_nested_list(lst):
@@ -286,7 +305,73 @@ def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = Non
     return sample
 
 
-# @torch.compile
+def norm_img_(
+    img: Float[Tensor, "... C H W"] | Float[Tensor, "... H W"],
+    per_channel=False,
+    clip_zero=True,
+    to_neg_1_1=True,
+    manual_img_max: float | None = None,
+    quantile_clip: Annotated[float, "0.0-1.0"] = 1.0,
+):
+    if is_dim2 := img.ndim == 2:
+        # is h, w image
+        img.unsqueeze_(0)  # add channel dim
+
+    if clip_zero:
+        img.clip_(min=0.0, max=None)  # clip to [0, inf)
+    else:
+        # if not clip zero, then we add the min to make it positive
+        img_min = img.min() if not per_channel else img.amin(dim=(-2, -1), keepdim=True)
+        img.add_(-img_min)
+
+    # If some value in some channels are too large, clamp them to the quantile value
+    if manual_img_max is not None:
+        assert not per_channel, "manual_img_max and per_channel cannot be set together"
+        assert quantile_clip == 1.0, (
+            "quantile_clip and manual_img_max cannot be set together"
+        )
+        q_max = manual_img_max
+    elif quantile_clip < 1.0:
+        dim = -2 if per_channel else 0
+        # (c, h, w) -> (c, h*w)
+        # (c, h, w) -> (c*h*w,)
+        q_max = (
+            img.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
+        )  # (c, 1) or (1,)
+
+        # c, 1, 1
+        if per_channel:
+            q_max = q_max[..., None]
+        else:
+            q_max = q_max.item()
+    else:
+        q_max = None
+
+    # Per-channel normalization
+    if per_channel:
+        img_max = img.amax(dim=(-2, -1), keepdim=True)
+    else:
+        img_max = img.max()
+    if q_max is not None:
+        img_max = img_max.clip_(min=None, max=q_max)
+    _img_max = img_max.item() if img_max.ndim == 0 else img_max.max().item()
+    if _img_max < 1e-4:
+        img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
+    else:
+        img.div_(img_max + 1e-6)  # normalize to [0, 1]
+
+    # To (-1, 1) or (0, 1)
+    if to_neg_1_1:
+        img.mul_(2.0).sub_(1.0).clamp_(-1.0, 1.0)  # normalize to [-1, 1]
+    else:
+        img.clamp_(0.0, 1.0)  # normalize to [0, 1]
+
+    if is_dim2:
+        img = img.squeeze(0)
+
+    return img
+
+
 def norm_img(
     sample: SampleType,
     norm_keys: str | list[str] | None = ["img"],
@@ -370,59 +455,10 @@ def norm_img(
                 )
                 return None  # None for webdataset means drop this sample
 
-        if clip_zero:
-            img.clip_(min=0.0, max=None)  # clip to [0, inf)
-        else:
-            # if not clip zero, then we add the min to make it positive
-            img_min = (
-                img.min() if not per_channel else img.amin(dim=(-2, -1), keepdim=True)
-            )
-            img.add_(-img_min)
-
-        # If some value in some channels are too large, clamp them to the quantile value
-        # breakpoint()
-        if manual_img_max is not None:
-            assert not per_channel, (
-                "manual_img_max and per_channel cannot be set together"
-            )
-            assert quantile_clip == 1.0, (
-                "quantile_clip and manual_img_max cannot be set together"
-            )
-            q_max = manual_img_max
-        elif quantile_clip < 1.0:
-            dim = -2 if per_channel else 0
-            # (c, h, w) -> (c, h*w)
-            # (c, h, w) -> (c*h*w,)
-            q_max = (
-                img.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
-            )  # (c, 1) or (1,)
-
-            # c, 1, 1
-            if per_channel:
-                q_max = q_max[..., None]
-            else:
-                q_max = q_max.item()
-        else:
-            q_max = None
-
-        # Per-channel normalization
-        if per_channel:
-            img_max = img.amax(dim=(-2, -1), keepdim=True)
-        else:
-            img_max = img.max()
-        if q_max is not None:
-            img_max = img_max.clip_(min=None, max=q_max)
-        _img_max = img_max.item() if img_max.ndim == 0 else img_max.max().item()
-        if _img_max < 1e-4:
-            img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
-        else:
-            img.div_(img_max + 1e-6)  # normalize to [0, 1]
-
-        # To (-1, 1) or (0, 1)
-        if to_neg_1_1:
-            img.mul_(2.0).sub_(1.0).clamp_(-1.0, 1.0)  # normalize to [-1, 1]
-        else:
-            img.clamp_(0.0, 1.0)  # normalize to [0, 1]
+        # Normalize image
+        img = norm_img_(
+            img, per_channel, clip_zero, to_neg_1_1, manual_img_max, quantile_clip
+        )
 
         sample[key] = img
 

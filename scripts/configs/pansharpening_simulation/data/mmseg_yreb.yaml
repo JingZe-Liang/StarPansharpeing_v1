@@ -7,7 +7,7 @@ wds_paths:
 batch_size: 16 # Example batch size
 num_workers: 3
 shuffle_size: -1
-to_neg_1_1: true
+to_neg_1_1: false
 hyper_transforms_lst: null
 transform_prob: 0.0
 random_apply: 1

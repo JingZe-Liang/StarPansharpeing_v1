@@ -288,19 +288,67 @@ class catch_any(ContextDecorator):
     A context manager and decorator that catches any exception raised within its scope or the decorated function,
     logs the exception using the configured logger, and suppresses the exception to prevent it from propagating.
 
+    This utility is particularly useful for:
+    - Handling unexpected errors in non-critical code paths
+    - Preventing exceptions from interrupting program flow
+    - Debugging by logging exceptions without crashing
+    - Graceful error handling in user-facing applications
+
     Usage as a context manager:
         with catch_any():
             # code that may raise exceptions
+            result = risky_operation()
+            # continues execution even if risky_operation() fails
 
     Usage as a decorator:
         @catch_any()
         def my_function():
             # code that may raise exceptions
+            return some_value
+        # returns None if exception occurs, otherwise returns function result
 
-    Exceptions are logged with traceback details, and execution continues after the block or function.
+    Examples:
+        # Context manager with file operations
+        with catch_any():
+            with open('nonexistent_file.txt', 'r') as f:
+                content = f.read()
+
+        # Decorator for function that might fail
+        @catch_any()
+        def fetch_data(url):
+            response = requests.get(url)
+            return response.json()
+
+        # Nested usage
+        @catch_any()
+        def process_data():
+            with catch_any():
+                data = load_external_data()
+                return transform_data(data)
+
+    Args:
+        func (callable, optional): Function to be decorated when used as a decorator.
+                                 When used as a context manager, this should be None.
+
+    Returns:
+        catch_any: When used as a decorator, returns the wrapped function.
+                  When used as a context manager, returns self for __enter__.
+
+    Notes:
+        - All exceptions are caught and logged with full traceback information
+        - The exception is suppressed and does not propagate up the call stack
+        - When used as a decorator, the decorated function returns None if an exception occurs
+        - When used as a context manager, execution continues after the 'with' block
+        - Exceptions are logged using the configured loguru logger with ERROR level
+        - Use this sparingly as it can hide important errors that should be handled explicitly
+
+    Warning:
+        Overuse of this utility can make debugging difficult by masking exceptions.
+        Only use it for non-critical operations where failure is acceptable and expected.
     """
 
-    def __enter__(self):
+    def __enter__(self, func=None):
+        self.func = func
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -310,7 +358,12 @@ class catch_any(ContextDecorator):
             )
         return True  # Suppress the exception
 
-    def __call__(self, func):
+    def __call__(self, func=None):
+        if func is None and self.func is None:
+            return self
+        elif func is None:
+            return self
+
         @wraps(func)
         def wrapped(*args, **kwargs):
             with self:

@@ -12,10 +12,11 @@ import yaml
 from PIL import Image
 from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
+from timm.layers.helpers import to_2tuple
 
 from src.utilities.logging import log_print, once
 
-from .utils import to_n_tuple
+from .utils import norm_img_
 
 # --- Encoding Functions ---
 
@@ -121,8 +122,7 @@ def img_decode_io(img_bytes: bytes):
             img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
 
             for warning in w:
-                _w = Image.DecompressionBombWarning
-                if issubclass(warning.category, _w):
+                if issubclass(warning.category, Image.DecompressionBombWarning):
                     # Handle decompression bomb warnings specifically
                     warnings.warn(
                         f"Image decompression bomb warning: {warning.message}, image size: {img.shape}",
@@ -262,6 +262,11 @@ def mat_decode_io(mat_bytes: bytes) -> Dict[str, np.ndarray]:
     return data_dict
 
 
+def single_img_mat_decode_io(mat_bytes: bytes) -> np.ndarray:
+    data: dict = mat_decode_io(mat_bytes)
+    return data[list(data.keys())[0]]  # assume only one key
+
+
 def safetensors_decode_io(
     safetensors_bytes: bytes,
     to_device=False,
@@ -324,6 +329,11 @@ def is_tiff_file(file_path: str) -> bool:
     return file_path.lower().endswith((".tiff", ".tif"))
 
 
+def is_mat_file(file_path: str) -> bool:
+    """Check if the file is a MATLAB file based on its extension."""
+    return file_path.lower().endswith((".mat"))
+
+
 def is_rgb_file(file_path: str) -> bool:
     """Check if the file is an RGB image based on its extension."""
     return file_path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".img_content"))
@@ -341,6 +351,10 @@ def is_encoded_file(file_path: str) -> bool:
 
 def is_config_file(file_path: str) -> bool:
     return file_path.lower().endswith((".yaml", ".yml", ".json", "jsonl"))
+
+
+def is_img_file(file_path: str) -> bool:
+    return is_rgb_file(file_path) or is_tiff_file(file_path) or is_mat_file(file_path)
 
 
 def wids_caption_decode(sample: dict):
@@ -368,6 +382,10 @@ def wids_image_decode(
     resize_fn: str = "interpolate",
     resize: int | tuple[int, int] | None = None,
     process_img_keys: str | list[str] | Literal["ALL"] | None = "img",
+    mat_is_single_img: bool = True,
+    clip_zero=True,
+    quantile_clip=1.0,
+    manual_img_max=None,
 ):
     def img_process_fn(img, key: str, resize=resize):
         img = img.astype(np.float32)
@@ -380,16 +398,7 @@ def wids_image_decode(
             )
             return img
 
-        _img_max = img.max()
-        if _img_max < 1e-4:
-            img = np.zeros_like(img) if not to_neg_1_1 else np.ones_like(img) / 2
-        else:
-            img = img / (_img_max + 1e-6)
-
-        if to_neg_1_1:
-            img = (img * 2 - 1).clip(-1.0, 1.0)  # to [-1, 1]
-
-        if permute is True:
+        if permute is True and img.ndim == 3:
             # Permute the image dimensions from HWC to CHW
             img = np.transpose(img, (2, 0, 1))  # (c, h, w)
         elif permute == "auto":
@@ -402,13 +411,21 @@ def wids_image_decode(
             )
 
         # to Tensor
-        img = torch.as_tensor(img)
+        img = torch.as_tensor(img, dtype=torch.float32)
+
+        # Normalize image
+        img = norm_img_(
+            img,
+            clip_zero=clip_zero,
+            to_neg_1_1=to_neg_1_1,
+            quantile_clip=quantile_clip,
+            manual_img_max=manual_img_max,
+        )
 
         # Resize
         if resize is not None:
+            resize = to_2tuple(resize)
             img = img.unsqueeze(0)  # add batch dim
-            if isinstance(resize, int):
-                resize = to_n_tuple(resize, 2)
             if resize_fn == "interpolate":
                 img = torch.nn.functional.interpolate(
                     img, size=resize, mode="bilinear", align_corners=False
@@ -423,13 +440,14 @@ def wids_image_decode(
             return img_decode_io
         elif is_tiff_file(k):
             return tiff_decode_io
+        elif is_mat_file(k):
+            return single_img_mat_decode_io if mat_is_single_img else mat_decode_io
         else:
             raise ValueError(f"Unsupported image file type: {k}")
 
     # 1. Decode image files
     img_in_sample = False
     keys = list(sample.keys())
-    is_img_file = lambda k: is_rgb_file(k) or is_tiff_file(k)
     for key in keys:
         if key.startswith("__"):
             continue
