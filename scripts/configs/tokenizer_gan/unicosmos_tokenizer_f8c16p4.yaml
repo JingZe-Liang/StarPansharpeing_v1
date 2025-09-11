@@ -26,7 +26,7 @@ vq_loss:
   # perceptual loss
   perceptual_weight: 0.05
   # repa loss
-  repa_loss_weight: 0.1
+  repa_loss_weight: 0.02 # 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -34,6 +34,9 @@ vq_loss:
     img_resize: 512 # null for no resize
     dino_img_size: 512
     dino_name: "dinov3_vitl16"
+    feature_resample_type: match_student
+    loss_type: am_radio
+    feature_normalize: false
   # vf loss
   vf_loss_weight:
   vf_loss_options:
@@ -83,35 +86,34 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_tokenizer_path: runs/stage1_cosmos/2025-08-14_00-52-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  uni_tokenizer_path: runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
   loading_type: pretrained
-
-  # blocks
-  enc_moe: false
-  dec_moe: false
-  norm_type: gn
-  norm_groups: 32
-  block_name: res_block
-  moe_token_mixer_type: res_block
-  hidden_factor: 4
-  use_residual_factor: false
-
-  # others
-  patch_method: haar
-  patch_size: 1
-  attn_type: none
-  padding_mode: reflect # for boundary?
-
-  # latents
-  latent_channels: 16
-  z_channels: 16
 
   # augmentations
   latent_noise_prob: 0.0
   use_channel_drop: false
 
-  # train
-  act_checkpoint: true
+  # blocks
+  model:
+    norm_type: gn
+    norm_groups: 32
+    block_name: res_block
+    moe_token_mixer_type: res_block
+    hidden_factor: 4
+    use_residual_factor: false
+
+    # others
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
+    padding_mode: reflect # for boundary?
+
+    # latents
+    latent_channels: 16
+    z_channels: 16
+
+    # train
+    act_checkpoint: true
 
   channel_drop_config:
     drop_type: ${list:[4, 8, 12]}
@@ -131,9 +133,9 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 500_000
+  max_steps: 10_000_000
   save_every: 1000
-  resume_path: #runs/stage1_cosmos/2025-08-18_22-17-53_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/checkpoints/checkpoint_5
+  resume_path: runs/stage1_cosmos/2025-09-10_23-17-49_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/checkpoints/checkpoint_41
   ema_load_path: #runs/stage1_cosmos/2025-08-14_00-52-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
@@ -153,7 +155,7 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 4.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
     ns_diff_abc: true
@@ -172,7 +174,7 @@ train:
   disc_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 4.0e-4
     weight_decay: 0.1
     adamw_eps: 1.0e-8
     ns_diff_abc: true

@@ -315,29 +315,39 @@ def norm_img_(
 ):
     if is_dim2 := img.ndim == 2:
         # is h, w image
-        img.unsqueeze_(0)  # add channel dim
+        img.unsqueeze_(0)  # add channel dim if ndim == 2
 
     if clip_zero:
         img.clip_(min=0.0, max=None)  # clip to [0, inf)
     else:
         # if not clip zero, then we add the min to make it positive
         img_min = img.min() if not per_channel else img.amin(dim=(-2, -1), keepdim=True)
-        img.add_(-img_min)
+        img.sub_(img_min)
 
     # If some value in some channels are too large, clamp them to the quantile value
+    is_ch_3 = img.shape[0] == 3
+    # if is_ch_3:
+    #     manual_img_max = 255.0
     if manual_img_max is not None:
         assert not per_channel, "manual_img_max and per_channel cannot be set together"
         assert quantile_clip == 1.0, (
             "quantile_clip and manual_img_max cannot be set together"
         )
         q_max = manual_img_max
-    elif quantile_clip < 1.0:
+    elif quantile_clip < 1.0 and not is_ch_3:
         dim = -2 if per_channel else 0
         # (c, h, w) -> (c, h*w)
         # (c, h, w) -> (c*h*w,)
-        q_max = (
-            img.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
-        )  # (c, 1) or (1,)
+        try:
+            img_ = img[..., ::4, ::4]
+            q_max = (
+                img_.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
+            )  # (c, 1) or (1,)
+        except Exception as e:
+            log_print(
+                f"Failed to compute quantile: {e} for shape {img.shape}", "warning"
+            )
+            raise RuntimeError from e
 
         # c, 1, 1
         if per_channel:
@@ -702,7 +712,7 @@ def wids_filter_img_size(constraint_size: int | tuple):
             if img_size >= constraint_size[0] and img_size <= constraint_size[1]:
                 return sample
         # return a null dict
-        log_print("is None", "debug")
+        log_print("[Wids filter image size]: return sample is None", "debug")
         return None
 
     return size_filter_fn

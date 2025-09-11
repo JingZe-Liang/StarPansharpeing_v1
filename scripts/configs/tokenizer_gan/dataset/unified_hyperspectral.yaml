@@ -27,6 +27,7 @@ train_paths:
 
   # 4 bands
   - - data/Multispectral-FMow-full/hyper_images_4bands/FMoW-4_bands-px_1024-RGB-jp2k-80-{0000..0001}.tar
+    - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
     - data_local/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
     - data_local/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
     - data_local/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
@@ -82,7 +83,7 @@ train_paths:
     - ${glob:"data/RSCaptions/conditions/*.tar"}
     - data/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
     - data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
-    - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0002..0005}.tar
+    - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar
     - data/Houston/conditions/Houston-50_bands-px_512-MSI-0000.tar
     - data/LoveDA/conditions/LoveDA-3_bands-px_1024-0000.tar
     - data/MDAS-HySpex/conditions/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar
@@ -215,7 +216,7 @@ train_loader:
   paths: ${dataset.train_paths}
   basic_kwargs:
     shuffle_size: -1
-    num_workers: 3
+    num_workers: 2
     resample: true
     prefetch_factor: 4
     shuffle_within_workers: true

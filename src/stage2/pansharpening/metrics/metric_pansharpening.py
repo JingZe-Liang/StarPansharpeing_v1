@@ -383,7 +383,7 @@ class PansharpeningMetrics(AnalysisPanAcc):
         self,
         ratio=4,
         ref=True,
-        eargas_ratio=4,
+        eargas_ratio=None,  # decrepated
         device: str = "cuda",
         **unref_factory_kwargs,
     ):
@@ -408,6 +408,10 @@ class PansharpeningMetrics(AnalysisPanAcc):
             acc_ave[k] = metric.compute().item()
         return acc_ave
 
+    def compute(self) -> dict[str, float]:
+        acc_ave = self._get_acc_ave()
+        return acc_ave
+
     def __call__(self, *inp_tensors):
         kwargs = self._call_check_args_to_kwargs(*inp_tensors)
         n = inp_tensors[0].shape[0]
@@ -423,6 +427,9 @@ class PansharpeningMetrics(AnalysisPanAcc):
         self.acc_ave = self._get_acc_ave()
         self._call_n += n
         return self.acc_ave
+
+    def update(self, *inp_tensors):
+        return self.__call__(*inp_tensors)
 
     def clear_history(self, verbose=False):
         super().clear_history(verbose)

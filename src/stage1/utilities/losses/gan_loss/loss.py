@@ -130,13 +130,19 @@ class LeCAM_EMA(object):
         self.logits_fake_ema = init
         self.decay = decay
 
+    def _detach_tensor(self, x):
+        if getattr(x, "requires_grad", False):
+            return x.detach()
+
     def update(self, logits_real, logits_fake):
-        self.logits_real_ema = self.logits_real_ema * self.decay + torch.mean(
-            logits_real
-        ).item() * (1 - self.decay)
-        self.logits_fake_ema = self.logits_fake_ema * self.decay + torch.mean(
-            logits_fake
-        ).item() * (1 - self.decay)
+        self.logits_real_ema = (
+            self.logits_real_ema * self.decay
+            + self._detach_tensor(logits_real.mean() * (1 - self.decay)).item()
+        )
+        self.logits_fake_ema = (
+            self.logits_fake_ema * self.decay
+            + self._detach_tensor(logits_fake.mean() * (1 - self.decay)).item()
+        )
 
 
 def lecam_reg(real_pred, fake_pred, lecam_ema):

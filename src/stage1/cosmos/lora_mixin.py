@@ -153,8 +153,8 @@ class TokenizerLoRAMixin(nn.Module):
         self.current_lora: str | None = None
         self.current_lora_chan: int | None = None
         scale_factor, shift_factor = tokenizer_scale_shift or (1.0, 0.0)
-        self.register_buffer("scale_factor", torch.as_tensor(self.scale_factor))
-        self.register_buffer("shift_factor", torch.as_tensor(self.shift_factor))
+        self.register_buffer("scale_factor", torch.as_tensor(scale_factor))
+        self.register_buffer("shift_factor", torch.as_tensor(shift_factor))
 
         self.encode: Callable
         self.decode: Callable

@@ -58,42 +58,36 @@ vq_loss:
 
 tokenizer:
   # repa
-  hook_for_repa: true
+  use_repa_loss: true
+  use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
-  proj_for_vf: false
-  vf_on_z_or_module: module
-
+  vf_on_z_or_module: z # [z, module]
+  dino_feature_dim: 1024
   # loading
   uni_tokenizer_path:
   loading_type:
-
   # blocks
-  enc_moe: false
-  dec_moe: false
-  norm_type: gn
-  norm_groups: 32
-  block_name: res_block
-  moe_token_mixer_type: res_block
-  hidden_factor: 4
-  use_residual_factor: false
-
-  # others
-  quantizer_type: bsq
-  patch_method: haar
-  patch_size: 1
-  attn_type: none
-  padding_mode: reflect # for boundary?
-
-  # latents
-  latent_channels: 36
-  z_channels: 36
-
+  model:
+    norm_type: gn
+    norm_groups: 32
+    block_name: res_block
+    moe_token_mixer_type: res_block
+    hidden_factor: 4
+    use_residual_factor: false
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
+    padding_mode: reflect # for boundary?
+    # latents
+    latent_channels: 16
+    z_channels: 16
+    # train
+    act_checkpoint: true
+    # quantization
+    quantizer_type: bsq
   # augmentations
   latent_noise_prob: 0.0
   use_channel_drop: false
-
-  # train
-  act_checkpoint: true
 
 ema:
   beta: 0.995

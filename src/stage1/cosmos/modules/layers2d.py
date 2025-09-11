@@ -33,6 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from timm.layers.layer_scale import LayerScale2d
 from typing_extensions import deprecated
 
 from src.stage1.cosmos.modules.blocks import (
@@ -608,6 +609,7 @@ class GenerativeDecoder(Decoder):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
+        per_layer_noise: bool = False,
         **ignore_kwargs,
     ):
         super().__init__(
@@ -642,6 +644,8 @@ class GenerativeDecoder(Decoder):
             **ignore_kwargs,
         )
 
+        self.per_layer_noise = per_layer_noise
+
         # First conv_in should be [z, noise]
         block_in = channels * channels_mult[self.num_resolutions - 1]
         self.conv_in = torch.nn.Conv2d(
@@ -655,10 +659,13 @@ class GenerativeDecoder(Decoder):
 
         # Code conditioning blocks
         self.cond_layers = nn.ModuleList()
+        self.noise_ls = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block_out = channels * channels_mult[i_level]
             adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
             self.cond_layers.append(adap_gn)
+            if self.per_layer_noise:
+                self.noise_ls.append(LayerScale2d(block_in))
 
     @no_type_check
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
@@ -676,6 +683,9 @@ class GenerativeDecoder(Decoder):
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             h = self.cond_layers[i_level](h, cond)
+            if self.per_layer_noise:
+                layer_noise = torch.randn_like(h)
+                h = h + self.noise_ls[i_level](layer_noise)
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
@@ -1346,6 +1356,7 @@ if __name__ == "__main__":
             False,
             patch_size=1,
             padding_mode="reflect",
+            per_layer_noise=True,
         ).cuda()
 
         x = torch.randn(1, 16, 32, 32).cuda()

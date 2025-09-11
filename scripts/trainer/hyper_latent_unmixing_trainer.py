@@ -906,6 +906,7 @@ class UnmixingTrainer:
             k: v.update(log_losses[k]) for k, v in loss_metrics.items()
         }
 
+        val_out = None
         for batch_or_idx in val_iter:  # type: ignore
             if self.val_cfg.max_val_iters > 0:
                 batch = next(self._val_loader_iter)
@@ -933,13 +934,14 @@ class UnmixingTrainer:
         metrics = self.get_metrics()
         loss_val = metrics_sync(loss_metrics, output_tensor_dict=True)
 
+        assert val_out is not None
         if self.accelerator.is_main_process:
             # visualize the last val batch
             self.visualize_reconstruction(
                 batch_img_rgb,  # gt
                 pred_img_rgb,  # prediction
                 add_step=True,
-                img_name="val/denoising",
+                img_name="val/reconstruction",
                 no_to_rgb=True,
             )
 

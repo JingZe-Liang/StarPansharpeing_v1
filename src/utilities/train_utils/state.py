@@ -5,8 +5,8 @@ from typing import Any, Literal, cast
 import accelerate
 import numpy as np
 import torch
-from torch import Tensor
 import torch.distributed as dist
+from torch import Tensor
 from torchmetrics.aggregation import (
     MaxMetric,
     MeanMetric,
@@ -689,6 +689,14 @@ def dict_tensor_sync(
             return _reduce_obj_syn()
 
     return metrics
+
+
+def object_all_gather(obj: object):
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        lst_obj: list[object] = [None] * dist.get_world_size()  # type: ignore
+        dist.all_gather_object(lst_obj, obj)
+        return lst_obj
+    return [obj]
 
 
 # * --- test --- #

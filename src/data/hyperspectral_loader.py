@@ -2,7 +2,7 @@ import os
 import warnings
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence, cast
+from typing import Annotated, Any, Callable, Literal, Sequence, cast
 
 import accelerate
 import braceexpand
@@ -28,6 +28,7 @@ from kornia.augmentation import (
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from natsort import natsorted
 from safetensors.torch import load_file
+from timm.layers.helpers import to_2tuple
 from torch.utils.data import DataLoader, Dataset
 from typing_extensions import deprecated
 
@@ -132,10 +133,32 @@ def get_dict_tensor_mapper(to_neg_1_1=True):
 
 
 class HyperRandomGrayScale(IntensityAugmentationBase2D):
+    """Randomly convert hyperspectral images to grayscale.
+
+    This augmentation randomly converts hyperspectral images to grayscale by computing
+    the mean across all channels and repeating it for all channels. This preserves
+    the original tensor shape while simulating grayscale appearance.
+
+    Args:
+        p (float): Probability of applying the grayscale transformation. Defaults to 0.5.
+    """
+
     def __init__(self, p=0.5):
         super().__init__(p)
 
     def apply_transform(self, input, params, flags, transform=None):
+        """Apply grayscale transformation to input tensor.
+
+        Args:
+            input (Tensor): Input tensor of shape (B, C, H, W) where B is batch size,
+                C is number of channels, H is height, and W is width.
+            params: Parameters for the transformation (unused in this implementation).
+            flags: Flags for the transformation (unused in this implementation).
+            transform: Additional transform parameters (unused in this implementation).
+
+        Returns:
+            Tensor: Grayscale version of input tensor with the same shape (B, C, H, W).
+        """
         assert input.ndim == 4
         c = input.shape[1]
         gray = input.mean(dim=1, keepdim=True).repeat_interleave(c, dim=1)
@@ -148,6 +171,26 @@ def hyper_transform(
     random_apply: int | tuple[int] = 2,
     default_img_size: int = 256,
 ):
+    """Create a hyper-spectral image augmentation transform function.
+
+    This function creates a configurable data augmentation pipeline for hyperspectral images
+    using various image transformations. The transformations are applied sequentially with
+    specified probabilities.
+
+    Args:
+        op_list (tuple[str, ...]): List of augmentation operations to apply.
+            Supported operations: 'grayscale', 'channel_shuffle', 'sharpness',
+            'rotation', 'horizontal_flip', 'vertical_flip', 'cutmix', 'blur',
+            'center_crop', 'resized_crop'.
+        probs (tuple[float, ...] | float): Probability of applying each operation.
+            If float, same probability is used for all operations. Defaults to 0.5.
+        random_apply (int | tuple[int]): Number of operations to randomly apply.
+            If tuple, specifies the range. Defaults to 2.
+        default_img_size (int): Default image size for crop operations. Defaults to 256.
+
+    Returns:
+        function: A transform function that applies the specified augmentations to input data.
+    """
     if isinstance(probs, float):
         probs: tuple[float, ...] = tuple([probs] * len(op_list))
     assert len(probs) == len(op_list), (  # type: ignore
@@ -265,7 +308,7 @@ def get_hyperspectral_dataloaders(
     tgt_key: str | list[str] | None = None,
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
-    quantile_img_clip: float = 1.0,
+    quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 0.99,
     manual_img_max: float | None = None,
     undecoded_filtered: bool = True,
     # int for minimal_size; tuple for (min, max)
@@ -841,74 +884,11 @@ def only_hyperspectral_img_folder_dataloader(
 # * --- wids loaders --- #
 
 
-def get_hyperspectral_wids_dataloaders(
-    index_file: str | list[str],
-    batch_size: int,
-    num_workers: int,
-    shuffle_size: int = 100,
-    to_neg_1_1: bool = True,
-    permute: bool = True,
-    img_size_filter_file: str | None = None,
-    constraint_size: int | tuple[int, int] | None = None,
-    resize_before_transform: int | tuple[int, int] | None = 512,
-    tgt_key: str | None = "img",
-    hyper_transforms_lst: tuple[str, ...] | None = (
-        "grayscale",
-        "channel_shuffle",
-        "rotation",
-        "cutmix",
-        "horizontal_flip",
-        "vertical_flip",
-    ),
-    transform_prob: float = 0.2,
-    random_apply: int | tuple[int, int] = 1,
-    prefetch_factor: int | None = 6,
-    pin_memory: bool = False,
-    remove_meta_data: bool = False,
-    persistent_workers: bool = False,
-    wids_local_name_prefix: str | None = None,
-    filter_out_none: bool = True,
-    **__discard_kwargs,  # discard other kwargs
+def get_wids_sampler(
+    dataset: wids.ShardListDataset,
+    shuffle_size: int,
+    img_index: list[int] | None = None,
 ):
-    if isinstance(index_file, (list, tuple)):
-        index_infos: list[dict] = []
-        for p in index_file:
-            assert os.path.exists(p), f"Index file {p} does not exist"
-            index_info, _ = get_wids_index_json_info(p)
-            index_infos.extend(index_info)
-        index_file = index_infos
-
-    dataset = wids.ShardListDataset(
-        index_file,
-        localname=lambda x: f"{wids_local_name_prefix}/{x}"
-        if wids_local_name_prefix is not None
-        else x,
-        transformations=[
-            partial(  # type: ignore
-                wids_image_decode,
-                to_neg_1_1=to_neg_1_1,
-                permute=permute,
-                resize=None,
-                process_img_keys="ALL",
-            ),
-            wids_filter_img_size(constraint_size=constraint_size)
-            if constraint_size is not None
-            else lambda x: x,
-        ],
-    )
-
-    # image size filtering
-    img_index = None
-    if constraint_size is not None and img_size_filter_file is not None:
-        img_index = wids_img_size_filter_by_parquet_index(
-            img_size_filter_file,
-            min_size=constraint_size
-            if isinstance(constraint_size, int)
-            else constraint_size[0],
-            max_size=None if isinstance(constraint_size, int) else constraint_size[1],  # type: ignore
-        )
-
-    # dataloader
     if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
         if img_index is None:
             sampler = wids.DistributedChunkedSampler(
@@ -945,7 +925,82 @@ def get_hyperspectral_wids_dataloaders(
             )
     else:
         sampler = None
+    return sampler
 
+
+def get_hyperspectral_wids_dataloaders(
+    index_file: str | list[str],
+    batch_size: int,
+    num_workers: int,
+    shuffle_size: int = 100,
+    to_neg_1_1: bool = True,
+    permute: bool = True,
+    img_size_filter_file: str | None = None,
+    constraint_size: int | tuple[int, int] | None = None,
+    resize_before_transform: int | tuple[int, int] | None = 512,
+    tgt_key: str | None = "img",
+    quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 0.99,
+    manual_img_max: float | None = None,
+    hyper_transforms_lst: tuple[str, ...] | None = (
+        "grayscale",
+        "channel_shuffle",
+        "rotation",
+        "cutmix",
+        "horizontal_flip",
+        "vertical_flip",
+    ),
+    transform_prob: float = 0.2,
+    random_apply: int | tuple[int, int] = 1,
+    prefetch_factor: int | None = 6,
+    pin_memory: bool = False,
+    remove_meta_data: bool = False,
+    persistent_workers: bool = False,
+    wids_local_name_prefix: str | None = None,
+    filter_out_none: bool = True,
+    **__discard_kwargs,  # discard other kwargs
+):
+    if isinstance(index_file, (list, tuple)):
+        index_infos: list[dict] = []
+        for p in index_file:
+            assert os.path.exists(p), f"Index file {p} does not exist"
+            index_info, _ = get_wids_index_json_info(p)
+            index_infos.extend(index_info)
+        index_file = index_infos
+
+    decodes = [
+        partial(  # type: ignore
+            wids_image_decode,
+            to_neg_1_1=to_neg_1_1,
+            permute=permute,
+            resize=None,
+            process_img_keys="ALL",
+            quantile_clip=quantile_img_clip,
+            manual_img_max=manual_img_max,
+        )
+    ]
+    if constraint_size is not None:
+        decodes.append(wids_filter_img_size(constraint_size=constraint_size))
+    dataset = wids.ShardListDataset(
+        index_file,
+        localname=lambda x: f"{wids_local_name_prefix}/{x}"
+        if wids_local_name_prefix is not None
+        else x,
+        transformations=decodes,
+    )
+
+    # image size filtering
+    img_index = None
+    if constraint_size is not None and img_size_filter_file is not None:
+        img_index = wids_img_size_filter_by_parquet_index(
+            img_size_filter_file,
+            min_size=constraint_size
+            if isinstance(constraint_size, int)
+            else constraint_size[0],
+            max_size=None if isinstance(constraint_size, int) else constraint_size[1],  # type: ignore
+        )
+
+    # dataloader
+    sampler = get_wids_sampler(dataset, shuffle_size, img_index)
     dataloader = wds.WebLoader(
         dataset,
         batch_size=None,
@@ -975,9 +1030,7 @@ def get_hyperspectral_wids_dataloaders(
     # resize
     if resize_before_transform is not None:
         if isinstance(resize_before_transform, int):
-            resize_before_transform = to_n_tuple(  # type: ignore
-                resize_before_transform, 2
-            )
+            resize_before_transform = to_2tuple(resize_before_transform, 2)
         resizer = large_image_resizer_clipper(
             tgt_size=resize_before_transform, op_for_large="clip"
         )

@@ -1,6 +1,7 @@
 import math
 import sys
 import time
+from collections import namedtuple
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -46,6 +47,11 @@ from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metr
 from src.utilities.train_utils.visualization import visualize_segmentation_map
 
 heavyball = lazy_loader.load("heavyball")
+
+CDModelStepOutput = namedtuple(
+    "CDModelStepOutput",
+    ["pred_pixel", "loss", "log_losses"],
+)
 
 
 class HyperCDTrainer:
@@ -468,7 +474,7 @@ class HyperCDTrainer:
                 else self.model.parameters()
             )
             model_opt = _optimizer_creater(
-                self.train_cfg.denoise_optim, _get_model_params
+                self.train_cfg.model_optim, _get_model_params
             )
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
@@ -794,7 +800,7 @@ class HyperCDTrainer:
         )
         self._accumulated_preds.clear()
 
-        return dict(pred_pixel=pred_2d, seg_loss=loss, log_losses=log_losses)
+        return CDModelStepOutput(pred_2d, loss, log_losses)
 
     def _reconstruct_hypersigma_image(
         self, accumulated_preds: list[Tensor] | None = None, mode="train"
@@ -868,7 +874,7 @@ class HyperCDTrainer:
     def train_segment_step(self, img, gt, img_latent):
         pred, loss, log_losses = self.forward_segment_model(img, gt, img_latent)
         self._optimize_step(loss)
-        return dict(pred_pixel=pred, seg_loss=loss, log_losses=log_losses)
+        return CDModelStepOutput(pred, loss, log_losses)
 
     def train_single_img_accum_step(
         self,
@@ -894,7 +900,7 @@ class HyperCDTrainer:
         if is_image_complete:
             # Process the complete image and compute loss
             ret_dict = self._process_complete_hypersigma_image()
-            self._optimize_step(ret_dict["seg_loss"])
+            self._optimize_step(ret_dict.loss)
             return ret_dict
         else:
             raise NotImplementedError("Not implemented yet")
@@ -952,7 +958,7 @@ class HyperCDTrainer:
         self.step_train_state()
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_losses = self.format_log(train_out["log_losses"])
+            _log_losses = self.format_log(train_out.log_losses)
             self.log_msg(
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
@@ -960,7 +966,7 @@ class HyperCDTrainer:
             self.log_msg(f"[Train Tok]: {_log_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", train_out["log_losses"], self.global_step)
+            self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
@@ -1108,9 +1114,7 @@ class HyperCDTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "denoise_ema_model"
-        )
+        self.accelerator.save_model(self.ema_model.ema_model, ema_path / "cd_ema_model")
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -1270,7 +1274,6 @@ class HyperCDTrainer:
 
 _key = "cosmos_f8c16p4_segmentation"  # vq, bsq, fsq, kl
 _configs_dict = {
-    # cosmos tokenizer, simple denoising
     "cosmos_f8c16p4_segmentation": "cosmos_f8c16p4_segmentation",
 }
 

@@ -85,7 +85,7 @@ def _register_new_acts():
 
 
 @once
-def _register_new_norm():
+def _register_new_norms():
     try:
         from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 
@@ -95,7 +95,7 @@ def _register_new_norm():
 
 
 _register_new_acts()
-_register_new_norm()
+_register_new_norms()
 log(
     "[NormActRegister]: Register activation ('swiglu' and 'polynorm_act'), ",
     "normalization ('flash_rms_norm')",

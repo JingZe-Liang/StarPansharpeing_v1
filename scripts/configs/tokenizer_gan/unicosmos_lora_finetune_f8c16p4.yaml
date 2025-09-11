@@ -65,8 +65,6 @@ tokenizer:
   loading_type: pretrained
 
   # blocks
-  enc_moe: false
-  dec_moe: false
   norm_type: gn
   norm_groups: 32
   block_name: res_block

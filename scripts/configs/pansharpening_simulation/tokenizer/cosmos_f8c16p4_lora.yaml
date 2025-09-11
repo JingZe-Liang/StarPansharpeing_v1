@@ -28,8 +28,6 @@ model_kwargs:
   uni_tokenizer_path: runs/stage1_cosmos/2025-05-29_16-24-09_cosmos_f8c16p4_uni/ema/tokenizer/model.safetensors
   loading_type: pretrained
   use_channel_drop: false
-  enc_moe: false
-  dec_moe: false
   norm_type: gn
   norm_groups: 32
   block_name: res_block

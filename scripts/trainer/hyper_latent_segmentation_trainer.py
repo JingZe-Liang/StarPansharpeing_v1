@@ -2,6 +2,7 @@ import math
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Callable, Literal, Sequence, cast
@@ -46,6 +47,23 @@ from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metr
 from src.utilities.train_utils.visualization import visualize_segmentation_map
 
 heavyball = lazy_loader.load("heavyball")
+
+
+@dataclass
+class SegmentationOutput:
+    loss: Tensor
+    pred_pixel: Tensor
+    log_losses = None  # dict[str, Tensor]
+
+    def __post_init__(self):
+        assert self.loss is not None, "loss should not be None"
+        if isinstance(self.loss, tuple):
+            self.loss, self.log_losses = self.loss
+        else:
+            self.log_losses = {"seg_loss": self.loss.detach()}
+
+    def __getitem__(self, name):
+        return getattr(self.__dict__, name, None)
 
 
 class HyperSegmentationTrainer:
@@ -164,7 +182,7 @@ class HyperSegmentationTrainer:
             getattr(self.train_cfg, "segment_name", None)
             or self.model.__class__.__name__
         )
-        self.log_msg(f"use denoising model: {segment_name}")
+        self.log_msg(f"use segmentation model: {segment_name}")
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
@@ -269,7 +287,7 @@ class HyperSegmentationTrainer:
             beta=self.ema_cfg.beta,
             update_every=self.ema_cfg.update_every,
         ).to(self.device)
-        self.log_msg(f"create EMA model for denoising")
+        self.log_msg(f"create EMA model for segmentation")
 
     def configure_logger(self):
         self.logger = logger
@@ -467,9 +485,7 @@ class HyperSegmentationTrainer:
                 if with_name
                 else self.model.parameters()
             )
-            model_opt = _optimizer_creater(
-                self.train_cfg.denoise_optim, _get_model_params
-            )
+            model_opt = _optimizer_creater(self.train_cfg.seg_optim, _get_model_params)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
@@ -740,24 +756,17 @@ class HyperSegmentationTrainer:
 
     def compute_segmentation_loss(self, out, gt):
         loss = self.segment_loss(out, gt)
-
-        if isinstance(loss, torch.Tensor):
-            log_losses = {"seg_loss": loss.detach()}
-        elif isinstance(loss, (tuple, list)):
-            loss, log_losses = loss
-        else:
-            raise NotImplementedError(f"Unknown type {type(loss)}")
-
-        return loss, log_losses
+        return loss
 
     def forward_segment_model(self, img, gt, img_latent):
         with self.accelerator.autocast():
             # img -> model (DINOv3 backbone -> multi-scale FPN -> adapter -> Unet decoder -> prediction
             out = self.model(img, img_latent)
             # loss
-            loss, log_losses = self.compute_segmentation_loss(out, gt)
+            loss = self.compute_segmentation_loss(out, gt)
 
-        return out, loss, log_losses
+        output = SegmentationOutput(loss=loss, pred_pixel=out)
+        return output
 
     def _check_image_completion(self, batch: dict) -> bool:
         """Check if we have processed all patches for a complete image."""
@@ -789,12 +798,10 @@ class HyperSegmentationTrainer:
 
         # Reconstruct complete image from patches
         pred_2d, pred_indexed_1d, gt_indexed_1d = self._reconstruct_hypersigma_image()
-        loss, log_losses = self.compute_segmentation_loss(
-            pred_indexed_1d, gt_indexed_1d
-        )
+        loss = self.compute_segmentation_loss(pred_indexed_1d, gt_indexed_1d)
         self._accumulated_preds.clear()
 
-        return dict(pred_pixel=pred_2d, seg_loss=loss, log_losses=log_losses)
+        return SegmentationOutput(loss=loss, pred_pixel=pred_2d)
 
     def _reconstruct_hypersigma_image(
         self, accumulated_preds: list[Tensor] | None = None, mode="train"
@@ -835,11 +842,7 @@ class HyperSegmentationTrainer:
         pred_indexed_1d = pred_1d[index]
         gt_indexed_1d = gt_indexed_1d.to(pred_1d.device)
 
-        return {
-            "pred_2d": pred_2d,
-            "pred_indexed_1d": pred_indexed_1d,
-            "gt_indexed_1d": gt_indexed_1d,
-        }
+        return pred_2d, pred_indexed_1d, gt_indexed_1d
 
     def _optimize_step(self, loss: Tensor):
         if self.accelerator.sync_gradients:
@@ -866,9 +869,9 @@ class HyperSegmentationTrainer:
         return macro_outputs
 
     def train_segment_step(self, img, gt, img_latent):
-        pred, loss, log_losses = self.forward_segment_model(img, gt, img_latent)
-        self._optimize_step(loss)
-        return dict(pred_pixel=pred, seg_loss=loss, log_losses=log_losses)
+        out = self.forward_segment_model(img, gt, img_latent)
+        self._optimize_step(out.loss)
+        return out
 
     def train_single_img_accum_step(
         self,
@@ -893,18 +896,20 @@ class HyperSegmentationTrainer:
 
         if is_image_complete:
             # Process the complete image and compute loss
-            ret_dict = self._process_complete_hypersigma_image()
-            self._optimize_step(ret_dict["seg_loss"])
-            return ret_dict
+            out = self._process_complete_hypersigma_image()
+            self._optimize_step(out.loss)
+            return out
         else:
             raise NotImplementedError("Not implemented yet")
             return None
 
     def _get_metric_fn(self, clear=False):
-        if not hasattr(self, "_seg_metrics") or clear:
+        if not hasattr(self, "_seg_metrics"):
             self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(
                 self.metric_cfg
             )
+        elif clear:
+            self._seg_metrics.reset()
 
         # Return the segmentation metrics object
         return self._seg_metrics
@@ -952,7 +957,7 @@ class HyperSegmentationTrainer:
         self.step_train_state()
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_losses = self.format_log(train_out["log_losses"])
+            _log_losses = self.format_log(train_out.log_losses)
             self.log_msg(
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
@@ -960,7 +965,7 @@ class HyperSegmentationTrainer:
             self.log_msg(f"[Train Tok]: {_log_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", train_out["log_losses"], self.global_step)
+            self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
@@ -1042,20 +1047,18 @@ class HyperSegmentationTrainer:
     @torch.no_grad()
     def val_step(self, batch: dict):
         if self._use_single_img_indexing:
-            use_batch_accum = hasattr(batch, "sample_index") or "sample_index" in batch
+            use_batch_accum = "sample_index" in batch
             if use_batch_accum:
                 self._current_sample_index = batch.get("sample_index", None)
             macro_outputs = self._macro_forward_seg_model(batch, self.macro_batch_size)
             # revert back to a full image
-            pred_seg, *_ = (
-                self._reconstruct_hypersigma_image(macro_outputs, mode="val")
-            ).values()
+            pred_seg, *_ = self._reconstruct_hypersigma_image(macro_outputs, mode="val")
         else:
             img_latent = self.get_tokenizer_encoded(batch)
             # forward the segmentation network
-            pred_seg, *_ = self.forward_segment_model(
+            pred_seg = self.forward_segment_model(
                 batch["img"], batch["gt"], img_latent
-            )
+            ).pred_pixel
         return pred_seg
 
     def val_loop(self):
@@ -1109,7 +1112,7 @@ class HyperSegmentationTrainer:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "denoise_ema_model"
+            self.ema_model.ema_model, ema_path / "seg_ema_model"
         )
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
@@ -1268,9 +1271,8 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_segmentation"  # vq, bsq, fsq, kl
+_key = "cosmos_f8c16p4_segmentation"
 _configs_dict = {
-    # cosmos tokenizer, simple denoising
     "cosmos_f8c16p4_segmentation": "cosmos_f8c16p4_segmentation",
 }
 

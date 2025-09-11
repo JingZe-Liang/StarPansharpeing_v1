@@ -1,12 +1,15 @@
 import copy
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import open_clip
 import torch as th
 import torch.nn as nn
+
+from jaxtyping import Float
 from loguru import logger
 from lpips import LPIPS
+from numpy.typing import NDArray
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import models
 from torchvision.models.feature_extraction import create_feature_extractor
@@ -37,6 +40,18 @@ class WrappedClipVisual(nn.Module):
         x = self.body(x)
         x = self.final_norm(x)
         return x
+
+
+def choose_lightest_bands(img: Float[th.Tensor, "... c h w"] | Float[NDArray, "h w c"]):
+    mean_cs = img.mean((-3, -2, -1))  # (c,)
+    mean_cs = th.as_tensor(mean_cs)
+    _, indices = th.topk(mean_cs, k=3, largest=True)
+    indices = indices.tolist()
+    indices = sorted(indices, reverse=True)
+    assert indices[-1] < img.shape[1], (
+        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
+    )
+    return indices
 
 
 # Perceptual model creation
@@ -114,7 +129,7 @@ class HyperspectralFeatureLoss:
         self,
         use_group: bool = False,
         # rgb options
-        rgb_channels: list | Literal["random"] | str | None = None,
+        rgb_channels: list | Literal["random", "mean", "largest"] | str | None = None,
         # group options
         group_size: int = 3,
         num_groups_to_select: int | float | None = None,
@@ -156,6 +171,7 @@ class HyperspectralFeatureLoss:
                 assert self.rgb_channels in (
                     "random",
                     "mean",
+                    "largest",
                 ), "rgb_channels must be randomly selected"
             elif isinstance(self.rgb_channels, (list, tuple)):
                 assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
@@ -252,13 +268,16 @@ class HyperspectralFeatureLoss:
                 # mean three splitted bands
                 c = img.shape[1]
                 c_3 = c // 3
-                # list(range(c))[::3]
                 bands = [
                     img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
                 ]
                 img = th.stack(bands, dim=1)
+            elif self.rgb_channels == "largest":
+                bands = choose_lightest_bands(img)
+                img = img[:, bands]
             else:
                 rgb_channels = self.rgb_channels
+                rgb_channels = cast(list, rgb_channels)
                 img = img[:, rgb_channels]
 
         assert img.shape[1] == 3, "img must be rgb images"
@@ -313,7 +332,7 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
         self,
         percep_model: PerceptionModelChoices | str | nn.Module,
         use_group=False,
-        rgb_channels: list | Literal["random", "mean"] | str | None = None,
+        rgb_channels: list | Literal["random", "mean", "largest"] | str | None = None,
         group_size: int = 3,
         num_groups_to_select: int | float | None = None,
         padding_mode: Literal["zero", "repeat"] = "repeat",
@@ -474,15 +493,15 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}("
-            f"model_type={self.percep_model_name}, "
-            f"rgb_channels={self.rgb_channels}, "
-            f"group_size={self.group_size}, "
-            f"num_groups_to_select={self.num_groups_to_select}, "
-            f"padding_mode={self.padding_mode}, "
-            f"compute_on_logits={self.compute_on_logits}, "
-            f"use_lpips_vgg={self.use_lpips_vgg}, "
-            f"img_is_neg1_to_1={self.img_is_neg1_1}"
+            f"\n{self.__class__.__name__}(\n"
+            f"    model_type={self.percep_model_name},\n"
+            f"    rgb_channels={self.rgb_channels},\n"
+            f"    group_size={self.group_size},\n"
+            f"    num_groups_to_select={self.num_groups_to_select},\n"
+            f"    padding_mode={self.padding_mode},\n"
+            f"    compute_on_logits={self.compute_on_logits},\n"
+            f"    use_lpips_vgg={self.use_lpips_vgg},\n"
+            f"    img_is_neg1_to_1={self.img_is_neg1_1}\n"
             ")"
         )
 

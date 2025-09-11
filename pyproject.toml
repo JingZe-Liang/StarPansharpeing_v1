@@ -28,7 +28,7 @@ dependencies = [
     "kornia",
     "natsort",
     "safetensors",
-    "natten",  # Optional
+    "natten",                      # Optional
     "lazy_loader",
     "rich_argparse",
     "omegaconf",
@@ -49,13 +49,49 @@ where = ["src"]
 target-version = "py312"
 line-length = 88
 indent-width = 4
-extend-exclude = [".vscode", ".idea", "__pycache__", ".python-version", ".ruff.toml", "ruff.toml", "setup.cfg", "pyproject.toml"]
+extend-exclude = [
+    ".vscode",
+    ".idea",
+    "__pycache__",
+    ".python-version",
+    ".ruff.toml",
+    "ruff.toml",
+    "setup.cfg",
+    "pyproject.toml",
+]
 exclude = [
     "src/stage2/generative/maskbit",
     "src/stage2/generative/Sana",
     "**/datasets/**",
+    "data_local/",
     "data/",
     "src/stage2/generative/models/modules/deformable_attn/ops",
+    # Submodules from .gitmodules
+    "src/stage1/WeTok",
+    "src/stage1/perception_models",
+    "src/stage1/lora/LoRA-Pro",
+    "src/stage1/discretization/bsq-vit",
+    "src/stage1/discretization/vector-quantize-pytorch",
+    "src/stage1/discretization/LightningDiT",
+    "src/stage2/HyperSIGMA",
+    "src/stage2/generative/HSIGene",
+    "src/stage2/generative/maskbit",
+    "src/stage2/generative/MeanFlow",
+    "src/stage2/generative/modified-shortcut-models-pytorch",
+    "src/stage2/generative/integrate-the-integrator",
+    "src/stage1/MoEs/Mixture-of-Transformers",
+    "src/stage1/MoEs/MoBA",
+    "src/stage1/one_d_tokenizer/D-AR",
+    "src/stage1/one_d_tokenizer/GigaTok",
+    "src/stage1/one_d_tokenizer/SelftokTokenizer",
+    "src/stage1/one_d_tokenizer/titok",
+    "src/stage2/generative/shortcut_pytorch",
+    "src/stage1/MoEs/mixture_of_recursions",
+    "src/utilities/optim/dion",
+    "src/stage2/detections/GT-HAD",
+    "src/stage2/unmixing/traditional/HySUPP",
+    "src/stage2/unmixing/traditional/Hyperspectral-Unmixing-Models",
+    "src/stage2/generative/TiM",
 ]
 
 [tool.ruff.format]
@@ -66,10 +102,25 @@ docstring-code-line-length = 20
 
 [tool.ruff.lint]
 select = ["E501", "I", "E", "W"]
-ignore = ["E402","D103","I001","E731","E741","D202","D403","E731","E501","PLR0913","W291","E722","W293","E701"]
+ignore = [
+    "E402",
+    "D103",
+    "I001",
+    "E731",
+    "E741",
+    "D202",
+    "D403",
+    "E731",
+    "E501",
+    "PLR0913",
+    "W291",
+    "E722",
+    "W293",
+    "E701",
+]
 
 [tool.ruff.lint.per-file-ignores]
-"**/*.py" = ["D"]  # Disable all docstring-related rules
+"**/*.py" = ["D"] # Disable all docstring-related rules
 
 [tool.ruff.lint.pylint]
 max-args = 20
@@ -97,7 +148,25 @@ python_version = "3.12"
 allow_untyped_globals = true
 
 [[tool.mypy.overrides]]
-module = ["timm.*", "einops.*", "torch.*", "transformers.*", "loguru.*", "typer.*", "omegaconf.*", "accelerate.*"]
+module = [
+    "timm.*",
+    "einops.*",
+    "torch.*",
+    "transformers.*",
+    "loguru.*",
+    "typer.*",
+    "omegaconf.*",
+    "accelerate.*",
+    "heavyball.*",
+    "fvcore.*",
+    "jaxtyping.*",
+    "torchmetrics.*",
+    "tifffile.*",
+    "webdataset.*",
+    "wids.*",
+    "torchvision.*",
+    "tqdm.*",
+]
 ignore_missing_imports = true
 
 [tool.ty.rules]

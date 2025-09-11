@@ -1,9 +1,10 @@
 import sys
 import time
+from collections import namedtuple
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, NotRequired, Sequence, TypedDict, cast
+from typing import Callable, Literal, TypedDict, cast
 
 import accelerate
 import hydra
@@ -34,7 +35,7 @@ from src.utilities.config_utils import (
 )
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
-from src.utilities.train_utils.dict_utils import keys_in_dict
+from utilities.func.dict_utils import keys_in_dict
 from src.utilities.train_utils.state import StepsCounter
 
 
@@ -42,11 +43,17 @@ class BatchInput(TypedDict):
     lrms: Tensor
     pan: Tensor
     hrms: Tensor
-    sr: Tensor
 
-    lrms_latent: NotRequired[Tensor]
-    pan_latent: NotRequired[Tensor]
-    hrms_latent: NotRequired[Tensor]
+    # NotRequired fields
+    lrms_latent: Tensor
+    pan_latent: Tensor
+    hrms_latent: Tensor
+
+
+PansharpeningOutput = namedtuple(
+    "PansharpeningOutput",
+    ["pred_latent", "pred_sr", "pred_sr_from_latent", "sr_loss", "sr_log_losses"],
+)
 
 
 class PansharpeningTrainer:
@@ -671,7 +678,7 @@ class PansharpeningTrainer:
                 pred_sr_from_latent = out.get("pixel_from_latent", None)
             else:
                 pred_latent = self.pansp_model(lrms_latent, pan_latent)
-                pred_sr = self.forward_tokenizer(
+                pred_sr = self.forward_tokenizer(  # from de-tokenizer
                     pred_latent, mode="decode", no_grad=True
                 )["recon"]
                 pred_sr_from_latent = None
@@ -690,7 +697,9 @@ class PansharpeningTrainer:
                 else:
                     raise NotImplementedError(f"Unknown type {type(sr_loss)}")
 
-        return pred_latent, pred_sr, sr_loss, sr_log_losses
+        return PansharpeningOutput(
+            pred_latent, pred_sr, pred_sr_from_latent, sr_loss, sr_log_losses
+        )
 
     def train_pansp_step(
         self,
@@ -698,32 +707,18 @@ class PansharpeningTrainer:
         lrms,
         pan,
         sr,
-        # optional for *tok_out
-        lrms_tok_out: dict | None = None,
-        pan_tok_out: dict | None = None,
-        sr_tok_out: dict | None = None,
-        # latents (offline)
         lrms_latent: torch.Tensor | None = None,
         pan_latent: torch.Tensor | None = None,
         sr_latent: torch.Tensor | None = None,
     ):
-        if (
-            lrms_tok_out is not None
-            and pan_tok_out is not None
-            and sr_tok_out is not None
-        ):
-            lrms_latent = lrms_tok_out["latent"].detach()
-            pan_latent = pan_tok_out["latent"].detach()
-            sr_latent = sr_tok_out["latent"].detach()
-
-        pred_latent, _, sr_loss, sr_log_losses = self.forward_pansp_model(
+        out = self.forward_pansp_model(
             lrms, pan, sr, lrms_latent, pan_latent, sr_latent
         )
 
         if self.accelerator.sync_gradients:
             # backward
             self.pansp_optim.zero_grad()
-            self.accelerator.backward(sr_loss)
+            self.accelerator.backward(out.sr_loss)
             self.gradient_check(self.pansp_model)
             self.pansp_optim.step()
             self.pansp_sched.step()
@@ -731,9 +726,7 @@ class PansharpeningTrainer:
             # ema update
             self.ema_update(mode="pansharpening")
 
-        return dict(
-            pred_latent=pred_latent, sr_loss=sr_loss, sr_log_losses=sr_log_losses
-        )
+        return out
 
     def check_quality(
         self,
@@ -750,7 +743,6 @@ class PansharpeningTrainer:
 
     def train_step(self, batch: BatchInput):
         lrms_latent = pan_latent = hrms_latent = None
-        lrms_tok_out = pan_tok_out = sr_tok_out = None
 
         # offline latents
         if keys_in_dict(["lrms_latent", "pan_latent", "hrms_latent"], batch):
@@ -767,9 +759,9 @@ class PansharpeningTrainer:
                     and hasattr(self, "tokenizer_decoder")
                 )
             ), "tokenizer not found for online tokenize"
-            lrms_tok_out = self.forward_tokenizer(batch["lms"])
-            pan_tok_out = self.forward_tokenizer(batch["pan"])
-            sr_tok_out = self.forward_tokenizer(batch["hrms"])
+            lrms_latent = self.forward_tokenizer(batch["lrms"])["latent"]
+            pan_latent = self.forward_tokenizer(batch["pan"])["latent"]
+            hrms_latent = self.forward_tokenizer(batch["hrms"])["latent"]
 
         quality_track_n = self.train_cfg.track_metrics_duration
         # start track after n steps
@@ -789,16 +781,11 @@ class PansharpeningTrainer:
                 batch["lrms"],
                 batch["pan"],
                 batch["sr"],
-                # online tokenized latents
-                lrms_tok_out=lrms_tok_out,
-                pan_tok_out=pan_tok_out,
-                sr_tok_out=sr_tok_out,
-                # offline latents
                 lrms_latent=lrms_latent,
                 pan_latent=pan_latent,
                 sr_latent=hrms_latent,
             )
-            pred_img = train_out["output_sr"]
+            pred_img = train_out.pred_sr
 
             # track reconstruction quality
             if (
@@ -807,19 +794,19 @@ class PansharpeningTrainer:
                 and self.global_step >= quality_track_after
             ):
                 self.check_quality(
-                    self.pan_acc_reduced, pred_sr=pred_img, gt=batch["gt"]
+                    self.pan_acc_reduced, pred_sr=pred_img, gt=batch["sr"]
                 )
                 self.check_quality(
                     self.pan_acc_reduced_latent,
                     pred_sr=pred_img,
-                    gt=self.forward_tokenizer(sr_tok_out["latent"], mode="decode"),
+                    gt=self.forward_tokenizer(hrms_latent, mode="decode"),
                 )
 
         self.step_train_state()
 
         # log losses
         if self.global_step % self.train_cfg.log.log_every == 0:
-            _log_tok_losses = self.format_log(train_out["sr_log_losses"])
+            _log_tok_losses = self.format_log(train_out.sr_log_losses)
 
             self.log_msg(
                 f"[Train State]: lr {self.pansp_optim.param_groups[0]['lr']:1.4e} | "
@@ -828,7 +815,7 @@ class PansharpeningTrainer:
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
 
             # tensorboard log
-            self.tenb_log_any("metric", train_out["sr_log_losses"], self.global_step)
+            self.tenb_log_any("metric", train_out.sr_log_losses, self.global_step)
 
         if (
             quality_track_n >= 0
@@ -917,27 +904,27 @@ class PansharpeningTrainer:
             yield batch
 
     @torch.no_grad()
-    def val_step(self, batch: dict):
+    def val_step(self, batch: BatchInput):
         if not self.online_tokenize:
             lrms_latent = self.forward_tokenizer(batch["lrms"])["latent"]
             lrms_latent = self.forward_tokenizer(batch["pan"])["latent"]
-            gt_latent = self.forward_tokenizer(batch["gt"])["latent"]
+            gt_latent = self.forward_tokenizer(batch["hrms"])["latent"]
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
             gt_latent = batch["hrms_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
-        pred_latent, pred_img, *_ = self.forward_pansp_model(
+        out = self.forward_pansp_model(
             batch["lrms"],
             batch["pan"],
-            batch["gt"],
+            batch["hrms"],
             lrms_latent,
             pan_latent,
             gt_latent,
         )
 
-        return {"pred_img": pred_img, "pred_latent": pred_latent}
+        return out
 
     def val_loop(self):
         self.pansp_model.eval()
@@ -959,14 +946,14 @@ class PansharpeningTrainer:
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
-        elif self.val_cfg.max_val_iters <= 0:
+        else:
             tbar = self.finite_val_loader()
             self.log_msg(
                 f"[Val]: start validating with the whole val set", only_rank_zero=False
             )
 
         # track psnr and ssim
-        pan_acc_fn = AnalysisPanAcc(ratio=self.train_cfg.pansp_ratio, ref=True)
+        pan_acc_fn = PansharpeningMetrics(ratio=self.train_cfg.pansp_ratio, ref=True)
         loss_metrics = MeanMetric().to(device=self.device)
 
         for batch_or_idx in tbar:
@@ -975,11 +962,11 @@ class PansharpeningTrainer:
             else:
                 batch = batch_or_idx
 
-            batch = cast(dict[str, torch.Tensor], batch)
+            batch = cast(BatchInput, batch)
             gt = batch["hrms"].to(self.device)
             val_out = self.val_step(batch)
 
-            pred_img_rgb = self.to_rgb(val_out["pred_img"])
+            pred_img_rgb = self.to_rgb(val_out.pred_sr)
             batch_img_rgb = self.to_rgb(gt)
 
             # l1 loss
@@ -991,39 +978,15 @@ class PansharpeningTrainer:
             # metrics
             pan_acc_fn(batch_img_rgb, pred_img_rgb)
 
-        pan_acc = pan_acc_fn.acc_ave
+        pan_acc = pan_acc_fn._get_acc_ave()
         loss_val = loss_metrics.compute()
-
-        # from src.utilities.train_utils.state import LossMetricTracker
-
-        # track = LossMetricTracker(
-        #     loss_metrics_tracked=pan_acc,
-        #     loss_metrics_values={"val_loss": loss_val.item()},
-        #     __instance_name__="val_tracker",
-        # )
-        # track = LossMetricTracker.sync_state(instance_name="val_tracker")
-
-        # gather
-        if self.accelerator.use_distributed:
-            pan_accs = self.accelerator.gather_for_metrics(pan_acc)
-            pan_acc_mean = {}
-            for k in pan_accs[0].keys():
-                for i in range(len(pan_accs)):
-                    pan_acc_mean[k] = pan_acc_mean.get(k, 0) + pan_accs[i][k]
-                pan_acc_mean[k] /= len(pan_accs)
-        else:
-            pan_acc_mean = pan_acc
 
         if self.accelerator.is_main_process:
             _metric_str = ""
-            for k, v in pan_acc_mean.items():
+            for k, v in pan_acc.items():
                 _metric_str += f"{k}: {v:.4f} - "
             self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.4f}")
-            self.tenb_log_any(
-                "metric",
-                pan_acc_mean,
-                step=self.global_step,
-            )
+            self.tenb_log_any("metric", pan_acc, step=self.global_step)
 
             # visualize the last val batch
             self.visualize_reconstruction(

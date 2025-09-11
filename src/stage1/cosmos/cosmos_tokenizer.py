@@ -2,11 +2,11 @@ import inspect
 import random
 import warnings
 from collections import OrderedDict, namedtuple
-from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from itertools import chain
 from pathlib import Path
-from typing import Callable, Literal, NamedTuple, Sequence, no_type_check, override
+from typing import Any, Literal, NamedTuple, no_type_check
 
 import accelerate
 import numpy as np
@@ -19,6 +19,9 @@ from peft import (
     get_peft_model,
     set_peft_model_state_dict,
 )
+from rsa import DecryptionError
+from timm.layers.create_norm_act import get_norm_act_layer
+from timm.layers.mlp import ConvMlp, Mlp
 from torch import Tensor, nn
 
 import src.stage1.cosmos.modules.blocks as cosmos_block
@@ -32,32 +35,48 @@ from src.stage1.discretization.collections import BinarySphericalQuantizer as BS
 from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
 )
-from src.utilities.config_utils import function_config_to_basic_types
+from src.utilities.config_utils import (
+    dataclass_from_dict,
+    function_config_to_basic_types,
+)
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
-def build_mlp(hidden_size, projector_dim, z_dim, is_1d=False):
-    ln_cls = nn.Linear if is_1d else partial(nn.Conv2d, kernel_size=1)
-    return nn.Sequential(
-        ln_cls(hidden_size, projector_dim),
-        nn.SiLU(),
-        ln_cls(projector_dim, projector_dim),
-        nn.SiLU(),
-        ln_cls(projector_dim, z_dim),
+def build_mlp(
+    hidden_size: int,
+    projector_dim: int,
+    z_dim: int,
+    is_1d=False,
+    norm_type: str = "layernorm",
+    act_type: str = "gelu",
+):
+    linear_cls = nn.Linear if is_1d else partial(nn.Conv2d, kernel_size=1)
+    if not is_1d:
+        norm_type = norm_type + "2d"
+    norm_act = get_norm_act_layer(norm_type, act_layer=act_type)
+    assert norm_act is not None, "norm_act should not be None"
+    # two layers Mlp
+    mlp = nn.Sequential(
+        norm_act(hidden_size),
+        linear_cls(hidden_size, projector_dim),
+        norm_act(projector_dim),
+        linear_cls(projector_dim, z_dim),
     )
+    return mlp
 
 
-def _list_or_num_mult(x: list | int | float, factor: int):
-    """
-    Multiply each element in the list by the factor.
-    """
-    if not isinstance(x, list):
-        assert isinstance(x, (int, float)), "x should be a number or a list of numbers"
-        return x * factor
-    return [i * factor for i in x]
+def build_mlp_timm(hidden_size, projector_dim, z_dim, is_1d=False):
+    mlp_cls = Mlp if is_1d else ConvMlp
+    mlp = mlp_cls(
+        in_features=hidden_size,
+        hidden_features=projector_dim,
+        out_features=z_dim,
+        act_layer=nn.GELU,
+    )
+    return mlp
 
 
 # * --- Latent augmentation --- #
@@ -149,7 +168,7 @@ class NestChannelDrop(nn.Module):
         if self.drop_type == "exp":
             leave_channels = self.exponential_sampling(size=bs, **self.sample_kwargs)
         elif self.drop_type == "uniform":
-            leave_channels = self.uniform_sampling(size=bs, **self.sample_kwargs)
+            leave_channels = self.uniform_sampling(size=bs, **self.sample_kwargs)  # type: ignore
         elif self.drop_type == "prefixed":
             leave_channels = self.prefixed_sampling(size=bs)
         else:
@@ -188,7 +207,6 @@ class NestChannelDrop(nn.Module):
 
 
 class MultiInputSequential(nn.Sequential):
-    @override
     def forward(self, input: tuple[torch.Tensor, ...] | torch.Tensor):
         # if input is a tuple, the first element is changed sequentially by module
         # and the last n-1 elements are unchanged for those modules taken not only one input
@@ -261,6 +279,81 @@ class DecoderSequential(nn.Module):
 # * --- Tokenizer main --- #
 
 
+@dataclass
+class ChannelDropConfig:
+    drop_type: str = "exp"
+    max_channels: int = 16
+    drop_prob: float = 0.5
+
+
+@dataclass
+class EncoderDecoderConfig:
+    in_channels: Any = 16
+    out_channels: Any = 16
+    channels: int = 128
+    channels_mult: list[int] = field(default_factory=lambda: [2, 4, 4])
+    num_res_blocks: int = 2
+    attn_resolutions: list[int] = field(default_factory=lambda: [])
+    dropout: float = 0.0
+    resolution: int = 1024
+    z_channels: int = 16
+    latent_channels: int = 16
+    spatial_compression: int = 8
+    act_checkpoint: bool = False
+    use_residual_factor: bool = False
+    # downsampling
+    downsample_type: str = "PadConv"
+    downsample_shortcut: Any = None  # str
+    # patch size, patcher, and blocks
+    patch_size: int = 1
+    patch_method: str = "haar"
+    conv_in_module: str = "conv"
+    block_name: str = "res_block"
+    attn_type: str = "none"  # 'attn_vanilla' or 'none'
+    # if block_name != 'moe', does not use
+    moe_n_experts: int = 4
+    moe_n_selected: int = 1
+    moe_n_shared_experts: int = 1
+    hidden_factor: int = 2
+    moe_type: str = "tc"
+    moe_token_mixer_type: str = "res_block"
+    # padding and norm
+    padding_mode: str = "zeros"
+    norm_type: str = "gn"
+    norm_groups: int = 32
+    downsample_manually_pad: bool = True
+    resample_norm_keep: bool = False
+
+
+@dataclass
+class ContinuousTokenizerConfig:
+    # feauture distillation related
+    use_repa_loss: bool = False
+    use_vf_loss: bool = False
+    hook_module: str = "decoder.decoder.mid.block_2"
+    vf_on_z_or_module: str = "module"
+    dino_feature_dim: int = 768
+    latent_noise_prob: float = 0.0
+    # quantizer related
+    quantizer_type: str | None = None  # "kl", "bsq", "fsq", None
+    random_quant: float = 0.0
+    fsq_num_codebooks: int = 6
+    fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
+    norm_in_quant_conv = False
+    # loading related
+    enc_path: str = ""
+    dec_path: str = ""
+    uni_path: str = ""
+    loading_type: Any = None  # "nvidia", "uni", None
+    # latent augmented related
+    use_channel_drop: bool = False
+    channel_drop_config: ChannelDropConfig = field(default_factory=ChannelDropConfig)
+    # model related
+    name: str = "ContinuousImageTokenizer"
+    model: EncoderDecoderConfig = field(default_factory=lambda: EncoderDecoderConfig())
+    z_factor: int = 1
+
+
 class ContinuousImageTokenizer(nn.Module):
     # FSDP attribution
     _no_split_modules: list[str] = ["ResnetBlock", "AttnBlock"]
@@ -283,72 +376,140 @@ class ContinuousImageTokenizer(nn.Module):
     z: torch.Tensor | None = None  # the latent z
 
     @function_config_to_basic_types
-    def __init__(
-        self,
-        z_channels: int,
-        z_factor: int = 1,
-        latent_channels: int = 8,
-        loading_type: Literal["pretrained", "nvidia"] | None = "nvidia",
-        **kwargs,
-    ) -> None:
+    def __init__(self, cfg: ContinuousTokenizerConfig):
         super().__init__()
-        self._use_repa_loss = kwargs.pop("use_repa_loss", False)
-        self._use_vf_loss = kwargs.pop("use_vf_loss", False)
-        self._hook_module = kwargs.pop("hook_module", self._hook_module)
-        self._vf_on_z_or_module = kwargs.pop(
-            "vf_on_z_or_module", self._vf_on_z_or_module
-        )
-        self._dino_feature_dim = kwargs.pop("dino_feature_dim", 768)
-        self.latent_noise_prob = kwargs.pop("latent_noise_prob", 0.0)
+        self._use_repa_loss = cfg.use_repa_loss
+        self._use_vf_loss = cfg.use_vf_loss
+        self._hook_module = cfg.hook_module
+        self._vf_on_z_or_module = cfg.vf_on_z_or_module
+        self._dino_feature_dim = cfg.dino_feature_dim
+        self.latent_noise_prob = cfg.latent_noise_prob
         self.use_latent_denoise = self.latent_noise_prob > 0.0
+        self.model_cfg = model_cfg = cfg.model
 
         # < repa or vf projectors
         assert not (self._use_repa_loss and self._use_vf_loss), (
             "repa and vf losses should not be used at the same time"
         )
-        if self._use_repa_loss:
-            if self._vf_on_z_or_module == "module":
-                self._repa_proj = build_mlp(
-                    512,
-                    self._dino_feature_dim,
-                    self._dino_feature_dim,
-                )
-            else:
-                self._repa_proj = build_mlp(
-                    latent_channels, self._dino_feature_dim, self._dino_feature_dim
-                )
-        if self._use_vf_loss:
-            if self._vf_on_z_or_module == "z":
-                self._vf_proj = build_mlp(
-                    latent_channels, self._dino_feature_dim, self._dino_feature_dim
-                )
-            else:
-                self._vf_proj = build_mlp(
-                    512,
-                    self._dino_feature_dim,
-                    self._dino_feature_dim,
-                )
+        self._build_feature_align_mlp()
 
         # < FSDP wrapper module
-        if kwargs.get("attn_type") in ("none", None):
+        if len(model_cfg.attn_resolutions) == 0:
             self._no_split_modules.remove("AttnBlock")
 
-        # < quantizer
-        self.quantizer_type = kwargs.pop("quantizer_type", None)
-        self.random_quant = kwargs.pop("random_quant", 0.0)
-        self.quantizer: BSQ | FSQ | None
+        # < Quantizer
+        self.quantizer_type = cfg.quantizer_type
+        self.random_quant = cfg.random_quant
+        self.quantizer: BSQ | FSQ | None = self._build_quantizer(cfg)
+
+        self.loading_type = cfg.loading_type
+        self.name = cfg.name
+        self.latent_channels = model_cfg.z_channels
+        self.norm_in_quant_conv = cfg.norm_in_quant_conv
+
+        self.in_channels_after_patcher = (
+            np.array(model_cfg.in_channels * model_cfg.patch_size**2)
+        ).tolist()
+        self.out_channels_after_patcher = (
+            np.array(model_cfg.out_channels * model_cfg.patch_size**2)
+        ).tolist()
+
+        # NOTE: encoder and decoder maybe separated, e.g., NVIDIA pretrained tokenizer, or
+        # trained on hyperspectral images before
+        # if the uni_tokenizer_path is not empty, then the encoder and decoder are loaded directly.
+        enc_path = cfg.enc_path
+        dec_path = cfg.dec_path
+        uni_tokenizer_path = cfg.uni_path
+
+        self.register_buffer("dummy_param", torch.tensor(0))
+
+        # < Encoder and Decoder
+        # pretrained encoder and decoder
+        if cfg.loading_type == "nvidia":
+            assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
+            # pretrained model from NVIDIA cosmos tokenizer
+            assert not self.norm_in_quant_conv, (
+                "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
+            )
+
+            tokenizer_cfg = dict(
+                z_channels=model_cfg.z_channels,
+                z_factor=cfg.z_factor,
+                latent_channels=model_cfg.z_channels,
+            )
+            tokenizer_cfg.update(asdict(model_cfg))
+            log_print(
+                f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}",
+                "debug",
+            )
+            enc_jit, dec_jit = self.load_pretrained(enc_path, dec_path, tokenizer_cfg)  # type: ignore
+
+            # split the encoder and decoder
+            encoder, quant_conv = enc_jit[0], enc_jit[1]
+            decoder, post_quant_conv = dec_jit[1], dec_jit[0]
+
+            self.encoder = self.encoder_jit(encoder, quant_conv)
+            self.decoder = self.decoder_jit(decoder, post_quant_conv)
+
+        else:
+            # encoder and decoder
+            # not combine the encoder, for FSDP wrap
+            encoder, decoder = self._build_encoder_decoder(model_cfg)
+            quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
+
+            self.encoder = self.encoder_jit(encoder, quant_conv)
+            self.decoder = self.decoder_jit(decoder, post_quant_conv)
+
+            # Load weights
+            if cfg.loading_type is not None:
+                if cfg.norm_in_quant_conv:
+                    assert enc_path == "" and dec_path == "", (
+                        "norm_in_quant_conv is not supported for pretrained settings, train it from scratch"
+                    )
+                self.load_pretrained(
+                    enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
+                )
+
+        # token channel drop
+        self.use_channel_drop = cfg.use_channel_drop
+        if self.use_channel_drop:
+            self.channel_drop = NestChannelDrop(**asdict(cfg.channel_drop_config))
+            log_print(f"use channel drop: {cfg.channel_drop_config}")
+
+        # register repa hook
+        if self._vf_on_z_or_module == "module" and (
+            self._use_vf_loss or self._use_repa_loss
+        ):
+            self.register_feature_hook()
+
+        num_parameters = sum(param.numel() for param in self.parameters())
+        log_print(f"model={self.name}, num_parameters={num_parameters:,}")
+        log_print(
+            f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}."
+        )
+
+    def _build_encoder_decoder(self, model_cfg: EncoderDecoderConfig):
+        model_kwargs = asdict(model_cfg)
+        encoder = Encoder(**model_kwargs)
+        decoder = Decoder(**model_kwargs)
+        return encoder, decoder
+
+    def _build_quantizer(self, cfg: ContinuousTokenizerConfig):
+        model_cfg = self.model_cfg
         if self.quantizer_type == "kl":
-            if z_factor != 2:
+            if cfg.z_factor != 2:
                 log_print(
                     "when use kl, z_factor should be 2, set it to 2 explicitly",
                     "warning",
                 )
-                z_factor = 2
+                cfg.z_factor = 2
             self.quantizer = DiagonalGaussianDistribution  # not quantizer, compatible with trainer  # type: ignore
         elif self.quantizer_type == "bsq":
-            assert latent_channels % 2 == 0, "quantizer out channels should be even"
+            assert model_cfg.z_channels % 2 == 0, (
+                "quantizer out channels should be even"
+            )
             self.quantizer = BSQ(
-                embed_dim=latent_channels,  # 18 or 36
+                embed_dim=model_cfg.z_channels,  # 18 or 36
                 beta=0.0,  # commitment loss
                 gamma0=1.0,
                 gamma=1.0,
@@ -362,9 +523,9 @@ class ContinuousImageTokenizer(nn.Module):
             )
         elif self.quantizer_type == "fsq":
             self.quantizer = FSQ(
-                levels=kwargs.pop("fsq_levels", [8, 8, 8, 5, 5, 5]),
-                dim=latent_channels,
-                num_codebooks=kwargs.pop("fsq_num_codebooks", 6),
+                levels=cfg.fsq_levels,
+                dim=model_cfg.z_channels,
+                num_codebooks=cfg.fsq_num_codebooks,
                 channel_first=True,
             )
         elif self.quantizer_type is None:
@@ -377,111 +538,62 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             log_print(f"use no quantizer or VAE, the tokenizer is only an AutoEncoder")
 
-        # < Tokenizer configs
-        tokenizer_cfg = dict(
-            z_channels=z_channels,
-            z_factor=z_factor,
-            latent_channels=latent_channels,
-            **kwargs,
-        )
-        self.loading_type = loading_type
-        self.name = kwargs.get("name", "ContinuousImageTokenizer")
-        self.latent_channels = latent_channels
-        self.norm_in_quant_conv = kwargs.get("norm_in_quant_conv", False)
+        return self.quantizer
 
-        self.in_channels_after_patcher = (
-            np.array(kwargs["in_channels"]) * kwargs["patch_size"] ** 2
-        ).tolist()
-        self.out_channels_after_patcher = (
-            np.array(kwargs["out_channels"] * kwargs["patch_size"] ** 2)
-        ).tolist()
-
-        # NOTE: encoder and decoder maybe separated, e.g., NVIDIA pretrained tokenizer, or
-        # trained on hyperspectral images before
-        # if the uni_tokenizer_path is not empty, then the encoder and decoder are loaded directly.
-        enc_path = kwargs.pop("enc_path", "")
-        dec_path = kwargs.pop("dec_path", "")
-        uni_tokenizer_path = kwargs.pop("uni_tokenizer_path", "")
-
-        self.register_buffer("dummy_param", torch.tensor(0))
-
-        # < Encoder and Decoder
-        # pretrained encoder and decoder
-        if loading_type == "nvidia":
-            assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
-            # pretrained model from NVIDIA cosmos tokenizer
-            assert not self.norm_in_quant_conv, (
-                "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
+    def _build_pre_post_quant_convs(self, cfg: ContinuousTokenizerConfig):
+        model_cfg = self.model_cfg
+        # quant_conv and post_quant_conv
+        if self.norm_in_quant_conv:
+            warnings.warn(
+                '"norm_in_quant_conv" is not supported for pretrained settings and not recommended to use'
+                "it will be removed",
+                DeprecationWarning,
             )
-
-            log_print(
-                f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}",
-                "debug",
+            quant_conv = nn.Sequential(
+                Normalize(cfg.z_factor * model_cfg.z_channels, norm_type="gn"),
+                torch.nn.Conv2d(
+                    cfg.z_factor * model_cfg.z_channels,
+                    cfg.z_factor * model_cfg.z_channels,
+                    1,
+                ),
             )
-            enc_jit, dec_jit = self.load_pretrained(enc_path, dec_path, tokenizer_cfg)
-
-            # split the encoder and decoder
-            encoder = enc_jit[0]
-            quant_conv = enc_jit[1]
-
-            decoder = dec_jit[1]
-            post_quant_conv = dec_jit[0]
-
-            self.encoder = self.encoder_jit(encoder, quant_conv)
-            self.decoder = self.decoder_jit(decoder, post_quant_conv)
-
         else:
-            # encoder and decoder
-            # not combine the encoder, for FSDP wrap
-            encoder = Encoder(z_channels=z_factor * z_channels, **kwargs)
-            decoder = Decoder(z_channels=z_channels, **kwargs)
+            quant_conv = torch.nn.Conv2d(
+                cfg.z_factor * model_cfg.z_channels,
+                cfg.z_factor * model_cfg.z_channels,
+                1,
+            )
+        post_quant_conv = torch.nn.Conv2d(model_cfg.z_channels, model_cfg.z_channels, 1)
 
-            # quant_conv and post_quant_conv
-            if self.norm_in_quant_conv:
-                warnings.warn(
-                    '"norm_in_quant_conv" is not supported for pretrained settings and not recommended to use'
-                    "it will be removed"
-                )
-                quant_conv = nn.Sequential(
-                    Normalize(z_factor * z_channels, norm_type="gn"),
-                    torch.nn.Conv2d(
-                        z_factor * z_channels, z_factor * latent_channels, 1
-                    ),
+        return quant_conv, post_quant_conv
+
+    def _build_feature_align_mlp(self):
+        if self._use_repa_loss:
+            if self._vf_on_z_or_module == "module":
+                self._repa_proj = build_mlp(
+                    512,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
                 )
             else:
-                quant_conv = torch.nn.Conv2d(
-                    z_factor * z_channels, z_factor * latent_channels, 1
+                self._repa_proj = build_mlp(
+                    self.model_cfg.z_channels,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
                 )
-            post_quant_conv = torch.nn.Conv2d(latent_channels, z_channels, 1)
-
-            self.encoder = self.encoder_jit(encoder, quant_conv)
-            self.decoder = self.decoder_jit(decoder, post_quant_conv)
-
-            # Load weights
-            if loading_type is not None:
-                if kwargs.get("norm_in_quant_conv", False):
-                    assert enc_path == "" and dec_path == "", (
-                        "norm_in_quant_conv is not supported for pretrained settings, train it from scratch"
-                    )
-                self.load_pretrained(
-                    enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
+        if self._use_vf_loss:
+            if self._vf_on_z_or_module == "z":
+                self._vf_proj = build_mlp(
+                    self.model_cfg.z_channels,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
                 )
-
-        # token channel drop
-        self.use_channel_drop = kwargs.get("use_channel_drop", False)
-        if self.use_channel_drop:
-            self.channel_drop = NestChannelDrop(**kwargs["channel_drop_config"])
-            log_print(f"use channel drop: {kwargs['channel_drop_config']}")
-
-        # register repa hook
-        if self._vf_on_z_or_module == "module" and (
-            self._use_vf_loss or self._use_repa_loss
-        ):
-            self.register_feature_hook()
-
-        num_parameters = sum(param.numel() for param in self.parameters())
-        log_print(f"model={self.name}, num_parameters={num_parameters:,}")
-        log_print(f"z_channels={z_channels}, latent_channels={self.latent_channels}.")
+            else:
+                self._vf_proj = build_mlp(
+                    512,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
+                )
 
     def encoder_jit(self, encoder, quant_conv):
         return nn.Sequential(
@@ -718,7 +830,7 @@ class ContinuousImageTokenizer(nn.Module):
 
     def forward(self, input: torch.Tensor):
         if cosmos_block.compile_forward_fn:
-            torch.compiler.cudagraph_mark_step_begin()
+            torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
         latent = self.encode(input)
         dec = self.decode(latent, input.shape)
 
@@ -1073,6 +1185,13 @@ class ContinuousImageTokenizer(nn.Module):
 
         return add_tgt_modules
 
+    # * --- Create model --- #
+
+    @classmethod
+    def create_model(cls, **kwargs):
+        cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
+        return cls(cfg)
+
 
 # * --- test --- * #
 
@@ -1080,15 +1199,16 @@ from src.utilities.logging import catch_any
 
 
 @catch_any()
-def test_tokenizer_fb(
+def test_tokenizer_forward_backward(
+    model_cls=ContinuousImageTokenizer,
     is_lora=False,
     count_params=False,
     real_data: str | None = None,
     use_optim=False,
     device="cuda:1",
     base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-    lora_ckpt: str | list[str] | None = None,
-    lora_changes_chans: list[int] | None = None,
+    lora_ckpt: list[str] | None = None,
+    lora_changes_chans: dict[str, int] | None = None,
     active_lora_name: str | None = None,
     check_grad=False,
     show_mem_usage=False,
@@ -1120,64 +1240,59 @@ def test_tokenizer_fb(
     blocks.compile_forward_fn = False
     torch.cuda.set_device(device)
 
+    if base_model_ckpt is None:
+        base_model_ckpt = ""
+
+    default_multi_chans = [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
     config = {
-        "attn_resolutions": [32],
-        "channels": 128,
-        "channels_mult": [2, 4, 4],
-        "dropout": 0.0,
-        "in_channels": [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368],
-        "spatial_compression": 8,
-        "num_res_blocks": 2,
-        "out_channels": [
-            3,
-            4,
-            8,
-            10,
-            12,
-            13,
-            32,
-            50,
-            150,
-            175,
-            202,
-            224,
-            242,
-            368,
-        ],
-        "resolution": 1024,
-        "patch_size": 1,
-        "patch_method": "haar",
-        "latent_channels": 16,
-        "z_channels": 16,
-        "z_factor": 1,
+        "model": {
+            "attn_resolutions": [32],
+            "channels": 128,
+            "channels_mult": [2, 4, 4],
+            "dropout": 0.0,
+            "in_channels": default_multi_chans,
+            "spatial_compression": 8,
+            "num_res_blocks": 2,
+            "out_channels": default_multi_chans,
+            "resolution": 1024,
+            "patch_size": 1,
+            "patch_method": "haar",
+            "z_channels": 16,
+            # "formulation": "AE",
+            # "encoder": "Default",
+            # "decoder": "Default",
+            # "enc_moe": False,
+            # "dec_moe": False,
+            "act_checkpoint": True,
+            "block_name": "res_block",  # res_block, res_moe
+            "padding_mode": "reflect",
+            "norm_type": "gn",
+            "norm_groups": 32,
+            "attn_type": "none",
+        },
         "name": "CI",
-        "formulation": "AE",
-        "encoder": "Default",
-        "decoder": "Default",
-        "act_checkpoint": True,
         "uni_tokenizer_path": base_model_ckpt,
         "loading_type": "pretrained" if Path(base_model_ckpt).exists() else None,
-        "hook_for_repa": False,
-        "block_name": "res_block",  # res_block, res_moe
         "quantizer_type": None,
-        "enc_moe": False,
-        "dec_moe": False,
-        "padding_mode": "reflect",
-        "norm_type": "gn",
-        "norm_groups": 32,
-        "attn_type": "none",
         # repa
+        "hook_for_repa": False,
         "use_repa_loss": True,
         "use_vf_loss": False,
         "vf_on_z_or_module": "z",
         "dino_feature_dim": 1024,
+        # "latent_channels": 16,
+        "z_factor": 1,
     }
     if other_model_kwargs:
-        config.update(other_model_kwargs)
-    tokenizer = ContinuousImageTokenizer(**config).cuda()
+        if "model" in other_model_kwargs:
+            config["model"].update(other_model_kwargs.pop("model"))
+        else:
+            config.update(other_model_kwargs)
+    tokenizer = model_cls.create_model(**config).cuda()
     tokenizer = tokenizer.eval().to(dtype)
 
     if is_lora:
+        assert lora_ckpt is not None, "lora_ckpt is required for lora test"
         # Use TokenizerLoRAMixin for lazy LoRA loading
         if isinstance(lora_ckpt, str):
             lora_ckpt = [lora_ckpt]
@@ -1248,7 +1363,7 @@ def test_tokenizer_fb(
             x = x / 255.0
             x = x * 2 - 1  # normalize to [-1, 1]
         else:
-            dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)
+            dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
             for i, sample in enumerate(tqdm(dl, desc="Get sample ...")):
                 if i >= idx_of_dl:
                     break
@@ -1328,15 +1443,8 @@ def test_tokenizer_fb(
 
 
 if __name__ == "__main__":
-    # test_tokenizer_fb(
-    #     real_data="RS5M",
-    #     save_pca_vis=True,
-    #     pca_type="z",
-    #     idx_of_dl=12,
-    # )
-
     # Test lora
-    test_tokenizer_fb(
+    test_tokenizer_forward_backward(
         base_model_ckpt="runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
         real_data="Xiongan",
         save_pca_vis=True,

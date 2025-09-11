@@ -1,11 +1,10 @@
-from typing import TypeVar, cast
+from typing import cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from beartype import beartype
 from jaxtyping import Float, Float32, Int, UInt
-from matplotlib.cm import get_cmap
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from numpy.typing import NDArray
 from PIL import Image
@@ -34,17 +33,6 @@ type VisGTMapType = (
 )
 
 
-@beartype
-def choose_lightest_bands(
-    img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
-) -> list[int]:
-    mean_cs = img.mean((-3, -2, -1))  # (c,)
-    mean_cs = torch.as_tensor(mean_cs)
-    _, indices = torch.topk(mean_cs, k=3, largest=True)
-    indices = indices.tolist()
-    return indices
-
-
 RGB_CHANNELS_BY_BANDS = {
     4: [2, 1, 0],
     8: [4, 2, 0],
@@ -52,7 +40,7 @@ RGB_CHANNELS_BY_BANDS = {
     12: [3, 2, 1],
     13: [4, 3, 2],
     32: [12, 9, 3],
-    50: [40, 20, 10],
+    50: "largest",
     150: "mean",  # [37, 28, 13],
     175: "mean",  # [42, 32, 13],
     191: [19, 12, 8],  # WDC mall
@@ -66,6 +54,22 @@ RGB_CHANNELS_BY_BANDS = {
     438: "mean",  # [62, 33, 19],
     439: "mean",
 }
+
+
+@beartype
+def choose_largest_bands(
+    img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
+) -> list[int]:
+    if torch.is_tensor(img):
+        mean_cs = img.view(-1, *img.shape[-3:]).mean((0, -2, -1)).detach().cpu()
+    else:
+        mean_cs = img.mean((0, 1))
+    mean_cs = np.asarray(mean_cs)
+    indices = np.argsort(mean_cs)[::-1][:3].tolist()
+    assert indices[-1] < img.shape[1], (
+        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
+    )
+    return indices
 
 
 def get_coco_colors():
@@ -177,8 +181,8 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None
         c_3 = c // 3
         bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
         rgb_img = torch.stack(bands, dim=1)
-    elif rgb_channels == "lightest":
-        indices = choose_lightest_bands(img)
+    elif rgb_channels == "largest":
+        indices = choose_largest_bands(img)
         rgb_img = img[:, indices, :, :]
     else:
         raise ValueError(

@@ -47,6 +47,7 @@ from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
+from utilities.logging.print import print_info_if_raise
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -1633,7 +1634,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     self.tokenizer.train()
 
         # track psnr and ssim
-        psnr_fn = PeakSignalNoiseRatio().to(device=self.device, dtype=self.dtype)
+        psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
         ssim_fn = StructuralSimilarityIndexMeasure().to(
             device=self.device, dtype=self.dtype
         )
