@@ -116,7 +116,7 @@ class AmotizedModelMixin(nn.Module):
             )
 
     def _single_tensor_to_tuple(self, x: Tensor | tuple) -> tuple[Tensor | Any, ...]:
-        return (x,) if not isinstance(x, tuple) else x
+        return (x,) if torch.is_tensor(x) else x
 
     def simple_merge_forward(
         self, pixel_in: tuple, latent_in: tuple, amotize_type: str
