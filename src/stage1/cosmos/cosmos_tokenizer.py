@@ -3,7 +3,6 @@ import random
 import warnings
 from collections import OrderedDict, namedtuple
 from dataclasses import asdict, dataclass, field
-from functools import partial
 from itertools import chain
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, no_type_check
@@ -11,6 +10,7 @@ from typing import Any, Literal, NamedTuple, no_type_check
 import accelerate
 import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
 from peft import (
     LoraConfig,
     PeftConfig,
@@ -19,14 +19,12 @@ from peft import (
     get_peft_model,
     set_peft_model_state_dict,
 )
-from rsa import DecryptionError
-from timm.layers.create_norm_act import get_norm_act_layer
-from timm.layers.mlp import ConvMlp, Mlp
 from torch import Tensor, nn
 
 import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
+from src.stage1.cosmos.modules.proj import build_mlp
 from src.stage1.cosmos.modules.utils import Normalize
 
 # Quantiers
@@ -41,42 +39,9 @@ from src.utilities.config_utils import (
 )
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_weights_with_shape_check
+from utilities.config_utils.to_dataclass import dataclass_from_dict_config
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
-
-
-def build_mlp(
-    hidden_size: int,
-    projector_dim: int,
-    z_dim: int,
-    is_1d=False,
-    norm_type: str = "layernorm",
-    act_type: str = "gelu",
-):
-    linear_cls = nn.Linear if is_1d else partial(nn.Conv2d, kernel_size=1)
-    if not is_1d:
-        norm_type = norm_type + "2d"
-    norm_act = get_norm_act_layer(norm_type, act_layer=act_type)
-    assert norm_act is not None, "norm_act should not be None"
-    # two layers Mlp
-    mlp = nn.Sequential(
-        norm_act(hidden_size),
-        linear_cls(hidden_size, projector_dim),
-        norm_act(projector_dim),
-        linear_cls(projector_dim, z_dim),
-    )
-    return mlp
-
-
-def build_mlp_timm(hidden_size, projector_dim, z_dim, is_1d=False):
-    mlp_cls = Mlp if is_1d else ConvMlp
-    mlp = mlp_cls(
-        in_features=hidden_size,
-        hidden_features=projector_dim,
-        out_features=z_dim,
-        act_layer=nn.GELU,
-    )
-    return mlp
 
 
 # * --- Latent augmentation --- #
@@ -281,7 +246,7 @@ class DecoderSequential(nn.Module):
 
 @dataclass
 class ChannelDropConfig:
-    drop_type: str = "exp"
+    drop_type: Any = "exp"
     max_channels: int = 16
     drop_prob: float = 0.5
 
@@ -332,10 +297,10 @@ class ContinuousTokenizerConfig:
     use_vf_loss: bool = False
     hook_module: str = "decoder.decoder.mid.block_2"
     vf_on_z_or_module: str = "module"
-    dino_feature_dim: int = 768
+    dino_feature_dim: int = 1024
     latent_noise_prob: float = 0.0
     # quantizer related
-    quantizer_type: str | None = None  # "kl", "bsq", "fsq", None
+    quantizer_type: Any = None  # "kl", "bsq", "fsq", None
     random_quant: float = 0.0
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
@@ -375,7 +340,6 @@ class ContinuousImageTokenizer(nn.Module):
     _hook_feature: torch.Tensor | None = None
     z: torch.Tensor | None = None  # the latent z
 
-    @function_config_to_basic_types
     def __init__(self, cfg: ContinuousTokenizerConfig):
         super().__init__()
         self._use_repa_loss = cfg.use_repa_loss
@@ -791,23 +755,34 @@ class ContinuousImageTokenizer(nn.Module):
             else:
                 self.z = None
 
-    def encode(
-        self, x, use_quantizer=None
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, NamedTuple]:
+    def encode_with_itermediate_features(self, x, use_quantizer=None):
+        encoded, feats = self.encoder(x, ret_interm_feats=True)
+        maybe_q_encoded = self.apply_quantizer(encoded, use_quantizer)
+
+        q_loss = loss_breakdown = None
+        if isinstance(maybe_q_encoded, tuple):
+            encoded, q_loss, loss_breakdown = maybe_q_encoded
+        return dict(
+            encoded=encoded,
+            itermediate_feats=feats,
+            q_loss=q_loss,
+            loss_breakdown=loss_breakdown,
+        )
+
+    def encode(self, x, use_quantizer=None):
         # Encoder
         h = self.encoder(x)
         # TODO: add additional cross-attention to convert the 2D latent to 1D latent
 
         # Quantization
-        ret = self.apply_quantizer(h, use_quantizer)
-        if isinstance(ret, tuple):
-            return ret
-        else:
-            h = ret
+        maybe_q_ret = self.apply_quantizer(h, use_quantizer)
+        if isinstance(maybe_q_ret, tuple):
+            h, q_loss, loss_breakdown = maybe_q_ret
+            # NOTE: if quantizer is used, the aug z is not applied
+            return h, q_loss, loss_breakdown
 
         # z augmentions
-        h = self.z_aug(h)
-
+        h = self.z_aug(maybe_q_ret)
         return h
 
     def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size, clamp=False):
@@ -1188,8 +1163,14 @@ class ContinuousImageTokenizer(nn.Module):
     # * --- Create model --- #
 
     @classmethod
-    def create_model(cls, **kwargs):
-        cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
+    # @function_config_to_basic_types
+    def create_model(cls, config: DictConfig | None = None, **kwargs):
+        if config is not None:
+            cfg = dataclass_from_dict_config(
+                ContinuousTokenizerConfig, config, strict=False
+            )
+        else:
+            cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
         return cls(cfg)
 
 
@@ -1220,6 +1201,7 @@ def test_tokenizer_forward_backward(
     rgb_chans: list[int] = [4, 2, 0],
     dtype=torch.bfloat16,
     upscale: int = 1,
+    fake_img_shape: tuple = (1, 12, 256, 256),
 ):
     from contextlib import nullcontext
 
@@ -1237,7 +1219,6 @@ def test_tokenizer_forward_backward(
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    blocks.compile_forward_fn = False
     torch.cuda.set_device(device)
 
     if base_model_ckpt is None:
@@ -1258,11 +1239,6 @@ def test_tokenizer_forward_backward(
             "patch_size": 1,
             "patch_method": "haar",
             "z_channels": 16,
-            # "formulation": "AE",
-            # "encoder": "Default",
-            # "decoder": "Default",
-            # "enc_moe": False,
-            # "dec_moe": False,
             "act_checkpoint": True,
             "block_name": "res_block",  # res_block, res_moe
             "padding_mode": "reflect",
@@ -1271,7 +1247,7 @@ def test_tokenizer_forward_backward(
             "attn_type": "none",
         },
         "name": "CI",
-        "uni_tokenizer_path": base_model_ckpt,
+        "uni_path": base_model_ckpt,
         "loading_type": "pretrained" if Path(base_model_ckpt).exists() else None,
         "quantizer_type": None,
         # repa
@@ -1369,7 +1345,7 @@ def test_tokenizer_forward_backward(
                     break
                 x = sample["img"]
     else:
-        x = torch.randn(1, 12, 256, 256).to("cuda", dtype)
+        x = torch.randn(*fake_img_shape).to("cuda", dtype)
     x = x.to(dtype).cuda()
     if upscale != 1:
         x = torch.nn.functional.interpolate(
@@ -1384,6 +1360,7 @@ def test_tokenizer_forward_backward(
     mem_ctx = mem_context(device) if show_mem_usage else nullcontext()
     with torch.autocast("cuda", dtype) and ctx():
         with mem_ctx:
+            breakpoint()
             y = tokenizer(x)
             y.clamp_(-1, 1)
             log_print(y.shape)
@@ -1446,11 +1423,11 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="Xiongan",
-        save_pca_vis=True,
+        real_data="BigEarthNetS2",
+        save_pca_vis=False,
         pca_type="z",
-        idx_of_dl=16,
-        is_lora=True,
+        idx_of_dl=2,
+        is_lora=False,
         lora_ckpt=[
             "runs/stage1_cosmos_lora/2025-08-28_23-17-54_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
             "runs/stage1_cosmos_lora/2025-08-29_19-28-44_cosmos_lora=lora_r=32_f8c16p1_IKONOS/peft_ckpt/IKONOS",
@@ -1464,7 +1441,7 @@ if __name__ == "__main__":
             "Xiongan": 256,
         },
         save_img_dir="tmp",
-        rgb_chans=[49, 39, 29],  # RGB
+        rgb_chans=[6, 5, 4],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
         active_lora_name="Xiongan",

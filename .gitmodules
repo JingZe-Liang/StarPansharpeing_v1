@@ -97,3 +97,7 @@
 [submodule "src/stage2/generative/TiM"]
     path = src/stage2/generative/TiM
     url = https://github.com/WZDTHU/TiM.git
+
+[submodule "src/stage2/detections/AETNet"]
+    path = src/stage2/detections/AETNet
+    url = https://github.com/ZhaoxuLi123/AETNet.git

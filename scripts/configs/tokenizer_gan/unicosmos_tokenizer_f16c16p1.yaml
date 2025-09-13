@@ -81,7 +81,7 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_tokenizer_path: runs/stage1_cosmos/2025-08-14_00-32-26_cosmos_f16c32p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
+  uni_path: runs/stage1_cosmos/2025-08-14_00-32-26_cosmos_f16c32p1_unified_hyperspectral_uni/ema/tokenizer/model.safetensors
   loading_type: pretrained
 
   # blocks

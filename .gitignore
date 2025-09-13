@@ -141,9 +141,8 @@ dmypy.json
 src/stage1/cosmos/pretrained/
 data
 data/
+!src/**/data
 data_local/
-!src/data
-!scripts/configs/pansharpening_simulation/data
 runs/
 tmp/
 .ruff_cache/

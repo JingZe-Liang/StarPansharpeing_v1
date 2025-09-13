@@ -114,29 +114,57 @@ class AdaptiveHADMSE(nn.Module):
         # Store current residual for anomaly detection (keep batch dimension)
         self.current_residual = residual_img.detach()
 
-        # Average across batch dimension for weight calculation
-        # This creates a unified weight mask based on overall reconstruction patterns
-        avg_residual = residual_img.mean(dim=0)  # [H, W]
+        # Calculate per-sample residual weights (vectorized implementation)
+        # Each sample maintains its own weight pattern based on individual reconstruction errors
 
-        # Convert averaged residuals to weights (inverse relationship)
+        # Get max values for each sample in the batch [B]
+        r_max_per_sample = residual_img.view(batch, -1).max(dim=1)[0]  # [B]
+        r_max_per_sample = r_max_per_sample.view(
+            batch, 1, 1
+        )  # [B, 1, 1] for broadcasting
+
+        # Convert residuals to weights (inverse relationship)
         # Higher error -> lower weight
-        r_max = avg_residual.max()
-        residual_weights = r_max - avg_residual  # Invert
-        r_min = residual_weights.min()
-        r_max = residual_weights.max()
+        batch_residual_weights = r_max_per_sample - residual_img  # [B, H, W]
 
-        # Normalize to [0, 1]
-        if r_max > r_min:
-            residual_weights = (residual_weights - r_min) / (
-                r_max - r_min + self.epsilon
-            )
-        else:
-            residual_weights = torch.ones_like(residual_weights)
+        # Normalize each sample individually to [0, 1]
+        # Get min and max for each sample
+        r_min_per_sample = torch.amin(
+            batch_residual_weights, dim=(1, 2), keepdim=True
+        )  # [B, 1, 1]
+        r_max_per_sample = torch.amax(
+            batch_residual_weights, dim=(1, 2), keepdim=True
+        )  # [B, 1, 1]
 
-        # Update mask: all channels use the same weight pattern
-        for b in range(batch):
-            for c in range(channels):
-                self.mask[b, c, :] = residual_weights
+        # Already in correct shape for broadcasting
+        # r_min_per_sample and r_max_per_sample are already [B, 1, 1]
+
+        # Normalize samples where range > 0
+        valid_range = (r_max_per_sample > r_min_per_sample).squeeze()  # [B]
+
+        # Handle both batch and single sample cases
+        if valid_range.dim() == 0:  # Single sample case
+            if valid_range:
+                batch_residual_weights[0] = (
+                    batch_residual_weights[0] - r_min_per_sample[0]
+                ) / (r_max_per_sample[0] - r_min_per_sample[0] + self.epsilon)
+            else:
+                batch_residual_weights[0] = 1.0
+        else:  # Batch case
+            for b in range(batch):
+                if valid_range[b]:
+                    batch_residual_weights[b] = (
+                        batch_residual_weights[b] - r_min_per_sample[b]
+                    ) / (r_max_per_sample[b] - r_min_per_sample[b] + self.epsilon)
+
+            # Set uniform weights for samples with no range
+            for b in range(batch):
+                if not valid_range[b]:
+                    batch_residual_weights[b] = 1.0
+
+        # Update mask: each sample uses its own weight pattern for all channels
+        # Expand weights to match mask dimensions [B, C, H, W]
+        self.mask = batch_residual_weights.unsqueeze(1).expand(-1, channels, -1, -1)
 
         # Update residual for output
         self.residual = residual_img

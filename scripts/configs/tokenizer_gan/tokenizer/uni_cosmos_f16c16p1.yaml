@@ -33,7 +33,7 @@ dino_feature_dim: 1024
 # loading
 enc_path: ""
 dec_path: ""
-uni_tokenizer_path: ""
+uni_path: ""
 loading_type: null
 # quant
 norm_in_quant_conv: false

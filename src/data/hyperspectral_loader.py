@@ -308,7 +308,7 @@ def get_hyperspectral_dataloaders(
     tgt_key: str | list[str] | None = None,
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
-    quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 0.99,
+    quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 1.0,
     manual_img_max: float | None = None,
     undecoded_filtered: bool = True,
     # int for minimal_size; tuple for (min, max)
@@ -640,6 +640,7 @@ def get_fast_test_hyperspectral_data(
         prefetch_factor=None,
         permute=permute,
         resample=False,
+        quantile_img_clip=1 - 1e-5,
         **other_kwargs,
     )
 

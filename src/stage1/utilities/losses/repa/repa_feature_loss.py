@@ -440,6 +440,7 @@ class REPALoss(torch.nn.Module):
                 load_from=dino_type,
                 version=dino_version,
                 dino_v3_pretrained_on=dino_pretrained_on,
+                compile=False,
             )
             if baton.try_acquire():
                 try:

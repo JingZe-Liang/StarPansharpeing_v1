@@ -43,4 +43,8 @@ if __name__ == "__main__":
         model_cls=CosmosGenerativeTokenizer,
         base_model_ckpt="",
         other_model_kwargs={"model": {"per_layer_noise": True}},
+        use_optim=True,
+        show_mem_usage=True,
+        real_data=None,
+        fake_img_shape=(5, 12, 512, 512),
     )

@@ -1,7 +1,7 @@
 import inspect
 from typing import Any, Type, TypeVar
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from typing_extensions import deprecated
 
 T = TypeVar("T")
@@ -15,6 +15,15 @@ def dataclass_from_dict(cls: type[T], data: dict, strict: bool = True) -> T:
     OmegaConf.set_struct(base, strict)
     override = OmegaConf.create(data)
     return OmegaConf.to_object(OmegaConf.merge(base, override))  # type: ignore
+
+
+def dataclass_from_dict_config(cls: type[T], cfg: DictConfig, strict: bool = True) -> T:
+    """
+    Converts a DictConfig to a dataclass instance, recursively for nested structures.
+    """
+    base = OmegaConf.structured(cls)
+    OmegaConf.set_struct(base, strict)
+    return OmegaConf.to_object(OmegaConf.merge(base, cfg))  # type: ignore
 
 
 def dataclass_to_dict(dataclass_instance: T) -> dict[str, Any]:

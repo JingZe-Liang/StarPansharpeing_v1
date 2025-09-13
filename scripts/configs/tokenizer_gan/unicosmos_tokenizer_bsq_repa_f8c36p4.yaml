@@ -64,7 +64,7 @@ tokenizer:
   vf_on_z_or_module: z # [z, module]
   dino_feature_dim: 1024
   # loading
-  uni_tokenizer_path:
+  uni_path:
   loading_type:
   # blocks
   model:

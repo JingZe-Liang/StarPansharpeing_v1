@@ -3,6 +3,7 @@ import os
 import random
 import re
 import types
+import warnings
 from itertools import chain, product
 from pathlib import Path
 from typing import Annotated, Any, Callable, Iterable, TypeAlias, cast
@@ -305,6 +306,13 @@ def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = Non
     return sample
 
 
+def _is_large_img(img):
+    h, w = img.shape[-2:]
+    if h > 2047 or w > 2047:
+        return True
+    return False
+
+
 def norm_img_(
     img: Float[Tensor, "... C H W"] | Float[Tensor, "... H W"],
     per_channel=False,
@@ -312,6 +320,7 @@ def norm_img_(
     to_neg_1_1=True,
     manual_img_max: float | None = None,
     quantile_clip: Annotated[float, "0.0-1.0"] = 1.0,
+    eps: float = 1e-8,
 ):
     if is_dim2 := img.ndim == 2:
         # is h, w image
@@ -326,55 +335,68 @@ def norm_img_(
 
     # If some value in some channels are too large, clamp them to the quantile value
     is_ch_3 = img.shape[0] == 3
-    # if is_ch_3:
-    #     manual_img_max = 255.0
+    use_quantile_clip = (
+        quantile_clip < 1.0 and not is_ch_3
+    )  # ignore RGB image, always use max
+
     if manual_img_max is not None:
         assert not per_channel, "manual_img_max and per_channel cannot be set together"
         assert quantile_clip == 1.0, (
             "quantile_clip and manual_img_max cannot be set together"
         )
-        q_max = manual_img_max
-    elif quantile_clip < 1.0 and not is_ch_3:
+        q_max = torch.as_tensor(manual_img_max).to(img.device)
+
+    elif use_quantile_clip:
         dim = -2 if per_channel else 0
         # (c, h, w) -> (c, h*w)
         # (c, h, w) -> (c*h*w,)
         try:
-            img_ = img[..., ::4, ::4]
+            # Downsample if the image is too large, reduce the cost of quantile computation
+            img_ = img
+            _n_down_iter = 0
+            while _is_large_img(img_):
+                img_ = img_[..., ::2, ::2]
+                _n_down_iter += 1
+                if _n_down_iter > 10:
+                    warnings.warn(
+                        "Too many downsampling iterations, something might be wrong.",
+                        category=UserWarning,
+                    )
             q_max = (
-                img_.flatten(dim).quantile(q=quantile_clip, dim=-1, keepdim=True) + 1e-6
+                img_.flatten(dim).quantile(
+                    q=quantile_clip, dim=-1, interpolation="higher", keepdim=True
+                )
+                + eps
             )  # (c, 1) or (1,)
+            log_print(f"Quantile clip: {q_max}, Max: {img.max()}", "debug")
         except Exception as e:
-            log_print(
-                f"Failed to compute quantile: {e} for shape {img.shape}", "warning"
-            )
+            log_print(f"Failed to compute quantile: {e} for shape {img.shape}", "error")
             raise RuntimeError from e
 
-        # c, 1, 1
         if per_channel:
-            q_max = q_max[..., None]
-        else:
-            q_max = q_max.item()
+            q_max = q_max[..., None]  # c, 1, 1
     else:
         q_max = None
 
     # Per-channel normalization
-    if per_channel:
-        img_max = img.amax(dim=(-2, -1), keepdim=True)
+    if not use_quantile_clip:
+        if per_channel:
+            img_max = img.amax(dim=(-2, -1), keepdim=True)
+        else:
+            img_max = img.max()
     else:
-        img_max = img.max()
-    if q_max is not None:
-        img_max = img_max.clip_(min=None, max=q_max)
-    _img_max = img_max.item() if img_max.ndim == 0 else img_max.max().item()
-    if _img_max < 1e-4:
+        assert q_max is not None, "q_max is None"
+        img_max = q_max
+
+    if img_max.max().item() < 1e-4:
+        # fall back
         img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
     else:
-        img.div_(img_max + 1e-6)  # normalize to [0, 1]
+        img.div_(img_max + eps).clamp_(0.0, 1.0)  # normalize to [0, 1]
 
     # To (-1, 1) or (0, 1)
     if to_neg_1_1:
-        img.mul_(2.0).sub_(1.0).clamp_(-1.0, 1.0)  # normalize to [-1, 1]
-    else:
-        img.clamp_(0.0, 1.0)  # normalize to [0, 1]
+        img.mul_(2.0).sub_(1.0)  # normalize to [-1, 1]
 
     if is_dim2:
         img = img.squeeze(0)

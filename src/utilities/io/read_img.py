@@ -3,6 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import rasterio
+import spectral
 import tifffile
 import torch
 from PIL import Image
@@ -27,7 +28,7 @@ def read_image(
         img_path = Path(img_path)
 
     if verbose:
-        log("reading image from: {}", img_path.as_posix())
+        log(f"reading image from: {img_path.as_posix()}")
 
     if img_path.suffix == ".mat":
         try:
@@ -104,6 +105,18 @@ def read_image(
             img = np.clip(img, 0, None)
             bands_imgs.append(img)
         img = np.stack(bands_imgs, axis=-1)  # [h, w, c]
+    elif img_path.suffix in [".dat", ".hdr"]:
+        # is envi file
+        if img_path.suffix == ".hdr":
+            hdr_file = str(img_path)
+            img_file = str(img_path.with_suffix(".dat"))
+        else:
+            hdr_file = str(img_path.with_suffix(".hdr"))
+            img_file = img_path
+        if not Path(hdr_file).exists() or not Path(img_file).exists():
+            log(f"envi file pair not found: {hdr_file}, {img_file}", "warning")
+            return None
+        img = spectral.envi.open(hdr_file, img_file).load()
     elif img_path.suffix.lower() in [".tif", ".tiff"]:
         # memmap
         tif = tifffile.TiffFile(img_path)
@@ -149,3 +162,9 @@ def read_image(
             )
 
     return img
+
+
+if __name__ == "__main__":
+    path = "data/Downstreams/HAD/HAD100/data/aviris_normal/f080709t01p00r15_1.dat"
+    img = read_image(path, verbose=True)
+    print(img.shape, type(img))

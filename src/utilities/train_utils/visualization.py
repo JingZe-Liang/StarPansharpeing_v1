@@ -40,7 +40,7 @@ RGB_CHANNELS_BY_BANDS = {
     12: [3, 2, 1],
     13: [4, 3, 2],
     32: [12, 9, 3],
-    50: "largest",
+    50: "mean",
     150: "mean",  # [37, 28, 13],
     175: "mean",  # [42, 32, 13],
     191: [19, 12, 8],  # WDC mall
@@ -313,3 +313,117 @@ def visualize_segmentation_map(
             elif ms.ndim == 3:
                 ms = ms[:, None]
         return ms
+
+
+@beartype
+@function_config_to_basic_types
+def visualize_data_range_bins(
+    data: Tensor | np.ndarray,
+    nbins: int = 100,
+    title: str = "Data Distribution",
+    figsize: tuple[int, int] = (10, 6),
+    return_fig: bool = False,
+    save_path: str | None = None,
+    log_scale: bool = False,
+    show_stats: bool = True,
+):
+    """Visualize data distribution using histogram bins.
+
+    Args:
+        data: Input data tensor or numpy array
+        nbins: Number of histogram bins (default: 100)
+        title: Plot title (default: "Data Distribution")
+        figsize: Figure size (default: (10, 6))
+        return_fig: Whether to return the figure object (default: False)
+        save_path: Path to save the plot (default: None)
+        log_scale: Whether to use log scale for y-axis (default: False)
+        show_stats: Whether to show statistics on the plot (default: True)
+
+    Returns:
+        If return_fig is True, returns matplotlib Figure object
+        Otherwise, displays the plot
+    """
+    # Convert to tensor and flatten
+    data = torch.asarray(data).flatten()
+
+    # Remove NaN and Inf values
+    data = data[torch.isfinite(data)]
+
+    if data.numel() == 0:
+        raise ValueError("No valid data points after removing NaN/Inf values")
+
+    # Convert to numpy for plotting
+    data_np = data.cpu().numpy()
+
+    # Calculate statistics
+    data_min = float(data.min().item())
+    data_max = float(data.max().item())
+    data_mean = float(data.mean().item())
+    data_std = float(data.std().item())
+    data_median = float(data.median().item())
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Create histogram
+    if log_scale:
+        hist, bins, patches = ax.hist(
+            data_np, bins=nbins, alpha=0.7, edgecolor="black", log=True
+        )
+    else:
+        hist, bins, patches = ax.hist(data_np, bins=nbins, alpha=0.7, edgecolor="black")
+
+    # Set labels and title
+    ax.set_xlabel("Value")
+    ax.set_ylabel("Frequency" + (" (log scale)" if log_scale else ""))
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+
+    # Add statistics text
+    if show_stats:
+        stats_text = (
+            f"Min: {data_min:.4f}\n"
+            f"Max: {data_max:.4f}\n"
+            f"Mean: {data_mean:.4f}\n"
+            f"Std: {data_std:.4f}\n"
+            f"Median: {data_median:.4f}\n"
+            f"Count: {len(data_np)}"
+        )
+        ax.text(
+            0.02,
+            0.98,
+            stats_text,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        )
+
+    # Add vertical lines for mean and median
+    ax.axvline(
+        data_mean,
+        color="red",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Mean: {data_mean:.4f}",
+    )
+    ax.axvline(
+        data_median,
+        color="green",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Median: {data_median:.4f}",
+    )
+    ax.legend()
+
+    plt.tight_layout()
+
+    # Save plot if path provided
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    # Return or show
+    if return_fig:
+        return fig
+    else:
+        plt.show()
+        plt.close()

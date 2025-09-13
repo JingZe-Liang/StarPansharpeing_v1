@@ -16,7 +16,6 @@ from timm.layers.drop import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 
-natten = lazy_loader.load("natten")
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
 from src.utilities.logging import log_print
@@ -30,6 +29,8 @@ from .utils import (
     val2tuple,
 )
 
+natten = lazy_loader.load("natten")
+
 # * --- Blocks compilations --- * #
 
 compile_forward_fn = True
@@ -38,6 +39,7 @@ compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True
 epilogue_fusion = True
 shape_padding = True
+
 if compile_forward_fn:
     _compile_decorator = torch.compile(
         mode=compile_mode,

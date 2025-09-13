@@ -148,18 +148,19 @@ class AdaptiveGroupNorm(nn.Module):
         self.beta = nn.Linear(cond_chan, in_chan)
         self.eps = eps
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, x, z: torch.Tensor):
         B, C, _, _ = x.shape
-        fz = rearrange(z, "b c ... -> b c (...)")
+        # fz = rearrange(z, "b c ... -> b c (...)")
+        fz = z.flatten(2)
+
         # calcuate var for scale
-        scale = fz
-        scale = scale.var(dim=-1) + self.eps  # not unbias
+        scale = fz.var(dim=-1) + self.eps  # not unbias
         scale = scale.sqrt()
         scale = self.gamma(scale).view(B, C, 1, 1)
 
         # calculate mean for bias
-        bias = fz
-        bias = bias.mean(dim=-1)
+        bias = fz.mean(dim=-1)
         bias = self.beta(bias).view(B, C, 1, 1)
 
         x = self.gn(x)
