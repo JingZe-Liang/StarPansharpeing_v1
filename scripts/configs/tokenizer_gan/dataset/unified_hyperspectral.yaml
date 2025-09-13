@@ -164,7 +164,7 @@ train_changed_kwargs_by_loader:
     num_workers: 0
   - batch_size: 5 # MDAS-EeteS
     num_workers: 0
-  - batch_size: 5 # conditions
+  - batch_size: 4 # conditions
     resize_before_transform: 512
     img_key: [mlsd, sketch, hed, segmentation]
     keys_to_remove: [rgb.*]
