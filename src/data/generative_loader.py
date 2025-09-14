@@ -7,6 +7,7 @@ import webdataset as wds
 from torch import Tensor
 from typing_extensions import deprecated
 
+from data.multimodal_loader import MultimodalityDataloader
 from src.data.codecs import (
     img_decode_io,
     mat_decode_io,
@@ -14,7 +15,6 @@ from src.data.codecs import (
     safetensors_decode_io,
     tiff_decode_io,
 )
-from data.multimodal_loader import MultimodalityDataloader
 from src.data.utils import (
     chained_dataloaders,
     expand_paths_and_correct_loader_kwargs_mm,
@@ -124,8 +124,8 @@ class GenerativeMMDataloader(MultimodalityDataloader):
     """
 
     def before_init_datasets(self):
-        assert self.return_classed_dict, (
-            "GenerativeMMDataloader requires return_classed_dict=True"
+        assert self.getitem_type == "structured", (
+            "GenerativeMMDataloader requires getitem_type to be 'structured'"
         )
 
     def get_y_mask(self, sample: dict) -> Tensor:
@@ -153,9 +153,11 @@ class GenerativeMMDataloader(MultimodalityDataloader):
 
         # latent image
         if "image_latent" in sample:
-            latent_chw = torch.as_tensor(sample["image_latent"])
+            latent_chw = torch.as_tensor(
+                sample["image_latent"]
+            )  # TODO: fix this when is structured sample
         else:
-            latent_chw = torch.as_tensor(sample["pixel_image"])
+            latent_chw = torch.as_tensor(sample["pixel_image"]["img"])
 
         # conditions images or latents
         if "condition_latent" in sample:
@@ -408,9 +410,9 @@ if __name__ == "__main__":
     #     print(sample.keys())
 
     main_kwargs = {
-        "batch_size": 8,
+        "batch_size": 2,
         "num_workers": 0,
-        "return_classed_dict": True,
+        "getitem_type": "structured",
     }
     wids_paths = [
         {
@@ -420,7 +422,7 @@ if __name__ == "__main__":
         },
         {
             "captions": "data/DCF_2019/condition_captions/shardindex.json",
-            "condition_latent": "data/DCF_2019/conditions/shardindex.json",
+            "condition_image": "data/DCF_2019/conditions/shardindex.json",
             "pixel_image": "data/DCF_2019/hyper_images/shardindex.json",
         },
     ]

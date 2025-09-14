@@ -309,7 +309,7 @@ def get_hyperspectral_dataloaders(
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
     quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 1.0,
-    manual_img_max: float | None = None,
+    mannual_img_min_max: tuple[float, float] | None = None,
     undecoded_filtered: bool = True,
     # int for minimal_size; tuple for (min, max)
     constraint_size: int | tuple[int, int] | None = None,
@@ -487,7 +487,7 @@ def get_hyperspectral_dataloaders(
             check_nan=check_nan,
             per_channel=per_channel_norm,
             quantile_clip=quantile_img_clip,
-            manual_img_max=manual_img_max,
+            mannual_img_min_max=mannual_img_min_max,
         )
     )
 

@@ -1,4 +1,6 @@
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -13,10 +15,59 @@ from torchvision.io import video_reader
 from ..logging import log
 
 
+class ExtractMode(Enum):
+    LAST = "last"
+    ALL = "all"
+    NOT_META = "not_meta"
+    SPECIFIC = "specific"
+
+
+def dict_extract(
+    d: dict | h5py.File,
+    keys: list[str] | None = None,
+    extract_type: ExtractMode = ExtractMode.LAST,
+    force_load: bool = True,
+) -> dict | Any:
+    etype = (
+        extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
+    )
+    force_load_fn = lambda x: x[:] if force_load else x
+
+    if keys is None:
+        if etype == "not_meta":
+            ret = {k: force_load_fn(v) for k, v in d.items() if not k.startswith("__")}
+        elif etype == "all":
+            ret = d
+        elif etype == "last":
+            k = list(d.keys())[-1]
+            ret = force_load_fn(d[k])
+        else:
+            raise Exception(f"Invalid extract_type: {etype} when keys is None")
+    else:
+        assert etype == "specific", (
+            f"extract_type must be 'specific' when keys is provided, got {etype}"
+        )
+        ret = {}
+        d_keys = list(d.keys())
+        for k in keys:
+            if k in d_keys:
+                ret[k] = force_load_fn(d[k])
+
+    if isinstance(ret, dict):
+        if len(ret) == 0:
+            log(f"No valid keys found in the dict, available keys: {list(d.keys())}")
+            return None
+        if len(ret) == 1:
+            return list(ret.values())[0]
+
+    return ret
+
+
 def read_image(
     img_path: str | Path,
     *,
-    mat_load_key="I",
+    key_if_dict: list[str] | str | None = None,
+    dict_extract_type: ExtractMode = ExtractMode.LAST,
     verbose=False,
     tiff_read_mode="array",
     tiff_bands_seperated: bool = False,
@@ -26,6 +77,13 @@ def read_image(
 ) -> np.ndarray | dict[str, np.ndarray] | np.memmap | list[np.ndarray] | None:
     if isinstance(img_path, str):
         img_path = Path(img_path)
+    if isinstance(key_if_dict, str):
+        key_if_dict = [key_if_dict]
+    if key_if_dict is not None:
+        assert not mat_ret_all, (
+            "mat_ret_all is not supported when key_if_dict is not None"
+        )
+        dict_extract_type = ExtractMode.SPECIFIC
 
     if verbose:
         log(f"reading image from: {img_path.as_posix()}")
@@ -33,13 +91,7 @@ def read_image(
     if img_path.suffix == ".mat":
         try:
             d = loadmat(img_path)
-            if not mat_ret_all:
-                key_ = list(d.keys())[-1]
-                img = d[key_]
-                return img
-            else:
-                d_ret = {k: v for k, v in d.items() if not k.startswith("__")}
-                return d_ret
+            return dict_extract(d, key_if_dict, dict_extract_type)
         except Exception as e:
             log(
                 f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
@@ -48,13 +100,8 @@ def read_image(
             )
 
             with h5py.File(img_path, "r") as f:
-                if not mat_ret_all:
-                    key_ = list(f.keys())[-1]
-                    img = f[key_][:]
-                    return img
-                else:
-                    d_ret = {k: v[:] for k, v in f.items()}
-                    return d_ret
+                d = dict_extract(f, key_if_dict, dict_extract_type)
+                return d
     elif img_path.suffix.lower() == ".img":
         with rasterio.open(img_path) as dataset:
             bands = dataset.count
@@ -63,8 +110,6 @@ def read_image(
             )
             for i in range(bands):
                 img[..., i] = dataset.read(i + 1)
-            return img
-
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
         try:
             img = np.array(Image.open(img_path))

@@ -1,12 +1,13 @@
 import os
-from PIL import Image
-from utils.gen_mask import Mask
+import random
+
 import numpy as np
 import torch
+from PIL import Image
+from skimage import transform as sk_transform
 from torch.utils.data import Dataset
 from torchvision import transforms
-from skimage import transform as sk_transform
-import random
+from utils.gen_mask import Mask
 
 
 class HADDataset(Dataset):

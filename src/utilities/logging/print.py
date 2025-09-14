@@ -78,13 +78,17 @@ def configure_logger(
     elif sink is None:
         sink = sys.stderr
 
+    is_file = False
+    if isinstance(sink, (str, Path)):
+        is_file = True
+
     if removed:
         logger.remove()
     handler = logger.add(
         sink,
         level=level.upper(),
         enqueue=False,
-        colorize=True,
+        colorize=True if not is_file else False,
         format=(
             "{time:HH:mm:ss} "
             "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
@@ -93,7 +97,6 @@ def configure_logger(
         ),
         filter=filter,
     )
-    # logger.debug("Logger reconfigured", re_config=True)
 
     return handler
 

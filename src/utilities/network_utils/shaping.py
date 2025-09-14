@@ -1,13 +1,31 @@
 import inspect
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import Callable
 
 import numpy as np
 import torch
 from einops import rearrange, reduce, repeat
+from numpy.typing import NDArray
+from torch import Tensor
+
+type ReshapeTyped = str | list[str | None] | dict[str, str | None]
+type OpTyped = str | list[str | Callable] | dict[str, str | Callable] | Callable
 
 
-def get_einops_op(op):
+def get_einops_op(op: str | Callable) -> Callable:
+    """
+    Get the einops operation function from string or callable.
+
+    Args:
+        op: Operation name ("rearrange", "reduce", "repeat") or callable function
+
+    Returns:
+        Callable: The corresponding einops operation function
+
+    Raises:
+        ValueError: If operation name is not supported
+        TypeError: If operation is neither string nor callable
+    """
     if callable(op):
         return op
     elif isinstance(op, str):
@@ -19,10 +37,6 @@ def get_einops_op(op):
         return ops[op]
     else:
         raise TypeError(f"Operation must be a string or callable, got {type(op)}")
-
-
-type ReshapeTyped = str | list[str | None] | dict[str, str | None]
-type OpTyped = str | list[str | Callable] | dict[str, str | Callable] | Callable
 
 
 # decorator
@@ -184,8 +198,191 @@ def reshape_wrapper(
     return decorator
 
 
+@lru_cache(maxsize=16)
+def get_reduce_einops_pattern(
+    tensor_dim: int | list, reduce_dims: tuple[int, ...]
+) -> str:
+    """
+    Generate einops pattern for reducing specified dimensions.
+
+    Args:
+        tensor_dim: Number of dimensions (int) or sequence representing dimensions
+        reduce_dims: Tuple of dimension indices to reduce (supports negative indexing)
+
+    Returns:
+        str: Einops pattern string (e.g., "a b c -> a 1 c")
+
+    Examples:
+        >>> get_reduce_einops_pattern(3, (1,))
+        'a b c -> a 1 c'
+        >>> get_reduce_einops_pattern(4, (-2, -1))
+        'a b c d -> a b 1 1'
+    """
+    # tensor_dim: int or sequence; reduce_dims: tuple of dims to reduce
+    dims = tensor_dim if isinstance(tensor_dim, int) else len(tensor_dim)
+    # normalize negative dims and sort
+    rd = sorted(d if d >= 0 else dims + d for d in reduce_dims)
+    # generate a name for each axis, e.g. 'a','b','c',...
+    axes = [chr(ord("a") + i) for i in range(dims)]
+    # in the output pattern, replace reduced axes with '1'
+    out = [("1" if i in rd else axes[i]) for i in range(dims)]
+    return f"{' '.join(axes)} -> {' '.join(out)}"
+
+
+@lru_cache(maxsize=16)
+def get_flatten_einops_pattern(
+    tensor_dim: int | list,
+    flatten_dims: tuple[int, ...],
+    f_dim_at: int = -1,
+) -> tuple[str, dict[str, int]]:
+    """
+    Generate einops pattern for flattening specified dimensions.
+
+    Args:
+        tensor_dim: Number of dimensions (int) or sequence representing dimensions
+        flatten_dims: Tuple of dimension indices to flatten (supports negative indexing)
+        f_dim_at: Position to place the flattened dimension (supports negative indexing).
+                 -1 means last position, 0 means first position, etc.
+
+    Returns:
+        tuple[str, dict[str, int]]:
+            - Einops pattern string (e.g., "a b c d -> a (b c d)")
+            - Dictionary mapping axis names to their dimension indices for size computation
+
+    Examples:
+        >>> get_flatten_einops_pattern(4, (1, 2, 3))
+        ('a b c d -> a (b c d)', {'b': 1, 'c': 2, 'd': 3})
+        >>> get_flatten_einops_pattern(4, (1, 2), f_dim_at=1)
+        ('a b c d -> a (b c) d', {'b': 1, 'c': 2})
+        >>> get_flatten_einops_pattern(4, (1, 2), f_dim_at=0)
+        ('a b c d -> (b c) a d', {'b': 1, 'c': 2})
+        >>> get_flatten_einops_pattern(3, (0, 1, 2))
+        ('a b c -> (a b c)', {'a': 0, 'b': 1, 'c': 2})
+    """
+    # tensor_dim: int or sequence; flatten_dims: tuple of dims to flatten
+    dims = tensor_dim if isinstance(tensor_dim, int) else len(tensor_dim)
+    # normalize negative dims and sort
+    fd = sorted(d if d >= 0 else dims + d for d in flatten_dims)
+    # generate a name for each axis, e.g. 'a','b','c',...
+    axes = [chr(ord("a") + i) for i in range(dims)]
+
+    # group the axes to be flattened and the remaining axes
+    flatten_axes = [axes[i] for i in fd]
+    remaining_axes = [axes[i] for i in range(dims) if i not in fd]
+
+    # construct the pattern
+    if remaining_axes and flatten_axes:
+        # if there are both remaining and flatten axes
+        flatten_pattern = " ".join(flatten_axes)
+
+        # determine where to place the flattened dimension
+        n_remaining = len(remaining_axes)
+        if f_dim_at < 0:
+            f_dim_at = n_remaining + 1 + f_dim_at  # convert negative index
+
+        # ensure f_dim_at is in valid range
+        f_dim_at = max(0, min(f_dim_at, n_remaining))
+
+        # insert flattened dimension at specified position
+        output_axes = remaining_axes.copy()
+        output_axes.insert(f_dim_at, f"({flatten_pattern})")
+
+        # create dictionary mapping axis names to dimension indices
+        flatten_dim_dict = {
+            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
+        }
+
+        return f"{' '.join(axes)} -> {' '.join(output_axes)}", flatten_dim_dict
+    elif remaining_axes:
+        # if only remaining axes (no flattening needed)
+        return f"{' '.join(axes)} -> {' '.join(remaining_axes)}", {}
+    elif flatten_axes:
+        # if only flatten axes (flatten to 1D)
+        flatten_dim_dict = {
+            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
+        }
+        return f"{' '.join(axes)} -> ({' '.join(flatten_axes)})", flatten_dim_dict
+    else:
+        # edge case: no axes specified
+        return f"{' '.join(axes)} -> {' '.join(axes)}", {}
+
+
+def reverse_einops_pattern(pattern: str):
+    # 'a b c -> a (b c)' -> 'a (b c) -> a b c'
+    a, b = pattern.split("->")
+    new_p = b.strip() + " -> " + a.strip()
+    return new_p
+
+
+def reduce_any(reduce_op: str, x: NDArray | Tensor, op_dim: tuple[int, ...]):
+    p = get_reduce_einops_pattern(x.ndim, op_dim)
+    return reduce(x, p, reduction=reduce_op)
+
+
+def flatten_any(x: NDArray | Tensor, op_dim: tuple[int, ...], f_dim_at: int = -1):
+    p, dim_dict = get_flatten_einops_pattern(x.ndim, op_dim, f_dim_at)
+    # Calculate the actual flattened dimension size
+    flatten_size = 1
+    for axis, dim_idx in dim_dict.items():
+        flatten_size *= x.shape[dim_idx]
+
+    # Create size dict with actual dimension sizes
+    size_dict = {axis: x.shape[dim_idx] for axis, dim_idx in dim_dict.items()}
+    size_dict["flatten_size"] = flatten_size
+
+    return rearrange(x, p), size_dict
+
+
 if __name__ == "__main__":
     from functools import partial
+
+    # Test the new get_flatten_einops_pattern function
+    print("=== Testing get_flatten_einops_pattern ===")
+
+    # Test case 1: 4D tensor, flatten last 3 dimensions
+    pattern, dim_dict = get_flatten_einops_pattern(4, (1, 2, 3))
+    print(f"4D tensor, flatten dims (1,2,3):")
+    print(f"  Pattern: {pattern}")
+    print(f"  Dim dict: {dim_dict}")
+    print()
+
+    # Test case 2: 4D tensor, flatten middle 2 dimensions at position 1
+    pattern, dim_dict = get_flatten_einops_pattern(4, (1, 2), f_dim_at=1)
+    print(f"4D tensor, flatten dims (1,2) at position 1:")
+    print(f"  Pattern: {pattern}")
+    print(f"  Dim dict: {dim_dict}")
+    print()
+
+    # Test case 3: 3D tensor, flatten all dimensions
+    pattern, dim_dict = get_flatten_einops_pattern(3, (0, 1, 2))
+    print(f"3D tensor, flatten all dims:")
+    print(f"  Pattern: {pattern}")
+    print(f"  Dim dict: {dim_dict}")
+    print()
+
+    # Test case 4: Test flatten_any function with actual tensor
+    import torch
+
+    x = torch.randn(2, 3, 4, 5)  # Shape: [batch, channels, height, width]
+
+    # Test flatten_any with spatial dimensions (height, width) -> dims 2,3
+    print(f"Original tensor shape: {x.shape}")
+    result, size_dict = flatten_any(x, (2, 3), f_dim_at=2)
+    print(f"Flatten spatial dims (2,3) at position 2:")
+    print(f"  Result shape: {result.shape}")
+    print(f"  Size dict: {size_dict}")
+    print(f"  Expected flatten size: 4*5 = {4 * 5}, got: {size_dict['flatten_size']}")
+    print()
+
+    # Test case 5: Flatten channels and height
+    result2, size_dict2 = flatten_any(x, (1, 2), f_dim_at=1)
+    print(f"Flatten channels and height (1,2) at position 1:")
+    print(f"  Result shape: {result2.shape}")
+    print(f"  Size dict: {size_dict2}")
+    print(f"  Expected flatten size: 3*4 = {3 * 4}, got: {size_dict2['flatten_size']}")
+    print()
+
+    print("✓ All tests passed!")
 
     # 示例1: 使用不同的输入操作符
     # @reshape_wrapper(

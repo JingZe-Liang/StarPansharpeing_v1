@@ -18,9 +18,9 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: OSCD
+  used: WV3
   prefetch_factor: 6
-  num_workers: 4
+  num_workers: 3
   shuffle_size: -1
   loader_type: webdataset
   shuffle_within_workers: false
@@ -61,43 +61,40 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_tokenizer_path: runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
   loading_type: pretrained
 
   # blocks
-  norm_type: gn
-  norm_groups: 32
-  block_name: res_block
-  moe_token_mixer_type: res_block
-  hidden_factor: 4
-  use_residual_factor: false
+  model:
+    norm_type: gn
+    norm_groups: 32
+    block_name: res_block
+    moe_token_mixer_type: res_block
+    hidden_factor: 4
+    use_residual_factor: false
 
-  # others
-  patch_method: haar
-  patch_size: 1
-  attn_type: none
-  padding_mode: reflect
+    # others
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
+    padding_mode: reflect # for boundary?
 
-  # latents
-  latent_channels: 16
-  z_channels: 16
+    # latents
+    latent_channels: 16
+    z_channels: 16
 
-  # augmentations
-  latent_noise_prob: 0.0
-  use_channel_drop: false
-
-  # train
-  act_checkpoint: true
+    # train
+    act_checkpoint: true
 
   channel_drop_config:
     drop_type: ${list:[4, 8, 12]}
-    max_channels: ${tokenizer.latent_channels}
+    max_channels: ${tokenizer.model.latent_channels}
     drop_prob: 0.5
 
 vq_loss:
   # perceptual loss
   perceptual_weight: 0.05
-  repa_loss_weight: 0.1
+  repa_loss_weight: 0.02
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -105,6 +102,8 @@ vq_loss:
     img_resize: 512 # null for no resize
     dino_img_size: 512
     dino_name: "dinov3_vitl16"
+    loss_type: am_radio
+    feature_normalize: false
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
@@ -177,8 +176,8 @@ train:
   grad_check: false
   compile_model: false
   # LoRA related
-  conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
-  add_norms: true
+  conv_in_out_reinit: false # if do not have the same channels in pretrain stage, set this to true
+  add_norms: false
   save_peft_ckpts: true
   resume_path:
   ema_load_path: #runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
@@ -242,7 +241,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: cosmos_lora=${peft.peft_type}_r=${peft.r}_f8c${tokenizer.latent_channels}p${tokenizer.patch_size}_${dataset.used}
+    run_comment: cosmos_lora=${peft.peft_type}_r=${peft.r}_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}
     log_with_time: true
     visualize_every: 200
     log_every: 10

@@ -1,7 +1,7 @@
 import hashlib
 import math
+from enum import Enum
 from functools import partial
-from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
@@ -11,7 +11,6 @@ import wids
 
 from src.data.codecs import (
     img_decode_io,
-    mat_decode_io,
     npz_decode_io,
     safetensors_decode_io,
     tiff_decode_io,
@@ -23,7 +22,6 @@ from src.data.codecs import (
 from src.data.curriculums import get_curriculum_fn
 from src.data.utils import (
     chained_dataloaders,
-    expand_paths_and_correct_loader_kwargs,
     flatten_sub_dict,
     merge_modalities,
     norm_img,
@@ -69,7 +67,15 @@ def local_name_fn(name, prefix: str | None = None):
 # * --- multimodal wids dataloader --- #
 
 
+class GetitemType(str, Enum):
+    FLAT = "flat"
+    EXTRACTED = "extracted"
+    STRUCTURED = "structured"
+
+
 class MultimodalityDataloader:
+    registed_decoders: dict[str, Callable] = {}
+
     @function_config_to_basic_types
     def __init__(
         self,
@@ -78,42 +84,25 @@ class MultimodalityDataloader:
         to_neg_1_1: bool = True,
         permute: bool = True,
         wids_local_name_prefix: str | None = None,
-        return_classed_dict: bool | None = None,
-        extracted_keys: list[list[tuple[str, str]]]
-        | None = None,  # num_of_modalities[extracted_keys[(in_key, out_key)]]
+        # 'structured' | 'flat' | 'extracted'
+        getitem_type: GetitemType = GetitemType.FLAT,
+        # num_of_modalities[extracted_keys[(in_key, out_key)]]
+        extracted_keys: list[list[tuple[str, str]]] | None = None,
+        getitem_remove_meta: bool = False,
         **kwargs,
     ):
         # get wids datasets
         self.wds_paths = wds_paths
         self.datasets = {}
         self.mm_names = []
-        self.return_classed_dict = return_classed_dict  # remove the '__any_key' keys
+        self.getitem_type = getitem_type
         self.extracted_keys = extracted_keys
+        self.getitem_remove_meta = getitem_remove_meta
 
         # default codecs
-        img_fn_ = partial(
-            wids_image_decode,
-            to_neg_1_1=to_neg_1_1,
-            permute=permute,
-            resize=None,
-            process_img_keys="ALL",
+        self.supported_codecs_mapping = self._get_supported_decodes(
+            to_neg_1_1=to_neg_1_1, permute=permute
         )
-        self.supported_codecs_mapping = {
-            # hyperspectral images or pairs
-            "pixel_image": img_fn_,
-            "condition_image": img_fn_,
-            "pansharpening_image": img_fn_,
-            "denoising_image": img_fn_,
-            # images, conditions or downstream latents
-            "image_latent": wids_latent_decode,
-            "condition_latent": wids_latent_decode,
-            "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
-            "denoising_latent": partial(
-                wids_latent_decode, return_dict=True
-            ),  # if gt is in, return_dict=True
-            # language captions and its embeddings
-            "captions": wids_caption_embed_decode,
-        }
         if codecs is not None:
             self.supported_codecs_mapping.update(codecs)
 
@@ -170,6 +159,37 @@ class MultimodalityDataloader:
         # hook after init datasets
         self.datasets = self.after_init_datasets(self.datasets)
 
+    @classmethod
+    def register_decoder(cls, name: ModalityName, fn: Callable):
+        assert callable(fn), "Decoder must be a callable function"
+        cls.registed_decoders[name] = fn
+
+    def _get_supported_decodes(self, **kwargs):
+        img_fn_ = partial(
+            wids_image_decode,
+            to_neg_1_1=kwargs.get("to_neg_1_1", True),
+            permute=kwargs.get("permute", True),
+            resize=None,
+            process_img_keys="ALL",
+        )
+        default_decodes = {
+            # hyperspectral images or pairs
+            "pixel_image": img_fn_,
+            "condition_image": img_fn_,
+            "pansharpening_image": img_fn_,
+            "denoising_image": img_fn_,
+            # images, conditions or downstream latents
+            "image_latent": wids_latent_decode,
+            "condition_latent": wids_latent_decode,
+            "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
+            "denoising_latent": partial(
+                wids_latent_decode, return_dict=True
+            ),  # if gt is in, return_dict=True
+            # language captions and its embeddings
+            "captions": wids_caption_embed_decode,
+        }
+        return default_decodes | self.registed_decoders
+
     def __len__(self):
         len_f = self.total_len / getattr(self, "batch_size", 1)
         return (
@@ -194,24 +214,37 @@ class MultimodalityDataloader:
 
             # convert the sample into a flat dict
             if isinstance(sample, dict):
-                if self.return_classed_dict is not None and self.return_classed_dict:
+                if self.getitem_type == GetitemType.FLAT:
                     modality_sample.update(
                         self._extract_key_for_non_nested_dict(sample, name)
                     )
-                elif self.extracted_keys is not None:
+                elif (
+                    self.getitem_type == GetitemType.EXTRACTED
+                    and self.extracted_keys is not None
+                ):
                     ext_key = self.extracted_keys[i]
                     modality_sample.update(self._extract_keys(sample, ext_key, None))
+                elif self.getitem_type == GetitemType.EXTRACTED:
+                    modality_sample[name] = self._extract_without_extension(sample)
                 else:
-                    modality_sample.update(self._extract_without_extension(sample))
+                    raise ValueError(
+                        f"Invalid getitem_type {self.getitem_type}, must be 'flat', 'extracted' or 'structured'"
+                    )
             else:
                 modality_sample[name] = {"default": sample}
 
         # hook after getitem
         modality_sample = self.after_getitem(modality_sample)
 
+        if self.getitem_remove_meta:
+            modality_sample = self._remove_all_meta_info(modality_sample)
+
         return modality_sample
 
     # * --- Getitem utilities --- #
+
+    def _remove_all_meta_info(self, modal_sample: dict) -> dict[str, Any]:
+        return {k: v for k, v in modal_sample.items() if not k.startswith("__")}
 
     def _extract_key_for_non_nested_dict(
         self, modal_sample: dict, modality_name: str, without_extension=True
@@ -596,57 +629,4 @@ def __test_wids_mm_loaders(*args):
 
 
 if __name__ == "__main__":
-    # _, loader = get_panshap_dataloaders(
-    #     wds_paths=[
-    #         "data/pansharpening/MMSeg_YREB/dataset_0000.tar",
-    #         # "data/pansharpening/MMSeg_YREB/dataset_0001.tar",
-    #     ],
-    #     batch_size=4,
-    #     num_workers=1,
-    #     latent_ext="npz",
-    # )
-    # for i, sample in enumerate(loader):
-    #     # print(sample)
-    #     # break
-    #     print(i)
-
-    # _, loader = get_multimodal_dataloaders(
-    #     wds_paths=[
-    #         "data/MMSeg_YREB/[hyper_images,pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
-    #     ],
-    #     batch_size=32,
-    #     num_workers=3,
-    #     resample=True,
-    #     prefetch_factor=6,
-    #     pin_memory=False,
-    #     shuffle_size=-1,
-    # )
-
-    # from tqdm import tqdm
-
-    # for sample in tqdm(loader):
-    #     print(sample.keys())
-    #     # pass
-
-    # for name, data in sample.items():
-    #     print(f"  {name}: {data['img'].shape if 'img' in data else data.shape}")
-    # if i >= 5:
-    #     break
-
     __test_wids_mm_loaders()
-
-    # # mp
-    # import torch.multiprocessing as mp
-
-    # mp.set_start_method("spawn")
-
-    # # start with 2 processes
-    # world_size = 2
-    # # torch distributed init
-
-    # mp.spawn(
-    #     test_wids_mm_loaders,
-    #     args=(world_size,),
-    #     nprocs=world_size,
-    #     join=True,
-    # )

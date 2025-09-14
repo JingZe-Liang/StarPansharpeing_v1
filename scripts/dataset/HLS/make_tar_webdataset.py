@@ -1,9 +1,10 @@
-import glob
 import io
 import math
-import sys
+from enum import Enum
+from functools import lru_cache
+from glob import glob
 from pathlib import Path
-from typing import Iterable, Literal, cast
+from typing import Any, Iterable, Literal, Sequence, cast
 
 import einops
 import h5py
@@ -12,45 +13,37 @@ import numpy as np
 import rasterio
 import safetensors
 import safetensors.torch
+import spectral
 import tifffile
 import torch
 import webdataset as wds
 from PIL import Image
 from scipy.io import loadmat
-from torchvision.io import read_video
+from torchvision.io import read_video, video_reader
 from tqdm import tqdm
 
 from src.utilities.logging.print import catch_any, configure_logger, log, logger
 
+configure_logger(sink="tmp/run.log", level="debug", auto=False, removed=False)
+
 Image.MAX_IMAGE_PIXELS = None  # disable the warning for large images
 
-# logger.remove()
-# logger.add(
-#     sink=sys.stdout,
-#     level="DEBUG",
-#     format="<green>[{time:MM-DD HH:mm:ss}]</green> <cyan>{name}</cyan> <level>[{level}]</level> - <level>{message}</level>",
-#     backtrace=True,
-#     diagnose=True,
-#     colorize=True,
-# )
-
-configure_logger(level="info", auto=False)
-
-
-_numpy_dtype_to_tensor = {
-    "uint8": torch.uint8,
-    "uint16": torch.uint16,
-    "uint32": torch.uint32,
-    "uint64": torch.uint64,
+_dtype_max_dtypes_unsign = [np.uint8, np.uint16, np.uint32, np.uint64]
+_dtype_max_dtypes_sign = [np.int8, np.int16, np.int32, np.int64]
+_unsign_to_sign = {
+    np.uint8: np.int8,
+    np.uint16: np.int16,
+    np.uint32: np.int32,
+    np.uint64: np.int64,
 }
-
-_dtype_max_dtypes = [np.uint8, np.uint16, np.uint32, np.uint64]
 _dtype_max_vals = [
     np.iinfo(np.uint8).max,
     np.iinfo(np.uint16).max,
     np.iinfo(np.uint32).max,
     np.iinfo(np.uint64).max,
 ]
+SLIDE_WINDOW_INTERP_MODE = "bilinear"
+IMG_SAVE_NAME = "img"
 
 BANDS_NAME = [
     "B01",
@@ -123,7 +116,8 @@ def to_batched(img: torch.Tensor, is_hwc=False):
     return img, inverse
 
 
-def get_einops_pattern(tensor_dim, reduce_dims):
+@lru_cache(maxsize=16)
+def get_reduce_einops_pattern(tensor_dim, reduce_dims):
     # tensor_dim: int or sequence; reduce_dims: tuple of dims to reduce
     dims = tensor_dim if isinstance(tensor_dim, int) else len(tensor_dim)
     # normalize negative dims and sort
@@ -135,11 +129,169 @@ def get_einops_pattern(tensor_dim, reduce_dims):
     return f"{' '.join(axes)} -> {' '.join(out)}"
 
 
-def per_channel_normalize(img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1)):
-    if isinstance(img, (torch.Tensor, np.ndarray)):
-        dims = img.dim() if torch.is_tensor(img) else img.ndim
-        pattern = get_einops_pattern(dims, c_dim)
+@lru_cache(maxsize=16)
+def get_flatten_einops_pattern(
+    tensor_dim: int | list,
+    flatten_dims: tuple[int, ...],
+    f_dim_at: int = -1,
+) -> tuple[str, dict[str, int]]:
+    """
+    Generate einops pattern for flattening specified dimensions.
 
+    Args:
+        tensor_dim: Number of dimensions (int) or sequence representing dimensions
+        flatten_dims: Tuple of dimension indices to flatten (supports negative indexing)
+        f_dim_at: Position to place the flattened dimension (supports negative indexing).
+                 -1 means last position, 0 means first position, etc.
+
+    Returns:
+        tuple[str, dict[str, int]]:
+            - Einops pattern string (e.g., "a b c d -> a (b c d)")
+            - Dictionary mapping axis names to their dimension indices for size computation
+
+    Examples:
+        >>> get_flatten_einops_pattern(4, (1, 2, 3))
+        ('a b c d -> a (b c d)', {'b': 1, 'c': 2, 'd': 3})
+        >>> get_flatten_einops_pattern(4, (1, 2), f_dim_at=1)
+        ('a b c d -> a (b c) d', {'b': 1, 'c': 2})
+        >>> get_flatten_einops_pattern(4, (1, 2), f_dim_at=0)
+        ('a b c d -> (b c) a d', {'b': 1, 'c': 2})
+        >>> get_flatten_einops_pattern(3, (0, 1, 2))
+        ('a b c -> (a b c)', {'a': 0, 'b': 1, 'c': 2})
+    """
+    # tensor_dim: int or sequence; flatten_dims: tuple of dims to flatten
+    dims = tensor_dim if isinstance(tensor_dim, int) else len(tensor_dim)
+    # normalize negative dims and sort
+    fd = sorted(d if d >= 0 else dims + d for d in flatten_dims)
+    # generate a name for each axis, e.g. 'a','b','c',...
+    axes = [chr(ord("a") + i) for i in range(dims)]
+
+    # group the axes to be flattened and the remaining axes
+    flatten_axes = [axes[i] for i in fd]
+    remaining_axes = [axes[i] for i in range(dims) if i not in fd]
+
+    # construct the pattern
+    if remaining_axes and flatten_axes:
+        # if there are both remaining and flatten axes
+        flatten_pattern = " ".join(flatten_axes)
+
+        # determine where to place the flattened dimension
+        n_remaining = len(remaining_axes)
+        if f_dim_at < 0:
+            f_dim_at = n_remaining + 1 + f_dim_at  # convert negative index
+
+        # ensure f_dim_at is in valid range
+        f_dim_at = max(0, min(f_dim_at, n_remaining))
+
+        # insert flattened dimension at specified position
+        output_axes = remaining_axes.copy()
+        output_axes.insert(f_dim_at, f"({flatten_pattern})")
+
+        # create dictionary mapping axis names to dimension indices
+        flatten_dim_dict = {
+            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
+        }
+
+        return f"{' '.join(axes)} -> {' '.join(output_axes)}", flatten_dim_dict
+    elif remaining_axes:
+        # if only remaining axes (no flattening needed)
+        return f"{' '.join(axes)} -> {' '.join(remaining_axes)}", {}
+    elif flatten_axes:
+        # if only flatten axes (flatten to 1D)
+        flatten_dim_dict = {
+            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
+        }
+        return f"{' '.join(axes)} -> ({' '.join(flatten_axes)})", flatten_dim_dict
+    else:
+        # edge case: no axes specified
+        return f"{' '.join(axes)} -> {' '.join(axes)}", {}
+
+
+def reverse_einops_pattern(pattern):
+    # 'a b c -> a (b c)' -> 'a (b c) -> a b c'
+    a, b = pattern.split("->")
+    new_p = b.strip() + " -> " + a.strip()
+    return new_p
+
+
+def add_n_dim_last_as(x, other):
+    n_add_dim = other.ndim - x.ndim
+    assert n_add_dim >= 0, "other dim should be larger than x dim"
+    for _ in range(n_add_dim):
+        x = x.unsqueeze(-1)
+    return x
+
+
+def quantile_clip(
+    img: torch.Tensor,
+    dim: Sequence[int] = (-2, -1),
+    quantile: float = 1.0,
+    clip_mode: str = "both",
+    q_interp="higher",
+):
+    if quantile == 1.0:
+        return img
+
+    # negative dims to positive dims
+    ndim = img.ndim
+    dim = [i if i > 0 else ndim + i for i in dim]
+    remain_dims = [i for i in range(img.ndim) if i not in dim]
+    # [0, 1, 2, 3] -> [0, 3, 1, 2]
+    p_dims = remain_dims + list(dim)
+    img = img.permute(*p_dims)
+    flatten_dim_vals = [img.shape[i] for i in dim]
+    img = img.flatten(start_dim=-len(dim))
+
+    q_dim = -1
+    if clip_mode == "both":
+        q_min = img.quantile(
+            1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+        )
+        q_max = img.quantile(quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
+    elif clip_mode == "min":
+        q_min = img.quantile(
+            1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+        )
+        q_max = None
+    elif clip_mode == "max":
+        q_min = None
+        q_max = img.quantile(quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
+    else:
+        raise ValueError(f"Unknown clip_mode: {clip_mode}")
+
+    if q_min is not None:
+        q_min = add_n_dim_last_as(q_min, img)
+    if q_max is not None:
+        q_max = add_n_dim_last_as(q_max, img)
+
+    # clamp
+    img = img.clamp_(q_min, q_max)
+
+    # reshape back
+    # img = einops.rearrange(img, reverse_einops_pattern(fp), **fp_values)
+    # reverse flatten dim
+    # permute back
+    # [0, 1, 2, 3] -> [0, 3, 1, 2] -> [0, 1, 2, 3]
+    reshape_dim = np.array(img.shape)[remain_dims].tolist() + flatten_dim_vals
+    img = img.reshape(*reshape_dim)
+    rp_dims = np.argsort(p_dims).tolist()
+    img = img.permute(rp_dims)
+    return img
+
+
+def per_channel_normalize(
+    img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1), quantile=1.0
+):
+    if isinstance(img, (torch.Tensor, np.ndarray)):
+        is_tensor = torch.is_tensor(img)
+        dims = img.ndim
+        if not is_tensor:
+            img = torch.as_tensor(img)
+
+        # Use quantile to avoid outliers
+        img = quantile_clip(img, dim=c_dim, quantile=quantile, clip_mode="both")
+
+        pattern = get_reduce_einops_pattern(dims, c_dim)
         min_c = einops.reduce(img, pattern=pattern, reduction="min")
         max_c = einops.reduce(img, pattern=pattern, reduction="max")
 
@@ -152,21 +304,32 @@ def per_channel_normalize(img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1
             img = img.clamp(0, 1)
         else:
             img = np.clip(img, 0, 1)
-        raise ValueError(f"Unsupported image type: {type(img)}, shape: {img.shape}")
 
     return img
 
 
-def per_channel_add_min(img: torch.Tensor | np.ndarray, hw_dim: tuple = (-2, -1)):
+def per_channel_add_min(
+    img: torch.Tensor | np.ndarray, hw_dim: tuple = (-2, -1), quantile=1.0
+):
     if isinstance(img, (torch.Tensor, np.ndarray)):
-        dims = img.dim() if torch.is_tensor(img) else img.ndim
-        pattern = get_einops_pattern(dims, hw_dim)
-
+        img = torch.as_tensor(img)
+        dims = img.ndim
+        img = quantile_clip(img, quantile=quantile, clip_mode="min")
+        pattern = get_reduce_einops_pattern(dims, hw_dim)
         min_c = einops.reduce(img, pattern=pattern, reduction="min")
         img = img - min_c
     else:
         raise ValueError(f"Unsupported image type: {type(img)}, shape: {img.shape}")
 
+    return img
+
+
+def img_add_min(img, hw_dim: tuple = (-2, -1), quantile=1.0):
+    img = torch.as_tensor(img)
+    dims = img.ndim
+    img = quantile_clip(img, quantile=quantile, clip_mode="min")
+    img_min = img.amin((-3, -2, -1), keepdim=True)
+    img = img - img_min
     return img
 
 
@@ -242,8 +405,7 @@ def sliding_window(
             image = torch.nn.functional.interpolate(
                 image.float(),
                 size=(target_h, target_w),
-                mode="bilinear",
-                align_corners=False,
+                mode=SLIDE_WINDOW_INTERP_MODE,
             ).to(orig_dtype)
             image = shape_inverse(image)
 
@@ -281,8 +443,8 @@ def sliding_window(
             img_slide = torch.as_tensor(img_slide)
             # Check the patch is all zero
             if (
-                background_is_all_zero(img_slide.cuda(), norm=True, is_hwc=is_hwc)
-                and check_background
+                # background_is_all_zero(img_slide.cuda(), norm=True, is_hwc=is_hwc)
+                False and check_background
             ):  # on device check
                 logger.warning(
                     f"Background is all zero at patch ({i_start}:{i_end}, {j_start}:{j_end})"
@@ -314,9 +476,9 @@ def resize_img(
     img = torch.as_tensor(img) if isinstance(img, np.ndarray) else img
     img = cast(torch.Tensor, img)
     img, shape_inverse = to_batched(img, is_hwc=is_hwc)
-    if background_is_all_zero(img[0], norm=True, is_hwc=is_hwc):
-        logger.warning("Image is all zero, skipping resizing.")
-        return [(None, None)]
+    # if background_is_all_zero(img[0], norm=True, is_hwc=is_hwc):
+    #     logger.warning("Image is all zero, skipping resizing.")
+    #     return [(None, None)]
 
     dtype = img.dtype
 
@@ -350,7 +512,7 @@ def resize_or_clip_img(
         h, w = img.shape[-2:]
 
     if resize_before:
-        img = resize_img(img, resize_before, is_hwc=is_hwc)
+        img, _ = resize_img(img, resize_before, is_hwc=is_hwc)[0]
 
     h_max = w_max = 1024
 
@@ -411,33 +573,83 @@ def merge_patches(patches, coords, original_shape, patch_size, stride):
     return merged_image
 
 
+class ExtractMode(Enum):
+    LAST = "last"
+    ALL = "all"
+    NOT_META = "not_meta"
+    SPECIFIC = "specific"
+
+
+def dict_extract(
+    d: dict | h5py.File,
+    keys: list[str] | None = None,
+    extract_type: ExtractMode = ExtractMode.LAST,
+    force_load: bool = True,
+) -> dict | Any:
+    etype = (
+        extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
+    )
+    force_load_fn = lambda x: x[:] if force_load else x
+
+    if keys is None:
+        if etype == "not_meta":
+            ret = {k: force_load_fn(v) for k, v in d.items() if not k.startswith("__")}
+        elif etype == "all":
+            ret = d
+        elif etype == "last":
+            k = list(d.keys())[-1]
+            ret = force_load_fn(d[k])
+        else:
+            raise Exception(f"Invalid extract_type: {etype} when keys is None")
+    else:
+        assert etype == "specific", (
+            f"extract_type must be 'specific' when keys is provided, got {etype}"
+        )
+        ret = {}
+        d_keys = list(d.keys())
+        for k in keys:
+            if k in d_keys:
+                ret[k] = force_load_fn(d[k])
+
+    if isinstance(ret, dict):
+        if len(ret) == 0:
+            log(f"No valid keys found in the dict, available keys: {list(d.keys())}")
+            return None
+        if len(ret) == 1:
+            return list(ret.values())[0]
+
+    return ret
+
+
 def read_image(
     img_path: str | Path,
     *,
-    mat_load_key="I",
+    key_if_dict: list[str] | str | None = None,
+    dict_extract_type: ExtractMode = ExtractMode.LAST,
     verbose=False,
     tiff_read_mode="array",
     tiff_bands_seperated: bool = False,
     force_to_dtype: np.dtype | None = None,
-    bands_name: list[str] | None = BANDS_NAME,
+    bands_name: list[str] | None = None,
     mat_ret_all=False,
-):
+) -> np.ndarray | dict[str, np.ndarray] | np.memmap | list[np.ndarray] | None:
     if isinstance(img_path, str):
         img_path = Path(img_path)
+    if isinstance(key_if_dict, str):
+        key_if_dict = [key_if_dict]
+    if key_if_dict is not None:
+        assert not mat_ret_all, (
+            "mat_ret_all is not supported when key_if_dict is not None"
+        )
+        dict_extract_type = ExtractMode.SPECIFIC
 
     if verbose:
-        log("reading image from: {}", img_path.as_posix())
+        log(f"reading image from: {img_path.as_posix()}")
 
     if img_path.suffix == ".mat":
         try:
             d = loadmat(img_path)
-            if not mat_ret_all:
-                key_ = list(d.keys())[-1]
-                img = d[key_]
-                return img
-            else:
-                d_ret = {k: v for k, v in d.items() if not k.startswith("__")}
-                return d_ret
+            return dict_extract(d, key_if_dict, dict_extract_type)
         except Exception as e:
             log(
                 f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
@@ -446,13 +658,8 @@ def read_image(
             )
 
             with h5py.File(img_path, "r") as f:
-                if not mat_ret_all:
-                    key_ = list(f.keys())[-1]
-                    img = f[key_][:]
-                    return img
-                else:
-                    d_ret = {k: v[:] for k, v in f.items()}
-                    return d_ret
+                d = dict_extract(f, key_if_dict, dict_extract_type)
+                return d
     elif img_path.suffix.lower() == ".img":
         with rasterio.open(img_path) as dataset:
             bands = dataset.count
@@ -461,10 +668,6 @@ def read_image(
             )
             for i in range(bands):
                 img[..., i] = dataset.read(i + 1)
-
-        log(f"Read image {img_path=} using rasterio done")
-        return img
-
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
         try:
             img = np.array(Image.open(img_path))
@@ -505,6 +708,18 @@ def read_image(
             img = np.clip(img, 0, None)
             bands_imgs.append(img)
         img = np.stack(bands_imgs, axis=-1)  # [h, w, c]
+    elif img_path.suffix in [".dat", ".hdr"]:
+        # is envi file
+        if img_path.suffix == ".hdr":
+            hdr_file = str(img_path)
+            img_file = str(img_path.with_suffix(".dat"))
+        else:
+            hdr_file = str(img_path.with_suffix(".hdr"))
+            img_file = img_path
+        if not Path(hdr_file).exists() or not Path(img_file).exists():
+            log(f"envi file pair not found: {hdr_file}, {img_file}", "warning")
+            return None
+        img = spectral.envi.open(hdr_file, img_file).load()
     elif img_path.suffix.lower() in [".tif", ".tiff"]:
         # memmap
         tif = tifffile.TiffFile(img_path)
@@ -521,8 +736,6 @@ def read_image(
             )
             return None
     elif img_path.suffix.lower() in [".mp4"]:
-        from torchvision.io import video_reader
-
         # read video frame
         reader = video_reader.VideoReader(img_path.as_posix(), num_threads=2)
         frames = []
@@ -550,14 +763,13 @@ def read_image(
                 "Please check the image data type and the target dtype.",
                 level="warning",
             )
-
     return img
 
 
 def postprocess_img(
     img: np.ndarray | torch.Tensor,
     normalize: bool = True,
-    rescale: Literal["clamp", "min_max", "add_min"] = "clamp",
+    rescale: Literal["clamp", "min_max", "add_min", "none"] = "clamp",
     to_tensor=True,
     transpose: bool = True,
 ):
@@ -575,8 +787,8 @@ def postprocess_img(
         assert torch.is_tensor(img), "img must be a tensor"
 
         img = img.to(torch.float32)
-        img_max = img.max()
-        if (img_min := img.min()) < 0:
+        img_min, img_max = img.min(), img.max()
+        if img_min < 0:
             logger.warning(f"Image min value is {img_min}, {rescale} to 0")
 
         if rescale == "clamp":
@@ -584,55 +796,84 @@ def postprocess_img(
             img = img / img_max
         elif rescale == "min_max":
             img = per_channel_normalize(
-                img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1)
+                img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999
             )
+        elif rescale == "none" or rescale is None:
+            pass
         else:
             raise ValueError(f"Unsupported rescale method: {rescale} for {normalize=}")
     else:
         # NOTE: To be honest, I am not sure if directly clamping is suitable for hyperspectral image
         # because some sensors may output the negtive value
-
-        img = img.float() if torch.is_tensor(img) else img.astype(np.float32)
+        img = torch.as_tensor(img)
+        img = img.float()
 
         if rescale == "clamp":
             img = img.clamp(min=0)
         elif rescale == "add_min":
-            img = per_channel_add_min(img, hw_dim=(-2, -1) if img.ndim == 4 else (0, 1))
+            # img = per_channel_add_min(
+            #     img,
+            #     hw_dim=(-2, -1) if img.ndim == 4 else (0, 1),
+            #     quantile=0.999,
+            # )
+            img = img_add_min(
+                img, hw_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999
+            )
+        elif rescale == "none" or rescale is None:
+            pass
         else:
             raise ValueError(f"Unsupported rescale method: {rescale} for {normalize=}")
 
-        img_max = img.to(torch.int32).max()
+        img = img.to(torch.int32)
+        img_min, img_max = img.min(), img.max()
 
-    return img, img_max
+    return img, (img_min, img_max)
 
 
 def to_suitable_dtype_img(
     img: torch.Tensor | np.ndarray,
+    img_min: torch.Tensor,
     img_max: torch.Tensor,
     dtype: np.dtype | None = None,
     is_normed: bool = True,
 ):
-    def determine_fit_dtype(img_max, dtype):
+    global _dtype_max_dtypes_unsign, _unsign_to_sign, _dtype_max_dtypes_sign
+
+    def determine_fit_dtype(dtype):
         if dtype is not None:
             return dtype
 
-        global _dtype_max_dtypes, _dtype_max_vals, _numpy_dtype_to_tensor
+        if dtype in [np.float32, torch.float32, torch.float, float, "float"]:
+            return dtype
 
-        for dt, max_val in zip(_dtype_max_dtypes, _dtype_max_vals):
+        dtype = None
+        for dt_us, max_val in zip(_dtype_max_dtypes_unsign, _dtype_max_vals):
             if int(img_max) <= max_val:
-                return dt
+                dtype = dt_us
+                break
+        if img_min < 0:
+            dtype = _unsign_to_sign[dtype]
 
-        raise ValueError(f"Image max value {img_max} is too large to fit any dtype")
+        if dtype is None:
+            raise ValueError(f"Image max value {img_max} is too large to fit any dtype")
 
-    if dtype not in [np.float32, np.float16]:
-        dtype = determine_fit_dtype(img_max, dtype)
+        log(
+            f"Determine image dtype to be {dtype} for img_min: {img_min}, img_max: {img_max}",
+            level="debug",
+        )
+        return dtype
+
+    dtype = determine_fit_dtype(dtype)
 
     if is_normed:
         img = img * img_max
 
     if torch.is_tensor(img):
-        assert img.shape[0] == 1, "batch size must be 1"
-        img = img.cpu().permute(0, 2, 3, 1)[0].numpy().astype(dtype)
+        if img.ndim == 4:
+            img = img.squeeze(0)
+        assert img.ndim == 3
+        # [C, H, W] -> [H, W, C]
+        img = img.cpu().permute(1, 2, 0).numpy().astype(dtype)
     elif isinstance(img, np.ndarray):
         img = img.astype(dtype)
     else:
@@ -698,7 +939,7 @@ def img_saver_backend_compact_with_wds(
             ) from e
     elif extension == "safetensors":
         byte = safetensors.torch.save(
-            {"img": torch.as_tensor(img, dtype=_numpy_dtype_to_tensor[img.dtype.name])}
+            {"img": torch.as_tensor(img, dtype=getattr(torch, img.dtype.name))}
         )
         return byte
     elif extension == "webdataset":
@@ -728,8 +969,9 @@ def clip_img_to_webdataset(
     read_fn_kwargs: dict = {},
     save_kwargs: dict = {"jpg_quality": 90},
     use_yield: bool = True,
-    process_img_type: str = "clip",
-    rescale: str = "clamp",
+    process_img_type: Literal["clip", "resize", "clip_resize", None] = "clip",
+    rescale: Literal["clamp", "min_max", "add_min", "none"] = "clamp",
+    norm: bool = False,
     force_save_dtype: str | np.dtype = "auto",
     add_global_index: bool = False,
     assert_channel_n: int | None = None,
@@ -787,18 +1029,17 @@ def clip_img_to_webdataset(
             global total_img_saved_count
             total_img_saved_count += 1
 
-            patch, img_max = postprocess_img(
+            patch, min_max = postprocess_img(
                 patch,
                 to_tensor=True,
-                normalize=False,
+                normalize=norm,
                 transpose=transpose,
                 rescale=rescale,
             )
 
-            patch, dtype = to_suitable_dtype_img(
-                patch, img_max, dtype=save_dtype, is_normed=False
+            patch, save_dtype = to_suitable_dtype_img(
+                patch, *min_max, dtype=save_dtype, is_normed=norm
             )
-            save_dtype = dtype
 
             # write to webdataset
             # img_name = img_name.replace(
@@ -818,7 +1059,7 @@ def clip_img_to_webdataset(
             sink.write(
                 {
                     "__key__": saved_name,
-                    f"img.{saved_ext}": img_saver_backend_compact_with_wds(
+                    f"{IMG_SAVE_NAME}.{saved_ext}": img_saver_backend_compact_with_wds(
                         patch,
                         save_backend,
                         **save_kwargs,
@@ -835,9 +1076,12 @@ def clip_img_to_webdataset(
 
     img_name = Path(img_path).stem
     img = read_image(img_path, verbose=False, **read_fn_kwargs)
+    assert isinstance(img, np.ndarray)
     if img is None:
         logger.warning(f"Failed to read image from {img_path}, skipping.")
         return None, None, None
+    if img.ndim == 2:
+        img = img[..., None]  # H, W -> H, W, 1
     if assert_channel_n is not None:
         if img.shape[-1] != assert_channel_n:
             logger.warning(
@@ -870,6 +1114,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     ] = "tiff",
     max_size: int = 4 * 1024 * 1024 * 1024,
     force_save_dtype: str | np.dtype = "auto",
+    img_rescale="clamp",
     save_kwargs: dict = {"jpg_quality": 90},
     add_global_index: bool = False,
     glob_pattern: str | list[str] = ["*.tif", "*.tiff"],
@@ -878,6 +1123,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     tqdm_or_not: bool = True,
     delete_file: bool = False,
     channel_n: int | None = None,  # assert the channel number of the image
+    use_shard_writter: bool = True,
 ):
     if dataset_root is not None:
         if isinstance(dataset_root, (str, Path)):
@@ -905,7 +1151,11 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     logger.info(f"make output dir {Path(webdataset_pattern).parent.as_posix()}")
 
     # write to webdataset
-    with wds.ShardWriter(webdataset_pattern, maxsize=max_size) as sink:
+    if use_shard_writter:
+        writter_fn = lambda: wds.ShardWriter(webdataset_pattern, maxsize=max_size)
+    else:
+        writter_fn = lambda: wds.TarWriter(webdataset_pattern)
+    with writter_fn() as sink:
         for msi_file in (tbar := tqdm(msi_files, disable=not tqdm_or_not)):
             msi_file = cast(Path, msi_file)  # ensure msi_file is Path type
             n_patches, shape, patch_shape = clip_img_to_webdataset(
@@ -919,7 +1169,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 transpose=read_transpose,
                 read_fn_kwargs=read_fn_kwargs,
                 save_kwargs=save_kwargs,
-                rescale="clamp",  # default rescale method
+                rescale=img_rescale,
                 force_save_dtype=force_save_dtype,
                 assert_channel_n=channel_n,
                 add_global_index=add_global_index,
@@ -1209,22 +1459,48 @@ if __name__ == "__main__":
         #     }
         # )
 
-        all_msi_files_s = [
-            "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm1.mat",
-            "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm2.mat",
-        ]
-        webdataset_pts = "data/Downstreams/ChangeDetection/hyper_images/CD-FarmLand-155bands-px_128-%04d.tar"
+        # all_msi_files_s = [
+        #     "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm1.mat",
+        #     "data/Downstreams/ChangeDetection/mat_2/FarmLand/mat/Farm2.mat",
+        # ]
+        # webdataset_pts = "data/Downstreams/ChangeDetection/hyper_images/CD-FarmLand-155bands-px_128-%04d.tar"
+        # func_kwargs.update(
+        #     {
+        #         "channel_n": 155,
+        #         "save_backend": "tiff",
+        #         "process_img_type": "clip",
+        #         "img_clip_size": (128, 128),
+        #         "img_stride": (128, 128),
+        #         "save_backend": "tiff",
+        #         "save_kwargs": {
+        #             "tiff_compression_type": "zlib",
+        #         },
+        #     }
+        # )
+
+        # Oil leakage segmentation
+        all_msi_files_s = glob("data/Downstreams/OilLeackage/*.mat")
+        webdataset_pts = (
+            # "data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_Image.tar"
+            "data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_GT.tar"
+        )
+        IMG_SAVE_NAME = "gt"
+        SLIDE_WINDOW_INTERP_MODE = "nearest"
         func_kwargs.update(
             {
-                "channel_n": 155,
+                "img_rescale": "none",  # img: add_min, gt: none
+                "read_fn_kwargs": {"key_if_dict": "map"},
                 "save_backend": "tiff",
                 "process_img_type": "clip",
-                "img_clip_size": (128, 128),
-                "img_stride": (128, 128),
+                "img_clip_size": (512, 512),
+                "img_stride": (512, 512),
                 "save_backend": "tiff",
                 "save_kwargs": {
+                    # "tiff_compression_type": "jpeg2000",
+                    # "jpeg_quality": 90,
                     "tiff_compression_type": "zlib",
                 },
+                "use_shard_writter": False,
             }
         )
 
@@ -1345,12 +1621,6 @@ if __name__ == "__main__":
         )
         for wds_pt, all_msi_files in zip(webdataset_pts, all_msi_files_s):
             loop_dataset_tif_MSI_images_to_webdataset(
-                # webdataset_pattern="data/DIOR_RSVG_Dataset/hyper_images/DIOR_RSVG_3_bands-px_800-RGB-jp2k-80-%04d.tar",
-                # webdataset_pattern="data/OpenEarthMap/hyper_images/OpenEarthMap_3_bands-px_1000-RGB-jp2k-80-%04d.tar",
-                # webdataset_pattern='data/RefSegRS/hyper_images/RefSegRS_3_bands-px_512-RGB-jp2k-80-%04d.tar',
-                # webdataset_pattern="data/VDD/segmentation_label/VDD_3_bands-px_512-RGB-jp2k-80-%04d.tar",
-                # webdataset_pattern="data/LoveDA/hyper_images/LoveDA-3_bands-px_1024-%04d.tar",
-                # webdataset_pattern="data/ERA_UAV_Video_Dataset/hyper_images/ERA_UAV_Video_Dataset_key_frames_3_bands-px_512-RGB-jp2k-80-%04d.tar",
                 webdataset_pattern=wds_pt,
                 msi_files=all_msi_files,
                 save_backend=func_kwargs.pop("save_backend", "jpeg"),

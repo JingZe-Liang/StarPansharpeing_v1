@@ -66,56 +66,6 @@ def change_new_conv_in_out_modules(
     conv_out_module.add_or_drop_modules(add_chans=add_chans, drop_chans=drop_chans)
 
 
-# * --- Latent utilities --- #
-
-
-def dim_match(tensor: Tensor, target: Tensor) -> Tensor:
-    if tensor.ndim == 0:
-        return tensor
-    elif tensor.ndim == 1:
-        if target.ndim == 4:  # b, c, h, w
-            return tensor.view(1, -1, 1, 1)
-        elif target.ndim == 3:  # b, l, c
-            return tensor.view(1, 1, -1)
-        else:
-            raise ValueError(f"Unsupported target ndim: {target.ndim}")
-    else:
-        raise ValueError(f"Unsupported tensor ndim: {tensor.ndim}")
-
-
-def scale_shift_latent(
-    latent: Tensor, scale: Tensor | float, shift: Tensor | float
-) -> Tensor:
-    """Scale and shift the latent tensor."""
-    if isinstance(scale, float):
-        scale = torch.as_tensor(scale, device=latent.device, dtype=latent.dtype)
-    if isinstance(shift, float):
-        shift = torch.as_tensor(shift, device=latent.device, dtype=latent.dtype)
-
-    scale = cast(Tensor, scale)
-    shift = cast(Tensor, shift)
-
-    scale = dim_match(scale, latent)
-    shift = dim_match(shift, latent)
-    latent.sub_(shift).div_(scale)
-
-    return latent
-
-
-def un_scale_shift_latent(latent, scale, shift):
-    """Un-scale and un-shift the latent tensor."""
-    if isinstance(scale, float):
-        scale = torch.as_tensor(scale, device=latent.device, dtype=latent.dtype)
-    if isinstance(shift, float):
-        shift = torch.as_tensor(shift, device=latent.device, dtype=latent.dtype)
-
-    scale = dim_match(scale, latent)
-    shift = dim_match(shift, latent)
-    latent.mul_(scale).add_(shift)
-
-    return latent
-
-
 # * --- LoRA Mixin --- #
 
 

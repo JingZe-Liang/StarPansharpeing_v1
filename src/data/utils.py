@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 import re
@@ -6,7 +7,7 @@ import types
 import warnings
 from itertools import chain, product
 from pathlib import Path
-from typing import Annotated, Any, Callable, Iterable, TypeAlias, cast
+from typing import Annotated, Any, Callable, Iterable, Literal, TypeAlias, cast
 
 import braceexpand
 import numpy as np
@@ -23,6 +24,7 @@ from kornia.augmentation import (
 from torch import Tensor
 
 from src.utilities.logging.print import log_print
+from src.utilities.network_utils.shaping import reverse_einops_pattern
 from src.utilities.train_utils.state import StepsCounter
 
 LoadedData: TypeAlias = torch.Tensor | np.ndarray | str
@@ -306,100 +308,201 @@ def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = Non
     return sample
 
 
-def _is_large_img(img):
+# * --- Normalization Functions --- #
+
+
+def _is_large_img(img, max_hw: int = 2048):
     h, w = img.shape[-2:]
-    if h > 2047 or w > 2047:
+    if h > max_hw or w > max_hw:
         return True
     return False
+
+
+def _downsample_img(
+    img: Float[Tensor, "c h w"], tgt_hw: int = 1024, downsample_type: str = "slice"
+):
+    if not _is_large_img(img, tgt_hw):
+        return img
+
+    get_longest_downsample_scale = lambda hw: math.ceil(math.ceil(max(hw) / tgt_hw))
+
+    def _slice_fn(img):
+        h, w = img.shape[-2:]
+        scale = get_longest_downsample_scale((h, w))
+        # longest side
+        img = img[..., ::scale, ::scale]
+        return img
+
+    if downsample_type == "slice":
+        return _slice_fn(img)
+    elif downsample_type == "interpolate":
+        # add batch dim
+        img = img.unsqueeze(0)  # 1, c, h, w
+        scale = get_longest_downsample_scale(tuple(img.shape[2:]))
+        img = torch.nn.functional.interpolate(
+            img, scale_factor=1 / scale, mode="bilinear", align_corners=False
+        )
+    else:
+        raise ValueError(f"Unknown downsample_type: {downsample_type}")
+
+    return img.squeeze(0)
+
+
+def add_n_dim_last_as(x, other):
+    n_add_dim = other.ndim - x.ndim
+    assert n_add_dim >= 0, "other dim should be larger than x dim"
+    for _ in range(n_add_dim):
+        x = x.unsqueeze(-1)
+    return x
+
+
+def quantile_clip_(
+    img: Float[Tensor, "... c h w"],
+    quantile: float = 1.0,
+    per_channel: bool = False,
+    clip_mode: str = "both",
+    q_interp="higher",
+):
+    if quantile == 1.0:
+        return img
+
+    def q_clip_closure_(x: Tensor):
+        q_dim = -1
+        if clip_mode == "both":
+            q_min = x.quantile(
+                1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+            )
+            q_max = x.quantile(
+                quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+            )
+        elif clip_mode == "min":
+            q_min = x.quantile(
+                1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+            )
+            q_max = None
+        elif clip_mode == "max":
+            q_min = None
+            q_max = x.quantile(
+                quantile, dim=q_dim, interpolation=q_interp, keepdim=True
+            )
+        else:
+            raise ValueError(f"Unknown clip_mode: {clip_mode}")
+
+        # expand q_min, q_max to x dims
+        if q_min is not None:
+            q_min = add_n_dim_last_as(q_min, x)
+        if q_max is not None:
+            q_max = add_n_dim_last_as(q_max, x)
+        return q_min, q_max
+
+    # flatten for quantile calculation
+    c, h, w = img.shape[-3:]
+    fp = "... c h w -> ... (c h w)" if not per_channel else "... c h w -> ... c (h w)"
+    img = rearrange(img, fp)
+
+    # downsample the image to avoid quantile calculation error
+    img_ = _downsample_img(img, tgt_hw=1024, downsample_type="slice")
+    try:
+        q_min, q_max = q_clip_closure_(img_)
+    except Exception as e:
+        raise RuntimeError(f"Failed to compute the quantile for {img.shape}") from e
+
+    # clamp
+    img = img.clamp_(q_min, q_max)
+
+    # reshape back
+    r_fp = reverse_einops_pattern(fp)
+    img = rearrange(img, r_fp, c=c, h=h, w=w)
+    return img
+
+
+def img_normalize_to_zero_one_(
+    img: Float[Tensor, "... c h w"],
+    norm_type: str = "clip_zero_div",
+    per_channel: bool = False,
+    mannual_img_min_max: tuple[float, float] | None = None,
+    eps=1e-8,
+):
+    if mannual_img_min_max is not None:
+        img_min, img_max = mannual_img_min_max
+        img.sub_(img_min).div_(img_max - img_min + 1e-8)
+        return img
+
+    if norm_type == "min_max":
+        dims = (-2, -1) if per_channel else (-3, -2, -1)
+        img_min = img.amin(dims, keepdim=True)
+        img_max = img.amax(dims, keepdim=True)
+        if img_max.max().item() - img_min.max().item() < 1e-4:
+            img = torch.zeros_like(img)
+        else:
+            img.sub_(img_min).div_(img_max - img_min + eps)
+    elif norm_type == "clip_zero_div":
+        img = img.clamp_(min=0)
+        dims = (-2, -1) if per_channel else (-3, -2, -1)
+        img_max = img.amax(dim=dims, keepdim=True)
+        if img_max.max().item() < 1e-4:
+            img = torch.zeros_like(img)
+        else:
+            img.div_(img_max + eps)
+    elif norm_type == "z_score":
+        dims = (-2, -1) if per_channel else (-3, -2, -1)
+        mean = img.mean(dims, keepdim=True)
+        std = img.std(dims, keepdim=True)
+        # Handle case where std is 0 (constant image)
+        if std.max().item() < 1e-8:
+            img = torch.zeros_like(img)
+        else:
+            img.sub_(mean).div_(std + eps)
+    else:
+        raise ValueError(f"Invalid norm_type: {norm_type}")
+
+    return img
 
 
 def norm_img_(
     img: Float[Tensor, "... C H W"] | Float[Tensor, "... H W"],
     per_channel=False,
-    clip_zero=True,
+    norm_type: str = "clip_zero_div",
     to_neg_1_1=True,
-    manual_img_max: float | None = None,
-    quantile_clip: Annotated[float, "0.0-1.0"] = 1.0,
+    mannual_img_min_max: tuple[float, float] | None = None,
+    q_clip: Annotated[float, "0.0-1.0"] = 1.0,
     eps: float = 1e-8,
 ):
+    # quantile clip -> normalization -> to (0, 1) or (-1, 1)
+
+    # 1. Add the channel dim to form h, w, c shape
     if is_dim2 := img.ndim == 2:
         # is h, w image
         img.unsqueeze_(0)  # add channel dim if ndim == 2
 
-    if clip_zero:
-        img.clip_(min=0.0, max=None)  # clip to [0, inf)
-    else:
-        # if not clip zero, then we add the min to make it positive
-        img_min = img.min() if not per_channel else img.amin(dim=(-2, -1), keepdim=True)
-        img.sub_(img_min)
-
-    # If some value in some channels are too large, clamp them to the quantile value
+    # 2. Quantile clip
     is_ch_3 = img.shape[0] == 3
-    use_quantile_clip = (
-        quantile_clip < 1.0 and not is_ch_3
-    )  # ignore RGB image, always use max
-
-    if manual_img_max is not None:
-        assert not per_channel, "manual_img_max and per_channel cannot be set together"
-        assert quantile_clip == 1.0, (
-            "quantile_clip and manual_img_max cannot be set together"
+    use_quantile_clip = q_clip < 1.0 and not is_ch_3  # ignore RGB image, always use max
+    if use_quantile_clip:
+        img = quantile_clip_(
+            img, quantile=q_clip, per_channel=per_channel, clip_mode="both"
         )
-        q_max = torch.as_tensor(manual_img_max).to(img.device)
 
-    elif use_quantile_clip:
-        dim = -2 if per_channel else 0
-        # (c, h, w) -> (c, h*w)
-        # (c, h, w) -> (c*h*w,)
-        try:
-            # Downsample if the image is too large, reduce the cost of quantile computation
-            img_ = img
-            _n_down_iter = 0
-            while _is_large_img(img_):
-                img_ = img_[..., ::2, ::2]
-                _n_down_iter += 1
-                if _n_down_iter > 10:
-                    warnings.warn(
-                        "Too many downsampling iterations, something might be wrong.",
-                        category=UserWarning,
-                    )
-            q_max = (
-                img_.flatten(dim).quantile(
-                    q=quantile_clip, dim=-1, interpolation="higher", keepdim=True
-                )
-                + eps
-            )  # (c, 1) or (1,)
-            log_print(f"Quantile clip: {q_max}, Max: {img.max()}", "debug")
-        except Exception as e:
-            log_print(f"Failed to compute quantile: {e} for shape {img.shape}", "error")
-            raise RuntimeError from e
+    # 3. Image normalization to (0, 1)
+    if is_ch_3:
+        # RGB image is not JPEG or PNG decoded, it can not have negative values
+        # and no need to use quantile clip
+        norm_type = "clip_zero_div"
+    img = img_normalize_to_zero_one_(
+        img,
+        norm_type=norm_type,
+        per_channel=per_channel,
+        mannual_img_min_max=mannual_img_min_max,
+        eps=eps,
+    )
 
-        if per_channel:
-            q_max = q_max[..., None]  # c, 1, 1
-    else:
-        q_max = None
-
-    # Per-channel normalization
-    if not use_quantile_clip:
-        if per_channel:
-            img_max = img.amax(dim=(-2, -1), keepdim=True)
-        else:
-            img_max = img.max()
-    else:
-        assert q_max is not None, "q_max is None"
-        img_max = q_max
-
-    if img_max.max().item() < 1e-4:
-        # fall back
-        img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
-    else:
-        img.div_(img_max + eps).clamp_(0.0, 1.0)  # normalize to [0, 1]
-
-    # To (-1, 1) or (0, 1)
+    # 4. To (-1, 1) or (0, 1)
     if to_neg_1_1:
         img.mul_(2.0).sub_(1.0)  # normalize to [-1, 1]
 
+    # 5. Squeeze the image
     if is_dim2:
-        img = img.squeeze(0)
+        img.squeeze_(0)
 
     return img
 
@@ -411,10 +514,10 @@ def norm_img(
     permute: bool = True,
     check_nan: bool = False,
     on_device: bool = False,
-    clip_zero: bool = True,
+    norm_type: Literal["clip_zero_div", "min_max", "z_score"] = "clip_zero_div",
     per_channel: bool = False,
     quantile_clip: float = 1.0,
-    manual_img_max: float | None = None,
+    mannual_img_min_max: tuple[float, float] | None = None,
 ):
     """
     Normalize image(s) in a sample to [0, 1] and optionally to [-1, 1].
@@ -489,12 +592,21 @@ def norm_img(
 
         # Normalize image
         img = norm_img_(
-            img, per_channel, clip_zero, to_neg_1_1, manual_img_max, quantile_clip
+            img=img,
+            per_channel=per_channel,
+            norm_type=norm_type,
+            to_neg_1_1=to_neg_1_1,
+            mannual_img_min_max=mannual_img_min_max,
+            q_clip=quantile_clip,
+            eps=1e-8,
         )
 
         sample[key] = img
 
     return sample
+
+
+# * --- Filters --- #
 
 
 def size_filtering(

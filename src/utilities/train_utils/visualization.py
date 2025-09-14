@@ -8,6 +8,7 @@ from jaxtyping import Float, Float32, Int, UInt
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from numpy.typing import NDArray
 from PIL import Image
+from scipy.stats import entropy
 from torch import Tensor
 from torchvision.utils import make_grid
 
@@ -54,22 +55,6 @@ RGB_CHANNELS_BY_BANDS = {
     438: "mean",  # [62, 33, 19],
     439: "mean",
 }
-
-
-@beartype
-def choose_largest_bands(
-    img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
-) -> list[int]:
-    if torch.is_tensor(img):
-        mean_cs = img.view(-1, *img.shape[-3:]).mean((0, -2, -1)).detach().cpu()
-    else:
-        mean_cs = img.mean((0, 1))
-    mean_cs = np.asarray(mean_cs)
-    indices = np.argsort(mean_cs)[::-1][:3].tolist()
-    assert indices[-1] < img.shape[1], (
-        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
-    )
-    return indices
 
 
 def get_coco_colors():
@@ -163,6 +148,65 @@ def get_coco_colors():
     return COCO_CATEGORIES / 255.0
 
 
+@beartype
+def _choose_largest_bands(
+    img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
+) -> list[int]:
+    if torch.is_tensor(img):
+        mean_cs = img.view(-1, *img.shape[-3:]).mean((0, -2, -1)).detach().cpu()
+    else:
+        mean_cs = img.mean((0, 1))
+    mean_cs = np.asarray(mean_cs)
+    indices = np.argsort(mean_cs)[::-1][:3].tolist()
+    assert indices[-1] < img.shape[1], (
+        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
+    )
+    return indices
+
+
+def _calculate_band_entropy(band: torch.Tensor) -> float:
+    """Calculate entropy of a single band for band selection."""
+    # Convert to numpy and normalize to [0, 1] for entropy calculation
+    band_np = band.cpu().numpy()
+    band_np = (band_np - band_np.min()) / (band_np.max() - band_np.min() + 1e-10)
+
+    # Calculate histogram
+    hist, _ = np.histogram(band_np, bins=256, range=(0, 1))
+    prob = hist / hist.sum()
+
+    # Calculate entropy
+    return entropy(prob)
+
+
+def _select_bands_by_entropy(img: torch.Tensor, n_bands: int = 3) -> list[int]:
+    """Select bands with highest entropy."""
+    c = img.shape[1]
+    entropies = torch.tensor(
+        [_calculate_band_entropy(img[:, i, :, :]) for i in range(c)]
+    )
+    return torch.argsort(entropies, descending=True)[:n_bands].tolist()
+
+
+def _select_bands_by_low_correlation(img: torch.Tensor, n_bands: int = 3) -> list[int]:
+    """Select bands with lowest correlation to other bands."""
+    c = img.shape[1]
+
+    # Reshape to 2D for correlation calculation
+    img_2d = img.permute(0, 2, 3, 1).reshape(-1, c)
+
+    # Calculate correlation matrix
+    correlation_matrix = torch.corrcoef(img_2d.T)
+
+    # Handle NaN values (can occur with constant bands)
+    correlation_matrix = torch.nan_to_num(correlation_matrix, nan=0.0)
+
+    # Calculate correlation scores (sum of absolute correlations)
+    correlation_scores = torch.sum(torch.abs(correlation_matrix), dim=1)
+
+    # Select bands with lowest correlation scores
+    return torch.argsort(correlation_scores)[:n_bands].tolist()
+
+
 @function_config_to_basic_types
 def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None):
     global RGB_CHANNELS_BY_BANDS
@@ -182,13 +226,22 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None
         bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
         rgb_img = torch.stack(bands, dim=1)
     elif rgb_channels == "largest":
-        indices = choose_largest_bands(img)
+        indices = _choose_largest_bands(img)
+        rgb_img = img[:, indices, :, :]
+    elif rgb_channels == "std":
+        stds = img.var(dim=(1, 2, 3))
+        index = torch.argsort(stds, descending=True)[:3]
+        rgb_img = img[:, index, :, :]
+    elif rgb_channels == "entropy":
+        indices = _select_bands_by_entropy(img)
+        rgb_img = img[:, indices, :, :]
+    elif rgb_channels == "low_correlation":
+        indices = _select_bands_by_low_correlation(img)
         rgb_img = img[:, indices, :, :]
     else:
         raise ValueError(
-            f"Invalid RGB channels mapping: {rgb_channels}. Expected list, tuple or 'mean'."
+            f"Invalid RGB channels mapping: {rgb_channels}. Expected list, tuple, 'mean', 'largest', 'std', 'entropy', or 'low_correlation'."
         )
-
     return rgb_img
 
 
@@ -202,7 +255,7 @@ def visualize_hyperspectral_image(
     nrows: int = 1,
     to_grid=False,
     to_uint8=True,
-) -> Float[NDArray, "h w c"] | list[Image.Image] | Image.Image:
+) -> UInt[NDArray, "h w c"] | Float[NDArray, "h w c"] | list[Image.Image] | Image.Image:
     """Visualize a hyperspectral image by converting it to RGB format.
 
     Args:

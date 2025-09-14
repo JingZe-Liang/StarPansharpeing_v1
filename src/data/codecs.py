@@ -2,7 +2,7 @@ import io
 import json
 import warnings
 from functools import partial
-from typing import Any, Dict, Literal, assert_type, cast
+from typing import Any, Dict, Literal, cast
 
 import numpy as np
 import scipy.io
@@ -14,7 +14,7 @@ from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
 from timm.layers.helpers import to_2tuple
 
-from src.utilities.logging import log_print, once
+from src.utilities.logging import log_print
 
 from .utils import norm_img_
 
@@ -380,12 +380,14 @@ def wids_image_decode(
     to_neg_1_1: bool = True,
     permute: bool | Literal["auto"] = True,
     resize_fn: str = "interpolate",
+    interp_mode: str = "bilinear",
     resize: int | tuple[int, int] | None = None,
     process_img_keys: str | list[str] | Literal["ALL"] | None = "img",
     mat_is_single_img: bool = True,
-    clip_zero=True,
+    per_channel: bool = False,
+    norm_type: str = "clip_zero_div",
     quantile_clip=1.0,
-    manual_img_max=None,
+    mannual_img_min_max=None,
 ):
     def img_process_fn(img, key: str, resize=resize):
         img = img.astype(np.float32)
@@ -406,8 +408,9 @@ def wids_image_decode(
             # assume c is the smallest dimension
             if c < h and c < w:  # is (h, w, c) shape
                 img = np.transpose(img, (2, 0, 1))  # to CHW
-            once(log_print)(
+            log_print(
                 f"[Wids Decoder]: auto permute is enabled, the image shape is ({h, w, c}) -> ({tuple(img.shape)})",
+                once=True,
             )
 
         # to Tensor
@@ -416,10 +419,11 @@ def wids_image_decode(
         # Normalize image
         img = norm_img_(
             img,
-            clip_zero=clip_zero,
+            norm_type=norm_type,
+            per_channel=per_channel,
             to_neg_1_1=to_neg_1_1,
-            quantile_clip=quantile_clip,
-            manual_img_max=manual_img_max,
+            q_clip=quantile_clip,
+            mannual_img_min_max=mannual_img_min_max,
         )
 
         # Resize
@@ -428,7 +432,10 @@ def wids_image_decode(
             img = img.unsqueeze(0)  # add batch dim
             if resize_fn == "interpolate":
                 img = torch.nn.functional.interpolate(
-                    img, size=resize, mode="bilinear", align_corners=False
+                    img,
+                    size=resize,
+                    mode=interp_mode,
+                    align_corners=False if interp_mode == "bilinear" else None,
                 ).squeeze(0)
             else:
                 raise NotImplementedError(f"not implmented function {resize_fn}")
@@ -444,6 +451,8 @@ def wids_image_decode(
             return single_img_mat_decode_io if mat_is_single_img else mat_decode_io
         else:
             raise ValueError(f"Unsupported image file type: {k}")
+
+    ## Entry
 
     # 1. Decode image files
     img_in_sample = False

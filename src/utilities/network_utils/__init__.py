@@ -16,4 +16,11 @@ from .perf_utils import (
     speed_test_context,
     timer,
 )
-from .shaping import reshape_wrapper
+from .shaping import (
+    flatten_any,
+    get_flatten_einops_pattern,
+    get_reduce_einops_pattern,
+    reduce_any,
+    reshape_wrapper,
+    reverse_einops_pattern,
+)

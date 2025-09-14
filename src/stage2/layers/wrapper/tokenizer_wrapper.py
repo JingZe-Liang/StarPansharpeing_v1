@@ -20,7 +20,7 @@ def _not_lora_not_implemented_raise(self, *args, **kwargs):
     )
 
 
-class ModelTokenizerWrapper(nn.Module):
+class DownstreamModelTokenizerWrapper(nn.Module):
     def __init__(
         self,
         tokenizer: ContinuousImageTokenizer | TokenizerLoRAMixin,
