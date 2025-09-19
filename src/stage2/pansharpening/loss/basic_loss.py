@@ -2187,7 +2187,7 @@ def get_ssim_loss(implem_by: str = "kornia", **ssim_kwargs):
     """
     if implem_by == "kornia":
         ssim_kwargs.pop("channel", None)
-        return K_SSIMLoss(**ssim_kwargs)
+        return K_SSIMLoss(window_size=11, **ssim_kwargs)
     elif implem_by == "torch":
         return SSIMLoss(**ssim_kwargs)
     else:

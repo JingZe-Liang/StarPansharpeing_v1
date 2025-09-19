@@ -1,6 +1,7 @@
 from functools import partial
 
 import torch.nn as nn
+import torch.utils.checkpoint
 from timm.layers.create_act import create_act_layer, get_act_layer
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
@@ -64,9 +65,10 @@ class MbConvLNBlock(nn.Module):
         expand_ratio: float = 4.0,
     ):
         super(MbConvLNBlock, self).__init__()
+        self.grad_checkpointing = False
+
         self.stride, self.in_chs, self.out_chs = stride, in_chs, out_chs
         mid_chs = make_divisible(out_chs * expand_ratio)
-        # breakpoint()
         prenorm_act_layer = partial(
             get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
         )
@@ -98,10 +100,7 @@ class MbConvLNBlock(nn.Module):
             cond_chs, mid_chs, 3, stride=1, padding=1, bias=True
         )
 
-    def init_weights(self, scheme=""):
-        named_apply(partial(_init_conv, scheme=scheme), self)
-
-    def forward(self, x, cond):
+    def forward_(self, x, cond):
         shortcut = self.shortcut(x)
 
         x = self.pre_norm(x)
@@ -121,3 +120,11 @@ class MbConvLNBlock(nn.Module):
         x = self.drop_path(x) + shortcut
 
         return x
+
+    def forward(self, x, cond):
+        if self.grad_checkpointing:
+            return torch.utils.checkpoint.checkpoint(
+                self.forward_, x, cond, use_reentrant=False
+            )
+        else:
+            return self.forward_(x, cond)

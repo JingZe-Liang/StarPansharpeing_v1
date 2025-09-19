@@ -4,7 +4,7 @@ hydra:
     dir: .
 
 defaults:
-  - data: ikonos
+  - data: qb
   - tokenizer: cosmos_f8c16p4_lora
   # self ============
   - _self_
@@ -19,13 +19,14 @@ total_bands_of_sensors:
   WV2: 8
   WV3: 8
   WV4: 4
+  QB: 4
   IKONOS: 4
   MMSeg_YREB: 12
   DCF_2019: 8
 
 processor:
   ratio: 4
-  sensor: IKONOS
+  sensor: QB
   pan_weights: mean # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
   downsample_type: avgpool
   nbands: ${total_bands_of_sensors.${processor.sensor}}
@@ -42,5 +43,5 @@ consts:
   tar_file_name: Pansharpening_${processor.sensor}.tar
 
 output:
-  output_dir: data/IKONOS
+  output_dir: data/QB
   maxsize: 4.0e9

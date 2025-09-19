@@ -4,16 +4,19 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from src.utilities.config_utils import function_config_to_basic_types
+
 from .basic_loss import get_loss
 
 
 class AmotizedPixelLoss(nn.Module):
+    @function_config_to_basic_types
     def __init__(
         self,
         pixel_loss_type: str,
         amotized_loss: Callable[[Tensor, Tensor], Tensor],
         pixel_loss_kwargs: dict = {},
-        factors: tuple = (1.0, 1.0),
+        factors: tuple = (0.0, 1.0),
     ):
         super().__init__()
         self.amotized_loss = amotized_loss
@@ -35,14 +38,18 @@ class AmotizedPixelLoss(nn.Module):
         # 2. pixel loss on sr (e.g., dircectly predicted sr pixels) and gt
         sr_pixel_loss = 0.0
         if pred_sr is not None and sr is not None:
-            sr_pixel_loss = self.pixel_loss(pred_sr, sr) * self.factors[1]
+            sr_pixel_loss = self.pixel_loss(pred_sr, sr)
+            if isinstance(sr_pixel_loss, tuple):
+                sr_pixel_loss, _ = sr_pixel_loss
+            sr_pixel_loss = sr_pixel_loss * self.factors[1]
 
         # 3. pixel loss on tokenizer decoded sr and gt, may backward from the de-tokenizer
         sr_pixel_loss2 = 0.0
         if pred_sr_from_latent is not None and sr2 is not None:
-            sr_pixel_loss2 += (
-                self.pixel_loss(pred_sr_from_latent, sr2) * self.factors[-1]
-            )
+            sr_pixel_loss2 += self.pixel_loss(pred_sr_from_latent, sr2)
+            if isinstance(sr_pixel_loss2, tuple):
+                sr_pixel_loss2, _ = sr_pixel_loss2
+            sr_pixel_loss2 = sr_pixel_loss2 * self.factors[1]
 
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
@@ -58,7 +65,7 @@ class AmotizedPixelLoss(nn.Module):
         loss_dict = {
             "latent_loss": latent_loss,
             "pixel_loss": pixel_loss,
-            "pixel_from_latent": pixel_from_latent,
+            "pixel_from_latent_loss": pixel_from_latent,
             "total_loss": loss,
         }
 

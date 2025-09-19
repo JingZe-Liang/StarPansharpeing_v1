@@ -1,4 +1,4 @@
-_target_: src.data.get_wids_mat_full_resolution_dataloder
+_target_:  src.stage2.pansharpening.data.pansharpening_loader.get_wids_mat_full_resolution_dataloder
 wds_paths:
   img: data/WorldView2/pansharpening_full/MS_shardindex.json # to be img compatible with the processor
   pan: data/WorldView2/pansharpening_full/PAN_shardindex.json

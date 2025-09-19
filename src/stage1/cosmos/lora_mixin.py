@@ -7,13 +7,16 @@ import accelerate
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, set_peft_model_state_dict
-from torch import Tensor
+from torch import Tensor, unsafe_chunk
 
 from src.stage1.cosmos.modules.blocks import (
     DiffBandsInputConvIn,
     DiffBandsInputConvOut,
 )
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
+
+from .tokenizer_inference import scale_shift_latent, un_scale_shift_latent
 
 # * --- Network utilites --- #
 
@@ -70,6 +73,7 @@ def change_new_conv_in_out_modules(
 
 
 class TokenizerLoRAMixin(nn.Module):
+    @function_config_to_basic_types
     def __init__(
         self,
         tokenizer: nn.Module,
@@ -105,10 +109,8 @@ class TokenizerLoRAMixin(nn.Module):
         scale_factor, shift_factor = tokenizer_scale_shift or (1.0, 0.0)
         self.register_buffer("scale_factor", torch.as_tensor(scale_factor))
         self.register_buffer("shift_factor", torch.as_tensor(shift_factor))
-
-        self.encode: Callable
-        self.decode: Callable
-        self.forward: Callable
+        self.scale_factor: nn.Buffer
+        self.shift_factor: nn.Buffer
 
         # Store LoRA info for lazy loading
         self.lora_weights = {
@@ -140,12 +142,17 @@ class TokenizerLoRAMixin(nn.Module):
         if active_lora is not None:
             self.change_lora(active_lora, merge=False)
 
+        # Update methods to use base model
+        self._update_methods_from_model(self.base_model)
+
     def set_base_model(self, model):
         """Set the base tokenizer"""
         assert model is not None, "model should be a nn.Module"
         model.requires_grad_(False)
         self._offload_model = deepcopy(model.cpu())  # offload to CPU
         self.base_model = model.cuda()
+        if hasattr(self.base_model, "quantizer"):
+            self.quantizer = self.base_model.quantizer
         log_print(f"Offload one copy of model into CPU and one base model to CUDA.")
 
     @property
@@ -167,7 +174,7 @@ class TokenizerLoRAMixin(nn.Module):
 
     def _update_methods_from_model(self, model):
         """Update encode/decode/forward methods from given model"""
-        attrs = ["encode", "decode", "forward", "to", "cuda", "cpu", "train", "eval"]
+        attrs = ["to", "cuda", "cpu", "train", "eval"]
         for attr in attrs:
             setattr(self, attr, getattr(model, attr))
 
@@ -246,7 +253,7 @@ class TokenizerLoRAMixin(nn.Module):
         self.current_lora_chan = self.lora_changed_chans[lora_name]
 
         # Update methods to use PEFT model instead of base tokenizer
-        self._update_methods_from_model(self.model_peft)
+        # self._update_methods_from_model(self.model_peft)
 
     def change_lora(
         self, lora_name: str, merge=False, not_cache_action: str = "warning"
@@ -305,7 +312,7 @@ class TokenizerLoRAMixin(nn.Module):
             self.model_peft = None
             self.current_lora = None
             # Update methods to use merged model
-            self._update_methods_from_model(self._tokenizer)
+            # self._update_methods_from_model(self._tokenizer)
             log_print("Merged current LoRA weights into base model")
 
     def merge_specific_lora(self, adapter_name: str | None = None):
@@ -320,7 +327,7 @@ class TokenizerLoRAMixin(nn.Module):
             self.model_peft = None
             self.current_lora = None
             # Update methods to use merged model
-            self._update_methods_from_model(self._tokenizer)
+            # self._update_methods_from_model(self._tokenizer)
             log_print(f"Merged LoRA weights: {adapter_name or 'current'}")
 
     @contextmanager
@@ -344,7 +351,7 @@ class TokenizerLoRAMixin(nn.Module):
             self.base_model.to("cuda")
 
             # Update methods to use base model
-            self._update_methods_from_model(self.base_model)
+            # self._update_methods_from_model(self.base_model)
             log_print(
                 f"Drop LoRA <green>{self.current_lora}</>, reverted to base model"
             )
@@ -373,3 +380,22 @@ class TokenizerLoRAMixin(nn.Module):
 
     def get_base_model(self):
         return self.base_model
+
+    def encode(self, x, use_quantizer=None):
+        encs = self.model_peft.encode(x, use_quantizer=use_quantizer)  # type: ignore
+        if isinstance(encs, tuple):
+            latent = encs[0]
+            latent = scale_shift_latent(latent, self.scale_factor, self.shift_factor)
+            return (latent, *encs[1:])
+        else:
+            encs = scale_shift_latent(encs, self.scale_factor, self.shift_factor)
+            return encs
+
+    def decode(self, z, inp_shape):
+        z = un_scale_shift_latent(z, self.scale_factor, self.shift_factor)
+        return self.model_peft.decode(z, inp_shape)  # type: ignore
+
+    def forward(self, input):
+        encs = self.encode(input)
+        dec = self.decode(encs, input.shape)
+        return dec

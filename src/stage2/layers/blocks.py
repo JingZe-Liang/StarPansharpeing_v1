@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from timm.layers.drop import DropPath
+from timm.layers.mlp import Mlp
 from timm.models.convnext import ConvNeXtStage
 from torch.utils.checkpoint import checkpoint
 
@@ -31,6 +32,7 @@ class AttentionBlock(nn.Module):
         mlp_norm_layer=nn.LayerNorm,
         act_layer=nn.SiLU,
         layer_scale_value=1e-3,
+        use_layerscale=False,
     ):
         super().__init__()
         self.grad_checkpointing = False
@@ -82,8 +84,12 @@ class AttentionBlock(nn.Module):
             norm_layer=mlp_norm_layer,
             use_conv=attn_type != "1d",
         )
-        self.ls1 = LayerScale(dim, layer_scale_value)
-        self.ls2 = LayerScale(dim, layer_scale_value)
+        self.ls1 = (
+            LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
+        )
+        self.ls2 = (
+            LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
+        )
 
         self.drop_path = DropPath(drop_path)
 
@@ -94,7 +100,9 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x, mask=None, pe=None):
         if self.grad_checkpointing:
-            return torch.utils.checkpoint.checkpoint(self.forward_, x, mask, pe)
+            return torch.utils.checkpoint.checkpoint(
+                self.forward_, x, mask, pe, use_reentrant=False
+            )
         else:
             return self.forward_(x, mask, pe)
 
@@ -119,8 +127,6 @@ class MbConvStages(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.grad_checkpointing = False
-
         self.stem = Stem(
             in_chs=in_chans,
             out_chs=stem_width,
@@ -158,9 +164,6 @@ class MbConvStages(nn.Module):
         # stages
         for stage in self.stages.values():
             for block in stage:  # type: ignore
-                if self.grad_checkpointing and self.training:
-                    x = checkpoint(block, x, cond, use_reentrant=False)
-                else:
-                    x = block(x, cond)
+                x = block(x, cond)
 
         return x

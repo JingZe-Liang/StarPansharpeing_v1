@@ -13,8 +13,8 @@ Reference:
     Speech and Signal Processing, 1990.
 """
 
-import torch
 import numpy as np
+import torch
 
 
 def RX_numpy(hsi_img):
@@ -116,7 +116,7 @@ def RX_torch(hsi_img_batch):
     return dist_data.reshape(B, H, W)
 
 
-def RX(hsi_img):
+def RX(hsi_img: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
     """
     Wrapper function that handles both NumPy and PyTorch inputs.
 

@@ -1,26 +1,50 @@
 cfgs:
-  used: MMSeg_YREB
-  batch_size_train: 32
-  batch_size_val: 32
+  used: WV3
+  batch_size_train: 8
+  batch_size_val: 8
   num_workers: 1
-  prefetch_factor: null
+  prefetch_factor: 2
   train_name: ${dataset.cfgs.used}_train
   val_name: ${dataset.cfgs.used}_val
+  val_full_name: ${dataset.cfgs.used}_val_full
 
 dataset_paths:
-  MMSeg_YREB_train: "data/MMSeg_YREB/[pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar"
-  MMSeg_YREB_val: "data/MMSeg_YREB/[pansharpening_pairs,latents]/MMSeg_YREB_train_part-12_bands-MSI-0003.tar"
+  WV3_train: data/WorldView3/pansharpening_reduced/Pansharping_WV3_train.tar
+  WV3_val: data/WorldView3/pansharpening_reduced/Pansharping_WV3_val.tar
+  WV3_val_full:
+    lrms: data/WorldView3/pansharpening_full/MS_shardindex.json
+    pan: data/WorldView3/pansharpening_full/PAN_shardindex.json
 
-  wv3_train:
-  wv3_val:
+  WV2_train: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_train.tar
+  WV2_val: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_val.tar
+  WV2_val_full:
+    lrms: data/WorldView2/pansharpening_full/MS_shardindex.json
+    pan: data/WorldView2/pansharpening_full/PAN_shardindex.json
 
-  qb_train:
-  qb_val:
+  WV4_train: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_train.tar
+  WV4_val: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_val.tar
+  WV4_val_full:
+    lrms: data/WorldView4/pansharpening_full/MS_shardindex.json
+    pan: data/WorldView4/pansharpening_full/PAN_shardindex.json
 
-  gf2_train:
-  gf2_val:
+  QB_train: data/QuickBird/pansharpening_reduced/Pansharpening_QB_train.tar
+  QB_val: data/QuickBird/pansharpening_reduced/Pansharpening_QB_val.tar
+  QB_val_full:
+    lrms: data/QuickBird/pansharpening_full/MS_shardindex.json
+    pan: data/QuickBird/pansharpening_full/PAN_shardindex.json
+
+  IKONOS_train: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar
+  IKONOS_val: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar
+  IKONOS_val_full:
+    lrms: data/IKONOS/pansharpening_full/MS_shardindex.json
+    pan: data/IKONOS/pansharpening_full/PAN_shardindex.json
 
 dataset_names_to_rgb_channels:
+  WV3: [5, 3, 2]
+  WV2: [5, 3, 2]
+  WV4: [5, 3, 2]
+  IKONOS: [2, 1, 0]
+
   MMSeg_YREB: [4, 3, 2]
   DCF_2019: [5, 3, 2]
   DCF_2020: [9, 6, 3]
@@ -29,23 +53,23 @@ dataset_names_to_rgb_channels:
   Houston: [40, 20, 10]
   DFC_2020: [9, 6, 4]
   MUSLI: [66, 38, 16]
-  WV3: [5, 3, 2]
+  GF1: [2, 1, 0]
   OHS: [18, 11, 6]
   QB: [2, 1, 0]
-  GF1: [2, 1, 0]
-  IKONOS: [2, 1, 0]
 
 consts:
   MMSeg_YREB: 12
-  wv3: 8
-  qb: 4
-  gf2: 4
+  WV3: 8
+  WV2: 8
+  WV: 4
+  IKONOS: 4
+  QB: 4
 
   bands: ${dataset.consts.${dataset.cfgs.used}}
   rgb_channels: ${dataset.dataset_names_to_rgb_channels.${dataset.cfgs.used}}
 
 train:
-  _target_: src.data.panshap_loader.get_multimodal_dataloaders
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_lantent_dataloader
   wds_paths: ${dataset.dataset_paths.${dataset.cfgs.train_name}}
   batch_size: ${dataset.cfgs.batch_size_train}
   num_workers: ${dataset.cfgs.num_workers}
@@ -53,13 +77,24 @@ train:
   to_neg_1_1: true
   resample: true
   prefetch_factor: ${dataset.cfgs.prefetch_factor}
+  add_satellite_name: true
 
 val:
-  _target_: src.data.panshap_loader.get_multimodal_dataloaders
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_lantent_dataloader
   wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_name}}
   batch_size: ${dataset.cfgs.batch_size_val}
-  num_workers: ${dataset.cfgs.num_workers}
+  num_workers: 0
+  resample: false
   shuffle_size: 100
   to_neg_1_1: true
-  resample: true
   prefetch_factor: ${dataset.cfgs.prefetch_factor}
+  add_satellite_name: true
+
+val_full:
+  _target_: src.stage2.data.pansharp_loader.get_wids_mat_full_resolution_dataloder
+  wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_full_name}}
+  batch_size: 1
+  to_neg_1_1: true
+  num_workers: 0
+  shuffle_size: 0
+  add_satellite_name: true

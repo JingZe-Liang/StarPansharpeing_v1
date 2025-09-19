@@ -92,17 +92,12 @@ config_path_mapping = {
 
 
 def task_trainer():
-    parser = argparse.ArgumentParser(
-        description="Trainer for different hyperspectral image tasks"
-    )
-    parser.add_argument(
-        "task",
-        type=str,
-        choices=list(trainer_mapping.keys()),
-        help="Training task to perform",
-    )
+    # fmt: off
+    parser = argparse.ArgumentParser(description="Trainer for different hyperspectral image tasks")
+    parser.add_argument( "task", type=str, choices=list(trainer_mapping.keys()), help="Training task to perform")
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
+    # fmt: on
 
     # Task / trainer / cfgs mappings
     log(f"Trainer task: {args.task}")

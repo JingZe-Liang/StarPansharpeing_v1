@@ -37,7 +37,7 @@ from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
 )
-from src.utilities.logging import log_print
+from src.utilities.logging import catch_any, log_print
 from src.utilities.network_utils import load_weights_with_shape_check
 from utilities.config_utils.to_dataclass import dataclass_from_dict_config
 
@@ -1176,8 +1176,6 @@ class ContinuousImageTokenizer(nn.Module):
 
 # * --- test --- * #
 
-from src.utilities.logging import catch_any
-
 
 @catch_any()
 def test_tokenizer_forward_backward(
@@ -1196,12 +1194,13 @@ def test_tokenizer_forward_backward(
     save_pca_vis=False,
     pca_type: str = "proj",
     other_model_kwargs: dict | None = None,
-    idx_of_dl: int = 1,
     save_img_dir: str | None = None,
     rgb_chans: list[int] = [4, 2, 0],
     dtype=torch.bfloat16,
     upscale: int = 1,
     fake_img_shape: tuple = (1, 12, 256, 256),
+    compute_mean_std: bool = False,
+    max_iters: int = 100,
 ):
     from contextlib import nullcontext
 
@@ -1217,6 +1216,7 @@ def test_tokenizer_forward_backward(
     from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
     from src.stage1.cosmos.modules import blocks
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
+    from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
     torch.cuda.set_device(device)
@@ -1292,18 +1292,6 @@ def test_tokenizer_forward_backward(
         # tokenizer = tokenizer_mixin.base_tokenizer
         tokenizer = tokenizer_mixin
 
-        # ! mixed adapter loaded may fail, because the module_save is different
-        # tokenizer_peft = None
-        # for lora_name, ckpt_path in lora_weights.items():
-        #     if tokenizer_peft is None:
-        #         tokenizer_peft = PeftMixedModel.from_pretrained(
-        #             tokenizer, ckpt_path, lora_name
-        #         )
-        #     else:
-        #         tokenizer_peft.load_adapter(ckpt_path, lora_name)
-
-        #     log_print(f"Loaded adapter named {lora_name}")
-
         # Move to device and set to eval mode
         tokenizer = tokenizer.to("cuda", dtype)
         tokenizer.eval()
@@ -1311,20 +1299,10 @@ def test_tokenizer_forward_backward(
         # Log available LoRAs
         log_print(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
 
-        # Activate specified LoRA if provided
-        # if active_lora_name:
-        #     try:
-        #         tokenizer_mixin.change_lora("IKONOS")
-        #         tokenizer_mixin.change_lora(active_lora_name)
-        #         log_print(f"Activated LoRA: {tokenizer_mixin.get_current_lora()}")
-        #     except Exception as e:
-        #         raise RuntimeError(
-        #             f"[TokenizerTest]: Failed to activate LoRA '{active_lora_name}'"
-        #         )
-
     if count_params:
         log_print(parameter_count_table(tokenizer))
 
+    is_itered = False
     if real_data is not None:
         if Path(real_data).exists():
             # only support RGB image
@@ -1338,16 +1316,16 @@ def test_tokenizer_forward_backward(
             )
             x = x / 255.0
             x = x * 2 - 1  # normalize to [-1, 1]
+            iterations = [x]
+            is_itered = True
         else:
             dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
-            for i, sample in enumerate(tqdm(dl, desc="Get sample ...")):
-                if i >= idx_of_dl:
-                    break
-                x = sample["img"]
+            iterations = dl
     else:
         x = torch.randn(*fake_img_shape).to("cuda", dtype)
-    x = x.to(dtype).cuda()
-    if upscale != 1:
+        iterations = [x]
+
+    if not is_itered and upscale != 1:
         x = torch.nn.functional.interpolate(
             x, scale_factor=upscale, align_corners=True, mode="bicubic"
         )
@@ -1356,14 +1334,38 @@ def test_tokenizer_forward_backward(
         opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
     metric = MeanMetric().cuda()
+    if compute_mean_std:
+        mean_fn = StackMeanMetrics().cuda()
+        std_fn = StackMeanMetrics().cuda()
     ctx = torch.no_grad if not (use_optim or check_grad) else torch.enable_grad
     mem_ctx = mem_context(device) if show_mem_usage else nullcontext()
-    with torch.autocast("cuda", dtype) and ctx():
-        with mem_ctx:
-            breakpoint()
-            y = tokenizer(x)
+    with torch.autocast("cuda", dtype) and mem_ctx:
+        for index, x in (tbar := tqdm(enumerate(iterations))):
+            with ctx():
+                if isinstance(x, dict):
+                    x = x["img"].to("cuda", dtype)
+                encs = tokenizer.encode(x)
+                if isinstance(encs, tuple):
+                    h = encs[0]
+                else:
+                    h = encs
+                decs = tokenizer.decode(encs, x.shape)
+                if isinstance(decs, tuple):
+                    y = decs[0]
+                else:
+                    y = decs
+
             y.clamp_(-1, 1)
-            log_print(y.shape)
+            # log_print(y.shape)
+
+            # Compute mean and std of the latent
+            if compute_mean_std:
+                # mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))
+                mean_c, std_c = h.mean(), h.std()
+                mean_fn.update(mean_c)
+                std_fn.update(std_c)
+                # means.append(mean_c)
+                # stds.append(std_c)
 
             # save reconstruction
             if save_img_dir is not None:
@@ -1385,7 +1387,8 @@ def test_tokenizer_forward_backward(
             if real_data:
                 psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
                 psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-                log_print(f"PSNR: {psnr_val}")
+                # log_print(f"PSNR: {psnr_val}")
+                tbar.set_description(f"PSNR: {psnr_val:.4f} - shape: {x.shape}")
                 metric.update(psnr_val)
 
             if use_optim:
@@ -1398,8 +1401,20 @@ def test_tokenizer_forward_backward(
                     if p.grad is None:
                         print(f"{n} grad is None")
 
+            if max_iters <= index:
+                break
+
         if metric.update_count >= 1:
             log_print(metric.compute())
+
+    # print mean and std of the latent
+    if compute_mean_std:
+        # m = torch.mean(torch.stack(means), dim=0)
+        # s = torch.mean(torch.stack(stds), dim=0)
+        m = mean_fn.compute()
+        s = std_fn.compute()
+        log_print(f"mean of the latent: {m}")
+        log_print(f"std of the latent: {s}")
 
     if save_pca_vis:
         if pca_type == "proj":
@@ -1422,11 +1437,10 @@ def test_tokenizer_forward_backward(
 if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="BigEarthNetS2",
+        base_model_ckpt="runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
+        real_data="RS5M",
         save_pca_vis=False,
         pca_type="z",
-        idx_of_dl=2,
         is_lora=False,
         lora_ckpt=[
             "runs/stage1_cosmos_lora/2025-08-28_23-17-54_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
@@ -1440,9 +1454,13 @@ if __name__ == "__main__":
             "WDC": 191,
             "Xiongan": 256,
         },
-        save_img_dir="tmp",
-        rgb_chans=[6, 5, 4],  # [49, 39, 29],  # RGB
+        save_img_dir=None,
+        rgb_chans=[3, 2, 1],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
         active_lora_name="Xiongan",
+        max_iters=1000,
+        compute_mean_std=True,
+        use_optim=False,
+        check_grad=False,
     )

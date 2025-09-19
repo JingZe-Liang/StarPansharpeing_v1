@@ -11,6 +11,11 @@ CLI_DEFAUTL_DICT = {
 }
 
 
+def remove_argparser_args(unknown_args):
+    script_name = sys.argv[0]
+    sys.argv = [script_name] + unknown_args
+
+
 def argsparse_cli_args(
     exp_config_dict: dict[str, str],
     cli_default_dict: dict = CLI_DEFAUTL_DICT,
@@ -19,32 +24,18 @@ def argsparse_cli_args(
     if parser is None:
         parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
-    config_name_parser = parser.add_argument_group(
-        "Configuration Names",
-        description="Determine which config to be used to launch the experiment",
-    )
-    config_name_parser.add_argument(
-        "--config_name",
-        "-c",
-        type=str,
-        default=None,
-        help=f"Available config names: {list(exp_config_dict.keys())}",
-    )
-    config_name_parser.add_argument(
-        "--only_rank_zero_catch",
-        "-zc",
-        action="store_false",
-        default=True,
-        help="Only catch exceptions on rank zero",
-    )
+    # fmt: off
+    config_name_parser = parser.add_argument_group("Configuration Names", description="Determine which config to be used to launch the experiment")
+    config_name_parser.add_argument("--config_name", "-c", type=str, default=None, help=f"Available config names: {list(exp_config_dict.keys())}")
+    config_name_parser.add_argument("--only_rank_zero_catch", "-zc", action="store_false", default=True, help="Only catch exceptions on rank zero")
+    # fmt: on
 
     cli_args, unknown = parser.parse_known_args()
     config_name = cli_args.config_name or cli_default_dict["config_name"]
     hydra_config_path = exp_config_dict.get(config_name)
 
     # refactor the sys.argv
-    script_name = sys.argv[0]
-    sys.argv = [script_name] + unknown
+    remove_argparser_args(unknown)
 
     if hydra_config_path is None:
         logger.error(f"Unknown config name: {config_name}")

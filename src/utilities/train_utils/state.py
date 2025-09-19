@@ -699,6 +699,16 @@ def object_all_gather(obj: object):
     return [obj]
 
 
+def object_scatter(obj: object, src: int = 0):
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        lst_obj: list[object] = [None] * dist.get_world_size()  # type: ignore
+        if dist.get_rank() == src:
+            lst_obj = [obj] * dist.get_world_size()
+        dist.scatter_object_list(lst_obj, lst_obj, src=src)
+        return lst_obj[dist.get_rank()]
+    return obj
+
+
 # * --- test --- #
 
 

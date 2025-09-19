@@ -436,6 +436,9 @@ class PansharpeningMetrics(AnalysisPanAcc):
         for n, metric in self.acc_ave_metrics.items():
             metric.reset()
 
+    def reset(self):  # alias
+        self.clear_history()
+
 
 # * --- Test --- #
 

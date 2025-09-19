@@ -4,6 +4,7 @@
 #   maskgit: https://github.com/google-research/maskgit/blob/main/maskgit/nets/discriminator.py
 import functools
 import math
+
 import torch
 import torch.nn as nn
 
@@ -35,7 +36,7 @@ class PatchGANDiscriminator(nn.Module):
         else:
             norm_layer = ActNorm
         if (
-            type(norm_layer) == functools.partial
+            type(norm_layer) is functools.partial
         ):  # no need to use bias as BatchNorm2d has affine parameters
             use_bias = norm_layer.func != nn.BatchNorm2d
         else:

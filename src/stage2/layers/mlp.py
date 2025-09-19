@@ -68,7 +68,7 @@ class ClipSwiGLUMlp(SwiGLU):
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer: type[nn.Module] = SwiGLUAct,
+        act_layer: type[nn.Module] = nn.SiLU,
         norm_layer=None,
         bias=True,
         drop=0.0,

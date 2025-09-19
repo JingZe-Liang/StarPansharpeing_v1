@@ -1,0 +1,258 @@
+# NAFNet compatibility
+from dataclasses import dataclass, field
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from timm.layers.create_conv2d import create_conv2d
+from timm.layers.create_norm import create_norm_layer
+from timm.layers.create_norm_act import create_norm_act_layer
+from torch.utils.checkpoint import checkpoint
+
+from src.utilities.config_utils import dataclass_from_dict
+from src.utilities.logging import log
+
+
+def modulate(x, shift, scale):
+    return x * (scale + 1) + shift
+
+
+class SimpleGate(nn.Module):
+    def forward(self, x):
+        x1, x2 = x.chunk(2, dim=1)
+        return x1 * x2
+
+
+class NAFBlock(nn.Module):
+    def __init__(
+        self, c, DW_Expand=2, FFN_Expand=2, drop_out_rate=0.0, **__discarded_kwargs
+    ):
+        super().__init__()
+        self.grad_checkpointing = False
+        dw_channel = c * DW_Expand
+        self.conv1 = create_conv2d(c, dw_channel, 1)
+        self.conv2 = create_conv2d(
+            dw_channel, dw_channel, 3, stride=1, padding=1, depthwise=True
+        )
+        self.conv3 = create_conv2d(dw_channel // 2, c, 1)
+
+        # Simplified Channel Attention
+        self.sca = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            create_conv2d(dw_channel // 2, dw_channel // 2, 1),
+        )
+
+        # SimpleGate
+        self.sg = SimpleGate()
+
+        ffn_channel = FFN_Expand * c
+        self.conv4 = create_conv2d(c, ffn_channel, 1)
+        self.conv5 = create_conv2d(ffn_channel // 2, c, 3, stride=1, padding=1)
+
+        self.norm1 = create_norm_layer("layernorm2d", c)
+        self.norm2 = create_norm_layer("layernorm2d", c)
+
+        self.dropout1 = (
+            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
+        )
+        self.dropout2 = (
+            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
+        )
+
+        self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+        self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+
+    def forward(self, inp):
+        def forward_closure(inp):
+            x = inp
+
+            x = self.norm1(x)
+
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.sg(x)
+            x = x * self.sca(x)
+            x = self.conv3(x)
+
+            x = self.dropout1(x)
+
+            y = inp + x * self.beta
+
+            x = self.conv4(self.norm2(y))
+            x = self.sg(x)
+            x = self.conv5(x)
+
+            x = self.dropout2(x)
+
+            return y + x * self.gamma
+
+        if self.grad_checkpointing and self.training:
+            return checkpoint(forward_closure, inp, use_reentrant=False)
+        else:
+            return forward_closure(inp)
+
+
+class NAFBlockConditional(NAFBlock):
+    def __init__(
+        self,
+        c,
+        cond_chs=256,
+        DW_Expand=2,
+        FFN_Expand=2,
+        drop_out_rate=0.0,
+        **__discarded_kwargs,
+    ):
+        super().__init__(c, DW_Expand, FFN_Expand, drop_out_rate)
+        ffn_channel = FFN_Expand * c
+        self.modulation = nn.Sequential(
+            create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
+            create_norm_act_layer(
+                "layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6
+            ),
+            create_conv2d(
+                ffn_channel // 2,
+                ffn_channel * 2,
+                3,
+                padding=1,
+                stride=1,
+                bias=False,
+                groups=ffn_channel // 2,
+            ),
+        )
+
+    def forward(self, inp, cond):
+        def forward_closure(inp, cond):
+            x = inp
+
+            x = self.norm1(x)
+
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.sg(x)
+            x = x * self.sca(x)
+            x = self.conv3(x)
+
+            x = self.dropout1(x)
+
+            y = inp + x * self.beta
+
+            # Condition
+            cond = F.interpolate(
+                cond, size=y.shape[-2:], mode="bilinear", align_corners=False
+            )
+            scale, shift = self.modulation(cond).chunk(2, dim=1)
+            x = self.conv4(self.norm2(y))
+            x = modulate(x, shift, scale)
+
+            x = self.sg(x)
+            x = self.conv5(x)
+
+            x = self.dropout2(x)
+
+            return y + x * self.gamma
+
+        if self.grad_checkpointing and self.training:
+            return checkpoint(forward_closure, inp, cond, use_reentrant=False)
+        else:
+            return forward_closure(inp, cond)
+
+
+@dataclass
+class NAFNetConfig:
+    img_channel: int = 3
+    width: int = 256
+    middle_blk_num: int = 1
+    enc_blk_nums: list = field(default_factory=lambda: [1, 1, 1, 1])
+    dec_blk_nums: list = field(default_factory=lambda: [1, 1, 1, 1])
+
+
+class NAFNet(nn.Module):
+    def __init__(self, cfg: NAFNetConfig):
+        super().__init__()
+        self.intro = nn.Conv2d(
+            in_channels=cfg.img_channel,
+            out_channels=cfg.width,
+            kernel_size=3,
+            padding=1,
+            stride=1,
+            groups=1,
+            bias=True,
+        )
+        self.ending = create_conv2d(cfg.width, cfg.img_channel, 3, padding=1)
+
+        self.encoders = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        self.middle_blks = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        self.downs = nn.ModuleList()
+
+        chan = cfg.width
+        for num in cfg.enc_blk_nums:
+            self.encoders.append(nn.Sequential(*[NAFBlock(chan) for _ in range(num)]))
+            self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))
+            chan = chan * 2
+
+        self.middle_blks = nn.Sequential(
+            *[NAFBlock(chan) for _ in range(cfg.middle_blk_num)]
+        )
+
+        for num in cfg.dec_blk_nums:
+            self.ups.append(
+                nn.Sequential(
+                    nn.Conv2d(chan, chan * 2, 1, bias=False),
+                    nn.PixelShuffle(2),
+                )
+            )
+            chan = chan // 2
+            self.decoders.append(nn.Sequential(*[NAFBlock(chan) for _ in range(num)]))
+
+        self.padder_size = 2 ** len(self.encoders)
+
+    def forward(self, inp):
+        B, C, H, W = inp.shape
+
+        x = self.intro(inp)
+
+        encs = []
+
+        for encoder, down in zip(self.encoders, self.downs):
+            x = encoder(x)
+            encs.append(x)
+            x = down(x)
+
+        x = self.middle_blks(x)
+
+        for decoder, up, enc_skip in zip(self.decoders, self.ups, encs[::-1]):
+            x = up(x)
+            x = x + enc_skip
+            x = decoder(x)
+
+        x = self.ending(x)
+        x = x + inp
+
+        return x
+
+    @classmethod
+    def create_model(cls, **kwargs):
+        cfg = dataclass_from_dict(NAFNetConfig, kwargs)
+        model = cls(cfg)
+        return model
+
+
+def test_model():
+    model = NAFNet.create_model(
+        img_channel=4,
+        width=64,
+        middle_blk_num=1,
+        enc_blk_nums=[1, 1, 1, 1],
+        dec_blk_nums=[1, 1, 1, 1],
+    )
+    x = torch.randn(2, 4, 256, 256)
+    with torch.no_grad():
+        y = model(x)
+    print(y.shape)
+    assert y.shape == x.shape
+
+
+if __name__ == "__main__":
+    test_model()

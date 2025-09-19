@@ -6,6 +6,7 @@ from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 
 from src.stage2.layers import MbConvStages
+from src.utilities.logging import log
 
 
 @dataclass
@@ -67,6 +68,32 @@ class VitaminModel(nn.Module):
             **asdict(cfg.conv_cfg),
         )
         self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.ms_channel)
+
+    def init_weights(self):
+        for name, module in self.stages.named_modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        for patcher in self.patchers.values():
+            for name, module in patcher.named_modules():
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        log("[VitaminModel] Initializing model ...")
 
     def forward(self, ms, pan, cond):
         x_ms = self.patchers["ms_conv"](ms)

@@ -52,6 +52,9 @@ indent-width = 4
 extend-exclude = [
     ".vscode",
     ".idea",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".claude",
     "__pycache__",
     ".python-version",
     ".ruff.toml",
@@ -95,28 +98,29 @@ exclude = [
 ]
 
 [tool.ruff.format]
+exclude = ["*.pyi"]
+
 indent-style = "space"
 line-ending = "lf"
 docstring-code-format = false
-docstring-code-line-length = 20
-
+docstring-code-line-length = 40
 [tool.ruff.lint]
-select = ["E501", "I", "E", "W"]
+select = ["I", "E", "W"]
 ignore = [
-    "E402",
+    "E402",    # module level import not at top of file
+    "I001",    # import not at top of file
+    "E731",    # lambda assigned to variable
+    "E741",    # multiple statements on one line (semicolon)
+    "E701",    # multiple statements on one line (colon)
+    "E731",    # lambda
+    "E501",    # line too long
+    "E722",    # do not use bare except
+    "PLR0913",
+    "W291",    # trailing whitespace
+    "W293",    # blank line at end of file
     "D103",
-    "I001",
-    "E731",
-    "E741",
     "D202",
     "D403",
-    "E731",
-    "E501",
-    "PLR0913",
-    "W291",
-    "E722",
-    "W293",
-    "E701",
 ]
 
 [tool.ruff.lint.per-file-ignores]

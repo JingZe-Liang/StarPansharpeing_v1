@@ -8,5 +8,6 @@ from .state import (
     dict_tensor_sync,
     metrics_sync,
     object_all_gather,
+    object_scatter,
 )
 from .visualization import get_rgb_image

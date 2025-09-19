@@ -1,9 +1,14 @@
 import functools
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Literal, TypedDict, no_type_check
 
 import torch
 from torch import Tensor, nn
 from torch.nn import Module
+
+from src.utilities.config_utils import dataclass_from_dict
+from src.utilities.logging import log
 
 
 def amotizing_call_model(
@@ -35,15 +40,6 @@ def amotizing_call_model(
 # *==============================================================
 
 
-type AmotizedType = (
-    Literal[
-        "pixel_to_pixel_fusion",
-        "latent_to_pixel_fusion",
-        "one_model_conditioning",
-    ]
-    | str
-)
-
 ModelOutput = TypedDict(
     "ModelOutput",
     {
@@ -52,6 +48,13 @@ ModelOutput = TypedDict(
         "pixel_out": Tensor,
     },
 )
+
+
+class AmotizedForwardType(str, Enum):
+    SIMPLE_MERGE_ADD = "simple_merge_add"
+    PIXEL_TO_PIXEL_FUSION = "pixel_to_pixel_fusion"
+    LATENT_TO_PIXEL_FUSION = "latent_to_pixel_fusion"
+    ONE_MODEL = "one_model"
 
 
 class AmotizedModelMixin(nn.Module):
@@ -79,12 +82,16 @@ class AmotizedModelMixin(nn.Module):
 
     """
 
+    amotizing_pixels = True  # do not change
+
     def __init__(
         self,
         pixel_model: Module,
         amotized_model: Module,
-        decoder_fn: Module | Callable[[Tensor], Tensor],
-        amotize_type: AmotizedType,
+        # take latent and size of orignal pixels
+        decoder_fn: Module | Callable[[Tensor, torch.Size], Tensor],
+        amotize_type: AmotizedForwardType
+        | str = AmotizedForwardType.LATENT_TO_PIXEL_FUSION,
         backward_decoder: bool = False,
         learn_decoder: bool = False,
     ):
@@ -118,18 +125,27 @@ class AmotizedModelMixin(nn.Module):
     def _single_tensor_to_tuple(self, x: Tensor | tuple) -> tuple[Tensor | Any, ...]:
         return (x,) if torch.is_tensor(x) else x
 
+    def _get_pixel_shape(self, pixel_in: tuple) -> torch.Size:
+        # assume the first element is the main pixel input
+        return pixel_in[0].shape
+
+    def _decoded_to_pixel(self, decoded: Tensor | tuple) -> Tensor:
+        return decoded if torch.is_tensor(decoded) else decoded[0]
+
     def simple_merge_forward(
         self, pixel_in: tuple, latent_in: tuple, amotize_type: str
     ):
         latent_out = self.amotized_model(*latent_in)
-        amotized_pixel_from_latent = self.decoder(
-            latent_out
-        )  # latent loss ? (if use, the pixel branch is just residual)
+        shape = self._get_pixel_shape(pixel_in)
+        # latent loss ? (if use, the pixel branch is just residual)
+        amotized_pixel_from_latent = self.decoder(latent_out, shape)
+        amotized_pixel_from_latent = self._decoded_to_pixel(amotized_pixel_from_latent)
         pixel_out = self.pixel_model(*pixel_in)
+        # todo: add more complex merging logic
         if amotize_type == "add":
             out = (
                 pixel_out + amotized_pixel_from_latent  # -> pixel loss
-            )  # todo: add more complex merging logic
+            )
         else:
             raise ValueError(f"Unknown amotize_type: {amotize_type}")
 
@@ -141,7 +157,9 @@ class AmotizedModelMixin(nn.Module):
 
     def pixel_to_pixel_fusion_forward(self, pixel_in: tuple, latent_in: tuple):
         latent_out = self.amotized_model(*latent_in)  # -> latent loss
-        amotized_pixel_from_latent = self.decoder(latent_out)  # -> pixel loss
+        shape = self._get_pixel_shape(pixel_in)
+        amotized_pixel_from_latent = self.decoder(latent_out, shape)  # -> pixel loss
+        amotized_pixel_from_latent = self._decoded_to_pixel(amotized_pixel_from_latent)
         # args: (pixel_in, amotized_pixel_from_latent)
         pixel_ins = pixel_in + self._single_tensor_to_tuple(amotized_pixel_from_latent)
         pixel_out = self.pixel_model(*pixel_ins)  # -> pixel loss
@@ -171,7 +189,9 @@ class AmotizedModelMixin(nn.Module):
 
         pixel_out = None
         if self.backward_decoder or self.learn_decoder:
-            pixel_out = self.decoder(latent_out)  # -> pixel loss
+            shape = self._get_pixel_shape(pixel_in)
+            pixel_out = self.decoder(latent_out, shape)  # -> pixel loss
+            pixel_out = self._decoded_to_pixel(pixel_out)
 
         return {
             "latent_out": latent_out,
@@ -186,139 +206,57 @@ class AmotizedModelMixin(nn.Module):
         pixel_in = self._single_tensor_to_tuple(pixel_in)
         latent_in = self._single_tensor_to_tuple(latent_in)
 
-        if self.amotize_type[:11] == "simple_merge":
+        if (
+            self.amotize_type[:11] == "simple_merge"
+            or self.amotize_type == AmotizedForwardType.SIMPLE_MERGE_ADD
+        ):
             return self.simple_merge_forward(
                 pixel_in, latent_in, self.amotize_type.rsplit("_")[-1]
             )
-        elif self.amotize_type == "pixel_to_pixel_fusion":
+
+        elif self.amotize_type == AmotizedForwardType.PIXEL_TO_PIXEL_FUSION:
             return self.pixel_to_pixel_fusion_forward(pixel_in, latent_in)
-        elif self.amotize_type == "latent_to_pixel_fusion":
+
+        elif self.amotize_type == AmotizedForwardType.LATENT_TO_PIXEL_FUSION:
             return self.latent_to_pixel_fusion_forward(pixel_in, latent_in)
-        elif self.amotize_type == "one_model":
+
+        elif self.amotize_type == AmotizedForwardType.ONE_MODEL:
             return self.one_model_conditioning_forward(pixel_in, latent_in)
+
         else:
             raise ValueError(f"Unknown amotize_type: {self.amotize_type}")
 
+    @classmethod
+    def create_model(
+        cls,
+        amotized_model_class: type[nn.Module],
+        pixel_model_class: type[nn.Module],
+        amotized_cfg_cls: "type[dataclass]",
+        pixel_cfg_cls: "type[dataclass]",
+        amotized_kwargs: dict = {},
+        pixel_kwargs: dict = {},
+        mixin_kwargs: dict = {},
+    ):
+        if amotized_cfg_cls is not None:
+            amotized_cfg = dataclass_from_dict(amotized_cfg_cls, amotized_kwargs)
+            amotized_model = amotized_model_class(amotized_cfg)
+        else:
+            amotized_model = amotized_model_class(**amotized_kwargs)
 
-# * --- Instances --- #
+        if pixel_cfg_cls is not None:
+            pixel_cfg = dataclass_from_dict(pixel_cfg_cls, pixel_kwargs)
+            pixel_model = pixel_model_class(pixel_cfg)
+        else:
+            pixel_model = pixel_model_class(**pixel_kwargs)
 
-from src.stage2.pansharpening.models.transformer import Transformer
-from src.stage2.pansharpening.models.vitamin_conv import (
-    ConvCfg,
-    VitaminCfg,
-    VitaminModel,
-)
+        return cls(
+            pixel_model=pixel_model,
+            amotized_model=amotized_model,
+            **mixin_kwargs,
+        )
 
-
-def vitamin_transformer_amotized_in_pixel_small(
-    ms_chan: int, pan_chan: int, latent_chan: int, decoder_fn
-):
-    latent_model = Transformer(
-        in_dim=latent_chan,
-        dim=256,
-        depth=8,
-        num_heads=8,
-        mlp_ratio=4,
-        drop=0.0,
-        patch_size=2,
-        out_channels=256,
-    )
-
-    conv_cfg = ConvCfg(
-        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-    )
-    vitamin_cfg = VitaminCfg(
-        stem_width=32,
-        embed_dim=[64, 192, 192],
-        depths=[2, 2, 2],
-        ms_channel=ms_chan,
-        pan_channel=pan_chan,
-        condition_channel=256,
-        use_residual=True,
-        conv_cfg=conv_cfg,
-    )
-
-    pixel_model = VitaminModel(vitamin_cfg)
-
-    amotized_model = AmotizedModelMixin(
-        decoder_fn=decoder_fn,
-        amotize_type="latent_to_pixel_fusion",
-        amotized_model=latent_model,
-        backward_decoder=False,
-        learn_decoder=False,
-        pixel_model=pixel_model,
-    )
-
-    return amotized_model
-
-
-ALL_AMOTIZED_MODELS = {
-    "transformer_vitamin_latent_to_pixel_small": vitamin_transformer_amotized_in_pixel_small,
-}
-
-# * --- Test --- * #
-
-
-def test_amotized_pansharpening_model():
-    from src.stage2.pansharpening.models.transformer import Transformer
-    from src.stage2.pansharpening.models.vitamin_conv import (
-        ConvCfg,
-        VitaminCfg,
-        VitaminModel,
-    )
-
-    device = "cuda:1"
-    torch.cuda.set_device(device)
-
-    transformer = Transformer(
-        in_dim=16,
-        dim=256,
-        depth=8,
-        num_heads=8,
-        mlp_ratio=4,
-        drop=0.0,
-        patch_size=2,
-        out_channels=256,
-    ).cuda()
-
-    conv_cfg = ConvCfg(
-        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-    )
-    vitamin_cfg = VitaminCfg(
-        stem_width=32,
-        embed_dim=[64, 192, 192],
-        depths=[2, 2, 2],
-        pan_channel=1,
-        ms_channel=8,
-        condition_channel=256,
-        use_residual=True,
-        conv_cfg=conv_cfg,
-    )
-    vitamin_model = VitaminModel(vitamin_cfg).cuda()
-
-    bs = 2
-    ms_latent = torch.randn(bs, 16, 32, 32).cuda()
-    pan_latent = torch.randn(bs, 16, 32, 32).cuda()
-    ms = torch.randn(bs, 8, 256, 256).cuda()
-    pan = torch.randn(bs, 1, 256, 256).cuda()
-
-    amotized_model = AmotizedModelMixin(
-        decoder_fn=lambda x: x,  # Dummy decoder
-        amotize_type="latent_to_pixel_fusion",
-        amotized_model=transformer,
-        backward_decoder=False,
-        learn_decoder=False,
-        pixel_model=vitamin_model,
-    ).cuda()
-
-    y = amotized_model(pixel_in=(ms, pan), latent_in=(ms_latent, pan_latent))
-    print(y["pixel_out"].shape)
-
-    # Parameters
-    from fvcore.nn import FlopCountAnalysis, parameter_count_table
-
-    print(parameter_count_table(amotized_model, max_depth=3))
-
-
-if __name__ == "__main__":
-    test_amotized_model()
+    def set_checkpoint_mode(self, mode=True):
+        for module in self.modules():
+            if hasattr(module, "grad_checkpointing"):
+                module.grad_checkpointing = mode
+                log(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")

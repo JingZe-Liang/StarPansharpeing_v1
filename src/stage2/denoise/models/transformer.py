@@ -31,113 +31,96 @@ class TransformerConfig:
     drop_path: float = 0.0
     input_size: int = 32
     patch_size: int = 2
-    raw_img_size: Any = None
-    raw_img_chans: Any = None
+    raw_img_size: int | None = None
+    raw_img_chans: int | None = None
     pos_embed_type: str = "sincos"
-    norm_layer: Any = "layernorm"
-    mlp_norm_layer: Any = "layernorm"
-    act_layer: Any = "swiglu"
-    feature_layer_ids: Any = None
+    norm_layer: str = "layernorm"
+    mlp_norm_layer: str = "layernorm"
+    act_layer: str = "swiglu"
+    feature_layer_ids: list[int] | None = None
 
 
 class Transformer(nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        dim,
-        depth,
-        num_heads,
-        with_raw_img=False,
-        mlp_ratio=4.0,
-        drop=0.0,
-        drop_path=0.0,
-        input_size: int = 32,
-        patch_size=2,
-        out_channels=16,
-        raw_img_size=None,
-        raw_img_chans=None,
-        pos_embed_type="sincos",
-        norm_layer="layernorm",
-        mlp_norm_layer="layernorm",
-        act_layer="swiglu",
-        feature_layer_ids: list[int] | None = None,
-    ):
+    def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
+        # Store config for reference
+        self.cfg = cfg
+
         # patch embedding
-        self.patch_size = patch_size
-        self.input_size = input_size
-        self.num_patches = (input_size // patch_size) ** 2
+        self.patch_size = cfg.patch_size
+        self.input_size = cfg.input_size
+        self.num_patches = (cfg.input_size // cfg.patch_size) ** 2
         self._n_modalities = 1
-        self.with_raw_img = with_raw_img
-        self.raw_img_size = raw_img_size
-        self.raw_img_chans = raw_img_chans
+        self.with_raw_img = cfg.with_raw_img
+        self.raw_img_size = cfg.raw_img_size
+        self.raw_img_chans = cfg.raw_img_chans
         self.raw_patch_size = 16
         self.patch_embed = PatchEmbed(
-            img_size=input_size,
-            patch_size=patch_size,
-            in_chans=in_dim,
-            embed_dim=dim,
+            img_size=cfg.input_size,
+            patch_size=cfg.patch_size,
+            in_chans=cfg.in_dim,
+            embed_dim=cfg.dim,
             bias=True,
             strict_img_size=False,
         )
         if self.with_raw_img:
-            assert raw_img_size is not None
-            assert raw_img_chans is not None
-            assert self.pos_embed_type == "sincos"
+            assert cfg.raw_img_size is not None
+            assert cfg.raw_img_chans is not None
+            assert cfg.pos_embed_type == "sincos"
             self.raw_img_patcher = PatchEmbed(
-                img_size=raw_img_size,
+                img_size=cfg.raw_img_size,
                 patch_size=self.raw_patch_size,
-                in_chans=raw_img_chans,
-                embed_dim=dim,
+                in_chans=cfg.raw_img_chans,
+                embed_dim=cfg.dim,
                 bias=True,
                 strict_img_size=False,
             )
         # self.fuse_stem = nn.Linear(dim // self._n_modalities * self._n_modalities, dim)
-        self.base_size = input_size // self.patch_size
+        self.base_size = cfg.input_size // self.patch_size
         self.pe_interpolation = 1.0
-        self.out_channels = out_channels
-        self.num_heads = num_heads
-        self.feature_layer_ids = feature_layer_ids
-        if feature_layer_ids:
-            assert max(feature_layer_ids) < depth, (
+        self.out_channels = cfg.out_channels
+        self.num_heads = cfg.num_heads
+        self.feature_layer_ids = cfg.feature_layer_ids
+        if cfg.feature_layer_ids:
+            assert max(cfg.feature_layer_ids) < cfg.depth, (
                 "max feature_layer_id must be less than depth"
             )
 
         # layers
         layers = []
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
+        drop_path_rates = [
+            x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)
         ]  # stochastic depth decay rule
-        norm_layer = get_norm_layer(norm_layer)
-        mlp_norm_layer = get_norm_layer(mlp_norm_layer)
-        act_layer = get_act_layer(act_layer)
-        for i in range(depth):
+        norm_layer = get_norm_layer(cfg.norm_layer)
+        mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
+        act_layer = get_act_layer(cfg.act_layer)
+        for i in range(cfg.depth):
             layers.append(
                 AttentionBlock(
-                    dim=dim,
-                    mlp_ratio=mlp_ratio,
-                    num_heads=num_heads,
+                    dim=cfg.dim,
+                    mlp_ratio=cfg.mlp_ratio,
+                    num_heads=cfg.num_heads,
                     qkv_bias=True,
                     qk_norm=norm_layer,
-                    drop=drop,
-                    attn_drop=drop,
-                    drop_path=drop_path[i]
-                    if isinstance(drop_path, list)
-                    else drop_path,
+                    drop=cfg.drop,
+                    attn_drop=cfg.drop,
+                    drop_path=drop_path_rates[i]
+                    if isinstance(drop_path_rates, list)
+                    else cfg.drop_path,
                     norm_layer=mlp_norm_layer,
                     act_layer=act_layer,
                 )
             )
         self.layers = nn.ModuleList(layers)
         self.head = nn.Sequential(
-            norm_layer(dim),
-            nn.Linear(dim, out_channels * patch_size**2, bias=True),
+            norm_layer(cfg.dim),
+            nn.Linear(cfg.dim, cfg.out_channels * cfg.patch_size**2, bias=True),
         )
 
         # positional embedding
-        self.pos_embed_type = pos_embed_type
-        self.setup_pe(dim)
+        self.pos_embed_type = cfg.pos_embed_type
+        self.setup_pe(cfg.dim)
 
     @property
     def dtype(self):
@@ -182,7 +165,7 @@ class Transformer(nn.Module):
         elif self.pos_embed_type == "rope":
             if rope_options is None:
                 self.rope_options = {
-                    "dim": dim // self.num_heads,
+                    "dim": dim // self.cfg.num_heads,
                     "rope_dim": "2D",
                     "beta_fast": 4,
                     "beta_slow": 1,

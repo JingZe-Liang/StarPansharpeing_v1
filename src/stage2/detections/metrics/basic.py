@@ -8,16 +8,55 @@ The implementation follows the protocol defined in src.stage2.utilities.metrics.
 and leverages torchmetrics for efficient computation.
 """
 
-from typing import Any, Dict, Optional, Union
+from collections import namedtuple
+from typing import Any, Dict, Optional, TypedDict, Union, no_type_check
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torchmetrics
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import (
+    auc,
+    f1_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
+
+from src.utilities.metrics.aggregation import StackMeanMetrics
+
+from ..utils.RX import RX
+
+Pr_Auc_F1_EER_TypedDict = TypedDict(
+    "Pr_Auc_F1_EER_TypedDict",
+    {
+        "pr_auc": float,
+        "f1_score": float,
+        "optimal_threshold": float,
+        "eer": float,
+    },
+)
+FPR_TPE_Threshold_TypedDict = TypedDict(
+    "FPR_TPE_Threshold_TypedDict",
+    {
+        "fpr": np.ndarray,
+        "tpr": np.ndarray,
+        "thresholds": np.ndarray,
+    },
+)
+AUC5_TypedDict = TypedDict(
+    "AUC5_TypedDict",
+    {
+        "auc1": float,
+        "auc2": float,
+        "auc3": float,
+        "auc4": float,
+        "auc5": float,
+    },
+)
 
 
-class AnomalyDetectionMetrics(nn.Module):
+class AnomalyDetectionMetricsBase(nn.Module):
     """
     Comprehensive metrics for hyperspectral anomaly detection.
 
@@ -49,23 +88,49 @@ class AnomalyDetectionMetrics(nn.Module):
     """
 
     def __init__(
-        self, compute_kwargs: Optional[Dict[str, Any]] = None, prefix: str = ""
+        self,
+        compute_kwargs: Optional[Dict[str, Any]] = None,
+        prefix: str = "",
+        device: str | torch.device = "cuda",
     ):
         super().__init__()
         self.compute_kwargs = compute_kwargs or {}
         self.prefix = prefix
+        self.device = torch.device(device)
 
         # Core metrics using torchmetrics
         self.auc = torchmetrics.AUROC(task="binary")
+        self.pr_auc_f1_metrics = nn.ModuleDict(
+            {
+                "pr_auc": torchmetrics.MeanMetric(),
+                "f1_score": torchmetrics.MeanMetric(),
+                "optimal_threshold": torchmetrics.MeanMetric(),
+                "eer": torchmetrics.MeanMetric(),
+            }
+        )
+        # We don't need to store fpr, tpr, thresholds arrays since they vary in length
+        # Instead, we'll compute AUC5 metrics directly in each batch
+        self.auc5 = nn.ModuleDict(
+            {f"auc{i}": torchmetrics.MeanMetric() for i in range(1, 6)}
+        )
 
         # For accumulation of predictions and targets
         self.reset()
 
+    def _update_any(self, metrics_module, **updates):
+        for k, v in updates.items():
+            metrics_module[k].update(v)
+
     def reset(self):
         """Reset all accumulated predictions and targets."""
-        self.preds_list = []
-        self.targets_list = []
+        for metric in self.pr_auc_f1_metrics.values():
+            metric.reset()
+        for metric in self.auc5.values():
+            metric.reset()
         self.auc.reset()
+
+    def _to_tensor(self, x):
+        return torch.as_tensor(x)
 
     def update(
         self,
@@ -77,47 +142,72 @@ class AnomalyDetectionMetrics(nn.Module):
         Update metrics with new predictions and targets.
 
         Args:
-            preds: Model predictions [B, ...] or anomaly scores [B, H, W]
-            target: Ground truth labels [B, ...] or [B, H, W]
-            anomaly_scores: Optional explicit anomaly scores if preds are class probabilities
+            preds: Reconstructed images from model [B, C, H, W]
+            target: Ground truth anomaly labels [B, H, W] (binary: 0=normal, 1=anomaly)
+            anomaly_scores: Optional explicit anomaly scores [B, H, W], if None use RX on preds
         """
         # Ensure tensors are on the same device
-        device = (
-            next(self.parameters()).device
-            if len(list(self.parameters())) > 0
-            else preds.device
-        )
-        preds = preds.to(device)
+        device = preds.device
         target = target.to(device)
 
-        # If preds are class probabilities (B, 2, H, W), extract anomaly scores
-        if preds.dim() == 4 and preds.shape[1] == 2:
-            # Assuming preds are [B, 2, H, W] with [background, anomaly] probabilities
-            anomaly_scores = preds[:, 1, :, :]  # Take anomaly probability
-        elif anomaly_scores is not None:
-            anomaly_scores = anomaly_scores.to(device)
+        # If no explicit anomaly scores provided, compute using RX on reconstructed images
+        if anomaly_scores is None:
+            anomaly_scores = RX(preds)
         else:
-            # Assume preds are already anomaly scores
-            anomaly_scores = preds
+            anomaly_scores = anomaly_scores.to(device)
 
         # Flatten spatial dimensions for computation
-        if anomaly_scores.dim() > 2:
-            anomaly_scores_flat = anomaly_scores.flatten()
-            target_flat = target.flatten()
-        else:
-            anomaly_scores_flat = anomaly_scores
-            target_flat = target
+        anomaly_scores_flat = anomaly_scores.flatten()
+        target_flat = target.flatten().to(torch.int32)
 
-        # Store for detailed AUC computation
-        self.preds_list.append(anomaly_scores_flat.detach().cpu())
-        self.targets_list.append(target_flat.detach().cpu())
+        # Check shapes consistency
+        if anomaly_scores_flat.shape != target_flat.shape:
+            raise ValueError(
+                f"Shape mismatch after flattening: {anomaly_scores_flat.shape} vs {target_flat.shape}"
+            )
 
-        # Update torchmetrics AUC
-        self.auc.update(anomaly_scores_flat, target_flat.long())
+        # Metrics
+        self.auc.update(anomaly_scores_flat, target_flat)
+        target_flat = target_flat.cpu().numpy()
+        anomaly_scores_flat = anomaly_scores_flat.cpu().numpy()
+        f1_eer_metrics = self._compute_pr_auc_f1_score_eer_metrics(
+            anomaly_scores_flat, target_flat
+        )
+        fpr, tpr, thresholds = roc_curve(target_flat, anomaly_scores_flat)
+        auc5 = self._compute_auc5(fpr, tpr, thresholds)
 
-    def _compute_auc_variants(
+        # Update
+        self._update_any(self.pr_auc_f1_metrics, **f1_eer_metrics)
+        self._update_any(self.auc5, **auc5)
+
+    def _format_result(self):
+        results = {}
+        results[f"{self.prefix}_pr_auc_f1_metrics"] = self._compute_any(
+            self.pr_auc_f1_metrics
+        )
+        results[f"{self.prefix}_auc5"] = self._compute_any(self.auc5)
+        results[f"{self.prefix}_torchmetrics_auc"] = self.auc.compute().item()
+        return results
+
+    def _add_prefix(self, d: dict):
+        d = {f"{self.prefix}_{k}": v for k, v in d.items()}
+        return d
+
+    @no_type_check
+    def _update_torchmetrics_from_numpy_metrics(
+        self,
+        numpy_metrics: dict[str, np.ndarray | float] | Any,
+        metrics: nn.ModuleDict,
+    ):
+        if hasattr(numpy_metrics, "_asdict"):
+            numpy_metrics = numpy_metrics._asdict()
+
+        for key, value in numpy_metrics.items():
+            metrics[key].update(torch.as_tensor(value, self.device))
+
+    def _compute_auc5(
         self, fpr: np.ndarray, tpr: np.ndarray, thresholds: np.ndarray
-    ) -> Dict[str, float]:
+    ) -> AUC5_TypedDict:
         """
         Compute various AUC variants as defined in HyperSIGMA.
 
@@ -149,17 +239,11 @@ class AnomalyDetectionMetrics(nn.Module):
         # AUC5: AUC3 / AUC2
         auc5 = auc3 / auc2 if auc2 != 0 else 0.0
 
-        return {
-            "auc1": round(auc1, 4),
-            "auc2": round(auc2, 4),
-            "auc3": round(auc3, 4),
-            "auc4": round(auc4, 4),
-            "auc5": round(auc5, 4),
-        }
+        return {"auc1": auc1, "auc2": auc2, "auc3": auc3, "auc4": auc4, "auc5": auc5}
 
-    def compute_additional_metrics(
-        self, preds: torch.Tensor, target: torch.Tensor
-    ) -> Dict[str, float]:
+    def _compute_pr_auc_f1_score_eer_metrics(
+        self, preds_np: np.ndarray, target_np: np.ndarray
+    ) -> Pr_Auc_F1_EER_TypedDict:
         """
         Compute additional anomaly detection metrics.
 
@@ -170,53 +254,50 @@ class AnomalyDetectionMetrics(nn.Module):
         Returns:
             Dictionary of additional metrics
         """
-        preds_np = preds.cpu().numpy()
-        target_np = target.cpu().numpy()
-
-        metrics_dict = {}
 
         # Precision-Recall AUC
-        try:
-            from sklearn.metrics import auc, precision_recall_curve
-
-            precision, recall, _ = precision_recall_curve(target_np, preds_np)
-            pr_auc = auc(recall, precision)
-            metrics_dict["pr_auc"] = round(float(pr_auc), 4)
-        except Exception:
-            metrics_dict["pr_auc"] = 0.0
+        precision, recall, _ = precision_recall_curve(target_np, preds_np)
+        pr_auc = auc(recall, precision)
 
         # F1 score at optimal threshold
-        try:
-            fpr, tpr, thresholds = roc_curve(target_np, preds_np)
-            # Find optimal threshold (closest to (0,1) on ROC curve)
-            optimal_idx = np.argmax(tpr - fpr)
-            optimal_threshold = thresholds[optimal_idx]
+        fpr, tpr, thresholds = roc_curve(target_np, preds_np)
+        # Find optimal threshold (closest to (0,1) on ROC curve)
+        optimal_idx = np.argmax(tpr - fpr)
+        optimal_threshold = thresholds[optimal_idx]
 
-            # Compute binary predictions at optimal threshold
-            binary_pred = (preds_np >= optimal_threshold).astype(int)
+        # Compute binary predictions at optimal threshold
+        binary_pred = (preds_np >= optimal_threshold).astype(int)
 
-            # F1 score
-            from sklearn.metrics import f1_score
-
-            f1 = f1_score(target_np, binary_pred, zero_division=0)
-            metrics_dict["f1_score"] = round(float(f1), 4)
-            metrics_dict["optimal_threshold"] = round(float(optimal_threshold), 4)
-        except Exception:
-            metrics_dict["f1_score"] = 0.0
-            metrics_dict["optimal_threshold"] = 0.5
+        # F1 score
+        f1 = f1_score(target_np, binary_pred, zero_division=0)
+        f1_score_val = round(float(f1), 4)
+        optimal_threshold = round(float(optimal_threshold), 4)
 
         # EER (Equal Error Rate)
-        try:
-            fpr, tpr, thresholds = roc_curve(target_np, preds_np)
-            # Find threshold where FPR ≈ FNR (1 - TPR)
-            fnr = 1 - tpr
-            eer_idx = np.argmin(np.abs(fpr - fnr))
-            eer = fpr[eer_idx]
-            metrics_dict["eer"] = round(float(eer), 4)
-        except Exception:
-            metrics_dict["eer"] = 0.0
+        fpr, tpr, thresholds = roc_curve(target_np, preds_np)
+        # Find threshold where FPR ≈ FNR (1 - TPR)
+        fnr = 1 - tpr
+        eer_idx = np.argmin(np.abs(fpr - fnr))
+        eer = fpr[eer_idx]
 
-        return metrics_dict
+        # pr_auc, f1_score, optimal_threshold, eer
+        # return metrics_dict
+        return {
+            "pr_auc": pr_auc,
+            "f1_score": f1_score_val,
+            "optimal_threshold": optimal_threshold,
+            "eer": eer,
+        }
+
+    def _compute_any(self, metrics):
+        if isinstance(metrics, torchmetrics.Metric):
+            return metrics.compute()
+        elif isinstance(metrics, nn.ModuleDict):
+            return {k: v.compute() for k, v in metrics.items()}
+        else:
+            raise ValueError(
+                f"Metrics type {type(metrics)} are not supported to compute"
+            )
 
     def compute(self) -> Dict[str, Any]:
         """
@@ -225,16 +306,19 @@ class AnomalyDetectionMetrics(nn.Module):
         Returns:
             Dictionary containing all computed metrics
         """
-        if not self.preds_list or not self.targets_list:
-            return {}
 
-        # Concatenate all accumulated predictions and targets
-        all_preds = torch.cat(self.preds_list, dim=0)
-        all_targets = torch.cat(self.targets_list, dim=0)
+        return self._format_result()
 
+    def forward(self, all_preds, all_targets):
+        self.update(all_preds, all_targets)
+        return self._format_result()
+
+    def __old_compute(self, all_preds, all_targets) -> Dict[str, Any]:
         # Convert to numpy for detailed computations
-        preds_np = all_preds.numpy()
-        targets_np = all_targets.numpy()
+        preds_np = all_preds.detach().cpu().numpy()
+        targets_np = all_targets.detach().cpu().numpy()
+
+        # Compute all metrics
 
         results = {}
 
@@ -243,32 +327,24 @@ class AnomalyDetectionMetrics(nn.Module):
         results[f"{self.prefix}torchmetrics_auc"] = round(float(torchmetrics_auc), 4)
 
         # Compute ROC curve and AUC variants
-        try:
-            fpr, tpr, thresholds = roc_curve(targets_np, preds_np)
+        fpr, tpr, thresholds = roc_curve(targets_np, preds_np)
 
-            # Compute AUC variants
-            auc_variants = self._compute_auc_variants(fpr, tpr, thresholds)
-            for key, value in auc_variants.items():
-                results[f"{self.prefix}{key}"] = value
+        # Compute AUC variants
+        auc_variants = self._compute_auc5(fpr, tpr, thresholds)
+        for key, value in auc_variants.items():
+            results[f"{self.prefix}{key}"] = value
 
-            # Store ROC curve for analysis
-            results[f"{self.prefix}roc_curve"] = {
-                "fpr": fpr.tolist(),
-                "tpr": tpr.tolist(),
-                "thresholds": thresholds.tolist(),
-            }
-
-        except Exception as e:
-            print(f"Error computing AUC variants: {e}")
-            # Fallback to basic AUC
-            try:
-                basic_auc = roc_auc_score(targets_np, preds_np)
-                results[f"{self.prefix}auc1"] = round(float(basic_auc), 4)
-            except Exception:
-                results[f"{self.prefix}auc1"] = 0.0
+        # Store ROC curve for analysis
+        results[f"{self.prefix}roc_curve"] = {
+            "fpr": fpr.tolist(),
+            "tpr": tpr.tolist(),
+            "thresholds": thresholds.tolist(),
+        }
 
         # Compute additional metrics
-        additional_metrics = self.compute_additional_metrics(all_preds, all_targets)
+        additional_metrics = self._compute_pr_auc_f1_score_eer_metrics(
+            all_preds, all_targets
+        )
         for key, value in additional_metrics.items():
             results[f"{self.prefix}{key}"] = value
 
@@ -293,20 +369,51 @@ class HADDetectionMetrics(nn.Module):
     experiments, with the same naming conventions and computation methods.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.metrics = AnomalyDetectionMetrics(prefix="had_")
+    def __init__(self, device: str | torch.device = "cuda"):
+        """
+        Initialize HADDetectionMetrics.
 
-    def reset(self):
+        Args:
+            device: Device to run computations on
+        """
+        super().__init__()
+        self.metrics = AnomalyDetectionMetricsBase(prefix="had_", device=device)
+
+    def reset(self) -> None:
         """Reset accumulated metrics."""
         self.metrics.reset()
 
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """Update metrics with new predictions."""
+    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
+        """
+        Update metrics with new predictions.
+
+        Args:
+            preds: Reconstructed images from model
+            target: Ground truth anomaly labels
+        """
         self.metrics.update(preds, target)
 
-    def compute(self) -> Dict[str, Any]:
-        """Compute all metrics, returning HyperSIGMA-compatible results."""
+    def forward(self, preds: torch.Tensor, target: torch.Tensor) -> Dict[str, Any]:
+        """
+        Forward method for PyTorch compatibility.
+
+        Args:
+            preds: Predictions
+            target: Ground truth labels
+
+        Returns:
+            Computed metrics
+        """
+        self.update(preds, target)
+        return self.compute()
+
+    def compute(self) -> Dict[str, float]:
+        """
+        Compute all metrics, returning HyperSIGMA-compatible results.
+
+        Returns:
+            Dictionary containing AUC1-AUC5 metrics
+        """
         results = self.metrics.compute()
 
         # Extract main results in HyperSIGMA format
@@ -320,28 +427,53 @@ class HADDetectionMetrics(nn.Module):
 
         return had_results
 
+    def __repr__(self) -> str:
+        """Return string representation."""
+        return f"HADDetectionMetrics(device='{self.metrics.device}')"
 
-def test_anomaly_detection_metrics():
-    """Test function to demonstrate usage."""
-    print("Testing AnomalyDetectionMetrics...")
+
+def test_anomaly_detection_metrics() -> None:
+    """
+    Test function to demonstrate usage of anomaly detection metrics.
+
+    This function tests both AnomalyDetectionMetricsbase and HADDetectionMetrics
+    with synthetic data to verify functionality.
+    """
+    print("=" * 60)
+    print("Testing Anomaly Detection Metrics")
+    print("=" * 60)
 
     # Create sample data
     batch_size = 4
+    channels = 224
     height, width = 32, 32
 
-    # Initialize metrics
-    metrics = AnomalyDetectionMetrics(prefix="test_")
+    # Initialize metrics with device specification
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    metrics = AnomalyDetectionMetricsBase(prefix="test_", device=device)
+
+    print("\n" + "-" * 40)
+    print("Testing AnomalyDetectionMetricsbase")
+    print("-" * 40)
 
     # Simulate validation loop
+    total_samples = 0
+    total_anomalies = 0
+
     for i in range(3):
         # Create sample predictions and targets
-        preds = torch.rand(batch_size, height, width)
+        preds = torch.rand(batch_size, channels, height, width, device=device)
 
         # Create some anomalies (binary targets)
-        target = torch.zeros(batch_size, height, width)
+        target = torch.zeros(batch_size, height, width, device=device)
+        batch_anomalies = 0
+
         # Add random anomalies
         for b in range(batch_size):
-            num_anomalies = torch.randint(1, 10, (1,)).item()
+            num_anomalies: int = torch.randint(1, 10, (1,)).item()  # type: ignore
+            batch_anomalies += num_anomalies
             for _ in range(num_anomalies):
                 y, x = (
                     torch.randint(0, height, (1,)).item(),
@@ -349,9 +481,13 @@ def test_anomaly_detection_metrics():
                 )
                 target[b, y, x] = 1
 
+        total_samples += batch_size * height * width
+        total_anomalies += batch_anomalies
+
         print(f"\nBatch {i + 1}:")
         print(f"  Pred range: [{preds.min():.4f}, {preds.max():.4f}]")
-        print(f"  Target sum: {target.sum().item()}")
+        print(f"  Target anomalies: {batch_anomalies}")
+        print(f"  Anomaly ratio: {batch_anomalies / (batch_size * height * width):.4f}")
 
         # Update metrics
         metrics.update(preds, target)
@@ -359,28 +495,82 @@ def test_anomaly_detection_metrics():
     # Compute final metrics
     results = metrics.compute()
 
-    print("\nFinal Results:")
+    print("\n" + "-" * 40)
+    print("AnomalyDetectionMetricsbase Results")
+    print("-" * 40)
+
     for key, value in results.items():
         if not isinstance(value, dict):  # Skip nested dicts like roc_curve
             print(f"  {key}: {value}")
 
-    # Test HAD-specific metrics
-    print("\nTesting HADDetectionMetrics...")
-    had_metrics = HADDetectionMetrics()
+    print(f"\nDataset statistics:")
+    print(f"  Total samples: {total_samples}")
+    print(f"  Total anomalies: {total_anomalies}")
+    print(f"  Overall anomaly ratio: {total_anomalies / total_samples:.4f}")
 
-    # Use same data
-    preds = torch.rand(batch_size, height, width)
-    target = torch.zeros(batch_size, height, width)
-    target[:, : height // 4, : width // 4] = 1  # Add some anomalies
+    # Test HAD-specific metrics
+    print("\n" + "-" * 40)
+    print("Testing HADDetectionMetrics")
+    print("-" * 40)
+
+    had_metrics = HADDetectionMetrics(device=device)
+
+    # Create test data with known anomaly pattern
+    preds = torch.rand(batch_size, channels, height, width, device=device)
+    target = torch.zeros(batch_size, height, width, device=device)
+
+    # Add structured anomalies (top-left quadrant)
+    target[:, : height // 4, : width // 4] = 1
+    num_anomalies = batch_size * (height // 4) * (width // 4)
+
+    print(f"\nHAD Test Data:")
+    print(f"  Pred range: [{preds.min():.4f}, {preds.max():.4f}]")
+    print(f"  Target anomalies: {num_anomalies}")
+    print(f"  Anomaly ratio: {num_anomalies / (batch_size * height * width):.4f}")
 
     had_metrics.update(preds, target)
     had_results = had_metrics.compute()
 
-    print("HAD Results:")
+    print("\nHAD Results:")
     for key, value in had_results.items():
         print(f"  {key}: {value}")
 
-    print("\nAll tests completed successfully!")
+    # Test multiple updates for HAD metrics
+    print("\n" + "-" * 40)
+    print("Testing HADDetectionMetrics with multiple updates")
+    print("-" * 40)
+
+    had_metrics.reset()
+
+    for i in range(2):
+        # Create different anomaly patterns
+        preds = torch.rand(batch_size, channels, height, width, device=device)
+        target = torch.zeros(batch_size, height, width, device=device)
+
+        if i == 0:
+            # Center anomalies
+            h_start, h_end = height // 3, 2 * height // 3
+            w_start, w_end = width // 3, 2 * width // 3
+            target[:, h_start:h_end, w_start:w_end] = 1
+        else:
+            # Corner anomalies
+            target[:, : height // 6, : width // 6] = 1
+            target[:, -height // 6 :, -width // 6 :] = 1
+
+        print(f"\nUpdate {i + 1}:")
+        print(f"  Anomaly pattern: {'center' if i == 0 else 'corners'}")
+        print(f"  Anomaly count: {target.sum().item()}")
+
+        had_metrics.update(preds, target)
+
+    final_had_results = had_metrics.compute()
+    print("\nFinal HAD Results (after multiple updates):")
+    for key, value in final_had_results.items():
+        print(f"  {key}: {value}")
+
+    print("\n" + "=" * 60)
+    print("All tests completed successfully!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

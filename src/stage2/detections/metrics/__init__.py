@@ -1,2 +1,2 @@
-from .basic import AnomalyDetectionMetrics, HADDetectionMetrics
+from .basic import AnomalyDetectionMetricsBase, HADDetectionMetrics
 from .visualizer import AnomalyDetectionVisualizer

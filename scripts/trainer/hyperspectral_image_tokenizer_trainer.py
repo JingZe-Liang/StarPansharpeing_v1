@@ -1634,10 +1634,11 @@ class CosmosHyperspectralTokenizerTrainer:
                     self.tokenizer.train()
 
         # track psnr and ssim
-        psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
-        ssim_fn = StructuralSimilarityIndexMeasure().to(
-            device=self.device, dtype=self.dtype
-        )
+        if self.train_cfg.track_metrics:
+            psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
+            ssim_fn = StructuralSimilarityIndexMeasure().to(
+                device=self.device, dtype=self.dtype
+            )
         loss_metrics = MeanMetric().to(device=self.device)
 
         _set_all_model_modes(train=False)
@@ -1664,16 +1665,20 @@ class CosmosHyperspectralTokenizerTrainer:
             recon_for_metrics = self.to_rgb(recon)
             batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
 
-            with torch.no_grad():
+            if self.train_cfg.track_metrics:
                 psnr_fn.update(batch_img_rgb, recon_for_metrics)
                 ssim_fn.update(batch_img_rgb, recon_for_metrics)
 
-                # recon loss
-                loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
-                loss_metrics.update(loss)
+            # recon loss
+            loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
+            loss_metrics.update(loss)
 
-        psnr_val = psnr_fn.compute()
-        ssim_val = ssim_fn.compute()
+        if self.train_cfg.track_metrics:
+            psnr_val = psnr_fn.compute()
+            ssim_val = ssim_fn.compute()
+        else:
+            psnr_val = torch.tensor(0.0).to(self.device)
+            ssim_val = torch.tensor(0.0).to(self.device)
         loss_val = loss_metrics.compute()
 
         # gather

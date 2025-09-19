@@ -37,16 +37,13 @@ def moe_balance_info(num_experts: int):
         total_tokens = top_k_index.shape[0]
 
         # count the index number in this tensor (chosed experts)
-        # 统计每个专家被选中的次数
         unique, counts = torch.unique(top_k_index, return_counts=True)
         counts_dict = dict(zip(unique.cpu().numpy(), counts.cpu().numpy()))
 
-        # 初始化所有专家的计数为0
         for expert_idx in range(num_experts):
             if expert_idx not in counts_dict:
                 counts_dict[expert_idx] = 0
 
-        # 更新balance_info
         balance_info["expert_counts"] = counts_dict
         balance_info["total_tokens"] = total_tokens
         balance_info["expert_percent"] = {

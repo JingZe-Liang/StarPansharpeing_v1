@@ -83,10 +83,10 @@ dataset_names_to_img_size:
   OSCD: 512
 
 WDC_train:
-  - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
+  - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
 
 WDC_val:
-  - - data/WDC/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
+  - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
 
 MMSeg_YREB_train:
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar

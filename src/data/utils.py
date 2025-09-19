@@ -5,6 +5,7 @@ import random
 import re
 import types
 import warnings
+from collections import OrderedDict
 from itertools import chain, product
 from pathlib import Path
 from typing import Annotated, Any, Callable, Iterable, Literal, TypeAlias, cast
@@ -60,8 +61,6 @@ def key_list_to_dict(keys: list[str] | set[str], use_ordered_dict=True):
     find complexity O(1) time, but dict is C-implemented, it's faster than ordered dict.
     """
     if use_ordered_dict:
-        from collections import OrderedDict
-
         return OrderedDict((k, None) for k in keys)
     else:
         return {k: None for k in keys}
@@ -308,6 +307,16 @@ def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = Non
     return sample
 
 
+def repeat_chans(x: torch.Tensor, repeat_n: int):
+    # [h, w] or [1, h, w]
+    if x.ndim == 2:
+        x = x[None]
+    if x.shape[0] == 1:
+        x = x.repeat(repeat_n, 1, 1)
+
+    return x
+
+
 # * --- Normalization Functions --- #
 
 
@@ -461,7 +470,7 @@ def img_normalize_to_zero_one_(
 
 def norm_img_(
     img: Float[Tensor, "... C H W"] | Float[Tensor, "... H W"],
-    per_channel=False,
+    per_channel: bool = False,
     norm_type: str = "clip_zero_div",
     to_neg_1_1=True,
     mannual_img_min_max: tuple[float, float] | None = None,
