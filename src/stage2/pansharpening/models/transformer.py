@@ -300,18 +300,23 @@ if __name__ == "__main__":
     # ).to(device)
     # print(mlp(x).shape)
 
+    from fvcore.nn import parameter_count_table
+
     # Create config for Transformer
     cfg = TransformerConfig(
         in_dim=16,
-        dim=128,
-        depth=4,
+        dim=384,
+        depth=8,
         num_heads=8,
+        mlp_ratio=4,
         out_channels=16,
         pos_embed_type="sincos",
         norm_layer="rmsnorm",
         input_size=32,
     )
     model = Transformer(cfg).to(device)
+    print(parameter_count_table(model))
+
     x = torch.randn(1, 16, 64, 64).to(device)
     out = model(x, x)
     print(out.shape)  # Expected shape: (1, 16, 32, 32)

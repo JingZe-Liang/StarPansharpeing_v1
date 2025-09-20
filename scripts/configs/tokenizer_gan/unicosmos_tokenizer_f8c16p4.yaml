@@ -130,6 +130,7 @@ train:
   proj_dir: runs/stage1_cosmos
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 0.08
+  track_metrics: false
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200

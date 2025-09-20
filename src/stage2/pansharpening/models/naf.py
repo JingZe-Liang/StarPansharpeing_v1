@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer, get_norm_layer
 
-from src.stage2.layers.naf import NAFBlockConditional
+from src.stage2.layers.naf import NAFBlock, NAFBlockConditional
 from src.stage2.layers.patcher import create_patcher, create_unpatcher
 from src.utilities.config_utils import dataclass_from_dict
 from src.utilities.logging import log
@@ -26,6 +26,10 @@ class PansharpeningNAFNetConfig:
     dw_expand: int = 2
     ffn_expand: int = 2
     patch_size: int = 1
+    condition_on_decoder: bool = False
+    block_drop: float = 0.0
+    output_rescale: bool = True
+    is_neg_1_1: bool = True
 
 
 class PansharpeningNAFNet(nn.Module):
@@ -55,21 +59,32 @@ class PansharpeningNAFNet(nn.Module):
         self.downs = nn.ModuleList()
 
         chan = cfg.width
-        block_partial = partial(
+        enc_block_partial = partial(
             NAFBlockConditional,
-            cond_chan=cfg.width,
+            cond_chs=cfg.width,
             DW_Expand=cfg.dw_expand,
             FFN_Expand=cfg.ffn_expand,
+            drop_out_rate=cfg.block_drop,
+        )
+        dec_block_partial = (
+            partial(
+                NAFBlock,
+                DW_Expand=cfg.dw_expand,
+                FFN_Expand=cfg.ffn_expand,
+                drop_out_rate=cfg.block_drop,
+            )
+            if not cfg.condition_on_decoder
+            else enc_block_partial
         )
         for num in cfg.enc_blk_nums:
             self.encoders.append(
-                nn.ModuleList([block_partial(chan) for _ in range(num)])
+                nn.ModuleList([enc_block_partial(chan) for _ in range(num)])
             )
             self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))
             chan = chan * 2
 
         self.middle_blks = nn.ModuleList(
-            [block_partial(chan) for _ in range(cfg.middle_blk_num)]
+            [dec_block_partial(chan) for _ in range(cfg.middle_blk_num)]
         )
 
         for num in cfg.dec_blk_nums:
@@ -82,7 +97,7 @@ class PansharpeningNAFNet(nn.Module):
             )
             chan = chan // 2
             self.decoders.append(
-                nn.ModuleList([block_partial(chan) for _ in range(num)])
+                nn.ModuleList([dec_block_partial(chan) for _ in range(num)])
             )
 
         self.padder_size = 2 ** len(self.encoders)
@@ -138,6 +153,11 @@ class PansharpeningNAFNet(nn.Module):
         if self.cfg.use_residual:
             x = x + ms
 
+        if self.cfg.output_rescale:
+            if self.cfg.is_neg_1_1:
+                x = torch.tanh(x)
+            else:
+                x = torch.sigmoid(x)
         return x
 
     @classmethod
@@ -151,21 +171,29 @@ def test_pansharpening_nafnet():
     """Test PansharpeningNAFNet model with sample inputs."""
     # Create model with valid configuration
     model = PansharpeningNAFNet.create_model(
-        ms_channel=3,
+        ms_channel=8,
         pan_channel=1,
-        condition_channel=16,
+        condition_channel=8,
         width=64,
         middle_blk_num=1,
-        enc_blk_nums=[1, 1, 1, 1],
-        dec_blk_nums=[1, 1, 1, 1],
+        enc_blk_nums=[1, 1, 1],
+        dec_blk_nums=[1, 1, 1],
         use_residual=True,
+        patch_size=2,
+        dw_expand=1,
+        ffn_expand=1,
     )
     model.train()
 
+    from fvcore.nn import parameter_count_table
+
+    print(parameter_count_table(model))
+
     # Create sample inputs
-    ms = torch.randn(1, 3, 256, 256)
+    ms = torch.randn(1, 8, 256, 256)
     pan = torch.randn(1, 1, 256, 256)
-    cond = torch.randn(1, 16, 256, 256)
+    # cond = torch.randn(1, 16, 32, 32)
+    cond = torch.randn(1, 8, 256, 256)
 
     # Test forward pass
     output = model(ms, pan, cond)

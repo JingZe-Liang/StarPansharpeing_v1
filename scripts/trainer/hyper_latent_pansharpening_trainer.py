@@ -26,7 +26,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from tqdm import trange
+from tqdm import tqdm, trange
 
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
@@ -115,6 +115,9 @@ class PansharpeningTrainer:
         )
         self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
             self.dataset_cfg.val
+        )
+        self.val_full_dataset, self.val_full_dataloader = hydra.utils.instantiate(
+            self.dataset_cfg.val_full
         )
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
@@ -486,7 +489,7 @@ class PansharpeningTrainer:
             level=level.lower(),
             warn_once=warn_once,
             only_rank_zero=only_rank_zero,
-            stack_level=2,
+            stack_level=3,
             **kwargs,
         )
 
@@ -796,7 +799,9 @@ class PansharpeningTrainer:
         elif isinstance(x, dict):
             return {k: self._cast_to_dtype(v) for k, v in x.items()}
 
-    def _to_tokenizer_range(self, x: torch.Tensor):
+    def _to_tokenizer_range(self, x: torch.Tensor | None):
+        if x is None:
+            return None
         if not self.train_cfg.to_neg_1_1:  # dataset gives data range [0, 1]
             return x * 2 - 1
         return x
@@ -889,6 +894,15 @@ class PansharpeningTrainer:
             self.log_msg(f"[Real GT Metrics]: {self.pan_acc_reduced.print_str()}")
             self.log_msg(f"[Latent Metrics]: {self.pan_acc_reduced_latent.print_str()}")
 
+        # visualize train
+        if self.global_step % self.train_cfg.visualize_every == 0:
+            hrms = batch["hrms"]
+            self.visualize_reconstruction(
+                [hrms, pred_img],
+                img_name="train/train_vis",
+                add_step=True,
+            )
+
     def format_log(self, log_sr_loss: dict) -> str:
         def dict_round_to_list_str(
             d: dict, n_round: int = 4, select: list[str] | None = None
@@ -942,7 +956,10 @@ class PansharpeningTrainer:
                 raise e
 
             if self.global_step % self.val_cfg.val_duration == 0:
+                torch.cuda.empty_cache()
                 self.val_loop()
+                self.val_full_loop()
+                torch.cuda.empty_cache()
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
@@ -972,28 +989,60 @@ class PansharpeningTrainer:
             raise ValueError("No validation dataloader found")
 
         for batch in self.val_full_dataloader:
-            return batch
+            yield batch
+
+    def _ensure_paired_shapes(self, lrms, pan, hrms=None):
+        # lrms: is upsampled MS or only MS
+        if hrms is not None:
+            H, W = hrms.shape[-2:]
+        else:
+            H, W = pan.shape[-2:]
+
+        ms_shape = H // self.train_cfg.pansp_ratio, W // self.train_cfg.pansp_ratio
+        if lrms.shape[-2:] == torch.Size(ms_shape):
+            if getattr(self.train_cfg, "upsample_lrms", True):
+                lrms = torch.nn.functional.interpolate(
+                    lrms, size=(H, W), mode="bilinear"
+                )
+            else:
+                raise ValueError(
+                    f"MS upsampled shape {lrms.shape} does not match MS shape {ms_shape}"
+                )
+        else:
+            assert lrms.shape[-2:] == torch.Size((H, W)), (
+                f"lrms shape {lrms.shape} does not match pan/hrms shape {pan.shape}/{hrms.shape}"
+            )
+
+        return lrms
 
     @torch.no_grad()
     def val_step(self, batch: BatchInput):
         batch = self._cast_to_dtype(batch)
+        lrms, pan, hrms = (
+            batch["lrms"],
+            batch["pan"],
+            batch.get("hrms", None),
+        )
         if self.online_tokenize:
-            lrms, pan, hrms = batch["lrms"], batch["pan"], batch["hrms"]
             lrms, pan, hrms = map(self._to_tokenizer_range, (lrms, pan, hrms))
-            pan = pan.repeat_interleave(lrms.shape[1], dim=1)
+            pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
             lrms_latent = self.forward_tokenizer(lrms)["latent"]
-            pan_latent = self.forward_tokenizer(pan)["latent"]
-            gt_latent = self.forward_tokenizer(hrms)["latent"]
+            pan_latent = self.forward_tokenizer(pan_)["latent"]
+            gt_latent = None
+            if hrms is not None:
+                gt_latent = self.forward_tokenizer(hrms)["latent"]
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
-            gt_latent = batch["hrms_latent"].to(self.device, self.dtype)
+            gt_latent = batch.get("hrms_latent", None)
+            if gt_latent is not None:
+                gt_latent = gt_latent.to(self.device, self.dtype)
 
         # forward the fusion network
         out = self.forward_pansp_model(
-            batch["lrms"],
-            batch["pan"],
-            batch["hrms"],
+            lrms,
+            pan,
+            hrms,
             lrms_latent,
             pan_latent,
             gt_latent,
@@ -1002,26 +1051,37 @@ class PansharpeningTrainer:
         return out
 
     def _get_val_tbar_iter(self, val_loader, mode="reduced"):
-        if self.val_cfg.max_val_iters > 0:
+        max_iters = getattr(self.val_cfg, f"max_val_{mode}_iters")
+        if max_iters > 0:
             # create a new iterator for the validation loader
             # state in the loader generator
-            if not hasattr(self, "_val_loader_iter"):
+            load_name = f"_val_{mode}_loader_iter"
+            if not hasattr(self, load_name):
                 val_loader_iter = iter(val_loader)
-                name = f"_val_{mode}_loader_iter"
-                setattr(self, name, val_loader_iter)
+                setattr(self, load_name, val_loader_iter)
 
             tbar = trange(
-                self.val_cfg.max_val_iters,
+                max_iters,
                 desc="validating ...",
                 leave=False,
                 disable=not self.accelerator.is_main_process,
             )
             self.log_msg(
-                f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
+                f"[Val]: start validating with only {max_iters} batches",
                 only_rank_zero=False,
             )
         else:
-            tbar = self.finite_val_loader()
+            loader = (
+                self.finite_val_loader()
+                if mode == "reduced"
+                else self.finite_val_full_loader()
+            )
+            tbar = tqdm(
+                loader,
+                desc="validating ...",
+                leave=False,
+                disable=not self.accelerator.is_main_process,
+            )
             self.log_msg(
                 f"[Val]: start validating with the whole val set", only_rank_zero=False
             )
@@ -1029,7 +1089,6 @@ class PansharpeningTrainer:
 
     def val_loop(self):
         self.pansp_model.eval()
-        torch.cuda.empty_cache()
 
         tbar = self._get_val_tbar_iter(self.finite_val_loader())
         # track psnr and ssim
@@ -1039,7 +1098,7 @@ class PansharpeningTrainer:
 
         self._val_reduced_loader_iter: Iterable
         for batch_or_idx in tbar:
-            if self.val_cfg.max_val_iters > 0:
+            if isinstance(batch_or_idx, int):
                 batch = next(self._val_reduced_loader_iter)
             else:
                 batch = batch_or_idx
@@ -1056,9 +1115,7 @@ class PansharpeningTrainer:
             loss_metrics.update(loss_of_latent)
 
             # metrics
-            pred_sr = self.to_rgb(pred_sr)
-            gt = self.to_rgb(gt)
-            pan_acc_fn(pred_sr, gt)
+            pan_acc_fn(self.to_rgb(pred_sr), self.to_rgb(gt))
 
         # pan_acc = pan_acc_fn._get_acc_ave()
         pan_acc = pan_acc_fn.acc_ave
@@ -1073,25 +1130,26 @@ class PansharpeningTrainer:
 
             # visualize the last val batch
             self.visualize_reconstruction(
-                gt,  # gt
-                pred_sr,  # prediction
+                [gt, val_out.pred_sr],
                 add_step=True,
                 img_name="val/pansharpened_reduced",
-                no_to_rgb=True,
             )
 
     def val_full_loop(self):
         self.pansp_model.eval()
-        torch.cuda.empty_cache()
 
         tbar = self._get_val_tbar_iter(self.finite_val_full_loader(), mode="full")
         # track psnr and ssim
-        pan_acc_fn = PansharpeningMetrics(ratio=self.train_cfg.pansp_ratio, ref=False)
+        pan_acc_fn = PansharpeningMetrics(
+            ratio=self.train_cfg.pansp_ratio,
+            sensor=self.dataset_cfg.cfgs.used,
+            ref=False,
+        )
         loss_metrics = MeanMetric().to(device=self.device)
 
         self._val_full_loader_iter: Iterable
         for batch_or_idx in tbar:
-            if self.val_cfg.max_val_iters > 0:
+            if isinstance(batch_or_idx, int):
                 batch = next(self._val_full_loader_iter)
             else:
                 batch = batch_or_idx
@@ -1099,7 +1157,7 @@ class PansharpeningTrainer:
             batch = cast(BatchInput, batch)
             val_out = self.val_step(batch)
 
-            pred_sr, lrms, pan = map(
+            acc_fn_inputs = map(
                 self.to_rgb,
                 [
                     val_out.pred_sr,
@@ -1107,7 +1165,7 @@ class PansharpeningTrainer:
                     batch["pan"].to(self.device),
                 ],
             )
-            pan_acc_fn(pred_sr, lrms, pan)
+            pan_acc_fn(*list(acc_fn_inputs))
 
         pan_acc = pan_acc_fn._get_acc_ave()
         loss_val = loss_metrics.compute()
@@ -1119,12 +1177,11 @@ class PansharpeningTrainer:
             self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.4f}")
             self.tenb_log_any("metric", pan_acc, step=self.global_step)
 
-            # visualize the last val batch
+            # visualize the last val batch with pan, lrms, pred_sr, and gt for comparison
             self.visualize_reconstruction(
-                pred_sr,  # gt
+                [batch["pan"], batch["lrms"], val_out.pred_sr],
                 add_step=True,
-                img_name="val/pansharpened_full",
-                no_to_rgb=True,
+                img_name="val/full",
             )
 
     def save_state(self):
@@ -1182,46 +1239,57 @@ class PansharpeningTrainer:
 
     def visualize_reconstruction(
         self,
-        x: torch.Tensor,
-        recon: torch.Tensor | None = None,
+        tensors: torch.Tensor | list[torch.Tensor],
         img_name: str = "pansharpening_reduced",
         add_step: bool = False,
         only_vis_n: int | None = None,
         no_to_rgb: bool = False,
     ):
-        if not no_to_rgb:
-            x = self.to_rgb(x)
-        if recon is not None and not no_to_rgb:
-            recon = self.to_rgb(recon)
+        # Convert single tensor to list for uniform processing
+        if isinstance(tensors, torch.Tensor):
+            tensors = [tensors]
+
+        # Apply RGB conversion if needed
+        processed_tensors = []
+        for tensor in tensors:
+            if not no_to_rgb:
+                tensor = self.to_rgb(tensor)
+            processed_tensors.append(tensor)
 
         _only_n = only_vis_n or 16
         to_img = lambda x: tensor_to_image(
             make_grid(x[:_only_n].float(), n_row=4, padding=2)
         )
-        c = x.shape[1]
 
-        def hyperspectral_to_rgb(x):
-            # is rgb or gray images
-            if c in (1, 3):
+        def process_tensor_to_rgb(x):
+            """Process a tensor to RGB format based on its channel count."""
+            c = x.shape[1]
+
+            # Handle different channel cases
+            if c == 1:
+                # Single channel (like PAN) - repeat to 3 channels
+                x_rgb = x.repeat(1, 3, 1, 1)
+                x_np = to_img(x_rgb)
+            elif c == 3:
+                # Already RGB - direct conversion
                 x_np = to_img(x)
             else:
-                rgb_channels = to_cont(
-                    self.dataset_cfg.consts.rgb_channels
-                )  # _prefixed_rgb_channels[c]
+                # Hyperspectral - use RGB channels
+                rgb_channels = to_cont(self.dataset_cfg.consts.rgb_channels)
                 x_np = to_img(x[:, rgb_channels])
 
             return x_np
 
-        x_np = hyperspectral_to_rgb(x)
+        # Process all tensors
+        tensor_images = []
+        for tensor in processed_tensors:
+            img_np = process_tensor_to_rgb(tensor)
+            tensor_images.append(img_np)
 
-        # cat original and reconstructed images
-        if recon is not None:
-            recon_np = hyperspectral_to_rgb(recon)
-            img = np.concatenate([x_np, recon_np], axis=1)
-        else:
-            img = x_np
+        # Concatenate all images horizontally
+        img = np.concatenate(tensor_images, axis=1)
 
-        # save
+        # Save
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
@@ -1247,9 +1315,9 @@ class PansharpeningTrainer:
         self.train_loop()
 
 
-_key = "tokenizer_lora_vitamin"
+_key = "tokenizer_lora_nafnet"
 _configs = {
-    "tokenizer_lora_vitamin": "tokenizer_lora_vitamin",
+    "tokenizer_lora_nafnet": "tokenizer_lora_nafnet",
 }[_key]
 
 

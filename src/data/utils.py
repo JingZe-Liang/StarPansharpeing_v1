@@ -99,6 +99,49 @@ def remove_extension(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     return sample_dict
 
 
+def flatten_sample_subdict(sample: dict, flatten_key_ext="npz"):
+    """use this before removing all extensions
+    sample has keys: __key__, pair.npz ({'lrms', 'hrms', 'pan'}), and other keys that not a dict
+    flatten the samples to be {'__key__', 'lrms', 'hrms', 'pan', ...}
+    if dict is a nest dict, flatten all off the dicts that the nested dict to be in the root dict
+    with keys as the nested keys joined by '_'
+
+    Args:
+        sample: Input sample dictionary
+        flatten_key_ext: String or list of strings specifying extensions to flatten
+    """
+
+    def _flatten_dict(d: Any, parent_key: str = "", sep: str = "_") -> dict:
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(_flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    # Convert to list if single string
+    if isinstance(flatten_key_ext, str):
+        flatten_exts = [flatten_key_ext]
+    else:
+        flatten_exts = flatten_key_ext
+
+    keys = list(sample.keys())
+    for k in keys:
+        # Check if key ends with any of the specified extensions
+        should_flatten = any(k.endswith(f".{ext}") for ext in flatten_exts)
+
+        if should_flatten:
+            sub_dict = sample[k]
+            if isinstance(sub_dict, dict):
+                flattened = _flatten_dict(sub_dict, parent_key="", sep="_")
+                sample.update(flattened)
+                del sample[k]
+
+    return sample
+
+
 def remove_meta_data(sample: dict[str, LoadedData]) -> dict[str, LoadedData]:
     for k in sample.keys():
         if k.startswith("__"):

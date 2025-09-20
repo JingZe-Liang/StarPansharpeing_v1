@@ -5,7 +5,7 @@ import torch.nn as nn
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 
-from src.stage2.layers import MbConvStages
+from src.stage2.layers import MbConvStages, RescaleOutput
 from src.utilities.logging import log
 
 
@@ -38,6 +38,8 @@ class VitaminCfg:
     condition_channel: int = 256
     use_residual: bool = False
     conv_cfg: ConvCfg = field(default_factory=ConvCfg)
+    output_rescale: bool = True
+    is_neg_1_1: bool = True
 
 
 def create_conv3x3_same(in_chan, out_chan):
@@ -68,6 +70,10 @@ class VitaminModel(nn.Module):
             **asdict(cfg.conv_cfg),
         )
         self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.ms_channel)
+        self.scale_output = RescaleOutput(
+            rescale=cfg.output_rescale,
+            out_val_range="minus_one_one" if cfg.is_neg_1_1 else "zero_one",
+        )
 
     def init_weights(self):
         for name, module in self.stages.named_modules():
@@ -108,6 +114,8 @@ class VitaminModel(nn.Module):
 
         if self.cfg.use_residual:
             x = x + ms
+
+        x = self.scale_output(x)
 
         return x
 

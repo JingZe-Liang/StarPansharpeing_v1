@@ -1,4 +1,5 @@
 import math
+import os
 from functools import partial, wraps
 from inspect import isclass
 from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
@@ -33,7 +34,7 @@ natten = lazy_loader.load("natten")
 
 # * --- Blocks compilations --- * #
 
-compile_forward_fn = True
+compile_forward_fn = bool(os.getenv("MODEL_COMPILED", "true"))
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True

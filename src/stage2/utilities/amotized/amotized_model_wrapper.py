@@ -200,7 +200,7 @@ class AmotizedModelMixin(nn.Module):
         }
 
     @no_type_check
-    def forward(
+    def forward_all_amotized_types(
         self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple
     ) -> ModelOutput:
         pixel_in = self._single_tensor_to_tuple(pixel_in)
@@ -226,13 +226,17 @@ class AmotizedModelMixin(nn.Module):
         else:
             raise ValueError(f"Unknown amotize_type: {self.amotize_type}")
 
+    def forward(self, pixel_in, latent_in):
+        # for easy override
+        return self.forward_all_amotized_types(pixel_in, latent_in)
+
     @classmethod
-    def create_model(
+    def create_model[DataclassType](
         cls,
         amotized_model_class: type[nn.Module],
         pixel_model_class: type[nn.Module],
-        amotized_cfg_cls: "type[dataclass]",
-        pixel_cfg_cls: "type[dataclass]",
+        amotized_cfg_cls: type[DataclassType] | None,
+        pixel_cfg_cls: type[DataclassType] | None,
         amotized_kwargs: dict = {},
         pixel_kwargs: dict = {},
         mixin_kwargs: dict = {},
@@ -260,3 +264,34 @@ class AmotizedModelMixin(nn.Module):
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode
                 log(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")
+
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
+        if self.learn_decoder:
+            assert hasattr(self.decoder, "state_dict")
+            # save the decoder if learnable
+            state = {
+                "decoder": self.decoder.state_dict(),
+                "pixel_model": self.pixel_model.state_dict(),
+                "amotized_model": self.amotized_model.state_dict(),
+            }
+        else:
+            state = super().state_dict(destination, prefix, keep_vars)
+        return state
+
+    def load_state_dict(self, state_dict, strict=True):
+        if self.learn_decoder:
+            assert hasattr(self.decoder, "load_state_dict")
+            rets = {}
+            rets["decoder"] = self.decoder.load_state_dict(
+                state_dict["decoder"], strict=strict
+            )
+            rets["pixel_model"] = self.pixel_model.load_state_dict(
+                state_dict["pixel_model"], strict=strict
+            )
+            rets["amotized_model"] = self.amotized_model.load_state_dict(
+                state_dict["amotized_model"], strict=strict
+            )
+            return rets
+        else:
+            rets = super().load_state_dict(state_dict, strict)
+            return rets

@@ -18,7 +18,7 @@ defaults:
 
 dataset:
   cfgs:
-    used: WV3
+    used: QB
 
 ema:
   _target_: ema_pytorch.EMA
@@ -53,7 +53,7 @@ train:
   save_every: 500
 
   resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-04-11_03-19-56_cosmos_pretrained_f8c16p4_percep_remote_clip_RN50/ema
+  ema_load_path:
 
   pansharpening_loss:
     _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
@@ -61,8 +61,8 @@ train:
     amotized_loss:
       _target_: torch.nn.MSELoss
     pixel_loss_kwargs:
-      weighted_r: [1.0, 0.1]
-    factors: [0.0, 1.0]
+      weighted_r: [1.0, 0.1] # l1ssim weights
+    factors: [0.1, 1.0] # latetnt and pixel weights
 
   pansharp_optim:
     # _target_: torch.optim.AdamW
@@ -90,13 +90,13 @@ train:
     num_cycles: 1
 
   log:
-    run_comment: f8c16p1_${dataset.cfgs.used}_vitmain
+    run_comment: f8c16p1_${dataset.cfgs.used}_nafnet
     log_with_time: True
-    visualize_every: 200
     log_every: 10
 
   debug: true
 
 val:
-  val_duration: 500
-  max_val_iters: -1 # val only `max_val_iters` batches
+  val_duration: 1000
+  max_val_reduced_iters: -1 # val only `max_val_iters` batches
+  max_val_full_iters: 20

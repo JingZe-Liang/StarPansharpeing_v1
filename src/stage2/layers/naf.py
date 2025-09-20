@@ -62,7 +62,7 @@ class NAFBlock(nn.Module):
         self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
         self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
 
-    def forward(self, inp):
+    def forward(self, inp, cond=None):
         def forward_closure(inp):
             x = inp
 

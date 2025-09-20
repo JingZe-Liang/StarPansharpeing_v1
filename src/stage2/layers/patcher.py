@@ -1,7 +1,8 @@
-from timm.layers.patch_embed import PatchEmbed
-from timm.layers.create_conv2d import create_conv2d
-
+import torch.nn as nn
 from einops.layers.torch import Rearrange
+from timm.layers.create_conv2d import create_conv2d
+from timm.layers.helpers import to_2tuple
+from timm.layers.patch_embed import PatchEmbed
 
 
 def create_patcher(

@@ -1,43 +1,35 @@
 cfgs:
   used: WV3
-  batch_size_train: 8
-  batch_size_val: 8
+  batch_size_train: 32
+  batch_size_val: 4
   num_workers: 1
   prefetch_factor: 2
   train_name: ${dataset.cfgs.used}_train
   val_name: ${dataset.cfgs.used}_val
   val_full_name: ${dataset.cfgs.used}_val_full
+  train_drop_last: true
+  val_drop_last: true
 
 dataset_paths:
-  WV3_train: data/WorldView3/pansharpening_reduced/Pansharping_WV3_train.tar
-  WV3_val: data/WorldView3/pansharpening_reduced/Pansharping_WV3_val.tar
-  WV3_val_full:
-    lrms: data/WorldView3/pansharpening_full/MS_shardindex.json
-    pan: data/WorldView3/pansharpening_full/PAN_shardindex.json
+  WV3_train: data/WorldView3/pansharpening_reduced/Pansharping_WV3_train.npz.tar
+  WV3_val: data/WorldView3/pansharpening_reduced/Pansharping_WV3_val.npz.tar
+  WV3_val_full: data/WorldView3/pansharpening_full/Pansharpening_FullResolution_WV3_val.npz.tar
 
-  WV2_train: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_train.tar
-  WV2_val: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_val.tar
-  WV2_val_full:
-    lrms: data/WorldView2/pansharpening_full/MS_shardindex.json
-    pan: data/WorldView2/pansharpening_full/PAN_shardindex.json
+  WV2_train: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_train.npz.tar
+  WV2_val: data/WorldView2/pansharpening_reduced/Pansharpening_WV2_val.npz.tar
+  WV2_val_full: data/WorldView2/pansharpening_full/Pansharpening_FullResolution_WV2_val.npz.tar
 
-  WV4_train: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_train.tar
-  WV4_val: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_val.tar
-  WV4_val_full:
-    lrms: data/WorldView4/pansharpening_full/MS_shardindex.json
-    pan: data/WorldView4/pansharpening_full/PAN_shardindex.json
+  WV4_train: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_train.npz.tar
+  WV4_val: data/WorldView4/pansharpening_reduced/Pansharpening_WV4_val.npz.tar
+  WV4_val_full: data/WorldView4/pansharpening_full/Pansharpening_FullResolution_WV4_val.npz.tar
 
-  QB_train: data/QuickBird/pansharpening_reduced/Pansharpening_QB_train.tar
-  QB_val: data/QuickBird/pansharpening_reduced/Pansharpening_QB_val.tar
-  QB_val_full:
-    lrms: data/QuickBird/pansharpening_full/MS_shardindex.json
-    pan: data/QuickBird/pansharpening_full/PAN_shardindex.json
+  QB_train: data/QuickBird/pansharpening_reduced/Pansharpening_QB_train.npz.tar
+  QB_val: data/QuickBird/pansharpening_reduced/Pansharpening_QB_val.npz.tar
+  QB_val_full: data/QuickBird/pansharpening_full/Pansharpening_FullResolution_IKONOS_val.npz.tar
 
-  IKONOS_train: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar
-  IKONOS_val: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar
-  IKONOS_val_full:
-    lrms: data/IKONOS/pansharpening_full/MS_shardindex.json
-    pan: data/IKONOS/pansharpening_full/PAN_shardindex.json
+  IKONOS_train: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.npz.tar
+  IKONOS_val: data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.npz.tar
+  IKONOS_val_full: data/IKONOS/pansharpening_full/Pansharpening_FullResolution_IKONOS_val.npz.tar
 
 dataset_names_to_rgb_channels:
   WV3: [5, 3, 2]
@@ -69,7 +61,7 @@ consts:
   rgb_channels: ${dataset.dataset_names_to_rgb_channels.${dataset.cfgs.used}}
 
 train:
-  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_lantent_dataloader
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_wds_dataloader
   wds_paths: ${dataset.dataset_paths.${dataset.cfgs.train_name}}
   batch_size: ${dataset.cfgs.batch_size_train}
   num_workers: ${dataset.cfgs.num_workers}
@@ -78,23 +70,27 @@ train:
   resample: true
   prefetch_factor: ${dataset.cfgs.prefetch_factor}
   add_satellite_name: true
+  drop_last: ${dataset.cfgs.train_drop_last}
 
 val:
-  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_lantent_dataloader
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_wds_dataloader
   wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_name}}
   batch_size: ${dataset.cfgs.batch_size_val}
-  num_workers: 0
+  num_workers: 1
   resample: false
-  shuffle_size: 100
+  shuffle_size: 10
   to_neg_1_1: true
   prefetch_factor: ${dataset.cfgs.prefetch_factor}
   add_satellite_name: true
+  drop_last: ${dataset.cfgs.val_drop_last}
 
 val_full:
-  _target_: src.stage2.data.pansharp_loader.get_wids_mat_full_resolution_dataloder
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharp_wds_dataloader
   wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_full_name}}
   batch_size: 1
   to_neg_1_1: true
-  num_workers: 0
-  shuffle_size: 0
+  resample: false
+  num_workers: 1
+  shuffle_size: 10
   add_satellite_name: true
+  drop_last: ${dataset.cfgs.val_drop_last}

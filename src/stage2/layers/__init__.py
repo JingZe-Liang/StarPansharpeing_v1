@@ -3,6 +3,8 @@ from .blocks import AttentionBlock, ConvNeXtStage, MbConvStages
 from .conv import ConvNeXtBlock, MbConvLNBlock, Stem, StridedConv
 from .layerscale import LayerScale
 from .mlp import SwiGLU, SwiGLUAct
+from .patcher import create_patcher, create_unpatcher
+from .rescale import RescaleOutput
 from .rope import (
     AxialPositionalEmbedding,
     AxialPositionalEmbedding2D,

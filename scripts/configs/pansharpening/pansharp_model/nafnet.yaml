@@ -37,12 +37,15 @@ pixel_model:
     _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNetConfig
     pan_channel: 1
     ms_channel: ${dataset.consts.bands}
-    width: 256
-    middle_blk_num: 2
-    enc_blk_nums: [2, 2, 2]
-    dec_blk_nums: [2, 2, 2]
+    width: 64
+    middle_blk_num: 1
+    enc_blk_nums: [1, 1, 1]
+    dec_blk_nums: [1, 1, 1]
     condition_channel: 16
     patch_size: 2
     use_residual: true
     dw_expand: 1
     ffn_expand: 2
+    condition_on_decoder: false
+    is_neg_1_1: true
+    output_rescale: true

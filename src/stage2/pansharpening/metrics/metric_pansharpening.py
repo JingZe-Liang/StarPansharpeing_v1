@@ -134,14 +134,17 @@ class AnalysisPanAcc(object):
     def __init__(self, ratio=4, ref=True, ergas_ratio: int = 4, **unref_factory_kwargs):
         """pansharpening metric analysis class
 
-        Args:
+        Args
+        ---
             ratio (int, optional): fusion ratio. Defaults to 4.
             ref (bool, optional): reduce-resolution or full-resolution. Defaults to True.
             ergas_ratio (int, optional): previous api (may decrepated soon). Defaults to 4.
             unref_factory_kwargs(dict): sensor, default_max_value. Defaults to {'sensor': 'default', 'default_max_value': None}.
 
-        ## Main function call
-        Args:
+        Main function call
+        ----
+            All input values are ranging from 0 to 1.
+            For unreference mode (full-resolution Pansharpening), the values are re-scaled into int16 [0, max_val).
 
             - ref mode (reduced-resolution)
                 b_gt (torch.Tensor): [b, c, h, w]
@@ -179,7 +182,9 @@ class AnalysisPanAcc(object):
             sensor = unref_factory_kwargs.pop("sensor", "default").upper()
 
             if sensor == "DEFAULT":
-                warn("sensor is not specified, use default sensor type")
+                log_print(
+                    "sensor is not specified, use default sensor type", warn_once=True
+                )
             self.default_max_value = unref_factory_kwargs.pop("default_max_value", None)
 
             if self.default_max_value is None:
@@ -198,12 +203,12 @@ class AnalysisPanAcc(object):
                     "GF2-GF5": 1,
                 }
                 self.default_max_value = _default_max_value.get(sensor)
-                log_print(
-                    f">>> `default_max_value` is not specified, set it according to `sensor`:"
-                    f"{sensor, self.default_max_value}\n"
-                    "-" * 20,
-                    level="warning",
-                )
+                # log_print(
+                #     f">>> `default_max_value` is not specified, set it according to `sensor`:"
+                #     f"{sensor, self.default_max_value}\n"
+                #     "-" * 20,
+                #     level="warning",
+                # )
 
             self.FS_metric_fn = partial(
                 indexes_evaluation_FS,
@@ -266,7 +271,7 @@ class AnalysisPanAcc(object):
         return acc_ds
 
     def D_lambda_D_s_HQNR_batch(self, sr=None, ms=None, lms=None, pan=None):
-        assert sr is not None and lms is not None and pan is not None and ms is not None
+        assert sr is not None and lms is not None and pan is not None
         if ms is None:
             ms = torch.nn.functional.interpolate(
                 lms, scale_factor=1 / self.ratio, mode="bilinear", align_corners=False
@@ -312,21 +317,25 @@ class AnalysisPanAcc(object):
         if len(args) == 2:
             assert self.ref, "ref mode should have 2 args"
             kwargs = dict(b_gt=args[0], b_pred=args[1])
-            assert args[0].shape == args[1].shape
+            assert args[0].shape == args[1].shape, (
+                f"shapes are not matched: {[arg.shape for arg in args]}"
+            )
         elif len(args) == 3:
             assert not self.ref, "unref mode should have more than 2 args"
             kwargs = dict(sr=args[0], lms=args[1], pan=args[2])
-            assert args[0].shape == args[1].shape == args[2].shape
+            assert args[0].shape[-2:] == args[1].shape[-2:] == args[2].shape[-2:], (
+                f"shapes are not matched: {[arg.shape for arg in args]}"
+            )
         elif len(args) == 4:
             assert not self.ref, "unref mode should have more than 2 args"
             kwargs = dict(sr=args[0], ms=args[1], lms=args[2], pan=args[3])
             bs, c, h, w = args[1].shape
             assert (
-                args[0].shape
-                == torch.Size((bs, c, int(h * self.ratio), int(w * self.ratio)))
-                == args[2].shape
-                # == args[3].shape
-            )
+                kwargs["sr"].shape[-2:]
+                == (int(h * self.ratio), int(w * self.ratio))
+                == kwargs["lms"].shape[-2]
+                == kwargs["pan"].shape[-2:]
+            ), f"shapes are not matched: {[arg.shape for arg in args]}"
         else:
             raise ValueError("args should have 2 or 4 elements")
 

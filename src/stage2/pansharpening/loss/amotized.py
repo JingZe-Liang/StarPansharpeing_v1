@@ -16,7 +16,7 @@ class AmotizedPixelLoss(nn.Module):
         pixel_loss_type: str,
         amotized_loss: Callable[[Tensor, Tensor], Tensor],
         pixel_loss_kwargs: dict = {},
-        factors: tuple = (0.0, 1.0),
+        factors: tuple = (0.1, 1.0),
     ):
         super().__init__()
         self.amotized_loss = amotized_loss

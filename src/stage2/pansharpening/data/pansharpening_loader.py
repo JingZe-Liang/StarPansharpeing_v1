@@ -3,12 +3,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
-import beartype
 import h5py
 import torch
 import webdataset as wds
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose, ToTensor
+from torchvision.transforms import Compose
 from tqdm import tqdm
 
 from src.data.codecs import (
@@ -20,34 +19,76 @@ from src.data.codecs import (
     wids_image_decode,
 )
 from src.data.multimodal_loader import MultimodalityDataloader
+from src.data.utils import (
+    flatten_sample_subdict,
+    permute_img_to_chw,
+    remove_extension,
+    to_tensor,
+)
 from src.data.utils import norm_img_ as norm_img_fn
-from src.data.utils import permute_img_to_chw, remove_extension, to_tensor
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 
 SUPPORTED_SATELLITES = {"WV2", "WV3", "WV4", "QB", "IKONOS"}
 
 
+__all__ = [
+    "get_pansharp_wds_dataloader",
+    "get_wids_mat_full_resolution_dataloder",
+    "CachedDataset",
+    "H5Dataset",
+]
+
 # * --- Webdataset dataloader --- #
 
 
+def norm_to_neg_1_1(sample: dict) -> dict:
+    keys = ["hrms", "lrms", "pan"]
+    for k in keys:
+        if k in sample:
+            sample[k] = sample[k] * 2 - 1
+    return sample
+
+
 def img_dict_mapper_with_ext(
-    sample: dict, to_neg_1_1: bool = True, latent_ext="safetensors"
+    sample: dict,
+    to_neg_1_1: bool = True,
+    latent_ext="safetensors",
+    permute=False,
+    norm=False,
+    upsample_lrms: bool = True,
 ):
     # keys: ['hrms', 'lrms', 'pan', 'ms', 'hrms_latent', 'lrms_latent', 'pan_latent', 'ms_latent']
-    hrms = permute_img_to_chw(to_tensor(sample["hrms"]))
-    lrms = permute_img_to_chw(to_tensor(sample["lrms"]))
-    pan = permute_img_to_chw(to_tensor(sample["pan"]))  # h, w
+    permutatio_fn = permute_img_to_chw if permute else lambda x: x
+    hrms = permutatio_fn(to_tensor(sample["hrms"])) if "hrms" in sample else None
+    lrms = permutatio_fn(to_tensor(sample["lrms"]))
+    pan = permutatio_fn(to_tensor(sample["pan"]))  # h, w
     if pan.ndim == 2:
         pan = pan[None]  # add channel dim
 
     # normalize
-    norm_fn_partial = partial(
-        norm_img_fn,
-        to_neg_1_1=to_neg_1_1,
-        per_channel=False,
-    )
-    hrms, lrms, pan = map(norm_fn_partial, [hrms, lrms, pan])
+    if norm:
+        norm_fn_partial = partial(
+            norm_img_fn,
+            to_neg_1_1=False,
+            per_channel=False,
+        )
+        if hrms is not None:
+            hrms = norm_fn_partial(hrms)
+        lrms, pan = map(norm_fn_partial, [lrms, pan])
+    # upsample lrms to pan size
+    if lrms.shape[-2:] != pan.shape[-2:] and upsample_lrms:
+        if lrms.ndim == 3:
+            lrms.unsqueeze_(0)
+        lrms = torch.nn.functional.interpolate(
+            lrms, size=pan.shape[-2:], mode="bilinear", align_corners=False
+        )
+        lrms.squeeze_(0)
+    # normalize to [-1, 1]
+    if to_neg_1_1:
+        hrms = hrms * 2 - 1 if hrms is not None else None
+        lrms = lrms * 2 - 1
+        pan = pan * 2 - 1
 
     # if has latents
     if "latents" in sample or "hrms_latent" in sample:
@@ -87,7 +128,11 @@ def img_dict_mapper_with_ext(
         }
 
     else:
-        sample_new = {"hrms": hrms, "lrms": lrms, "pan": pan}
+        sample_new = (
+            {"hrms": hrms, "lrms": lrms, "pan": pan}
+            if hrms is not None
+            else {"lrms": lrms, "pan": pan}
+        )
     sample.update(sample_new)
 
     return sample
@@ -98,7 +143,8 @@ def satellite_name_add(sample: dict):
     file_stem = Path(url).stem
     sat_name = file_stem.split("_")[-2]  # e.g., Pansharpening_WV3_train
     assert sat_name in SUPPORTED_SATELLITES, (
-        f"Satellite name {sat_name} not in supported list {SUPPORTED_SATELLITES}"
+        f"Satellite name {sat_name} not in supported list {SUPPORTED_SATELLITES}, "
+        "but got from {url}"
     )
     sample["satellite"] = sat_name
     return sample
@@ -128,7 +174,7 @@ def satellite_name_add_collated(sample: dict):
 
 
 @function_config_to_basic_types
-def get_pansharp_lantent_dataloader(
+def get_pansharp_wds_dataloader(
     wds_paths: str | list[str],
     batch_size: int,
     num_workers: int,
@@ -138,6 +184,7 @@ def get_pansharp_lantent_dataloader(
     prefetch_factor: int = 6,
     latent_ext: Literal["safetensors", "npy", "npz"] = "safetensors",
     shardshuffle: bool = False,
+    drop_last: bool = False,
     add_satellite_name=False,
 ):
     """
@@ -173,12 +220,15 @@ def get_pansharp_lantent_dataloader(
 
     # * --- dict mapper of images and latents ---
 
+    dataset = dataset.map(flatten_sample_subdict)
     dataset = dataset.map(remove_extension)
     dataset = dataset.map(
         partial(img_dict_mapper_with_ext, to_neg_1_1=to_neg_1_1, latent_ext=latent_ext)
     )
     if add_satellite_name:
         dataset = dataset.map(satellite_name_add)
+    if shuffle_size > 0:
+        dataset = dataset.shuffle(shuffle_size)
 
     # since we do not use any transforms, the batch and unbatch is useless.
 
@@ -188,7 +238,7 @@ def get_pansharp_lantent_dataloader(
         num_workers=num_workers,
         persistent_workers=True if num_workers > 0 else False,
         prefetch_factor=None if num_workers == 0 else prefetch_factor,
-        drop_last=False,
+        drop_last=drop_last,
     )
 
     # dataloader = dataloader.with_length(10_000)  # 10k pairs of the dataloader
@@ -328,7 +378,7 @@ def get_wids_mat_full_resolution_dataloder(
 
 
 def test_wds_reduced_resolution_loading():
-    ds, dl = get_pansharp_lantent_dataloader(
+    ds, dl = get_pansharp_wds_dataloader(
         "data/WorldView3/pansharpening_reduced/Pansharping_WV3_train.tar",
         batch_size=2,
         shuffle_size=0,
@@ -337,7 +387,21 @@ def test_wds_reduced_resolution_loading():
     )
     for sample in dl:
         print(f"Satellite: {sample['satellite']}: {sample.keys()}")
-        break
+
+
+def test_full_resolution_wds_loading():
+    path = "data/QuickBird/pansharpening_full/Pansharpening_FullResolution_IKONOS_val.npz.tar"
+    ds, dl = get_pansharp_wds_dataloader(
+        path,
+        batch_size=4,
+        num_workers=1,
+        shuffle_size=0,
+        add_satellite_name=True,
+        resample=False,
+    )
+    for sample in tqdm(dl, total=100):
+        print(f"Satellite: {sample['satellite']}: {sample.keys()}")
+        print(sample["lrms"].shape, sample["pan"].shape)
 
 
 def test_mat_full_resolution_loading():
@@ -353,7 +417,7 @@ def test_mat_full_resolution_loading():
 
 
 def test_cache_dataset():
-    ds, dl = get_pansharp_lantent_dataloader(
+    ds, dl = get_pansharp_wds_dataloader(
         "data_local/Pansharpening_WV2_train.tar",
         batch_size=8,
         num_workers=1,
@@ -383,4 +447,5 @@ if __name__ == "__main__":
     # test_mat_full_resolution_loading()
     # test_wds_reduced_resolution_loading()
     # test_cache_dataset()
-    test_h5_dataset()
+    # test_h5_dataset()
+    test_full_resolution_wds_loading()

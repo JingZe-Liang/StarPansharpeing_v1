@@ -1550,7 +1550,7 @@ if __name__ == "__main__":
         # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
         # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
         # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
         # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
         # [
         #     "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
@@ -1633,12 +1633,12 @@ if __name__ == "__main__":
         # ["data/Multispectral-FMow-full/hyper_images_8bands/shardindex.json"]
         # ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
         # ["data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"]
-        ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"]
+        # ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"]
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 1
+    test_batch_size = 2
     test_num_workers = 0
     test_shuffle_size = -1
 
@@ -1653,7 +1653,7 @@ if __name__ == "__main__":
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=512,
+        resize_before_transform=128,
         shuffle_within_workers=False,
         resample=True,
     )
@@ -1668,17 +1668,17 @@ if __name__ == "__main__":
         #     "resample": False,
         # },
         # {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
-        # {"img_key": "auto", "resize_before_transform": 512, "check_channels_n": 3},
+        {"img_key": "auto"},
         # {"img_key": ["img"], "keys_to_remove": ["metadata"]}
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},
-        {
-            # "img_key": ["img1", "img2"],
-            "tgt_key": "img",
-            "random_one_key": True,
-            "manual_img_max": 3800.0,
-            "keys_to_remove": ["gt"],
-        }
+        # {
+        #     # "img_key": ["img1", "img2"],
+        #     "tgt_key": "img",
+        #     "random_one_key": True,
+        #     "manual_img_max": 3800.0,
+        #     "keys_to_remove": ["gt"],
+        # }
         # {"permute": False},
         # {
         #     "loader_type": "wids",
