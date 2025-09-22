@@ -7,6 +7,7 @@ from einops import rearrange
 from jaxtyping import Array, Float
 from timm.layers import get_act_layer, get_norm_layer
 from timm.layers.patch_embed import PatchEmbed
+from timm.layers.pos_embed import resample_abs_pos_embed
 from torch import Tensor
 
 from src.utilities.logging import log
@@ -131,7 +132,7 @@ class Transformer(nn.Module):
                 pe_interpolation=self.pe_interpolation,
                 base_size=self.base_size,
             )
-            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+            self.pos_embed.data.copy_(torch.as_tensor(pos_embed).float().unsqueeze(0))
         elif self.pos_embed_type == "rope":
             if rope_options is None:
                 self.rope_options = {
@@ -166,17 +167,17 @@ class Transformer(nn.Module):
 
             if pe.shape[1] != h * w:
                 # re-init the pos_embed
-                pe = get_2d_sincos_pos_embed(
-                    pe.shape[-1],
-                    (h // ps, w // ps),
-                    pe_interpolation=self.pe_interpolation,
-                    base_size=base_size,
+                # pe = get_2d_sincos_pos_embed(
+                #     pe.shape[-1],
+                #     (h // ps, w // ps),
+                #     pe_interpolation=self.pe_interpolation,
+                #     base_size=base_size,
+                # )
+                new_h, new_w = hw
+                pos_embed = resample_abs_pos_embed(  # type: ignore
+                    self.pos_embed, new_size=(new_h, new_w), num_prefix_tokens=0
                 )
-                self.register_buffer(
-                    name,
-                    (pe := torch.from_numpy(pe).float().unsqueeze(0)),
-                    persistent=False,
-                )
+                pe = torch.as_tensor(pos_embed).float()
             return pe
         elif self.pos_embed_type == "rope":
             # TODO: add multi-modal-rope
@@ -228,7 +229,8 @@ class Transformer(nn.Module):
         y = self.fuse_stem(torch.cat(ys, dim=-1))
 
         # pe
-        pe = self.get_pe(latents[0].shape[-2:])
+        hw = torch.as_tensor(latents[0].shape[2:], device=y.device) // self.patch_size
+        pe = self.get_pe(tuple(hw))
         if self.pos_embed_type == "sincos":
             assert torch.is_tensor(pe), "Positional embedding must be a tensor."
             y = y + pe.to(y)

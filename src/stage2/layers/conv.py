@@ -121,6 +121,7 @@ class MbConvLNBlock(nn.Module):
 
         return x
 
+    @torch.compile
     def forward(self, x, cond):
         if self.grad_checkpointing:
             return torch.utils.checkpoint.checkpoint(

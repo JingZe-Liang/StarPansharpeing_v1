@@ -259,7 +259,7 @@ class AmotizedModelMixin(nn.Module):
             **mixin_kwargs,
         )
 
-    def set_checkpoint_mode(self, mode=True):
+    def set_grad_checkpointing(self, mode=True):
         for module in self.modules():
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode
@@ -275,7 +275,9 @@ class AmotizedModelMixin(nn.Module):
                 "amotized_model": self.amotized_model.state_dict(),
             }
         else:
-            state = super().state_dict(destination, prefix, keep_vars)
+            state = super().state_dict(
+                destination=destination, prefix=prefix, keep_vars=keep_vars
+            )
         return state
 
     def load_state_dict(self, state_dict, strict=True):

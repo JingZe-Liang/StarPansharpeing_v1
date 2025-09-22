@@ -81,6 +81,7 @@ def save_to_npz_tar_from_tar(tar_path: str, save_tar_path: str):
         to_neg_1_1=False,  # Keep original values
         resample=False,
         add_satellite_name=False,
+        norm=False,
     )
 
     print(f"Processing tar file: {tar_path}")
@@ -151,6 +152,7 @@ def save_to_npz_tar_from_tar_full_resolution(
         shuffle_size=0,
         to_neg_1_1=False,  # Keep original values
         add_satellite_name=False,
+        norm=False,
     )
 
     print(f"Processing tar file: {tar_path}")
@@ -159,11 +161,13 @@ def save_to_npz_tar_from_tar_full_resolution(
     tar_writter = TarWriter(save_tar_path)
 
     # Process each sample
-    for i, sample in enumerate(tqdm(dataloader, desc="Converting to NPZ ...")):
+    for i, sample in enumerate(
+        (tbar := tqdm(dataloader, desc="Converting to NPZ ..."))
+    ):
         try:
             # Extract image data from sample
-            lrms = sample["lrms"][0].numpy()
-            pan = sample["pan"][0].numpy()
+            lrms = sample["lrms"][0].numpy().astype("uint16")
+            pan = sample["pan"][0].numpy().astype("uint16")
 
             # Create NPZ file with all three images
             npz_buffer = io.BytesIO()
@@ -184,7 +188,7 @@ def save_to_npz_tar_from_tar_full_resolution(
                 "pair.npz": npz_content,
             }
             tar_writter.write(file_in)
-
+            tbar.set_postfix({"min": lrms.min().item(), "max": lrms.max().item()})
         except Exception as e:
             print(f"Error processing sample {i}: {e}")
             continue
@@ -202,37 +206,37 @@ if __name__ == "__main__":
     # save_to_h5_from_tar(tar_path, h5file)
 
     paths = [
-        "data/WorldView3/pansharpening_reduced/Pansharping_WV3_train.tar",
-        "data/WorldView3/pansharpening_reduced/Pansharping_WV3_val.tar",
-        "data/WorldView2/pansharpening_reduced/Pansharpening_WV2_train.tar",
-        "data/WorldView2/pansharpening_reduced/Pansharpening_WV2_val.tar",
-        "data/WorldView4/pansharpening_reduced/Pansharpening_WV4_train.tar",
-        "data/WorldView4/pansharpening_reduced/Pansharpening_WV4_val.tar",
-        "data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar",
-        "data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar",
-        "data/QuickBird/pansharpening_reduced/Pansharpening_QB_train.tar",
-        "data/QuickBird/pansharpening_reduced/Pansharpening_QB_val.tar",
+        "data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_train.tar",
+        "data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_val.tar",
+        "data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_train.tar",
+        "data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_val.tar",
+        "data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_train.tar",
+        "data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_val.tar",
+        "data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar",
+        "data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar",
+        "data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_train.tar",
+        "data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_val.tar",
     ]
     full_paths = [
         dict(
-            lrms="data/WorldView2/pansharpening_full/MS_shardindex.json",
-            pan="data/WorldView2/pansharpening_full/PAN_shardindex.json",
+            lrms="data/Downstreams/PanCollectionV2/WV2/pansharpening_full/MS_shardindex.json",
+            pan="data/Downstreams/PanCollectionV2/WV2/pansharpening_full/PAN_shardindex.json",
         ),
         dict(
-            lrms="data/WorldView3/pansharpening_full/MS_shardindex.json",
-            pan="data/WorldView3/pansharpening_full/PAN_shardindex.json",
+            lrms="data/Downstreams/PanCollectionV2/WV3/pansharpening_full/MS_shardindex.json",
+            pan="data/Downstreams/PanCollectionV2/WV3/pansharpening_full/PAN_shardindex.json",
         ),
         dict(
-            lrms="data/WorldView4/pansharpening_full/MS_shardindex.json",
-            pan="data/WorldView4/pansharpening_full/PAN_shardindex.json",
+            lrms="data/Downstreams/PanCollectionV2/WV4/pansharpening_full/MS_shardindex.json",
+            pan="data/Downstreams/PanCollectionV2/WV4/pansharpening_full/PAN_shardindex.json",
         ),
         dict(
-            lrms="data/IKONOS/pansharpening_full/MS_shardindex.json",
-            pan="data/IKONOS/pansharpening_full/PAN_shardindex.json",
+            lrms="data/Downstreams/PanCollectionV2/IKONOS/pansharpening_full/MS_shardindex.json",
+            pan="data/Downstreams/PanCollectionV2/IKONOS/pansharpening_full/PAN_shardindex.json",
         ),
         dict(
-            lrms="data/QuickBird/pansharpening_full/MS_shardindex.json",
-            pan="data/QuickBird/pansharpening_full/PAN_shardindex.json",
+            lrms="data/Downstreams/PanCollectionV2/QB/pansharpening_full/MS_shardindex.json",
+            pan="data/Downstreams/PanCollectionV2/QB/pansharpening_full/PAN_shardindex.json",
         ),
     ]
 
@@ -247,11 +251,15 @@ if __name__ == "__main__":
 
     #     # NPZ Tar converter
     #     tar_save_path = Path(tar_path).with_suffix(".npz.tar").as_posix()
-    #     save_to_npy_tar_from_tar(tar_path, tar_save_path)
+    #     save_to_npz_tar_from_tar(tar_path, tar_save_path)
     #     print(f"Saved to {tar_save_path}")
 
     # full
     for wids_dict_path in full_paths:
         lrms_path = wids_dict_path["lrms"]
-        save_path = Path(lrms_path).parent / "Pansharpening_FullResolution_val.npz.tar"
+        satellite_name = Path(lrms_path).parents[1].name
+        save_path = (
+            Path(lrms_path).parent
+            / f"Pansharpening_FullResolution_{satellite_name}_val.npz.tar"
+        )
         save_to_npz_tar_from_tar_full_resolution(wids_dict_path, save_path.as_posix())

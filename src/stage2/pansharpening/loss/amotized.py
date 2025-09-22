@@ -17,11 +17,19 @@ class AmotizedPixelLoss(nn.Module):
         amotized_loss: Callable[[Tensor, Tensor], Tensor],
         pixel_loss_kwargs: dict = {},
         factors: tuple = (0.1, 1.0),
+        is_neg_1_1: bool = False,
     ):
         super().__init__()
         self.amotized_loss = amotized_loss
         self.pixel_loss = get_loss(pixel_loss_type, **pixel_loss_kwargs)
         self.factors = factors
+        self.to_neg_1_1 = is_neg_1_1
+
+    def _map_to_0_1(self, x: Tensor | None):
+        """Map tensor from [-1, 1] to [0, 1]"""
+        if not self.to_neg_1_1 or x is None:
+            return x
+        return (x + 1.0) / 2.0
 
     def forward(
         self,
@@ -32,12 +40,18 @@ class AmotizedPixelLoss(nn.Module):
         pred_sr_from_latent=None,
         sr2=None,
     ):
+        pred_sr, sr, pred_sr_from_latent, sr2 = map(
+            self._map_to_0_1, (pred_sr, sr, pred_sr_from_latent, sr2)
+        )
+
         # 1. loss on latent of sr and gt
-        latent_loss = self.amotized_loss(pred_latent, sr_latent) * self.factors[0]
+        latent_loss = 0.0
+        if self.factors[0] > 0:
+            latent_loss = self.amotized_loss(pred_latent, sr_latent) * self.factors[0]
 
         # 2. pixel loss on sr (e.g., dircectly predicted sr pixels) and gt
         sr_pixel_loss = 0.0
-        if pred_sr is not None and sr is not None:
+        if pred_sr is not None and sr is not None and self.factors[1] > 0:
             sr_pixel_loss = self.pixel_loss(pred_sr, sr)
             if isinstance(sr_pixel_loss, tuple):
                 sr_pixel_loss, _ = sr_pixel_loss
@@ -46,11 +60,12 @@ class AmotizedPixelLoss(nn.Module):
         # 3. pixel loss on tokenizer decoded sr and gt, may backward from the de-tokenizer
         sr_pixel_loss2 = 0.0
         if pred_sr_from_latent is not None and sr2 is not None:
-            sr_pixel_loss2 += self.pixel_loss(pred_sr_from_latent, sr2)
+            sr_pixel_loss2 = self.pixel_loss(pred_sr_from_latent, sr2)
             if isinstance(sr_pixel_loss2, tuple):
                 sr_pixel_loss2, _ = sr_pixel_loss2
             sr_pixel_loss2 = sr_pixel_loss2 * self.factors[1]
 
+        # Sum all losses
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
         _to_out_tensor_detached = (

@@ -5,10 +5,11 @@ import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable, Literal, TypedDict, cast
+from typing import Callable, Generator, Iterable, Literal, TypedDict, cast
 
 import accelerate
 import accelerate.utils
+import ema_pytorch
 import hydra
 import numpy as np
 import PIL.Image as Image
@@ -18,9 +19,9 @@ from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler  # ty: ignore
-from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from PIL import Image
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
@@ -31,9 +32,7 @@ from tqdm import tqdm, trange
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc, PansharpeningMetrics
-from src.utilities.config_utils import (
-    to_object as to_cont,  # register new resolvers at the same time
-)
+from src.utilities.config_utils import to_object as to_cont
 from src.utilities.func.dict_utils import keys_in_dict
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_peft_model_checkpoint
@@ -175,13 +174,15 @@ class PansharpeningTrainer:
         ).amotizing_pixels
 
         # checkpoint
-        if (
+        use_checkpoint = (
             hasattr(
-                self.accelerator.unwrap_model(self.pansp_model), "set_checkpoint_mode"
+                (_unwrapped_model := self.accelerator.unwrap_model(self.pansp_model)),
+                "set_checkpoint_mode",
             )
             and self.train_cfg.model_act_checkpoint
-        ):
-            self.accelerator.unwrap_model(self.pansp_model).set_checkpoint_mode(True)
+        )
+        if use_checkpoint:
+            _unwrapped_model.set_grad_checkpointing(True)  # type: ignore
 
         if self.pansp_amotizing_pixels:
             assert hasattr(self, "tokenizer"), (
@@ -203,9 +204,6 @@ class PansharpeningTrainer:
         tokenizer_name = self.train_cfg.tokenizer_name
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
         self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.tokenizer_not_req_grad = getattr(
-            self.train_cfg, "tokenizer_not_req_grad", True
-        )
         self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
@@ -264,9 +262,6 @@ class PansharpeningTrainer:
 
             # not lora mixin, handled by this trainer
             if not self.train_cfg.is_lora_mixin:
-                if self.tokenizer_not_req_grad:
-                    self.tokenizer.requires_grad_(False)
-
                 if self.train_cfg.peft_pretrained_path is not None:
                     self.log_msg(
                         f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
@@ -291,15 +286,22 @@ class PansharpeningTrainer:
                     f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
                 )
 
-        # set to eval
+        # set to eval and gradients requirements
+        backward_decoder = self.cfg.pansharp_model.backward_decoder
+        learn_decoder = self.cfg.pansharp_model.learn_decoder
+        decoder_req_grad = backward_decoder or learn_decoder
         if self.sep_enc_dec:
             self.tokenizer_encoder.eval()
             self.tokenizer_decoder.eval()
             self.tokenizer.to(self.device, self.dtype)
             self.tokenizer.to(self.device, self.dtype)
+            self.tokenizer_encoder.requires_grad_(False)
+            self.tokenizer_decoder.requires_grad_(decoder_req_grad)
         else:
             self.tokenizer.eval()
             self.tokenizer.to(self.device, self.dtype)
+            self.tokenizer.encoder.requires_grad_(False)
+            self.tokenizer.decoder.requires_grad_(decoder_req_grad)
 
         if self.use_quantizer and isinstance(self.quantizer, nn.Module):
             self.quantizer.eval()
@@ -310,8 +312,10 @@ class PansharpeningTrainer:
         if self.no_ema:
             return
 
-        self.ema_pansp_model = hydra.utils.instantiate(self.cfg.ema)(
-            self.pansp_model
+        buffer_name = [name for name, _ in self.pansp_model.named_buffers()]
+        self.log_msg(f"EMA ignore buffers: {buffer_name}")
+        self.ema_pansp_model: ema_pytorch.EMA = hydra.utils.instantiate(self.cfg.ema)(
+            model=self.pansp_model, ignore_names=set(buffer_name)
         ).to(self.device)
         self.log_msg(f"create EMA model for pansharpening")
 
@@ -489,7 +493,7 @@ class PansharpeningTrainer:
             level=level.lower(),
             warn_once=warn_once,
             only_rank_zero=only_rank_zero,
-            stack_level=3,
+            stack_level=2,
             **kwargs,
         )
 
@@ -624,6 +628,10 @@ class PansharpeningTrainer:
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
+        if hasattr(self, "val_full_dataloader"):
+            self.val_full_dataloader = self.accelerator.prepare(
+                self.val_full_dataloader
+            )
 
     def step_train_state(self):
         self.train_state.update("train")
@@ -718,15 +726,18 @@ class PansharpeningTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def forward_pansp_model(self, lrms, pan, sr, lrms_latent, pan_latent, sr_latent):
+    def forward_pansp_model(
+        self, lrms, pan, sr, lrms_latent, pan_latent, sr_latent, ema=False
+    ):
+        pansp_model = self.pansp_model if not ema else self.ema_pansp_model.ema_model
         with self.accelerator.autocast():
             if self.pansp_amotizing_pixels:
-                out = self.pansp_model((lrms, pan), (lrms_latent, pan_latent))
+                out = pansp_model((lrms, pan), (lrms_latent, pan_latent))
                 pred_latent = out["latent_out"]
                 pred_sr = out["pixel_out"]
                 pred_sr_from_latent = out.get("pixel_from_latent", None)
             else:
-                pred_latent = self.pansp_model(lrms_latent, pan_latent)
+                pred_latent = pansp_model(lrms_latent, pan_latent)
                 pred_sr = self.forward_tokenizer(
                     pred_latent, mode="decode", no_grad=True
                 )["recon"]
@@ -977,20 +988,6 @@ class PansharpeningTrainer:
                 )
                 break
 
-    def finite_val_loader(self):
-        if self.val_dataloader is None:
-            raise ValueError("No validation dataloader found")
-
-        for batch in self.val_dataloader:
-            yield batch
-
-    def finite_val_full_loader(self):
-        if self.val_full_dataloader is None:
-            raise ValueError("No validation dataloader found")
-
-        for batch in self.val_full_dataloader:
-            yield batch
-
     def _ensure_paired_shapes(self, lrms, pan, hrms=None):
         # lrms: is upsampled MS or only MS
         if hrms is not None:
@@ -1046,63 +1043,65 @@ class PansharpeningTrainer:
             lrms_latent,
             pan_latent,
             gt_latent,
+            ema=True,
         )
 
         return out
 
-    def _get_val_tbar_iter(self, val_loader, mode="reduced"):
+    def _get_val_tbar_iter(
+        self, mode="reduced"
+    ) -> tqdm | Generator[BatchInput, None, None]:
         max_iters = getattr(self.val_cfg, f"max_val_{mode}_iters")
+        val_loader = (
+            self.val_dataloader if mode == "reduced" else self.val_full_dataloader
+        )
         if max_iters > 0:
-            # create a new iterator for the validation loader
-            # state in the loader generator
-            load_name = f"_val_{mode}_loader_iter"
-            if not hasattr(self, load_name):
+            # Create a generator that limits the number of iterations
+            def _val_loader():
                 val_loader_iter = iter(val_loader)
-                setattr(self, load_name, val_loader_iter)
+                tbar = trange(
+                    max_iters,
+                    desc="validating ...",
+                    leave=False,
+                    disable=not self.accelerator.is_main_process,
+                )
 
-            tbar = trange(
-                max_iters,
-                desc="validating ...",
-                leave=False,
-                disable=not self.accelerator.is_main_process,
-            )
+                for _ in tbar:
+                    try:
+                        yield next(val_loader_iter)
+                    except StopIteration:
+                        # Recreate the iterator when exhausted
+                        val_loader_iter = iter(val_loader)
+                        yield next(val_loader_iter)
+
             self.log_msg(
                 f"[Val]: start validating with only {max_iters} batches",
                 only_rank_zero=False,
             )
+            return _val_loader()
         else:
-            loader = (
-                self.finite_val_loader()
-                if mode == "reduced"
-                else self.finite_val_full_loader()
+            # Use the full validation set
+            self.log_msg(
+                f"[Val]: start validating with the whole val set", only_rank_zero=False
             )
-            tbar = tqdm(
-                loader,
+            return tqdm(
+                val_loader,
                 desc="validating ...",
                 leave=False,
                 disable=not self.accelerator.is_main_process,
             )
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
-        return tbar
 
     def val_loop(self):
         self.pansp_model.eval()
 
-        tbar = self._get_val_tbar_iter(self.finite_val_loader())
+        tbar = self._get_val_tbar_iter(mode="reduced")
         # track psnr and ssim
         pan_acc_fn = AnalysisPanAcc(ratio=self.train_cfg.pansp_ratio, ref=True)
         # pan_acc_fn = PansharpeningMetrics(ratio=self.train_cfg.pansp_ratio, ref=True)
         loss_metrics = MeanMetric().to(device=self.device)
 
         self._val_reduced_loader_iter: Iterable
-        for batch_or_idx in tbar:
-            if isinstance(batch_or_idx, int):
-                batch = next(self._val_reduced_loader_iter)
-            else:
-                batch = batch_or_idx
-
+        for batch in tbar:
             batch = cast(BatchInput, batch)
             gt = batch["hrms"].to(self.device)
             val_out = self.val_step(batch)
@@ -1138,7 +1137,7 @@ class PansharpeningTrainer:
     def val_full_loop(self):
         self.pansp_model.eval()
 
-        tbar = self._get_val_tbar_iter(self.finite_val_full_loader(), mode="full")
+        tbar = self._get_val_tbar_iter(mode="full")
         # track psnr and ssim
         pan_acc_fn = PansharpeningMetrics(
             ratio=self.train_cfg.pansp_ratio,
@@ -1148,12 +1147,7 @@ class PansharpeningTrainer:
         loss_metrics = MeanMetric().to(device=self.device)
 
         self._val_full_loader_iter: Iterable
-        for batch_or_idx in tbar:
-            if isinstance(batch_or_idx, int):
-                batch = next(self._val_full_loader_iter)
-            else:
-                batch = batch_or_idx
-
+        for batch in tbar:
             batch = cast(BatchInput, batch)
             val_out = self.val_step(batch)
 
@@ -1244,7 +1238,36 @@ class PansharpeningTrainer:
         add_step: bool = False,
         only_vis_n: int | None = None,
         no_to_rgb: bool = False,
+        use_linstretch: bool = True,
+        linstretch_tol: list[float] | None = None,
     ):
+        """Visualize reconstruction results using the enhanced batch comparison function.
+
+        This function now uses the optimized visualize_batch_comparisons_imgs function
+        which supports linear stretching for better contrast enhancement.
+
+        Parameters
+        ----------
+        tensors : torch.Tensor | list[torch.Tensor]
+            Input tensors to visualize.
+        img_name : str, optional
+            Base name for the saved image. Defaults to "pansharpening_reduced".
+        add_step : bool, optional
+            Whether to add training step to filename. Defaults to False.
+        only_vis_n : int | None, optional
+            Number of images to visualize. Defaults to None (uses 8).
+        no_to_rgb : bool, optional
+            Whether to skip RGB conversion. Defaults to False.
+        use_linstretch : bool, optional
+            Whether to apply linear stretching for contrast enhancement. Defaults to True.
+        linstretch_tol : list[float] | None, optional
+            Tolerance values for linear stretching. Defaults to None.
+        """
+        # Import the enhanced visualization function
+        from src.utilities.train_utils.visualization import (
+            visualize_batch_comparisons_imgs,
+        )
+
         # Convert single tensor to list for uniform processing
         if isinstance(tensors, torch.Tensor):
             tensors = [tensors]
@@ -1256,42 +1279,56 @@ class PansharpeningTrainer:
                 tensor = self.to_rgb(tensor)
             processed_tensors.append(tensor)
 
-        _only_n = only_vis_n or 16
-        to_img = lambda x: tensor_to_image(
-            make_grid(x[:_only_n].float(), n_row=4, padding=2)
+        # Limit number of images to visualize
+        _only_n = only_vis_n or 8
+        limited_tensors = [tensor[:_only_n] for tensor in processed_tensors]
+
+        # Get RGB channels configuration for hyperspectral data
+        rgb_channels = None
+        if hasattr(self.dataset_cfg, "consts") and hasattr(
+            self.dataset_cfg.consts, "rgb_channels"
+        ):
+            rgb_channels = to_cont(self.dataset_cfg.consts.rgb_channels)
+            # Ensure rgb_channels is the correct type
+            if isinstance(rgb_channels, list):
+                pass  # Already correct format
+            elif isinstance(rgb_channels, tuple):
+                rgb_channels = list(rgb_channels)  # Convert tuple to list
+            elif isinstance(rgb_channels, str):
+                pass  # String format is also acceptable
+            else:
+                rgb_channels = None  # Fallback to automatic selection
+
+        # Use the enhanced visualization function with linear stretching
+        img = visualize_batch_comparisons_imgs(
+            *limited_tensors,
+            rgb_channels=rgb_channels,
+            norm=False,  # Don't apply additional normalization since we already applied to_rgb
+            spacing=5,  # 5 pixels spacing between images
+            to_uint8=True,
+            to_pil=True,  # We'll handle PIL conversion ourselves
+            to_grid=True,  # We want horizontal concatenation
+            use_linstretch=use_linstretch,
+            linstretch_tol=linstretch_tol,
         )
 
-        def process_tensor_to_rgb(x):
-            """Process a tensor to RGB format based on its channel count."""
-            c = x.shape[1]
-
-            # Handle different channel cases
-            if c == 1:
-                # Single channel (like PAN) - repeat to 3 channels
-                x_rgb = x.repeat(1, 3, 1, 1)
-                x_np = to_img(x_rgb)
-            elif c == 3:
-                # Already RGB - direct conversion
-                x_np = to_img(x)
-            else:
-                # Hyperspectral - use RGB channels
-                rgb_channels = to_cont(self.dataset_cfg.consts.rgb_channels)
-                x_np = to_img(x[:, rgb_channels])
-
-            return x_np
-
-        # Process all tensors
-        tensor_images = []
-        for tensor in processed_tensors:
-            img_np = process_tensor_to_rgb(tensor)
-            tensor_images.append(img_np)
-
-        # Concatenate all images horizontally
-        img = np.concatenate(tensor_images, axis=1)
-
         # Save
-        img = (img * 255.0).astype(np.uint8)
-        img_to_save = Image.fromarray(img)
+        if isinstance(img, np.ndarray):
+            if img.dtype == np.uint8:
+                img_to_save = Image.fromarray(img)
+            else:
+                img_to_save = Image.fromarray((img * 255.0).astype(np.uint8))
+        elif isinstance(img, Image.Image):
+            img_to_save = img
+        elif torch.is_tensor(img):
+            # Handle tensor case
+            img_array = img.cpu().numpy()
+            if img_array.dtype != np.uint8:
+                img_array = (img_array * 255.0).astype(np.uint8)
+            img_to_save = Image.fromarray(img_array)
+        else:
+            raise ValueError(f"Unsupported image type: {type(img)}")
+
         if add_step:
             img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
         else:
@@ -1318,21 +1355,35 @@ class PansharpeningTrainer:
 _key = "tokenizer_lora_nafnet"
 _configs = {
     "tokenizer_lora_nafnet": "tokenizer_lora_nafnet",
-}[_key]
-
-
-@hydra.main(
-    config_path="../configs/pansharpening",
-    config_name=_configs,
-    version_base=None,
-)
-def main(cfg):
-    catcher = logger.catch if PartialState().is_main_process else nullcontext
-
-    with catcher():
-        trainer = PansharpeningTrainer(cfg)
-        trainer.run()
-
+    "tokenizer_lora_vitamin": "tokenizer_lora_vitamin",
+}
 
 if __name__ == "__main__":
+    from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
+
+    # change the config name in cli
+    cli_default_dict = {
+        "config_name": _key,
+        "only_rank_zero_catch": True,
+    }
+
+    chosen_cfg, cli_args = argsparse_cli_args(_configs, cli_default_dict)
+
+    log_print(f"[Train]: using config {chosen_cfg} with CLI args {cli_args}")
+    log_print(f"Hydra configs are {sys.argv[1:]}")
+    if is_rank_zero := PartialState().is_main_process:
+        print_colored_banner("HyperSharpening")
+
+    @hydra.main(
+        config_path="../configs/pansharpening",
+        config_name=chosen_cfg,
+        version_base=None,
+    )
+    def main(cfg):
+        catcher = logger.catch if is_rank_zero else nullcontext
+
+        with catcher():
+            trainer = PansharpeningTrainer(cfg)
+            trainer.run()
+
     main()

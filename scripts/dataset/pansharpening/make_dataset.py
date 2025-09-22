@@ -179,59 +179,64 @@ def filter_in_index(member: tarfile.TarInfo, index_need: list):
 if __name__ == "__main__":
     import numpy as np
 
-    # extract_tar_files_into(
-    #     "data/WorldView3/pansharpening_reduced/Pansharpening_WV3.tar",
-    #     dest="data/WorldView3/pansharpening_reduced/Pansharping_WV3_val.tar",
-    #     member_filters=filter_by_index,
-    # )
-
-    length = 100  # WV4: 500, QB: 250, WV2: 250, IKONOS: 100
+    length = 80  # WV4: 500, QB: 250, WV2: 250, IKONOS: 100, WV3: 80
     full_list = list(range(length))
     perm = np.random.permutation(length)
-    train_indices = perm[int(length * 0.1) :].tolist()
-    test_indices = perm[: int(length * 0.1)].tolist()
+    train_indices = perm[int(length * 0.2) :].tolist()
+    test_indices = perm[: int(length * 0.2)].tolist()
     print("train_indices", train_indices)
     print("test_indices", test_indices)
-    # extract_tar_files_into(
-    #     "data/WorldView4/pansharpening_reduced/Pansharpening_WV4.tar",
-    #     dest="data/WorldView4/pansharpening_reduced/Pansharpening_WV4_train.tar",
-    #     member_filters=partial(filter_in_index, index_need=train_indices),
-    # )
-    # extract_tar_files_into(
-    #     "data/WorldView4/pansharpening_reduced/Pansharpening_WV4.tar",
-    #     dest="data/WorldView4/pansharpening_reduced/Pansharpening_WV4_val.tar",
-    #     member_filters=partial(filter_in_index, index_need=test_indices),
-    # )
-
-    # extract_tar_files_into(
-    #     "data/QuickBird/pansharpening_reduced/Pansharpening_QB.tar",
-    #     dest="data/QuickBird/pansharpening_reduced/Pansharpening_QB_train.tar",
-    #     member_filters=partial(filter_in_index, index_need=train_indices),
-    # )
-    # extract_tar_files_into(
-    #     "data/QuickBird/pansharpening_reduced/Pansharpening_QB.tar",
-    #     dest="data/QuickBird/pansharpening_reduced/Pansharpening_QB_val.tar",
-    #     member_filters=partial(filter_in_index, index_need=test_indices),
-    # )
-
-    # extract_tar_files_into(
-    #     "data/WorldView2/pansharpening_reduced/Pansharpening_WV2.tar",
-    #     dest="data/WorldView2/pansharpening_reduced/Pansharpening_WV2_train.tar",
-    #     member_filters=partial(filter_in_index, index_need=train_indices),
-    # )
-    # extract_tar_files_into(
-    #     "data/WorldView2/pansharpening_reduced/Pansharpening_WV2.tar",
-    #     dest="data/WorldView2/pansharpening_reduced/Pansharpening_WV2_val.tar",
-    #     member_filters=partial(filter_in_index, index_need=test_indices),
-    # )
-
     extract_tar_files_into(
-        "data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS.tar",
-        dest="data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar",
+        "data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharpening_WV3.tar",
+        dest="data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_train.tar",
         member_filters=partial(filter_in_index, index_need=train_indices),
     )
     extract_tar_files_into(
-        "data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS.tar",
-        dest="data/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar",
+        "data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharpening_WV3.tar",
+        dest="data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_val.tar",
         member_filters=partial(filter_in_index, index_need=test_indices),
     )
+
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4.tar",
+    #     dest="data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_train.tar",
+    #     member_filters=partial(filter_in_index, index_need=train_indices),
+    # )
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4.tar",
+    #     dest="data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_val.tar",
+    #     member_filters=partial(filter_in_index, index_need=test_indices),
+    # )
+
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB.tar",
+    #     dest="data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_train.tar",
+    #     member_filters=partial(filter_in_index, index_need=train_indices),
+    # )
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB.tar",
+    #     dest="data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_val.tar",
+    #     member_filters=partial(filter_in_index, index_need=test_indices),
+    # )
+
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2.tar",
+    #     dest="data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_train.tar",
+    #     member_filters=partial(filter_in_index, index_need=train_indices),
+    # )
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2.tar",
+    #     dest="data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_val.tar",
+    #     member_filters=partial(filter_in_index, index_need=test_indices),
+    # )
+
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS.tar",
+    #     dest="data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar",
+    #     member_filters=partial(filter_in_index, index_need=train_indices),
+    # )
+    # extract_tar_files_into(
+    #     "data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS.tar",
+    #     dest="data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar",
+    #     member_filters=partial(filter_in_index, index_need=test_indices),
+    # )

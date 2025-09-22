@@ -37,9 +37,9 @@ from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
 )
+from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any, log_print
 from src.utilities.network_utils import load_weights_with_shape_check
-from utilities.config_utils.to_dataclass import dataclass_from_dict_config
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
@@ -1356,7 +1356,6 @@ def test_tokenizer_forward_backward(
                     y = decs
 
             y.clamp_(-1, 1)
-            # log_print(y.shape)
 
             # Compute mean and std of the latent
             if compute_mean_std:
@@ -1369,6 +1368,7 @@ def test_tokenizer_forward_backward(
 
             # save reconstruction
             if save_img_dir is not None:
+                Path(save_img_dir).mkdir(parents=True, exist_ok=True)
 
                 def plot_img(img, path):
                     y_grid = make_grid(img.float(), nrow=1, padding=2)
@@ -1438,29 +1438,31 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="RS5M",
+        real_data="QB",
         save_pca_vis=False,
         pca_type="z",
-        is_lora=False,
+        is_lora=True,
         lora_ckpt=[
-            "runs/stage1_cosmos_lora/2025-08-28_23-17-54_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
-            "runs/stage1_cosmos_lora/2025-08-29_19-28-44_cosmos_lora=lora_r=32_f8c16p1_IKONOS/peft_ckpt/IKONOS",
-            "runs/stage1_cosmos_lora/2025-08-29_22-23-28_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC",
-            "runs/stage1_cosmos_lora/2025-09-02_18-36-19_cosmos_lora=lora_r=32_f8c16p1_Xiongan/peft_ckpt/Xiongan",
+            "runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
+            "runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB",
+            "runs/stage1_cosmos_lora/2025-09-15_23-03-10_cosmos_lora=lora_r=32_f8c16p1_IKONOS/peft_ckpt/IKONOS",
+            "runs/stage1_cosmos_lora/2025-09-15_17-37-20_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC",
+            "runs/stage1_cosmos_lora/2025-09-15_17-23-14_cosmos_lora=lora_r=32_f8c16p1_Xiongan/peft_ckpt/Xiongan",
         ],
         lora_changes_chans={
             "WV3": 8,
+            "QB": 4,
             "IKONOS": 4,
             "WDC": 191,
             "Xiongan": 256,
         },
-        save_img_dir=None,
-        rgb_chans=[3, 2, 1],  # [49, 39, 29],  # RGB
+        active_lora_name="QB",
+        save_img_dir="tmp/vis_pansharpening_loras",
+        rgb_chans=[2, 1, 0],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        active_lora_name="Xiongan",
-        max_iters=1000,
-        compute_mean_std=True,
+        max_iters=10,
+        compute_mean_std=False,
         use_optim=False,
         check_grad=False,
     )

@@ -3,8 +3,10 @@ hydra:
   run:
     dir: .
 
+used_data: WV3
+
 defaults:
-  - data: qb
+  - data: WV3
   - tokenizer: cosmos_f8c16p4_lora
   # self ============
   - _self_
@@ -26,11 +28,11 @@ total_bands_of_sensors:
 
 processor:
   ratio: 4
-  sensor: QB
+  sensor: ${used_data}
   pan_weights: mean # Or a list e.g., [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
-  downsample_type: avgpool
   nbands: ${total_bands_of_sensors.${processor.sensor}}
   upsample_type: bilinear
+  downsample_type: avgpool
 
 consts:
   sensor: ${processor.sensor}
@@ -41,7 +43,8 @@ consts:
   run_device: 1
   to_neg_1_1: ${data.to_neg_1_1}
   tar_file_name: Pansharpening_${processor.sensor}.tar
+  save_fn: chw_uint
 
 output:
-  output_dir: data/QB
+  output_dir: data/Downstreams/PanCollectionV2/${used_data}
   maxsize: 4.0e9

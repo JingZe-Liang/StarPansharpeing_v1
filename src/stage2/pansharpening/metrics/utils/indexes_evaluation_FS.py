@@ -221,7 +221,7 @@ def D_s(img_fake, img_lm, pan, satellite="QuickBird", scale=4, block_size=32, q=
         "Pan's and fake's spatial resolution should be the same"
     )
     # get LRPan, 2D
-    pan_lr = mtf_resize(pan, satellite=satellite, scale=scale)
+    pan_lr = fmtf_resize(pan, satellite=satellite, scale=scale)
     # print(pan_lr.shape)
     # D_s
     Q_hr = []

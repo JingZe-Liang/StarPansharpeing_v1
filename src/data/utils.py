@@ -478,7 +478,7 @@ def img_normalize_to_zero_one_(
     if mannual_img_min_max is not None:
         img_min, img_max = mannual_img_min_max
         img.sub_(img_min).div_(img_max - img_min + 1e-8)
-        return img
+        return img, img_min, img_max
 
     if norm_type == "min_max":
         dims = (-2, -1) if per_channel else (-3, -2, -1)
@@ -492,6 +492,7 @@ def img_normalize_to_zero_one_(
         img = img.clamp_(min=0)
         dims = (-2, -1) if per_channel else (-3, -2, -1)
         img_max = img.amax(dim=dims, keepdim=True)
+        img_min = torch.zeros_like(img_max)
         if img_max.max().item() < 1e-4:
             img = torch.zeros_like(img)
         else:
@@ -505,10 +506,13 @@ def img_normalize_to_zero_one_(
             img = torch.zeros_like(img)
         else:
             img.sub_(mean).div_(std + eps)
+        # for return
+        img_min = mean
+        img_max = std
     else:
         raise ValueError(f"Invalid norm_type: {norm_type}")
 
-    return img
+    return img, img_min.flatten(), img_max.flatten()
 
 
 def norm_img_(
@@ -540,7 +544,7 @@ def norm_img_(
         # RGB image is not JPEG or PNG decoded, it can not have negative values
         # and no need to use quantile clip
         norm_type = "clip_zero_div"
-    img = img_normalize_to_zero_one_(
+    img, i_min, i_max = img_normalize_to_zero_one_(
         img,
         norm_type=norm_type,
         per_channel=per_channel,
@@ -556,7 +560,7 @@ def norm_img_(
     if is_dim2:
         img.squeeze_(0)
 
-    return img
+    return img, i_min, i_max
 
 
 def norm_img(
@@ -570,6 +574,7 @@ def norm_img(
     per_channel: bool = False,
     quantile_clip: float = 1.0,
     mannual_img_min_max: tuple[float, float] | None = None,
+    norm_info_add_in_sample: bool = False,
 ):
     """
     Normalize image(s) in a sample to [0, 1] and optionally to [-1, 1].
@@ -643,7 +648,7 @@ def norm_img(
                 return None  # None for webdataset means drop this sample
 
         # Normalize image
-        img = norm_img_(
+        img, img_min, img_max = norm_img_(
             img=img,
             per_channel=per_channel,
             norm_type=norm_type,
@@ -654,6 +659,10 @@ def norm_img(
         )
 
         sample[key] = img
+
+        if norm_info_add_in_sample:
+            sample[f"{key}_min"] = img_min
+            sample[f"{key}_max"] = img_max
 
     return sample
 

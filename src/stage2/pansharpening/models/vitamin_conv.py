@@ -5,7 +5,12 @@ import torch.nn as nn
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 
-from src.stage2.layers import MbConvStages, RescaleOutput
+from src.stage2.layers import (
+    MbConvStages,
+    RescaleOutput,
+    create_patcher,
+    create_unpatcher,
+)
 from src.utilities.logging import log
 
 
@@ -40,6 +45,7 @@ class VitaminCfg:
     conv_cfg: ConvCfg = field(default_factory=ConvCfg)
     output_rescale: bool = True
     is_neg_1_1: bool = True
+    patch_size: int = 1
 
 
 def create_conv3x3_same(in_chan, out_chan):
@@ -52,14 +58,21 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         patchers = nn.ModuleDict()
-        patchers["pan_conv"] = create_conv3x3_same(cfg.pan_channel, cfg.stem_width)
-        patchers["ms_conv"] = create_conv3x3_same(cfg.ms_channel, cfg.stem_width)
+        patchers["pan_conv"] = create_patcher(
+            cfg.pan_channel, cfg.stem_width, cfg.patch_size
+        )
+        patchers["ms_conv"] = create_patcher(
+            cfg.ms_channel, cfg.stem_width, cfg.patch_size
+        )
         patchers["fused_conv"] = create_conv3x3_same(cfg.stem_width * 2, cfg.stem_width)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
         )
         self.patchers = patchers
+        self.unpatcher = create_unpatcher(
+            cfg.embed_dim[-1], cfg.embed_dim[-1], cfg.patch_size
+        )
 
         self.stages = MbConvStages(
             cfg.stem_width,
@@ -110,6 +123,10 @@ class VitaminModel(nn.Module):
 
         # stages
         x = self.stages(x, cond)
+
+        # unpatcher
+        x = self.unpatcher(x)
+
         x = self.out_conv(x)
 
         if self.cfg.use_residual:
@@ -132,13 +149,14 @@ if __name__ == "__main__":
     # Example usage of VitaminCfg dataclass
     vitamin_cfg = VitaminCfg(
         stem_width=32,
-        embed_dim=[64, 192, 192],
+        embed_dim=[64, 128, 128],
         depths=[2, 2, 2],
         pan_channel=1,
         ms_channel=8,
-        condition_channel=256,
+        condition_channel=16,
         use_residual=True,
         conv_cfg=conv_cfg,
+        patch_size=2,
     )
     print("VitaminCfg example:", vitamin_cfg)
 

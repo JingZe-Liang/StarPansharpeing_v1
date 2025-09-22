@@ -45,9 +45,9 @@ from src.stage1.utilities.train.network import (
 )
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file
+from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
-from utilities.logging.print import print_info_if_raise
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -1501,6 +1501,7 @@ class CosmosHyperspectralTokenizerTrainer:
                         "learn_code_opt_loss",
                     ],  # none is all to be selected
                     "kl": ["kl_loss"],
+                    "fsq": ["fsq_loss"],  # is zero for FSQ
                 }
 
                 _log_q = dict_round_to_list_str(

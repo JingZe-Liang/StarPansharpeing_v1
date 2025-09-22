@@ -1,4 +1,4 @@
-_target_: src.stage2.pansharpening.models.amotized_vitamin.AmotizedPansharpeningVitamin
+_target_: src.stage2.utilities.amotized.amotized_model_wrapper.AmotizedModelMixin
 _partial_: true # for decode_fn
 
 # Model configuration
@@ -35,16 +35,30 @@ pixel_model:
   _target_: src.stage2.pansharpening.models.vitamin_conv.VitaminModel
   cfg:
     _target_: src.stage2.pansharpening.models.vitamin_conv.VitaminCfg
-    stem_width: 32
-    embed_dim: [64, 192, 192]
-    depths: [2, 2, 2]
-    ms_channel: ${dataset.consts.${dataset.cfgs.used}}
     pan_channel: 1
+    ms_channel: ${dataset.consts.bands}
+    stem_width: 64
+    embed_dim: [64, 128, 256]
+    depths: [2, 2, 2]
     condition_channel: 16
-    use_residual: false
+    patch_size: 2
+    use_residual: true
+    output_rescale: true
+    is_neg_1_1: true
+
+    # Conv configuration
     conv_cfg:
       _target_: src.stage2.pansharpening.models.vitamin_conv.ConvCfg
-      expand_ratio: 2.0
+      expand_ratio: 4.0
+      expand_output: true
       kernel_size: 3
+      group_size: 1
+      pre_norm_act: false
+      stride_mode: "dw"
+      pool_type: "avg2"
+      downsample_pool_type: "avg2"
       act_layer: "gelu"
       norm_layer: "layernorm2d"
+      norm_eps: 1e-5
+      down_shortcut: true
+      mlp: "mlp"

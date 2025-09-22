@@ -1,11 +1,12 @@
 import copy
-from typing import Literal, cast
+from typing import Literal, Sequence, cast
 
+import einx
 import numpy as np
 import open_clip
+import torch
 import torch as th
 import torch.nn as nn
-
 from jaxtyping import Float
 from loguru import logger
 from lpips import LPIPS
@@ -19,6 +20,8 @@ from src.stage1.utilities.losses.repa.repa_feature_loss import (
     DINOV3_TO_NUM_LAYERS,
     load_repa_dino_v3_model,
 )
+
+from .utils import get_rgb_channels_for_model, linstretch_torch
 
 
 class Norm(nn.Module):
@@ -40,18 +43,6 @@ class WrappedClipVisual(nn.Module):
         x = self.body(x)
         x = self.final_norm(x)
         return x
-
-
-def choose_lightest_bands(img: Float[th.Tensor, "... c h w"] | Float[NDArray, "h w c"]):
-    mean_cs = img.mean((-3, -2, -1))  # (c,)
-    mean_cs = th.as_tensor(mean_cs)
-    _, indices = th.topk(mean_cs, k=3, largest=True)
-    indices = indices.tolist()
-    indices = sorted(indices, reverse=True)
-    assert indices[-1] < img.shape[1], (
-        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
-    )
-    return indices
 
 
 # Perceptual model creation
@@ -232,55 +223,18 @@ class HyperspectralFeatureLoss:
         else:
             x_selected = x_grouped
 
+        # linestretch each group
+        x_selected = x_selected.view(-1, self.group_size, h, w)
+        x_selected = linstretch_torch(x_selected)
+        x_selected = einx.rearrange(
+            "(b g) c h w -> b g c h w", x_selected, b=b, c=self.group_size
+        )
+
         return x_selected
 
-    def _rgb_select(self, img: th.Tensor):
-        if self.rgb_channels is not None and img.shape[1] > 3:
-            assert img.shape[1] >= 3, "img must be hyperspectral images"
-            if self.rgb_channels == "random":
-                _rgb_chan_select = th.randperm(img.shape[1])[:3]
-                rgb_channels = _rgb_chan_select.tolist()
-                img = img[:, rgb_channels]
-            elif (
-                not isinstance(self.rgb_channels, (list, tuple))
-                and self.rgb_channels.startswith("random")
-                and self.rgb_channels != "random"
-            ):
-                # e.g., random_5_12, means select 3 of channels from 5 to 12 channel index
-                _lft_idx = self.rgb_channels.split("_")[1]
-                _rgt_idx = self.rgb_channels.split("_")[2]
-
-                _lft_idx = int(_lft_idx)
-                _rgt_idx = int(_rgt_idx)
-
-                assert _lft_idx < _rgt_idx, (
-                    "rgb_channels must be in the range of [lft, rgt)"
-                )
-                assert _rgt_idx < img.shape[1], (
-                    "rgb_channels must be in the range of [lft, rgt)"
-                )
-                _rgb_chan_select = th.randperm(_rgt_idx - _lft_idx)[:3] + _lft_idx
-                rgb_channels = th.tensor(
-                    [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
-                )
-                img = img[:, rgb_channels]
-            elif self.rgb_channels == "mean":
-                # mean three splitted bands
-                c = img.shape[1]
-                c_3 = c // 3
-                bands = [
-                    img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
-                ]
-                img = th.stack(bands, dim=1)
-            elif self.rgb_channels == "largest":
-                bands = choose_lightest_bands(img)
-                img = img[:, bands]
-            else:
-                rgb_channels = self.rgb_channels
-                rgb_channels = cast(list, rgb_channels)
-                img = img[:, rgb_channels]
-
-        assert img.shape[1] == 3, "img must be rgb images"
+    def _rgb_select(self, img: th.Tensor, use_linstretch: bool = False):
+        """Select RGB channels from hyperspectral image."""
+        img = get_rgb_channels_for_model(self.rgb_channels, img, use_linstretch)
         return img
 
     def get_img_rgb(self, x: th.Tensor):
@@ -383,8 +337,11 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
     def _compute_gram_matrix(self, feature_maps: th.Tensor) -> th.Tensor:
         b, c, h, w = feature_maps.size()
         features = feature_maps.view(b, c, h * w)
-        gram = th.bmm(features, features.transpose(1, 2))
-        return gram / (c * h * w)
+        # Atoken: it can stabilize the training, even eliminating the need for GAN training.
+        gram = th.bmm(
+            features, features.transpose(1, 2)
+        )  # [b, c, l] x [b, l, c] -> [b, c, c]
+        return gram / (h * w)
 
     def _compute_percep_loss(self, input: th.Tensor, target: th.Tensor) -> th.Tensor:
         """Compute perceptual loss for a single group of channels.

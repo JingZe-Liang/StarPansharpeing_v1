@@ -102,6 +102,8 @@
     path = src/stage2/detections/AETNet
     url = https://github.com/ZhaoxuLi123/AETNet.git
 
-[submodule "src/stage2/generative/Sana"]
-    path = src/stage2/generative/Sana
-    url = https://github.com/NVlabs/Sana.git
+
+# local dir
+# [submodule "src/stage2/generative/Sana"]
+#     path = src/stage2/generative/Sana
+#     url = https://github.com/NVlabs/Sana.git

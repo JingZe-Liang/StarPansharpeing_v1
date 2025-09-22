@@ -15,6 +15,7 @@ import webdataset as wds
 from omegaconf import DictConfig, OmegaConf
 from peft import PeftConfig
 from tqdm import tqdm
+from transformers import LongformerSelfAttention
 
 from src.data.codecs import npz_codec_io, safetensors_codec_io, tiff_codec_io
 from src.data.tar_utils import TarSinkManager, tar_sink_manager
@@ -37,6 +38,11 @@ warnings.filterwarnings(
     "ignore",
     module="torch.utils.checkpoint",
 )
+
+
+def valid_value(x):
+    return torch.isnan(x).sum() == 0 and torch.isinf(x).sum() == 0
+
 
 # * --- Tokenizer processor --- #
 
@@ -116,6 +122,7 @@ class PansharpTokenizeProcessor(nn.Module):
         bs, c, h, w = hrms.shape
 
         try:
+            hrms, pan = map(lambda x: x.to(torch.uint16), (hrms, pan))
             lrms, pan = self.pansharp_simulator(hrms, pan)
         except Exception as e:
             log_print(
@@ -139,9 +146,11 @@ class PansharpTokenizeProcessor(nn.Module):
 
         # To convert the images to target dtypes
         if self.before_save_fn is not None:
-            hrms, lrms, pan = map(
-                self.before_save_fn, (hrms, lrms, pan)
-            )  # bs, c, h, w -> bs, h, w, c ndarray
+            hrms = self.before_save_fn(img=hrms)
+            lrms = self.before_save_fn(img=lrms)
+            pan = self.before_save_fn(img=pan)
+
+        map(valid_value, (hrms, lrms, pan))
 
         # Let's modify this to return a list of dictionaries, one per sample.
         output_list = []
@@ -149,9 +158,10 @@ class PansharpTokenizeProcessor(nn.Module):
             # * --- will save the original images or not --- #
             sample_data = {
                 "__key__": keys[i],
-                "hrms.tiff": tiff_codec_io(hrms[i]),
-                "lrms.tiff": tiff_codec_io(lrms[i]),
-                "pan.tiff": tiff_codec_io(pan[i]),
+                # "hrms.tiff": tiff_codec_io(hrms[i]),
+                # "lrms.tiff": tiff_codec_io(lrms[i]),
+                # "pan.tiff": tiff_codec_io(pan[i]),
+                "pair.npz": {"hrms": hrms[i], "lrms": lrms[i], "pan": pan[i]},
             }
             # Assuming latent tensors also have a batch dimension
             if self.has_tokenizer:
@@ -231,6 +241,35 @@ def seperate_pansharpening_latent_pairs(
 # * --- Main entry --- #
 
 
+def save_hwc_float_0_1(
+    cfg, img, const: float | None = None, dtype: np.dtype | None = None
+) -> np.ndarray:
+    # Convert to float32 and scale to [0, 1]
+    if cfg.consts.to_neg_1_1:
+        img = (img + 1) / 2
+
+    img = img.permute(0, 2, 3, 1)  # (bs, c, h, w) -> (bs, h, w, c)
+    img = img.cpu().numpy()
+    img = np.clip(img, 0, 1)
+
+    if const is not None and dtype is not None:
+        img = (img * const).astype(dtype)
+    else:
+        log_print(
+            "[save fn]: const and dtype, one of them is not provided, save the img using float32",
+            warn_once=True,
+        )
+        img = img.astype("float32")
+
+    return img
+
+
+def save_chw_uint(cfg, img, dtype=np.uint16):
+    # bs, c, h, w
+    img = img.cpu().numpy()
+    return img.astype(dtype)
+
+
 @hydra.main(
     config_path="../configs/pansharpening_simulation",
     config_name="pan_wv3_simulation",
@@ -293,32 +332,13 @@ def process_dataset(cfg: DictConfig) -> None:
         tokenizer = None
         log_print("No tokenizer provided, skipping latent generation.")
 
-    def before_save_fn(
-        img, const: float | None = None, dtype: np.dtype | None = None
-    ) -> np.ndarray:
-        # Convert to float32 and scale to [0, 1]
-        if cfg.consts.to_neg_1_1:
-            img = (img + 1) / 2
-
-        img = img.permute(0, 2, 3, 1)  # (bs, c, h, w) -> (bs, h, w, c)
-        img = img.cpu().numpy()
-        img = np.clip(img, 0, 1)
-
-        if const is not None and dtype is not None:
-            img = (img * const).astype(dtype)
-        else:
-            log_print(
-                "[save fn]: const and dtype, one of them is not provided, save the img using float32",
-                warn_once=True,
-            )
-            img = img.astype("float32")
-
-        return img
-
+    before_save_fn_ = (
+        save_chw_uint if cfg.consts.save_fn == "chw_uint" else save_hwc_float_0_1
+    )
     processor = PansharpTokenizeProcessor(
         pansharp_simulator=pansharp_sim,
         tokenizer=tokenizer,
-        before_save_fn=before_save_fn,
+        before_save_fn=partial(before_save_fn_, cfg=cfg),
         latent_save_backend="npz",
     )
     # 2. Setup WebDataset pipeline using get_hyperspectral_dataloaders
@@ -338,11 +358,7 @@ def process_dataset(cfg: DictConfig) -> None:
     log_print("Starting processing...")
     count = 0
     total_samples = 0  # Keep track of total samples written
-
-    try:
-        progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
-    except TypeError:
-        progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
+    progress_bar = tqdm(input_dataloader, desc="Processing Batches", unit="batch")
 
     sink_manager = TarSinkManager(output_dir)
     for batch in progress_bar:
@@ -368,8 +384,6 @@ def process_dataset(cfg: DictConfig) -> None:
                 else:
                     name = "default.tar"
 
-                # tar_path = os.path.join(output_dir, name)
-                # output_sink = sinks.get(name, None)
                 pansharp_sink = sink_manager.get_sink(
                     f"pansharpening_{name}", f"pansharpening_reduced/{name}"
                 )

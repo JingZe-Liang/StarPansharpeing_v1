@@ -40,7 +40,6 @@ def to_numpy(*args):
 def dict_to_str(d, decimals=4):
     n = len(d)
 
-    # func = lambda k, v: f"{k}: {torch.round(v, decimals=decimals).item() if isinstance(v, torch.Tensor) else round(v, decimals)}"
     def func(k, v):
         if isinstance(v, torch.Tensor):
             return f"{k}: {round(v.item(), decimals)}"
@@ -55,20 +54,6 @@ def dict_to_str(d, decimals=4):
     for i, (k, v) in enumerate(d.items()):
         s += func(k, v) + (", " if i < n - 1 else "")
     return s
-
-
-def normalize_to_01(x):
-    # normalize tensor to [0, 1]
-    if isinstance(x, torch.Tensor):
-        x -= x.flatten(-2).min(-1, keepdim=True)[0][..., None]
-        x /= x.flatten(-2).max(-1, keepdim=True)[0][..., None]
-    elif isinstance(x, np.ndarray):
-        x -= x.min((-2, -1), keepdims=True)
-        x /= x.max((-2, -1), keepdims=True)
-    else:
-        raise TypeError("x should be tensor or numpy array")
-
-    return x
 
 
 def psnr_one_img(img_gt, img_test):
@@ -161,7 +146,7 @@ class AnalysisPanAcc(object):
         if ratio is None:
             ratio = ergas_ratio
             warn(
-                "`ergas_ratio` is deprecated, use ratio instead",
+                "ergas_ratio is deprecated, use ratio instead",
                 category=DeprecationWarning,
             )
         self.ratio = ratio
@@ -174,11 +159,10 @@ class AnalysisPanAcc(object):
             )
             self.ssim = ssim_batch_tensor_metric
         else:
-            # @sensor in ['QB', 'IKONOS', 'WV2', 'WV3', 'default']
             assert (
                 "sensor" in unref_factory_kwargs
                 or "default_max_value" in unref_factory_kwargs
-            ), "@sensor or @default_max_value should be specified in unrefactory_kwargs"
+            ), "sensor or default_max_value should be specified in unrefactory_kwargs"
             sensor = unref_factory_kwargs.pop("sensor", "default").upper()
 
             if sensor == "DEFAULT":
@@ -190,7 +174,7 @@ class AnalysisPanAcc(object):
             if self.default_max_value is None:
                 _default_max_value = {
                     "QB": 2047,
-                    "IKONOS": 1023,
+                    "IKONOS": 1023,  # 1023 or 2047?
                     "WV2": 2047,
                     "WV3": 2047,
                     "GF2": 1023,
@@ -203,12 +187,10 @@ class AnalysisPanAcc(object):
                     "GF2-GF5": 1,
                 }
                 self.default_max_value = _default_max_value.get(sensor)
-                # log_print(
-                #     f">>> `default_max_value` is not specified, set it according to `sensor`:"
-                #     f"{sensor, self.default_max_value}\n"
-                #     "-" * 20,
-                #     level="warning",
-                # )
+                log_print(
+                    f"[Pan Acc]: default_max_value is set to {self.default_max_value} with sensor {sensor}",
+                    "debug",
+                )
 
             self.FS_metric_fn = partial(
                 indexes_evaluation_FS,
@@ -333,7 +315,7 @@ class AnalysisPanAcc(object):
             assert (
                 kwargs["sr"].shape[-2:]
                 == (int(h * self.ratio), int(w * self.ratio))
-                == kwargs["lms"].shape[-2]
+                == kwargs["lms"].shape[-2:]
                 == kwargs["pan"].shape[-2:]
             ), f"shapes are not matched: {[arg.shape for arg in args]}"
         else:

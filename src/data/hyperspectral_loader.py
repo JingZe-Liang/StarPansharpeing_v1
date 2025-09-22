@@ -631,6 +631,8 @@ def get_fast_test_hyperspectral_data(
                 "resize_before_transform": 512,
             }
         )
+    elif data_type in ["QB", "WV2", "WV4", "IKONOS", "WV3"]:
+        other_kwargs.update({"mannual_img_min_max": (0, 2047)})
 
     _, dataloader = get_hyperspectral_dataloaders(
         wds_paths,

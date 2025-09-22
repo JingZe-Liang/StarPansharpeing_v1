@@ -5,12 +5,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers.create_conv2d import create_conv2d
-from timm.layers.create_norm import create_norm_layer
+from timm.layers.create_norm import create_norm_layer, get_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer
+from timm.layers.patch_embed import PatchEmbed
 from torch.utils.checkpoint import checkpoint
 
 from src.utilities.config_utils import dataclass_from_dict
 from src.utilities.logging import log
+
+from .cross_attn import CrossAttention
+from .patcher import create_unpatcher
 
 
 def modulate(x, shift, scale):
@@ -104,6 +108,7 @@ class NAFBlockConditional(NAFBlock):
     ):
         super().__init__(c, DW_Expand, FFN_Expand, drop_out_rate)
         ffn_channel = FFN_Expand * c
+        # lora-like modulation
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
             create_norm_act_layer(
@@ -113,7 +118,6 @@ class NAFBlockConditional(NAFBlock):
                 ffn_channel // 2,
                 ffn_channel * 2,
                 3,
-                padding=1,
                 stride=1,
                 bias=False,
                 groups=ffn_channel // 2,
@@ -124,16 +128,14 @@ class NAFBlockConditional(NAFBlock):
         def forward_closure(inp, cond):
             x = inp
 
+            # Conv stage 1
             x = self.norm1(x)
-
             x = self.conv1(x)
             x = self.conv2(x)
             x = self.sg(x)
             x = x * self.sca(x)
             x = self.conv3(x)
-
             x = self.dropout1(x)
-
             y = inp + x * self.beta
 
             # Condition
@@ -141,12 +143,12 @@ class NAFBlockConditional(NAFBlock):
                 cond, size=y.shape[-2:], mode="bilinear", align_corners=False
             )
             scale, shift = self.modulation(cond).chunk(2, dim=1)
+
+            # Conv stage 2
             x = self.conv4(self.norm2(y))
             x = modulate(x, shift, scale)
-
             x = self.sg(x)
             x = self.conv5(x)
-
             x = self.dropout2(x)
 
             return y + x * self.gamma
@@ -155,6 +157,113 @@ class NAFBlockConditional(NAFBlock):
             return checkpoint(forward_closure, inp, cond, use_reentrant=False)
         else:
             return forward_closure(inp, cond)
+
+
+class NAFCrossAttentionConditional(NAFBlock):
+    def __init__(
+        self,
+        c,
+        cond_chs=256,
+        DW_Expand=2,
+        FFN_Expand=2,
+        drop_out_rate=0.0,
+        cross_attn: bool = False,
+        cross_attn_kwargs: dict = dict(
+            n_q_heads=8,
+            n_kv_heads=8,
+            qk_norm="zero_mean_rmsnorm",
+            use_gate=True,
+            cross_attn_patch_size=2,
+        ),
+        **__discarded_kwargs,
+    ):
+        super().__init__(c, DW_Expand, FFN_Expand, drop_out_rate)
+        ffn_channel = FFN_Expand * c
+        # lora-like modulation
+        self.modulation = nn.Sequential(
+            create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
+            create_norm_act_layer(
+                "layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6
+            ),
+            create_conv2d(
+                ffn_channel // 2,
+                ffn_channel * 2,
+                3,
+                stride=1,
+                bias=False,
+                groups=ffn_channel // 2,
+            ),
+        )
+        self.use_cross_attn = cross_attn
+        if cross_attn:
+            ps = cross_attn_kwargs.pop("cross_attn_patch_size", 2)
+            self.ca_patch_size = ps
+            self.cond_to_x_dim = create_conv2d(cond_chs, c, 1, bias=True)
+            self.cross_attn = CrossAttention(
+                dim=c, **cross_attn_kwargs if cross_attn_kwargs else {}
+            )
+            self.ca_q_patcher = PatchEmbed(
+                patch_size=ps,
+                norm_layer=get_norm_layer("layernorm"),
+                in_chans=c,
+                embed_dim=c,
+                output_fmt="NLC",
+                strict_img_size=False,
+            )
+            self.ca_q_unpatcher = create_unpatcher(c, c, ps, depthwise=True)
+
+    def _forward_cross_attn(self, x, cond):
+        B, C, H, W = x.shape
+        qh, qw = H // self.ca_patch_size, W // self.ca_patch_size
+        x_in = x
+        q = self.ca_q_patcher(x)  # (B, Hq*Wq, C)
+        cond = self.cond_to_x_dim(cond)
+        cond = cond.flatten(2).transpose(1, 2)  # (B, Hc*Wc, C)
+        q = self.cross_attn(q, cond)
+        q = q.transpose(1, 2).view(B, C, qh, qw)
+        x = self.ca_q_unpatcher(q)
+        x = x + x_in
+        return x
+
+    def forward(self, inp, cond_modulate, cond_cross_attn):
+        def forward_closure(inp, cond_modulate, cond_cross_attn):
+            x = inp
+            # Conv stage 1
+            x = self.norm1(x)
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.sg(x)
+            x = x * self.sca(x)
+            x = self.conv3(x)
+            x = self.dropout1(x)
+            y = inp + x * self.beta
+
+            # Condition
+            if self.use_cross_attn:
+                y = self._forward_cross_attn(y, cond_cross_attn)
+            cond_modulate = F.interpolate(
+                cond_modulate, size=y.shape[-2:], mode="bilinear", align_corners=False
+            )
+            scale, shift = self.modulation(cond_modulate).chunk(2, dim=1)
+            # Conv stage 2
+            x = self.conv4(self.norm2(y))
+            x = modulate(x, shift, scale)
+            x = self.sg(x)
+            x = self.conv5(x)
+            x = self.dropout2(x)
+
+            return y + x * self.gamma
+
+        if self.grad_checkpointing and self.training:
+            return checkpoint(
+                forward_closure,
+                inp,
+                cond_modulate,
+                cond_cross_attn,
+                use_reentrant=False,
+            )
+        else:
+            return forward_closure(inp, cond_modulate, cond_cross_attn)
 
 
 @dataclass

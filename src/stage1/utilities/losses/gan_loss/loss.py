@@ -345,7 +345,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
     ):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla", "non_saturate", "relative"]
-        assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", None]
+        assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", "fsq", None]
         assert disc_network_type in [
             "patchgan",
             "patchgan_v2",
@@ -421,7 +421,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             default_quant_opts = None
         logger.info(f"[VQ fn loss]: use quantizer type={quantizer_type}")
         self.quantizer_options = quantizer_options or default_quant_opts
-        self.vq_options_check()
+        self._vq_options_check()
 
         # * perceptual loss
         self.use_perceptual_loss = False
@@ -593,7 +593,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # zero buffer
         self.register_buffer("zero", torch.tensor(0.0), persistent=False)
 
-    def calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
+    def _calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
         if last_layer is not None:
             # TODO: add fsdp2 support
             if torch.is_tensor(last_layer) and not isinstance(
@@ -640,106 +640,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
         return d_weight
 
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        reconstructions: torch.Tensor,
-        optimizer_idx: int,
-        global_step: int,
-        q_loss_breakdown: NamedTuple | Dict | None = None,
-        q_loss_total: torch.Tensor | None = None,
-        outer_recon_loss: torch.Tensor | None = None,
-        last_layer: nn.Parameter | torch.Tensor | None = None,
-        enc_last_layer: nn.Parameter | None = None,
-        cond: torch.Tensor | None = None,
-        tokenizer_feat: torch.Tensor | None = None,
-        split: str = "train",  # TODO: remove this
-        add_prefix: bool = False,
-    ):
-        """Forward pass of the VQ-GAN loss function.
-
-        This method computes different loss components based on the optimizer index:
-        - When optimizer_idx=0: Computes generator losses (reconstruction, perceptual, adversarial, quantization, REPA/VF)
-        - When optimizer_idx=1: Computes discriminator losses (adversarial with optional regularization)
-
-        Args:
-            inputs (torch.Tensor): Ground truth input images of shape [B, C, H, W] or [B, C, T, H, W] for video.
-            reconstructions (torch.Tensor): Reconstructed images from the generator of same shape as inputs.
-            optimizer_idx (int): Index indicating which optimizer is being used (0 for generator, 1 for discriminator).
-            global_step (int): Current global training step for scheduling losses.
-            q_loss_breakdown (NamedTuple | Dict | None): Breakdown of quantization losses from the quantizer.
-            q_loss_total (torch.Tensor | None): Total quantization loss value.
-            outer_recon_loss (torch.Tensor | None): External reconstruction loss (used when force_not_use_recon_loss=True).
-            last_layer (nn.Parameter | torch.Tensor | None): Last layer of the generator for adaptive weight computation.
-            enc_last_layer (nn.Parameter | None): Last layer of the encoder for VF loss adaptive weight computation.
-            cond (torch.Tensor | None): Conditional input for conditional GANs.
-            tokenizer_feat (torch.Tensor | None): Tokenizer features for REPA or VF loss computation.
-            split (str): Data split identifier (train/val/test). Defaults to "train".
-            add_prefix (bool): Whether to add prefix to log keys. Defaults to False.
-
-        Returns:
-            tuple: When optimizer_idx=0 (generator):
-                - dict: Loss dictionary with keys 'gen_loss' and 'q_loss'
-                - dict: Log dictionary with loss components for logging
-            tuple: When optimizer_idx=1 (discriminator):
-                - dict: Loss dictionary with key 'disc_loss'
-                - dict: Log dictionary with loss components for logging
-        """
-        if split != "train":
-            # not use `split`
-            warnings.warn(
-                "split is not used, we will remove this argument", DeprecationWarning
-            )
-
-        # input shapes
-        if inputs.ndim == 5:
-            assert self.num_frames == inputs.shape[2], (
-                f"Number of frames does not match input "
-            )
-            inputs = rearrange(inputs, "n c t h w -> (n t) c h w")
-            reconstructions = rearrange(reconstructions, "n c t h w -> (n t) c h w")
-
-        assert (q_loss_total is None and q_loss_breakdown is None) or (
-            q_loss_total is not None and q_loss_breakdown is not None
-        ), "q_loss_total and q_loss_breakdown must be both None or both not None"
-
-        # * ==========================================================
-        # * GAN loss
-
-        # now the GAN part
-        if optimizer_idx == 0:
-            return self.gen_loss(
-                inputs=inputs,
-                reconstructions=reconstructions,
-                last_layer=last_layer,
-                global_step=global_step,
-                q_loss_breakdown=q_loss_breakdown,
-                split=split,
-                add_prefix=add_prefix,
-                cond=cond,
-                q_loss_total=q_loss_total,
-                outer_recon_loss=outer_recon_loss,
-                tokenizer_feat=tokenizer_feat,
-                enc_last_layer=enc_last_layer,
-            )
-
-        # * ==========================================================
-        # * discriminator losses
-
-        elif optimizer_idx == 1:
-            return self.disc_loss(
-                inputs=inputs,
-                reconstructions=reconstructions,
-                global_step=global_step,
-                cond=cond,
-                split=split,
-                add_prefix=add_prefix,
-            )
-
-        else:
-            raise ValueError(f"{optimizer_idx=} is invalid")
-
-    def gen_loss_weight_fn(self, nll_loss, g_loss, last_layer):
+    def _gen_loss_weight_fn(self, nll_loss, g_loss, last_layer):
         if self.gen_loss_weight is None:
             # try:
             #     d_weight = self.calculate_adaptive_weight(
@@ -751,7 +652,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             #     logger.warning("d_weight is set to 0")
             #     d_weight = self.zero.to(nll_loss.device)
 
-            d_weight = self.calculate_adaptive_weight(
+            d_weight = self._calculate_adaptive_weight(
                 nll_loss, g_loss, last_layer=last_layer
             )
         else:
@@ -759,7 +660,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return d_weight
 
-    def q_loss(
+    def _q_loss(
         self,
         q_loss_total: torch.Tensor,
         q_loss_breakdown: NamedTuple | Dict,
@@ -857,9 +758,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
             q_loss = q_loss_total * self.quantizer_options["kl_weight"]
             logs = {"kl_loss": q_loss}
 
+        # > fsq ============
+        elif self.quantizer_type == "fsq":
+            # no loss for fsq
+            q_loss = q_loss_total  # is zero
+            logs = {"fsq_loss": q_loss}  # must be zeros
+
         return q_loss, logs
 
-    def vq_options_check(self):
+    def _vq_options_check(self):
         def _assert_in_dict(names: list[str], d: dict):
             for name in names:
                 assert name in d, f"{name} not in {d}"
@@ -898,7 +805,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             f"for quantizer type: {self.quantizer_type}"
         )
 
-    def train_disc_log_form(
+    def _train_disc_log_form(
         self,
         split: str,
         disc_factor: float,
@@ -941,7 +848,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return logs
 
-    def train_generator_log_form(
+    def _train_generator_log_form(
         self,
         # infos =======
         disc_factor: float,
@@ -1016,7 +923,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return log
 
-    def reconstruction_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
+    def _reconstruction_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
         # recon loss
         if self.reconstruction_loss_type == "mse":
             recon_loss = F.mse_loss(inputs, targets)
@@ -1081,7 +988,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             recon_loss = outer_recon_loss
             ssim_loss = self.zero
         else:
-            recon_loss_d = self.reconstruction_loss(inputs, reconstructions)
+            recon_loss_d = self._reconstruction_loss(inputs, reconstructions)
             recon_loss = recon_loss_d["recon_loss"] * self.reconstruction_weight
             ssim_loss = recon_loss_d["ssim_loss"] * self.ssim_weight
 
@@ -1110,7 +1017,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * gram loss
         if self.use_gram:
-            gram_loss = self.gram_loss(inputs, tokenizer_feat, nll_loss, enc_last_layer)
+            gram_loss = self.gram_loss(
+                inputs, reconstructions, nll_loss, enc_last_layer
+            )
             gram_loss = gram_loss * self.gram_loss_weight
 
         # * (un)conditional gan loss
@@ -1137,20 +1046,20 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 else:
                     g_loss = self.generator_loss(logits_fake)
 
-            d_weight *= self.gen_loss_weight_fn(nll_loss, g_loss, last_layer)
+            d_weight *= self._gen_loss_weight_fn(nll_loss, g_loss, last_layer)
         d_weight *= self.discriminator_weight
         if not self.training:
             real_g_loss = disc_factor * g_loss
         g_loss = d_weight * disc_factor * g_loss
 
         # * quantization losses
-        q_loss, q_loss_logs = self.q_loss(q_loss_total, q_loss_breakdown, global_step)
+        q_loss, q_loss_logs = self._q_loss(q_loss_total, q_loss_breakdown, global_step)
 
         # * basic losses
         loss = nll_loss + g_loss + repa_loss + vf_loss
 
         # * form logs
-        log = self.train_generator_log_form(
+        log = self._train_generator_log_form(
             disc_factor=disc_factor,
             split=split,
             total_loss=loss,
@@ -1257,7 +1166,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             r1_loss_scale = self.zero
             r2_loss_scale = self.zero
 
-        log = self.train_disc_log_form(
+        log = self._train_disc_log_form(
             split=split,
             disc_factor=disc_factor,
             lecam_loss=lecam_loss,
@@ -1271,3 +1180,102 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_loss = dict(disc_loss=d_loss)
 
         return disc_loss, log
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        reconstructions: torch.Tensor,
+        optimizer_idx: int,
+        global_step: int,
+        q_loss_breakdown: NamedTuple | Dict | None = None,
+        q_loss_total: torch.Tensor | None = None,
+        outer_recon_loss: torch.Tensor | None = None,
+        last_layer: nn.Parameter | torch.Tensor | None = None,
+        enc_last_layer: nn.Parameter | None = None,
+        cond: torch.Tensor | None = None,
+        tokenizer_feat: torch.Tensor | None = None,
+        split: str = "train",  # TODO: remove this
+        add_prefix: bool = False,
+    ):
+        """Forward pass of the VQ-GAN loss function.
+
+        This method computes different loss components based on the optimizer index:
+        - When optimizer_idx=0: Computes generator losses (reconstruction, perceptual, adversarial, quantization, REPA/VF)
+        - When optimizer_idx=1: Computes discriminator losses (adversarial with optional regularization)
+
+        Args:
+            inputs (torch.Tensor): Ground truth input images of shape [B, C, H, W] or [B, C, T, H, W] for video.
+            reconstructions (torch.Tensor): Reconstructed images from the generator of same shape as inputs.
+            optimizer_idx (int): Index indicating which optimizer is being used (0 for generator, 1 for discriminator).
+            global_step (int): Current global training step for scheduling losses.
+            q_loss_breakdown (NamedTuple | Dict | None): Breakdown of quantization losses from the quantizer.
+            q_loss_total (torch.Tensor | None): Total quantization loss value.
+            outer_recon_loss (torch.Tensor | None): External reconstruction loss (used when force_not_use_recon_loss=True).
+            last_layer (nn.Parameter | torch.Tensor | None): Last layer of the generator for adaptive weight computation.
+            enc_last_layer (nn.Parameter | None): Last layer of the encoder for VF loss adaptive weight computation.
+            cond (torch.Tensor | None): Conditional input for conditional GANs.
+            tokenizer_feat (torch.Tensor | None): Tokenizer features for REPA or VF loss computation.
+            split (str): Data split identifier (train/val/test). Defaults to "train".
+            add_prefix (bool): Whether to add prefix to log keys. Defaults to False.
+
+        Returns:
+            tuple: When optimizer_idx=0 (generator):
+                - dict: Loss dictionary with keys 'gen_loss' and 'q_loss'
+                - dict: Log dictionary with loss components for logging
+            tuple: When optimizer_idx=1 (discriminator):
+                - dict: Loss dictionary with key 'disc_loss'
+                - dict: Log dictionary with loss components for logging
+        """
+        if split != "train":
+            # not use split
+            warnings.warn(
+                "split is not used, we will remove this argument", DeprecationWarning
+            )
+
+        # input shapes
+        if inputs.ndim == 5:
+            assert self.num_frames == inputs.shape[2], (
+                f"Number of frames does not match input "
+            )
+            inputs = rearrange(inputs, "n c t h w -> (n t) c h w")
+            reconstructions = rearrange(reconstructions, "n c t h w -> (n t) c h w")
+
+        assert (q_loss_total is None and q_loss_breakdown is None) or (
+            q_loss_total is not None and q_loss_breakdown is not None
+        ), "q_loss_total and q_loss_breakdown must be both None or both not None"
+
+        # * ==========================================================
+        # * GAN loss
+
+        # now the GAN part
+        if optimizer_idx == 0:
+            return self.gen_loss(
+                inputs=inputs,
+                reconstructions=reconstructions,
+                last_layer=last_layer,
+                global_step=global_step,
+                q_loss_breakdown=q_loss_breakdown,
+                split=split,
+                add_prefix=add_prefix,
+                cond=cond,
+                q_loss_total=q_loss_total,
+                outer_recon_loss=outer_recon_loss,
+                tokenizer_feat=tokenizer_feat,
+                enc_last_layer=enc_last_layer,
+            )
+
+        # * ==========================================================
+        # * discriminator losses
+
+        elif optimizer_idx == 1:
+            return self.disc_loss(
+                inputs=inputs,
+                reconstructions=reconstructions,
+                global_step=global_step,
+                cond=cond,
+                split=split,
+                add_prefix=add_prefix,
+            )
+
+        else:
+            raise ValueError(f"{optimizer_idx=} is invalid")

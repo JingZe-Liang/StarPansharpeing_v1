@@ -180,7 +180,7 @@ from rich.text import Text
 
 
 def print_colored_banner(text: str, font: str = "slant", color: str = "bold magenta"):
-    ascii_art = figlet_format(text, font=font)
+    ascii_art = figlet_format(text, font=font, width=200)
     console = Console()
     styled_text = Text(ascii_art, style=color)
-    console.print(styled_text, width=400)
+    console.print(styled_text, width=600)

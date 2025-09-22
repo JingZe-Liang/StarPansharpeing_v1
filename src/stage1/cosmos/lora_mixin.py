@@ -145,6 +145,10 @@ class TokenizerLoRAMixin(nn.Module):
         # Update methods to use base model
         self._update_methods_from_model(self.base_model)
 
+        # encoder and decoder
+        self.encoder = self.actived_model.encoder
+        self.decoder = self.actived_model.decoder
+
     def set_base_model(self, model):
         """Set the base tokenizer"""
         assert model is not None, "model should be a nn.Module"

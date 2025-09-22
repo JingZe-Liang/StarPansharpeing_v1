@@ -6,7 +6,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-import torch as th
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger

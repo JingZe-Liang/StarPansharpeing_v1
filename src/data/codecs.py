@@ -388,7 +388,8 @@ def wids_image_decode(
     norm_type: str = "clip_zero_div",
     quantile_clip=1.0,
     mannual_img_min_max=None,
-):
+    _disable_norm=True,
+) -> Dict[str, Any]:
     def img_process_fn(img, key: str, resize=resize):
         img = img.astype(np.float32)
 
@@ -414,17 +415,19 @@ def wids_image_decode(
             )
 
         # to Tensor
-        img = torch.as_tensor(img, dtype=torch.float32)
+        img = torch.as_tensor(img)
 
         # Normalize image
-        img = norm_img_(
-            img,
-            norm_type=norm_type,
-            per_channel=per_channel,
-            to_neg_1_1=to_neg_1_1,
-            q_clip=quantile_clip,
-            mannual_img_min_max=mannual_img_min_max,
-        )
+        if not _disable_norm:
+            img = img.type(torch.float32)  # ensure float32
+            img = norm_img_(
+                img,
+                norm_type=norm_type,
+                per_channel=per_channel,
+                to_neg_1_1=to_neg_1_1,
+                q_clip=quantile_clip,
+                mannual_img_min_max=mannual_img_min_max,
+            )
 
         # Resize
         if resize is not None:

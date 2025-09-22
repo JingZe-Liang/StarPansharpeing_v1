@@ -8,7 +8,7 @@ defaults:
   - dataset: pansharpening_data
   - tokenizer: cosmos_f8c16p1_lora
   - accelerator: base
-  - pansharp_model: nafdecoder # [nafnet, nafdecoder]
+  - pansharp_model: vitamin
   # self ===============
   - _self_
 
@@ -19,15 +19,15 @@ defaults:
 dataset:
   cfgs:
     used: QB
+    batch_size_train: 16
 
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
   beta: 0.999
   update_after_step: 1000
-  update_every: 1
+  update_every: 2
   allow_different_devices: true
-  lazy_init_ema: true
 
 train:
   tokenizer_name: cosmos_f8c16p4
@@ -50,7 +50,7 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 300_000
+  max_steps: 400_000
   save_every: 500
 
   resume_path:
@@ -63,21 +63,18 @@ train:
       _target_: torch.nn.MSELoss
     pixel_loss_kwargs:
       weighted_r: [1.0, 0.1] # l1ssim weights
-    factors: [0.0, 1.0] # latetnt and pixel weights
-    is_neg_1_1: true
+    factors: [0.1, 1.0] # latetnt and pixel weights
 
   pansharp_optim:
-    _target_: heavyball.ForeachAdamW
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-10
-    betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
+    weight_decay: 1.0e-3
+    eps: 1.0e-8
     foreach: true
     # _target_: src.utilities.optim.get_muon_optimizer
     # _partial_: true
-    # lr: 4.0e-4
+    # lr: 6.0e-4
     # weight_decay: 0.1
     # adamw_eps: 1.0e-8
     # ns_diff_abc: true
@@ -85,6 +82,7 @@ train:
     # momentum: 0.9
     # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     # adamw_wd: 0.
+    # betas: [0.8, 0.95]
 
   pansharp_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -94,7 +92,7 @@ train:
     num_cycles: 1
 
   log:
-    run_comment: f8c16p1_${dataset.cfgs.used}_nafdecoder
+    run_comment: f8c16p1_${dataset.cfgs.used}_vitamin
     log_with_time: True
     log_every: 10
 
@@ -102,5 +100,5 @@ train:
 
 val:
   val_duration: 1000
-  max_val_reduced_iters: -1
-  max_val_full_iters: -1
+  max_val_reduced_iters: -1 # val only `max_val_iters` batches
+  max_val_full_iters: 20

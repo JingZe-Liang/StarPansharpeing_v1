@@ -141,6 +141,9 @@ dmypy.json
 src/stage1/cosmos/pretrained/
 data
 data/
+data2
+data2/
+CLAUDE.md
 !src/**/data
 data_local/
 runs/

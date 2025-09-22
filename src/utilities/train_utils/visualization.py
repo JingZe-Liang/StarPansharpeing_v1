@@ -1,3 +1,4 @@
+import math
 from typing import cast
 
 import matplotlib.pyplot as plt
@@ -208,11 +209,47 @@ def _select_bands_by_low_correlation(img: torch.Tensor, n_bands: int = 3) -> lis
 
 
 @function_config_to_basic_types
-def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None):
+def get_rgb_image(
+    img: torch.Tensor,
+    rgb_channels: list[int] | str | None = None,
+    use_linstretch: bool = False,
+    linstretch_tol: list[float] | None = None,
+):
+    """
+    Convert hyperspectral image to RGB format with optional linear stretching.
+
+    Parameters
+    ----------
+    img : torch.Tensor
+        Input hyperspectral image tensor of shape (b, c, h, w).
+    rgb_channels : list[int] | str | None, optional
+        Indices of channels to use for RGB visualization. If None, uses default RGB channels.
+    use_linstretch : bool, optional
+        Whether to apply linear stretching to enhance contrast. Defaults to False.
+    linstretch_tol : list[float] | None, optional
+        Tolerance values for linear stretching [min_percentile, max_percentile].
+        If None, uses [0.01, 0.995]. Defaults to None.
+
+    Returns
+    -------
+    torch.Tensor
+        RGB image tensor of shape (b, 3, h, w).
+
+    Raises
+    ------
+    ValueError
+        If invalid RGB channels mapping is provided.
+    """
+    if (img.ndim == 4 and img.shape[1] == 1) or img.ndim == 3:
+        # [b, 1, h, w] or [b, h, w]
+        img = img.unsqueeze(1) if img.ndim == 3 else img
+        img = img.repeat(1, 3, 1, 1)
+        return img
+
     global RGB_CHANNELS_BY_BANDS
 
     c = img.shape[1]
-    if c not in RGB_CHANNELS_BY_BANDS:
+    if c not in RGB_CHANNELS_BY_BANDS and rgb_channels is None:
         raise ValueError(
             f"Invalid number of channels: {c}. Expected one of {list(RGB_CHANNELS_BY_BANDS.keys())}"
         )
@@ -242,6 +279,11 @@ def get_rgb_image(img: torch.Tensor, rgb_channels: list[int] | str | None = None
         raise ValueError(
             f"Invalid RGB channels mapping: {rgb_channels}. Expected list, tuple, 'mean', 'largest', 'std', 'entropy', or 'low_correlation'."
         )
+
+    # Apply linear stretching if requested
+    if use_linstretch:
+        rgb_img = linstretch_torch(rgb_img, tol=linstretch_tol)
+
     return rgb_img
 
 
@@ -255,6 +297,8 @@ def visualize_hyperspectral_image(
     nrows: int = 1,
     to_grid=False,
     to_uint8=True,
+    use_linstretch: bool = False,
+    linstretch_tol: list[float] | None = None,
 ) -> UInt[NDArray, "h w c"] | Float[NDArray, "h w c"] | list[Image.Image] | Image.Image:
     """Visualize a hyperspectral image by converting it to RGB format.
 
@@ -266,6 +310,9 @@ def visualize_hyperspectral_image(
         nrows: Number of rows when creating a grid of images. Defaults to 1.
         to_grid: Whether to arrange images in a grid. Defaults to False.
         to_uint8: Whether to convert output to uint8 format. Defaults to True.
+        use_linstretch: Whether to apply linear stretching to enhance contrast. Defaults to False.
+        linstretch_tol: Tolerance values for linear stretching [min_percentile, max_percentile].
+            If None, uses [0.01, 0.995]. Defaults to None.
 
     Returns:
         If to_pil is True, returns PIL Image or list of PIL Images.
@@ -281,7 +328,9 @@ def visualize_hyperspectral_image(
         )
         img = img.detach()
 
-    rgb_img = get_rgb_image(img, rgb_channels)  # (b, 3, h, w)
+    rgb_img = get_rgb_image(
+        img, rgb_channels, use_linstretch=use_linstretch, linstretch_tol=linstretch_tol
+    )  # (b, 3, h, w)
     if norm:
         rgb_img = (rgb_img - rgb_img.min()) / (rgb_img.max() - rgb_img.min())
         rgb_img = torch.clamp(rgb_img, 0, 1)
@@ -480,3 +529,380 @@ def visualize_data_range_bins(
     else:
         plt.show()
         plt.close()
+
+
+@beartype
+@function_config_to_basic_types
+def visualize_batch_comparisons_imgs(
+    *x: HyperImageType,
+    rgb_channels: list[int] | str | None = None,
+    norm: bool = False,
+    spacing: int = 5,
+    to_uint8: bool = True,
+    to_pil: bool = False,
+    to_grid: bool = True,
+    use_linstretch: bool = False,
+    linstretch_tol: list[float] | None = None,
+) -> UInt[NDArray, "h w c"] | Float[NDArray, "h w c"] | Image.Image | list[Image.Image]:
+    """Visualize multiple hyperspectral images by concatenating them horizontally.
+
+    This function takes multiple hyperspectral images with the same batch size,
+    converts them to RGB, and concatenates them horizontally along the width axis.
+
+    Parameters
+    ----------
+    *x : HyperImageType
+        Variable number of hyperspectral image tensors or arrays.
+        All images should have the same batch size.
+    rgb_channels : list[int] | str | None, optional
+        Indices of channels to use for RGB visualization.
+        If None, uses default RGB channels for each image.
+    norm : bool, optional
+        Whether to normalize each image to [0, 1] range. Defaults to False.
+    spacing : int, optional
+        Number of pixels to insert between images as spacing. Defaults to 5.
+    to_uint8 : bool, optional
+        Whether to convert output to uint8 format. Defaults to True.
+    to_pil : bool, optional
+        Whether to convert output to PIL Image format. Defaults to False.
+    to_grid : bool, optional
+        Whether to arrange batch images in a grid layout. If False, returns
+        individual images. Only applies when batch_size > 1. Defaults to True.
+    use_linstretch : bool, optional
+        Whether to apply linear stretching to enhance contrast. Defaults to False.
+    linstretch_tol : list[float] | None, optional
+        Tolerance values for linear stretching [min_percentile, max_percentile].
+        If None, uses [0.01, 0.995]. Defaults to None.
+
+    Returns
+    -------
+    UInt[NDArray, "h w c"] | Float[NDArray, "h w c"] | Image.Image | list[Image.Image]
+        Concatenated RGB image as numpy array, PIL Image, or list of images.
+
+    Raises
+    ------
+    ValueError
+        If input images have different batch sizes or heights.
+    """
+    if not x:
+        raise ValueError("At least one image must be provided")
+
+    # Convert all inputs to tensors and validate shapes
+    tensors = []
+    batch_size = None
+    height = None
+
+    for img in x:
+        if isinstance(img, np.ndarray):
+            assert img.ndim == 3, (
+                f"Invalid image shape: {img.shape}. Expected (h, w, c)."
+            )
+            img_tensor = (
+                torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+            )  # (1, c, h, w)
+        else:
+            assert img.ndim == 4, (
+                f"Invalid image shape: {img.shape}. Expected (b, c, h, w)."
+            )
+            img_tensor = img.detach()
+
+        # Validate consistent batch size and height
+        current_batch = img_tensor.shape[0]
+        current_height = img_tensor.shape[2]
+
+        if batch_size is None:
+            batch_size = current_batch
+            height = current_height
+        else:
+            if current_batch != batch_size:
+                raise ValueError(
+                    f"All images must have the same batch size. "
+                    f"Found {batch_size} and {current_batch}."
+                )
+            if current_height != height:
+                raise ValueError(
+                    f"All images must have the same height. "
+                    f"Found {height} and {current_height}."
+                )
+
+        tensors.append(img_tensor)
+
+    # Ensure batch_size and height are not None
+    assert batch_size is not None, "batch_size cannot be None after processing"
+    assert height is not None, "height cannot be None after processing"
+
+    # Convert each tensor to RGB
+    rgb_images = []
+    for tensor in tensors:
+        rgb_img = get_rgb_image(
+            tensor,
+            rgb_channels,
+            use_linstretch=use_linstretch,
+            linstretch_tol=linstretch_tol,
+        )  # (b, 3, h, w)
+        if norm:
+            rgb_img = (rgb_img - rgb_img.min()) / (rgb_img.max() - rgb_img.min())
+            rgb_img = torch.clamp(rgb_img, 0, 1)
+        rgb_images.append(rgb_img)
+
+    # Concatenate images horizontally for each batch item
+    concatenated_batch = []
+    for batch_idx in range(batch_size):
+        batch_images = [
+            rgb_img[batch_idx] for rgb_img in rgb_images
+        ]  # List of (3, h, w)
+
+        # Calculate total width
+        total_width = sum(img.shape[2] for img in batch_images) + spacing * (
+            len(batch_images) - 1
+        )
+
+        # Create concatenated image
+        concatenated_img = torch.ones(3, height, total_width)
+
+        current_width = 0
+        for i, img in enumerate(batch_images):
+            img_width = img.shape[2]
+            concatenated_img[:, :, current_width : current_width + img_width] = img
+            current_width += img_width
+
+            # Add spacing (except after last image)
+            if i < len(batch_images) - 1:
+                concatenated_img[:, :, current_width : current_width + spacing] = (
+                    0.5  # Gray spacing
+                )
+                current_width += spacing
+
+        concatenated_batch.append(concatenated_img)
+
+    # Stack batch items
+    final_tensor = torch.stack(concatenated_batch, dim=0)  # (b, 3, h, total_w)
+
+    # Convert to output format
+    if to_uint8:
+        final_tensor = final_tensor.mul(255).to(torch.uint8)
+
+    # Handle output based on batch size and parameters
+    if batch_size == 1:
+        # Single image case
+        result = final_tensor[0].permute(1, 2, 0).numpy()  # (h, total_w, 3)
+
+        if to_pil:
+            return Image.fromarray(result)
+        else:
+            return result
+    else:
+        # Batch case
+        if to_grid:
+            # Arrange images in a grid
+            grid_tensor = make_grid(
+                final_tensor,
+                nrow=int(np.ceil(np.sqrt(batch_size))),
+                padding=spacing,
+                normalize=False,
+            )
+
+            if to_pil:
+                grid_array = grid_tensor.permute(1, 2, 0).numpy()
+                return Image.fromarray(grid_array)
+            else:
+                return grid_tensor.permute(1, 2, 0).numpy()
+        else:
+            # Return individual images
+            if to_pil:
+                return [
+                    Image.fromarray(img.permute(1, 2, 0).numpy())
+                    for img in final_tensor
+                ]
+            else:
+                return final_tensor.permute(0, 2, 3, 1).numpy()  # (b, h, total_w, 3)
+
+
+def linstretch(images, tol=None):
+    """Linear stretching for image contrast enhancement using NumPy.
+
+    Parameters
+    ----------
+    images : np.ndarray
+        Input image or images of shape (h, w) or (h, w, c).
+    tol : list[float], optional
+        Tolerance values [min_percentile, max_percentile]. Defaults to [0.01, 0.995].
+
+    Returns
+    -------
+    np.ndarray
+        Linear stretched image(s).
+    """
+    if tol is None:
+        tol = [0.01, 0.995]
+    if images.ndim == 3:
+        h, w, channels = images.shape
+    else:
+        images = np.expand_dims(images, axis=-1)
+        h, w, channels = images.shape
+    N = h * w
+    for c in range(channels):
+        image = np.float32(np.round(images[:, :, c])).reshape(N, 1)
+        # Handle case where all values are the same
+        if image.max() == image.min():
+            # If all values are the same, return zeros
+            images[..., c] = np.zeros((h, w))
+            continue
+
+        hb, levelb = np.histogram(
+            image, bins=max(1, math.ceil(image.max() - image.min()))
+        )
+        chb = np.cumsum(hb, 0)
+        levelb_center = levelb[:-1] + (levelb[1] - levelb[0]) / 2
+
+        # Handle edge cases for threshold selection
+        lower_mask = chb > N * tol[0]
+        upper_mask = chb < N * tol[1]
+
+        if not np.any(lower_mask):
+            lbc_min = levelb_center[0]
+        else:
+            lbc_min = levelb_center[lower_mask][0]
+
+        if not np.any(upper_mask):
+            lbc_max = levelb_center[-1]
+        else:
+            lbc_max = levelb_center[upper_mask][-1]
+        image = np.clip(image, a_min=lbc_min, a_max=lbc_max)
+        # Handle division by zero
+        if lbc_max == lbc_min:
+            image = np.zeros_like(image)
+        else:
+            image = (image - lbc_min) / (lbc_max - lbc_min)
+        images[..., c] = np.reshape(image, (h, w))
+
+    images = np.squeeze(images)
+
+    return images
+
+
+def linstretch_torch(
+    images: torch.Tensor, tol: list[float] | None = None, bins: int = 256
+) -> torch.Tensor:
+    """Linear stretching for image contrast enhancement using PyTorch.
+
+    This function provides a PyTorch-native implementation of linear stretching,
+    which avoids CPU-GPU transfers and is more efficient for batch processing.
+
+    Parameters
+    ----------
+    images : torch.Tensor
+        Input image tensor of shape (b, c, h, w) or (c, h, w) or (h, w).
+    tol : list[float], optional
+        Tolerance values [min_percentile, max_percentile]. Defaults to [0.01, 0.995].
+    bins : int, optional
+        Number of histogram bins. Defaults to 256.
+
+    Returns
+    -------
+    torch.Tensor
+        Linear stretched image tensor with same shape as input.
+
+    Raises
+    ------
+    ValueError
+        If input tensor has invalid number of dimensions.
+    """
+    if tol is None:
+        tol = [0.01, 0.995]
+
+    # Handle different input shapes
+    original_shape = images.shape
+    if images.ndim == 2:
+        # (h, w) -> (1, 1, h, w)
+        images = images.unsqueeze(0).unsqueeze(0)
+    elif images.ndim == 3:
+        # (c, h, w) -> (1, c, h, w)
+        images = images.unsqueeze(0)
+    elif images.ndim != 4:
+        raise ValueError(
+            f"Input tensor must have 2, 3, or 4 dimensions, got {images.ndim}"
+        )
+
+    batch_size, channels, height, width = images.shape
+    total_pixels = height * width
+
+    # Flatten spatial dimensions for each channel and batch
+    flattened = images.view(batch_size, channels, -1)  # (b, c, h*w)
+
+    # Convert to float32 for processing
+    flattened = flattened.to(torch.float32)
+
+    # Calculate min and max values for each channel and batch
+    min_vals = flattened.amin(dim=-1, keepdim=True)  # (b, c, 1)
+    max_vals = flattened.amax(dim=-1, keepdim=True)  # (b, c, 1)
+
+    # Handle case where all values are the same
+    range_vals = max_vals - min_vals
+    range_vals = torch.where(range_vals == 0, torch.ones_like(range_vals), range_vals)
+
+    # Calculate histogram for each channel and batch
+    hist = torch.zeros(batch_size, channels, bins, device=images.device)
+
+    for b in range(batch_size):
+        for c in range(channels):
+            channel_data = flattened[b, c]  # (h*w,)
+            channel_min = min_vals[b, c].item()
+            channel_max = max_vals[b, c].item()
+
+            # Create histogram bins for this channel
+            hist_edges = torch.linspace(
+                channel_min, channel_max, bins + 1, device=images.device
+            )  # (bins+1,)
+
+            # Calculate histogram using torch.histc
+            hist[b, c] = torch.histc(
+                channel_data, bins=bins, min=channel_min, max=channel_max
+            )
+
+    # Calculate cumulative histogram
+    cumsum_hist = torch.cumsum(hist, dim=-1)  # (b, c, bins)
+
+    # Calculate bin centers for each channel
+    bin_centers = torch.zeros(batch_size, channels, bins, device=images.device)
+    for b in range(batch_size):
+        for c in range(channels):
+            channel_min = min_vals[b, c].item()
+            channel_max = max_vals[b, c].item()
+            hist_edges = torch.linspace(
+                channel_min, channel_max, bins + 1, device=images.device
+            )  # (bins+1,)
+            bin_centers[b, c] = (hist_edges[:-1] + hist_edges[1:]) / 2  # (bins,)
+
+    # Find percentile thresholds
+    lower_threshold_idx = torch.argmax(
+        (cumsum_hist > total_pixels * tol[0]).float(), dim=-1
+    )  # (b, c)
+    upper_threshold_idx = (
+        bins
+        - 1
+        - torch.argmax((cumsum_hist.flip(-1) < total_pixels * tol[1]).float(), dim=-1)
+    )  # (b, c)
+
+    # Get threshold values
+    lower_thresholds = torch.gather(
+        bin_centers, -1, lower_threshold_idx.unsqueeze(-1)
+    ).squeeze(-1)  # (b, c)
+    upper_thresholds = torch.gather(
+        bin_centers, -1, upper_threshold_idx.unsqueeze(-1)
+    ).squeeze(-1)  # (b, c)
+
+    # Reshape thresholds for broadcasting
+    lower_thresholds = lower_thresholds.unsqueeze(-1)  # (b, c, 1)
+    upper_thresholds = upper_thresholds.unsqueeze(-1)  # (b, c, 1)
+
+    # Apply linear stretching
+    stretched = torch.clamp(flattened, lower_thresholds, upper_thresholds)
+    stretched = (stretched - lower_thresholds) / (
+        upper_thresholds - lower_thresholds + 1e-8
+    )
+
+    # Reshape back to original dimensions
+    result = stretched.view(original_shape)
+
+    return result

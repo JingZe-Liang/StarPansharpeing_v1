@@ -30,23 +30,27 @@ amotized_model:
     raw_img_chans: null
     feature_layer_ids: null
 
-# Pixel model (NAFNet branch)
+# Pixel model (NAFDecoder branch)
 pixel_model:
-  _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNet
+  _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNet
   cfg:
-    _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNetConfig
+    _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNetConfig
     pan_channel: 1
     ms_channel: ${dataset.consts.bands}
-    width: 64
-    middle_blk_num: 1
-    enc_blk_nums: [1, 1, 1]
-    dec_blk_nums: [1, 1, 1]
-    condition_channel: 256 # comes from the de-tokenizer
-    patch_size: 1
-    use_residual: true
-    dw_expand: 1
+    width: 384
+    middle_blk_num: 2
+    dec_blk_nums: [2, 1, 1]
+    condition_channel: 256
+    residual_type: pan
+    dw_expand: 2
     ffn_expand: 2
-    condition_on_decoder: false
-    is_neg_1_1: true
+    patch_size: 1
+    block_drop: 0.0
     output_rescale: true
-    cond_type: latent
+    is_neg_1_1: true
+    up_ratio: 4
+    decoder_cross_attn_idx: [0, 1]
+    cross_attn_kwargs:
+      n_q_heads: 4
+      n_kv_heads: 4
+      cross_attn_patch_size: 2
