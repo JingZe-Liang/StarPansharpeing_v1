@@ -5,20 +5,16 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: pansharpening_data
+  - dataset: OSCD
   - tokenizer: cosmos_f8c16p1_lora
   - accelerator: base
-  - pansharp_model: nafnet # [nafnet, nafdecoder]
+  - segment_model: dinov3_adaptor
   # self ===============
   - _self_
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
-
-dataset:
-  cfgs:
-    used: QB
 
 ema:
   _target_: ema_pytorch.EMA
@@ -29,22 +25,38 @@ ema:
   allow_different_devices: true
   lazy_init_ema: true
 
+segment_loss:
+  _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
+  ignore_index: 255
+  ce_weight: [1.0, 10.0]
+  loss_weights: [0.5, 1.0, 0.5]
+
+metric:
+  _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
+  n_classes: ${dataset.consts.num_classes}
+  ignore_index: 255
+  include_bg: false
+
 train:
-  tokenizer_name: cosmos_f8c16p4
+  tokenizer_name: cosmos_f8c16p1
   is_lora_mixin: true
   tokenizer_not_req_grad: true
-  base_model_pretrained_path: "" # tokenizer base model loading
-  peft_pretrained_path: "" # tokenizer peft model loading
+  base_model_pretrained_path: # tokenizer base model loading
+  peft_pretrained_path: # tokenizer peft model loading
   seperate_enc_dec: false
   online_tokenize: true
   quantizer_type:
   prepare_tokenizer_in_accelerator: false # aviod return base model of lora wrapper
   to_neg_1_1: true
-  model_act_checkpoint: true
-  pansp_ratio: 4
-  val_use_patches: true
+  model_act_checkpoint: false
+  val_slide_window: true
+  grad_check: false
 
-  proj_dir: runs/stage2_pansharpening/
+  use_single_img_indexing: false
+  patches_per_image:
+  macro_batch_size: 32
+
+  proj_dir: runs/stage2_CD/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
 
@@ -57,17 +69,7 @@ train:
   resume_path:
   ema_load_path:
 
-  pansharpening_loss:
-    _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
-    pixel_loss_type: l1ssim
-    amotized_loss:
-      _target_: torch.nn.MSELoss
-    pixel_loss_kwargs:
-      weighted_r: [1.0, 0.1] # l1ssim weights
-    factors: [0.0, 1.0] # latetnt and pixel weights
-    is_neg_1_1: true
-
-  pansharp_optim:
+  segment_optim:
     _target_: heavyball.ForeachAdamW
     _partial_: true
     lr: 4.0e-4
@@ -76,18 +78,8 @@ train:
     betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
     caution: true
     foreach: true
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 4.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
 
-  pansharp_sched:
+  segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 100
@@ -95,12 +87,11 @@ train:
     num_cycles: 1
 
   log:
-    run_comment: f8c16p1_${dataset.cfgs.used}_nafdecoder
+    run_comment: OSCD_dinov3_adaptor
     log_with_time: True
     log_every: 10
   debug: true
 
 val:
-  val_duration: 1000
-  max_val_reduced_iters: -1
-  max_val_full_iters: -1
+  val_duration: 500
+  max_val_iters: -1

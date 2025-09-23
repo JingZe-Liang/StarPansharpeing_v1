@@ -1,3 +1,4 @@
+import random
 from collections.abc import Generator
 from functools import partial
 
@@ -7,18 +8,22 @@ import torch
 import webdataset as wds
 from kornia.augmentation import (
     AugmentationSequential,
+    ImageSequential,
+    RandomAffine,
     RandomHorizontalFlip,
     RandomResizedCrop,
     RandomVerticalFlip,
 )
+from kornia.constants import DataKey
 from timm.layers.helpers import to_2tuple
 
 from src.data.codecs import tiff_decode_io
 from src.data.utils import norm_img, not_dunder_keys, remove_extension, remove_meta_data
-from src.data.window_slider import create_windowed_dataloader
+from src.data.window_slider import WindowSlider, create_windowed_dataloader
+from src.stage2.change_detection.data.label_centric_patcher import (
+    label_centrical_patcher,
+)
 from src.utilities.logging import log
-
-from .label_centric_patcher import label_centrical_patcher
 
 OSCD_UNCHANGED_LABEL = 0
 OSCD_CHANGED_LABEL = 1
@@ -50,23 +55,49 @@ def gt_to_int(gt: np.ndarray, gt_changes: dict | None = None):
     return gt
 
 
-def random_img_crop(crop_size=(256, 256), prob: float = 0.5):
-    pipe = AugmentationSequential(
-        RandomResizedCrop(crop_size, scale=(0.8, 1.0), ratio=(0.75, 1.33), p=1.0),
-        RandomHorizontalFlip(p=prob),
-        RandomVerticalFlip(p=prob),
-        data_keys=["input", "input", "mask"],
-        same_on_batch=True,
+def random_img_crop(crop_size=(256, 256)):
+    crop = AugmentationSequential(
+        RandomResizedCrop(crop_size, scale=(0.2, 1.0), ratio=(0.75, 1.33), p=1.0),
+        data_keys=[DataKey.INPUT, DataKey.INPUT, DataKey.MASK],
+        same_on_batch=False,
         keepdim=True,
     )
 
-    def augment(sample: dict):
-        img1, img2, gt = sample["img1"], sample["img2"], sample["gt"]
-        img1, img2, gt = pipe(img1, img2, gt)
-        sample["img1"], sample["img2"], sample["gt"] = img1, img2, gt
+    def _crop_closure(sample: dict):
+        img1, img2, gt = (
+            sample["img1"],
+            sample["img2"],
+            sample["gt"],
+        )
+        img1, img2, gt = crop(img1, img2, gt)
+        sample["img1"], sample["img2"], sample["gt"] = img1, img2, gt.type(torch.long)
         return sample
 
-    return augment
+    return _crop_closure
+
+
+def as_tensor(x, pin_memory: bool = False):
+    return torch.as_tensor(x, device="cuda" if pin_memory else "cpu")
+
+
+def random_img_augment(prob: float = 0.5):
+    pipe = AugmentationSequential(
+        RandomHorizontalFlip(p=prob),
+        RandomVerticalFlip(p=prob),
+        RandomAffine(degrees=30, translate=(0.0, 0.1), scale=(0.8, 1.2), p=prob),
+        data_keys=["input", "input", "mask"],
+        same_on_batch=True,
+        keepdim=True,
+        random_apply=1,
+    )
+
+    def _augment_closure(sample: dict):
+        img1, img2, gt = sample["img1"], sample["img2"], sample["gt"]
+        img1, img2, gt = pipe(img1, img2, gt)
+        sample["img1"], sample["img2"], sample["gt"] = img1, img2, gt.type(torch.long)
+        return sample
+
+    return _augment_closure
 
 
 def shared_times_norm_img(
@@ -191,12 +222,12 @@ def create_oscd_loader(
     shuffle: bool = False,
     remove_meta: bool = False,
     norm_img_keys: list[str] = ["img1", "img2"],
-    crop_size: tuple[int, int] | int | None = 256,
-    random_flip_prob: float = 0.5,
+    crop_size: tuple[int, int] | int | None = None,
+    random_flip_prob: float = 0.0,
     shared_norm: bool = True,
     prefetch_factor: int | None = None,
     remapped_gt: dict | None = None,
-):
+):  # -> tuple[Any, Any | WebLoader]:
     """
     Create a dataloader for OSCD (Onera Satellite Change Detection) dataset.
 
@@ -280,6 +311,14 @@ def create_oscd_loader(
         )
     dataset = dataset.map_dict(gt=partial(gt_to_int, gt_changes=remapped_gt))
 
+    # 1.3 all to tensor
+    as_tensor_fn = partial(as_tensor, pin_memory=False)
+    dataset = dataset.map_dict(**{key: as_tensor_fn for key in ["img1", "img2", "gt"]})
+
+    # 1.4 crop images
+    if crop_size is not None:
+        dataset = dataset.map(random_img_crop(to_2tuple(crop_size)))
+
     # 2. create dataloader
     if shuffle and shuffle_size > 0:
         dataset = dataset.shuffle(shuffle_size)
@@ -291,15 +330,12 @@ def create_oscd_loader(
         pin_memory=pin_memory,
         drop_last=False,
         shuffle=False,
+        # multiprocessing_context="spawn" if pin_memory else None,
     )
 
-    # 2.1 crop images
-    augmentation = (
-        random_img_crop(to_2tuple(crop_size), prob=random_flip_prob)
-        if crop_size
-        else None
-    )
-    if augmentation is not None:
+    # 2.1 augment images
+    if random_flip_prob > 0:
+        augmentation = random_img_augment(random_flip_prob)
         dataloader = dataloader.map(augmentation)
 
     return dataset, dataloader
@@ -311,7 +347,7 @@ def create_window_slider_oscd_dataloader(
     window_size: int = 64,
     stride: int | None = None,
     overlap: float | None = None,
-    slide_keys: list[str] = ["img"],
+    slide_keys: list[str] = ["img1", "img2", "gt"],
     shuffle_size: int = 0,
     to_neg_1_1: bool = False,
     resample: bool = True,
@@ -392,31 +428,89 @@ def create_window_slider_oscd_dataloader(
 # * --- Test --- #
 
 
-def test_oscd_loader():
-    gt_remapped = {
-        "changed": 1,
-        "unchanged": 2,
-    }
-    path = "data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"
-    _, dl = create_oscd_loader(
-        [path],
-        batch_size=1,
+def test_oscd_wind_loader():
+    ds, dl = create_window_slider_oscd_dataloader(
+        wds_paths=["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"],
         num_workers=0,
+        window_size=128,
+        overlap=0.5,
         to_neg_1_1=False,
-        shuffle=False,
-        shared_norm=False,
-        remapped_gt=gt_remapped,
     )
     for batch in dl:
         img1 = batch["img1"]
         img2 = batch["img2"]
         label = batch["gt"]
-        for img1, img2, label in label_centrical_patcher(
-            img1, img2, label, micro_batch_size=4, patch_size=32, label_mode="seg"
-        ):
-            print(img1.shape, img2.shape, label.shape)
-        print("next batch")
+        print(img1.shape, img2.shape, label.shape, "label unique", torch.unique(label))
+
+
+def test_oscd_loader(mode=None):
+    from tqdm import tqdm
+
+    gt_remapped = {
+        "changed": 1,
+        "unchanged": 2,
+    }
+    path = "data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.npy.tar"
+    _, dl = create_oscd_loader(
+        [path],
+        batch_size=2,
+        num_workers=8,
+        to_neg_1_1=False,
+        shuffle=True,
+        shuffle_size=10,
+        shared_norm=True,
+        remapped_gt=None,
+        crop_size=256,
+        random_flip_prob=0.8,
+        pin_memory=True,
+        prefetch_factor=4,
+    )
+    for batch in tqdm(dl):
+        img1 = batch["img1"]
+        img2 = batch["img2"]
+        label = batch["gt"]
+        if mode == "label_centrical":
+            for img1, img2, label in label_centrical_patcher(
+                img1, img2, label, micro_batch_size=4, patch_size=128, label_mode="seg"
+            ):
+                print(
+                    img1.shape,
+                    img2.shape,
+                    label.shape,
+                    "label unique",
+                    torch.unique(label),
+                )
+            print("next batch")
+        elif mode == "window_slider":
+            window_slider = WindowSlider(["img1", "img2", "gt"], 128, 128)
+            model_out_lst = []
+            for batch_s in window_slider.slide_windows(batch):
+                img1, img2, label = batch_s["img1"], batch_s["img2"], batch_s["gt"]
+                print(
+                    img1.shape,
+                    img2.shape,
+                    label.shape,
+                    "label unique",
+                    torch.unique(label),
+                )
+                # dummy model
+                label += 1
+                win_info = batch_s["window_info"]
+                model_out_lst.append({"gt": label, "window_info": win_info})
+            # merge
+            gt_merged = window_slider.merge_windows(model_out_lst, merged_keys=["gt"])
+            print("merged gt shape", gt_merged, "unique", torch.unique(gt_merged))
+        else:
+            # do nothing
+            print(
+                img1.shape,
+                img2.shape,
+                label.shape,
+                "label unique",
+                torch.unique(label),
+            )
 
 
 if __name__ == "__main__":
     test_oscd_loader()
+    # test_oscd_wind_loader()

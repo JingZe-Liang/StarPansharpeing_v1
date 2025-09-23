@@ -1,6 +1,7 @@
 import inspect
 import re
 import sys
+import time
 from contextlib import ContextDecorator
 from functools import wraps
 from pathlib import Path
@@ -27,7 +28,7 @@ __re_config_logger = True
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
-logger.level("INFO", icon="⭐", color="<light-black>")
+logger.level("INFO", icon="ℹ️", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
@@ -116,8 +117,6 @@ def set_logger_file(
         "- <level>[{level}]</level> "
         "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
     )
-
-    import time
 
     t = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     if file is None:

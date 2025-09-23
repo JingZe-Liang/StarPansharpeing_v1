@@ -1,6 +1,5 @@
 import sys
 from dataclasses import dataclass, field
-from re import A
 from typing import Any
 
 import torch
@@ -11,13 +10,12 @@ from timm.layers import create_norm
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
 
+from src.utilities.train_utils.visualization import get_rgb_image
+
 sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
 
 from src.stage1.utilities.losses.repa import (
     load_repa_dino_v3_model as load_dino_v3_model,
-)
-from src.stage1.utilities.losses.repa.feature_pca import (
-    feature_pca_torch as hyper_to_rgb_pca,
 )
 from src.utilities.config_utils import (
     dataclass_from_dict,
@@ -25,7 +23,12 @@ from src.utilities.config_utils import (
 )
 from src.utilities.logging import log
 
-from .adapter import DINOv3_Adapter, DINOv3EncoderAdapter, UNetDecoder  # type: ignore
+from .adapter import (
+    DINOv3_Adapter,  # type: ignore
+    DINOv3EncoderAdapter,
+    UNetDecoder,
+    initialize,
+)
 from .vitamin_conv import MbConvLNBlock
 
 DINOv3_INTERACTION_INDEXES = {
@@ -82,9 +85,12 @@ class DinoUnetConfig:
     num_classes: int = 3  # 0: unknown, 1: changed, 2: unchanged
     deep_supervision: bool = False
     n_stages: int = 4
-    use_latent: bool = False
-    ensure_rgb_type: str = "pca"
+    use_latent: bool = True
+    ensure_rgb_type: Any = field(default_factory=lambda: [2, 1, 0])
     _debug: bool = False
+
+
+# * --- Blocks --- #
 
 
 def modulate(x, scale, shift):
@@ -246,8 +252,15 @@ class DinoUNet(nn.Module):
             deep_supervision=cfg.deep_supervision,
         )
 
-        # Init weights
-        self.apply(self.initialize)
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, module in self.named_modules():
+            if "backbone" not in name:  # skip dinov3 backbone
+                initialize(module)
+            else:
+                log("skip init backbone weights: {}".format(name), level="debug")
 
     def _create_dinov3_encoder(self, cfg: DinoUnetConfig):
         """Create DINOv3 encoder"""
@@ -259,7 +272,10 @@ class DinoUNet(nn.Module):
 
         # Load DINOv3 backbone
         dinov3_backbone = load_dino_v3_model(
-            cfg.dino.pretrained_path, model_name, pretrained_on=cfg.dino.pretrained_on
+            cfg.dino.pretrained_path,
+            model_name,
+            pretrained_on=cfg.dino.pretrained_on,
+            compile=False,
         )
 
         # Create DINOv3_Adapter using correct interaction layer indices
@@ -293,41 +309,20 @@ class DinoUNet(nn.Module):
         return encoder_adapter
 
     def _ensure_rgb_input(
-        self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "pca"
+        self,
+        x: Float[Tensor, "b c h w"],
+        larger_then_3_op: str | list[int] | None = None,
     ):
         C = x.size(1)
         if C == 1:
-            x = x.repeat(1, 3, 1, 1)
-        elif C != 3:
-            if C < 3:
-                x = x.repeat(1, 3 // C + (1 if 3 % C != 0 else 0), 1, 1)[:, :3, :, :]
-            elif larger_then_3_op == "first_3":
-                x = x[:, :3, :, :]
-            elif larger_then_3_op == "mean":
-                channels_per_group = C // 3
-                remainder = C % 3
-                groups = []
-                start = 0
-                for i in range(3):
-                    group_size = channels_per_group + (1 if i < remainder else 0)
-                    end = start + group_size
-                    groups.append(x[:, start:end].mean(dim=1, keepdim=True))
-                    start = end
-                x = torch.cat(groups, dim=1)
-            elif larger_then_3_op == "pca":
-                x = hyper_to_rgb_pca(x, pca_k=3)
-            elif isinstance(larger_then_3_op, (list, tuple)):
-                x = x[:, larger_then_3_op]
-            else:
-                raise ValueError(
-                    f"Unknown operation for C > 3 ({C=}): {larger_then_3_op}"
-                )
-        elif C == 3:
-            pass
+            x_rgb = x.repeat(1, 3, 1, 1)
         else:
-            raise ValueError(f"Unexpected number of channels: {C}")
-
-        return x
+            x_rgb = get_rgb_image(
+                x,
+                larger_then_3_op or self.cfg.ensure_rgb_type,
+                use_linstretch=True,
+            )
+        return x_rgb
 
     def forward(
         self,
@@ -355,38 +350,9 @@ class DinoUNet(nn.Module):
 
         return output
 
-    def initialize(self, module) -> None:
-        if isinstance(module, _ConvNd):
-            if module.weight.requires_grad:
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu"
-                )
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-        norm_cls = (
-            nn.LayerNorm,
-            nn.RMSNorm,
-            *[
-                create_norm.get_norm_layer(n)
-                for n in ["layernorm", "layernorm2d", "rmsnorm", "rmsnorm2d"]
-            ],
-        )
-        if isinstance(module, norm_cls):
-            if module.weight.requires_grad:
-                nn.init.ones_(module.weight)
-                if hasattr(module, "bias") and module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-        if isinstance(module, nn.Linear):
-            if module.weight.requires_grad:
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
     @classmethod
     @function_config_to_basic_types
-    def from_config(cls, overrides: dict | None = None):
+    def create_model(cls, overrides: dict | None = None):
         """
         Create DinoUNet instance from network configuration dictionary
         """
@@ -395,6 +361,16 @@ class DinoUNet(nn.Module):
         )
 
         return cls(cfg)
+
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        filtered_state_dict = {
+            k: v for k, v in state_dict.items() if "backbone." not in k
+        }
+        return filtered_state_dict
+
+    def load_state_dict(self, state_dict, strict=False):
+        return super().load_state_dict(state_dict, strict=strict)
 
 
 # * --- Test --- #
@@ -420,17 +396,19 @@ def test_model():
     from fvcore.nn import parameter_count_table
 
     # Test with latent enabled
-    model = DinoUNet.from_config({"adapter": {"latent_width": 16}, "use_latent": True})
+    model = DinoUNet.create_model(
+        {"adapter": {"latent_width": 16}, "use_latent": True}
+    ).cuda()
 
     print("=== Model Parameters ===")
     print(parameter_count_table(model))
 
     # Create test data for change detection
     # Two different temporal images
-    x1 = torch.randn(1, 3, 256, 256)  # First temporal image
-    x2 = torch.randn(1, 3, 256, 256)  # Second temporal image
-    cond1 = torch.randn(1, 16, 32, 32)  # Condition for first image
-    cond2 = torch.randn(1, 16, 32, 32)  # Condition for second image
+    x1 = torch.randn(1, 3, 256, 256).cuda()  # First temporal image
+    x2 = torch.randn(1, 3, 256, 256).cuda()  # Second temporal image
+    cond1 = torch.randn(1, 16, 32, 32).cuda()  # Condition for first image
+    cond2 = torch.randn(1, 16, 32, 32).cuda()  # Condition for second image
 
     print("\n=== Basic Forward Pass ===")
     output = model(x1, x2, cond1, cond2)
@@ -439,19 +417,29 @@ def test_model():
     # Validate output
     assert output.shape == (
         1,
-        7,
+        3,
         256,
         256,
-    ), f"Expected (1, 7, 256, 256), got {output.shape}"
+    ), f"Expected (1, 3, 256, 256), got {output.shape}"
     assert not torch.isnan(output).any(), "Output contains NaN values"
     assert torch.isfinite(output).all(), "Output contains infinite values"
+
+    # backward pass
+    print("\n=== Basic Backward Pass ===")
+    loss = output.mean()
+    loss.backward()
+    for name, param in model.named_parameters():
+        if param.requires_grad and param.grad is None:
+            print(f"Parameter {name} has no gradient!")
 
     print("✓ Basic forward pass test passed")
 
 
 def test_model_without_latent():
     """Test DinoUNet without latent conditions"""
-    model = DinoUNet.from_config({"adapter": {"latent_width": 16}, "use_latent": False})
+    model = DinoUNet.create_model(
+        {"adapter": {"latent_width": 16}, "use_latent": False, "num_classes": 3}
+    )
 
     # Create test data without conditions
     x1 = torch.randn(1, 3, 256, 256)
@@ -464,10 +452,10 @@ def test_model_without_latent():
     # Validate output
     assert output.shape == (
         1,
-        7,
+        3,
         256,
         256,
-    ), f"Expected (1, 7, 256, 256), got {output.shape}"
+    ), f"Expected (1, 3, 256, 256), got {output.shape}"
     assert not torch.isnan(output).any(), "Output contains NaN values"
     assert torch.isfinite(output).all(), "Output contains infinite values"
 
@@ -476,7 +464,9 @@ def test_model_without_latent():
 
 def test_model_with_multichannel_input():
     """Test DinoUNet with multi-channel hyperspectral input"""
-    model = DinoUNet.from_config({"adapter": {"latent_width": 16}, "use_latent": False})
+    model = DinoUNet.create_model(
+        {"adapter": {"latent_width": 16}, "use_latent": False}
+    )
 
     # Test with different input channel configurations
     test_cases = [
@@ -497,10 +487,10 @@ def test_model_with_multichannel_input():
         # Validate output
         assert output.shape == (
             1,
-            7,
+            3,
             h,
             w,
-        ), f"Expected (1, 7, {h}, {w}), got {output.shape}"
+        ), f"Expected (1, 3, {h}, {w}), got {output.shape}"
         assert not torch.isnan(output).any(), (
             f"Output contains NaN for {channels} channels"
         )
@@ -513,7 +503,9 @@ def test_model_with_multichannel_input():
 
 def test_model_different_input_sizes():
     """Test DinoUNet with different input sizes"""
-    model = DinoUNet.from_config({"adapter": {"latent_width": 16}, "use_latent": False})
+    model = DinoUNet.create_model(
+        {"adapter": {"latent_width": 16}, "use_latent": False}
+    )
 
     # Test with different input sizes
     test_sizes = [(128, 128), (256, 256), (512, 512)]
@@ -529,10 +521,10 @@ def test_model_different_input_sizes():
         # Validate output
         assert output.shape == (
             1,
-            7,
+            3,
             h,
             w,
-        ), f"Expected (1, 7, {h}, {w}), got {output.shape}"
+        ), f"Expected (1, 3, {h}, {w}), got {output.shape}"
         assert not torch.isnan(output).any(), f"Output contains NaN for size ({h}, {w})"
         assert torch.isfinite(output).all(), (
             f"Output contains infinite values for size ({h}, {w})"
@@ -545,7 +537,7 @@ def test_model_flops():
     """Test model FLOPs count"""
     from torch.utils.flop_counter import FlopCounterMode
 
-    model = DinoUNet.from_config({"adapter": {"latent_width": 16}, "use_latent": True})
+    model = DinoUNet.create_model({"adapter": {"latent_width": 16}, "use_latent": True})
 
     x1 = torch.randn(1, 3, 256, 256)
     x2 = torch.randn(1, 3, 256, 256)
@@ -578,4 +570,8 @@ def run_all_tests():
 
 
 if __name__ == "__main__":
-    run_all_tests()
+    """
+        python -m src.stage2.change_detection.model.dinov3_adapted
+    """
+    # run_all_tests()
+    test_model()

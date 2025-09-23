@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from beartype import beartype
+from beartype.door import is_bearable
 from jaxtyping import Float, Float32, Int, UInt
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from numpy.typing import NDArray
@@ -28,10 +29,7 @@ type GTMapType = (
     | UInt[Tensor, "b h w"]
 )
 type VisGTMapType = (
-    Image.Image
-    | list[Image.Image]
-    | Float32[NDArray, "b h w"]
-    | Float32[NDArray, "h w"]
+    Image.Image | list[Image.Image] | Float[NDArray, "b h w"] | Float[NDArray, "h w"]
 )
 
 

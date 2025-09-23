@@ -173,7 +173,7 @@ class DinoUNet(nn.Module):
         return encoder_adapter
 
     def _ensure_rgb_input(
-        self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "pca"
+        self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "mean"
     ):
         C = x.size(1)
         if C == 1:

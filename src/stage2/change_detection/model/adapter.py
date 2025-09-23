@@ -6,9 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 from timm.layers.create_conv2d import create_conv2d
+from timm.layers.create_norm import get_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer, get_norm_act_layer
 from timm.layers.squeeze_excite import SqueezeExcite
 from torch import Tensor
+from torch.nn.modules.conv import _ConvNd
 
 sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
 
@@ -20,6 +22,36 @@ from dinov3.models.vision_transformer import (  # type: ignore
 )
 
 from .vitamin_conv import MbConvSeqentialCond
+
+
+def initialize(module) -> None:
+    from timm.layers.weight_init import lecun_normal_
+
+    if isinstance(module, _ConvNd):
+        if module.weight.requires_grad:
+            lecun_normal_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    norm_cls = (
+        nn.LayerNorm,
+        nn.RMSNorm,
+        *[
+            get_norm_layer(n)
+            for n in ["layernorm", "layernorm2d", "rmsnorm", "rmsnorm2d"]
+        ],
+    )
+    if isinstance(module, norm_cls):
+        if module.weight.requires_grad:
+            nn.init.ones_(module.weight)
+            if hasattr(module, "bias") and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    if isinstance(module, nn.Linear):
+        if module.weight.requires_grad:
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
 
 class GatedChannelSelection(nn.Module):
@@ -468,9 +500,16 @@ class UNetDecoder(nn.Module):
             # we always build the deep supervision outputs so that we can always load parameters. If we don't do this
             # then a model trained with deep_supervision=True could not easily be loaded at inference time where
             # deep supervision is not needed. It's just a convenience thing
-            seg_layers.append(
-                encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True)
-            )
+
+            if self.deep_supervision or s == (
+                n_stages_encoder - 1
+            ):  # Zihan NOTE: add this
+                # add segmentation layer
+                seg_layers.append(
+                    encoder.conv_op(
+                        input_features_skip, num_classes, 1, 1, 0, bias=True
+                    )
+                )
 
         self.stages = nn.ModuleList(stages)
         self.transpconvs = nn.ModuleList(transpconvs)

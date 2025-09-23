@@ -1,4 +1,5 @@
 import math
+import os
 import sys
 import time
 from collections import namedtuple
@@ -29,9 +30,13 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from tqdm import trange
+from tqdm import tqdm, trange
 
+from src.data.window_slider import WindowSlider, model_predict_patcher
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage2.change_detection.data.label_centric_patcher import (
+    label_centrical_patcher,
+)
 from src.stage2.segmentation.data.data_split import (
     SingleImageHyperspectralSegmentationDataset,
 )
@@ -41,10 +46,14 @@ from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
 from src.utilities.logging import dict_round_to_list_str, log
+from src.utilities.logging.print import log_print
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
-from src.utilities.train_utils.visualization import visualize_segmentation_map
+from src.utilities.train_utils.visualization import (
+    get_rgb_image,
+    visualize_segmentation_map,
+)
 
 heavyball = lazy_loader.load("heavyball")
 
@@ -123,8 +132,6 @@ class HyperCDTrainer:
             self.no_ema = True
 
         # dataloader
-        used_dataset = self.dataset_cfg.cfgs.used
-        self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
             self.dataset_cfg.train
         )
@@ -150,8 +157,8 @@ class HyperCDTrainer:
 
         # loss
         self.segment_loss: HyperSegmentationLoss | Callable
-        if hasattr(self.train_cfg, "segment_loss"):
-            self.segment_loss = hydra.utils.instantiate(self.train_cfg.segment_loss)
+        if hasattr(self.cfg, "segment_loss"):
+            self.segment_loss = hydra.utils.instantiate(self.cfg.segment_loss)
         else:
             # default loss
             self.segment_loss = nn.CrossEntropyLoss()
@@ -170,7 +177,7 @@ class HyperCDTrainer:
             getattr(self.train_cfg, "segment_name", None)
             or self.model.__class__.__name__
         )
-        self.log_msg(f"use denoising model: {segment_name}")
+        self.log_msg(f"use change detection model: {segment_name}")
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
@@ -270,12 +277,12 @@ class HyperCDTrainer:
         if self.no_ema:
             return
 
-        self.ema_model = EMA(
-            self.model,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
+        buffer_name = [name for name, _ in self.model.named_buffers()]
+        self.log_msg(f"EMA ignore buffers: {buffer_name}")
+        self.ema_model: EMA = hydra.utils.instantiate(self.cfg.ema)(
+            model=self.model, ignore_names=set(buffer_name)
         ).to(self.device)
-        self.log_msg(f"create EMA model for denoising")
+        self.log_msg(f"create EMA model for change detection")
 
     def configure_logger(self):
         self.logger = logger
@@ -308,7 +315,7 @@ class HyperCDTrainer:
         )
         log_format_in_cmd = (
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
             "- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
@@ -321,10 +328,21 @@ class HyperCDTrainer:
                 backtrace=True,
                 colorize=False,
             )
+            # including trace and debug
+            self.logger.add(
+                log_file.parent / "debug.log",
+                format=log_format_in_file,
+                level="DEBUG",
+                filter=lambda record: record["level"].no <= 10,
+                rotation="10 MB",
+                enqueue=True,
+                backtrace=True,
+                colorize=False,
+            )
         self.logger.add(
-            sys.stdout,
+            sys.stderr,
             format=log_format_in_cmd,
-            level="DEBUG",
+            level=os.getenv("SHELL_LOG_LEVEL", "DEBUG"),
             backtrace=True,
             colorize=True,
         )
@@ -419,7 +437,18 @@ class HyperCDTrainer:
         else:
             raise NotImplementedError(f"Unknown log_type {log_type}")
 
-    def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
+    def log_msg(
+        self,
+        *msgs,
+        only_rank_zero=True,
+        level="INFO",
+        sep=",",
+        warn_once=False,
+        **kwargs,
+    ):
+        if warn_once:
+            level = "warning"
+
         assert level.lower() in [
             "info",
             "warning",
@@ -431,17 +460,20 @@ class HyperCDTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
-        log_fn = getattr(self.logger, level.lower())
+        _log_fn = partial(
+            log_print,
+            level=level.lower(),
+            warn_once=warn_once,
+            only_rank_zero=only_rank_zero,
+            stack_level=2,
+            **kwargs,
+        )
 
-        if only_rank_zero:
-            if self.accelerator.is_main_process:
-                log_fn(str_msg(*msgs), **kwargs)
-        else:  # not only rank zero
-            with self.accelerator.main_process_first():
-                msg_string = str_msg(*msgs)
-                # prefix rank info
-                msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
-                log_fn(msg_string, **kwargs)
+        def log_it(*msg, **kwargs):
+            msg_string = str_msg(*msg)
+            _log_fn(msg_string, **kwargs)
+
+        log_it(*msgs, **kwargs)
 
     def get_optimizer_lr_scheduler(
         self,
@@ -453,11 +485,15 @@ class HyperCDTrainer:
             not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
-            def _optimizer_creater(optimizer_cfg, params_getter):
+            def _optimizer_creater(optimizer_cfg):
                 if "get_muon_optimizer" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
-                    named_params = params_getter(with_name=True)
+                    named_params = {
+                        k: v
+                        for k, v in self.model.named_parameters()
+                        if v.requires_grad
+                    }
                     return hydra.utils.instantiate(optimizer_cfg)(
                         named_parameters=named_params
                     )
@@ -465,17 +501,10 @@ class HyperCDTrainer:
                     self.log_msg(
                         f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
                     )
-                    params = params_getter(with_name=False)
+                    params = [p for p in self.model.parameters() if p.requires_grad]
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
-            _get_model_params = (
-                lambda with_name: self.model.named_parameters()
-                if with_name
-                else self.model.parameters()
-            )
-            model_opt = _optimizer_creater(
-                self.train_cfg.model_optim, _get_model_params
-            )
+            model_opt = _optimizer_creater(self.train_cfg.segment_optim)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
@@ -636,36 +665,44 @@ class HyperCDTrainer:
         )
         return bands
 
-    def forward_tokenizer(
-        self, x: torch.Tensor, mode: str = "encode", no_grad=True
-    ) -> dict:
+    def to_tokenizer_range(self, x):
+        if not self.train_cfg.to_neg_1_1:
+            # to (-1, 1)
+            return x * 2 - 1
+        return x
+
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True):
         assert hasattr(self, "tokenizer"), "Tokenizer not found"
         grad_ctx = torch.no_grad() if no_grad else nullcontext()
 
         latent_q, recon = None, None
-        with grad_ctx and self.accelerator.autocast():
+        with self.accelerator.autocast():
             if self.sep_enc_dec:
                 to_enc = lambda x: self.tokenizer_encoder(x)[0]
                 to_dec = lambda x: self.tokenizer_decoder(x)
 
                 if mode == "encode":
-                    latent = to_enc(x)  # x is the image
+                    with grad_ctx:
+                        latent = to_enc(x)  # x is the image
                     if self.quantizer is not None:
                         latent_q, q_loss, q_info = self.quantizer(latent)
                     else:
                         latent_q = latent
                 elif mode == "decode":
-                    recon = to_dec(x)  # x is the latent
+                    with grad_ctx:
+                        recon = to_dec(x)  # x is the latent
             else:
                 to_enc = lambda img: self.tokenizer.encode(img)
                 to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
 
                 if mode == "encode":
-                    latent = to_enc(x)
+                    with grad_ctx:
+                        latent_q = to_enc(x)
                 else:
                     bands = self.get_training_sample_channels()
                     bs_chan = [x.shape[0], bands]
-                    recon = to_dec(x, bs_chan)
+                    with grad_ctx:
+                        recon = to_dec(x, bs_chan)
                     if isinstance(recon, tuple):
                         recon = recon[0]  # construction is the first output
 
@@ -724,14 +761,18 @@ class HyperCDTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def get_tokenizer_encoded(self, batch: dict) -> Tensor:
+    def get_tokenizer_encoded(
+        self, img: Tensor | None = None, batch: dict | None = None
+    ) -> Tensor:
         img_latent = None
+
         # offline latents
-        if "img_latent" in batch:
+        if batch is not None and "img_latent" in batch:
             img_latent = batch["img_latent"].to(self.device, self.dtype)
 
         # tokenizer online
         else:
+            assert img is not None, "img is None"
             assert self.online_tokenize and (
                 hasattr(self, "tokenizer")
                 or (
@@ -739,12 +780,17 @@ class HyperCDTrainer:
                     and hasattr(self, "tokenizer_decoder")
                 )
             ), "tokenizer not found for online tokenize"
-            img_latent = self.forward_tokenizer(batch["img"])["latent"]
+
+            img_latent = self.forward_tokenizer(img)["latent"]
 
         assert img_latent is not None, "img_latent is None"
         return img_latent
 
     def compute_segmentation_loss(self, out, gt):
+        # loss, ensure gt is long and ndim == 3
+        gt = gt.type(torch.long).squeeze_(1)
+        assert gt.ndim == 3, f"gt ndim should be 3, got {gt.ndim} of shape {gt.shape}"
+        gt = gt.contiguous()
         loss = self.segment_loss(out, gt)
 
         if isinstance(loss, torch.Tensor):
@@ -756,12 +802,12 @@ class HyperCDTrainer:
 
         return loss, log_losses
 
-    def forward_segment_model(self, img, gt, img_latent):
+    def forward_segment_model(self, img1, img2, img_latent1, img_latent2, gt):
         with self.accelerator.autocast():
             # img -> model (DINOv3 backbone -> multi-scale FPN -> adapter -> Unet decoder -> prediction
-            out = self.model(img, img_latent)
+            out = self.model(img1, img2, img_latent1, img_latent2)
             # loss
-            loss, log_losses = self.compute_segmentation_loss(out, gt)
+            loss, log_losses = self.compute_segmentation_loss(out, gt.to(out.device))
 
         return out, loss, log_losses
 
@@ -871,8 +917,8 @@ class HyperCDTrainer:
                 macro_outputs.append(macro_pred)
         return macro_outputs
 
-    def train_segment_step(self, img, gt, img_latent):
-        pred, loss, log_losses = self.forward_segment_model(img, gt, img_latent)
+    def train_segment_step(self, *inputs) -> CDModelStepOutput:
+        pred, loss, log_losses = self.forward_segment_model(*inputs)
         self._optimize_step(loss)
         return CDModelStepOutput(pred, loss, log_losses)
 
@@ -906,25 +952,38 @@ class HyperCDTrainer:
             raise NotImplementedError("Not implemented yet")
             return None
 
+    def _cast_to_dtype(self, x: torch.Tensor | list | dict[str, torch.Tensor]):
+        if isinstance(x, torch.Tensor):
+            return x.to(dtype=self.dtype, device=self.device)
+        elif isinstance(x, list):
+            return [self._cast_to_dtype(xx) for xx in x]
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                if "gt" != k:
+                    x[k] = self._cast_to_dtype(v)
+                else:
+                    x[k] = v.to(device=self.device)
+            return x
+
     def _get_metric_fn(self, clear=False):
         if not hasattr(self, "_seg_metrics") or clear:
             self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(
                 self.metric_cfg
             )
-
         # Return the segmentation metrics object
+        self._seg_metrics.to(self.device)
         return self._seg_metrics
 
     def update_metrics(self, pred, gt, clear=False, only_update=True):
         seg_metrics = self._get_metric_fn(clear)
         assert seg_metrics is not None
         # Update segmentation metrics with prediction and ground truth
-        seg_metrics._update_all_metrics(pred, gt)
+        seg_metrics.update(pred, gt)
 
     def get_metrics(self):
         seg_metrics = self._get_metric_fn()
         assert seg_metrics is not None
-        metrics = seg_metrics._compute_all_metrics()
+        metrics = seg_metrics.compute()
         return {
             k: v.item() if isinstance(v, torch.Tensor) else v
             for k, v in metrics.items()
@@ -933,6 +992,7 @@ class HyperCDTrainer:
     def train_step(self, batch: dict):
         # NOTE: in HyperSIGMA mode: the batch is a single image patches, to input
         # the segmented model, we use a 'macro-batch' to control the input-model-batch-size
+        batch = self._cast_to_dtype(batch)
 
         # Check if we should use HyperSIGMA-style indexing
         use_batch_accum = hasattr(batch, "sample_index") or "sample_index" in batch
@@ -947,11 +1007,12 @@ class HyperCDTrainer:
                 )
         else:
             # Standard mode: process immediately
+            img_latent1 = self.get_tokenizer_encoded(batch["img1"])
+            img_latent2 = self.get_tokenizer_encoded(batch["img2"])
             with self.accelerator.accumulate(self.model):
-                img_latent = self.get_tokenizer_encoded(batch)
                 # train segmentation model
                 train_out = self.train_segment_step(
-                    batch["img"], batch["gt"], img_latent
+                    batch["img1"], batch["img2"], img_latent1, img_latent2, batch["gt"]
                 )
 
         # update training state
@@ -975,15 +1036,44 @@ class HyperCDTrainer:
         strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
         return " - ".join(strings)
 
-    def finite_train_loader(self):
-        """Finite train loader that handles complete images properly."""
-        for batch in self.train_dataloader:
-            yield batch
+    def _postprocess_batch_label_centric(self, batch: dict):
+        img1, img2, label = batch["img1"], batch["img2"], batch["gt"]
+        for img1_i, img2_i, label_i in label_centrical_patcher(
+            img1,
+            img2,
+            label,
+            micro_batch_size=self.dataset_cfg.micro_batch_size,
+            patch_size=self.dataset_cfg.patch_size // 2,
+            unchanged_label=self.dataset_cfg.consts.unchanged_label,
+            changed_label=self.dataset_cfg.consts.changed_label,
+            changed_ratio=0.8,
+            label_mode="seg",
+        ):
+            ret = {"img1": img1_i, "img2": img2_i, "gt": label_i}
+            yield ret
+
+    def _post_process_batch_slide_window(self, batch: dict):
+        slider = WindowSlider(
+            ["img1", "img2", "gt"],
+            window_size=self.dataset_cfg.patch_size,
+            stride=self.dataset_cfg.patch_size // 2,
+        )
+        m_bs = self.dataset_cfg.micro_batch_size
+        for batch in slider.slide_windows(batch):
+            n_bs = batch["img1"].shape[0]
+            ...
 
     def infinity_train_loader(self):
         while True:
             for batch in self.train_dataloader:
-                yield batch
+                if self.dataset_cfg.data_type == "label_centrical":
+                    for micro_batch in self._postprocess_batch_label_centric(batch):
+                        yield micro_batch
+                elif self.dataset_cfg.data_type == "slide_window":
+                    for micro_batch in self._post_process_batch_slide_window(batch):
+                        yield micro_batch
+                else:
+                    yield batch
 
     def train_loop(self):
         _stop_train_and_save = False
@@ -1013,37 +1103,50 @@ class HyperCDTrainer:
                 )
                 break
 
-    def _finite_val_loader(self):
-        if self.val_dataloader is None:
-            raise ValueError("No validation dataloader found")
-
-        for batch in self.val_dataloader:
-            yield batch
-
     def get_val_loader_iter(self):
         if self.val_cfg.max_val_iters > 0:
             # create a new iterator for the validation loader
             # state in the loader generator
             if not hasattr(self, "_val_loader_iter"):
-                self._val_loader_iter = iter(self._finite_val_loader())
+                self._val_loader_iter = iter(self.val_dataloader)
 
-            iterable_ = trange(
-                self.val_cfg.max_val_iters,
-                desc="validating ...",
-                leave=False,
-                disable=not self.accelerator.is_main_process,
-            )
+            def _tbar_loader():
+                tbar = trange(
+                    self.val_cfg.max_val_iters,
+                    desc="validating ...",
+                    leave=False,
+                    disable=not self.accelerator.is_main_process,
+                )
+                for _ in tbar:
+                    try:
+                        yield next(self._val_loader_iter)
+                    except StopIteration:
+                        # re-create the iterator
+                        self._val_loader_iter = iter(self.val_dataloader)
+                        yield next(self._val_loader_iter)
+
             self.log_msg(
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
         else:
-            iterable_ = self._finite_val_loader()
+            iterable_ = iter(self.val_dataloader)
+
+            def _tbar_loader():
+                for batch in tqdm(
+                    iterable_,
+                    desc="validating ...",
+                    leave=False,
+                    disable=not self.accelerator.is_main_process,
+                ):
+                    yield batch
+
             self.log_msg(
                 f"[Val]: start validating with the whole val set", only_rank_zero=False
             )
 
-        return iterable_
+        tbar = _tbar_loader()
+        return tbar
 
     @torch.no_grad()
     def val_step(self, batch: dict):
@@ -1057,11 +1160,30 @@ class HyperCDTrainer:
                 self._reconstruct_hypersigma_image(macro_outputs, mode="val")
             ).values()
         else:
-            img_latent = self.get_tokenizer_encoded(batch)
-            # forward the segmentation network
-            pred_seg, *_ = self.forward_segment_model(
-                batch["img"], batch["gt"], img_latent
-            )
+
+            def _val_model_closure(batch):
+                img_latent1 = self.get_tokenizer_encoded(batch["img1"])
+                img_latent2 = self.get_tokenizer_encoded(batch["img2"])
+                # forward the segmentation network
+                pred_seg, *_ = self.forward_segment_model(
+                    batch["img1"], batch["img2"], img_latent1, img_latent2, batch["gt"]
+                )
+                return {"pred_logits": pred_seg}
+
+            # slide windows
+            if self.train_cfg.val_slide_window:
+                model_outputs = model_predict_patcher(
+                    _val_model_closure,
+                    batch,
+                    patch_keys=["img1", "img2", "gt"],
+                    patch_size=128,
+                    stride=64,
+                    merge_keys=["pred_logits"],
+                )
+                pred_seg = model_outputs["pred_logits"].argmax(1)
+            else:
+                pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+
         return pred_seg
 
     def val_loop(self):
@@ -1075,9 +1197,12 @@ class HyperCDTrainer:
             else:
                 batch = batch_or_idx
 
+            batch = self._cast_to_dtype(batch)
             batch = cast(dict[str, torch.Tensor], batch)
+
             gt = batch.get("gt", batch.get("gt_full", None))
             assert gt is not None, "gt or gt_full not found in the val batch"
+
             pred_seg = self.val_step(batch)
             # metrics - use segmentation predictions and ground truth
             self.update_metrics(pred_seg, gt)
@@ -1095,6 +1220,8 @@ class HyperCDTrainer:
 
             # visualize the last val batch
             self.visualize_segmentation(
+                batch["img1"],
+                batch["img2"],
                 pred_seg,  # prediction
                 gt,  # gt
                 add_step=True,
@@ -1142,13 +1269,15 @@ class HyperCDTrainer:
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
-        if self.train_cfg.is_neg_1_1:
+        if self.train_cfg.to_neg_1_1:
             return ((x + 1) / 2).clamp(0, 1).float()
         else:
             return x
 
     def visualize_segmentation(
         self,
+        img1,
+        img2,
         pred_map: torch.Tensor,
         gt_map: torch.Tensor,
         img_name: str = "val/segmentation",
@@ -1179,67 +1308,121 @@ class HyperCDTrainer:
             gt_map = gt_map.squeeze(1)  # (B, H, W)
 
         # Only visualize the first few samples
+        assert pred_map.ndim == 3 and gt_map.ndim == 3, (
+            f"{pred_map.shape=}, {gt_map.shape=}"
+        )
+        assert pred_map.shape[-2:] == gt_map.shape[-2:], (
+            f"{pred_map.shape=}, {gt_map.shape=}"
+        )
+        assert img1.shape == img2.shape, f"{img1.shape=}, {img2.shape=}"
+
         pred_map = pred_map[:_only_n]
         gt_map = gt_map[:_only_n]
+        img1 = img1[:_only_n]
+        img2 = img2[:_only_n]
 
-        # Visualize each sample and concatenate
-        vis_images = []
-        for i in range(pred_map.shape[0]):
-            # Visualize predicted segmentation map
-            pred_vis = visualize_segmentation_map(
-                pred_map[i],
-                n_class=n_class,
-                use_coco_colors=use_coco_colors,
-                to_pil=False,
-                bg_black=True,
+        # Visualize input images
+        img1_rgb = get_rgb_image(
+            self.to_rgb(img1), rgb_channels=[3, 2, 1], use_linstretch=True
+        )
+        img2_rgb = get_rgb_image(
+            self.to_rgb(img2), rgb_channels=[3, 2, 1], use_linstretch=True
+        )
+
+        # Convert RGB images to numpy arrays and ensure correct format
+        def convert_to_hwc_format(img_tensor):
+            """Convert tensor to (H, W, C) numpy array format."""
+            if isinstance(img_tensor, Image.Image):
+                return np.array(img_tensor)
+
+            # Handle tensor format
+            if torch.is_tensor(img_tensor):
+                img_tensor = img_tensor.detach().cpu()
+                if img_tensor.dim() == 4:  # (B, C, H, W) -> (H, W, C)
+                    img_tensor = img_tensor[0]  # Take first sample for now
+                if (
+                    img_tensor.dim() == 3 and img_tensor.shape[0] == 3
+                ):  # (C, H, W) -> (H, W, C)
+                    img_tensor = img_tensor.permute(1, 2, 0)
+            elif (
+                isinstance(img_tensor, np.ndarray) and img_tensor.shape[0] == 3
+            ):  # (C, H, W) -> (H, W, C)
+                img_tensor = np.transpose(img_tensor, (1, 2, 0))
+
+            return img_tensor.numpy() if torch.is_tensor(img_tensor) else img_tensor
+
+        # Convert batch images to correct format
+        img1_rgb = convert_to_hwc_format(img1_rgb)
+        img2_rgb = convert_to_hwc_format(img2_rgb)
+
+        # Visualize segmentation maps for entire batch
+        pred_vis = visualize_segmentation_map(
+            pred_map,
+            n_class=n_class,
+            use_coco_colors=use_coco_colors,
+            to_pil=False,
+            bg_black=True,
+        )
+
+        gt_vis = visualize_segmentation_map(
+            gt_map,
+            n_class=n_class,
+            use_coco_colors=use_coco_colors,
+            to_pil=False,
+            bg_black=True,
+        )
+
+        # Ensure segmentation maps are numpy arrays
+        if isinstance(pred_vis, Image.Image):
+            pred_vis = np.array(pred_vis)
+        elif isinstance(pred_vis, list):
+            pred_vis = np.stack([np.array(p) for p in pred_vis], axis=0)
+
+        if isinstance(gt_vis, Image.Image):
+            gt_vis = np.array(gt_vis)
+        elif isinstance(gt_vis, list):
+            gt_vis = np.stack([np.array(g) for g in gt_vis], axis=0)
+
+        # Resize input images to match segmentation map size
+        h, w = pred_vis.shape[1:3] if pred_vis.ndim == 4 else pred_vis.shape[:2]
+
+        if img1_rgb.shape[:2] != (h, w):
+            img1_rgb = np.array(
+                Image.fromarray(img1_rgb).resize((w, h), Image.Resampling.BILINEAR)
+            )
+        if img2_rgb.shape[:2] != (h, w):
+            img2_rgb = np.array(
+                Image.fromarray(img2_rgb).resize((w, h), Image.Resampling.BILINEAR)
             )
 
-            # Visualize ground truth segmentation map
-            gt_vis = visualize_segmentation_map(
-                gt_map[i],
-                n_class=n_class,
-                use_coco_colors=use_coco_colors,
-                to_pil=False,
-                bg_black=True,
-            )
+        # Handle batch dimension and concatenate images
+        if pred_vis.ndim == 4:  # Batch processing
+            # Stack all images horizontally for each sample
+            batch_size = pred_vis.shape[0]
+            vis_images = []
 
-            # Ensure both are numpy arrays
-            if isinstance(pred_vis, Image.Image):
-                pred_vis = np.array(pred_vis)
-            elif isinstance(pred_vis, list):
-                pred_vis = (
-                    np.array(pred_vis[0])
-                    if len(pred_vis) > 0
-                    else np.zeros((100, 100, 3))
+            for i in range(batch_size):
+                # Get individual samples
+                img1_sample = img1_rgb[i] if img1_rgb.ndim == 4 else img1_rgb
+                img2_sample = img2_rgb[i] if img2_rgb.ndim == 4 else img2_rgb
+                pred_sample = pred_vis[i]
+                gt_sample = gt_vis[i]
+
+                # Concatenate horizontally: [img1, img2, pred_map, gt_map]
+                combined_vis = np.concatenate(
+                    [img1_sample, img2_sample, pred_sample, gt_sample], axis=1
                 )
+                vis_images.append(combined_vis)
+        else:  # Single sample
+            # Concatenate horizontally: [img1, img2, pred_map, gt_map]
+            vis_images = [
+                np.concatenate([img1_rgb, img2_rgb, pred_vis, gt_vis], axis=1)
+            ]
 
-            if isinstance(gt_vis, Image.Image):
-                gt_vis = np.array(gt_vis)
-            elif isinstance(gt_vis, list):
-                gt_vis = (
-                    np.array(gt_vis[0]) if len(gt_vis) > 0 else np.zeros((100, 100, 3))
-                )
-
-            # Concatenate the two visualizations side by side
-            combined_vis = np.concatenate([pred_vis, gt_vis], axis=1)
-            vis_images.append(combined_vis)
-
-        # Stack all visualizations
+        # Stack all visualizations vertically by batch
         if len(vis_images) > 1:
-            # Create a grid of images
-            rows = int(np.ceil(len(vis_images) / 2))
-            cols = 2 if len(vis_images) > 1 else 1
-
-            # Pad with empty images if necessary
-            while len(vis_images) < rows * cols:
-                vis_images.append(np.zeros_like(vis_images[0]))
-
-            # Create grid
-            grid_images = []
-            for row in range(rows):
-                row_images = vis_images[row * cols : (row + 1) * cols]
-                grid_images.append(np.concatenate(row_images, axis=1))
-            img = np.concatenate(grid_images, axis=0)
+            # Concatenate all samples vertically along the height axis
+            img = np.concatenate(vis_images, axis=0)
         else:
             img = vis_images[0]
 
@@ -1272,9 +1455,9 @@ class HyperCDTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_segmentation"  # vq, bsq, fsq, kl
+_key = "tokenizer_dinov3_adaptor"  # vq, bsq, fsq, kl
 _configs_dict = {
-    "cosmos_f8c16p4_segmentation": "cosmos_f8c16p4_segmentation",
+    "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
 }
 
 
@@ -1288,7 +1471,7 @@ if __name__ == "__main__":
     }
     chosen_cfg, cli_args = argsparse_cli_args(_configs_dict, cli_default_dict)
     if is_rank_zero := PartialState().is_main_process:
-        print_colored_banner("Segmentation")
+        print_colored_banner("Change Detection")
     log(
         "<green>\n"
         + "=" * 60
@@ -1303,7 +1486,7 @@ if __name__ == "__main__":
 
     # Main function
     @hydra.main(
-        config_path="configs/segmentation",
+        config_path="../configs/change_detection",
         config_name=chosen_cfg,
         version_base=None,
     )

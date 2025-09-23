@@ -1,0 +1,14 @@
+_target_: src.stage2.change_detection.model.dinov3_adapted.DinoUNet.create_model
+overrides:
+  dino:
+    model_name: dinov3_vitl16
+    pretrained_on: satellite
+    features_per_stage: [256, 256, 256, 256]
+  adapter:
+    latent_width: ${tokenizer.tokenizer.model.latent_channels} # tokenizer latent dim
+
+  input_channels: 3 # RGB for dino model
+  num_classes: ${dataset.consts.num_classes}
+  use_latent: true
+  n_stages: 4
+  ensure_rgb_type: mean

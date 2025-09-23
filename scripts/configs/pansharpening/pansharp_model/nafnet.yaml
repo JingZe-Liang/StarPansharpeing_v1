@@ -3,7 +3,7 @@ _partial_: true # for decode_fn
 
 # Model configuration
 amotize_type: "latent_to_pixel_fusion"
-backward_decoder: true
+backward_decoder: false
 learn_decoder: false
 
 # Amotized model (Transformer branch)
@@ -43,10 +43,9 @@ pixel_model:
     dec_blk_nums: [1, 1, 1]
     condition_channel: 256 # comes from the de-tokenizer
     patch_size: 1
-    use_residual: true
     dw_expand: 1
     ffn_expand: 2
-    condition_on_decoder: false
+    condition_on_decoder: true
+    residual_type: ms
     is_neg_1_1: true
     output_rescale: true
-    cond_type: latent

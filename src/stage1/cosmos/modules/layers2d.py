@@ -36,7 +36,9 @@ import torch.nn.functional as F
 from timm.layers.layer_scale import LayerScale2d
 from typing_extensions import deprecated
 
-from src.stage1.cosmos.modules.blocks import (
+from src.utilities.logging import log_print
+
+from .blocks import (
     ConvNeXtBlock,
     DiCoBlock,
     DiffBandsInputConvIn,
@@ -47,13 +49,11 @@ from src.stage1.cosmos.modules.blocks import (
     ResnetBlockMoE2D,
     ResnetBlockSlotsInjected,
     TimestepEmbedder,
-    build_downsample_block,
-    build_upsample_block,
     make_attn,
     nonlinearity,
 )
-from src.stage1.cosmos.modules.patching import Patcher, UnPatcher
-from src.utilities.logging import log_print
+from .patching import Patcher, UnPatcher
+from .resample import build_downsample_block, build_upsample_block
 
 
 @deprecated(

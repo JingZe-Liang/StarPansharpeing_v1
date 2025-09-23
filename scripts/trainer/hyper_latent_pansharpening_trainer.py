@@ -1,8 +1,8 @@
-import dataclasses
 import os
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Callable, Generator, Iterable, Literal, TypedDict, cast
@@ -19,6 +19,7 @@ from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler  # ty: ignore
+from kornia.contrib import combine_tensor_patches, extract_tensor_patches
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
@@ -51,13 +52,13 @@ class BatchInput(TypedDict):
     hrms_latent: Tensor
 
 
-@dataclasses.dataclass
+@dataclass
 class PansharpeningOutput:
-    pred_latent: Tensor
     pred_sr: Tensor
-    pred_sr_from_latent: Tensor | None
-    sr_loss: Tensor
-    sr_log_losses: dict[str, Tensor]
+    pred_sr_from_latent: Tensor = None
+    pred_latent: Tensor = None
+    sr_loss: Tensor = None
+    sr_log_losses: dict[str, Tensor] = None
 
 
 class PansharpeningTrainer:
@@ -759,7 +760,11 @@ class PansharpeningTrainer:
             sr_loss = cast(torch.Tensor, sr_loss)
 
         return PansharpeningOutput(
-            pred_latent, pred_sr, pred_sr_from_latent, sr_loss, sr_log_losses
+            pred_latent=pred_latent,
+            pred_sr=pred_sr,
+            pred_sr_from_latent=pred_sr_from_latent,
+            sr_loss=sr_loss,
+            sr_log_losses=sr_log_losses,
         )
 
     def train_pansp_step(
@@ -1013,6 +1018,76 @@ class PansharpeningTrainer:
         return lrms
 
     @torch.no_grad()
+    def val_step_patches_legacy(self, batch):
+        from src.stage2.utilities.patches.patcher_legacy import PatchMergeModule
+
+        batch = self._cast_to_dtype(batch)
+        lrms, pan, hrms = (
+            batch["lrms"],
+            batch["pan"],
+            batch.get("hrms", None),
+        )
+        assert self.online_tokenize, "only support online tokenize for val full"
+
+        def _model_step_fn(lrms, pan):
+            lrms, pan = map(self._to_tokenizer_range, (lrms, pan))
+            pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
+            lrms_latent = self.forward_tokenizer(lrms)["latent"]
+            pan_latent = self.forward_tokenizer(pan_)["latent"]
+
+            pred_sr = self.forward_pansp_model(
+                lrms, pan, None, lrms_latent, pan_latent, None, ema=False
+            ).pred_sr
+            return pred_sr
+
+        patcher = PatchMergeModule(
+            patch_merge_step=_model_step_fn,
+            crop_batch_size=16,
+            patch_size_list=[64, 64],
+            scale=1,
+            device=self.device,
+        )
+        # batch size should be 1
+        pred_sr = []
+        for i in range(lrms.shape[0]):
+            lrms_i = lrms[i : i + 1]
+            pan_i = pan[i : i + 1]
+            pred_sr_i = patcher.forward_chop(lrms_i, pan_i)[0]
+            pred_sr.append(pred_sr_i)
+        pred_sr = torch.cat(pred_sr, dim=0)
+        return PansharpeningOutput(pred_sr=pred_sr)
+
+    @torch.no_grad()
+    def val_step_patches(self, batch: BatchInput):
+        batch = self._cast_to_dtype(batch)
+        lrms, pan, hrms = (
+            batch["lrms"],
+            batch["pan"],
+            batch.get("hrms", None),
+        )
+        assert self.online_tokenize, "only support online tokenize for val full"
+        patcher_kwargs = dict(window_size=64, stride=32)
+        lrms_patches, pan_patches = map(
+            partial(extract_tensor_patches, **patcher_kwargs), [lrms, pan]
+        )
+        assert lrms_patches.shape[1] == pan_patches.shape[1]
+        n = lrms_patches.shape[1]
+        sr_s = []
+        for patch_idx in range(n):
+            lrms_i, pan_i = lrms_patches[:, patch_idx], pan_patches[:, patch_idx]
+            # now normal val step
+            batch_in = {"lrms": lrms_i, "pan": pan_i}
+            val_out = self.val_step(batch_in)
+            pred_sr_i = val_out.pred_sr
+            sr_s.append(pred_sr_i)
+        pred_sr = torch.stack(sr_s, dim=1)
+        # combine patches
+        pred_sr = combine_tensor_patches(
+            pred_sr, original_size=tuple(lrms.shape[-2:]), **patcher_kwargs
+        )
+        return PansharpeningOutput(pred_sr)
+
+    @torch.no_grad()
     def val_step(self, batch: BatchInput):
         batch = self._cast_to_dtype(batch)
         lrms, pan, hrms = (
@@ -1104,7 +1179,12 @@ class PansharpeningTrainer:
         for batch in tbar:
             batch = cast(BatchInput, batch)
             gt = batch["hrms"].to(self.device)
-            val_out = self.val_step(batch)
+            if self.train_cfg.val_use_patches:
+                self.log_msg("use patches for val step", level="DEBUG")
+                # val_out = self.val_step_patches(batch)
+                val_out = self.val_step_patches_legacy(batch)
+            else:
+                val_out = self.val_step(batch)
 
             # l1 loss
             pred_sr = val_out.pred_sr
@@ -1149,7 +1229,10 @@ class PansharpeningTrainer:
         self._val_full_loader_iter: Iterable
         for batch in tbar:
             batch = cast(BatchInput, batch)
-            val_out = self.val_step(batch)
+            if self.train_cfg.val_use_patches:
+                val_out = self.val_step_patches(batch)
+            else:
+                val_out = self.val_step(batch)
 
             acc_fn_inputs = map(
                 self.to_rgb,

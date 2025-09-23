@@ -9,6 +9,7 @@ from torch.nn import Module
 
 from src.utilities.config_utils import dataclass_from_dict
 from src.utilities.logging import log
+from src.stage2.utilities.patches import ModelForwardPatcher
 
 
 def amotizing_call_model(

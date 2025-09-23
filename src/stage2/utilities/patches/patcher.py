@@ -11,7 +11,7 @@ from src.utilities.logging import log
 class ModelForwardPatcher(nn.Module):
     def __init__(
         self,
-        model: nn.Module,
+        model: nn.Module | Callable,
         patch_size: dict[str, int],
         stride: dict[str, int],
         out_patch_size: int | None = None,
@@ -30,7 +30,7 @@ class ModelForwardPatcher(nn.Module):
             "patch_size and stride should have the same keys"
         )
         log(
-            f"[ModelForwardPatcher] Patching model {model.__class__.__name__} with patch_size={patch_size} and stride={stride}"
+            f"[ModelForwardPatcher] Patching model with patch_size={patch_size} and stride={stride}"
         )
 
     def forward(

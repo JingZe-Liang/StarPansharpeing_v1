@@ -357,6 +357,9 @@ class AnomalyDetectionMetricsBase(nn.Module):
 
         return results
 
+    def to(self, device, **kwargs):
+        self.auc.to(device)
+
     def __repr__(self) -> str:
         return f"AnomalyDetectionMetrics(prefix='{self.prefix}')"
 

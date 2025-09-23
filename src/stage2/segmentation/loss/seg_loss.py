@@ -15,6 +15,7 @@ def loss_apply_weights(
 
     if isinstance(weights, (tuple, list)):
         weights = torch.as_tensor(weights).to(loss_stk)
+    weights = weights.to(loss_stk.device)
 
     weighted_loss = loss_stk * weights
     loss_out = weighted_loss.sum()
@@ -38,7 +39,7 @@ class HyperSegmentationLoss(torch.nn.Module):
         loss_weights: list[float] | None = None,
     ):
         super().__init__()
-        ce_weight = torch.as_tensor(ce_weight) if ce_weight is not None else None
+        ce_weight = torch.as_tensor(ce_weight).cuda() if ce_weight is not None else None
 
         self.cross_entropy = torch.nn.CrossEntropyLoss(
             weight=ce_weight, ignore_index=ignore_index
@@ -58,13 +59,17 @@ class HyperSegmentationLoss(torch.nn.Module):
         self.loss_weights = loss_weights or (1.0, 1.0, 0.75)
         self.loss_weights = torch.as_tensor(self.loss_weights)
 
-    def forward(self, pred: Float[Tensor, "b c h w"], gt: Int[Tensor, "b c h w"]):
+    def forward(self, pred: Float[Tensor, "b c h w"], gt: Int[Tensor, "b h w"]):
         dice_loss = self.dice_loss(pred, gt)
         ce_loss = self.cross_entropy(pred, gt)
         lovasz_loss = self.lovasz_loss(pred, gt)
         loss = loss_apply_weights([dice_loss, ce_loss, lovasz_loss], self.loss_weights)
 
-        return loss, {"dice_loss": dice_loss, "ce_loss": ce_loss}
+        return loss, {
+            "dice_loss": dice_loss,
+            "ce_loss": ce_loss,
+            "lovasz_loss": lovasz_loss,
+        }
 
 
 # * --- Test --- #

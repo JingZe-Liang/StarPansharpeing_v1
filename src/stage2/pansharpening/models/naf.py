@@ -39,11 +39,11 @@ class PansharpeningNAFNetConfig:
     dw_expand: int = 2
     ffn_expand: int = 2
     patch_size: int = 1
-    condition_on_decoder: bool = False
+    condition_on_decoder: bool = True
     block_drop: float = 0.0
     output_rescale: bool = True
     is_neg_1_1: bool = True
-    cond_type: str = "pixel"  # 'pixel' or 'latent'
+    residual_type: str = "ms"
 
 
 class PansharpeningNAFNet(nn.Module):
@@ -57,9 +57,7 @@ class PansharpeningNAFNet(nn.Module):
         patchers["fused_conv"] = create_patcher(cfg.width * 2, cfg.width, 1)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer("layernorm2d", cfg.condition_channel),
-            create_conv2d(
-                cfg.condition_channel, cfg.width, 3, stride=1, padding=1, bias=True
-            ),
+            create_conv2d(cfg.condition_channel, cfg.width, 3, bias=True),
         )
         self.cfg = cfg
         self.patchers = patchers
@@ -114,11 +112,11 @@ class PansharpeningNAFNet(nn.Module):
 
         for num in cfg.dec_blk_nums:
             self.ups.append(
-                nn.ConvTranspose2d(chan, chan // 2, 2, 2)
-                # nn.Sequential(
-                #     nn.Conv2d(chan, chan * 2, 1, bias=False),
-                #     nn.PixelShuffle(2),
-                # )
+                # nn.ConvTranspose2d(chan, chan // 2, 2, 2)
+                nn.Sequential(
+                    nn.Conv2d(chan, chan * 2, 1, bias=False),
+                    nn.PixelShuffle(2),
+                )
             )
             chan = chan // 2
             self.decoders.append(
@@ -126,6 +124,8 @@ class PansharpeningNAFNet(nn.Module):
             )
 
         self.padder_size = 2 ** len(self.encoders)
+
+        self._init_weights()
 
     def _create_head(self):
         out_chan = self.cfg.ms_channel
@@ -180,14 +180,18 @@ class PansharpeningNAFNet(nn.Module):
         # heads
         x = self.head(x)
 
-        if self.cfg.use_residual:
-            if self.cfg.cond_type == "latent":
-                x = x + ms
-            else:
-                assert cond.shape[1] == x.shape[1], (
-                    f"Condition channel {cond.shape[1]} must match output channel {x.shape[1]}"
-                )
-                x = x + cond
+        res_type = self.cfg.residual_type
+        if res_type == "condition":
+            assert cond.shape[1] == x.shape[1], (
+                f"Condition channel {cond.shape[1]} must match output channel {x.shape[1]}"
+            )
+            x = x + cond
+        elif res_type == "ms":
+            assert ms.shape[-2:] == x.shape[-2:]
+            x = x + ms
+        elif res_type == "pan":
+            assert pan.shape[1] == 1
+            x = x + pan
 
         # Apply output rescaling using RescaleOutput layer
         x = self.output_rescale(x)
@@ -198,6 +202,29 @@ class PansharpeningNAFNet(nn.Module):
         cfg = dataclass_from_dict(PansharpeningNAFNetConfig, kwargs)
         model = cls(cfg)
         return model
+
+    def _init_weights(self):
+        def _apply(module):
+            if isinstance(module, nn.Conv2d):
+                # nn.init.kaiming_normal_(module.weight, mode="fan_in")
+                lecun_normal_(module.weight)
+                if hasattr(module, "bias") and module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if hasattr(module, "bias") and module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+        # init weights
+        self.apply(_apply)
+        # zeros out head
+        nn.init.zeros_(self.head[1].weight)
+        nn.init.zeros_(self.head[1].bias)
+
+        log("[PansharpeningNAFNet] Initialized weights")
 
 
 # *==============================================================
@@ -467,7 +494,7 @@ def test_pansharpening_nafnet():
     model = PansharpeningNAFNet.create_model(
         ms_channel=8,
         pan_channel=1,
-        condition_channel=8,
+        condition_channel=256,
         width=64,
         middle_blk_num=1,
         enc_blk_nums=[1, 1, 1],
@@ -476,6 +503,10 @@ def test_pansharpening_nafnet():
         patch_size=2,
         dw_expand=1,
         ffn_expand=1,
+        condition_on_decoder=True,
+        residual_type="ms",
+        is_neg_1_1=True,
+        output_rescale=True,
     )
     model.train()
 
@@ -486,8 +517,8 @@ def test_pansharpening_nafnet():
     # Create sample inputs
     ms = torch.randn(1, 8, 256, 256)
     pan = torch.randn(1, 1, 256, 256)
-    # cond = torch.randn(1, 16, 32, 32)  # latents
-    cond = torch.randn(1, 8, 256, 256)  # images
+    cond = torch.randn(1, 256, 32, 32)  # latents
+    # cond = torch.randn(1, 8, 256, 256)  # images
 
     # Test forward pass
     output = model(ms, pan, cond)
@@ -566,8 +597,8 @@ def test_pansharpening_naf_decoder_net():
 
 
 if __name__ == "__main__":
-    # test_pansharpening_nafnet()
-    test_pansharpening_naf_decoder_net()
+    test_pansharpening_nafnet()
+    # test_pansharpening_naf_decoder_net()
 
     # import timm
 

@@ -3,7 +3,8 @@ Window sliding utilities for processing large images in patches.
 """
 
 from collections.abc import Generator, Iterable
-from typing import Any
+from typing import Any, Callable
+import math
 
 import numpy as np
 import torch
@@ -81,9 +82,17 @@ class WindowSlider:
         else:
             raise ValueError(f"Unsupported image dimensions: {img.shape}")
 
-        # Calculate number of windows
-        num_windows_h = (h - self.window_size) // self.stride + 1
-        num_windows_w = (w - self.window_size) // self.stride + 1
+        # Calculate number of windows - ensure full coverage with padding
+        # We need to generate windows that cover the entire image, including edges
+        # This may require virtual padding beyond image boundaries
+        if h >= self.window_size and w >= self.window_size:
+            num_windows_h = math.ceil((h - self.window_size) / self.stride) + 1
+            num_windows_w = math.ceil((w - self.window_size) / self.stride) + 1
+        else:
+            # If image is smaller than window size, we still need to generate at least one window
+            # This window will extend beyond image boundaries (handled in extraction)
+            num_windows_h = 1
+            num_windows_w = 1
 
         # Store original image info for merging
         original_info = {
@@ -99,10 +108,28 @@ class WindowSlider:
         # Generate all windows, each containing the full batch
         for i in range(num_windows_h):
             for j in range(num_windows_w):
+                # Calculate ideal window position
                 h_start = i * self.stride
-                h_end = h_start + self.window_size
                 w_start = j * self.stride
+                h_end = h_start + self.window_size
                 w_end = w_start + self.window_size
+
+                # Adjust window position to ensure it stays within image boundaries
+                # Always return full-sized windows
+                if h_end > h:
+                    # Window extends beyond bottom edge, shift up
+                    h_start = h - self.window_size
+                    h_end = h
+                if w_end > w:
+                    # Window extends beyond right edge, shift left
+                    w_start = w - self.window_size
+                    w_end = w
+
+                # Ensure window doesn't go beyond top/left edges
+                h_start = max(0, h_start)
+                w_start = max(0, w_start)
+                h_end = min(h, h_start + self.window_size)
+                w_end = min(w, w_start + self.window_size)
 
                 # Extract window for the entire batch at once
                 window_sample = self._extract_window_batch(
@@ -377,7 +404,10 @@ class WindowSlider:
                 if merge_method == "average" and count_tensor is not None:
                     if data.dim() == 4:  # (B, C, H, W)
                         merged_tensor[:, :, h_start:h_end, w_start:w_end] += data
-                        count_tensor[:, h_start:h_end, w_start:w_end] += 1
+                        if has_batch:
+                            count_tensor[:, h_start:h_end, w_start:w_end] += 1
+                        else:
+                            count_tensor[h_start:h_end, w_start:w_end] += 1
                     elif data.dim() == 3:  # (C, H, W)
                         if has_batch:
                             # This should not happen with the new format
@@ -465,9 +495,18 @@ class WindowSlider:
             if merge_method == "average" and count_tensor is not None:
                 count_tensor = count_tensor.clamp(min=1)
                 if merged_tensor.dim() == 4:  # (B, C, H, W)
-                    merged_tensor = merged_tensor / count_tensor.unsqueeze(1)
+                    if count_tensor.dim() == 2:  # (H, W)
+                        # Need to add dimensions for batch and channel
+                        count_tensor = count_tensor.unsqueeze(0).unsqueeze(0)
+                    elif count_tensor.dim() == 3:  # (B, H, W)
+                        # Need to add dimension for channel
+                        count_tensor = count_tensor.unsqueeze(1)
+                    merged_tensor = merged_tensor / count_tensor
                 elif merged_tensor.dim() == 3:  # (C, H, W)
-                    merged_tensor = merged_tensor / count_tensor.unsqueeze(0)
+                    if count_tensor.dim() == 2:  # (H, W)
+                        # Need to add dimension for channel
+                        count_tensor = count_tensor.unsqueeze(0)
+                    merged_tensor = merged_tensor / count_tensor
                 else:
                     merged_tensor = merged_tensor / count_tensor
 
@@ -504,3 +543,36 @@ def create_windowed_dataloader(
         slide_keys=slide_keys, window_size=window_size, stride=stride, overlap=overlap
     )
     return slider.create_window_generator(dataloader)
+
+
+def model_predict_patcher(
+    model: torch.nn.Module | Callable[[dict[str, Any]], Any],
+    model_in: dict,
+    postprocess_model_out: Callable | None = None,
+    patch_keys=["img1", "img2"],
+    merge_keys: list[str] = ["gt"],
+    merge_method: str = "average",
+    patch_size: int = 128,
+    stride: int | None = None,
+    overlap: float | None = None,
+    label_mode: str = "seg",
+):
+    assert callable(postprocess_model_out) or postprocess_model_out is None, (
+        "postprocess_model_out must be callable or None"
+    )
+    slider = WindowSlider(
+        slide_keys=patch_keys, window_size=patch_size, stride=stride, overlap=overlap
+    )
+    windowed_samples = slider.slide_windows(model_in)
+    model_outs: list[dict] = []
+    for sample in windowed_samples:
+        model_out = model(sample)
+        if postprocess_model_out is not None:
+            model_out = postprocess_model_out(model_out, label_mode=label_mode)
+        # Combine model output with window info
+        model_out_combined = {**model_out, "window_info": sample["window_info"]}
+        model_outs.append(model_out_combined)
+    merged_output = slider.merge_windows(
+        model_outs, merge_method=merge_method, merged_keys=merge_keys
+    )
+    return merged_output
