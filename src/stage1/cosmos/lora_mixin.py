@@ -395,7 +395,7 @@ class TokenizerLoRAMixin(nn.Module):
             encs = scale_shift_latent(encs, self.scale_factor, self.shift_factor)
             return encs
 
-    def decode(self, z, inp_shape):
+    def decode(self, z, inp_shape: int | torch.Size):
         z = un_scale_shift_latent(z, self.scale_factor, self.shift_factor)
         return self.model_peft.decode(z, inp_shape)  # type: ignore
 

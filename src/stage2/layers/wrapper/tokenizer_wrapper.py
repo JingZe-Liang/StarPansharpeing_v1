@@ -1,17 +1,24 @@
 import inspect
 from collections import deque
+from functools import partial
 from types import MethodType
-from typing import Sequence
+from typing import Callable
 
 import torch
 import torch.nn as nn
-from param import Callable
 from torch import Tensor
 
 from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
 from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
+from src.stage1.cosmos.tokenizer_inference import (
+    scale_shift_latent,
+    un_scale_shift_latent,
+)
 from src.stage2.utilities.amotized.amotized_model_wrapper import AmotizedModelMixin
+from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log
+
+type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None
 
 
 def _not_lora_not_implemented_raise(self, *args, **kwargs):
@@ -20,21 +27,54 @@ def _not_lora_not_implemented_raise(self, *args, **kwargs):
     )
 
 
+def _partial_amotized_model_decode_fn(tokenizer):
+    def decode_fn(x, inp_shape):
+        return tokenizer.decode(x, inp_shape)
+
+    return decode_fn
+
+
 class DownstreamModelTokenizerWrapper(nn.Module):
+    @function_config_to_basic_types
     def __init__(
         self,
         tokenizer: ContinuousImageTokenizer | TokenizerLoRAMixin,
-        downstream_model: nn.Module | AmotizedModelMixin,
+        downstream_model: nn.Module | AmotizedModelMixin | partial,
         froze_tokenizer: bool = True,
         n_img_encoded: int = 1,
+        tokenizer_scale_shift: LatentScaleShiftType = None,
+        tokenizer_img_processor: Callable | None = None,
+        detokenizer_img_processor: Callable | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
         self.downstream_model = downstream_model
+        self.is_scale_latent = tokenizer_scale_shift is not None
+        if self.is_scale_latent:
+            scale, shift = tokenizer_scale_shift
+            scale, shift = torch.as_tensor(scale), torch.as_tensor(shift)
+            self.scale = nn.Buffer(scale)
+            self.shift = nn.Buffer(shift)
+        self.tokenizer_img_processor = tokenizer_img_processor
+        if tokenizer_img_processor is not None:
+            assert callable(tokenizer_img_processor), (
+                "tokenizer_img_processor must be callable"
+            )
+        self.detokenizer_img_processor = detokenizer_img_processor
+        if detokenizer_img_processor is not None:
+            assert callable(detokenizer_img_processor), (
+                "detokenizer_img_processor must be callable"
+            )
 
+        # low-level tasks wrapper
         self.is_downstream_amotized = isinstance(
             self.downstream_model, AmotizedModelMixin
         )
+        # is a partial inited class
+        if isinstance(self.downstream_model, partial):
+            decoder_fn = _partial_amotized_model_decode_fn(self.tokenizer)
+            self.downstream_model = self.downstream_model(decoder_fn=decoder_fn)
+
         self._check_downstream_model_args()
 
         assert hasattr(self.tokenizer, "encode"), "tokenizer must have an encode method"
@@ -47,7 +87,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             self.tokenizer.eval()
             self.tokenizer.requires_grad_(False)
             if self.is_downstream_amotized and downstream_model.learn_decoder:
-                self.downstream_model.decoder.requires_grad_(True)
+                self.tokenizer.decoder.requires_grad_(True)
 
         self._img_chans_cache = deque(maxlen=n_img_encoded)
 
@@ -78,8 +118,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
                 in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
             ]
         )
-        assert n_params == 2, (
-            "downstream_model.forward must have two positional args (pixel_in, latent_in), found {n_params}"
+        assert n_params >= 2, (
+            "downstream_model.forward must have more than two positional args "
+            f"(pixel_in, latent_in, ...), found {n_params}"
         )
 
     def _update_lora_methods(self):
@@ -126,19 +167,28 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             raise ValueError("No image channels cached. Please run forward once.")
         return self._img_chans_cache.pop()  # left in, right out: FIFO
 
-    def clear_cached_img_channels(self):
+    def _clear_cached_img_channels(self):
         self._img_chans_cache.clear()
 
     def _forward_tokenizer_encode_single_img(self, img: Tensor) -> Tensor:
         latent_ret_ = self._encode_fn(img)
+
         # only return latent
-        if isinstance(latent_ret_, tuple):  # latent, q_loss, loss_breakdown
-            return latent_ret_[0]
-        return latent_ret_
+        if isinstance(latent_ret_, (tuple, list)):  # latent, q_loss, loss_breakdown
+            latent = latent_ret_[0]
+        else:
+            latent = latent_ret_
+        # scale and shift latent
+        if self.is_scale_latent:
+            latent = scale_shift_latent(latent, self.scale, self.shift)
+        return latent
 
     def _forward_tokenizer_decode_single_latent(
-        self, latent: Tensor, input_shape: torch.Size
+        self, latent: Tensor, input_shape: torch.Size | int
     ) -> Tensor:
+        # un-scale and un-shift latent
+        if self.is_scale_latent:
+            latent = un_scale_shift_latent(latent, self.scale, self.shift)
         decoded = self._decode_fn(latent, input_shape)
         if isinstance(decoded, tuple):
             return decoded[0]
@@ -146,11 +196,15 @@ class DownstreamModelTokenizerWrapper(nn.Module):
 
     def _forward_tokenizer_encode(
         self,
-        pixel_in: Tensor | Sequence[Tensor],
-        latent_in: Tensor | Sequence[Tensor] | None = None,
-    ) -> Tensor | Sequence[Tensor]:
+        pixel_in: Tensor | list[Tensor],
+        latent_in: Tensor | list[Tensor] | None = None,
+    ) -> Tensor | list[Tensor]:
         if latent_in is not None:
             return latent_in
+
+        # process image for tokenizer
+        if self.tokenizer_img_processor is not None:
+            pixel_in = self.tokenizer_img_processor(*pixel_in)
 
         if torch.is_tensor(pixel_in):
             self._cache_img_chans(pixel_in)
@@ -164,30 +218,30 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             return latents
 
     def _forward_tokenizer_decode(
-        self,
-        latents: Tensor | Sequence[Tensor],
-        chans: int | Sequence[int],
-    ) -> Tensor | Sequence[Tensor]:
+        self, latents: Tensor | list[Tensor], chans: int | list[int]
+    ) -> Tensor | list[Tensor]:
         if isinstance(latents, torch.Tensor):
             assert isinstance(chans, int), "chans must be int if latents is Tensor"
-            input_shape = torch.Size([latents.shape[0], chans])
-            return self._forward_tokenizer_decode_single_latent(latents, input_shape)
+            decoded = self._forward_tokenizer_decode_single_latent(latents, chans)
         else:
             decoded = []
             assert isinstance(chans, (tuple, list)), (
                 "chans must be list or tuple of int"
             )
             for latent_, chan_ in zip(latents, chans):
-                input_shape = torch.Size([latent_.shape[0], chan_])
                 decoded.append(
-                    self._forward_tokenizer_decode_single_latent(latent_, input_shape)
+                    self._forward_tokenizer_decode_single_latent(latent_, chan_)
                 )
-            return decoded
+        # process image for detokenizer
+        if self.detokenizer_img_processor is not None:
+            decoded = self.detokenizer_img_processor(decoded)
+        return decoded
 
     def forward(
         self,
-        pixel_in: torch.Tensor | tuple[torch.Tensor, ...],
-        latent_in: Tensor | Sequence[Tensor] | None = None,
+        pixel_in: Tensor | list[Tensor],
+        # already and scale-shifted latents
+        latent_in: Tensor | list[Tensor] | None = None,
         **kwargs,
     ):
         latents = self._forward_tokenizer_encode(pixel_in, latent_in)
@@ -195,23 +249,26 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         return self.downstream_model(pixel_in, latents, **kwargs)
 
     def decode(
-        self, latents: Tensor | Sequence[Tensor], chans: int | list[int] | None = None
-    ):
+        self,
+        latents: Tensor | list[Tensor],
+        chans: int | list[int] | None = None,
+    ) -> Tensor | list[Tensor]:
         if chans is None:
             chans = self.img_cached_channels
             assert 0 < len(chans) < len(latents)
         else:
-            assert len(chans) == len(latents)
-
-        if torch.is_tensor(latents):
+            if isinstance(chans, int):
+                chans = [chans] * len(latents)
             if isinstance(chans, list):
-                chans = chans[0]
-            return self._decode_fn(latents, chans)
-        else:
-            assert isinstance(chans, list) and len(chans) == len(latents), (
-                "chans must be a list of same length as latents"
-            )
-            recons = []
-            for latent_, chan_ in zip(latents, chans):
-                recons.append(self._decode_fn(latent_, chan_))
-            return recons
+                assert len(chans) == len(latents), (
+                    "Channels should be a list of length equal to the number of latents"
+                )
+
+        return self._forward_tokenizer_decode(latents, chans)
+
+    def _only_first_from_tuple(self, tok: tuple[torch.Tensor, ...], disable=False):
+        if disable:
+            return tok
+        if isinstance(tok, (tuple, list)):
+            return tok[0]
+        return tok

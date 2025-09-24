@@ -1,7 +1,13 @@
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
+from timm.layers import (
+    ConvMlp,
+    LayerScale2d,
+    create_norm,
+    get_act_layer,
+    get_norm_layer,
+)
 from timm.layers.drop import DropPath
 from timm.layers.mlp import Mlp
 from timm.models.convnext import ConvNeXtStage
@@ -99,10 +105,8 @@ class AttentionBlock(nn.Module):
         return x
 
     def forward(self, x, mask=None, pe=None):
-        if self.grad_checkpointing:
-            return torch.utils.checkpoint.checkpoint(
-                self.forward_, x, mask, pe, use_reentrant=False
-            )
+        if self.grad_checkpointing and self.training:
+            return checkpoint(self.forward_, x, mask, pe, use_reentrant=False)
         else:
             return self.forward_(x, mask, pe)
 
@@ -166,4 +170,58 @@ class MbConvStages(nn.Module):
             for block in stage:  # type: ignore
                 x = block(x, cond)
 
+        return x
+
+
+class Spatial2DNATBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        k_size=8,
+        stride=2,
+        dilation=2,
+        n_heads=8,
+        ffn_ratio=4 / 3,
+        qkv_bias=True,
+        qk_norm="layernorm2d",
+        norm_layer="layernorm2d",
+    ) -> None:
+        super().__init__()
+        self.grad_checkpointing = False
+        qk_norm = get_norm_layer(qk_norm)
+        norm_layer = get_norm_layer(norm_layer)
+        self.attn = NatAttention2d(
+            dim,
+            k_size,
+            stride,
+            dilation,
+            n_heads,
+            qkv_bias,
+            qk_norm=qk_norm,
+            norm_layer=norm_layer,
+        )
+        self.cffn = ConvMlp(
+            dim,
+            int(dim * ffn_ratio),
+            dim,
+            norm_layer=norm_layer,
+            act_layer=get_act_layer("gelu_tanh"),
+        )
+        self.ls1 = LayerScale2d(dim, init_values=1e-5, inplace=True)
+        self.ls2 = LayerScale2d(dim, init_values=1e-5, inplace=True)
+
+        self.norm1 = norm_layer(dim)
+        self.norm2 = norm_layer(dim)
+
+    def forward(self, x):
+        def _closure(x):
+            x = x + self.ls1(self.attn(self.norm1(x)))
+            x = x + self.ls2(self.cffn(self.norm2(x)))
+            return x
+
+        # checkpointing
+        if self.grad_checkpointing and self.training:
+            x = checkpoint(_closure, x, use_reentrant=False)
+        else:
+            x = _closure(x)
         return x

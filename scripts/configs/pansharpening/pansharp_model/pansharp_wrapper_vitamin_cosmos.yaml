@@ -1,0 +1,97 @@
+_target_: src.stage2.layers.wrapper.tokenizer_wrapper.DownstreamModelTokenizerWrapper
+
+# Tokenizer configuration (from cosmos_f8c16p1_lora.yaml)
+tokenizer:
+  _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin
+  tokenizer:
+    _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
+    model:
+      attn_resolutions: [32]
+      channels: 128
+      channels_mult: [2, 4, 4]
+      dropout: 0.0
+      in_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+      spatial_compression: 8
+      num_res_blocks: 2
+      out_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+      resolution: 1024
+      z_channels: 16
+      act_checkpoint: false
+      latent_channels: 16
+      norm_type: gn
+      norm_groups: 32
+      block_name: res_block
+      moe_token_mixer_type: res_block
+      hidden_factor: 4
+      use_residual_factor: false
+      # others
+      patch_method: haar
+      patch_size: 1
+      attn_type: none
+      padding_mode: reflect # for boundary?
+    # repa
+    use_repa_loss: false
+    use_vf_loss: false
+    hook_module: decoder.decoder.mid.block_2
+    vf_on_z_or_module: z # [z, module]
+    dino_feature_dim: 1024
+    # loading
+    enc_path: ""
+    dec_path: ""
+    uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+    loading_type: pretrained
+    # quant
+    norm_in_quant_conv: false
+  lora_weights:
+    WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
+    QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
+  lora_hyper_chans:
+    WV3: 8
+    QB: 4
+  active_lora: ${dataset.cfgs.used}
+
+# Pansharpening model configuration (from vitamin.yaml)
+downstream_model:
+  _target_: src.stage2.pansharpening.models.vitamin.PanVitamin
+  model:
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    mlp_ratio: 4
+    in_chans: ${tokenizer.z_channels}
+    out_chans: ${tokenizer.z_channels}
+    patch_size: 1
+    image_size: 256
+    attn_type: self
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.0
+    act_layer: gelu
+    norm_layer: layer
+    initializer: "xavier_uniform"
+    use_checkpoint: false
+    use_pe: true
+    use_decoder: true
+    decoder_config:
+      embed_dim: 768
+      depth: 4
+      num_heads: 12
+      mlp_ratio: 4
+      out_chans: ${tokenizer.z_channels}
+      patch_size: 1
+      image_size: 256
+      attn_drop: 0.0
+      proj_drop: 0.0
+      drop_path: 0.0
+      act_layer: gelu
+      norm_layer: layer
+      initializer: "xavier_uniform"
+      use_checkpoint: false
+      use_pe: true
+  pretrained_model_path: ""
+  load_pretrained: false
+
+# Wrapper configuration
+froze_tokenizer: true
+n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
+tokenizer_scale_shift: [6.25221633, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml

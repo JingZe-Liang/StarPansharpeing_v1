@@ -785,7 +785,7 @@ class ContinuousImageTokenizer(nn.Module):
         h = self.z_aug(maybe_q_ret)
         return h
 
-    def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size, clamp=False):
+    def decode(self, z: torch.Tensor | tuple, inp_shape: torch.Size | int, clamp=False):
         # Break down input z losses
         q_loss = loss_breakdown = None
         if self.quantizer_type is not None and isinstance(z, (tuple, list)):
@@ -794,7 +794,8 @@ class ContinuousImageTokenizer(nn.Module):
             assert torch.is_tensor(z), "z should be the (quantized) latent"
 
         # Decoder
-        dec = self.decoder(z, inp_shape[1])  # [b, c, h, w]
+        chan = inp_shape[1] if isinstance(inp_shape, torch.Size) else inp_shape
+        dec = self.decoder(z, chan)  # [b, c, h, w]
         if clamp:
             dec = dec.clamp(-1, 1)
 

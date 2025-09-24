@@ -4,12 +4,12 @@ from enum import Enum
 from typing import Any, Callable, Literal, TypedDict, no_type_check
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor, is_tensor, nn
 from torch.nn import Module
 
+from src.stage2.utilities.patches import ModelForwardPatcher
 from src.utilities.config_utils import dataclass_from_dict
 from src.utilities.logging import log
-from src.stage2.utilities.patches import ModelForwardPatcher
 
 
 def amotizing_call_model(
@@ -124,7 +124,12 @@ class AmotizedModelMixin(nn.Module):
             )
 
     def _single_tensor_to_tuple(self, x: Tensor | tuple) -> tuple[Tensor | Any, ...]:
-        return (x,) if torch.is_tensor(x) else x
+        if torch.is_tensor(x):
+            return (x,)
+        elif isinstance(x, (tuple, list)):
+            return tuple(x)
+        else:
+            return x
 
     def _get_pixel_shape(self, pixel_in: tuple) -> torch.Size:
         # assume the first element is the main pixel input

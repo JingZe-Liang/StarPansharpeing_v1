@@ -66,7 +66,7 @@ CDModelStepOutput = namedtuple(
 class HyperCDTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
-        self.tokenizer_cfg = cfg.tokenizer
+        # Tokenizer configuration is now handled by wrapper
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -143,9 +143,7 @@ class HyperCDTrainer:
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
-        # setup the tokenizer
-        self.online_tokenize = self.train_cfg.online_tokenize
-        self.setup_tokenizer()  # must setup the tokenizer to decode the image
+        # setup the segmentation model
         self.setup_segmentation_model()  # setup the segmentation model
 
         # optimizers and lr schedulers
@@ -178,100 +176,6 @@ class HyperCDTrainer:
             or self.model.__class__.__name__
         )
         self.log_msg(f"use change detection model: {segment_name}")
-
-    def setup_tokenizer(self):
-        tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
-        self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
-
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
-            )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
-            )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
-
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
-
-            self.use_quantizer = self.quantizer is not None
-
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-
-        else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
-            self.norm_z = False  # in the model, not in trainer
-            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-
-            if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                )
-                self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
-                    base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
-                    peft_pretrained_path=self.train_cfg.peft_pretrained_path,
-                    merge_and_unload=True,
-                )
-
-            # quantizer in the tokenizer, not handled by this trainer
-            # vq, bsq, fsq, kl
-            self.use_quantizer = hasattr(self.tokenizer, "quantizer")
-            self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
-            if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
-
-        # set to eval
-        if self.sep_enc_dec:
-            self.tokenizer_encoder.eval()
-            self.tokenizer_decoder.eval()
-        else:
-            self.tokenizer.eval()
-
-        if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-            self.quantizer.eval()
-
-        self.log_msg("freeze the tokenizer and quantizer (if used).")
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -465,7 +369,7 @@ class HyperCDTrainer:
             level=level.lower(),
             warn_once=warn_once,
             only_rank_zero=only_rank_zero,
-            stack_level=2,
+            stack_level=3,
             **kwargs,
         )
 
@@ -614,34 +518,7 @@ class HyperCDTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
             self.model.dtype = torch.float
-
-        # tokenizer
-        if self.train_cfg.prepare_tokenizer_in_accelerator:
-            if self.sep_enc_dec:
-                # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
-                self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
-                self.accelerator._models.pop(-1)
-            else:
-                self.tokenizer = self.accelerator.prepare(self.tokenizer)
-                self.accelerator._models.pop(-1)
-
-        # quantizer
-        if self.quantizer is not None and self.use_quantizer:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            self.accelerator._models.pop(-1)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -657,56 +534,6 @@ class HyperCDTrainer:
             return
 
         self.ema_model.update()
-
-    def get_training_sample_channels(self):
-        bands: int = getattr(self, "_processed_bands", self.dataset_cfg.consts.bands)
-        assert bands is not None and bands.is_integer() and bands > 0, (
-            f"channel num: {bands}"
-        )
-        return bands
-
-    def to_tokenizer_range(self, x):
-        if not self.train_cfg.to_neg_1_1:
-            # to (-1, 1)
-            return x * 2 - 1
-        return x
-
-    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True):
-        assert hasattr(self, "tokenizer"), "Tokenizer not found"
-        grad_ctx = torch.no_grad() if no_grad else nullcontext()
-
-        latent_q, recon = None, None
-        with self.accelerator.autocast():
-            if self.sep_enc_dec:
-                to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                to_dec = lambda x: self.tokenizer_decoder(x)
-
-                if mode == "encode":
-                    with grad_ctx:
-                        latent = to_enc(x)  # x is the image
-                    if self.quantizer is not None:
-                        latent_q, q_loss, q_info = self.quantizer(latent)
-                    else:
-                        latent_q = latent
-                elif mode == "decode":
-                    with grad_ctx:
-                        recon = to_dec(x)  # x is the latent
-            else:
-                to_enc = lambda img: self.tokenizer.encode(img)
-                to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
-
-                if mode == "encode":
-                    with grad_ctx:
-                        latent_q = to_enc(x)
-                else:
-                    bands = self.get_training_sample_channels()
-                    bs_chan = [x.shape[0], bands]
-                    with grad_ctx:
-                        recon = to_dec(x, bs_chan)
-                    if isinstance(recon, tuple):
-                        recon = recon[0]  # construction is the first output
-
-        return dict(latent=latent_q, recon=recon)
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
@@ -761,31 +588,6 @@ class HyperCDTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def get_tokenizer_encoded(
-        self, img: Tensor | None = None, batch: dict | None = None
-    ) -> Tensor:
-        img_latent = None
-
-        # offline latents
-        if batch is not None and "img_latent" in batch:
-            img_latent = batch["img_latent"].to(self.device, self.dtype)
-
-        # tokenizer online
-        else:
-            assert img is not None, "img is None"
-            assert self.online_tokenize and (
-                hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
-            ), "tokenizer not found for online tokenize"
-
-            img_latent = self.forward_tokenizer(img)["latent"]
-
-        assert img_latent is not None, "img_latent is None"
-        return img_latent
-
     def compute_segmentation_loss(self, out, gt):
         # loss, ensure gt is long and ndim == 3
         gt = gt.type(torch.long).squeeze_(1)
@@ -802,10 +604,10 @@ class HyperCDTrainer:
 
         return loss, log_losses
 
-    def forward_segment_model(self, img1, img2, img_latent1, img_latent2, gt):
+    def forward_segment_model(self, img1, img2, gt):
         with self.accelerator.autocast():
-            # img -> model (DINOv3 backbone -> multi-scale FPN -> adapter -> Unet decoder -> prediction
-            out = self.model(img1, img2, img_latent1, img_latent2)
+            # pixel data -> wrapper (handles tokenization + change detection)
+            out = self.model([img1, img2])
             # loss
             loss, log_losses = self.compute_segmentation_loss(out, gt.to(out.device))
 
@@ -905,20 +707,24 @@ class HyperCDTrainer:
             self.ema_update()
 
     def _macro_forward_seg_model(self, batch: dict, macro_batch_size: int = 32):
-        total_img_patches: Tensor = batch["img"]
-        img_macro_batches: tuple[Tensor, ...] = total_img_patches.chunk(
+        # For change detection, we need to handle both img1 and img2
+        total_img1_patches: Tensor = batch["img1"]
+        total_img2_patches: Tensor = batch["img2"]
+        img1_macro_batches: tuple[Tensor, ...] = total_img1_patches.chunk(
+            macro_batch_size, dim=0
+        )
+        img2_macro_batches: tuple[Tensor, ...] = total_img2_patches.chunk(
             macro_batch_size, dim=0
         )
         macro_outputs: list[Tensor] = []
         with self.accelerator.autocast():
-            for macro_img in img_macro_batches:
-                img_latent = self.get_tokenizer_encoded(batch={"img": macro_img})
-                macro_pred = self.model(macro_img, img_latent)
+            for img1_batch, img2_batch in zip(img1_macro_batches, img2_macro_batches):
+                macro_pred = self.model([img1_batch, img2_batch])
                 macro_outputs.append(macro_pred)
         return macro_outputs
 
-    def train_segment_step(self, *inputs) -> CDModelStepOutput:
-        pred, loss, log_losses = self.forward_segment_model(*inputs)
+    def train_segment_step(self, img1, img2, gt) -> CDModelStepOutput:
+        pred, loss, log_losses = self.forward_segment_model(img1, img2, gt)
         self._optimize_step(loss)
         return CDModelStepOutput(pred, loss, log_losses)
 
@@ -1007,12 +813,10 @@ class HyperCDTrainer:
                 )
         else:
             # Standard mode: process immediately
-            img_latent1 = self.get_tokenizer_encoded(batch["img1"])
-            img_latent2 = self.get_tokenizer_encoded(batch["img2"])
             with self.accelerator.accumulate(self.model):
-                # train segmentation model
+                # train segmentation model with pixel data
                 train_out = self.train_segment_step(
-                    batch["img1"], batch["img2"], img_latent1, img_latent2, batch["gt"]
+                    batch["img1"], batch["img2"], batch["gt"]
                 )
 
         # update training state
@@ -1162,11 +966,9 @@ class HyperCDTrainer:
         else:
 
             def _val_model_closure(batch):
-                img_latent1 = self.get_tokenizer_encoded(batch["img1"])
-                img_latent2 = self.get_tokenizer_encoded(batch["img2"])
-                # forward the segmentation network
+                # forward the segmentation network with pixel data
                 pred_seg, *_ = self.forward_segment_model(
-                    batch["img1"], batch["img2"], img_latent1, img_latent2, batch["gt"]
+                    batch["img1"], batch["img2"], batch["gt"]
                 )
                 return {"pred_logits": pred_seg}
 
@@ -1269,10 +1071,8 @@ class HyperCDTrainer:
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
-        if self.train_cfg.to_neg_1_1:
-            return ((x + 1) / 2).clamp(0, 1).float()
-        else:
-            return x
+        # Default to [0, 1] range for visualization
+        return x.clamp(0, 1).float()
 
     def visualize_segmentation(
         self,

@@ -5,9 +5,9 @@ hydra:
 
 defaults:
   # wrapper ==========
-  - dataset: OSCD
+  - dataset: pansharpening_data
   - accelerator: base
-  - segment_model: cd_wrapper_dinov3_cosmos
+  - pansharp_model: pansharp_wrapper_vitamin_cosmos
   # self ===============
   - _self_
 
@@ -15,26 +15,18 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+dataset:
+  cfgs:
+    used: QB
+    batch_size_train: 16
+
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
   beta: 0.999
   update_after_step: 1000
-  update_every: 1
+  update_every: 2
   allow_different_devices: true
-  lazy_init_ema: true
-
-segment_loss:
-  _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
-  ignore_index: 255
-  ce_weight: [1.0, 10.0]
-  loss_weights: [0.5, 1.0, 0.5]
-
-metric:
-  _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
-  n_classes: ${dataset.consts.num_classes}
-  ignore_index: 255
-  include_bg: false
 
 train:
   # Wrapper-based training
@@ -45,30 +37,37 @@ train:
   patches_per_image:
   macro_batch_size: 32
 
-  proj_dir: runs/stage2_CD_wrapper/
+  proj_dir: runs/stage2_pansharpening_wrapper/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
 
   track_metrics_duration: -1
   track_metrics_after: 2000
-  visualize_every: 1000
-  max_steps: 300_000
+  visualize_every: 200
+  max_steps: 400_000
   save_every: 500
 
   resume_path:
   ema_load_path:
 
-  segment_optim:
-    _target_: heavyball.ForeachAdamW
+  pansharpening_loss:
+    _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
+    pixel_loss_type: l1ssim
+    amotized_loss:
+      _target_: torch.nn.MSELoss
+    pixel_loss_kwargs:
+      weighted_r: [1.0, 0.1] # l1ssim weights
+    factors: [0.1, 1.0] # latent and pixel weights
+
+  pansharp_optim:
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-10
-    betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
+    weight_decay: 1.0e-3
+    eps: 1.0e-8
     foreach: true
 
-  segment_sched:
+  pansharp_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 100
@@ -76,11 +75,18 @@ train:
     num_cycles: 1
 
   log:
-    run_comment: OSCD_dinov3_adaptor_wrapper
+    run_comment: f8c16p1_${dataset.cfgs.used}_vitamin_wrapper
     log_with_time: True
     log_every: 10
+
   debug: true
 
+  # Preserve the to_neg_1_1 configuration as requested
+  to_neg_1_1: true
+  pansp_ratio: 4
+  online_tokenize: true
+
 val:
-  val_duration: 500
-  max_val_iters: -1
+  val_duration: 1000
+  max_val_reduced_iters: -1 # val only `max_val_iters` batches
+  max_val_full_iters: 20

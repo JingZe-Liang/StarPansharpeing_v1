@@ -13,29 +13,30 @@ class HyperSegmentationScore(nn.Module):
         self,
         n_classes: int,
         ignore_index: int | None = None,
+        task="multiclass",
         top_k: int = 1,
-        reduction: Literal["micro", "macro", "weighted", "none"] | None = "macro",
+        reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
         per_class: bool = False,
         include_bg: bool = False,
         use_aggregation: bool = False,
     ):
         super().__init__()
         self.accuracy = Accuracy(
-            task="multiclass",
+            task=task,
             num_classes=n_classes,
             ignore_index=ignore_index,
             top_k=top_k,
             average=reduction,
         )
         self.recall = Recall(
-            task="multiclass",
+            task=task,
             num_classes=n_classes,
             ignore_index=ignore_index,
             top_k=top_k,
             average=reduction,
         )
         self.cohen_kappa = CohenKappa(
-            task="multiclass", num_classes=n_classes, ignore_index=ignore_index
+            task=task, num_classes=n_classes, ignore_index=ignore_index
         )
         self.dice_score = GeneralizedDiceScore(
             include_background=include_bg,
@@ -46,7 +47,7 @@ class HyperSegmentationScore(nn.Module):
             num_classes=n_classes, per_class=per_class, include_background=include_bg
         )
         self.f1_score = F1Score(
-            task="multiclass",
+            task=task,
             num_classes=n_classes,
             average=reduction,
             top_k=top_k,

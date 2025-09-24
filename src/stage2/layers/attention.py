@@ -198,8 +198,8 @@ class NatAttention2d(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
         if qk_norm is not None:
-            self.q_norm = qk_norm(self.head_dim)
-            self.k_norm = qk_norm(self.head_dim)
+            self.q_norm = qk_norm(dim)
+            self.k_norm = qk_norm(dim)
         else:
             self.q_norm = self.k_norm = nn.Identity()
 

@@ -1,35 +1,34 @@
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from math import e
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
-from timm.layers import create_norm
+from timm.layers import create_conv2d, create_norm_act_layer, create_norm_layer
 from torch import Tensor
-from torch.nn.modules.conv import _ConvNd
-
-from src.utilities.train_utils.visualization import get_rgb_image
+from torch.utils.checkpoint import checkpoint
 
 sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
-
 from src.stage1.utilities.losses.repa import (
     load_repa_dino_v3_model as load_dino_v3_model,
 )
-from src.utilities.config_utils import (
-    dataclass_from_dict,
-    function_config_to_basic_types,
-)
-from src.utilities.logging import log
-
-from .adapter import (
+from src.stage2.change_detection.model.adapter import (
     DINOv3_Adapter,  # type: ignore
     DINOv3EncoderAdapter,
     UNetDecoder,
     initialize,
 )
-from .vitamin_conv import MbConvLNBlock
+from src.stage2.change_detection.model.vitamin_conv import MbConvLNBlock
+from src.stage2.layers.blocks import Spatial2DNATBlock
+from src.utilities.config_utils import (
+    dataclass_from_dict,
+    function_config_to_basic_types,
+)
+from src.utilities.logging import log
+from src.utilities.train_utils.visualization import get_rgb_image
 
 DINOv3_INTERACTION_INDEXES = {
     "dinov3_vits16": [2, 5, 8, 11],
@@ -44,7 +43,7 @@ DINOv3_INTERACTION_INDEXES = {
 
 @dataclass
 class DinoConfig:
-    features_per_stage: Any = (256, 256, 256, 256)
+    features_per_stage: Any = (512, 512, 512, 512)
     pretrained_path: Any = field(default=None)  # path to pretrained weights
     model_name: str = "dinov3_vits16"
     pretrained_on: str = "web"
@@ -65,13 +64,32 @@ class AdapterConfig:
 
 @dataclass
 class MultiscaleMBConvStageConfig:
-    channels: list[int] = field(default_factory=lambda: [256, 256, 256, 256])
+    channels: list[int] = field(default_factory=lambda: [512, 512, 512, 512])
     stride: int = 1
     kernel_size: int = 3
     norm_layer: str = "layernorm2d"
     act_layer: str = "gelu"
     expand_ratio: float = 2.0
     block_type: str = "mbconv"
+    depth: int = 1
+
+
+@dataclass
+class MultiSpectralCDStageSkipsConfig:
+    out_chans_per_stage: list = field(default_factory=lambda: [512, 512, 512, 512])
+    norm_layer: str = "layernorm2d"
+    n_skips: int = 4
+    init_dim: int = 64
+    act_layer: str = "gelu"
+    depth_per_stage: int = 1
+    block_kwargs_per_layers: list = field(
+        default_factory=lambda: [
+            dict(k_size=12, stride=4, dilation=4),
+            dict(k_size=8, stride=2, dilation=2),
+            dict(k_size=8, stride=2, dilation=2),
+            dict(k_size=4, stride=1, dilation=1),
+        ]
+    )
 
 
 @dataclass
@@ -81,10 +99,14 @@ class DinoUnetConfig:
     cd_stage: MultiscaleMBConvStageConfig = field(
         default_factory=lambda: MultiscaleMBConvStageConfig()
     )
+    ms_cd_stage: MultiSpectralCDStageSkipsConfig = field(
+        default_factory=lambda: MultiSpectralCDStageSkipsConfig()
+    )
     input_channels: int = 3
     num_classes: int = 3  # 0: unknown, 1: changed, 2: unchanged
     deep_supervision: bool = False
     n_stages: int = 4
+    use_ms_stage: bool = True
     use_latent: bool = True
     ensure_rgb_type: Any = field(default_factory=lambda: [2, 1, 0])
     _debug: bool = False
@@ -101,30 +123,39 @@ def modulate(x, scale, shift):
 class MultiscaleMBConvSkipsStage(nn.Module):
     def __init__(self, cfg: MultiscaleMBConvStageConfig):
         super().__init__()
+        self.grad_checkpointing = False
         self.channels = cfg.channels
         self.stages = len(cfg.channels)
 
         self.stage = nn.ModuleDict()
         for i in range(self.stages):
             if cfg.block_type == "mbconv":
-                self.stage[f"stage_{i}"] = MbConvLNBlock(
-                    in_chs=cfg.channels[i],
-                    out_chs=cfg.channels[i],
-                    cond_chs=None,
-                    stride=cfg.stride,
-                    kernel_size=cfg.kernel_size,
-                    norm_layer=cfg.norm_layer,
-                    act_layer=cfg.act_layer,
-                    expand_ratio=cfg.expand_ratio,
+                self.stage[f"stage_{i}"] = nn.Sequential(
+                    *[
+                        MbConvLNBlock(
+                            in_chs=cfg.channels[i],
+                            out_chs=cfg.channels[i],
+                            cond_chs=None,
+                            stride=cfg.stride,
+                            kernel_size=cfg.kernel_size,
+                            norm_layer=cfg.norm_layer,
+                            act_layer=cfg.act_layer,
+                            expand_ratio=cfg.expand_ratio,
+                        )
+                        for _ in range(cfg.depth)
+                    ]
                 )
             elif cfg.block_type == "conv":
-                self.stage[f"stage_{i}"] = nn.Conv2d(
-                    cfg.channels[i],
-                    cfg.channels[i],
-                    kernel_size=cfg.kernel_size,
-                    stride=cfg.stride,
-                    padding=cfg.kernel_size // 2,
-                    bias=False,
+                self.stage[f"stage_{i}"] = nn.Sequential(
+                    *[
+                        create_conv2d(
+                            cfg.channels[i],
+                            cfg.channels[i],
+                            cfg.kernel_size,
+                            bias=False,
+                        )
+                        for _ in range(cfg.depth)
+                    ]
                 )
             else:
                 raise ValueError(
@@ -132,13 +163,17 @@ class MultiscaleMBConvSkipsStage(nn.Module):
                 )
 
     def forward(self, skip1, skip2):
-        outs = []
+        def _closure(skip1, skip2):
+            outs = []
+            res_skips = [s1 - s2 for s1, s2 in zip(skip1, skip2)]
+            for i in range(self.stages):
+                outs.append(self.stage[f"stage_{i}"](res_skips[i]))
+            return outs
 
-        res_skips = [s1 - s2 for s1, s2 in zip(skip1, skip2)]
-        for i in range(self.stages):
-            outs.append(self.stage[f"stage_{i}"](res_skips[i]))
-
-        return outs
+        if self.grad_checkpointing and self.training:
+            return checkpoint(_closure, skip1, skip2, use_reentrant=False)
+        else:
+            return _closure(skip1, skip2)
 
 
 class LatentSpectralStage(nn.Module):
@@ -157,6 +192,7 @@ class LatentSpectralStage(nn.Module):
             )
 
     def forward(self, skips: list[Tensor], latent: Float[Tensor, "b latent_dim h w"]):
+        """Modulation of skips with latent"""
         assert len(skips) == self.stages, (
             f"Expected {self.stages} skips, got {len(skips)}"
         )
@@ -171,6 +207,89 @@ class LatentSpectralStage(nn.Module):
             outs.append(skip)
 
         return outs
+
+
+# * --- Multispectral CD Attention and Mlp --- #
+
+
+class MultiSpectralCDStageWithDinoSkips(nn.Module):
+    def __init__(
+        self,
+        in_chans,
+        init_dim=64,
+        in_skips_chans_per_stage=[512, 512, 512, 512],
+        out_chans_per_stage=[512, 512, 512, 512],
+        norm_layer="layernorm2d",
+        act_layer="gelu",
+        n_skips=4,
+        depth_per_stage=1,
+        block_kwargs_per_layers=None,
+    ):
+        super().__init__()
+        dim = init_dim
+        self.stem = nn.Sequential(
+            create_conv2d(in_chans, dim, kernel_size=3, bias=False),
+            create_norm_act_layer(norm_layer, dim, act_layer),
+            create_conv2d(dim, dim, kernel_size=3, depthwise=True, bias=True),
+        )
+        self.n_skips = n_skips
+
+        if block_kwargs_per_layers is None:
+            block_kwargs_per_layers = [
+                dict(k_size=12, stride=4, dilation=4),
+                dict(k_size=8, stride=2, dilation=2),
+                dict(k_size=8, stride=2, dilation=2),
+                dict(k_size=4, stride=1, dilation=1),
+            ]
+        assert len(block_kwargs_per_layers) == n_skips == len(out_chans_per_stage), (
+            f"Expected {n_skips} blocks, got {len(block_kwargs_per_layers)=}, {len(out_chans_per_stage)=}"
+        )
+        self.stages = nn.ModuleDict()
+        for i in range(n_skips):
+            # stage and downsample
+            block = nn.Sequential(
+                *[
+                    Spatial2DNATBlock(
+                        dim, norm_layer=norm_layer, **block_kwargs_per_layers[i]
+                    )
+                    for _ in range(depth_per_stage)
+                ]
+            )
+            # first stage no downsample
+            stride = 1 if i == 0 else 2
+            down = create_conv2d(dim, dim * 2, kernel_size=3, stride=stride)
+            self.stages[f"stage_{i}"] = nn.Sequential(block, down)
+
+            # fuse skips and out
+            to_out = nn.Sequential(
+                create_conv2d(
+                    dim * 2 + in_skips_chans_per_stage[i],
+                    out_chans_per_stage[i],
+                    kernel_size=1,
+                    bias=False,
+                ),
+                create_norm_layer(norm_layer, out_chans_per_stage[i]),
+            )
+            self.stages[f"stage_{i}_out"] = to_out
+            dim = dim * 2
+
+    def forward(self, x, skips: list[Tensor]):
+        # per-layer downsample and to out skips
+        x = self.stem(x)
+
+        skips_new = []
+        for i in range(self.n_skips):
+            # stage
+            stage = self.stages[f"stage_{i}"]
+            x = stage(x)
+
+            # fuse skips
+            skip = skips[i]
+            skip_new = torch.cat([x, skip], dim=1)
+            skip_new = self.stages[f"stage_{i}_out"](skip_new)
+            skips_new.append(skip_new)
+
+        return skips_new
 
 
 # * --- Dino backbone change detection network --- #
@@ -195,8 +314,6 @@ class DinoUNet(nn.Module):
         n_stages = cfg.n_stages
         if isinstance(n_conv_per_stage, int):
             n_conv_per_stage = [n_conv_per_stage] * n_stages
-        # if isinstance(n_conv_per_stage_decoder, int):
-        #     n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
 
         # Ensure we have 4 stages to match DINOv3_Adapter output
         if cfg.n_stages != 4:
@@ -221,6 +338,12 @@ class DinoUNet(nn.Module):
 
         # Create DINOv3 encoder
         self.encoder = self._create_dinov3_encoder(self.cfg)
+
+        self.use_ms_cd_stage = self.cfg.use_ms_stage
+        if self.use_ms_cd_stage:
+            self.ms_cd_stage = MultiSpectralCDStageWithDinoSkips(
+                in_chans=cfg.input_channels, **asdict(cfg.ms_cd_stage)
+            )
 
         # Create DINOv3 skips stage for change detection
         # works like a priori to obtain the different areas
@@ -286,10 +409,10 @@ class DinoUNet(nn.Module):
             conv_inplane=64,
             n_points=4,
             deform_num_heads=16,
-            drop_path_rate=0.3,
+            drop_path_rate=0.1,
             init_values=0.0,
             with_cffn=True,
-            cffn_ratio=0.25,
+            cffn_ratio=0.5,
             deform_ratio=0.5,
             add_vit_feature=True,
             use_extra_extractor=True,
@@ -326,26 +449,36 @@ class DinoUNet(nn.Module):
 
     def forward(
         self,
-        x1: Float[Tensor, "b c h w"],
-        x2: Float[Tensor, "b c h w"],
-        cond1: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
-        cond2: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
+        pixel_in: list[Tensor],
+        latent_in: list[Tensor],
     ):
-        x1 = self._ensure_rgb_input(x1)
-        x2 = self._ensure_rgb_input(x2)
+        x1, x2 = pixel_in
+        cond1, cond2 = latent_in
 
-        skips1 = self.encoder(x1)
-        skips2 = self.encoder(x2)
+        x1_rgb = self._ensure_rgb_input(x1)
+        x2_rgb = self._ensure_rgb_input(x2)
 
+        # dino encoder
+        skips1 = self.encoder(x1_rgb)  # s, s//2, s//4, s//8
+        skips2 = self.encoder(x2_rgb)
+
+        # nat multispectral encoder
+        if self.use_ms_cd_stage:
+            skips1 = self.ms_cd_stage(x1, skips1)
+            skips2 = self.ms_cd_stage(x2, skips2)
+
+        # latent modulator
         skips1 = self.latent_modulator(skips1, cond1) if self.use_latent else skips1
         skips2 = self.latent_modulator(skips2, cond2) if self.use_latent else skips2
 
+        # cd stage
         skips = self.cd_stage(skips1, skips2)
 
         fused_cond = None
         if self.use_latent:
             fused_cond = self.fuse_conv(torch.cat([cond1, cond2], dim=1))  # type: ignore
 
+        # decoder
         output = self.decoder(skips, fused_cond)
 
         return output
@@ -411,7 +544,7 @@ def test_model():
     cond2 = torch.randn(1, 16, 32, 32).cuda()  # Condition for second image
 
     print("\n=== Basic Forward Pass ===")
-    output = model(x1, x2, cond1, cond2)
+    output = model((x1, x2), (cond1, cond2))
     print(f"Output shape: {output.shape}")
 
     # Validate output

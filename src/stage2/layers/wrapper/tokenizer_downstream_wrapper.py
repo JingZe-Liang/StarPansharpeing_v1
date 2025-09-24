@@ -16,11 +16,13 @@ from src.stage1.cosmos.tokenizer_inference import (
     scale_shift_latent,
     un_scale_shift_latent,
 )
+from typing_extensions import deprecated
 from stage2.utilities.amotized.amotized_model_wrapper import AmotizedModelMixin
 
 type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None
 
 
+@deprecated("Use DownstreamModelTokenizerWrapper")
 class TokenizerHyperDownstreamWrapper(TokenizerInferenceWrapper, AmotizedModelMixin):
     def __init__(
         self,

@@ -64,7 +64,7 @@ class PansharpeningOutput:
 class PansharpeningTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
-        self.tokenizer_cfg = cfg.tokenizer
+        # Tokenizer configuration is now handled by wrapper
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -124,9 +124,7 @@ class PansharpeningTrainer:
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
-        # setup the tokenizer
-        self.online_tokenize = self.train_cfg.online_tokenize
-        self.setup_tokenizer()  # must setup the tokenizer to decode the image
+        # setup the pansharpening model
         self.setup_pansharpening_model()  # setup the pansharpening model
 
         # optimizers and lr schedulers
@@ -160,7 +158,7 @@ class PansharpeningTrainer:
         # is partial
         if isinstance(self.pansp_model, partial):
             # add the decode fn
-            decoder_fn = self.tokenizer.decode
+            decoder_fn = self.get_decoder_fn()  # wrapper will handle decoding
             orignal_func = self.pansp_model.func
             known_args, known_kwargs = self.pansp_model.args, self.pansp_model.keywords
             # assert class must be init
@@ -168,7 +166,7 @@ class PansharpeningTrainer:
                 *known_args, decoder_fn=decoder_fn, **known_kwargs
             )
             self.log_msg(
-                f"[Pansharpening Model]: use partial model {orignal_func.__name__} with add 'decode_fn'={decoder_fn.__name__}"
+                f"[Pansharpening Model]: use partial model {orignal_func.__name__} with wrapper decoder"
             )
         self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
             self.pansp_model
@@ -186,9 +184,7 @@ class PansharpeningTrainer:
             _unwrapped_model.set_grad_checkpointing(True)  # type: ignore
 
         if self.pansp_amotizing_pixels:
-            assert hasattr(self, "tokenizer"), (
-                "pansharpening model must be used with tokenizer for amotizing pixels"
-            )
+            # wrapper will handle tokenization for amotizing pixels
             self.backward_detokenizer = True
         else:
             self.backward_detokenizer = self.train_cfg.backward_detokenizer
@@ -200,114 +196,6 @@ class PansharpeningTrainer:
         self.log_msg(
             f"use pansharpening model: {pansp_name}, amotizing pixels: {self.pansp_amotizing_pixels}"
         )
-
-    def setup_tokenizer(self):
-        tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
-        self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
-
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
-            )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
-            )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
-            if self.tokenizer_not_req_grad:
-                self.tokenizer_encoder.requires_grad_(False)
-                self.tokenizer_decoder.requires_grad_(False)
-
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
-
-            self.use_quantizer = self.quantizer is not None
-
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-
-        else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
-            self.norm_z = False  # in the model, not in trainer
-            self.tokenizer: nn.Module = hydra.utils.instantiate(self.cfg.tokenizer)
-
-            # not lora mixin, handled by this trainer
-            if not self.train_cfg.is_lora_mixin:
-                if self.train_cfg.peft_pretrained_path is not None:
-                    self.log_msg(
-                        f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                    )
-                    self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
-                        base_model=self.tokenizer,
-                        base_model_pretrained_path=getattr(
-                            self.train_cfg, "base_model_pretrained_path", None
-                        ),
-                        peft_pretrained_path=self.train_cfg.peft_pretrained_path,
-                        merge_and_unload=True,
-                    )
-
-            # quantizer in the tokenizer, not handled by this trainer
-            self.quantizer = getattr(self.tokenizer, "quantizer", None)
-            self.use_quantizer = self.quantizer is not None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
-            if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
-
-        # set to eval and gradients requirements
-        backward_decoder = self.cfg.pansharp_model.backward_decoder
-        learn_decoder = self.cfg.pansharp_model.learn_decoder
-        decoder_req_grad = backward_decoder or learn_decoder
-        if self.sep_enc_dec:
-            self.tokenizer_encoder.eval()
-            self.tokenizer_decoder.eval()
-            self.tokenizer.to(self.device, self.dtype)
-            self.tokenizer.to(self.device, self.dtype)
-            self.tokenizer_encoder.requires_grad_(False)
-            self.tokenizer_decoder.requires_grad_(decoder_req_grad)
-        else:
-            self.tokenizer.eval()
-            self.tokenizer.to(self.device, self.dtype)
-            self.tokenizer.encoder.requires_grad_(False)
-            self.tokenizer.decoder.requires_grad_(decoder_req_grad)
-
-        if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-            self.quantizer.eval()
-
-        self.log_msg("freeze the tokenizer and quantizer (if used).")
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -596,35 +484,7 @@ class PansharpeningTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
             self.pansp_model.dtype = torch.float
-
-        # tokenizer
-        if self.train_cfg.prepare_tokenizer_in_accelerator:
-            if self.sep_enc_dec:
-                # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
-                self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
-                self.accelerator._models.pop(-1)
-            else:
-                # FIXME: may return the base model. Why?
-                self.tokenizer = self.accelerator.prepare(self.tokenizer)
-                self.accelerator._models.pop(-1)
-
-        # quantizer
-        if self.quantizer is not None and self.use_quantizer:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            self.accelerator._models.pop(-1)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -643,42 +503,6 @@ class PansharpeningTrainer:
             # not support ema when is deepspeed zero2 or zero3
             return
         self.ema_pansp_model.update()
-
-    def forward_tokenizer(
-        self, x: torch.Tensor, mode: str = "encode", no_grad=True
-    ) -> dict:
-        assert hasattr(self, "tokenizer"), "Tokenizer not found"
-        grad_ctx = torch.no_grad() if no_grad else nullcontext()
-        x = self.to_tokenizer_range(x)
-
-        latent_q, recon = None, None
-        with self.accelerator.autocast():
-            if self.sep_enc_dec:
-                to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                to_dec = lambda x: self.tokenizer_decoder(x)
-
-                with grad_ctx:
-                    if mode == "encode":
-                        latent = to_enc(x)  # x is the image
-                        if self.quantizer is not None:
-                            latent_q, q_loss, q_info = self.quantizer(latent)
-                        else:
-                            latent_q = latent
-                    elif mode == "decode":
-                        recon = to_dec(x)  # x is the latent
-            else:
-                with grad_ctx:
-                    if mode == "encode":
-                        latent_q = self.tokenizer.encode(x)
-                        if isinstance(latent_q, tuple):
-                            latent_q = latent_q[0]
-                    elif mode == "decode":
-                        _bc = [x.shape[0], self.dataset_cfg.consts.bands]
-                        recon = self.tokenizer.decode(x, _bc)
-                        if isinstance(recon, tuple):
-                            recon = recon[0]
-
-        return dict(latent=latent_q, recon=recon)
 
     def get_global_step(self, mode="train"):
         # TODO: add val state
@@ -739,9 +563,12 @@ class PansharpeningTrainer:
                 pred_sr_from_latent = out.get("pixel_from_latent", None)
             else:
                 pred_latent = pansp_model(lrms_latent, pan_latent)
-                pred_sr = self.forward_tokenizer(
-                    pred_latent, mode="decode", no_grad=True
-                )["recon"]
+                # Use wrapper decoder for pixel output
+                if hasattr(self.pansp_model, "decode"):
+                    pred_sr = self.pansp_model.decode(pred_latent)
+                else:
+                    # If no decode method, return None for pixel output
+                    pred_sr = None
                 pred_sr_from_latent = None
 
             # loss
@@ -815,38 +642,27 @@ class PansharpeningTrainer:
         elif isinstance(x, dict):
             return {k: self._cast_to_dtype(v) for k, v in x.items()}
 
-    def _to_tokenizer_range(self, x: torch.Tensor | None):
-        if x is None:
-            return None
-        if not self.train_cfg.to_neg_1_1:  # dataset gives data range [0, 1]
-            return x * 2 - 1
-        return x
-
     def train_step(self, batch: BatchInput):
         lrms_latent = pan_latent = hrms_latent = None
         batch = self._cast_to_dtype(batch)
 
-        # offline latents
+        # Get latents from batch - wrapper handles tokenization
         if keys_in_dict(["lrms_latent", "pan_latent", "hrms_latent"], batch):  # type: ignore
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
             hrms_latent = batch["hrms_latent"].to(self.device, self.dtype)
-
-        # tokenizer online
         else:
-            assert self.online_tokenize and (
-                hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
-            ), "tokenizer not found for online tokenize"
+            # Wrapper expects pixel inputs directly
             lrms, pan, hrms = batch["lrms"], batch["pan"], batch["hrms"]
-            lrms, pan, hrms = map(self._to_tokenizer_range, (lrms, pan, hrms))
+            # Convert to tokenizer range if needed
+            lrms, pan, hrms = map(self.to_tokenizer_range, (lrms, pan, hrms))
             pan = pan.repeat_interleave(lrms.shape[1], dim=1)
-            lrms_latent = self.forward_tokenizer(lrms)["latent"]
-            pan_latent = self.forward_tokenizer(pan)["latent"]
-            hrms_latent = self.forward_tokenizer(hrms)["latent"]
+
+            # Wrapper will handle encoding internally
+            # Just pass the pixel data to the model
+            lrms_latent = lrms
+            pan_latent = pan
+            hrms_latent = hrms
 
         quality_track_n = self.train_cfg.track_metrics_duration
         # start track after n steps
@@ -881,11 +697,12 @@ class PansharpeningTrainer:
                 self.check_quality(
                     self.pan_acc_reduced, pred_sr=pred_img, gt=batch["hrms"]
                 )
-                self.check_quality(
-                    self.pan_acc_reduced_latent,
-                    pred_sr=pred_img,
-                    gt=self.forward_tokenizer(hrms_latent, mode="decode"),
-                )
+                # Skip latent quality check as tokenizer is handled by wrapper
+                # self.check_quality(
+                #     self.pan_acc_reduced_latent,
+                #     pred_sr=pred_img,
+                #     gt=self.forward_tokenizer(hrms_latent, mode="decode"),
+                # )
 
         self.step_train_state()
 
@@ -1030,10 +847,11 @@ class PansharpeningTrainer:
         assert self.online_tokenize, "only support online tokenize for val full"
 
         def _model_step_fn(lrms, pan):
-            lrms, pan = map(self._to_tokenizer_range, (lrms, pan))
+            lrms, pan = map(self.to_tokenizer_range, (lrms, pan))
             pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
-            lrms_latent = self.forward_tokenizer(lrms)["latent"]
-            pan_latent = self.forward_tokenizer(pan_)["latent"]
+            # Wrapper handles encoding internally
+            lrms_latent = lrms
+            pan_latent = pan_
 
             pred_sr = self.forward_pansp_model(
                 lrms, pan, None, lrms_latent, pan_latent, None, ema=False
@@ -1096,13 +914,14 @@ class PansharpeningTrainer:
             batch.get("hrms", None),
         )
         if self.online_tokenize:
-            lrms, pan, hrms = map(self._to_tokenizer_range, (lrms, pan, hrms))
+            lrms, pan, hrms = map(self.to_tokenizer_range, (lrms, pan, hrms))
             pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
-            lrms_latent = self.forward_tokenizer(lrms)["latent"]
-            pan_latent = self.forward_tokenizer(pan_)["latent"]
+            # Wrapper handles encoding internally
+            lrms_latent = lrms
+            pan_latent = pan_
             gt_latent = None
             if hrms is not None:
-                gt_latent = self.forward_tokenizer(hrms)["latent"]
+                gt_latent = hrms
         else:
             lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
             pan_latent = batch["pan_latent"].to(self.device, self.dtype)
