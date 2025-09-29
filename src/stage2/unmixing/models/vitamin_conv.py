@@ -4,6 +4,8 @@ import torch.nn as nn
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 
+from src.utilities.config_utils import dataclass_from_dict
+
 from ...layers import MbConvStages
 
 
@@ -28,14 +30,16 @@ class ConvCfg:
 
 @dataclass
 class VitaminCfg:
-    stem_width: int = 32
-    embed_dim: list[int] = field(default_factory=lambda: [64, 192, 192])
-    depths: list[int] = field(default_factory=lambda: [2, 2, 2])
+    stem_width: int
+    embed_dim: list[int]
+    depths: list[int]
     input_channel: int = 8
-    output_channel: int = 8
     condition_channel: int = 256
-    use_residual: bool = False
+    out_channel: int = 8
     conv_cfg: ConvCfg = field(default_factory=ConvCfg)
+    abunds_restriction: str = "softmax"
+    # decrepeted
+    use_residual: bool = False
 
 
 def create_conv3x3_same(in_chan, out_chan):
@@ -48,7 +52,7 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         patchers = nn.ModuleDict()
-        patchers["img_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
+        patchers["hyper_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
@@ -63,20 +67,36 @@ class VitaminModel(nn.Module):
             cond_width=cfg.condition_channel,
             **asdict(cfg.conv_cfg),
         )
-        self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.output_channel)
+        self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.out_channel)
+        self.abunds_restriction = self._create_abunds_restiction(cfg)
+
+    def _create_abunds_restiction(self, cfg: VitaminCfg):
+        if cfg.abunds_restriction == "softmax":
+            abunds_restriction = nn.Softmax(dim=1)
+        elif cfg.abunds_restriction == "sigmoid":
+            abunds_restriction = nn.Sigmoid()
+        elif cfg.abunds_restriction == "relu":
+            abunds_restriction = nn.ReLU()
+        else:
+            raise ValueError(f"{cfg.abunds_restriction} is not supported")
+        return abunds_restriction
 
     def forward(self, img, cond):
-        x = self.patchers["img_conv"](img)
+        x = self.patchers["hyper_conv"](img)
         cond = self.patchers["condition_conv"](cond)
 
         # stages
         x = self.stages(x, cond)
         x = self.out_conv(x)
+        x = self.abunds_restriction(x)
 
-        if self.cfg.use_residual:
-            x = x + img
+        return x  # abunds
 
-        return x
+    @classmethod
+    def create_model(cls, **overrides):
+        config: VitaminCfg = dataclass_from_dict(VitaminCfg, overrides)
+        model = cls(config)
+        return model
 
 
 if __name__ == "__main__":

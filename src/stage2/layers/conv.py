@@ -5,7 +5,7 @@ import torch.utils.checkpoint
 from timm.layers.create_act import create_act_layer, get_act_layer
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
-from timm.layers.create_norm_act import get_norm_act_layer
+from timm.layers.create_norm_act import create_norm_act_layer, get_norm_act_layer
 from timm.layers.drop import DropPath
 from timm.layers.helpers import make_divisible
 from timm.models import checkpoint_seq, named_apply
@@ -96,27 +96,33 @@ class MbConvLNBlock(nn.Module):
         self.act2 = create_act_layer(act_layer, inplace=True)
         self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=True)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.cond_conv_kxk = create_conv2d(
-            cond_chs, mid_chs, 3, stride=1, padding=1, bias=True
+        self.cond_conv_kxk = nn.Sequential(
+            create_conv2d(cond_chs, out_chs, 1, bias=True),
+            create_norm_act_layer("layernorm2d", mid_chs // 2, "gelu"),
+            create_conv2d(out_chs, out_chs * 2, 3, bias=False, groups=out_chs),
         )
 
     def forward_(self, x, cond):
         shortcut = self.shortcut(x)
 
         x = self.pre_norm(x)
-        x = self.down(x)  # nn.Identity()
+        x = self.down(x)
 
         # 1x1 expansion conv & act
         x = self.conv1_1x1(x)
         x = self.act1(x)
 
         # (strided) depthwise 3x3 conv & act
-        cond = self.cond_conv_kxk(cond)
-        x = self.conv2_kxk(x) + cond
+        x = self.conv2_kxk(x)
         x = self.act2(x)
 
         # 1x1 linear projection to output width
+        scale, shift = self.cond_conv_kxk(cond).chunk(2, dim=1)
         x = self.conv3_1x1(x)
+        # modulate
+        x = x * (1 + scale) + shift
+
+        # output
         x = self.drop_path(x) + shortcut
 
         return x

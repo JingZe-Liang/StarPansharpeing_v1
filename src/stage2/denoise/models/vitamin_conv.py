@@ -47,7 +47,7 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         patchers = nn.ModuleDict()
-        patchers["noisy_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
+        patchers["hyper_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
@@ -65,7 +65,7 @@ class VitaminModel(nn.Module):
         self.out_conv = create_conv3x3_same(cfg.embed_dim[-1], cfg.input_channel)
 
     def forward(self, noisy, cond):
-        x = self.patchers["noisy_conv"](noisy)
+        x = self.patchers["hyper_conv"](noisy)
         cond = self.patchers["condition_conv"](cond)
 
         # stages

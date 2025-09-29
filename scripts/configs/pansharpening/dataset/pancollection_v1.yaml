@@ -84,21 +84,7 @@ train:
     ## H5 Cfgs
     h5file: ${dataset.dataset_paths.${dataset.cfgs.train_name}}
     norm: 2047.0
-    to_neg_1_1: true
-
-    ## Webdataset Cfgs
-    # wds_paths: ${dataset.dataset_paths.${dataset.cfgs.train_name}}
-    # batch_size: ${dataset.cfgs.batch_size_train}
-    # num_workers: ${dataset.cfgs.num_workers}
-    # shuffle_size: 100
-    # to_neg_1_1: true
-    # resample: true
-    # prefetch_factor: ${dataset.cfgs.prefetch_factor}
-    # add_satellite_name: true
-    # drop_last: ${dataset.cfgs.train_drop_last}
-    # norm: 2047.0
-    # transform_prob: 0.5
-    # img_size: 256
+    to_neg_1_1: false
 
   loader_kwargs:
     batch_size: ${dataset.cfgs.batch_size_train}
@@ -114,18 +100,7 @@ val:
     ## H5 Cfgs
     h5file: ${dataset.dataset_paths.${dataset.cfgs.val_name}}
     norm: 2047.0
-    to_neg_1_1: true
-
-    # wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_name}}
-    # batch_size: ${dataset.cfgs.batch_size_val}
-    # num_workers: 1
-    # resample: false
-    # shuffle_size: 10
-    # to_neg_1_1: true
-    # prefetch_factor: ${dataset.cfgs.prefetch_factor}
-    # add_satellite_name: true
-    # drop_last: ${dataset.cfgs.val_drop_last}
-    # norm: 2047.0
+    to_neg_1_1: false
 
   loader_kwargs:
     batch_size: ${dataset.cfgs.batch_size_val}
@@ -141,17 +116,7 @@ val_full:
     ## H5 Cfgs
     h5file: ${dataset.dataset_paths.${dataset.cfgs.val_full_name}}
     norm: 2047.0
-    to_neg_1_1: true
-
-    # wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_full_name}}
-    # batch_size: 1
-    # to_neg_1_1: true
-    # resample: true
-    # num_workers: 1
-    # shuffle_size: 10
-    # add_satellite_name: true
-    # drop_last: ${dataset.cfgs.val_drop_last}
-    # norm: 2047.0
+    to_neg_1_1: false
 
   loader_kwargs:
     batch_size: ${dataset.cfgs.batch_size_val}

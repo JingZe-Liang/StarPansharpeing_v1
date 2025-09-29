@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Any, Literal
 
 
@@ -31,3 +32,40 @@ def keys_in_dict(
         return all(k in d for k in keys)
     else:
         raise ValueError(f"Invalid mode: {mode}. Must be 'any' or 'all'")
+
+
+def prefix_dict_keys(d: dict[str, Any], prefix: str, sep=".") -> dict[str, Any]:
+    """
+    Add a prefix to all keys in a dictionary.
+
+    Args:
+        d: Input dictionary
+        prefix: Prefix string to add to each key
+        sep: Separator between prefix and original key (default: ".")
+
+    Returns:
+        dict: New dictionary with prefixed keys
+    """
+    return {f"{prefix}{sep}{k}": v for k, v in d.items()}
+
+
+def parse_dict_keys(d: dict, sep=".") -> dict[str, dict[str, Any]]:
+    """
+    Parse dictionary keys with a separator into a nested dictionary.
+    Args:
+        d: Input dictionary with keys containing separators
+        sep: Separator string used in keys (default: ".")
+    Returns:
+        dict: Nested dictionary with top-level keys as prefixes and values as sub-dictionaries
+
+    """
+
+    out = defaultdict(dict)
+    prefixes = []
+    for k, v in d.items():
+        prefix, orig_k = k.split(sep, 1)
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+            out = defaultdict(dict)
+        out[prefix][orig_k] = v
+    return out

@@ -22,26 +22,22 @@ from ema_pytorch import EMA
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from peft import PeftModel
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
 
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
+from src.data.window_slider import WindowSlider
 from src.stage2.unmixing.loss import UnmixingLoss
 from src.stage2.unmixing.metrics import UnmixingMetrics, endmembers_visualize
+from src.stage2.unmixing.models.model import LatentUnmixingModel
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
 from src.utilities.logging import dict_round_to_list_str
-from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
-from stage2.unmixing.models.model import LatentUnmixingModel
 
 heavyball = lazy_loader.load("heavyball")
 
@@ -70,8 +66,14 @@ BatchInput = TypedDict(
 
 class UnmixingTrainer:
     def __init__(self, cfg: DictConfig):
+        """Initialize the unmixing trainer.
+
+        Parameters
+        ----------
+        cfg : DictConfig
+            Configuration dictionary containing all settings
+        """
         self.cfg = cfg
-        self.tokenizer_cfg = cfg.tokenizer
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -118,20 +120,18 @@ class UnmixingTrainer:
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
+            self.dataset_cfg.train_loader
         )
         self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
+            self.dataset_cfg.val_loader
         )
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
-        # setup the tokenizer
-        self.online_tokenize = self.train_cfg.online_tokenize
-        self.setup_tokenizer()  # must setup the tokenizer to decode the image
-        self.setup_unmixing_model()  # setup the denoising model
+        # setup the unmixing model
+        self._model_em_init = self.setup_unmixing_model()  # setup the unmixing model
 
         # optimizers and lr schedulers
         self.optim, self.sched = self.get_optimizer_lr_scheduler()
@@ -159,17 +159,10 @@ class UnmixingTrainer:
         torch.cuda.empty_cache()
 
     def setup_unmixing_model(self):
-        self.model = hydra.utils.instantiate(self.cfg.unmixing_model)
-        self.unmixing_amotizing_pixels = self.accelerator.unwrap_model(
-            self.model
-        ).amotizing_pixels
-        if self.unmixing_amotizing_pixels:
-            assert hasattr(self, "tokenizer"), (
-                "unmixing model must be used with tokenizer for amotizing pixels"
-            )
-            self.backward_detokenizer = True
-        else:
-            self.backward_detokenizer = self.train_cfg.backward_detokenizer
+        self.model = hydra.utils.instantiate(self.cfg.unmixing_model).to(
+            self.device, self.dtype
+        )
+        self.unmixing_amotizing_pixels = self.model.downstream_model.amotizing_pixels
 
         pansp_name = (
             getattr(self.train_cfg, "unmixing_name", None)
@@ -179,102 +172,37 @@ class UnmixingTrainer:
             f"use unmixing model: {pansp_name}, amotizing pixels: {self.unmixing_amotizing_pixels}"
         )
 
-    def setup_tokenizer(self):
-        tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
-        self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
+        # Set gradient checkpointing
+        if self.train_cfg.set_grad_checkpoint and hasattr(
+            self.model, "set_grad_checkpointing"
+        ):
+            self.model.set_grad_checkpoint(True)
 
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
+        # Initialize the model endmember using VCA
+        if self.train_cfg.init_endmembers:
+            assert hasattr(self.model.downstream_model, "init_endmembers"), (
+                "The model does not support endmember initialization"
             )
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
-            )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
-            )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
+            self._inited_endmember = False
 
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
+            # Return the a function that init the endmembers of the unmixing model
+            # and then for other steps we skip the initialization
+            def _model_init_EM_delayed(endmembers: Tensor):
+                if self._inited_endmember:
+                    return
 
-            self.use_quantizer = self.quantizer is not None
-
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-
-        else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
-            self.norm_z = False  # in the model, not in trainer
-            self.tokenizer: TokenizerLoRAMixin | PeftModel | nn.Module = (
-                hydra.utils.instantiate(self.cfg.tokenizer)
-            )
-
-            if self.train_cfg.peft_pretrained_path is not None:
+                endmembers.squeeze_(0)  # remove batch dim
+                assert endmembers.ndim == 2, "endmembers must be 2D"
+                if endmembers.shape[0] < endmembers.shape[1]:  # [c, d]
+                    endmembers = endmembers.T
+                self.model.downstream_model.init_endmembers(endmembers)  # type: ignore
+                self._inited_endmember = True
                 self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
+                    f"[Unmixing Model]: endmembers initialized with shape {endmembers.shape}"
                 )
-                self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
-                    base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
-                    peft_pretrained_path=self.train_cfg.peft_pretrained_path,
-                    merge_and_unload=True,
-                )
-
-            # quantizer in the tokenizer, not handled by this trainer
-            # vq, bsq, fsq, kl
-            self.use_quantizer = hasattr(self.tokenizer, "quantizer")
-            self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
-            if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
-
-        # set to eval
-        if self.sep_enc_dec:
-            self.tokenizer_encoder.eval()
-            self.tokenizer_decoder.eval()
         else:
-            self.tokenizer.eval()
-
-        if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-            self.quantizer.eval()
-
-        self.log_msg("freeze the tokenizer and quantizer (if used).")
-        self._model_inited_endmembers = False
+            _model_init_EM_delayed = lambda endmembers: None
+        return _model_init_EM_delayed
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -543,34 +471,7 @@ class UnmixingTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
             self.model.dtype = torch.float
-
-        # tokenizer
-        if self.train_cfg.prepare_tokenizer_in_accelerator:
-            if self.sep_enc_dec:
-                # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
-                self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
-                self.accelerator._models.pop(-1)
-            else:
-                self.tokenizer = self.accelerator.prepare(self.tokenizer)
-                self.accelerator._models.pop(-1)
-
-        # quantizer
-        if self.quantizer is not None and self.use_quantizer:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            self.accelerator._models.pop(-1)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -597,37 +498,39 @@ class UnmixingTrainer:
     def forward_tokenizer(
         self, x: torch.Tensor, mode: str = "encode", no_grad=True
     ) -> dict:
-        assert hasattr(self, "tokenizer"), "Tokenizer not found"
+        """
+        Forward through tokenizer using wrapper functionality.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor (image for encode, latent for decode)
+        mode : str
+            Either 'encode' or 'decode'
+        no_grad : bool
+            Whether to use no_grad context
+
+        Returns
+        -------
+        dict
+            Dictionary containing 'latent' (for encode) or 'recon' (for decode)
+        """
         grad_ctx = torch.no_grad() if no_grad else nullcontext()
 
-        latent_q, recon = None, None
         with grad_ctx and self.accelerator.autocast():
-            if self.sep_enc_dec:
-                to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                to_dec = lambda x: self.tokenizer_decoder(x)
-
-                if mode == "encode":
-                    latent = to_enc(x)  # x is the image
-                    if self.quantizer is not None:
-                        latent_q, q_loss, q_info = self.quantizer(latent)
-                    else:
-                        latent_q = latent
-                elif mode == "decode":
-                    recon = to_dec(x)  # x is the latent
+            if mode == "encode":
+                # Use wrapper encode method
+                latent = self.model.encode(x)
+                return dict(latent=latent, recon=None)
+            elif mode == "decode":
+                # Use wrapper decode method
+                bands = self.get_training_sample_channels()
+                recon = self.model.decode(x, bands)
+                if isinstance(recon, tuple):
+                    recon = recon[0]  # construction is the first output
+                return dict(latent=None, recon=recon)
             else:
-                to_enc = lambda img: self.tokenizer.encode(img)
-                to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
-
-                if mode == "encode":
-                    latent = to_enc(x)
-                else:
-                    bands = self.get_training_sample_channels()
-                    bs_chan = [x.shape[0], bands]
-                    recon = to_dec(x, bs_chan)
-                    if isinstance(recon, tuple):
-                        recon = recon[0]  # construction is the first output
-
-        return dict(latent=latent_q, recon=recon)
+                raise ValueError(f"Unsupported mode: {mode}")
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
@@ -690,8 +593,31 @@ class UnmixingTrainer:
             self.log_msg("initialize the endmembers of the unmixing model")
 
     def forward_unmixing_model(
-        self, img, img_latent, abunds_gt=None, endmember_gt=None
-    ):
+        self,
+        img: torch.Tensor,
+        img_latent: torch.Tensor | None,
+        abunds_gt: torch.Tensor | None = None,
+        endmember_gt: torch.Tensor | None = None,
+    ) -> UnmixingModelOutput:
+        """
+        Forward pass through the unmixing model.
+
+        Parameters
+        ----------
+        img : torch.Tensor
+            Input hyperspectral image
+        img_latent : torch.Tensor | None
+            Latent representation, if None wrapper will encode img
+        abunds_gt : torch.Tensor | None
+            Ground truth abundances
+        endmember_gt : torch.Tensor | None
+            Ground truth endmembers
+
+        Returns
+        -------
+        UnmixingModelOutput
+            Model output containing predictions and losses
+        """
         with self.accelerator.autocast():
             # Forward pass through the model to get unmixing results
             model_output = self.model(img, img_latent)
@@ -769,24 +695,26 @@ class UnmixingTrainer:
         return self.unmixing_metrics._compute_metrics()
 
     def train_step(self, batch: BatchInput):
-        # < Latent obtaining
+        """
+        Execute one training step for unmixing model.
+
+        Parameters
+        ----------
+        batch : BatchInput
+            Batch input containing image, abundances, endmembers, and optionally latents
+
+        Note
+        ----
+        The wrapper handles tokenization internally. If latents are not provided in the batch,
+        the wrapper will encode the image to latents automatically.
+        """
+        # Get latents from batch - wrapper handles tokenization
         img_latent = None
-        # offline latents
         if "img_latent" in batch:
             img_latent = batch["img_latent"].to(self.device, self.dtype)
-        # tokenizer online
-        else:
-            assert self.online_tokenize and (
-                hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
-            ), "tokenizer not found for online tokenize"
-            img_latent = self.forward_tokenizer(batch["img"])["latent"]
 
         # Init model endmembers
-        self._init_model_endmembers(batch["init_vca_endmembers"].to(self.device))
+        self._model_em_init(batch["init_vca_endmembers"].to(self.device))
 
         # < Unmixing training step
         with self.accelerator.accumulate(self.model):
@@ -804,7 +732,7 @@ class UnmixingTrainer:
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
-            self.log_msg(f"[Train Tok]: {_log_losses}")
+            self.log_msg(f"[Train Unmixing]: {_log_losses}")
 
             # tensorboard log
             self.tenb_log_any("metric", train_out.log_losses, self.global_step)
@@ -815,10 +743,30 @@ class UnmixingTrainer:
         strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
         return " - ".join(strings)
 
+    def _cast_dtype(self, x: dict | Tensor):
+        if isinstance(x, dict):
+            return {
+                k: v.to(self.device, self.dtype) if torch.is_tensor(v) else v
+                for k, v in x.items()
+            }
+        elif isinstance(x, Tensor):
+            return x.to(self.device, self.dtype)
+        else:
+            raise ValueError("Input must be a dict or Tensor")
+
     def infinity_train_loader(self):
         while True:
-            for batch in self.train_dataloader:
-                yield batch
+            w_size = self.dataset_cfg.cfgs.window_size
+            stride = self.dataset_cfg.cfgs.stride
+            if w_size > 0:
+                slider = WindowSlider(
+                    slide_keys=["img", "abunds"], window_size=w_size, stride=stride
+                )
+                for batch in slider.create_window_generator(self.train_dataloader):
+                    yield self._cast_dtype(batch)
+            else:
+                for batch in self.train_dataloader:
+                    yield self._cast_dtype(batch)
 
     def train_loop(self):
         _stop_train_and_save = False
@@ -852,42 +800,47 @@ class UnmixingTrainer:
         if self.val_dataloader is None:
             raise ValueError("No validation dataloader found")
 
-        for batch in self.val_dataloader:
-            yield batch
+        val_w_size = getattr(self.val_cfg, "window_size", 0)
+        val_stride = getattr(self.val_cfg, "stride", 0)
+        self._is_val_sliding_window = False
 
-    def get_val_loader_iter(self):
-        if self.val_cfg.max_val_iters > 0:
-            # create a new iterator for the validation loader
-            # state in the loader generator
-            if not hasattr(self, "_val_loader_iter"):
-                self._val_loader_iter = iter(self._finite_val_loader())
+        if val_w_size > 0:
+            val_slider = WindowSlider(
+                slide_keys=["img", "abunds"], window_size=val_w_size, stride=val_stride
+            )
+            self._is_val_sliding_window = True
+            self._val_slider = val_slider
+            for batch in val_slider.create_window_generator(self._finite_val_loader()):
+                yield self._cast_dtype(batch)
 
-            iterable_ = trange(
-                self.val_cfg.max_val_iters,
-                desc="validating ...",
-                leave=False,
-                disable=not self.accelerator.is_main_process,
-            )
-            self.log_msg(
-                f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
-                only_rank_zero=False,
-            )
         else:
-            iterable_ = self._finite_val_loader()
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
-
-        return iterable_
+            for batch in self.val_dataloader:
+                yield self._cast_dtype(batch)
 
     @torch.no_grad()
     def val_step(self, batch: BatchInput):
-        if not self.online_tokenize:
-            img_latent = self.forward_tokenizer(batch["img"])["latent"]
-        else:
-            img_latent = batch.get("img_latent", None)
-            assert img_latent is not None, "img_latent must be provided in the batch"
-        img_latent = img_latent.to(self.device, self.dtype)
+        """
+        Execute one validation step for unmixing model.
+
+        Parameters
+        ----------
+        batch : BatchInput
+            Batch input containing image, abundances, endmembers, and optionally latents
+
+        Returns
+        -------
+        UnmixingModelOutput
+            Model output containing predictions and losses
+
+        Note
+        ----
+        The wrapper handles tokenization internally. If latents are not provided in the batch,
+        the wrapper will encode the image to latents automatically.
+        """
+        # Get latents from batch - wrapper handles tokenization
+        img_latent = batch.get("img_latent", None)
+        if img_latent is not None:
+            img_latent = img_latent.to(self.device, self.dtype)
 
         # forward the unmixing network
         out = self.forward_unmixing_model(
@@ -899,7 +852,7 @@ class UnmixingTrainer:
     def val_loop(self):
         self.model.eval()
 
-        val_iter = self.get_val_loader_iter()
+        val_iter = self._finite_val_loader()
         # Init loss dict metrics
         loss_metrics = {k: MeanMetric() for k in self.unmixing_loss.loss_names}
         loss_metrics_update = lambda log_losses: {
@@ -907,13 +860,15 @@ class UnmixingTrainer:
         }
 
         val_out = None
-        for batch_or_idx in val_iter:  # type: ignore
-            if self.val_cfg.max_val_iters > 0:
-                batch = next(self._val_loader_iter)
-            else:
-                batch = batch_or_idx
+        for batch in val_iter:  # type: ignore
             batch = cast(BatchInput, batch)
 
+            if "endmembers" not in batch:
+                self.log_msg(
+                    f"[Val]: this dataset does not provide the GT endmembers",
+                    level="WARNING",
+                    once=True,
+                )
             endmembers_gt = batch["endmembers"].to(self.device)
             abundances_gt = batch["abunds"].to(self.device)
 
@@ -934,25 +889,29 @@ class UnmixingTrainer:
         metrics = self.get_metrics()
         loss_val = metrics_sync(loss_metrics, output_tensor_dict=True)
 
+        # Print out metrics
+        _log_losses = self.format_log(loss_val)
+        _log_metrics = self.format_log(metrics)
+        self.log_msg(f"[Val Unmixing Loss]: {_log_losses}")
+        self.log_msg(f"[Val Unmixing Metrics]: {_log_metrics}")
+
         assert val_out is not None
         if self.accelerator.is_main_process:
-            # visualize the last val batch
-            self.visualize_reconstruction(
-                batch_img_rgb,  # gt
-                pred_img_rgb,  # prediction
-                add_step=True,
-                img_name="val/reconstruction",
-                no_to_rgb=True,
-            )
+            # visualize reconstruction if available
+            if val_out.pred_pixel is not None:
+                self.visualize_reconstruction(
+                    batch["img"],  # original image
+                    val_out.pred_pixel,  # reconstructed image
+                    add_step=True,
+                    img_name="val/reconstruction",
+                    no_to_rgb=True,
+                )
 
             # visualize unmixing results if available
-            if (
-                val_out.get("abunds") is not None
-                and val_out.get("end_member") is not None
-            ):
+            if val_out.abunds is not None and val_out.endmembers is not None:
                 self.visualize_unmixing_results(
-                    val_out["abunds"],
-                    val_out["end_member"],
+                    val_out.abunds,
+                    val_out.endmembers,
                     add_step=True,
                     img_name="val/unmixing",
                 )
@@ -968,11 +927,11 @@ class UnmixingTrainer:
 
         ema_path = self.proj_dir / "ema"
         if self.accelerator.is_main_process:
-            ema_path.parent.mkdir(parents=True, exist_ok=True)
-
+            ema_path.mkdir(parents=True, exist_ok=True)
         self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "denoise_ema_model"
+            self.ema_model.ema_model, ema_path / "unmixing_ema_model"
         )
+
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -1057,7 +1016,7 @@ class UnmixingTrainer:
 
         self.log_msg("[Visualize]: save visualization at {}".format(save_path))
 
-    def visualize_unmixing_results(
+    def endmembers_visualize(
         self,
         abunds: torch.Tensor,
         end_members: torch.Tensor,
@@ -1066,95 +1025,174 @@ class UnmixingTrainer:
         only_vis_n: int | None = None,
     ):
         """
-        Visualize unmixing results including abundance maps and endmember spectra
+        Visualize unmixing results using the endmembers_visualize function.
 
-        Args:
-            abunds: Abundance maps [batch, num_endmembers, height, width]
-            end_members: Endmember spectra [num_endmembers, num_bands]
-            img_name: Base name for the visualization
-            add_step: Whether to add step number to the filename
-            only_vis_n: Number of samples to visualize
+        This function creates comprehensive visualizations including endmember spectral
+        comparison plots and abundance maps using the existing endmembers_visualize
+        function from the metrics module.
+
+        Parameters
+        ----------
+        abunds : torch.Tensor
+            Predicted abundance maps with shape [batch, num_endmembers, height, width]
+        end_members : torch.Tensor
+            Predicted endmember spectra with shape [num_endmembers, num_bands]
+        img_name : str
+            Base name for the visualization files
+        add_step : bool
+            Whether to add step number to the filename
+        only_vis_n : int | None
+            Number of samples to visualize, if None uses min(16, batch_size)
+
+        Notes
+        -----
+        This function creates two types of visualizations:
+        1. Endmember spectral comparison plots with SAD values
+        2. Individual abundance map images for each endmember
+
+        The function leverages the existing endmembers_visualize function which
+        handles endmember matching, SAD computation, and professional plotting.
         """
         if abunds is None or end_members is None:
             self.log_msg("[Visualize]: Skip unmixing visualization due to missing data")
             return
 
+        # Limit the number of samples to visualize
         _only_n = only_vis_n or min(16, abunds.shape[0])
         abunds = abunds[:_only_n]
 
+        # For endmember visualization, we need to create dummy ground truth
+        # since endmembers_visualize expects both predicted and ground truth
+        # We'll use the predicted endmembers as both for visualization purposes
+        dummy_endmembers_gt = end_members.clone()
+
+        # Get the first sample's abundances for visualization
+        # endmembers_visualize expects [num_endmembers, H, W]
+        if abunds.dim() == 4:  # [batch, num_endmembers, H, W]
+            abunds_vis = abunds[0]  # Take first sample
+        else:
+            abunds_vis = abunds  # Already [num_endmembers, H, W]
+
+        try:
+            # Use the endmembers_visualize function to create the plot
+            # This returns: sad_values, ordered_endmembers, ordered_abundances, fig, axes
+            sad_values, _, ordered_abundances, fig, _ = endmembers_visualize(
+                end_members, dummy_endmembers_gt, abunds_vis
+            )
+
+            # Save the endmember comparison plot
+            if add_step:
+                endmember_plot_name = (
+                    f"{img_name}_endmembers_step_{str(self.global_step).zfill(6)}.png"
+                )
+            else:
+                endmember_plot_name = f"{img_name}_endmembers.png"
+
+            save_path = Path(self.proj_dir) / "vis" / endmember_plot_name
+            if self.accelerator.is_main_process:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(save_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+
+            self.log_msg(f"[Visualize]: save endmember comparison at {save_path}")
+
+            # Extract individual abundance maps and save them
+            num_endmembers = ordered_abundances.shape[0]
+            for i in range(num_endmembers):
+                # Get abundance map for this endmember
+                abundance_map = ordered_abundances[i]  # [H, W]
+
+                # Convert to image format
+                abundance_img = tensor_to_image(abundance_map.unsqueeze(0).unsqueeze(0))
+                abundance_img = (abundance_img * 255.0).astype(np.uint8)
+
+                # Create filename
+                if add_step:
+                    abundance_img_name = f"{img_name}_abundance_{i + 1}_step_{str(self.global_step).zfill(6)}.jpg"
+                else:
+                    abundance_img_name = f"{img_name}_abundance_{i + 1}.jpg"
+
+                abundance_save_path = Path(self.proj_dir) / "vis" / abundance_img_name
+                if self.accelerator.is_main_process:
+                    abundance_img_to_save = Image.fromarray(abundance_img)
+                    abundance_img_to_save.save(abundance_save_path, quality=95)
+
+                self.log_msg(
+                    f"[Visualize]: save abundance map at {abundance_save_path}"
+                )
+
+            # Log average SAD value
+            if len(sad_values) > 0:
+                avg_sad = sad_values[-1].item()  # Last value is the average
+                self.log_msg(f"[Visualize]: average SAD: {avg_sad:.4f} rad")
+
+        except Exception as e:
+            self.log_msg(
+                f"[Visualize]: Error during endmember visualization: {e}",
+                level="WARNING",
+            )
+            # Fallback to simple visualization if the main function fails
+            self._fallback_visualization(abunds_vis, end_members, img_name, add_step)
+
+    def _fallback_visualization(
+        self,
+        abunds: torch.Tensor,
+        end_members: torch.Tensor,
+        img_name: str,
+        add_step: bool,
+    ):
+        """
+        Fallback visualization method in case the main endmembers_visualize function fails.
+
+        Parameters
+        ----------
+        abunds : torch.Tensor
+            Abundance maps with shape [num_endmembers, height, width]
+        end_members : torch.Tensor
+            Endmember spectra with shape [num_endmembers, num_bands]
+        img_name : str
+            Base name for the visualization files
+        add_step : bool
+            Whether to add step number to the filename
+        """
         # Move to CPU for visualization
         abunds_cpu = abunds.detach().cpu()
         end_members_cpu = end_members.detach().cpu()
 
-        # Create abundance maps visualization
-        num_endmembers = abunds_cpu.shape[1]
+        num_endmembers = abunds_cpu.shape[0]
 
-        # Create a grid of abundance maps
-        abundance_images = []
+        # Create simple endmember spectra plot
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
         for i in range(num_endmembers):
-            # Take first sample in batch for abundance visualization
-            abundance_map = abunds_cpu[0, i]  # [height, width]
-            abundance_images.append(abundance_map)
+            ax.plot(end_members_cpu[i].numpy(), label=f"Endmember {i + 1}")
 
-        # Create endmember spectra plot
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8))
-
-        # Plot endmember spectra
-        for i in range(num_endmembers):
-            axes[0].plot(end_members_cpu[i].numpy(), label=f"Endmember {i + 1}")
-        axes[0].set_xlabel("Band Index")
-        axes[0].set_ylabel("Reflectance")
-        axes[0].set_title("Endmember Spectra")
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-
-        # Plot abundance maps as grid
-        n_cols = min(4, num_endmembers)
-        n_rows = (num_endmembers + n_cols - 1) // n_cols
-
-        # Clear the second subplot and create subplots for abundance maps
-        axes[1].remove()
-
-        # Create abundance map subplots
-        abundance_axes = []
-        for i in range(num_endmembers):
-            row = i // n_cols
-            col = i % n_cols
-            if i == 0:
-                ax = fig.add_subplot(2, n_cols, n_cols + 1)
-            else:
-                ax = fig.add_subplot(2, n_cols, n_cols + 1 + i)
-
-            im = ax.imshow(abundance_images[i], cmap="viridis", aspect="auto")
-            ax.set_title(f"Abundance {i + 1}")
-            ax.set_xticks([])
-            ax.set_yticks([])
-            abundance_axes.append(ax)
-
-            # Add colorbar
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-        plt.tight_layout()
+        ax.set_xlabel("Band Index")
+        ax.set_ylabel("Reflectance")
+        ax.set_title("Endmember Spectra")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
         # Save the figure
         if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.png"
+            img_name_with_step = (
+                f"{img_name}_fallback_step_{str(self.global_step).zfill(6)}.png"
+            )
         else:
-            img_name = f"{img_name}.png"
+            img_name_with_step = f"{img_name}_fallback.png"
 
-        save_path = Path(self.proj_dir) / "vis" / img_name
+        save_path = Path(self.proj_dir) / "vis" / img_name_with_step
         if self.accelerator.is_main_process:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-        self.log_msg(f"[Visualize]: save unmixing visualization at {save_path}")
+        self.log_msg(f"[Visualize]: save fallback visualization at {save_path}")
 
-        # Also save abundance maps as individual images
+        # Save abundance maps
         for i in range(num_endmembers):
-            abundance_img = tensor_to_image(
-                abundance_images[i].unsqueeze(0).unsqueeze(0)
-            )
+            abundance_map = abunds_cpu[i]
+            abundance_img = tensor_to_image(abundance_map.unsqueeze(0).unsqueeze(0))
             abundance_img = (abundance_img * 255.0).astype(np.uint8)
 
             if add_step:
@@ -1179,15 +1217,15 @@ class UnmixingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_dino_unmixing"  # vq, bsq, fsq, kl
+_key = "cosmos_f8c16p1_vitamin_unmixing"  # vq, bsq, fsq, kl
 _configs = {
     # cosmos tokenizer, simple denoising
-    "cosmos_f8c16p4_dino_unmixing": "cosmos_f8c16p4_dino_unmixing",
+    "cosmos_f8c16p1_vitamin_unmixing": "cosmos_f8c16p1_vitamin_unmixing",
 }[_key]
 
 
 @hydra.main(
-    config_path="configs/unmixing",
+    config_path="../configs/unmixing",
     config_name=_configs,
     version_base=None,
 )

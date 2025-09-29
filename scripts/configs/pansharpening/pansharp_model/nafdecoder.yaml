@@ -1,56 +1,115 @@
-_target_: src.stage2.utilities.amotized.amotized_model_wrapper.AmotizedModelMixin
-_partial_: true # for decode_fn
+_target_: src.stage2.layers.wrapper.tokenizer_wrapper.DownstreamModelTokenizerWrapper
 
-# Model configuration
-amotize_type: "latent_to_pixel_fusion"
-backward_decoder: true
-learn_decoder: false
+# Tokenizer configuration (from cosmos_f8c16p1_lora.yaml)
+tokenizer:
+  _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin
+  tokenizer:
+    _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
+    model:
+      attn_resolutions: [32]
+      channels: 128
+      channels_mult: [2, 4, 4]
+      dropout: 0.0
+      in_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+      spatial_compression: 8
+      num_res_blocks: 2
+      out_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+      resolution: 1024
+      z_channels: 16
+      act_checkpoint: false
+      latent_channels: 16
+      norm_type: gn
+      norm_groups: 32
+      block_name: res_block
+      moe_token_mixer_type: res_block
+      hidden_factor: 4
+      use_residual_factor: false
+      # others
+      patch_method: haar
+      patch_size: 1
+      attn_type: none
+      padding_mode: reflect # for boundary?
+    # repa
+    use_repa_loss: false
+    use_vf_loss: false
+    hook_module: decoder.decoder.mid.block_2
+    vf_on_z_or_module: z # [z, module]
+    dino_feature_dim: 1024
+    # loading
+    enc_path: ""
+    dec_path: ""
+    uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+    loading_type: pretrained
+    # quant
+    norm_in_quant_conv: false
+  lora_weights:
+    WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
+    QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
+  lora_hyper_chans:
+    WV3: 8
+    QB: 4
+  active_lora: ${dataset.cfgs.used}
 
-# Amotized model (Transformer branch)
-amotized_model:
-  _target_: src.stage2.pansharpening.models.transformer.Transformer
-  cfg:
-    _target_: src.stage2.pansharpening.models.transformer.TransformerConfig
-    in_dim: 16
-    dim: 384
-    depth: 8
-    num_heads: 8
-    mlp_ratio: 4.0
-    drop: 0.0
-    drop_path: 0.0
-    patch_size: 1
-    out_channels: 256
-    norm_layer: "rmsnorm"
-    mlp_norm_layer: "rmsnorm"
-    act_layer: "silu"
-    pos_embed_type: "sincos"
-    input_size: 32
-    with_raw_img: false
-    raw_img_size: null
-    raw_img_chans: null
-    feature_layer_ids: null
+# Pansharpening model configuration (from nafdecoder.yaml)
+downstream_model:
+  _target_: src.stage2.utilities.amotized.amotized_model_wrapper.AmotizedModelMixin
+  _partial_: true # for decode_fn
 
-# Pixel model (NAFDecoder branch)
-pixel_model:
-  _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNet
-  cfg:
-    _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNetConfig
-    pan_channel: 1
-    ms_channel: ${dataset.consts.bands}
-    width: 384
-    middle_blk_num: 2
-    dec_blk_nums: [2, 1, 1]
-    condition_channel: 256
-    residual_type: pan
-    dw_expand: 2
-    ffn_expand: 2
-    patch_size: 1
-    block_drop: 0.0
-    output_rescale: true
-    is_neg_1_1: true
-    up_ratio: 4
-    decoder_cross_attn_idx: [0, 1]
-    cross_attn_kwargs:
-      n_q_heads: 4
-      n_kv_heads: 4
-      cross_attn_patch_size: 2
+  # Model configuration
+  amotize_type: "latent_to_pixel_fusion"
+  backward_decoder: true
+  learn_decoder: false
+
+  # Amotized model (Transformer branch)
+  amotized_model:
+    _target_: src.stage2.pansharpening.models.transformer.Transformer
+    cfg:
+      _target_: src.stage2.pansharpening.models.transformer.TransformerConfig
+      in_dim: 16
+      dim: 384
+      depth: 8
+      num_heads: 8
+      mlp_ratio: 4.0
+      drop: 0.0
+      drop_path: 0.0
+      patch_size: 1
+      out_channels: 256
+      norm_layer: "rmsnorm"
+      mlp_norm_layer: "rmsnorm"
+      act_layer: "silu"
+      pos_embed_type: "sincos"
+      input_size: 32
+      with_raw_img: false
+      raw_img_size: null
+      raw_img_chans: null
+      feature_layer_ids: null
+
+  # Pixel model (NAFDecoder branch)
+  pixel_model:
+    _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNet
+    cfg:
+      _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFDecoderNetConfig
+      pan_channel: 1
+      ms_channel: ${dataset.consts.bands}
+      width: 384
+      middle_blk_num: 2
+      dec_blk_nums: [2, 1, 1]
+      condition_channel: 256
+      residual_type: pan
+      dw_expand: 2
+      ffn_expand: 2
+      patch_size: 1
+      block_drop: 0.0
+      output_rescale: true
+      is_neg_1_1: true
+      up_ratio: 4
+      decoder_cross_attn_idx: [0, 1]
+      cross_attn_kwargs:
+        n_q_heads: 4
+        n_kv_heads: 4
+        cross_attn_patch_size: 2
+
+# Wrapper configuration
+froze_tokenizer: true
+n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
+tokenizer_scale_shift: [6.25221633, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml

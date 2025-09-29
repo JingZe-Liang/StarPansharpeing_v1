@@ -40,11 +40,9 @@ tokenizer:
   # quant
   norm_in_quant_conv: false
 lora_weights:
-  WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
-  QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
+  CD:
 lora_hyper_chans:
-  WV3: 8
-  QB: 4
+  CD: 224
 active_lora: ${dataset.cfgs.used}
 tokenizer_scale_shift:
   - 6.25221633 # std

@@ -28,7 +28,7 @@ __re_config_logger = True
 
 # Set the level
 logger.level("DEBUG", icon="🔍", color="<blue>")
-logger.level("INFO", icon="ℹ️", color="<light-black>")
+logger.level("INFO", icon="ℹ️ ", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
@@ -36,7 +36,7 @@ logger.level("CRITICAL", icon="💥", color="<red><bold>")
 
 # Setup console
 @once
-def setup_console():
+def setup_console(_auto_=True):
     global __setup_console, _console
 
     _console = Console()
@@ -45,6 +45,16 @@ def setup_console():
 
 if __setup_console:
     setup_console()
+
+
+def format_extra(record):
+    if len(record["extra"]) == 0:
+        record["extra"] = ""
+        return record
+
+    extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
+    record["extra"] = f" [{extras}]"
+    return record
 
 
 # Configure logger
@@ -66,9 +76,9 @@ def configure_logger(
     level="debug",
     filter=None,
     removed=True,
-    auto=True,  # reserved for once decorator
+    _auto_=True,  # reserved for once decorator
 ):
-    global __re_config_logger, _console
+    global __re_config_logger, _console, logger
 
     __re_config_logger = False
 
@@ -91,12 +101,13 @@ def configure_logger(
         colorize=True if not is_file else False,
         format=(
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
+            "- {level.icon} <level>[{level}] {file.name}:{line}</level> "
             "<green>{extra}</green> "
             "- <level>{message}</level>"
         ),
         filter=filter,
     )
+    logger = logger.patch(format_extra)
 
     return handler
 
@@ -112,10 +123,14 @@ def set_logger_file(
     mode="w",
     filter=None,
 ):
+    global logger
+
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
         "- <level>[{level}]</level> "
-        "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
+        "- <cyan>{file}:{line}</cyan> "
+        "<green>{extra}</green> "
+        "- <level>{message}</level>"
     )
 
     t = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
@@ -142,13 +157,14 @@ def set_logger_file(
         file,
         format=log_format_in_file,
         level=level.upper(),
-        enqueue=True,
+        enqueue=False,
         rotation="10 MB",
         backtrace=True,
         colorize=False,
         mode=mode,
         filter=filter,
     )
+    logger = logger.patch(format_extra)
     log_print(
         f"Set logger to log to file: {file} with level {level}, handler id: {handler}",
         level="info",
@@ -177,16 +193,6 @@ def get_dist_rank() -> tuple[bool, int]:
         dist.is_initialized(),
         dist.get_rank() if dist.is_initialized() else 0,
     )
-
-
-def format_extra(record):
-    if len(record["extra"]) == 0:
-        record["extra"] = ""
-        return record
-
-    extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
-    record["extra"] = f" [{extras}]"
-    return record
 
 
 @beartype
@@ -245,12 +251,12 @@ def log_print(
                 return
             __warn_once_set.add(msg)
 
-    if patch_fn is None:
-        # e.g., patch_fn = lambda record: r.update({"extra": {"user": "user_id"}})
-        # patch_fn = lambda r: r.update({"extra": ""})
-        patch_fn = format_extra
+    # if patch_fn is None:
+    #     # e.g., patch_fn = lambda record: r.update({"extra": {"user": "user_id"}})
+    #     # patch_fn = lambda r: r.update({"extra": ""})
+    #     patch_fn = format_extra
 
-    logger_patched = logger.patch(patch_fn)
+    logger_patched = logger.patch(patch_fn) if patch_fn is not None else logger
 
     logger_with_correct_depth = logger_patched.opt(
         depth=stack_level + 1,
@@ -442,3 +448,4 @@ if __name__ == "__main__":
         log_print("Hello, World!")
 
     log_print("This is a debug message", level="debug")
+    logger.debug("This is a debug message without using log_print")

@@ -5,9 +5,9 @@ hydra:
 
 defaults:
   # wrapper ==========
-  - dataset: pancollection_v1
+  - dataset: unmixing_collection
   - accelerator: base
-  - pansharp_model: pansharp_wrapper_nafnet_cosmos
+  - unmixing_model: vitamin
   # self ===============
   - _self_
 
@@ -17,7 +17,7 @@ defaults:
 
 dataset:
   cfgs:
-    used: QB
+    used: DC
     batch_size_train: 16
 
 ema:
@@ -30,9 +30,9 @@ ema:
 
 train:
   grad_check: false
-  proj_dir: runs/stage2_pansharpening_wrapper/
-  finetune_strategy: finetune_all
+  proj_dir: runs/stage2_unmixing/
   max_grad_norm: 0.03
+  set_grad_checkpoint: false
 
   track_metrics_duration: -1
   track_metrics_after: 1000
@@ -41,24 +41,17 @@ train:
   save_every: 1000
 
   to_neg_1_1: false
-  pansp_ratio: 4
   online_tokenize: true
-  add_pan_processor: true
+  init_endmembers: true
 
   resume_path:
   ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-25_19-16-29_f8c16p1_WV3_nafnet_wrapper/ema
 
-  pansharpening_loss:
-    _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
-    pixel_loss_type: l1ssim
-    amotized_loss:
-      _target_: torch.nn.MSELoss
-    pixel_loss_kwargs:
-      weighted_r: [1.0, 0.1] # l1ssim weights
-    factors: [0.0, 1.0] # latent and pixel weights
-    is_neg_1_1: false
+  unmixing_loss:
+    _target_: src.stage2.unmixing.loss.basic.UnmixingLoss
+    weights: ${list:[1.0, 0.35, 0.1]}
 
-  pansharp_optim:
+  unmixing_optim:
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 1.0e-3
@@ -82,7 +75,7 @@ train:
     # betas: ${tuple:[0.9, 0.99]}
     # weight_decay: 0.
 
-  pansharp_sched:
+  unmixing_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 100
@@ -90,7 +83,7 @@ train:
     num_cycles: 3
 
   log:
-    run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper
+    run_comment: f8c16p1_${dataset.cfgs.used}_unmixing_vitamin
     log_with_time: True
     log_every: 10
 
@@ -102,3 +95,5 @@ val:
   max_val_full_iters: 20
   val_use_patches: true
   crop_batch_size: 64
+  window_size: 128
+  stride: 64

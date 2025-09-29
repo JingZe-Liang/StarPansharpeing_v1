@@ -19,7 +19,7 @@ defaults:
 
 accelerator:
   gradient_accumulation_plugin:
-    num_steps: 2
+    num_steps: 1
 
 vq_loss:
   repa_loss_weight: 0.1

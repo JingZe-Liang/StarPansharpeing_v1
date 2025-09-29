@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import sys
@@ -48,6 +49,7 @@ from src.utilities.logging import log_print, set_logger_file
 from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
+from src.utilities.train_utils.visualization import get_rgb_image
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -1965,32 +1967,19 @@ class CosmosHyperspectralTokenizerTrainer:
             recon = self.to_rgb(recon)
 
         _only_n = only_vis_n or 16
-        to_img = lambda x: tensor_to_image(make_grid(x[:_only_n], n_row=4, padding=2))
-        c = x.shape[1]
+        _n_row = min(4, int(math.sqrt(_only_n)))
+        to_img = lambda x: tensor_to_image(
+            make_grid(x[:_only_n], n_row=_n_row, padding=2)
+        )
+        vis_fn = lambda x: to_img(
+            get_rgb_image(x, self.dataset_cfg.rgb_channels, use_linstretch=False)
+        )
 
-        # * --- hyperspectral image to rgb images --- #
-        def hyperspectral_to_rgb(x):
-            # is rgb or gray images
-            if c in (1, 3):
-                x_np = to_img(x)
-            elif isinstance(self.dataset_cfg.rgb_channels, Sequence):
-                rgb_channels = to_cont(self.dataset_cfg.rgb_channels)
-                x_np = to_img(x[:, rgb_channels])
-            elif callable(self.dataset_cfg.rgb_channels):
-                x_np = to_img(self.dataset_cfg.rgb_channels(x))
-            else:
-                raise ValueError(
-                    f"Unknown rgb_channels {self.dataset_cfg.rgb_channels},"
-                    f"typed {type(self.dataset_cfg.rgb_channels)}"
-                )
-
-            return x_np
-
-        x_np = hyperspectral_to_rgb(x)
+        x_np = vis_fn(x)
 
         # cat original and reconstructed images
         if recon is not None:
-            recon_np = hyperspectral_to_rgb(recon)
+            recon_np = vis_fn(recon)
             img = np.concatenate([x_np, recon_np], axis=1)
         else:
             img = x_np

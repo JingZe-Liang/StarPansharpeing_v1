@@ -43,39 +43,56 @@ tokenizer:
     # quant
     norm_in_quant_conv: false
   lora_weights:
-    WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
-    QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
-    OSCD: runs/stage1_cosmos_lora/2025-09-15_23-11-03_cosmos_lora=lora_r=32_f8c16p1_OSCD/peft_ckpt/OSCD/adapter_model.safetensors
+    DC: runs/stage1_cosmos_lora/2025-09-29_13-31-29_cosmos_lora=lora_r=32_f8c16p1_DC/peft_ckpt/DC/adapter_model.safetensors
+    Jasper: runs/stage1_cosmos_lora/2025-09-29_13-35-50_cosmos_lora=lora_r=32_f8c16p1_Jasper/peft_ckpt/Jasper/adapter_model.safetensors
   lora_hyper_chans:
-    WV3: 8
-    QB: 4
-    OSCD: 13
-  active_lora: ${dataset.consts.dataset_name}
+    DC: 191
+    Jasper: 198
+  active_lora: ${dataset.cfgs.used}
 
-# Downstream model configuration (from dinov3_adaptor.yaml)
+# Pansharpening model configuration (from nafnet.yaml)
 downstream_model:
-  _target_: src.stage2.change_detection.model.dinov3_adapted.DinoUNet.create_model
-  overrides:
-    dino:
-      model_name: dinov3_vitl16
-      pretrained_on: satellite
-      features_per_stage: [512, 512, 512, 512]
-    cd_stage:
-      channels: [512, 512, 512, 512]
-      depth: 2
-    ms_cd_stage:
-      out_chans_per_stage: [512, 512, 512, 512]
-      init_dim: 64
-      depth_per_stage: 1
-    adapter:
-      latent_width: 16 # tokenizer latent dim
-    input_channels: 13 # RGB for dino model
-    num_classes: ${dataset.consts.num_classes}
-    use_latent: true
-    n_stages: 4
-    ensure_rgb_type: [2,1,0]
+  _target_: src.stage2.unmixing.models.model.LatentUnmixingModel
+  _partial_: true # for decode_fn
+
+  # detokenizer ... partial
+  # endmember_init_value is partial
+
+  # Model configuration
+  amotized_model:
+    _target_: src.stage2.unmixing.models.transformer.Transformer.create_model
+    in_dim: 16
+    out_channels: 256
+    num_heads: 8
+    mlp_ratio: 2.0
+
+  pixel_model:
+    _target_: src.stage2.unmixing.models.vitamin_conv.VitaminModel.create_model
+    stem_width: 64
+    embed_dim: [192, 192, 192]
+    depths: [2, 2, 2]
+    input_channel: ${dataset.consts.bands}
+    out_channel: ${dataset.consts.n_endmembers}
+    condition_channel: 256
+    abunds_restriction: softmax
+    conv_cfg:
+      expand_ratio: 2.0
+      act_layer: gelu
+      norm_layer: layernorm2d
+
+  end_member_model:
+    _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberParameter
+    apply_relu: true
+    num_endmember: ${dataset.consts.n_endmembers}
+    channels: ${dataset.consts.bands}
+    init_value: null # left for trainer to initialize
+
+  amotize_type: latent_to_pixel_fusion
+  learn_decoder: false
+  backward_decoder: false
 
 # Wrapper configuration
 froze_tokenizer: true
-n_img_encoded: 2 # For change detection, we have 2 images
+n_img_encoded: 1 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
 tokenizer_scale_shift: [6.25221633, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
+img_is_neg_1_1: false

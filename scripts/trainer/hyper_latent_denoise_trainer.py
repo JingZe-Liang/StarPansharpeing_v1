@@ -27,7 +27,6 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
 
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage2.denoise.metrics import DenoisingMetrics
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
@@ -53,7 +52,6 @@ class TrainDenoisingStepOutput(NamedTuple):
 class DenoisingTrainer:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
-        self.tokenizer_cfg = cfg.tokenizer
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -110,9 +108,7 @@ class DenoisingTrainer:
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
-        # setup the tokenizer
-        self.online_tokenize = self.train_cfg.online_tokenize
-        self.setup_tokenizer()  # must setup the tokenizer to decode the image
+        # setup the denoising model
         self.setup_denoising_model()  # setup the denoising model
 
         # optimizers and lr schedulers
@@ -146,9 +142,7 @@ class DenoisingTrainer:
             self.model
         ).amotizing_pixels
         if self.denoising_amotizing_pixels:
-            assert hasattr(self, "tokenizer"), (
-                "denoising model must be used with tokenizer for amotizing pixels"
-            )
+            # Wrapper will handle tokenization for amotizing pixels
             self.backward_detokenizer = True
         else:
             self.backward_detokenizer = self.train_cfg.backward_detokenizer
@@ -160,100 +154,6 @@ class DenoisingTrainer:
         self.log_msg(
             f"use denoising model: {denoising_name}, amotizing pixels: {self.denoising_amotizing_pixels}"
         )
-
-    def setup_tokenizer(self):
-        tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
-        self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
-
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
-            )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
-            )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
-
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
-
-            self.use_quantizer = self.quantizer is not None
-
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-
-        else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
-            self.norm_z = False  # in the model, not in trainer
-            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-
-            if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                )
-                self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
-                    base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
-                    peft_pretrained_path=self.train_cfg.peft_pretrained_path,
-                    merge_and_unload=True,
-                )
-
-            # quantizer in the tokenizer, not handled by this trainer
-            # vq, bsq, fsq, kl
-            self.use_quantizer = hasattr(self.tokenizer, "quantizer")
-            self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
-            if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
-
-        # set to eval
-        if self.sep_enc_dec:
-            self.tokenizer_encoder.eval()
-            self.tokenizer_decoder.eval()
-        else:
-            self.tokenizer.eval()
-
-        if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-            self.quantizer.eval()
-
-        self.log_msg("freeze the tokenizer and quantizer (if used).")
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -521,34 +421,7 @@ class DenoisingTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
             self.model.dtype = torch.float
-
-        # tokenizer
-        if self.train_cfg.prepare_tokenizer_in_accelerator:
-            if self.sep_enc_dec:
-                # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
-                self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
-                self.accelerator._models.pop(-1)
-            else:
-                self.tokenizer = self.accelerator.prepare(self.tokenizer)
-                self.accelerator._models.pop(-1)
-
-        # quantizer
-        if self.quantizer is not None and self.use_quantizer:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            self.accelerator._models.pop(-1)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -575,37 +448,39 @@ class DenoisingTrainer:
     def forward_tokenizer(
         self, x: torch.Tensor, mode: str = "encode", no_grad=True
     ) -> dict:
-        assert hasattr(self, "tokenizer"), "Tokenizer not found"
+        """
+        Forward through tokenizer using wrapper functionality.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor (image for encode, latent for decode)
+        mode : str
+            Either 'encode' or 'decode'
+        no_grad : bool
+            Whether to use no_grad context
+
+        Returns
+        -------
+        dict
+            Dictionary containing 'latent' (for encode) or 'recon' (for decode)
+        """
         grad_ctx = torch.no_grad() if no_grad else nullcontext()
 
-        latent_q, recon = None, None
         with grad_ctx and self.accelerator.autocast():
-            if self.sep_enc_dec:
-                to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                to_dec = lambda x: self.tokenizer_decoder(x)
-
-                if mode == "encode":
-                    latent = to_enc(x)  # x is the image
-                    if self.quantizer is not None:
-                        latent_q, q_loss, q_info = self.quantizer(latent)
-                    else:
-                        latent_q = latent
-                elif mode == "decode":
-                    recon = to_dec(x)  # x is the latent
+            if mode == "encode":
+                # Use wrapper encode method
+                latent = self.model.encode(x)
+                return dict(latent=latent, recon=None)
+            elif mode == "decode":
+                # Use wrapper decode method
+                bands = self.get_training_sample_channels()
+                recon = self.model.decode(x, bands)
+                if isinstance(recon, tuple):
+                    recon = recon[0]  # construction is the first output
+                return dict(latent=None, recon=recon)
             else:
-                to_enc = lambda img: self.tokenizer.encode(img)
-                to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
-
-                if mode == "encode":
-                    latent = to_enc(x)
-                else:
-                    bands = self.get_training_sample_channels()
-                    bs_chan = [x.shape[0], bands]
-                    recon = to_dec(x, bs_chan)
-                    if isinstance(recon, tuple):
-                        recon = recon[0]  # construction is the first output
-
-        return dict(latent=latent_q, recon=recon)
+                raise ValueError(f"Unsupported mode: {mode}")
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
@@ -659,7 +534,32 @@ class DenoisingTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def forward_denoising_model(self, noisy, gt, noisy_latent, gt_latent):
+    def forward_denoising_model(
+        self,
+        noisy: torch.Tensor,
+        gt: torch.Tensor,
+        noisy_latent: torch.Tensor | None,
+        gt_latent: torch.Tensor | None,
+    ) -> TrainDenoisingStepOutput:
+        """
+        Forward pass through the denoising model.
+
+        Parameters
+        ----------
+        noisy : torch.Tensor
+            Input noisy image
+        gt : torch.Tensor
+            Ground truth clean image
+        noisy_latent : torch.Tensor | None
+            Latent representation of noisy image
+        gt_latent : torch.Tensor | None
+            Latent representation of ground truth image
+
+        Returns
+        -------
+        TrainDenoisingStepOutput
+            Model output containing predictions and losses
+        """
         with self.accelerator.autocast():
             if self.denoising_amotizing_pixels:
                 out = self.model(noisy, noisy_latent)
@@ -668,9 +568,11 @@ class DenoisingTrainer:
                 pred_from_latent = out.get("pixel_from_latent", None)
             else:
                 pred_latent = self.model(noisy_latent)
-                pred = self.forward_tokenizer(pred_latent, mode="decode", no_grad=True)[
-                    "recon"
-                ]
+                # Use wrapper decode method
+                bands = self.get_training_sample_channels()
+                pred = self.model.decode(pred_latent, bands)
+                if isinstance(pred, tuple):
+                    pred = pred[0]  # construction is the first output
                 pred_from_latent = None
 
             # loss
@@ -736,35 +638,35 @@ class DenoisingTrainer:
         return self._denoising_metrics.compute()
 
     def train_step(self, batch: dict):
-        noisy_latent = gt_latent = None
-        noisy_tok_out = gt_tok_out = None
+        """
+        Execute one training step for denoising model.
 
-        # offline latents
+        Parameters
+        ----------
+        batch : dict
+            Batch input containing noisy and clean images, and optionally latents
+
+        Note
+        ----
+        The wrapper handles tokenization internally. If latents are not provided in the batch,
+        the wrapper will encode the images to latents automatically.
+        """
+        noisy_latent = gt_latent = None
+
+        # Get latents from batch - wrapper handles tokenization
         if "noisy_latent" in batch:
             noisy_latent = batch["noisy_latent"].to(self.device, self.dtype)
             gt_latent = batch["gt_latent"].to(self.device, self.dtype)
-
-        # tokenizer online
-        else:
-            assert self.online_tokenize and (
-                hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
-            ), "tokenizer not found for online tokenize"
-            noisy_tok_out = self.forward_tokenizer(batch["noisy"])
-            gt_tok_out = self.forward_tokenizer(batch["gt"])
 
         with self.accelerator.accumulate(self.model):
             # train denoising model
             train_out = self.train_denoise_step(
                 batch["noisy"],
                 batch["gt"],
-                # online tokenized latents
-                noisy_tok_out,
-                gt_tok_out,
-                # offline latents
+                # latents (None if not provided, wrapper will handle encoding)
+                None,
+                None,
+                # offline latents if available
                 noisy_latent,
                 gt_latent,
             )
@@ -779,7 +681,7 @@ class DenoisingTrainer:
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
-            self.log_msg(f"[Train Tok]: {_log_losses}")
+            self.log_msg(f"[Train Denoising]: {_log_losses}")
 
             # tensorboard log
             self.tenb_log_any("metric", train_out.log_losses, self.global_step)
@@ -857,10 +759,28 @@ class DenoisingTrainer:
 
     @torch.no_grad()
     def val_step(self, batch: dict):
-        if not self.online_tokenize:
-            noisy_latent = self.forward_tokenizer(batch["noisy"])["latent"]
-            gt_latent = self.forward_tokenizer(batch["gt"])["latent"]
-        else:
+        """
+        Execute one validation step for denoising model.
+
+        Parameters
+        ----------
+        batch : dict
+            Batch input containing noisy and clean images, and optionally latents
+
+        Returns
+        -------
+        dict
+            Dictionary containing predictions
+
+        Note
+        ----
+        The wrapper handles tokenization internally. If latents are not provided in the batch,
+        the wrapper will encode the images to latents automatically.
+        """
+        noisy_latent = gt_latent = None
+
+        # Get latents from batch - wrapper handles tokenization
+        if "noisy_latent" in batch:
             noisy_latent = batch["noisy_latent"].to(self.device, self.dtype)
             gt_latent = batch["gt_latent"].to(self.device, self.dtype)
 

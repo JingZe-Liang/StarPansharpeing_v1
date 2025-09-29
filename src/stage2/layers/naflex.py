@@ -75,7 +75,7 @@ class NaFlexVitCfg:
     )
 
     # Other architecture choices
-    pre_norm: bool = False  # Whether to apply normalization before attention/MLP layers (start of blocks)
+    pre_norm: bool = True  # Whether to apply normalization before attention/MLP layers (start of blocks)
     final_norm: bool = True  # Whether to apply final normalization before pooling and classifier (end of blocks)
     fc_norm: Optional[bool] = (
         None  # Whether to normalize features before final classifier (after pooling)

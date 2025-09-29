@@ -52,25 +52,71 @@ tokenizer:
 
 # Pansharpening model configuration (from nafnet.yaml)
 downstream_model:
-  _target_: src.stage2.pansharpening.models.nafnet.NAFNet
-  img_channel: ${tokenizer.z_channels}
-  width: 32
-  enc_blk_nums: [2, 2, 4, 8]
-  middle_blk_num: 12
-  dec_blk_nums: [2, 2, 2, 2]
-  dw_expand: 2
-  ffn_expand: 2
-  bottleneck_expand: 2
-  input_resolution: 256
-  attention: true
-  attention_type: "self-attention"
-  attention_heads: 8
-  attention_dim: 32
-  attention_dropout: 0.1
-  attention_qkv_bias: true
-  attention_scale: true
+  _target_: src.stage2.utilities.amotized.amotized_model_wrapper.AmotizedModelMixin
+  _partial_: true # for decode_fn
+
+  # Model configuration
+  amotize_type: "latent_to_pixel_fusion"
+  backward_decoder: false
+  learn_decoder: false
+
+  # Amotized model (Transformer branch)
+  amotized_model:
+    _target_: src.stage2.pansharpening.models.transformer.Transformer.create_model
+    in_dim: 16
+    dim: 384
+    depth: 8
+    num_heads: 8
+    mlp_ratio: 4.0
+    drop: 0.0
+    drop_path: 0.0
+    patch_size: 1
+    out_channels: 256
+    norm_layer: "rmsnorm"
+    mlp_norm_layer: "rmsnorm"
+    act_layer: "silu"
+    pos_embed_type: "sincos"
+    input_size: 32
+    with_raw_img: false
+    raw_img_size: null
+    raw_img_chans: null
+    feature_layer_ids: null
+
+  # Pixel model (NAFNet branch)
+  pixel_model:
+    _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNet.create_model
+    pan_channel: 1
+    ms_channel: ${dataset.consts.bands}
+    width: 128
+    middle_blk_num: 2
+    enc_blk_nums: [1, 2, 2]
+    dec_blk_nums: [1, 2, 2]
+    enc_blk_type: ["naf", "naf", "nat"]
+    dec_blk_type: ["nat", "naf", "naf"]
+    condition_channel: 256 # comes from the de-tokenizer
+    patch_size: 1
+    dw_expand: 2
+    ffn_expand: 2
+    block_drop: 0.0
+    condition_on_decoder: true
+    residual_type: mscc
+    is_neg_1_1: false
+    output_rescale: false
+    # nat 1, 3 < nat 2
+    nat_enc_kwargs:
+      # - { "k_size": 8, "stride": 2, "dilation": 2 }
+      - null
+      - { "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 4, "stride": 1, "dilation": 2 }
+    nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
+    nat_dec_kwargs:
+      - { "k_size": 4, "stride": 1, "dilation": 2 }
+      - { "k_size": 4, "stride": 2, "dilation": 2 }
+      # - { "k_size": 8, "stride": 2, "dilation": 2 }
+      - null
 
 # Wrapper configuration
 froze_tokenizer: true
 n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
 tokenizer_scale_shift: [6.25221633, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
+img_is_neg_1_1: false

@@ -17,17 +17,17 @@ class AmotizedPixelLoss(nn.Module):
         amotized_loss: Callable[[Tensor, Tensor], Tensor],
         pixel_loss_kwargs: dict = {},
         factors: tuple = (0.1, 1.0),
-        is_neg_1_1: bool = False,
+        is_neg_1_1: bool = True,
     ):
         super().__init__()
         self.amotized_loss = amotized_loss
         self.pixel_loss = get_loss(pixel_loss_type, **pixel_loss_kwargs)
         self.factors = factors
-        self.to_neg_1_1 = is_neg_1_1
+        self.is_neg_1_1 = is_neg_1_1
 
     def _map_to_0_1(self, x: Tensor | None):
         """Map tensor from [-1, 1] to [0, 1]"""
-        if not self.to_neg_1_1 or x is None:
+        if not self.is_neg_1_1 or x is None:
             return x
         return (x + 1.0) / 2.0
 
@@ -46,7 +46,7 @@ class AmotizedPixelLoss(nn.Module):
 
         # 1. loss on latent of sr and gt
         latent_loss = 0.0
-        if self.factors[0] > 0:
+        if self.factors[0] > 0 and pred_latent is not None and sr_latent is not None:
             latent_loss = self.amotized_loss(pred_latent, sr_latent) * self.factors[0]
 
         # 2. pixel loss on sr (e.g., dircectly predicted sr pixels) and gt

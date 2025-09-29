@@ -84,7 +84,7 @@ def random_img_augment(prob: float = 0.5):
     pipe = AugmentationSequential(
         RandomHorizontalFlip(p=prob),
         RandomVerticalFlip(p=prob),
-        RandomAffine(degrees=30, translate=(0.0, 0.1), scale=(0.8, 1.2), p=prob),
+        # RandomAffine(degrees=30, translate=(0.0, 0.1), scale=(0.8, 1.2), p=prob),
         data_keys=["input", "input", "mask"],
         same_on_batch=True,
         keepdim=True,
@@ -109,7 +109,7 @@ def shared_times_norm_img(
     on_device: bool = False,
     clip_zero: bool = True,
     per_channel: bool = True,
-    quantile_clip: float = 1.0,
+    quantile_clip: float = 0.99,
 ):
     """
     Normalize image(s) in a sample to [0, 1] and optionally to [-1, 1].
@@ -196,8 +196,9 @@ def shared_times_norm_img(
     img_shard_max = img_t.amax((-3, -2, -1), keepdim=True).squeeze(-1)
 
     # normalize each time image
-    for key in norm_keys:
-        img = sample[key]
+    for i, (img_idx, key) in enumerate(zip(range(img_t.shape[-1]), norm_keys)):
+        # img = sample[key]
+        img = img_t[..., img_idx]
         img.sub_(img_shard_min)
         if img_shard_max.max().item() < 1e-4:
             img = torch.zeros_like(img) if not to_neg_1_1 else torch.ones_like(img) / 2
@@ -450,9 +451,10 @@ def test_oscd_loader(mode=None):
         "changed": 1,
         "unchanged": 2,
     }
-    path = "data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.npy.tar"
+    # path = ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.npy.tar"]
+    path = ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.npy.tar"]
     _, dl = create_oscd_loader(
-        [path],
+        path,
         batch_size=2,
         num_workers=8,
         to_neg_1_1=False,
@@ -469,9 +471,17 @@ def test_oscd_loader(mode=None):
         img1 = batch["img1"]
         img2 = batch["img2"]
         label = batch["gt"]
+        label = torch.zeros_like(label)
         if mode == "label_centrical":
             for img1, img2, label in label_centrical_patcher(
-                img1, img2, label, micro_batch_size=4, patch_size=128, label_mode="seg"
+                img1,
+                img2,
+                label,
+                micro_batch_size=4,
+                patch_size=128,
+                label_mode="seg",
+                changed_label=1,
+                unchanged_label=0,
             ):
                 print(
                     img1.shape,
@@ -498,7 +508,9 @@ def test_oscd_loader(mode=None):
                 win_info = batch_s["window_info"]
                 model_out_lst.append({"gt": label, "window_info": win_info})
             # merge
-            gt_merged = window_slider.merge_windows(model_out_lst, merged_keys=["gt"])
+            gt_merged = window_slider.merge_windows(model_out_lst, merged_keys=["gt"])[
+                "gt"
+            ]
             print("merged gt shape", gt_merged, "unique", torch.unique(gt_merged))
         else:
             # do nothing
@@ -512,5 +524,5 @@ def test_oscd_loader(mode=None):
 
 
 if __name__ == "__main__":
-    test_oscd_loader()
+    test_oscd_loader(mode="label_centrical")
     # test_oscd_wind_loader()

@@ -1,0 +1,67 @@
+cfgs:
+  used: DC
+  train_bs: 1
+  val_bs: 1
+  window_size: 128
+  stride: 64
+  num_workers: 1
+  pin_memory: true
+
+  val_window_size: 128
+  val_stride: 64
+
+# single image training
+paths:
+  Apex: data/Downstreams/UrbanUnmixing/splits/apex.tar
+  DC: data/Downstreams/UrbanUnmixing/splits/DC.tar
+  Houston: data/Downstreams/UrbanUnmixing/splits/houston_170.tar
+  Jasper: data/Downstreams/UrbanUnmixing/splits/Jasper.tar
+  Moffett: data/Downstreams/UrbanUnmixing/splits/moffett.tar
+  Urban: data/Downstreams/UrbanUnmixing/splits/Urban_188.tar
+  Samson: data/Downstreams/UrbanUnmixing/splits/Samson.tar
+
+bands:
+  Apex: 285
+  DC: 191
+  Houston: 170
+  Jasper: 198
+  Moffett: 184
+  Urban: 188
+  Samson: 156
+
+n_enbmembers:
+  Apex: 3
+  DC: 5
+  Houston: 7
+  Jasper: 4
+  Moffett: 3
+  Samson: 3
+  Urban: 4
+
+consts:
+  train_name: ${dataset.cfgs.used}
+  val_name: ${dataset.cfgs.used}
+  train_path: ${dataset.paths.${dataset.consts.train_name}}
+  val_path: ${dataset.paths.${dataset.consts.val_name}}
+  bands: ${dataset.bands.${dataset.cfgs.used}}
+  n_endmembers: ${dataset.n_enbmembers.${dataset.cfgs.used}}
+
+train_loader:
+  _target_: src.stage2.unmixing.data.unmixing_loader.get_unmixing_dataloader
+  wds_paths: ${dataset.consts.train_path}
+  batch_size: ${dataset.cfgs.train_bs}
+  num_workers: ${dataset.cfgs.num_workers}
+  pin_memory: ${dataset.cfgs.pin_memory}
+  resample: true
+  divisible_by: 8 # to avoid resizing
+  to_neg_1_1: false
+
+val_loader:
+  _target_: src.stage2.unmixing.data.unmixing_loader.get_unmixing_dataloader
+  wds_paths: ${dataset.consts.val_path}
+  batch_size: ${dataset.cfgs.val_bs}
+  num_workers: ${dataset.cfgs.num_workers}
+  pin_memory: ${dataset.cfgs.pin_memory}
+  resample: false
+  divisible_by: 8 # to avoid resizing
+  to_neg_1_1: false

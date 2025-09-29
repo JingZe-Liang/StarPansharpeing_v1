@@ -19,6 +19,14 @@ dataset_names_to_bs:
   CD_224: 5
   CD_242: 5
   OSCD: 5
+  Apex: 2
+  DC: 2
+  Houston_unmixing: 2
+  Jasper: 2
+  Moffett: 2
+  Urban: 2
+  Samson: 2
+  Oil_leak: 2
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -39,6 +47,14 @@ dataset_names_to_n_channels:
   CD_224: 224
   CD_242: 242
   OSCD: 13
+  Apex: 285
+  DC: 191
+  Houston_unmixing: 170
+  Jasper: 198
+  Moffett: 184
+  Urban: 188
+  Samson: 156
+  Oil_leak: 224
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -60,6 +76,7 @@ dataset_names_to_rgb_channels:
   CD_224: ${list:[49,39,29]}
   CD_242: ${list:[49,39,29]}
   OSCD: ${list:[3,2,1]}
+  DC: mean
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -81,6 +98,14 @@ dataset_names_to_img_size:
   CD_224: 128
   CD_242: 128
   OSCD: 512
+  DC: 256
+  Jasper: 256
+  Apex: 256
+  Houston_unmixing: 256
+  Moffett: 256
+  Urban: 256
+  Samson: 256
+  Oil_leak: 256
 
 WDC_train:
   - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
@@ -182,6 +207,7 @@ WHU_Hi_train:
 WHU_Hi_val:
   - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
 
+# Change detection: hermiston (242), bayArea, Farmland, SantaBarbara (224)
 CD_224_train:
   - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-224bands-px_128-0000.tar
 
@@ -202,6 +228,49 @@ OSCD_val:
   - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
   - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
 
+# Unmixing datasets
+Apex_train:
+  - - data/Downstreams/UrbanUnmixing/splits/apex.tar # 285
+Apex_val:
+  - - data/Downstreams/UrbanUnmixing/splits/apex.tar
+
+DC_train:
+  - - data/Downstreams/UrbanUnmixing/splits/DC.tar # 191
+DC_val:
+  - - data/Downstreams/UrbanUnmixing/splits/DC.tar
+
+Houston_unmixing_train: # same name
+  - - data/Downstreams/UrbanUnmixing/splits/houston_170.tar # 170
+Houston_unmixing_val:
+  - - data/Downstreams/UrbanUnmixing/splits/houston_170.tar
+
+Jasper_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Jasper.tar # 198
+Jasper_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Jasper.tar
+
+Moffett_train:
+  - - data/Downstreams/UrbanUnmixing/splits/moffett.tar # 184
+Moffett_val:
+  - - data/Downstreams/UrbanUnmixing/splits/moffett.tar
+
+Urban_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Urban_188.tar # 188
+Urban_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Urban_188.tar
+
+Samson_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Samson.tar # 156
+Samson_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Samson.tar
+
+# Segmentation
+
+Oil_leak_train:
+  - - data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_Image.tar
+Oil_leak_val:
+  - - data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_Image.tar
+
 # if is lora -------------
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 # ------------------------
@@ -212,7 +281,7 @@ wds_path_val: ${dataset[${dataset.val_name}]}
 dataset_channel: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
 batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
 batch_size_val: 8
-rgb_channels: ${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
+rgb_channels: null #${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
 img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
 hyper_transforms_lst:
   - grayscale
@@ -239,9 +308,10 @@ train_loader:
     check_channels_n: ${dataset.dataset_channel}
     quantile_img_clip: 1.0
     per_channel_norm: false
-    random_one_key: true
-    resize_before_transform: 512
-    keys_to_remove: ["gt"]
+    random_one_key: false
+    resize_before_transform: 256
+    # keys_to_remove: ["gt"]
+    keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]
 
 val_loader:
   _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
@@ -255,6 +325,7 @@ val_loader:
     check_channels_n: ${dataset.dataset_channel}
     quantile_img_clip: 1.0
     per_channel_norm: false
-    random_one_key: true
-    resize_before_transform: 512
-    keys_to_remove: ["gt"]
+    random_one_key: false
+    resize_before_transform: 256
+    # keys_to_remove: ["gt"]
+    keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]

@@ -66,7 +66,7 @@ class NAFBlock(nn.Module):
         self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
         self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
 
-    def forward(self, inp, cond=None):
+    def forward(self, inp, *args, **kwargs):
         def forward_closure(inp):
             x = inp
 
@@ -104,10 +104,14 @@ class NAFBlockConditional(NAFBlock):
         DW_Expand=2,
         FFN_Expand=2,
         drop_out_rate=0.0,
+        ms_cond_chans=None,
         **__discarded_kwargs,
     ):
         super().__init__(c, DW_Expand, FFN_Expand, drop_out_rate)
         ffn_channel = FFN_Expand * c
+        if ms_cond_chans is not None:
+            ms_cond_chans = cond_chs
+            self.ms_conv_before_add = create_conv2d(ms_cond_chans, c, 3)
         # lora-like modulation
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
@@ -124,9 +128,19 @@ class NAFBlockConditional(NAFBlock):
             ),
         )
 
-    def forward(self, inp, cond):
-        def forward_closure(inp, cond):
+    def forward(self, inp, mod_cond, ms_cond=None):
+        """input, latent_modulation, multispectral_add_condition"""
+
+        def forward_closure(inp, latent, ms_cond=None):
             x = inp
+
+            # Add multispectral condition
+            if hasattr(self, "ms_conv_before_add") and ms_cond is not None:
+                ms_cond = F.interpolate(
+                    ms_cond, size=x.shape[2:], mode="bilinear", align_corners=False
+                )
+                ms_cond = self.ms_conv_before_add(ms_cond)
+                x = x + ms_cond
 
             # Conv stage 1
             x = self.norm1(x)
@@ -138,11 +152,11 @@ class NAFBlockConditional(NAFBlock):
             x = self.dropout1(x)
             y = inp + x * self.beta
 
-            # Condition
-            cond = F.interpolate(
-                cond, size=y.shape[-2:], mode="bilinear", align_corners=False
+            # Latent modulation
+            l_cond = F.interpolate(
+                latent, size=y.shape[-2:], mode="bilinear", align_corners=False
             )
-            scale, shift = self.modulation(cond).chunk(2, dim=1)
+            scale, shift = self.modulation(l_cond).chunk(2, dim=1)
 
             # Conv stage 2
             x = self.conv4(self.norm2(y))
@@ -154,9 +168,11 @@ class NAFBlockConditional(NAFBlock):
             return y + x * self.gamma
 
         if self.grad_checkpointing and self.training:
-            return checkpoint(forward_closure, inp, cond, use_reentrant=False)
+            return checkpoint(
+                forward_closure, inp, mod_cond, ms_cond, use_reentrant=False
+            )
         else:
-            return forward_closure(inp, cond)
+            return forward_closure(inp, mod_cond, ms_cond)
 
 
 class NAFCrossAttentionConditional(NAFBlock):
@@ -238,13 +254,16 @@ class NAFCrossAttentionConditional(NAFBlock):
             x = self.dropout1(x)
             y = inp + x * self.beta
 
-            # Condition
+            # latent cross-attention
             if self.use_cross_attn:
                 y = self._forward_cross_attn(y, cond_cross_attn)
+
+            # ms modulation
             cond_modulate = F.interpolate(
                 cond_modulate, size=y.shape[-2:], mode="bilinear", align_corners=False
             )
             scale, shift = self.modulation(cond_modulate).chunk(2, dim=1)
+
             # Conv stage 2
             x = self.conv4(self.norm2(y))
             x = modulate(x, shift, scale)

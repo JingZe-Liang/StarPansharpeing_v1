@@ -1,6 +1,5 @@
 import sys
 from dataclasses import asdict, dataclass, field
-from math import e
 from typing import Any
 
 import torch
@@ -108,7 +107,7 @@ class DinoUnetConfig:
     n_stages: int = 4
     use_ms_stage: bool = True
     use_latent: bool = True
-    ensure_rgb_type: Any = field(default_factory=lambda: [2, 1, 0])
+    ensure_rgb_type: list = field(default_factory=lambda: [2, 1, 0])
     _debug: bool = False
 
 
@@ -306,6 +305,10 @@ class DinoUNet(nn.Module):
         self.dino_cfg = cfg.dino
         self.adapter_cfg = cfg.adapter
 
+        # from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+        # from torchvision.transforms import Normalize
+        # norm_ = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+
         self.use_latent = cfg.use_latent
         self._debug = cfg._debug
 
@@ -437,6 +440,8 @@ class DinoUNet(nn.Module):
         larger_then_3_op: str | list[int] | None = None,
     ):
         C = x.size(1)
+        if C == 3:
+            return x
         if C == 1:
             x_rgb = x.repeat(1, 3, 1, 1)
         else:
@@ -526,6 +531,8 @@ def test_cfg():
 
 def test_model():
     """Test basic functionality of DinoUNet for change detection"""
+    import numpy as np
+    import PIL.Image as Image
     from fvcore.nn import parameter_count_table
 
     # Test with latent enabled
@@ -538,8 +545,16 @@ def test_model():
 
     # Create test data for change detection
     # Two different temporal images
-    x1 = torch.randn(1, 3, 256, 256).cuda()  # First temporal image
-    x2 = torch.randn(1, 3, 256, 256).cuda()  # Second temporal image
+    # x1 = torch.randn(1, 3, 256, 256).cuda()  # First temporal image
+    # x2 = torch.randn(1, 3, 256, 256).cuda()  # Second temporal image
+
+    cat_meme = Image.open("scripts/tests/imgs/cat_memes.jpg")
+    cat_meme = (
+        torch.tensor(np.array(cat_meme.resize((256, 256))))
+        .permute(2, 0, 1)[None]
+        .cuda()
+    )
+    x1 = x2 = cat_meme / 255.0
     cond1 = torch.randn(1, 16, 32, 32).cuda()  # Condition for first image
     cond2 = torch.randn(1, 16, 32, 32).cuda()  # Condition for second image
 

@@ -590,7 +590,7 @@ class REPALoss(torch.nn.Module):
         self,
         img: Float[Tensor, "bs c h w"],
         get_interm_feats=False,
-        use_linstretch=False,
+        use_linstretch=True,
         detach=True,
     ):
         img_size = tuple(img.shape[-2:])

@@ -1,12 +1,17 @@
+from typing import TypeAlias
+
+import einx
 import torch
 from beartype import beartype
 from jaxtyping import Array, Float
 from kornia.filters import laplacian
 from torch import Tensor
 
-type Image = Float[Tensor, "b bands h w"]
-type EndMember = Float[Tensor, "n_endmember bands"]
-type Abunds = Float[Tensor, "b bands h w"]
+from src.utilities.train_utils.state import StepsCounter
+
+Image: TypeAlias = Float[Tensor, "b bands h w"]
+EndMember: TypeAlias = Float[Tensor, "n_endmember bands"]
+Abunds: TypeAlias = Float[Tensor, "b bands h w"]
 
 
 def loss_apply_weights(
@@ -31,19 +36,18 @@ def loss_apply_weights(
         return loss_out
 
 
-def SAD_loss(y_true: Image, y_pred: Image):
-    y_true = torch.nn.functional.normalize(y_true, dim=1, p=2)
-    y_pred = torch.nn.functional.normalize(y_pred, dim=1, p=2)
+def SAD_loss(gt: Image, pred: Image):
+    """Spectral Angle Distance Loss"""
 
-    A = torch.mul(y_true, y_pred)
-    A = torch.sum(A, dim=1)
-    sad = torch.acos(A)
-    loss = torch.mean(sad)
-    return loss
+    gt = einx.rearrange("b c h w -> b c (h w)", gt)
+    pred = einx.rearrange("b c h w -> b c (h w)", pred)
+    sad_loss = torch.acos(torch.cosine_similarity(gt, pred, dim=1))
+    sad_loss = sad_loss.mean()  # mean across batch and pixels
+    return sad_loss
 
 
 def abunds_loss(abunds: Abunds):
-    loss = torch.sqrt(abunds).mean()
+    loss = torch.sqrt(torch.abs(abunds)).mean()
     return loss
 
 
@@ -85,6 +89,11 @@ _unmixing_loss_registry = {
 class UnmixingLoss(torch.nn.Module):
     loss_names = ["sad_loss", "abunds_loss", "endmember_loss"]
 
+    # FIXME: bug somewhere
+    """
+    This is wield that the model will output NaN using this loss.
+    """
+
     def __init__(self, weights: list[float] | tuple[float, ...] | None = None):
         super().__init__()
         self.weights = weights if weights is not None else [1.0, 0.35, 0.1]
@@ -94,11 +103,11 @@ class UnmixingLoss(torch.nn.Module):
         hyper_in: Image,
         hyper_recon: Image,
         abunds: Abunds,
-        end_members: EndMember,
+        endmembers: EndMember,
     ):
-        sad_loss = SAD_loss(hyper_recon, hyper_in)
+        sad_loss = SAD_loss(hyper_in, hyper_recon)
         abds_loss = abunds_loss(abunds)
-        endmember_loss = endmember_tv_loss(end_members)
+        endmember_loss = endmember_tv_loss(endmembers)
 
         total_loss, (sad_loss, abds_loss, endmember_loss) = loss_apply_weights(
             [sad_loss, abds_loss, endmember_loss],
@@ -111,6 +120,323 @@ class UnmixingLoss(torch.nn.Module):
         )
 
 
+@beartype
+class StagedUnmixingLoss(torch.nn.Module):
+    """
+    Simplified Staged Unmixing Loss based on SSAF-Net training strategy
+
+    This loss function implements a two-stage training approach for simple networks:
+    Stage 1 (steps < switch_step): Focus on reconstruction and abundance constraints
+    Stage 2 (steps >= switch_step): Add endmember volume and spectral constraints
+
+    Network outputs expected: abunds, recon, em (no complex VAE components)
+
+    Based on SSAF-Net's training strategy with separate sub-loss functions
+    """
+
+    loss_names = [
+        "reconstruction",
+        "abundance_constraint",
+        "endmember_volume",
+        "endmember_spectral",
+    ]
+
+    def __init__(
+        self,
+        switch_step: int = 6000,
+        lambda_y2: float = 0.04,
+        lambda_pre: float = 10.0,
+        lambda_vol: float = 10.0,
+        lambda_sad: float = 5.0,
+    ):
+        """
+        Initialize staged unmixing loss with SSAF-Net hyperparameters
+
+        Parameters
+        ----------
+        switch_step : int
+            Step threshold to switch from stage 1 to stage 2 training
+        lambda_y2 : float
+            Weight for secondary reconstruction loss
+        lambda_pre : float
+            Weight for abundance constraint loss
+        lambda_vol : float
+            Weight for endmember volume loss
+        lambda_sad : float
+            Weight for endmember spectral angle loss
+        """
+        super().__init__()
+        self.switch_step = switch_step
+        self.steps_counter = StepsCounter()
+
+        # SSAF-Net inspired loss weights
+        self.lambda_y2 = lambda_y2
+        self.lambda_pre = lambda_pre
+        self.lambda_vol = lambda_vol
+        self.lambda_sad = lambda_sad
+
+    def _reconstruction_loss(self, hyper_in: Image, hyper_recon: Image) -> Tensor:
+        """
+        Compute reconstruction loss between input and reconstructed image
+
+        Based on SSAF-Net's dual reconstruction loss strategy
+
+        Parameters
+        ----------
+        hyper_in : Image
+            Input hyperspectral image [b bands h w]
+        hyper_recon : Image
+            Reconstructed image [b bands h w]
+
+        Returns
+        -------
+        Tensor
+            Reconstruction loss
+        """
+        # Primary reconstruction loss (MSE)
+        loss = torch.nn.functional.mse_loss(hyper_recon, hyper_in)
+        return loss
+
+    def _abundance_constraint_loss(
+        self, abunds: Abunds, abunds_fcls: Abunds | None = None
+    ) -> Tensor:
+        """
+        Compute abundance constraint loss
+
+        Based on SSAF-Net's abundance consistency loss with FCLS reference
+
+        Parameters
+        ----------
+        abunds : Abunds
+            Predicted abundances [b n_endmember h w]
+        abunds_fcls : Abunds | None
+            FCLS reference abundances (optional) [b n_endmember h w]
+
+        Returns
+        -------
+        Tensor
+            Abundance constraint loss
+        """
+        if abunds_fcls is not None:
+            # Compare with FCLS results (SSAF-Net's stage 1 approach)
+            loss = torch.nn.functional.mse_loss(abunds, abunds_fcls)
+        else:
+            # Use sparsity constraint as fallback
+            loss = abunds.abs().sqrt().mean()
+        return loss
+
+    def _endmember_volume_loss(self, endmembers: EndMember) -> Tensor:
+        """
+        Compute minimum volume loss for endmembers
+
+        Based on SSAF-Net's endmember minimum volume constraint:
+        loss_minvol = ((em_tensor - em_bar) ** 2).sum() / pixels / endmember_number / band_number
+
+        Parameters
+        ----------
+        endmembers : EndMember
+            Endmember tensors [n_endmember bands]
+
+        Returns
+        -------
+        Tensor
+            Minimum volume loss
+        """
+        # Compute mean endmember
+        em_mean = endmembers.mean(dim=1, keepdim=True)  # [n_endmember, 1]
+
+        # Minimum volume loss (distance from mean)
+        n_endmembers, n_bands = endmembers.shape
+        loss = ((endmembers - em_mean) ** 2).sum() / n_endmembers / n_bands
+
+        return loss
+
+    def _endmember_spectral_loss(self, endmembers: EndMember) -> Tensor:
+        """
+        Compute spectral angle loss for endmembers
+
+        Based on SSAF-Net's spectral angle divergence loss:
+        em_bar = em_tensor.mean(dim=0)
+        aa = (em_tensor * em_bar).sum(dim=2)
+        sad = torch.acos(aa / (em_bar_norm + 1e-6) / (em_tensor_norm + 1e-6))
+
+        Parameters
+        ----------
+        endmembers : EndMember
+            Endmember tensors [n_endmember bands]
+
+        Returns
+        -------
+        Tensor
+            Spectral angle loss
+        """
+        # Compute mean endmember spectrum
+        em_mean = endmembers.mean(dim=0)  # [bands]
+
+        # Vectorized computation of spectral angles
+        # Normalize endmembers and mean spectrum
+        em_norms = torch.norm(endmembers, dim=1)  # [n_endmember]
+        mean_norm = torch.norm(em_mean)  # scalar
+
+        # Compute dot products
+        dot_products = torch.matmul(endmembers, em_mean)  # [n_endmember]
+
+        # Compute cosine similarities
+        cos_sims = dot_products / (em_norms * mean_norm + 1e-6)
+        cos_sims = torch.clamp(cos_sims, -1.0, 1.0)
+
+        # Compute spectral angles and average
+        sad_values = torch.acos(cos_sims)
+        loss = sad_values.mean()
+
+        return loss
+
+    def _stage1_loss(
+        self,
+        hyper_in: Image,
+        abunds_pred: Abunds,
+        hyper_recon: Image,
+        abunds_fcls: Abunds | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """
+        Stage 1 loss: Reconstruction and abundance constraints
+
+        Based on SSAF-Net's first stage training (epoch < epochs // 2):
+        loss = loss_rec + lambda_kl * loss_kl + lambda_pre * loss_a + 0.1 * loss_a1_a2
+
+        Parameters
+        ----------
+        hyper_in : Image
+            Input hyperspectral image [b bands h w]
+        abunds_pred : Abunds
+            Predicted abundances [b n_endmember h w]
+        hyper_recon : Image
+            Reconstructed image [b bands h w]
+        abunds_fcls : Abunds | None
+            FCLS reference abundances (optional) [b n_endmember h w]
+
+        Returns
+        -------
+        tuple[Tensor, dict[str, Tensor]]
+            Total loss and loss dictionary
+        """
+        # Reconstruction loss
+        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon)
+
+        # Abundance constraint loss
+        abundance_loss = self._abundance_constraint_loss(abunds_pred, abunds_fcls)
+
+        # Weighted combination (SSAF-Net stage 1 style)
+        total_loss = rec_loss + self.lambda_pre * abundance_loss
+
+        loss_dict = {
+            "reconstruction": rec_loss,
+            "abundance_constraint": abundance_loss,
+            "endmember_volume": torch.tensor(0.0, device=rec_loss.device),
+            "endmember_spectral": torch.tensor(0.0, device=rec_loss.device),
+        }
+
+        return total_loss, loss_dict
+
+    def _stage2_loss(
+        self,
+        hyper_in: Image,
+        abunds_pred: Abunds,
+        endmembers: EndMember,
+        hyper_recon: Image,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """
+        Stage 2 loss: Add endmember property constraints
+
+        Based on SSAF-Net's second stage training (epoch >= epochs // 2):
+        loss = loss_rec + lambda_vol * loss_minvol + lambda_sad * loss_sad
+
+        Parameters
+        ----------
+        hyper_in : Image
+            Input hyperspectral image [b bands h w]
+        abunds_pred : Abunds
+            Predicted abundances [b n_endmember h w] (not used in stage 2)
+        endmembers : EndMember
+            Predicted endmembers [n_endmember bands]
+        hyper_recon : Image
+            Reconstructed image [b bands h w]
+
+        Returns
+        -------
+        tuple[Tensor, dict[str, Tensor]]
+            Total loss and loss dictionary
+        """
+        # abunds_pred is kept for interface consistency but not used in stage 2
+
+        # Reconstruction loss
+        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon)
+
+        # Endmember volume loss
+        volume_loss = self._endmember_volume_loss(endmembers)
+
+        # Endmember spectral loss
+        spectral_loss = self._endmember_spectral_loss(endmembers)
+
+        # Weighted combination (SSAF-Net stage 2 style)
+        total_loss = (
+            rec_loss + self.lambda_vol * volume_loss + self.lambda_sad * spectral_loss
+        )
+
+        loss_dict = {
+            "reconstruction": rec_loss,
+            "abundance_constraint": torch.tensor(0.0, device=rec_loss.device),
+            "endmember_volume": volume_loss,
+            "endmember_spectral": spectral_loss,
+        }
+
+        return total_loss, loss_dict
+
+    def forward(
+        self,
+        hyper_in: Image,
+        abunds_pred: Abunds,
+        endmembers: EndMember,
+        hyper_recon: Image,
+        abunds_fcls: Abunds | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """
+        Compute staged unmixing loss for simple network outputs
+
+        Parameters
+        ----------
+        hyper_in : Image
+            Input hyperspectral image [b bands h w]
+        abunds_pred : Abunds
+            Predicted abundances [b n_endmember h w]
+        endmembers : EndMember
+            Predicted endmembers [n_endmember bands]
+        hyper_recon : Image
+            Reconstructed image [b bands h w]
+        abunds_fcls : Abunds | None
+            FCLS reference abundances (optional) [b n_endmember h w]
+
+        Returns
+        -------
+        tuple[Tensor, dict[str, Tensor]]
+            Total loss and loss dictionary
+        """
+        current_step = self.steps_counter["train"]
+
+        # Stage 1: Reconstruction and abundance constraints
+        if current_step < self.switch_step:
+            total_loss, loss_dict = self._stage1_loss(
+                hyper_in, abunds_pred, hyper_recon, abunds_fcls
+            )
+        # Stage 2: Add endmember property constraints
+        else:
+            total_loss, loss_dict = self._stage2_loss(
+                hyper_in, abunds_pred, endmembers, hyper_recon
+            )
+
+        return total_loss, loss_dict
+
+
 # * --- Test --- * #
 
 
@@ -118,14 +444,14 @@ def test_loss():
     input = torch.randn(2, 128, 64, 64)
     recon = torch.randn(2, 128, 64, 64)
     abunds = torch.randn(2, 4, 64, 64).relu_()
-    endmembers = torch.randn(128, 4)
+    endmembers = torch.randn(4, 128)  # Note: shape should be [n_endmembers, bands]
 
     loss_fn = UnmixingLoss([1.0, 1.0, 1.0])
     total_loss, loss_dict = loss_fn(
         hyper_in=input,
         hyper_recon=recon,
         abunds=abunds,
-        end_members=endmembers,
+        endmembers=endmembers,
     )
     print("Total Loss:", total_loss.item())
     print("Loss Dictionary:", loss_dict)
@@ -134,5 +460,94 @@ def test_loss():
     assert isinstance(loss_dict, dict)
 
 
+def test_staged_loss():
+    """
+    Test function for StagedUnmixingLoss
+    """
+    print("Testing StagedUnmixingLoss...")
+
+    # Initialize StepsCounter first
+    from src.utilities.train_utils.state import StepsCounter
+
+    StepsCounter(step_names=["train"])
+
+    # Create test data
+    batch_size, bands, height, width = 2, 128, 64, 64
+    n_endmembers = 4
+
+    # Input tensors
+    hyper_in = torch.randn(batch_size, bands, height, width)
+    abunds_pred = torch.rand(batch_size, n_endmembers, height, width).relu_()
+    endmembers = torch.rand(n_endmembers, bands)
+    hyper_recon = torch.randn(batch_size, bands, height, width)
+    abunds_fcls = torch.rand(batch_size, n_endmembers, height, width).relu_()
+
+    # Test Stage 1 loss
+    print("\n--- Testing Stage 1 Loss ---")
+    loss_fn = StagedUnmixingLoss(switch_step=1000)  # Will use stage 1
+
+    # Mock the steps counter to simulate stage 1
+    loss_fn.steps_counter.update("train", 500)
+
+    total_loss, loss_dict = loss_fn(
+        hyper_in=hyper_in,
+        abunds_pred=abunds_pred,
+        endmembers=endmembers,
+        hyper_recon=hyper_recon,
+        abunds_fcls=abunds_fcls,
+    )
+
+    print(f"Stage 1 Total Loss: {total_loss.item():.6f}")
+    print("Stage 1 Loss Dictionary:")
+    for key, value in loss_dict.items():
+        print(f"  {key}: {value.item():.6f}")
+
+    # Test Stage 2 loss
+    print("\n--- Testing Stage 2 Loss ---")
+    # Mock the steps counter to simulate stage 2
+    loss_fn.steps_counter.update("train", 1500)
+
+    total_loss, loss_dict = loss_fn(
+        hyper_in=hyper_in,
+        abunds_pred=abunds_pred,
+        endmembers=endmembers,
+        hyper_recon=hyper_recon,
+        abunds_fcls=abunds_fcls,
+    )
+
+    print(f"Stage 2 Total Loss: {total_loss.item():.6f}")
+    print("Stage 2 Loss Dictionary:")
+    for key, value in loss_dict.items():
+        print(f"  {key}: {value.item():.6f}")
+
+    # Test without FCLS abundances
+    print("\n--- Testing without FCLS abundances ---")
+    # loss_fn.steps_counter.update('train', 500)  # Back to stage 1
+    loss_fn.steps_counter["train"] = 500  # Directly set to stage 1
+
+    total_loss, loss_dict = loss_fn(
+        hyper_in=hyper_in,
+        abunds_pred=abunds_pred,
+        endmembers=endmembers,
+        hyper_recon=hyper_recon,
+        abunds_fcls=None,
+    )
+
+    print(f"Stage 1 (no FCLS) Total Loss: {total_loss.item():.6f}")
+    print("Stage 1 (no FCLS) Loss Dictionary:")
+    for key, value in loss_dict.items():
+        print(f"  {key}: {value.item():.6f}")
+
+    # Validate outputs
+    assert isinstance(total_loss, torch.Tensor)
+    assert isinstance(loss_dict, dict)
+    assert all(isinstance(v, torch.Tensor) for v in loss_dict.values())
+    assert len(loss_dict) == 4  # Should have 4 loss components
+
+    print("\nStagedUnmixingLoss test passed!")
+
+
 if __name__ == "__main__":
     test_loss()
+    print("\n" + "=" * 50)
+    test_staged_loss()

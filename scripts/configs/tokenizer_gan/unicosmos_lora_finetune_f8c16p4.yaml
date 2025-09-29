@@ -18,14 +18,14 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: CD_224
+  used: Apex
   prefetch_factor: 6
-  num_workers: 3
+  num_workers: 1
   shuffle_size: -1
   loader_type: webdataset
   shuffle_within_workers: false
   # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -177,7 +177,7 @@ train:
   track_metrics: false
   compile_model: false
   # LoRA related
-  conv_in_out_reinit: false # if do not have the same channels in pretrain stage, set this to true
+  conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
   add_norms: false
   save_peft_ckpts: true
   resume_path:

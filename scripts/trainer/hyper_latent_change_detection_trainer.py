@@ -21,8 +21,6 @@ from accelerate.tracking import TensorBoardTracker
 from accelerate.utils import DummyOptim, DummyScheduler
 from einops import rearrange
 from ema_pytorch import EMA
-from jaxtyping import Float, Int
-from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
@@ -49,7 +47,12 @@ from src.utilities.logging import dict_round_to_list_str, log
 from src.utilities.logging.print import log_print
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
-from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
+from src.utilities.train_utils.state import (
+    StepsCounter,
+    dict_tensor_sync,
+    metrics_sync,
+    object_scatter,
+)
 from src.utilities.train_utils.visualization import (
     get_rgb_image,
     visualize_segmentation_map,
@@ -170,6 +173,13 @@ class HyperCDTrainer:
 
     def setup_segmentation_model(self):
         self.model = hydra.utils.instantiate(self.cfg.segment_model)
+        # self.model.to(device=self.device, dtype=self.dtype)
+
+        if self.train_cfg.act_checkpoint and hasattr(
+            self.model, "set_grad_checkpointing"
+        ):
+            self.log_msg("Using activation checkpointing to save memory")
+            self.model.set_grad_checkpointing(True)
 
         segment_name = (
             getattr(self.train_cfg, "segment_name", None)
@@ -201,13 +211,7 @@ class HyperCDTrainer:
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
-            if self.accelerator.is_main_process:
-                input_lst = [log_file] * self.accelerator.num_processes
-            else:
-                input_lst = [None] * self.accelerator.num_processes
-            output_lst = [None]
-            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
-            log_file: Path = output_lst[0]
+            log_file = object_scatter(log_file)
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
@@ -520,6 +524,10 @@ class HyperCDTrainer:
             # set models with property dtype
             self.model.dtype = torch.float
 
+        # cd model
+        self.model, self.optim = self.accelerator.prepare(self.model, self.optim)
+
+        # train and val dataloader
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
@@ -790,10 +798,14 @@ class HyperCDTrainer:
         seg_metrics = self._get_metric_fn()
         assert seg_metrics is not None
         metrics = seg_metrics.compute()
-        return {
-            k: v.item() if isinstance(v, torch.Tensor) else v
-            for k, v in metrics.items()
-        }
+
+        metrics_item = {}
+        for k, v in metrics.items():
+            if isinstance(v, torch.Tensor) and v.numel() == 1:
+                metrics_item[k] = v.item()
+            elif isinstance(v, (int, float)):
+                metrics_item[k] = v
+        return metrics_item
 
     def train_step(self, batch: dict):
         # NOTE: in HyperSIGMA mode: the batch is a single image patches, to input
@@ -886,10 +898,20 @@ class HyperCDTrainer:
 
         for batch in self.infinity_train_loader():
             # train step
-            self.train_step(batch)
+            try:
+                # breakpoint()
+                self.train_step(batch)
+            except Exception as e:
+                print(f"Error during training step: {e}")
+                for k, v in batch.items():
+                    print(f"{k}: {v.shape if torch.is_tensor(v) else v}")
+                raise RuntimeError from e
 
             if self.global_step % self.val_cfg.val_duration == 0:
+                torch.cuda.empty_cache()
                 self.val_loop()
+                torch.cuda.empty_cache()
+                # breakpoint()
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
@@ -988,10 +1010,11 @@ class HyperCDTrainer:
 
         return pred_seg
 
+    @torch.inference_mode()
     def val_loop(self):
         self.model.eval()
 
-        loss_metrics = MeanMetric().to(device=self.device)
+        # loss_metrics = MeanMetric().to(device=self.device)
         val_iter = self.get_val_loader_iter()
         for batch_or_idx in val_iter:  # type: ignore
             if self.val_cfg.max_val_iters > 0:
@@ -1011,7 +1034,8 @@ class HyperCDTrainer:
             self.step_train_state("val")
 
         metrics = self.get_metrics()
-        loss_val = loss_metrics.compute()
+        # loss_val = loss_metrics.compute()
+        loss_val = 0.0
 
         if self.accelerator.is_main_process:
             _metric_str = ""
@@ -1123,10 +1147,10 @@ class HyperCDTrainer:
 
         # Visualize input images
         img1_rgb = get_rgb_image(
-            self.to_rgb(img1), rgb_channels=[3, 2, 1], use_linstretch=True
+            self.to_rgb(img1), rgb_channels=[2, 1, 0], use_linstretch=True
         )
         img2_rgb = get_rgb_image(
-            self.to_rgb(img2), rgb_channels=[3, 2, 1], use_linstretch=True
+            self.to_rgb(img2), rgb_channels=[2, 1, 0], use_linstretch=True
         )
 
         # Convert RGB images to numpy arrays and ensure correct format

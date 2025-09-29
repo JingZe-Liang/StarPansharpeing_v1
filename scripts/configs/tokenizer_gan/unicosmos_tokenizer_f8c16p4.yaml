@@ -192,28 +192,28 @@ train:
     # foreach: true
 
   tokenizer_sched:
-    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-    # _partial_: true
-    # num_warmup_steps: 1000
-    # num_training_steps: ${train.max_steps}
-    # num_cycles: 1
-    # reduced_factor: 2
-    # min_lr: 1.0e-5
-    _target_: transformers.optimization.get_constant_schedule_with_warmup
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   disc_sched:
-    # _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-    # _partial_: true
-    # num_warmup_steps: 1000
-    # num_training_steps: ${train.max_steps}
-    # num_cycles: 1
-    # reduced_factor: 2
-    # min_lr: 1.0e-5
-    _target_: transformers.optimization.get_constant_schedule_with_warmup
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
     num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
 
   log:
     run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_latent_noise=${tokenizer.latent_noise_prob}_channel_drop=${tokenizer.use_channel_drop}

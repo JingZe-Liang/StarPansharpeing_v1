@@ -447,13 +447,13 @@ def quantile_clip_(
             q_max = add_n_dim_last_as(q_max, x)
         return q_min, q_max
 
+    # downsample the image to avoid quantile calculation error
+    img_ = _downsample_img(img, tgt_hw=1024, downsample_type="slice")
+
     # flatten for quantile calculation
     c, h, w = img.shape[-3:]
     fp = "... c h w -> ... (c h w)" if not per_channel else "... c h w -> ... c (h w)"
-    img = rearrange(img, fp)
-
-    # downsample the image to avoid quantile calculation error
-    img_ = _downsample_img(img, tgt_hw=1024, downsample_type="slice")
+    img_ = rearrange(img_, fp)
     try:
         q_min, q_max = q_clip_closure_(img_)
     except Exception as e:

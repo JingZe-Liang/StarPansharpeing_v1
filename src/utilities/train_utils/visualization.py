@@ -53,6 +53,15 @@ RGB_CHANNELS_BY_BANDS = {
     369: "mean",
     438: "mean",  # [62, 33, 19],
     439: "mean",
+    # unmixing dataset
+    191: "mean",  # DC
+    170: "mean",
+    198: "mean",
+    184: "mean",
+    188: "mean",
+    156: "mean",
+    224: "mean",
+    285: "mean",
 }
 
 

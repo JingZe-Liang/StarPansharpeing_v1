@@ -56,30 +56,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-class Qwen3NextRMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.zeros(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float())
-        # Llama does x.to(float16) * w whilst Qwen3Next is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        output = output * (1.0 + self.weight.float())
-        return output.type_as(x)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-
-# Register custom norm
-create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm
-
-
 class CrossAttention(nn.Module):
     def __init__(
         self,
@@ -91,8 +67,9 @@ class CrossAttention(nn.Module):
         qkv_bias=False,
         attn_drop=0.0,
         proj_drop=0.0,
-        use_gate=True,
+        gate_type: str | None = None,
         norm_eps=1e-6,
+        rope_type: str | None = None,
     ):
         super().__init__()
         self.ctx_dim = ctx_dim if ctx_dim is not None else dim
@@ -110,10 +87,18 @@ class CrossAttention(nn.Module):
 
         self.head_dim = dim // n_q_heads
         self.scale = self.head_dim**-0.5
+        self.rope_type = rope_type
 
-        q_dim = (
-            n_q_heads * self.head_dim if not use_gate else n_q_heads * self.head_dim * 2
-        )
+        self.gate_type = gate_type
+        if gate_type is None:
+            q_dim = n_q_heads * self.head_dim
+        elif gate_type == "element_wise":
+            q_dim = n_q_heads * self.head_dim * 2
+        elif gate_type == "head_wise":
+            q_dim = n_q_heads * self.head_dim + n_q_heads
+        else:
+            raise ValueError(f"Unsupported gate type: {gate_type}")
+
         kv_dim = n_kv_heads * self.head_dim
         self.q_proj = nn.Linear(dim, q_dim, bias=qkv_bias)
         self.kv_proj = nn.Linear(self.ctx_dim, kv_dim * 2, bias=qkv_bias)
@@ -122,6 +107,8 @@ class CrossAttention(nn.Module):
         if norm is not None:
             self.q_norm = norm(self.head_dim, eps=norm_eps)
             self.k_norm = norm(self.head_dim, eps=norm_eps)
+        else:
+            self.q_norm = self.k_norm = nn.Identity()
 
         self.out_proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -131,16 +118,37 @@ class CrossAttention(nn.Module):
         self.is_causal = False
         self._attn_implementation = "sdpa"
 
+    def _rope(self, q, k, rope: Callable | tuple[Tensor, Tensor] | None = None):
+        if self.rope_type == "rope_q":
+            raise NotImplementedError("rope_q not implemented")
+        else:
+            if callable(rope):
+                q, k = rope(q, k)
+            elif isinstance(rope, tuple):
+                cos, sin = rope
+                q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        return q, k
+
     def _qkv_proj(
         self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None
     ):
         bl_shape = x.shape[:-1]  # (B, L)
-        qg = self.q_proj(x)
-        qg = qg.view(*bl_shape, -1, self.head_dim * 2)
-        q_states, gate = qg.chunk(2, dim=-1)
-        q_states = self.q_norm(q_states).transpose(1, 2)  # (B, n_q_heads, L, head_dim)
-        gate = gate.reshape(*bl_shape, -1)  # (B, L, C)
 
+        # query and gate
+        qg = self.q_proj(x)
+        if self.gate_type is None:
+            q_states = qg.view(*bl_shape, -1, self.head_dim)
+            gate = None
+        elif self.gate_type == "element_wise":
+            qg = qg.view(*bl_shape, -1, self.head_dim * 2)
+            q_states, gate = qg.chunk(2, dim=-1)
+        else:
+            qg = qg.view(*bl_shape, -1, self.head_dim + 1)
+            q_states, gate = qg.split([self.head_dim, 1], dim=-1)
+            gate = gate.view(*bl_shape, -1, 1)  # (B, L, n_q_heads, 1)
+        q_states = self.q_norm(q_states).transpose(1, 2)  # (B, n_q_heads, L, head_dim)
+
+        # context key and value
         b_ctxl_shape = context.shape[:-1]  # (B, L2)
         kv_states = self.kv_proj(context)
         kv_states = kv_states.view(
@@ -150,11 +158,8 @@ class CrossAttention(nn.Module):
         k_states = self.k_norm(k_states).transpose(1, 2)
         v_states = v_states.transpose(1, 2)
 
-        if callable(rope):
-            q_states, k_states = rope(q_states, k_states)
-        elif isinstance(rope, tuple):
-            cos, sin = rope
-            q_states, k_states = apply_rotary_pos_emb(q_states, k_states, cos, sin)
+        # rope
+        q_states, k_states = self._rope(q_states, k_states, rope)
 
         return q_states, k_states, v_states, gate
 
@@ -186,8 +191,9 @@ class CrossAttention(nn.Module):
 
         q, k, v, g = self._qkv_proj(x, context, rope)
         attn_out, _ = self._attention(q, k, v, mask)
+        if g is not None:
+            attn_out = attn_out * g.sigmoid()
         attn_out = attn_out.reshape(*q_hidden_shape, -1)
-        attn_out = attn_out * g.sigmoid()
         out = self.out_proj(attn_out)
 
         return out
@@ -197,14 +203,17 @@ class CrossAttention(nn.Module):
 import pytest
 
 
-@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(["seq_len_q", "seq_len_kv"], [[128, 256], [256, 512]])
 @pytest.mark.parametrize("dim", [32, 64, 128])
-def test_forward(batch_size, seq_len_q, seq_len_kv, dim):
+@pytest.mark.parametrize("gate_type", ["element_wise", "head_wise", None])
+def test_forward(batch_size, seq_len_q, seq_len_kv, dim, gate_type):
     n_q_heads = 8
     n_kv_heads = 8
 
-    model = CrossAttention(dim, n_q_heads=n_q_heads, n_kv_heads=n_kv_heads)
+    model = CrossAttention(
+        dim, n_q_heads=n_q_heads, n_kv_heads=n_kv_heads, gate_type=gate_type
+    )
     x = torch.randn(batch_size, seq_len_q, dim)
     context = torch.randn(batch_size, seq_len_kv, dim)
 

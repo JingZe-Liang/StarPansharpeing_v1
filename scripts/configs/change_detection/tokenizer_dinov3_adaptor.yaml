@@ -31,7 +31,7 @@ segment_loss:
   loss_weights: [0.5, 1.0, 0.5]
 
 metric:
-  _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
+  _target_: src.stage2.change_detection.metrics.basic.ChangeDetectionScore
   n_classes: ${dataset.consts.num_classes}
   ignore_index: 255
   include_bg: false
@@ -40,6 +40,7 @@ train:
   # Wrapper-based training
   val_slide_window: true
   grad_check: false
+  act_checkpoint: true
 
   use_single_img_indexing: false
   patches_per_image:
@@ -61,7 +62,7 @@ train:
   segment_optim:
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 4.0e-4
+    lr: 6.0e-4
     weight_decay: 1.0e-4
     eps: 1e-10
     betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
@@ -71,9 +72,9 @@ train:
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
-    num_warmup_steps: 100
+    num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
-    num_cycles: 1
+    num_cycles: 3
 
   log:
     run_comment: OSCD_dinov3_adaptor_wrapper
@@ -82,5 +83,5 @@ train:
   debug: true
 
 val:
-  val_duration: 500
+  val_duration: 1000
   max_val_iters: -1

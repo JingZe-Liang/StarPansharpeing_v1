@@ -9,6 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.layers import create_norm_layer
+from torchvision.transforms import Normalize
 
 from ..utils.ms_deform_attn import MSDeformAttn
 
@@ -317,6 +320,7 @@ class DINOv3_Adapter(nn.Module):
         add_vit_feature=True,
         use_extra_extractor=True,
         with_cp=True,
+        use_bn=True,
     ):
         super(DINOv3_Adapter, self).__init__()
         self.backbone = backbone
@@ -356,16 +360,18 @@ class DINOv3_Adapter(nn.Module):
             ]
         )
         self.up = nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2)
-        self.norm1 = nn.SyncBatchNorm(embed_dim)
-        self.norm2 = nn.SyncBatchNorm(embed_dim)
-        self.norm3 = nn.SyncBatchNorm(embed_dim)
-        self.norm4 = nn.SyncBatchNorm(embed_dim)
+        self.norm1 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
 
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
         self.apply(self._init_deform_weights)
         torch.nn.init.normal_(self.level_embed)
+
+        self._input_norm = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -380,6 +386,7 @@ class DINOv3_Adapter(nn.Module):
             # fan_out //= m.groups
             # m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             from timm.layers.weight_init import lecun_normal_
+
             lecun_normal_(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
@@ -406,6 +413,7 @@ class DINOv3_Adapter(nn.Module):
         return c2, c3, c4
 
     def forward(self, x):
+        x = self._input_norm(x)  # for input is 0-1
         deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
 
         # SPM forward
@@ -425,20 +433,7 @@ class DINOv3_Adapter(nn.Module):
                     x, n=self.interaction_indexes, return_class_token=True
                 )
 
-        x_for_shape, _ = all_layers[0]
-        bs, _, dim = x_for_shape.shape
-        del x_for_shape
-
-        cls, x = (
-            x[
-                :,
-                :1,
-            ],
-            x[
-                :,
-                5:,
-            ],
-        )
+        bs, _, dim = all_layers[0][0].shape  # [x, cls] per layer out
 
         outs = list()
         for i, layer in enumerate(self.interactions):

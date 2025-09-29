@@ -1,0 +1,146 @@
+cfgs:
+  used: WV3
+  batch_size_train: 32
+  batch_size_val: 4
+  num_workers: 1
+  prefetch_factor: 2
+  train_name: ${dataset.cfgs.used}_train
+  val_name: ${dataset.cfgs.used}_val
+  val_full_name: ${dataset.cfgs.used}_val_full
+  train_drop_last: true
+  val_drop_last: false
+  dataset_type: wds
+
+dataset_paths:
+  WV3_train: data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_train.tar
+  WV3_val: data/Downstreams/PanCollectionV2/WV3/pansharpening_reduced/Pansharping_WV3_val.tar
+  WV3_val_full: data/Downstreams/PanCollectionV2/WV3/pansharpening_full/Pansharpening_FullResolution_WV3_val.npz.tar
+  WV3_h5_train:
+    - data/Downstreams/PanCollectionV1/wv3/training_wv3/train_wv3.h5
+    - data/Downstreams/PanCollectionV1/wv3/training_wv3/valid_wv3.h5
+  WV3_h5_val: data/Downstreams/PanCollectionV1/wv3/reduced_examples/test_wv3_multiExm1.h5
+  WV3_h5_val_full: data/Downstreams/PanCollectionV1/pansharpening_test/test_wv3_OrigScale_multiExm1.h5
+
+  WV2_train: data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_train.tar
+  WV2_val: data/Downstreams/PanCollectionV2/WV2/pansharpening_reduced/Pansharpening_WV2_val.tar
+  WV2_val_full: data/Downstreams/PanCollectionV2/WV2/pansharpening_full/Pansharpening_FullResolution_WV2_val.npz.tar
+
+  WV4_train: data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_train.tar
+  WV4_val: data/Downstreams/PanCollectionV2/WV4/pansharpening_reduced/Pansharpening_WV4_val.tar
+  WV4_val_full: data/Downstreams/PanCollectionV2/WV4/pansharpening_full/Pansharpening_FullResolution_WV4_val.npz.tar
+
+  QB_train: data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_train.tar
+  QB_val: data/Downstreams/PanCollectionV2/QB/pansharpening_reduced/Pansharpening_QB_val.tar
+  QB_val_full: data/Downstreams/PanCollectionV2/QB/pansharpening_full/Pansharpening_FullResolution_QB_val.npz.tar
+  QB_h5_train:
+    - data/Downstreams/PanCollectionV1/qb/training_qb/train_qb.h5
+    - data/Downstreams/PanCollectionV1/qb/training_qb/valid_qb.h5
+  QB_h5_val: data/Downstreams/PanCollectionV1/qb/reduced_examples/test_qb_multiExm1.h5
+  QB_h5_val_full: data/Downstreams/PanCollectionV1/pansharpening_test/test_qb_OrigScale_multiExm1.h5
+
+  IKONOS_train: data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_train.tar
+  IKONOS_val: data/Downstreams/PanCollectionV2/IKONOS/pansharpening_reduced/Pansharpening_IKONOS_val.tar
+  IKONOS_val_full: data/Downstreams/PanCollectionV2/IKONOS/pansharpening_full/Pansharpening_FullResolution_IKONOS_val.npz.tar
+
+  GF2_h5_train:
+    - data/Downstreams/PanCollectionV1/gf/training_gf2/train_gf2.h5
+    - data/Downstreams/PanCollectionV1/gf/training_gf2/valid_gf2.h5
+  GF2_h5_val: data/Downstreams/PanCollectionV1/gf/reduced_examples/test_gf2_multiExm1.h5
+  GF2_h5_val_full: data/Downstreams/PanCollectionV1/pansharpening_test/test_gf2_OrigScale_multiExm1.h5
+
+dataset_names_to_rgb_channels:
+  WV3: [5, 3, 2]
+  WV2: [5, 3, 2]
+  WV4: [5, 3, 2]
+  IKONOS: [2, 1, 0]
+
+  MMSeg_YREB: [4, 3, 2]
+  DCF_2019: [5, 3, 2]
+  DCF_2020: [9, 6, 3]
+  GID_GF2: [3, 2, 1]
+  DryadHyper: [90, 60, 40]
+  Houston: [40, 20, 10]
+  DFC_2020: [9, 6, 4]
+  MUSLI: [66, 38, 16]
+  GF1: [2, 1, 0]
+  OHS: [18, 11, 6]
+  QB: [2, 1, 0]
+
+consts:
+  MMSeg_YREB: 12
+  WV3: 8
+  WV2: 8
+  WV: 4
+  IKONOS: 4
+  QB: 4
+
+  bands: ${dataset.consts.${dataset.cfgs.used}}
+  rgb_channels: ${dataset.dataset_names_to_rgb_channels.${dataset.cfgs.used}}
+
+train:
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharpening_dataloader_interface
+  ds_type: ${dataset.cfgs.dataset_type}
+  func_kwargs:
+    ## Webdataset Cfgs
+    wds_paths: ${dataset.dataset_paths.${dataset.cfgs.train_name}}
+    batch_size: ${dataset.cfgs.batch_size_train}
+    num_workers: ${dataset.cfgs.num_workers}
+    shuffle_size: 100
+    to_neg_1_1: false
+    resample: true
+    prefetch_factor: ${dataset.cfgs.prefetch_factor}
+    add_satellite_name: true
+    drop_last: ${dataset.cfgs.train_drop_last}
+    norm: 2047.0
+    transform_prob: 0.5
+    img_size: 256
+
+  loader_kwargs:
+    batch_size: ${dataset.cfgs.batch_size_train}
+    num_workers: ${dataset.cfgs.num_workers}
+    shuffle: true
+    drop_last: ${dataset.cfgs.train_drop_last}
+    pin_memory: true
+
+val:
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharpening_dataloader_interface
+  ds_type: ${dataset.cfgs.dataset_type}
+  func_kwargs:
+    wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_name}}
+    batch_size: ${dataset.cfgs.batch_size_val}
+    num_workers: 1
+    resample: false
+    shuffle_size: 10
+    to_neg_1_1: false
+    prefetch_factor: ${dataset.cfgs.prefetch_factor}
+    add_satellite_name: true
+    drop_last: ${dataset.cfgs.val_drop_last}
+    norm: 2047.0
+
+  loader_kwargs:
+    batch_size: ${dataset.cfgs.batch_size_val}
+    num_workers: ${dataset.cfgs.num_workers}
+    shuffle: true
+    drop_last: ${dataset.cfgs.train_drop_last}
+    pin_memory: true
+
+val_full:
+  _target_: src.stage2.pansharpening.data.pansharpening_loader.get_pansharpening_dataloader_interface
+  ds_type: ${dataset.cfgs.dataset_type}
+  func_kwargs:
+    wds_paths: ${dataset.dataset_paths.${dataset.cfgs.val_full_name}}
+    batch_size: 1
+    to_neg_1_1: false
+    resample: true
+    num_workers: 1
+    shuffle_size: 10
+    add_satellite_name: true
+    drop_last: ${dataset.cfgs.val_drop_last}
+    norm: 2047.0
+
+  loader_kwargs:
+    batch_size: ${dataset.cfgs.batch_size_val}
+    num_workers: ${dataset.cfgs.num_workers}
+    shuffle: true
+    drop_last: ${dataset.cfgs.train_drop_last}
+    pin_memory: true

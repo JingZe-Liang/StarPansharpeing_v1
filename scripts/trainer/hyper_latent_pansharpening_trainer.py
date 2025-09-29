@@ -40,6 +40,7 @@ from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils import metrics_sync, object_all_gather, object_scatter
 from src.utilities.train_utils.state import StepsCounter
+from stage1.WeTok.src.WeTok.modules.util import requires_grad
 
 
 class BatchInput(TypedDict):
@@ -155,29 +156,22 @@ class PansharpeningTrainer:
     def setup_pansharpening_model(self):
         self.pansp_model = hydra.utils.instantiate(self.cfg.pansharp_model)
 
-        # is partial
-        if isinstance(self.pansp_model, partial):
-            # add the decode fn
-            decoder_fn = self.get_decoder_fn()  # wrapper will handle decoding
-            orignal_func = self.pansp_model.func
-            known_args, known_kwargs = self.pansp_model.args, self.pansp_model.keywords
-            # assert class must be init
-            self.pansp_model = orignal_func(
-                *known_args, decoder_fn=decoder_fn, **known_kwargs
-            )
-            self.log_msg(
-                f"[Pansharpening Model]: use partial model {orignal_func.__name__} with wrapper decoder"
-            )
         self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
-            self.pansp_model
+            self.pansp_model.downstream_model
         ).amotizing_pixels
 
-        # checkpoint
-        use_checkpoint = (
-            hasattr(
-                (_unwrapped_model := self.accelerator.unwrap_model(self.pansp_model)),
-                "set_checkpoint_mode",
+        # add processors
+        if self.train_cfg.add_pan_processor:
+            pan_processor = lambda ms, pan: (
+                ms,
+                pan.repeat_interleave(ms.shape[1], dim=1),
             )
+            self.pansp_model.tokenizer_img_processor = pan_processor
+
+        # checkpoint
+        _unwrapped_model = self.accelerator.unwrap_model(self.pansp_model)
+        use_checkpoint = (
+            hasattr(_unwrapped_model, "set_checkpoint_mode")
             and self.train_cfg.model_act_checkpoint
         )
         if use_checkpoint:
@@ -418,9 +412,13 @@ class PansharpeningTrainer:
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_panshap_model_params = (
-                lambda with_name: self.pansp_model.named_parameters()
+                lambda with_name: {
+                    k: v
+                    for k, v in self.pansp_model.named_parameters()
+                    if v.requires_grad
+                }
                 if with_name
-                else self.pansp_model.parameters()
+                else [p for p in self.pansp_model.parameters() if p.requires_grad]
             )
             pansp_opt = _optimizer_creater(
                 self.train_cfg.pansharp_optim, _get_panshap_model_params
@@ -486,6 +484,10 @@ class PansharpeningTrainer:
             # set models with property dtype
             self.pansp_model.dtype = torch.float
 
+        # prepare the model, optimizer, dataloader
+        self.pansp_model, self.pansp_optim = self.accelerator.prepare(
+            self.pansp_model, self.pansp_optim
+        )
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
@@ -552,20 +554,34 @@ class PansharpeningTrainer:
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
     def forward_pansp_model(
-        self, lrms, pan, sr, lrms_latent, pan_latent, sr_latent, ema=False
+        self,
+        lrms,
+        pan,
+        sr=None,
+        lrms_latent=None,
+        pan_latent=None,
+        sr_latent=None,
+        ema=False,
     ):
-        pansp_model = self.pansp_model if not ema else self.ema_pansp_model.ema_model
+        pansp_model: nn.Module = (
+            self.pansp_model if not ema else self.ema_pansp_model.ema_model  # type: ignore
+        )
         with self.accelerator.autocast():
             if self.pansp_amotizing_pixels:
-                out = pansp_model((lrms, pan), (lrms_latent, pan_latent))
+                pixel_in = (lrms, pan)
+                latent_in = None
+                if lrms_latent is not None and pan_latent is not None:
+                    latent_in = (lrms_latent, pan_latent)
+                out = pansp_model(pixel_in, latent_in)
                 pred_latent = out["latent_out"]
                 pred_sr = out["pixel_out"]
                 pred_sr_from_latent = out.get("pixel_from_latent", None)
             else:
+                # Works at latent space only
                 pred_latent = pansp_model(lrms_latent, pan_latent)
                 # Use wrapper decoder for pixel output
-                if hasattr(self.pansp_model, "decode"):
-                    pred_sr = self.pansp_model.decode(pred_latent)
+                if hasattr(pansp_model, "decode"):
+                    pred_sr = pansp_model.decode(pred_latent, chans=lrms.shape[1])
                 else:
                     # If no decode method, return None for pixel output
                     pred_sr = None
@@ -574,6 +590,7 @@ class PansharpeningTrainer:
             # loss
             sr_loss, sr_log_losses = None, {}
             if sr is not None or sr_latent is not None:
+                # breakpoint()
                 sr_loss = self.pansp_loss(
                     pred_latent, sr_latent, pred_sr, sr, pred_sr_from_latent, sr
                 )
@@ -655,14 +672,14 @@ class PansharpeningTrainer:
             # Wrapper expects pixel inputs directly
             lrms, pan, hrms = batch["lrms"], batch["pan"], batch["hrms"]
             # Convert to tokenizer range if needed
-            lrms, pan, hrms = map(self.to_tokenizer_range, (lrms, pan, hrms))
+            # lrms, pan, hrms = map(self.to_tokenizer_range, (lrms, pan, hrms))
             pan = pan.repeat_interleave(lrms.shape[1], dim=1)
 
             # Wrapper will handle encoding internally
             # Just pass the pixel data to the model
-            lrms_latent = lrms
-            pan_latent = pan
-            hrms_latent = hrms
+            lrms_latent = None
+            pan_latent = None
+            hrms_latent = self.pansp_model.encode(hrms)
 
         quality_track_n = self.train_cfg.track_metrics_duration
         # start track after n steps
@@ -697,12 +714,6 @@ class PansharpeningTrainer:
                 self.check_quality(
                     self.pan_acc_reduced, pred_sr=pred_img, gt=batch["hrms"]
                 )
-                # Skip latent quality check as tokenizer is handled by wrapper
-                # self.check_quality(
-                #     self.pan_acc_reduced_latent,
-                #     pred_sr=pred_img,
-                #     gt=self.forward_tokenizer(hrms_latent, mode="decode"),
-                # )
 
         self.step_train_state()
 
@@ -791,7 +802,7 @@ class PansharpeningTrainer:
             if self.global_step % self.val_cfg.val_duration == 0:
                 torch.cuda.empty_cache()
                 self.val_loop()
-                self.val_full_loop()
+                # self.val_full_loop()
                 torch.cuda.empty_cache()
 
             if self.global_step >= self.train_cfg.max_steps:
@@ -818,7 +829,7 @@ class PansharpeningTrainer:
             H, W = pan.shape[-2:]
 
         ms_shape = H // self.train_cfg.pansp_ratio, W // self.train_cfg.pansp_ratio
-        if lrms.shape[-2:] == torch.Size(ms_shape):
+        if lrms.shape[-2:] == tuple(ms_shape):
             if getattr(self.train_cfg, "upsample_lrms", True):
                 lrms = torch.nn.functional.interpolate(
                     lrms, size=(H, W), mode="bilinear"
@@ -835,32 +846,22 @@ class PansharpeningTrainer:
         return lrms
 
     @torch.no_grad()
-    def val_step_patches_legacy(self, batch):
+    def val_step_patches_legacy(self, batch: dict):
         from src.stage2.utilities.patches.patcher_legacy import PatchMergeModule
 
         batch = self._cast_to_dtype(batch)
-        lrms, pan, hrms = (
-            batch["lrms"],
-            batch["pan"],
-            batch.get("hrms", None),
-        )
-        assert self.online_tokenize, "only support online tokenize for val full"
+        lrms, pan, hrms = batch["lrms"], batch["pan"], batch.get("hrms", None)
 
         def _model_step_fn(lrms, pan):
-            lrms, pan = map(self.to_tokenizer_range, (lrms, pan))
-            pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
-            # Wrapper handles encoding internally
-            lrms_latent = lrms
-            pan_latent = pan_
-
+            # lrms, pan = map(self.to_tokenizer_range, (lrms, pan))
             pred_sr = self.forward_pansp_model(
-                lrms, pan, None, lrms_latent, pan_latent, None, ema=False
+                lrms, pan, None, None, None, None, ema=True
             ).pred_sr
             return pred_sr
 
         patcher = PatchMergeModule(
             patch_merge_step=_model_step_fn,
-            crop_batch_size=16,
+            crop_batch_size=self.val_cfg.crop_batch_size,
             patch_size_list=[64, 64],
             scale=1,
             device=self.device,
@@ -883,7 +884,9 @@ class PansharpeningTrainer:
             batch["pan"],
             batch.get("hrms", None),
         )
-        assert self.online_tokenize, "only support online tokenize for val full"
+        assert self.train_cfg.online_tokenize, (
+            "only support online tokenize for val full"
+        )
         patcher_kwargs = dict(window_size=64, stride=32)
         lrms_patches, pan_patches = map(
             partial(extract_tensor_patches, **patcher_kwargs), [lrms, pan]
@@ -913,31 +916,13 @@ class PansharpeningTrainer:
             batch["pan"],
             batch.get("hrms", None),
         )
-        if self.online_tokenize:
-            lrms, pan, hrms = map(self.to_tokenizer_range, (lrms, pan, hrms))
-            pan_ = pan.repeat_interleave(lrms.shape[1], dim=1)
-            # Wrapper handles encoding internally
-            lrms_latent = lrms
-            pan_latent = pan_
-            gt_latent = None
-            if hrms is not None:
-                gt_latent = hrms
-        else:
-            lrms_latent = batch["lrms_latent"].to(self.device, self.dtype)
-            pan_latent = batch["pan_latent"].to(self.device, self.dtype)
-            gt_latent = batch.get("hrms_latent", None)
-            if gt_latent is not None:
-                gt_latent = gt_latent.to(self.device, self.dtype)
+        lrms_latent, pan_latent, gt_latent = None, None, None
+        if hrms is not None:
+            gt_latent = self.pansp_model.encode(hrms)
 
         # forward the fusion network
         out = self.forward_pansp_model(
-            lrms,
-            pan,
-            hrms,
-            lrms_latent,
-            pan_latent,
-            gt_latent,
-            ema=True,
+            lrms, pan, hrms, lrms_latent, pan_latent, gt_latent, ema=True
         )
 
         return out
@@ -998,7 +983,7 @@ class PansharpeningTrainer:
         for batch in tbar:
             batch = cast(BatchInput, batch)
             gt = batch["hrms"].to(self.device)
-            if self.train_cfg.val_use_patches:
+            if self.val_cfg.val_use_patches:
                 self.log_msg("use patches for val step", level="DEBUG")
                 # val_out = self.val_step_patches(batch)
                 val_out = self.val_step_patches_legacy(batch)
@@ -1048,8 +1033,9 @@ class PansharpeningTrainer:
         self._val_full_loader_iter: Iterable
         for batch in tbar:
             batch = cast(BatchInput, batch)
-            if self.train_cfg.val_use_patches:
-                val_out = self.val_step_patches(batch)
+            if self.val_cfg.val_use_patches:
+                # val_out = self.val_step_patches(batch)
+                val_out = self.val_step_patches_legacy(batch)
             else:
                 val_out = self.val_step(batch)
 
@@ -1091,8 +1077,10 @@ class PansharpeningTrainer:
 
         ema_path = self.proj_dir / "ema"
         if self.accelerator.is_main_process:
-            ema_path.parent.mkdir(parents=True, exist_ok=True)
+            ema_path.mkdir(parents=True, exist_ok=True)
+            (ema_path / "pansharp_model").mkdir(parents=True, exist_ok=True)
 
+        # for accelerate dir loading
         self.accelerator.save_model(
             self.ema_pansp_model.ema_model, ema_path / "pansharp_model"
         )
@@ -1102,7 +1090,7 @@ class PansharpeningTrainer:
         accelerate.utils.save(self.train_state.state_dict(), _ema_path_state_train)
         self.log_msg(f"[Ckpt]: save ema at {ema_path}")
 
-    def load_from_ema(self, ema_path: str | Path, strict: bool = True):
+    def load_from_ema(self, ema_path: str | Path, strict: bool = False):
         ema_path = Path(ema_path)
 
         accelerate.load_checkpoint_in_model(
@@ -1255,10 +1243,7 @@ class PansharpeningTrainer:
 
 
 _key = "tokenizer_lora_nafnet"
-_configs = {
-    "tokenizer_lora_nafnet": "tokenizer_lora_nafnet",
-    "tokenizer_lora_vitamin": "tokenizer_lora_vitamin",
-}
+_configs = {"tokenizer_lora_nafnet": "pansharp_wrapper_nafnet_cosmos"}
 
 if __name__ == "__main__":
     from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner

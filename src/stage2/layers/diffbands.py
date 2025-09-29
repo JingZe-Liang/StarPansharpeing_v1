@@ -4,6 +4,7 @@ from typing import Literal
 import torch
 import torch.nn as nn
 from accelerate.state import PartialState
+from timm.layers import PatchEmbed
 
 from src.stage1.cosmos.modules.blocks import (
     GLUMBConv,
@@ -19,7 +20,20 @@ def _create_conv_in_module(
     c: int,
     hidden_dim: int,
     padding_mode: str,
+    is_patcher: bool = False,
+    patch_kwargs: dict | None = None,
 ):
+    if is_patcher:
+        module = PatchEmbed(
+            img_size=224,
+            in_chans=c,
+            embed_dim=hidden_dim,
+            strict_img_size=False,
+            output_fmt="NLC",
+            **(patch_kwargs or {}),
+        )
+        return module
+
     if basic_module == "conv":
         module = nn.Conv2d(
             in_channels=c,
@@ -178,6 +192,8 @@ class DiffBandsInputConvIn(nn.Module):
         basic_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         padding_mode: str = "zeros",
         check_grads: bool = True,
+        is_patcher: bool = False,
+        patch_kwargs: dict | None = None,
     ):
         super().__init__()
         self.band_lst = band_lst
@@ -187,6 +203,8 @@ class DiffBandsInputConvIn(nn.Module):
             "basic_module": basic_module,
             "hidden_dim": hidden_dim,
             "padding_mode": padding_mode,
+            "is_patcher": is_patcher,
+            "patch_kwargs": patch_kwargs,
         }
 
         self.in_modules = nn.ModuleDict()
@@ -361,3 +379,41 @@ class DiffBandsInputConvOut(nn.Module):
                 raise ValueError(
                     f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}. Available: conv, resnet, moe, inv_bottleneck"
                 )
+
+
+# * --- Dinov3 backbone diffbands compatibility --- #
+
+
+def dinov3_patchembeding_to_diffbands(
+    backbone,
+    band_lst: list[int],
+    hidden_dim: int,
+    basic_module="conv",
+    padding_mode: str = "zeros",
+    check_grads: bool = True,
+):
+    pe_weights = backbone.patch_embed.proj.weight  # (c, 3, 16, 16)
+    assert isinstance(backbone.patch_embed.norm, nn.Identity), (
+        "backbone.patch_embed.norm must be nn.Identity"
+    )
+    assert basic_module == "conv", "only conv is supported for dinov3 compatibility"
+    assert 3 in band_lst, "3 must be in band_lst for dinov3 compatibility"
+
+    conv_in = DiffBandsInputConvIn(
+        band_lst=band_lst,
+        hidden_dim=hidden_dim,
+        basic_module=basic_module,
+        padding_mode=padding_mode,
+        check_grads=check_grads,
+        is_patcher=True,
+        patch_kwargs={
+            "img_size": backbone.patch_size,
+        },
+    )
+    with torch.no_grad():
+        conv_in.in_modules["conv_in_3"].proj.weight.data.copy_(pe_weights.data)  # type: ignore
+    log_print("[Dinov3 Diffbands]: set patch embedding to hidden module for channel 3")
+
+    backbone.patch_embed = conv_in
+
+    return backbone

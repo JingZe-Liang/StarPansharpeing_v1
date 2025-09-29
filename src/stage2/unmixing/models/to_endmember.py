@@ -40,8 +40,8 @@ class ToEndMemberConv(EndMemberBase):
         super(ToEndMemberConv, self).__init__()
         padding = kernel // 2
         self.decoder = nn.Conv2d(
-            in_channels=channels,
-            out_channels=num_endmember,
+            in_channels=num_endmember,
+            out_channels=channels,
             kernel_size=kernel,
             stride=1,
             padding=padding,
@@ -61,7 +61,7 @@ class ToEndMemberConv(EndMemberBase):
         return code
 
     def init_endmembers(
-        self, init_value: Float[torch.Tensor, "num_endmember channels"]
+        self, init_value: Float[torch.Tensor, "channels num_endmember"]
     ):
         """Initialize endmembers with given values.
 
@@ -76,11 +76,13 @@ class ToEndMemberConv(EndMemberBase):
         )
         assert init_value.ndim == 2, "init_value must be 2D"
 
+        # channels, num_endmember, 1, 1
         self.decoder.weight.data.copy_(init_value[..., None, None])
 
     def get_endmember(self):
         # (num_endmember, channels)
         endmember = self.decoder.weight.data.clamp_(min=0.0)
+        endmember = endmember.squeeze(-2, -1).T
         return endmember
 
 
@@ -94,7 +96,7 @@ class ToEndMemberParameter(EndMemberBase):
         **kwargs,
     ):
         super(ToEndMemberParameter, self).__init__()
-        self.endmember = nn.Parameter(torch.randn(num_endmember, channels))
+        self.endmember = nn.Parameter(torch.empty(channels, num_endmember))
         self.apply_relu = apply_relu
 
         # init
@@ -110,7 +112,7 @@ class ToEndMemberParameter(EndMemberBase):
             self.endmember.data.clamp_(min=0.0)
 
     def forward(self, code):
-        code = torch.einsum("bchw,dc->bdhw", code, self.endmember)
+        code = torch.einsum("bdhw,cd->bchw", code, self.endmember)
         if self.apply_relu:
             # if self.apply_relu == False,
             # the negative values will cause the abunds_loss to nan
@@ -119,7 +121,7 @@ class ToEndMemberParameter(EndMemberBase):
         return code
 
     def init_endmembers(
-        self, init_value: Float[torch.Tensor, "num_endmember channels"]
+        self, init_value: Float[torch.Tensor, "channels num_endmember"]
     ):
         """Initialize endmembers with given values.
 
@@ -136,4 +138,4 @@ class ToEndMemberParameter(EndMemberBase):
         self.endmember.data.copy_(init_value)
 
     def get_endmember(self):
-        return self.endmember.data.clamp_(min=0.0)
+        return self.endmember.data.clamp_(min=0.0).T

@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Generator
 from typing import Literal
 
@@ -109,6 +110,7 @@ def label_centrical_patcher(
     changed_ratio: float = 0.5,
     patch_size: int = 32,
     label_mode: Literal["seg", "cls"] = "seg",
+    raise_if_not_enough_changes: bool = False,
 ) -> Generator[tuple[Tensor, Tensor, Tensor], None, None]:
     """
     Generate balanced patches for change detection tasks by sampling from changed and unchanged regions.
@@ -129,6 +131,8 @@ def label_centrical_patcher(
         label_mode (str): Mode for label processing ('seg' or 'cls'). Defaults to "seg".
             - 'seg': Return segmentation patches with shape (B, patch_size, patch_size)
             - 'cls': Return classification labels with shape (B,)
+        raise_if_not_enough_changes (bool): Whether to raise ValueError when no changes are found.
+            If False, yields only unchanged patches instead of raising. Defaults to False.
 
     Yields:
         tuple[Tensor, Tensor, Tensor]: A tuple containing:
@@ -180,12 +184,43 @@ def label_centrical_patcher(
             label_i, unchanged_label, changed_label
         )
         if len(changed_idx) == 0 or len(unchanged_idx) == 0:
-            # If no changes, return empty tensors
-            raise ValueError("No changes found in the label image")
-
-        # Randomly sample from changed and unchanged pixels
-        changed_indices[i] = changed_idx
-        unchanged_indices[i] = unchanged_idx
+            if raise_if_not_enough_changes:
+                # If no changes, raise ValueError
+                raise ValueError("No changes found in the label image")
+            else:
+                # If no changes and raise_if_not_enough_changes is False,
+                # handle different cases
+                if len(unchanged_idx) == 0 and len(changed_idx) == 0:
+                    # If neither changed nor unchanged patches, skip this batch item
+                    continue
+                elif len(unchanged_idx) == 0:
+                    # Only changed patches available, no unchanged patches
+                    unchanged_indices[i] = torch.empty(
+                        (0, 2), dtype=torch.long, device=changed_idx.device
+                    )
+                    changed_indices[i] = changed_idx
+                    warnings.warn(
+                        f"No unchanged patches found in batch item {i}. "
+                        f"Using only changed patches for training.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                elif len(changed_idx) == 0:
+                    # Only unchanged patches available, no changed patches
+                    unchanged_indices[i] = unchanged_idx
+                    changed_indices[i] = torch.empty(
+                        (0, 2), dtype=torch.long, device=unchanged_idx.device
+                    )
+                    warnings.warn(
+                        f"No changed patches found in batch item {i}. "
+                        f"Using only unchanged patches for training.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+        else:
+            # Randomly sample from changed and unchanged pixels
+            changed_indices[i] = changed_idx
+            unchanged_indices[i] = unchanged_idx
 
     num_changed_per_batch = int(micro_batch_size * changed_ratio)
     num_unchanged_per_batch = micro_batch_size - num_changed_per_batch
@@ -195,26 +230,55 @@ def label_centrical_patcher(
     img2_patches = []
     label_patches = []
     for i in range(bs):
+        if i not in changed_indices or i not in unchanged_indices:
+            continue
+
         changed_idx = changed_indices[i]
         unchanged_idx = unchanged_indices[i]
 
-        # batch indices
-        changed_perm = torch.randperm(len(changed_idx))[:num_changed_per_batch]
-        unchanged_perm = torch.randperm(len(unchanged_idx))[:num_unchanged_per_batch]
+        # Handle different sampling scenarios
+        if len(changed_idx) == 0 and len(unchanged_idx) == 0:
+            # Skip if no patches available
+            continue
+        elif len(changed_idx) == 0:
+            # Sample only unchanged patches
+            num_unchanged_to_sample = min(len(unchanged_idx), micro_batch_size)
+            unchanged_perm = torch.randperm(len(unchanged_idx))[
+                :num_unchanged_to_sample
+            ]
+            selected_unchanged = unchanged_idx[unchanged_perm]
+            selected_changed = torch.empty(
+                (0, 2), dtype=torch.long, device=unchanged_idx.device
+            )
+        elif len(unchanged_idx) == 0:
+            # Sample only changed patches
+            num_changed_to_sample = min(len(changed_idx), micro_batch_size)
+            changed_perm = torch.randperm(len(changed_idx))[:num_changed_to_sample]
+            selected_changed = changed_idx[changed_perm]
+            selected_unchanged = torch.empty(
+                (0, 2), dtype=torch.long, device=changed_idx.device
+            )
+        else:
+            # Normal sampling with both changed and unchanged patches
+            changed_perm = torch.randperm(len(changed_idx))[:num_changed_per_batch]
+            unchanged_perm = torch.randperm(len(unchanged_idx))[
+                :num_unchanged_per_batch
+            ]
 
-        selected_changed = changed_idx[changed_perm]
-        selected_unchanged = unchanged_idx[unchanged_perm]
+            selected_changed = changed_idx[changed_perm]
+            selected_unchanged = unchanged_idx[unchanged_perm]
 
         # Collect patches
         for select_idx in [selected_changed, selected_unchanged]:
-            img1_patches.extend(selected_collect_fn(img1[i], select_idx))
-            img2_patches.extend(selected_collect_fn(img2[i], select_idx))
-            if label_mode == "seg":
-                label_patches.extend(selected_collect_fn(label[i], select_idx))
-            elif label_mode == "cls":
-                # For cls, just use the center pixel's label
-                center_labels = label[i][..., select_idx[:, 0], select_idx[:, 1]]
-                label_patches.extend(center_labels.tolist())
+            if len(select_idx) > 0:  # Only process if there are indices to sample
+                img1_patches.extend(selected_collect_fn(img1[i], select_idx))
+                img2_patches.extend(selected_collect_fn(img2[i], select_idx))
+                if label_mode == "seg":
+                    label_patches.extend(selected_collect_fn(label[i], select_idx))
+                elif label_mode == "cls":
+                    # For cls, just use the center pixel's label
+                    center_labels = label[i][..., select_idx[:, 0], select_idx[:, 1]]
+                    label_patches.extend(center_labels.tolist())
 
         # Yield micro-batches
         assert len(img1_patches) == len(img2_patches) == len(label_patches)

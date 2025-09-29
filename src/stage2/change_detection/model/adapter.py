@@ -22,11 +22,10 @@ from dinov3.models.vision_transformer import (  # type: ignore
 )
 
 from .vitamin_conv import MbConvSeqentialCond
+from timm.layers.weight_init import lecun_normal_
 
 
 def initialize(module) -> None:
-    from timm.layers.weight_init import lecun_normal_
-
     if isinstance(module, _ConvNd):
         if module.weight.requires_grad:
             lecun_normal_(module.weight)
@@ -435,7 +434,7 @@ class UNetDecoder(nn.Module):
         """
         super().__init__()
         self.deep_supervision = deep_supervision
-        self.encoder = encoder
+        # self.encoder = encoder
         self.num_classes = num_classes
         n_stages_encoder = len(encoder.output_channels)
         if isinstance(n_conv_per_stage, int):

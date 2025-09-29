@@ -1552,7 +1552,8 @@ if __name__ == "__main__":
         # ["data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar"],
         # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
         # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
-        ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
+        ["data/Downstreams/UrbanUnmixing/splits/apex.tar"],
         # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
         # [
         #     "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
@@ -1655,7 +1656,7 @@ if __name__ == "__main__":
         pin_memory=False,
         prefetch_factor=2,
         remove_meta_data=False,
-        resize_before_transform=128,
+        resize_before_transform=None,
         shuffle_within_workers=False,
         resample=True,
     )
@@ -1747,173 +1748,6 @@ if __name__ == "__main__":
     i = 0
     while True:
         sample = next(test_loader)
-
-        # print(sample.keys(), sample["segmentation"].shape)
-        # print(sample.keys())
-
-        # img = sample["img"]
-        # img = img[0].permute(1, 2, 0)[..., [32, 18, 9]]
-        # img = (img * 255.0).to(torch.uint8)
-        # img = img.cpu().numpy()
-        # PIL.Image.fromarray(img).save(f"data/Downstreams/UrbanUnmixing/patch_{i}.jpg")
-
         i += 1
-
         tbar.update(1)
-        # continue
-
-        # img = sample["segmentation"]
-        # img =sample['img']
-        # assert "img" not in sample and "rgb" not in sample, f"{sample.keys()}"
-
-        # update sizes of the count
-        # s = np.prod(img.shape[-2:])
-        # if s not in sizes:
-        #     sizes[s] = img.shape[0]
-        # else:
-        #     sizes[s] += img.shape[0]
-
-        # index = [int(url.split("_")[-1].split(".")[0]) for url in sample["__url__"]]
-        # index = set(index)
-        # indices.update(index)
-
-        # tbar.set_description_str(
-        #     "rank: {}, img shape: {}, loader idx: {}, url: {}, exists indices: {}".format(
-        #         accelerator.process_index,
-        #         img.shape,
-        #         sample["__loader_idx__"],
-        #         sample["__url__"][0],
-        #         indices,
-        #         # (img.min().item(), img.max().item()),
-        #     )
-        # )
-
-        # if i == 2000:
-        #     break
-
-        step_counter.update("train")
-
-        # plot a batch
-        # import torchvision.utils as vutils
-
-        # img_s = (
-        #     vutils.make_grid(
-        #         (img[:8,] + 1) / 2,
-        #         # img / 2 + 0.5,
-        #         nrow=4,
-        #         padding=2,
-        #         normalize=True,
-        #     )
-        #     .permute(1, 2, 0)
-        #     .cpu()
-        #     .numpy()
-        #     * 255.0
-        # ).astype(np.uint8)
-
-        # import PIL.Image as Image
-
-        # Image.fromarray(img_s).save(f"S2_compress_{i}.png")
-        # if i == 6:
-        #     exit(0)
-
-    # * plot the image size bar image
-    # import matplotlib.pyplot as plt
-
-    # # group the sizes into n groups
-    # ngroups = 50
-    # uniq_sizes = sorted(sizes.keys())
-    # # group the sizes into n groups
-    # grouped_sizes = {k: 0 for k in uniq_sizes[:: len(uniq_sizes) // ngroups]}
-    # for size, count in sizes.items():
-    #     # find the closest key in grouped_sizes
-    #     closest_key = min(grouped_sizes.keys(), key=lambda x: abs(x - size))
-    #     grouped_sizes[closest_key] += count
-    # sizes = grouped_sizes
-    # # plot the sizes
-    # plt.figure(figsize=(10, 6))
-
-    # plt.bar(
-    #     [np.sqrt(k) for k in sizes.keys()],
-    #     list(sizes.values()),
-    #     width=20,
-    #     align="center",
-    #     # color="blue",
-    #     # alpha=0.7,
-    # )
-    # plt.xlabel("Image Size (sqrt of pixels)")
-    # plt.ylabel("Number of Samples")
-    # plt.title("Distribution of Image Sizes in Hyperspectral Dataset")
-    # plt.xticks(rotation=45)
-    # plt.grid(axis="y")
-    # plt.tight_layout()
-    # plt.savefig("hyperspectral_image_sizes.png", dpi=300)
-
-    # if i % 200 == 0:
-    #     # the top-10 sizes
-    #     sz_lst = sorted(sizes.items(), key=lambda x: x[1], reverse=True)[:10]
-    #     sz_lst = [f"{np.round(np.sqrt(k), 1).item()}: {v}" for k, v in sz_lst]
-    #     print(f"top-10 sizes: {sz_lst}, total samples: {sum(sizes.values())}")
-
-    # assert img.shape[-2] == img.shape[-1]
-    # assert torch.isnan(img).sum() == 0, "Image contains NaN values"
-    # assert img.shape[1] < img.shape[-1]
-
-    # step_counter.update("train")
-    # if img.shape[1] == 3:
-    #     print(sample["__url__"])
-    #     break
-    # if img.shape[1] not in channels:
-    #     print(sample["__url__"])
-    #     raise ValueError(f"Unknown image channel: {img.shape[1]}")
-
-    #     if img.shape[-1] == 256:
-    #         total_samples_256 += img.shape[0]
-    #     elif img.shape[-1] == 512:
-    #         total_samples_512 += img.shape[0]
-    #     else:
-    #         raise ValueError(f"Unknown image size: {img.shape[-1]}")
-
-    # print("pixel 256 size total samples: ", total_samples_256)
-    # print("pixel 512 size total samples: ", total_samples_512)
-
-    # * for loop the images
-    # for batch in test_loader:
-    #     # print(batch['img'].shape, batch.keys())
-    #     tar_paths = batch["__url__"]
-
-    #     # assert all tar paths are the same
-    # print(tar_paths)
-    # assert all(
-    #     tar_paths[0] == tar_path for tar_path in tar_paths
-    # ), "tar paths are not the same"
-
-    # img_tensor = batch["img"]  # shape: [N, C, H, W]
-    # print(f"{img_tensor.shape}")
-
-    # * plot the grid of images
-    # # Get a batch of data
-    # batch = next(iter(test_loader))
-    # img_tensor = batch["img"]  # shape: [N, C, H, W]
-
-    # # Select [4,2,0] channels for RGB visualization for all images in the batch
-    # rgb_imgs = img_tensor[:, [4, 2, 0], :, :]
-
-    # # Normalize from [-1, 1] to [0, 1]
-    # rgb_imgs = (rgb_imgs + 1) / 2
-
-    # # Create image grid using make_grid
-    # grid = torchvision.utils.make_grid(rgb_imgs, nrow=8, padding=2, normalize=False)
-
-    # # Convert to numpy and adjust dimension order for plotting
-    # grid_img = grid.permute(1, 2, 0).numpy()
-
-    # # Display and save the grid
-    # plt.figure(figsize=(15, 15))
-    # plt.imshow(grid_img)
-    # plt.axis("off")
-    # plt.savefig("multispectral_grid.png", bbox_inches="tight", pad_inches=0, dpi=300)
-    # plt.close()
-
-    # print(f"Batch shape: {img_tensor.shape}")
-    # print(f"Range: min={img_tensor.min():.2f}, max={img_tensor.max():.2f}")
-    # print(f"Data type: {img_tensor.dtype}")
+        print(sample["img"].shape)

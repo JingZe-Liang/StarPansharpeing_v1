@@ -8,7 +8,6 @@ from torch import Tensor, nn
 
 from src.utilities.config_utils import dataclass_from_dict, dataclass_to_dict
 from src.utilities.logging import log
-from src.utilities.network_utils import register_network_init
 
 from ...utilities.amotized import AmotizedModelMixin
 from .to_endmember import (
@@ -93,9 +92,9 @@ class LatentUnmixingModel(AmotizedModelMixin):
         }
 
     @classmethod
-    def from_config(cls, overrides: dict, detokenizer=None):
+    def create_model(cls, detokenizer=None, **overrides: dict):
         config: UnmixingConfig = dataclass_from_dict(UnmixingConfig, overrides)
-        amotized_model = Transformer(**asdict(config.transformer))
+        amotized_model = Transformer(config.transformer)
         pixel_model = VitaminModel(config.vitamin)
         end_member_model = (
             ToEndMemberConv(**asdict(config.to_endmember))
@@ -121,3 +120,68 @@ class LatentUnmixingModel(AmotizedModelMixin):
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode  # type: ignore[attr-defined]
                 log(f"Set grad_checkpointing={mode} for {name} ({module})")
+
+
+def test_model():
+    import torch
+
+    # Example usage of UnmixingConfig dataclass
+    unmixing_cfg = UnmixingConfig(
+        transformer=TransformerConfig(
+            in_dim=16,
+            out_channels=256,
+            num_heads=8,
+            mlp_ratio=2.0,
+        ),
+        vitamin=VitaminCfg(
+            stem_width=64,
+            embed_dim=[192, 192, 192],
+            depths=[2, 2, 2],
+            input_channel=170,  # for Houston dataset
+            condition_channel=256,
+            use_residual=False,
+            conv_cfg=ConvCfg(
+                expand_ratio=2.0,
+                kernel_size=3,
+                act_layer="gelu",
+                norm_layer="layernorm2d",
+            ),
+            output_channel=8,
+        ),
+        to_endmember=ToEndMemberConfig(
+            apply_relu=True,
+            channels=170,
+            init_value=None,
+            num_endmember=8,
+        ),
+        amotize_type="latent_to_pixel_fusion",
+        learn_decoder=False,
+        backward_decoder=False,
+        set_grad_checkpoint=False,
+    )
+    print("UnmixingConfig example:", unmixing_cfg)
+
+    # Create sample inputs
+    batch_size, height, width = 2, 256, 256
+    img = torch.randn(batch_size, unmixing_cfg.vitamin.input_channel, height, width)
+    latent = torch.randn(batch_size, 16, height // 8, width // 8)  # latent code
+
+    # Create model
+    model = LatentUnmixingModel.create_model(**asdict(unmixing_cfg))
+
+    # Forward pass
+    with torch.no_grad():
+        output = model(img, latent)
+        print("Output keys:", output.keys())
+
+    for k, v in output.items():
+        if isinstance(v, torch.Tensor):
+            print(f"{k}: {v.shape}")
+
+
+if __name__ == "__main__":
+    """
+        python -m src.stage2.unmixing.models.model
+    """
+
+    test_model()

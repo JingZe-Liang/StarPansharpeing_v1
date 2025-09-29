@@ -45,11 +45,13 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         tokenizer_scale_shift: LatentScaleShiftType = None,
         tokenizer_img_processor: Callable | None = None,
         detokenizer_img_processor: Callable | None = None,
+        img_is_neg_1_1: bool = False,
     ):
         super().__init__()
         self.tokenizer = tokenizer
         self.downstream_model = downstream_model
         self.is_scale_latent = tokenizer_scale_shift is not None
+        self.img_is_neg_1_1 = img_is_neg_1_1
         if self.is_scale_latent:
             scale, shift = tokenizer_scale_shift
             scale, shift = torch.as_tensor(scale), torch.as_tensor(shift)
@@ -83,11 +85,16 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self._decode_fn = self.tokenizer.decode
         self.is_tokenizer_lora = isinstance(self.tokenizer, TokenizerLoRAMixin)
 
+        # Freeze tokenizer by default
         if froze_tokenizer:
             self.tokenizer.eval()
             self.tokenizer.requires_grad_(False)
             if self.is_downstream_amotized and downstream_model.learn_decoder:
+                assert not self.is_tokenizer_lora, (
+                    'When using LoRA tokenizer, "learn_decoder" must be false.'
+                )
                 self.tokenizer.decoder.requires_grad_(True)
+            log(f"TokenizerWrapper: froze_tokenizer={froze_tokenizer}")
 
         self._img_chans_cache = deque(maxlen=n_img_encoded)
 
@@ -161,6 +168,16 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     def img_cached_channels(self):
         return list(self._img_chans_cache)
 
+    def _map_to_neg_1_1(self, x):
+        if self.img_is_neg_1_1:
+            return x
+        return x * 2.0 - 1.0
+
+    def _map_to_0_1(self, x):
+        if self.img_is_neg_1_1:
+            return (x + 1.0) / 2
+        return
+
     @property
     def img_fifo_channel(self):
         if len(self._img_chans_cache) == 0:
@@ -170,8 +187,11 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     def _clear_cached_img_channels(self):
         self._img_chans_cache.clear()
 
+    @torch.no_grad()
     def _forward_tokenizer_encode_single_img(self, img: Tensor) -> Tensor:
-        latent_ret_ = self._encode_fn(img)
+        img = self._map_to_neg_1_1(img)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            latent_ret_ = self._encode_fn(img)
 
         # only return latent
         if isinstance(latent_ret_, (tuple, list)):  # latent, q_loss, loss_breakdown
@@ -189,7 +209,14 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # un-scale and un-shift latent
         if self.is_scale_latent:
             latent = un_scale_shift_latent(latent, self.scale, self.shift)
-        decoded = self._decode_fn(latent, input_shape)
+        ctx = (
+            torch.no_grad()
+            if not self.downstream_model.learn_decoder
+            else torch.enable_grad()
+        )
+        with ctx:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                decoded = self._decode_fn(latent, input_shape)
         if isinstance(decoded, tuple):
             return decoded[0]
         return decoded
@@ -248,6 +275,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # inputs should be img and latent
         return self.downstream_model(pixel_in, latents, **kwargs)
 
+    def encode(self, img: Tensor) -> Tensor:
+        return self._forward_tokenizer_encode_single_img(img)
+
     def decode(
         self,
         latents: Tensor | list[Tensor],
@@ -272,3 +302,33 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         if isinstance(tok, (tuple, list)):
             return tok[0]
         return tok
+
+    def state_dict(self, *args, **kwargs):
+        # only save the first tokenizer if it is a lora tokenizer with multiple models
+        learn_detok = getattr(self.downstream_model, "learn_decoder", False)
+        # Filter out
+        if learn_detok and not self.is_tokenizer_lora:
+            filter_out_fn = (
+                lambda k: False if k.startswith("tokenizer.decoder") else True
+            )
+        elif learn_detok and self.is_tokenizer_lora:
+            filter_out_fn = (
+                lambda k: False if k.startswith("active_model.decoder") else True
+            )
+        else:
+            filter_out_fn = (
+                lambda k: True if k.startswith("downstream_model") else False
+            )
+
+        sd_out = {}
+        for k, v in super().state_dict().items():
+            if filter_out_fn(k):
+                sd_out[k] = v
+
+        return sd_out
+
+    def set_grad_checkpointing(self, mode=True):
+        for module in self.modules():
+            if hasattr(module, "grad_checkpointing"):
+                module.grad_checkpointing = mode
+                log(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")

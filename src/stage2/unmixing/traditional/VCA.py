@@ -190,7 +190,7 @@ def estimate_snr_torch(Y, r_m, x):
     return snr_est
 
 
-def vca_torch(Y, R, verbose=True, snr_input=0, device="cuda"):
+def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cuda"):
     """
     PyTorch implementation of Vertex Component Analysis
 
@@ -328,7 +328,8 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
     Batch implementation of VCA for large datasets
 
     Args:
-        Y: torch.Tensor of shape [L, N] - input hyperspectral data
+        Y: torch.Tensor of shape [L, N] - input hyperspectral data.
+            L: number of bands (channels), N: number of pixels
         R: int - number of endmembers to extract
         batch_size: int - batch size for processing
         verbose: bool - whether to print verbose output

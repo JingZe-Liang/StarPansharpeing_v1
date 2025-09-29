@@ -34,7 +34,7 @@ natten = lazy_loader.load("natten")
 
 # * --- Blocks compilations --- * #
 
-compile_forward_fn = bool(os.getenv("MODEL_COMPILED", "true"))
+compile_forward_fn = False  # bool(int(os.getenv("MODEL_COMPILED", "1")))
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True

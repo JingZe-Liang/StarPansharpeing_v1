@@ -65,7 +65,7 @@ class DinoUnetConfig:
     deep_supervision: bool = False
     n_stages: int = 4
     use_latent: bool = False
-    ensure_rgb_type: str = "pca"
+    ensure_rgb_type: str = "mean"
     _debug: bool = False
 
 

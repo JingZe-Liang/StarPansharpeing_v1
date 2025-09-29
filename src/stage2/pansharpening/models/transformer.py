@@ -11,6 +11,7 @@ from timm.layers.pos_embed import resample_abs_pos_embed
 from torch import Tensor
 
 from src.utilities.logging import log
+from src.utilities.config_utils import dataclass_from_dict
 
 from ...layers import (
     AttentionBlock,
@@ -157,7 +158,7 @@ class Transformer(nn.Module):
                 "Supported types are 'sincos' and 'rope'."
             )
 
-    def get_pe(self, hw: tuple | torch.Size, img_type=None):
+    def get_pe(self, hw: tuple | torch.Size):
         h, w = hw
         if self.pos_embed_type == "sincos":
             pe = self.pos_embed
@@ -183,12 +184,11 @@ class Transformer(nn.Module):
             # TODO: add multi-modal-rope
             # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
 
-            ph, pw = h // self.patch_size, w // self.patch_size
-            seq_len_x = ph * pw
+            seq_len_x = h * w
             pre_rope_seq_len = self.rope.cos_cached.shape[1]
             if seq_len_x > pre_rope_seq_len:
                 # re-init the rope
-                self.rope_options["latent_shape"] = (ph, pw)
+                self.rope_options["latent_shape"] = (h, w)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
 
@@ -281,6 +281,12 @@ class Transformer(nn.Module):
             torch.nn.init.zeros_(norm.bias)
 
         log("[Transformer] Initializing model ...")
+
+    @classmethod
+    def create_model(cls, **kwargs):
+        cfg = dataclass_from_dict(TransformerConfig, kwargs)
+        model = cls(cfg)
+        return model
 
 
 if __name__ == "__main__":

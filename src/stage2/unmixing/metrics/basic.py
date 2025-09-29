@@ -15,6 +15,12 @@ class UnmixingMetrics(torch.nn.Module):
     It supports PyTorch tensors and multi-process synchronization through MeanMetric.
     All calculations are performed using PyTorch operations.
 
+    The class includes functionality for:
+    - Endmember matching using greedy algorithm based on Spectral Angle Distance
+    - Abundance map comparison with proper endmember correspondence
+    - Comprehensive visualization of both endmember spectra and abundance maps
+    - Metrics calculation with multi-process support
+
     Attributes:
         sad_metrics (Dict[str, MeanMetric]): Dictionary of MeanMetric objects for SAD calculation
         mse_metrics (Dict[str, MeanMetric]): Dictionary of MeanMetric objects for MSE calculation
@@ -22,6 +28,13 @@ class UnmixingMetrics(torch.nn.Module):
         call_count (int): Number of times the metrics have been called
         sad_avg (Optional[float]): Average SAD value
         mse_avg (Optional[float]): Average MSE value
+        device (str): Device for computation ('cuda' or 'cpu')
+
+    Static Methods:
+        _order_endmembers: Match predicted to ground truth endmembers using SAD
+        _order_endmembers_and_abundances: Order both endmembers and abundances by matching
+        _plot_endmembers: Visualize endmember spectral comparison with SAD values
+        _plot_abunds: Visualize abundance maps with proper ground truth correspondence
     """
 
     def __init__(
@@ -192,6 +205,73 @@ class UnmixingMetrics(torch.nn.Module):
         return match_dict, sad_values, avg_sad
 
     @staticmethod
+    def _order_endmembers_and_abundances(
+        endmembers: torch.Tensor,
+        endmembers_gt: torch.Tensor,
+        abundances: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[int, int]]:
+        """
+        Order endmembers and abundances according to ground truth matching using greedy algorithm
+
+        This function uses Spectral Angle Distance (SAD) to match predicted endmembers
+        to ground truth endmembers, then reorders both endmembers and their corresponding
+        abundance maps accordingly. This ensures proper correspondence between predicted
+        and ground truth components for accurate evaluation and visualization.
+
+        Args:
+            endmembers (torch.Tensor): Predicted endmembers [num_em, bands]
+            endmembers_gt (torch.Tensor): Ground truth endmembers [num_em, bands]
+            abundances (torch.Tensor): Predicted abundances [num_em, H, W]
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[int, int]]:
+                - Ordered predicted endmembers [num_em, bands]: Reordered to match GT sequence
+                - Ordered predicted abundances [num_em, H, W]: Reordered to match GT sequence
+                - SAD values for matched endmembers [num_em]: Spectral angles for each match
+                - Mapping from GT index to predicted index: Correspondence mapping
+
+        Note:
+            Uses greedy algorithm matching based on minimum SAD. Unmatched endmembers
+            are assigned to remaining predicted components in order.
+        """
+        # Get matching using the existing order_endmembers function
+        match_dict, sad_values, avg_sad = UnmixingMetrics._order_endmembers(
+            endmembers, endmembers_gt
+        )
+
+        num_endmembers = endmembers.shape[0]
+
+        # Order endmembers and abundances according to matches
+        ordered_endmembers_list: List[torch.Tensor] = []
+        ordered_abundances_list: List[torch.Tensor] = []
+
+        for i in range(num_endmembers):
+            if i in match_dict:
+                ordered_endmembers_list.append(endmembers[match_dict[i]])
+                ordered_abundances_list.append(abundances[match_dict[i]])
+            else:
+                # If no match, use the first remaining endmember
+                for j in range(num_endmembers):
+                    if j not in match_dict.values():
+                        ordered_endmembers_list.append(endmembers[j])
+                        ordered_abundances_list.append(abundances[j])
+                        match_dict[i] = j
+                        break
+
+        ordered_endmembers = torch.stack(ordered_endmembers_list)
+        ordered_abundances = torch.stack(ordered_abundances_list)
+
+        # Compute SAD for ordered endmembers
+        ordered_sad_list: List[torch.Tensor] = []
+        for i in range(num_endmembers):
+            sad = UnmixingMetrics._compute_sad(ordered_endmembers[i], endmembers_gt[i])
+            ordered_sad_list.append(sad)
+
+        ordered_sad = torch.stack(ordered_sad_list)
+
+        return ordered_endmembers, ordered_abundances, ordered_sad, match_dict
+
+    @staticmethod
     def _plot_endmembers(
         endmembers: torch.Tensor,
         endmembers_gt: torch.Tensor,
@@ -216,38 +296,15 @@ class UnmixingMetrics(torch.nn.Module):
         num_endmembers = endmembers.shape[0]
         n_cols = (num_endmembers + 1) // 2  # Number of columns in subplot grid
 
-        # Match endmembers
-        match_dict, sad_values, avg_sad = UnmixingMetrics._order_endmembers(
-            endmembers, endmembers_gt
+        # Use the new ordering function
+        ordered_endmembers, ordered_abundances, ordered_sad, match_dict = (
+            UnmixingMetrics._order_endmembers_and_abundances(
+                endmembers, endmembers_gt, abundances
+            )
         )
 
-        # Order endmembers and abundances according to matches
-        ordered_endmembers_list: List[torch.Tensor] = []
-        ordered_abundances_list: List[torch.Tensor] = []
-
-        for i in range(num_endmembers):
-            if i in match_dict:
-                ordered_endmembers_list.append(endmembers[match_dict[i]])
-                ordered_abundances_list.append(abundances[match_dict[i]])
-            else:
-                # If no match, use the first remaining endmember
-                for j in range(num_endmembers):
-                    if j not in match_dict.values():
-                        ordered_endmembers_list.append(endmembers[j])
-                        ordered_abundances_list.append(abundances[j])
-                        match_dict[i] = j
-                        break
-
-        ordered_endmembers = torch.stack(ordered_endmembers_list)
-        ordered_abundances = torch.stack(ordered_abundances_list)
-
-        # Compute SAD for ordered endmembers
-        ordered_sad_list: List[float] = []
-        for i in range(num_endmembers):
-            sad = UnmixingMetrics._compute_sad(ordered_endmembers[i], endmembers_gt[i])
-            ordered_sad_list.append(sad.item())
-
-        ordered_sad = torch.tensor(ordered_sad_list, device=endmembers.device)
+        # Compute average SAD
+        avg_sad = torch.mean(ordered_sad)
 
         # Create figure
         fig, axes = plt.subplots(2, n_cols, figsize=(12, 8))
@@ -272,7 +329,7 @@ class UnmixingMetrics(torch.nn.Module):
             )
 
             # Set title with SAD value
-            ax.set_title(f"Endmember {i + 1}, SAD: {ordered_sad[i]:.4f} rad")
+            ax.set_title(f"Endmember {i + 1}, SAD: {ordered_sad[i].item():.4f} rad")
             ax.set_xlabel("Band Index")
             ax.set_ylabel("Reflectance")
 
@@ -290,6 +347,118 @@ class UnmixingMetrics(torch.nn.Module):
         ordered_sad_with_avg = torch.cat([ordered_sad, avg_sad.unsqueeze(0)])
 
         return ordered_sad_with_avg, ordered_endmembers, ordered_abundances, fig, axes
+
+    @staticmethod
+    def _plot_abunds(
+        endmembers: torch.Tensor,
+        endmembers_gt: torch.Tensor,
+        abundances: torch.Tensor,
+        abundances_gt: torch.Tensor,
+    ) -> Tuple[Any, np.ndarray]:
+        """
+        Plot predicted and ground truth abundance maps with proper endmember matching
+
+        This function creates a comprehensive visualization comparing predicted and ground truth
+        abundance maps. It uses the same greedy algorithm matching as _plot_endmembers to
+        ensure that predicted abundances are compared with their corresponding ground truth
+        abundances based on endmember spectral similarity.
+
+        The visualization includes three rows:
+        1. Predicted abundance maps (ordered by matching)
+        2. Ground truth abundance maps (ordered to match predictions)
+        3. Absolute difference maps (with SAD values in titles)
+
+        Args:
+            endmembers (torch.Tensor): Predicted endmembers [num_em, bands]
+            endmembers_gt (torch.Tensor): Ground truth endmembers [num_em, bands]
+            abundances (torch.Tensor): Predicted abundances [num_em, H, W]
+            abundances_gt (torch.Tensor): Ground truth abundances [num_em, H, W]
+
+        Returns:
+            Tuple[Any, np.ndarray]:
+                - Matplotlib figure object: Figure containing all abundance maps
+                - Matplotlib axes array: Array of subplot axes for customization
+
+        Note:
+            - Automatically handles unmatched endmembers by showing unmatched GT abundances
+            - Displays SAD values in difference map titles for quantitative comparison
+            - Uses 'viridis' colormap for abundance maps and 'hot' colormap for differences
+        """
+        # Get ordered abundances using the ordering function
+        ordered_endmembers, ordered_abundances, ordered_sad, match_dict = (
+            UnmixingMetrics._order_endmembers_and_abundances(
+                endmembers, endmembers_gt, abundances
+            )
+        )
+
+        num_endmembers = endmembers.shape[0]
+
+        # Create figure with multiple rows
+        fig, axes = plt.subplots(3, num_endmembers, figsize=(4 * num_endmembers, 12))
+
+        if num_endmembers == 1:
+            axes = axes.reshape(3, 1)
+
+        # Row 0: Predicted abundance maps
+        for i in range(num_endmembers):
+            ax = axes[0, i]
+            abundance_map = ordered_abundances[i].cpu().numpy()
+            im = ax.imshow(abundance_map, cmap="viridis")
+            ax.set_title(f"Predicted Abundance {i + 1}")
+            ax.axis("off")
+            plt.colorbar(im, ax=ax)
+
+        # Row 1: Ground truth abundance maps (ordered by matching)
+        for i in range(num_endmembers):
+            ax = axes[1, i]
+            if i in match_dict:
+                # This GT index matches to predicted index i
+                gt_abundance_map = abundances_gt[i].cpu().numpy()
+                ax.set_title(f"GT Abundance (matched to Pred {i + 1})")
+            else:
+                # Find unmatched GT abundance
+                for gt_idx in range(num_endmembers):
+                    if gt_idx not in match_dict.values():
+                        gt_abundance_map = abundances_gt[gt_idx].cpu().numpy()
+                        ax.set_title(f"GT Abundance {gt_idx + 1} (unmatched)")
+                        break
+                else:
+                    gt_abundance_map = torch.zeros_like(abundances_gt[0]).cpu().numpy()
+                    ax.set_title(f"GT Abundance (no match)")
+
+            im = ax.imshow(gt_abundance_map, cmap="viridis")
+            ax.axis("off")
+            plt.colorbar(im, ax=ax)
+
+        # Row 2: Abundance difference maps
+        for i in range(num_endmembers):
+            ax = axes[2, i]
+            if i in match_dict:
+                # Compare with corresponding GT abundance
+                abundance_diff = (
+                    torch.abs(ordered_abundances[i] - abundances_gt[i]).cpu().numpy()
+                )
+                ax.set_title(f"Difference (SAD: {ordered_sad[i].item():.4f})")
+            else:
+                # Show predicted abundance as difference (no GT match)
+                abundance_diff = ordered_abundances[i].cpu().numpy()
+                ax.set_title(f"Difference (no GT match)")
+
+            im = ax.imshow(abundance_diff, cmap="hot")
+            ax.axis("off")
+            plt.colorbar(im, ax=ax)
+
+        # Set main title
+        avg_sad = torch.mean(ordered_sad)
+        fig.suptitle(
+            f"Abundance Maps Comparison (Average SAD: {avg_sad.item():.4f} rad)",
+            fontsize=14,
+        )
+
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.93)
+
+        return fig, axes
 
     def _compute_mse(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         """
@@ -575,3 +744,4 @@ class UnmixingMetrics(torch.nn.Module):
 
 # Alias
 endmembers_visualize = UnmixingMetrics._plot_endmembers
+abunds_visualize = UnmixingMetrics._plot_abunds
