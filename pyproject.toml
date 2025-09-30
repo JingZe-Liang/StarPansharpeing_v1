@@ -21,6 +21,7 @@ dependencies = [
     "heavyball",
     "fvcore",
     "jaxtyping",
+    "tensorboard",
     "torchmetrics",
     "tifffile",
     "webdataset",

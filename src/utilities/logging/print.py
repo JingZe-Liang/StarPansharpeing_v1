@@ -1,4 +1,5 @@
 import inspect
+import os
 import re
 import sys
 import time
@@ -94,11 +95,19 @@ def configure_logger(
 
     if removed:
         logger.remove()
+
+    if "COLOR_LOG" in os.environ:
+        colorize = bool(int(os.getenv("COLOR_LOG")))
+    elif is_file:
+        colorize = False
+    else:
+        colorize = True
+
     handler = logger.add(
         sink,
         level=level.upper(),
         enqueue=False,
-        colorize=True if not is_file else False,
+        colorize=colorize,
         format=(
             "{time:HH:mm:ss} "
             "- {level.icon} <level>[{level}] {file.name}:{line}</level> "

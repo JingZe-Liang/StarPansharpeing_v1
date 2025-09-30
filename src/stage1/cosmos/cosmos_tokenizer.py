@@ -5,7 +5,7 @@ from collections import OrderedDict, namedtuple
 from dataclasses import asdict, dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, no_type_check
+from typing import Any, Literal, NamedTuple, Optional, no_type_check
 
 import accelerate
 import numpy as np
@@ -300,16 +300,16 @@ class ContinuousTokenizerConfig:
     dino_feature_dim: int = 1024
     latent_noise_prob: float = 0.0
     # quantizer related
-    quantizer_type: Any = None  # "kl", "bsq", "fsq", None
+    quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", None
     random_quant: float = 0.0
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
     norm_in_quant_conv = False
     # loading related
-    enc_path: str = ""
-    dec_path: str = ""
-    uni_path: str = ""
-    loading_type: Any = None  # "nvidia", "uni", None
+    enc_path: Optional[str] = None
+    dec_path: Optional[str] = None
+    uni_path: Optional[str] = None
+    loading_type: Optional[str] = None  # "nvidia", "uni", None
     # latent augmented related
     use_channel_drop: bool = False
     channel_drop_config: ChannelDropConfig = field(default_factory=ChannelDropConfig)
@@ -861,7 +861,7 @@ class ContinuousImageTokenizer(nn.Module):
         # * --- load pretrained uni-tokenizer or separate encoder and decoder --- #
 
         else:
-            if uni_tokenizer_path != "":
+            if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
                 log_print(
                     f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model"
                 )

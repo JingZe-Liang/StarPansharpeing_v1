@@ -22,24 +22,44 @@ accelerator:
     num_steps: 1
 
 vq_loss:
-  repa_loss_weight: 0.1
+  # perceptual loss
+  perceptual_weight: 0.05
+  # repa loss
+  repa_loss_weight: 0.02 # 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
-    img_resize: 224 # null for no resize
-    dino_img_size: 224
+    img_resize: 384 # null for no resize
+    dino_img_size: 384
+    dino_name: "dinov3_vitl16"
+    feature_resample_type: match_student
+    loss_type: am_radio
+    feature_normalize: true
+  # vf loss
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
-    img_resize: 224
-    dino_img_size: 224
+    img_resize: 384
+    dino_img_size: 384
     distmat_margin: 0.25
     cos_margin: 0.5
+    dino_name: "dinov3_vitl16"
+  # gram loss
+  gram_loss_weight:
+  gram_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 384 # null for no resize
+    dino_img_size: 384
+    dino_name: "dinov3_vitl16"
+  # quantizer loss
   quantizer_type: bsq
   quantizer_options:
+  # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
   disc_ndf: 128
   disc_num_layers: 3
@@ -64,8 +84,8 @@ tokenizer:
   vf_on_z_or_module: z # [z, module]
   dino_feature_dim: 1024
   # loading
-  uni_path:
-  loading_type:
+  uni_path: #runs/stage1_cosmos_bsq/2025-08-13_19-29-32_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
   # blocks
   model:
     norm_type: gn
@@ -79,15 +99,26 @@ tokenizer:
     attn_type: none
     padding_mode: reflect # for boundary?
     # latents
-    latent_channels: 16
-    z_channels: 16
+    latent_channels: 36
+    z_channels: 36
     # train
-    act_checkpoint: true
-    # quantization
-    quantizer_type: bsq
+    act_checkpoint: false
+    # resamples
+    # downsample_type: ConvPixelUnshuffle
+    # downsample_shortcut: averaging
+    # upsample_type: InterpolateConv
+    # upsample_shortcut: duplicating
+  # quantization
+  quantizer_type: bsq
   # augmentations
   latent_noise_prob: 0.0
   use_channel_drop: false
+  # generative specific
+  per_layer_noise: false
+  channel_drop_config:
+    drop_type: ${list:[4, 8, 12]}
+    max_channels: ${tokenizer.model.latent_channels}
+    drop_prob: 0.5
 
 ema:
   beta: 0.995
@@ -106,9 +137,10 @@ train:
   save_every: 500
   seperate_enc_dec: false
   resume_path:
-  ema_load_path: runs/stage1_cosmos/2025-07-04_20-37-49_unicosmos_f8c36p1_bsq/ema
+  ema_load_path: runs/2025-09-30_00-30-01_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema
   only_load_tokenizer: false
   grad_check: false
+  compile_model: false
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -157,7 +189,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: unicosmos_f{tokenizer.spatial_compression}c${tokenizer.latent_channels}p1_bsq_repa_${dataset.used}
+    run_comment: unicosmos_f${tokenizer.model.spatial_compression}c${tokenizer.model.latent_channels}p1_bsq_repa_${dataset.used}
     log_with_time: True
     visualize_every: 200
     log_every: 10
