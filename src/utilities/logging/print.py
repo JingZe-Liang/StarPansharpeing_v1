@@ -15,7 +15,7 @@ from rich.console import Console
 from .functions import default, once
 
 # Define a type hint for allowed log levels
-LogLevel = Literal["debug", "info", "warning", "error", "critical"]
+LogLevel = Literal["trace", "debug", "info", "warning", "error", "critical"] | str
 __warn_once_set = set()
 __warn_once_pattern_set = set()
 

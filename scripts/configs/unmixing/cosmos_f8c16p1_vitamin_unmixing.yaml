@@ -48,8 +48,15 @@ train:
   ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-25_19-16-29_f8c16p1_WV3_nafnet_wrapper/ema
 
   unmixing_loss:
-    _target_: src.stage2.unmixing.loss.basic.UnmixingLoss
-    weights: ${list:[1.0, 0.35, 0.1]}
+    # _target_: src.stage2.unmixing.loss.basic.UnmixingLoss
+    # weights: ${list:[1.0, 0.35, 0.1]}
+
+    _target_: src.stage2.unmixing.loss.basic.StagedUnmixingLoss
+    switch_step: 10
+    lambda_y2: 0.04
+    lambda_pre: 10.0
+    lambda_vol: 10.0
+    lambda_sad: 5.0
 
   unmixing_optim:
     # _target_: torch.optim.AdamW
@@ -90,10 +97,10 @@ train:
   debug: true
 
 val:
-  val_duration: 1000
+  val_duration: 10
   max_val_reduced_iters: -1 # val only `max_val_iters` batches
   max_val_full_iters: 20
   val_use_patches: true
   crop_batch_size: 64
-  window_size: 128
+  window_size: -1 #128
   stride: 64

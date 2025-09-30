@@ -107,22 +107,17 @@
     url = https://github.com/kylesargent/FlowMo.git
 
 [submodule "src/stage1/VAEs/maskbit/maskbit"]
-    path = src/stage1/VAEs/maskbit/maskbit
-    url = https://github.com/markweberdev/maskbit.git
+	path = src/stage1/VAEs/maskbit/maskbit
+	url = https://github.com/markweberdev/maskbit.git
 
 [submodule "src/stage1/VAEs/LeanVAE"]
-    path = src/stage1/VAEs/LeanVAE
-    url = https://github.com/westlake-repl/LeanVAE
+	path = src/stage1/VAEs/LeanVAE
+	url = https://github.com/westlake-repl/LeanVAE.git
 
 [submodule "src/stage1/VAEs/unitok"]
-    path = src/stage1/VAEs/unitok
-    url = https://github.com/FoundationVision/UniTok.git
+	path = src/stage1/VAEs/unitok
+	url = https://github.com/FoundationVision/UniTok.git
 
 [submodule "src/stage1/VAEs/WeTok"]
-    path = src/stage1/VAEs/WeTok
-    url = https://github.com/zhuangshaobin/WeTok.git
-
-# local dir
-# [submodule "src/stage2/generative/Sana"]
-#     path = src/stage2/generative/Sana
-#     url = https://github.com/NVlabs/Sana.git
+	path = src/stage1/VAEs/WeTok
+	url = https://github.com/zhuangshaobin/WeTok.git

@@ -68,7 +68,7 @@ def compute_init_em_abunds(
                 cache_name=cache_name,
                 fclsu_solver_kwargs=fclsu_solver_kwargs,
             )
-            sample["init_vca_endmembers"] = em_c_d
+            sample["init_vca_endmember"] = em_c_d
             sample["init_vca_abunds"] = fclsu_abunds_dhw
 
             nonlocal _last_hits
@@ -120,6 +120,7 @@ def get_unmixing_dataloader(
         dataset = dataset.map_dict(img=div_fn, abunds=div_fn)
     dataset = dataset.map_dict(img=img_clip, abunds=img_clip)
     # precompute endmembers and abundances using VCA + FCLSU
+    # smart caching the results using cache_solver_result()
     dataset = dataset.map(compute_init_em_abunds(precompute_em_abunds))
 
     dataloader = wds.WebLoader(
@@ -354,5 +355,5 @@ def test_loader() -> None:
 
 
 if __name__ == "__main__":
-    test_loader_loading(only_first_batch=False, plot=False)
+    test_loader_loading(only_first_batch=True, plot=False)
     # test_loader()

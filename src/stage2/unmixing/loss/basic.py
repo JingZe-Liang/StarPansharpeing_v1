@@ -102,11 +102,11 @@ class UnmixingLoss(torch.nn.Module):
         self,
         hyper_in: Image,
         hyper_recon: Image,
-        abunds: Abunds,
+        abunds_pred: Abunds,
         endmembers: EndMember,
     ):
         sad_loss = SAD_loss(hyper_in, hyper_recon)
-        abds_loss = abunds_loss(abunds)
+        abds_loss = abunds_loss(abunds_pred)
         endmember_loss = endmember_tv_loss(endmembers)
 
         total_loss, (sad_loss, abds_loss, endmember_loss) = loss_apply_weights(

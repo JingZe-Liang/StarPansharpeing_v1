@@ -1,1 +1,1 @@
-from .basic import UnmixingMetrics, endmembers_visualize
+from .basic import UnmixingMetrics, abunds_visualize, endmembers_visualize

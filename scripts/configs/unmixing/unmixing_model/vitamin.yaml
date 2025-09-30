@@ -65,6 +65,7 @@ downstream_model:
     out_channels: 256
     num_heads: 8
     mlp_ratio: 2.0
+    patch_size: 1  # if not slide window
 
   pixel_model:
     _target_: src.stage2.unmixing.models.vitamin_conv.VitaminModel.create_model
