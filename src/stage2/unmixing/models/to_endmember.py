@@ -32,7 +32,7 @@ class ToEndMemberConv(EndMemberBase):
         self,
         num_endmember: int,
         channels: int,
-        kernel: int,
+        kernel: int = 1,
         init_value=None,
         apply_relu=True,
         **kwargs,

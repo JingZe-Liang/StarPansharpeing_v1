@@ -57,6 +57,7 @@ train_loader:
   divisible_by: 8 # to avoid resizing
   to_neg_1_1: false
   precompute_em_abunds: true
+  cache: true
 
 val_loader:
   _target_: src.stage2.unmixing.data.unmixing_loader.get_unmixing_dataloader
@@ -68,3 +69,4 @@ val_loader:
   divisible_by: 8 # to avoid resizing
   to_neg_1_1: false
   precompute_em_abunds: true
+  cache: true

@@ -39,6 +39,8 @@ from typing_extensions import deprecated
 from src.utilities.logging import log_print
 
 from .blocks import (
+    AdaptiveInputConvLayer,
+    AdaptiveOutputConvLayer,
     ConvNeXtBlock,
     DiCoBlock,
     DiffBandsInputConvIn,
@@ -169,6 +171,8 @@ def make_block_fn(
 class Encoder(nn.Module):
     def __init__(
         self,
+        # list of channels using the diffbandsblock (different experts); int otherwise
+        # using a nested conv layer.
         in_channels: int | list[int],
         channels: int,
         channels_mult: list[int],
@@ -250,14 +254,24 @@ class Encoder(nn.Module):
             )
         else:
             in_channels = in_channels * patch_size * patch_size
-            self.conv_in = torch.nn.Conv2d(
-                in_channels,
-                channels,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-                padding_mode=padding_mode,
+
+            # Use a nested conv here
+            assert isinstance(in_channels, int)
+            self.conv_in = AdaptiveInputConvLayer(
+                in_channels=in_channels,
+                out_channels=channels,
+                use_bias=True,
             )
+
+            # NOTE: normally a conv
+            # self.conv_in = torch.nn.Conv2d(
+            #     in_channels,
+            #     channels,
+            #     kernel_size=3,
+            #     stride=1,
+            #     padding=1,
+            #     padding_mode=padding_mode,
+            # )
 
         # downsampling
         curr_res = resolution // patch_size
@@ -504,8 +518,7 @@ class Decoder(nn.Module):
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
 
-        self.use_diffbands_input = isinstance(out_channels, list)
-        if self.use_diffbands_input:
+        if isinstance(out_channels, list):
             log_print("[Decoder]: use diffbands input")
             out_ch = [c * patch_size * patch_size for c in out_channels]
             conv_out = DiffBandsInputConvOut(
@@ -513,13 +526,12 @@ class Decoder(nn.Module):
             )
         else:
             out_ch = out_channels * patch_size * patch_size
-            conv_out = torch.nn.Conv2d(
-                block_in,
-                out_ch,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-                padding_mode=padding_mode,
+            # Use a nested conv
+            assert isinstance(out_ch, int)
+            conv_out = AdaptiveOutputConvLayer(
+                in_channels=block_in,
+                out_channels=out_ch,
+                use_bias=True,
             )
 
         # fsdp warpper, but not used
@@ -554,11 +566,8 @@ class Decoder(nn.Module):
 
         h = self.norm_out(h)
         h = nonlinearity(h)
-        if not self.use_diffbands_input:
-            conv_out_h = (h,)
-        else:
-            assert out_channels is not None, "out_channels should be provided"
-            conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
+        assert out_channels is not None, "out_channels should be provided"
+        conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
         h = self.conv_out(*conv_out_h)
         h = self.unpatcher(h)
         return h
@@ -1365,9 +1374,28 @@ if __name__ == "__main__":
 
         print(out.shape)
 
+    def test_nested_conv():
+        conv_in = AdaptiveInputConvLayer(300, 32)
+        x = torch.randn(1, 256, 32, 32)
+        out = conv_in(x)
+        print(out.shape)
+
+        out.mean().backward()
+        for n, p in conv_in.named_parameters():
+            if p.grad is None:
+                print(f"{n} has no grad")
+            else:
+                print(f"{n} grad sum: {p.grad.shape}")
+
+    """
+        python -m src.stage1.cosmos.modules.layers2d
+    """
+
     # test_auto_enc_dec()
     # test_diff_enc_dec()
     # test_multi_bands_enc_dec(True)
-    test_generative_decoder()
+    # test_generative_decoder()
+
+    test_nested_conv()
 
     # test_moe_layer()

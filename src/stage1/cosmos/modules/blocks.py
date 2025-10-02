@@ -2,7 +2,16 @@ import math
 import os
 from functools import partial, wraps
 from inspect import isclass
-from typing import Any, Callable, Literal, Optional, Tuple, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    no_type_check,
+)
 
 import lazy_loader
 import numpy as np
@@ -13,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
+from timm.layers import create_conv2d
 from timm.layers.drop import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
@@ -34,7 +44,7 @@ natten = lazy_loader.load("natten")
 
 # * --- Blocks compilations --- * #
 
-compile_forward_fn = False  # bool(int(os.getenv("MODEL_COMPILED", "1")))
+compile_forward_fn = bool(int(os.getenv("MODEL_COMPILED", "1")))
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
 compile_full_graph = True
@@ -1072,6 +1082,94 @@ class DiffBandsInputConvOut(nn.Module):
                 raise ValueError(
                     f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}. Available: conv, resnet, moe, inv_bottleneck"
                 )
+
+
+# * --- Nested Diffbands conv --- #
+
+
+class AdaptiveInputConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        use_bias: bool = False,
+    ):
+        super().__init__()
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            groups=groups,
+            dilation=dilation,
+            bias=use_bias,
+        )
+
+    @no_type_check
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+        x = nn.functional.conv2d(
+            x,
+            self.conv.weight[:, :in_channels],
+            self.conv.bias,
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+        return x
+
+    @property
+    def weight(self):
+        return self.conv.weight
+
+
+class AdaptiveOutputConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        use_bias: bool = False,
+    ):
+        super().__init__()
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            groups=groups,
+            dilation=dilation,
+            bias=use_bias,
+        )
+
+    @no_type_check
+    def forward(
+        self, x: torch.Tensor, out_channels: Optional[int] = None
+    ) -> torch.Tensor:
+        if out_channels is None:
+            out_channels = self.conv.out_channels
+        x = nn.functional.conv2d(
+            x,
+            self.conv.weight[:out_channels],
+            self.conv.bias[:out_channels],
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+        return x
+
+    @property
+    def weight(self):
+        return self.conv.weight
 
 
 # * --- MoEs 2D --- #

@@ -63,7 +63,7 @@ def vca(Y, R, verbose=True, snr_input=0):
     # Initializations
     #############################################
     if len(Y.shape) != 2:
-        sys.exit(
+        raise ValueError(
             "Input data must be of size L (number of bands i.e. channels) by N (number of pixels)"
         )
 
@@ -71,7 +71,7 @@ def vca(Y, R, verbose=True, snr_input=0):
 
     R = int(R)
     if R < 0 or R > L:
-        sys.exit("ENDMEMBER parameter must be integer between 1 and L")
+        raise ValueError("ENDMEMBER parameter must be integer between 1 and L")
 
     #############################################
     # SNR Estimates

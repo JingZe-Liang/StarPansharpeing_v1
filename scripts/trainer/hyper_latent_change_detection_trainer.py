@@ -1037,6 +1037,9 @@ class HyperCDTrainer:
         # loss_val = loss_metrics.compute()
         loss_val = 0.0
 
+        self.model.train()
+        self.optim.zero_grad()
+
         if self.accelerator.is_main_process:
             _metric_str = ""
             for k, v in metrics.items():

@@ -1,3 +1,4 @@
+import math
 import sys
 import time
 from collections import namedtuple
@@ -27,21 +28,23 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from tqdm import trange
+from typing_extensions import Generator
 
 from src.data.window_slider import WindowSlider
+from src.stage2.layers.wrapper.tokenizer_wrapper import DownstreamModelTokenizerWrapper
 from src.stage2.unmixing.loss import UnmixingLoss
 from src.stage2.unmixing.metrics import (
     UnmixingMetrics,
     abunds_visualize,
     endmembers_visualize,
 )
-from src.stage2.unmixing.models.model import LatentUnmixingModel
 from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
 from src.utilities.logging import dict_round_to_list_str
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
+from src.utilities.train_utils.visualization import get_rgb_image
 
 heavyball = lazy_loader.load("heavyball")
 
@@ -164,10 +167,10 @@ class UnmixingTrainer:
         # clear GPU memory
         torch.cuda.empty_cache()
 
-    def setup_unmixing_model(self):
-        self.model = hydra.utils.instantiate(self.cfg.unmixing_model).to(
-            self.device, self.dtype
-        )
+    def setup_unmixing_model(self) -> Callable[..., None]:
+        self.model: DownstreamModelTokenizerWrapper = hydra.utils.instantiate(
+            self.cfg.unmixing_model
+        ).to(self.device, self.dtype)
         self.unmixing_amotizing_pixels = self.model.downstream_model.amotizing_pixels
 
         pansp_name = (
@@ -252,7 +255,7 @@ class UnmixingTrainer:
         )
         log_format_in_cmd = (
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
+            "- {level.icon} <level>{level} - [{file.name}:{line}]</level>"
             "- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
@@ -596,6 +599,7 @@ class UnmixingTrainer:
         abunds_gt: torch.Tensor | None = None,
         abunds_fcls: torch.Tensor | None = None,  # initial abundances
         endmember_gt: torch.Tensor | None = None,
+        ema: bool = False,
     ) -> UnmixingModelOutput:
         """
         Forward pass through the unmixing model.
@@ -616,9 +620,10 @@ class UnmixingTrainer:
         UnmixingModelOutput
             Model output containing predictions and losses
         """
+        model = self.model if not ema else self.ema_model
         with self.accelerator.autocast():
             # Forward pass through the model to get unmixing results
-            model_output = self.model(img, img_latent)
+            model_output = model(img, img_latent)
 
             pred_latent = model_output.get("amotized_model_out", None)
             recon = model_output["recon"]
@@ -825,6 +830,14 @@ class UnmixingTrainer:
             for batch in self.val_dataloader:
                 yield self._cast_dtype(batch)
 
+        # reload the val_loader if is a generator
+        if isinstance(self.val_dataloader, Generator):
+            self.log_msg("[Val]: reload the val_dataloader")
+            self.val_dataloader = self.val_dataset()
+            assert isinstance(self.val_dataloader, Generator), (
+                "val_dataloader must be a generator"
+            )
+
     @torch.no_grad()
     def val_step(self, batch: BatchInput):
         """
@@ -857,6 +870,7 @@ class UnmixingTrainer:
             batch["abunds"],
             batch.get("init_vca_abunds", None),
             batch["endmembers"],
+            ema=True,
         )
 
         return out
@@ -902,6 +916,8 @@ class UnmixingTrainer:
 
         metrics = self.get_metrics()
         loss_val = metrics_sync(loss_metrics, output_tensor_dict=True)
+        self.model.train()
+        self.optim.zero_grad()
 
         # Print out metrics
         _log_losses = self.format_log(loss_val)
@@ -918,7 +934,6 @@ class UnmixingTrainer:
                     val_out.pred_pixel,  # reconstructed image
                     add_step=True,
                     img_name="val/reconstruction",
-                    no_to_rgb=True,
                 )
 
             # visualize unmixing results if available
@@ -926,6 +941,8 @@ class UnmixingTrainer:
                 self.visualize_unmixing_results(
                     val_out.abunds,
                     val_out.endmembers,
+                    end_members_gt=endmembers_gt,
+                    abunds_gt=abundances_gt,
                     add_step=True,
                     img_name="val/unmixing",
                 )
@@ -973,7 +990,8 @@ class UnmixingTrainer:
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
-        return ((x + 1) / 2).clamp(0, 1).float()
+        # return ((x + 1) / 2).clamp(0, 1).float()
+        return x  # not [-1, 1]
 
     def visualize_reconstruction(
         self,
@@ -982,39 +1000,54 @@ class UnmixingTrainer:
         img_name: str = "train_original_recon",
         add_step: bool = False,
         only_vis_n: int | None = None,
-        no_to_rgb: bool = False,
     ):
-        if not no_to_rgb:
-            x = self.to_rgb(x)
-        if recon is not None and not no_to_rgb:
+        """
+        Visualize reconstruction results for hyperspectral images.
+
+        This function converts hyperspectral data to RGB for visualization
+        and saves the results as image files.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input hyperspectral tensor
+        recon : torch.Tensor | None, optional
+            Reconstructed tensor, by default None
+        img_name : str, optional
+            Base name for the saved image, by default "train_original_recon"
+        add_step : bool, optional
+            Whether to add training step to filename, by default False
+        only_vis_n : int | None, optional
+            Number of images to visualize, by default None (uses 16)
+
+        Notes
+        -----
+        This function handles both RGB and hyperspectral data by converting
+        hyperspectral bands to RGB using predefined channel indices.
+        """
+        x = self.to_rgb(x)
+        if recon is not None:
             recon = self.to_rgb(recon)
 
         _only_n = only_vis_n or 16
-        to_img = lambda x: tensor_to_image(make_grid(x[:_only_n], n_row=4, padding=2))
-        c = x.shape[1]
+        _n_row = min(4, int(math.sqrt(_only_n)))
+        to_img = lambda x: tensor_to_image(
+            make_grid(x[:_only_n].float(), n_row=_n_row, padding=2)
+        )
+        vis_fn = lambda x: to_img(
+            get_rgb_image(x, self.dataset_cfg.consts.rgb_channels, use_linstretch=False)
+        )
 
-        def hyperspectral_to_rgb(x):
-            # is rgb or gray images
-            if c in (1, 3):
-                x_np = to_img(x)
-            else:
-                rgb_channels = to_cont(
-                    self.dataset_cfg.consts.rgb_channels
-                )  # _prefixed_rgb_channels[c]
-                x_np = to_img(x[:, rgb_channels])
+        x_np = vis_fn(x)
 
-            return x_np
-
-        x_np = hyperspectral_to_rgb(x)
-
-        # cat original and reconstructed images
+        # concatenate original and reconstructed images
         if recon is not None:
-            recon_np = hyperspectral_to_rgb(recon)
+            recon_np = vis_fn(recon)
             img = np.concatenate([x_np, recon_np], axis=1)
         else:
             img = x_np
 
-        # save
+        # save image
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
         if add_step:
@@ -1034,6 +1067,7 @@ class UnmixingTrainer:
         self,
         abunds: torch.Tensor,
         end_members: torch.Tensor,
+        end_members_gt: torch.Tensor | None = None,
         img_name: str = "unmixing_results",
         add_step: bool = False,
         only_vis_n: int | None = None,
@@ -1051,6 +1085,9 @@ class UnmixingTrainer:
             Predicted abundance maps with shape [batch, num_endmembers, height, width]
         end_members : torch.Tensor
             Predicted endmember spectra with shape [num_endmembers, num_bands]
+        end_members_gt : torch.Tensor | None
+            Ground truth endmember spectra with shape [num_endmembers, num_bands].
+            If None, will use predicted endmembers for visualization purposes
         img_name : str
             Base name for the visualization files
         add_step : bool
@@ -1075,10 +1112,11 @@ class UnmixingTrainer:
         _only_n = only_vis_n or min(16, abunds.shape[0])
         abunds = abunds[:_only_n]
 
-        # For endmember visualization, we need to create dummy ground truth
-        # since endmembers_visualize expects both predicted and ground truth
-        # We'll use the predicted endmembers as both for visualization purposes
-        dummy_endmembers_gt = end_members.clone()
+        # Use provided ground truth endmembers if available, otherwise use predicted
+        # endmembers as fallback for visualization purposes
+        if end_members_gt is None:
+            end_members_gt = end_members.clone()
+        end_members_gt = end_members_gt.squeeze(0)
 
         # Get the first sample's abundances for visualization
         # endmembers_visualize expects [num_endmembers, H, W]
@@ -1090,7 +1128,7 @@ class UnmixingTrainer:
         # Use the endmembers_visualize function to create the plot
         # This returns: sad_values, ordered_endmembers, ordered_abundances, fig, axes
         sad_values, _, ordered_abundances, fig, _ = endmembers_visualize(
-            end_members, dummy_endmembers_gt, abunds_vis
+            end_members, end_members_gt, abunds_vis
         )
 
         # Save the endmember comparison plot
@@ -1118,6 +1156,7 @@ class UnmixingTrainer:
         self,
         abunds: torch.Tensor,
         end_members: torch.Tensor,
+        end_members_gt: torch.Tensor | None = None,
         abunds_gt: torch.Tensor | None = None,
         img_name: str = "unmixing_results",
         add_step: bool = False,
@@ -1136,6 +1175,8 @@ class UnmixingTrainer:
             Predicted abundance maps with shape [batch, num_endmembers, height, width]
         end_members : torch.Tensor
             Predicted endmember spectra with shape [num_endmembers, num_bands]
+        end_members_gt : torch.Tensor | None
+            Ground truth endmember spectra with shape [num_endmembers, num_bands]
         abunds_gt : torch.Tensor | None
             Ground truth abundance maps with shape [batch, num_endmembers, height, width]
         img_name : str
@@ -1155,13 +1196,21 @@ class UnmixingTrainer:
             self.log_msg("[Visualize]: Skip unmixing visualization due to missing data")
             return
 
+        # all to float
+        to_float = lambda x: x.to(torch.float32)
+        abunds, end_members = map(to_float, [abunds, end_members])
+        if end_members_gt is not None:
+            end_members_gt = to_float(end_members_gt)
+        if abunds_gt is not None:
+            abunds_gt = to_float(abunds_gt)
+
         # Limit the number of samples to visualize
         _only_n = only_vis_n or min(16, abunds.shape[0])
         abunds = abunds[:_only_n]
 
         # Visualize endmembers
         self.endmembers_visualize(
-            abunds, end_members, f"{img_name}_endmembers", add_step
+            abunds, end_members, end_members_gt, f"{img_name}_endmembers", add_step
         )
 
         # Visualize abundance maps if ground truth is available
@@ -1216,25 +1265,50 @@ class UnmixingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p1_vitamin_unmixing"  # vq, bsq, fsq, kl
+_key = "resnet"
 _configs = {
-    # cosmos tokenizer, simple denoising
-    "cosmos_f8c16p1_vitamin_unmixing": "cosmos_f8c16p1_vitamin_unmixing",
-}[_key]
-
-
-@hydra.main(
-    config_path="../configs/unmixing",
-    config_name=_configs,
-    version_base=None,
-)
-def main(cfg):
-    catcher = logger.catch if PartialState().is_main_process else nullcontext
-
-    with catcher():
-        trainer = UnmixingTrainer(cfg)
-        trainer.run()
+    "vitamin": "cosmos_f8c16p1_vitamin_unmixing",
+    "resnet": "cosmos_f8c16p1_resnet_unmixing",
+}
 
 
 if __name__ == "__main__":
+    from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
+
+    # change the config name in cli
+    cli_default_dict = {
+        "config_name": _key,
+        "only_rank_zero_catch": True,
+    }
+    chosen_cfg, cli_args = argsparse_cli_args(_configs, cli_default_dict)
+
+    if is_rank_zero := PartialState().is_main_process:
+        print_colored_banner("HyperUnmixing")
+    logger.info(
+        "<green>\n"
+        + "=" * 60
+        + "\n"
+        + f"[Config]: {chosen_cfg}\n"
+        + "\n"
+        + "Start Running , Good Luck!\n"
+        + "=" * 60
+        + "</>",
+        only_rank_zero=False,
+    )
+
+    @hydra.main(
+        config_path="../configs/unmixing",
+        config_name=chosen_cfg,
+        version_base=None,
+    )
+    def main(cfg):
+        if cli_args.only_rank_zero_catch:
+            catcher = logger.catch if is_rank_zero else nullcontext
+        else:
+            catcher = logger.catch
+
+        with catcher():
+            trainer = UnmixingTrainer(cfg)
+            trainer.run()
+
     main()

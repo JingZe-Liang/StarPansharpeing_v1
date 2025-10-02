@@ -144,10 +144,11 @@ class StagedUnmixingLoss(torch.nn.Module):
     def __init__(
         self,
         switch_step: int = 6000,
-        lambda_y2: float = 0.04,
         lambda_pre: float = 10.0,
         lambda_vol: float = 10.0,
         lambda_sad: float = 5.0,
+        lambda_abunds_physical: float = 1.0,
+        recon_type="sad",
     ):
         """
         Initialize staged unmixing loss with SSAF-Net hyperparameters
@@ -170,10 +171,11 @@ class StagedUnmixingLoss(torch.nn.Module):
         self.steps_counter = StepsCounter()
 
         # SSAF-Net inspired loss weights
-        self.lambda_y2 = lambda_y2
         self.lambda_pre = lambda_pre
         self.lambda_vol = lambda_vol
         self.lambda_sad = lambda_sad
+        self.lambda_abunds_physical = lambda_abunds_physical
+        self.recon_type = recon_type
 
     def _reconstruction_loss(self, hyper_in: Image, hyper_recon: Image) -> Tensor:
         """
@@ -194,7 +196,17 @@ class StagedUnmixingLoss(torch.nn.Module):
             Reconstruction loss
         """
         # Primary reconstruction loss (MSE)
-        loss = torch.nn.functional.mse_loss(hyper_recon, hyper_in)
+        if self.recon_type == "mse":
+            loss = torch.nn.functional.mse_loss(hyper_recon, hyper_in)
+        elif self.recon_type == "l1":
+            loss = torch.nn.functional.l1_loss(hyper_recon, hyper_in)
+        elif self.recon_type == "sad":
+            bs, band, h, w = hyper_recon.shape
+            hyper_recon = hyper_recon.reshape(bs, band, h * w)
+            hyper_in = hyper_in.reshape(bs, band, h * w)
+            loss = torch.acos(torch.cosine_similarity(hyper_in, hyper_recon, dim=1))
+            loss = loss.mean()
+
         return loss
 
     def _abundance_constraint_loss(
@@ -291,6 +303,13 @@ class StagedUnmixingLoss(torch.nn.Module):
 
         return loss
 
+    def _abunds_physical_loss(self, abunds: Abunds):
+        # no negative values
+        neg_loss = torch.relu(-abunds).mean()
+        # sum to one
+        sum_loss = ((abunds.sum(dim=1) - 1).sum() ** 2).mean()
+        return neg_loss, sum_loss
+
     def _stage1_loss(
         self,
         hyper_in: Image,
@@ -322,16 +341,18 @@ class StagedUnmixingLoss(torch.nn.Module):
         """
         # Reconstruction loss
         rec_loss = self._reconstruction_loss(hyper_in, hyper_recon)
+        total_loss = rec_loss
 
         # Abundance constraint loss
-        abundance_loss = self._abundance_constraint_loss(abunds_pred, abunds_fcls)
-
-        # Weighted combination (SSAF-Net stage 1 style)
-        total_loss = rec_loss + self.lambda_pre * abundance_loss
+        abundance_loss = 0.0
+        if self.lambda_pre > 0.0:
+            abundance_loss = self._abundance_constraint_loss(abunds_pred, abunds_fcls)
+            total_loss += self.lambda_pre * abundance_loss
 
         loss_dict = {
             "reconstruction": rec_loss,
             "abundance_constraint": abundance_loss,
+            "abundance_physical": torch.tensor(0.0, device=rec_loss.device),
             "endmember_volume": torch.tensor(0.0, device=rec_loss.device),
             "endmember_spectral": torch.tensor(0.0, device=rec_loss.device),
         }
@@ -371,21 +392,31 @@ class StagedUnmixingLoss(torch.nn.Module):
 
         # Reconstruction loss
         rec_loss = self._reconstruction_loss(hyper_in, hyper_recon)
+        total_loss = rec_loss
 
         # Endmember volume loss
-        volume_loss = self._endmember_volume_loss(endmembers)
+        volume_loss = 0.0
+        if self.lambda_vol > 0.0:
+            volume_loss = self._endmember_volume_loss(endmembers)
+            total_loss += self.lambda_vol * volume_loss
 
         # Endmember spectral loss
-        spectral_loss = self._endmember_spectral_loss(endmembers)
+        spectral_loss = 0.0
+        if self.lambda_sad > 0.0:
+            spectral_loss = self._endmember_spectral_loss(endmembers)
+            total_loss += self.lambda_sad * spectral_loss
 
-        # Weighted combination (SSAF-Net stage 2 style)
-        total_loss = (
-            rec_loss + self.lambda_vol * volume_loss + self.lambda_sad * spectral_loss
-        )
+        # Abundance physical constraints
+        abunds_phy_loss = 0.0
+        if self.lambda_abunds_physical > 0.0:
+            abu_neg_loss, abu_sum_loss = self._abunds_physical_loss(abunds_pred)
+            abunds_phy_loss = abu_neg_loss + abu_sum_loss
+            total_loss += self.lambda_abunds_physical * abunds_phy_loss
 
         loss_dict = {
             "reconstruction": rec_loss,
             "abundance_constraint": torch.tensor(0.0, device=rec_loss.device),
+            "abundance_physical": abunds_phy_loss,
             "endmember_volume": volume_loss,
             "endmember_spectral": spectral_loss,
         }

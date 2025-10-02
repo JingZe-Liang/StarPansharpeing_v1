@@ -5,13 +5,14 @@ This script tests the vca_fclsu_nnls_solver with real hyperspectral data
 and validates the reconstruction quality.
 """
 
-import torch
-import tifffile
-import numpy as np
-import matplotlib.pyplot as plt
 from typing import Tuple
 
-from .pipe import vca_fclsu_nnls_solver
+import matplotlib.pyplot as plt
+import numpy as np
+import tifffile
+import torch
+
+from src.stage2.unmixing.traditional.pipe import vca_fclsu_nnls_solver
 
 
 def load_hyperspectral_data(file_path: str) -> Tuple[torch.Tensor, dict]:
@@ -85,7 +86,7 @@ def test_solver_with_dc_data():
                 hyper_img=hyper_img,
                 n_endmembers=n_endmembers,
                 fclsu_solver_kwargs={
-                    "backend": "torch_pgd",
+                    "backend": "scipy",
                     "max_iter": 500,
                     "lr": 0.01,
                 },
@@ -121,12 +122,22 @@ def test_solver_with_dc_data():
             rmse = torch.sqrt(mse)
             mae = torch.mean(torch.abs(img_1d - reconstructed))
 
+            # Calculate PSNR (Peak Signal-to-Noise Ratio)
+            # PSNR = 20 * log10(MAX_I) - 10 * log10(MSE)
+            # For hyperspectral data, we use the maximum value in the original image
+            max_pixel_value = torch.max(img_1d)
+            if mse > 0:
+                psnr = 20 * torch.log10(max_pixel_value) - 10 * torch.log10(mse)
+            else:
+                psnr = torch.tensor(float("inf"))  # Perfect reconstruction
+
             # Calculate relative error
             relative_error = torch.norm(img_1d - reconstructed) / torch.norm(img_1d)
 
             print(f"  均方误差 (MSE): {mse.item():.6f}")
             print(f"  均方根误差 (RMSE): {rmse.item():.6f}")
             print(f"  平均绝对误差 (MAE): {mae.item():.6f}")
+            print(f"  峰值信噪比 (PSNR): {psnr.item():.6f} dB")
             print(f"  相对误差: {relative_error.item():.6f}")
 
             # Spectral Angle Mapper (SAM)

@@ -314,8 +314,8 @@ class UnmixingMetrics(torch.nn.Module):
             axes = axes.reshape(2, 1)
 
         # Convert to numpy for plotting
-        endmembers_gt_np = endmembers_gt.detach().cpu().numpy()
-        ordered_endmembers_np = ordered_endmembers.detach().cpu().numpy()
+        endmembers_gt_np = endmembers_gt.float().detach().cpu().numpy()
+        ordered_endmembers_np = ordered_endmembers.float().detach().cpu().numpy()
 
         # Plot endmembers
         for i in range(num_endmembers):

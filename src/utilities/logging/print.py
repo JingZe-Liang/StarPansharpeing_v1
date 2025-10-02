@@ -5,7 +5,7 @@ import time
 from contextlib import ContextDecorator
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Optional, Union
 
 import torch.distributed as dist
 from beartype import beartype
@@ -47,13 +47,13 @@ if __setup_console:
     setup_console()
 
 
-def format_extra(record):
+def format_extra(record: dict[str, Any]):
     if len(record["extra"]) == 0:
-        record["extra"] = ""
+        record["extra"] = None
         return record
-
     extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
-    record["extra"] = f" [{extras}]"
+    record["extra"] = None  # remove extras and put into message
+    record["message"] = f"[{extras}] {record['message']}"
     return record
 
 
@@ -102,7 +102,6 @@ def configure_logger(
         format=(
             "{time:HH:mm:ss} "
             "- {level.icon} <level>[{level}] {file.name}:{line}</level> "
-            "<green>{extra}</green> "
             "- <level>{message}</level>"
         ),
         filter=filter,
@@ -117,7 +116,7 @@ if __re_config_logger:
 
 
 def set_logger_file(
-    file: str | Path | None = None,
+    file: Optional[Union[str, Path]] = None,
     level: LogLevel = "debug",
     add_time: bool = True,
     mode="w",
@@ -129,7 +128,6 @@ def set_logger_file(
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
         "- <level>[{level}]</level> "
         "- <cyan>{file}:{line}</cyan> "
-        "<green>{extra}</green> "
         "- <level>{message}</level>"
     )
 
@@ -165,6 +163,7 @@ def set_logger_file(
         filter=filter,
     )
     logger = logger.patch(format_extra)
+
     log_print(
         f"Set logger to log to file: {file} with level {level}, handler id: {handler}",
         level="info",
@@ -251,14 +250,11 @@ def log_print(
                 return
             __warn_once_set.add(msg)
 
-    # if patch_fn is None:
-    #     # e.g., patch_fn = lambda record: r.update({"extra": {"user": "user_id"}})
-    #     # patch_fn = lambda r: r.update({"extra": ""})
-    #     patch_fn = format_extra
+    if context is None:
+        context = {}
+    context.update(other_context)
 
-    logger_patched = logger.patch(patch_fn) if patch_fn is not None else logger
-
-    logger_with_correct_depth = logger_patched.opt(
+    logger_with_correct_depth = logger.opt(
         depth=stack_level + 1,
         colors=True,
         record=opt_record,
@@ -266,10 +262,6 @@ def log_print(
         raw=opt_raw,
     )
     log_fn = getattr(logger_with_correct_depth, level)
-
-    if context is None:
-        context = {}
-    context.update(other_context)
 
     if only_rank_zero:
         log_fn(msg, **context)
@@ -444,8 +436,16 @@ def print_info_if_raise(ret_all_stacks_info=False):
 
 
 if __name__ == "__main__":
+    """
+        python -m src.utilities.logging.print
+    """
     with logger.contextualize(user="test_user"):
         log_print("Hello, World!")
 
-    log_print("This is a debug message", level="debug")
+    log_print(
+        "This is a debug message",
+        level="debug",
+        this_is_a_context=1,
+    )
+    logger.info("---------")
     logger.debug("This is a debug message without using log_print")

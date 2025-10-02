@@ -121,3 +121,7 @@
 [submodule "src/stage1/VAEs/WeTok"]
 	path = src/stage1/VAEs/WeTok
 	url = https://github.com/zhuangshaobin/WeTok.git
+
+[submodule "src/stage1/VAEs/SphereAR"]
+	path = src/stage1/VAEs/SphereAR
+	url = https://github.com/guolinke/SphereAR.git

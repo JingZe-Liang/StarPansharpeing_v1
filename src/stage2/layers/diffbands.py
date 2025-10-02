@@ -1,10 +1,11 @@
+import math
 from functools import partial
-from typing import Literal
+from typing import Literal, Optional, cast, no_type_check
 
 import torch
 import torch.nn as nn
 from accelerate.state import PartialState
-from timm.layers import PatchEmbed
+from timm.layers import PatchEmbed, create_conv2d
 
 from src.stage1.cosmos.modules.blocks import (
     GLUMBConv,
@@ -381,6 +382,86 @@ class DiffBandsInputConvOut(nn.Module):
                 )
 
 
+# * --- Nested Diffbands conv --- #
+
+
+class AdaptiveInputConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        use_bias: bool = False,
+    ):
+        super().__init__()
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            groups=groups,
+            dilation=dilation,
+            bias=use_bias,
+        )
+
+    @no_type_check
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+        x = nn.functional.conv2d(
+            x,
+            self.conv.weight[:, :in_channels],
+            self.conv.bias,
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+        return x
+
+
+class AdaptiveOutputConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        use_bias: bool = False,
+    ):
+        super().__init__()
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            groups=groups,
+            dilation=dilation,
+            bias=use_bias,
+        )
+
+    @no_type_check
+    def forward(
+        self, x: torch.Tensor, out_channels: Optional[int] = None
+    ) -> torch.Tensor:
+        if out_channels is None:
+            out_channels = self.conv.out_channels
+        x = nn.functional.conv2d(
+            x,
+            self.conv.weight[:out_channels],
+            self.conv.bias[:out_channels],
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+        return x
+
+
 # * --- Dinov3 backbone diffbands compatibility --- #
 
 
@@ -412,6 +493,36 @@ def dinov3_patchembeding_to_diffbands(
     )
     with torch.no_grad():
         conv_in.in_modules["conv_in_3"].proj.weight.data.copy_(pe_weights.data)  # type: ignore
+    log_print("[Dinov3 Diffbands]: set patch embedding to hidden module for channel 3")
+
+    backbone.patch_embed = conv_in
+
+    return backbone
+
+
+def dinov3_patchembeding_to_nested_bands(
+    backbone,
+    nested_max_chan: int,
+    hidden_dim: int,
+):
+    pe_weights = backbone.patch_embed.proj.weight  # (c, 3, 16, 16)
+    assert isinstance(backbone.patch_embed.norm, nn.Identity), (
+        "backbone.patch_embed.norm must be nn.Identity"
+    )
+
+    conv_in = AdaptiveInputConvLayer(
+        nested_max_chan,
+        hidden_dim,
+        kernel_size=backbone.patch_size,
+        stride=backbone.patch_size,
+    )
+    with torch.no_grad():
+        nested_c_pad_n = math.ceil(nested_max_chan / 3)
+        # repeat the orignal weights
+        pe_weights_repeated = pe_weights.repeat(1, nested_c_pad_n, 1, 1)[
+            :, :nested_max_chan
+        ]
+        conv_in.conv.weight.data.copy_(pe_weights_repeated.data)  # type: ignore
     log_print("[Dinov3 Diffbands]: set patch embedding to hidden module for channel 3")
 
     backbone.patch_embed = conv_in

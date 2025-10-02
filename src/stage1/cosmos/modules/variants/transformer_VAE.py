@@ -1,14 +1,11 @@
-from typing import Callable, Optional
+from typing import Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from jaxtyping import Float
 from timm.layers import create_norm
 from torch import Tensor
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-from .conv import ConvLayer, LinearLayer
 
 
 def rotate_half(x):
@@ -200,97 +197,6 @@ class CrossAttention(nn.Module):
         out = self.out_proj(attn_out)
 
         return out
-
-
-class SoftmaxCrossAttention2D(nn.Module):
-    """
-    input q is 2d image but the kv context is 1d.
-    """
-
-    def __init__(
-        self,
-        q_in_channels: int,
-        kv_in_channels: int,
-        out_channels: int,
-        head_dim: int = 32,
-        use_bias: bool = False,
-        norm: tuple[Optional[str], Optional[str]] = (None, None),
-        act_func: tuple[Optional[str], Optional[str]] = (None, None),
-    ):
-        super().__init__()
-        assert q_in_channels % head_dim == 0, (
-            "q_in_channels must be divisible by head_dim"
-        )
-        assert kv_in_channels % head_dim == 0, (
-            "kv_in_channels must be divisible by head_dim"
-        )
-        assert out_channels % head_dim == 0, (
-            "out_channels must be divisible by head_dim"
-        )
-
-        self.q_in_channels = q_in_channels
-        self.kv_in_channels = kv_in_channels
-        self.out_channels = out_channels
-        self.head_dim = head_dim
-        self.num_heads = out_channels // head_dim
-
-        self.q = ConvLayer(
-            q_in_channels,
-            out_channels,
-            1,
-            use_bias=use_bias,
-            norm=norm[0],
-            act_func=act_func[0],
-        )
-        self.kv = LinearLayer(
-            kv_in_channels,
-            out_channels * 2,
-            use_bias=use_bias,
-            norm=norm[0],
-            act_func=act_func[0],
-            try_squeeze=False,
-        )
-        self.proj = ConvLayer(
-            out_channels,
-            out_channels,
-            1,
-            use_bias=use_bias,
-            norm=norm[1],
-            act_func=act_func[1],
-        )
-
-    def forward(self, x, cond, mask=None):
-        # query: img tokens; key/value: condition; mask: if padding tokens
-        # cond: (B, N, C)
-        B, _, H, W = x.shape
-        N = cond.shape[1]
-
-        q = (
-            self.q(x).reshape(B, -1, self.head_dim, H * W).transpose(2, 3)
-        )  # (B, C, H, W) -> (B, num_heads, head_dim, H * W) -> (B, num_heads, H * W, head_dim)
-        kv = (
-            self.kv(cond).view(B, N, -1, 2 * self.head_dim).transpose(1, 2)
-        )  # (B, N, 2 * C) -> (B, N, num_heads, 2 * head_dim) -> (B, num_heads, N, 2 * head_dim)
-        k, v = kv[..., 0 : self.head_dim], kv[..., self.head_dim :]
-
-        if mask is not None and mask.ndim == 2:
-            raise NotImplementedError("mask is not supported")
-            # mask = (1 - mask.to(x.dtype)) * -10000.0
-            # mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
-        x = F.scaled_dot_product_attention(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            attn_mask=mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-        x = x.transpose(
-            2, 3
-        )  # (B, num_heads, H * W, head_dim) -> (B, num_heads, head_dim, H * W)
-        x = x.reshape(B, -1, H, W)
-        x = self.proj(x)
-        return x
 
 
 # * --- Test --- #
