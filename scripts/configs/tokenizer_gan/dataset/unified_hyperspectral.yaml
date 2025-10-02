@@ -3,21 +3,29 @@ dataset_names_to_img_size:
   unified_hyperspectral: 512
 
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
-img_size: 512
+img_size: 512 # place holder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+size_128_bs: 16
+size_256_bs: 12
+size_512_bs: 5
+val_bs: 12
+max_workers: 3
+min_workers: 2
+shuffle_size: 100
+prefetch_factor: 4
 
 train_paths:
   #> multispectral datasets
   - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0000}.tar
   - - data/TUM_128/hyper_images/TUM_128_data_{0006..0000}.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0003..0000}.tar
-  - - data2/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
   - - ${glob:"data/MMOT/hyper_images/*.tar"} # MMOT, ? bands
 
   # 8 bands
   - - data2/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-{0069..0000}.tar
-    - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-    - data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
+    - data2/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+    - data2/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
     - data2/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0017..0000}.tar
     - data/Multispectral-Spacenet-series/01_SN1_buildings_8band.tar
     - data/Multispectral-Spacenet-series/00_SN1_buildings_8band.tar
@@ -27,10 +35,10 @@ train_paths:
 
   # 4 bands
   - - data2/Multispectral-FMow-full/hyper_images_4bands/FMoW-4_bands-px_1024-RGB-jp2k-80-{0000..0001}.tar
-    - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
     - data2/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
     - data2/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
     - data2/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+    - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
     - data/Multispectral-Spacenet-series/00_SN4_buildings_PS-RGBNIR.tar
     - data/Multispectral-Spacenet-series/01_SN6_buildings_PS-RGBNIR.tar
     - data/Multispectral-Spacenet-series/02_SN7_buildings_images.tar
@@ -89,9 +97,9 @@ train_paths:
     - data/MDAS-HySpex/conditions/MDAS-HySpex-368_bands-px_256-MSI-{0003..0000}.tar
     - data/MMSeg_YREB/conditions/MMSeg_YREB_train_part-12_bands-MSI-{0003..0000}.tar
     - data/RefSegRS/conditions/RefSegRS_3_bands-px_512-RGB-jp2k-80-0000.tar
-    - data2/QuickBird/conditions/QuickBird-4_bands-px_256-MSI-0000.tar
-    - data2/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar
-    - data2/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar
+    - data/QuickBird/conditions/QuickBird-4_bands-px_256-MSI-0000.tar
+    - data/WorldView2/conditions/WorldView2-8_bands-px_256-MSI-0000.tar
+    - data/WorldView3/conditions/WorldView3-8_bands-px_256-MSI-0000.tar
 
   #> Earthview big datasets
   - - data/EarthView/hyper_images/neon/neon-{0013..0000}.tar # 369 channels
@@ -102,8 +110,8 @@ val_paths:
   - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_0006.tar
   - - data/TUM_128/hyper_images/TUM_128_data_0006.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
-  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
-  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+  - - data2/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data2/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
   - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
   - - data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar
   - - data2/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
@@ -123,30 +131,30 @@ val_paths:
 
 train_changed_kwargs_by_loader:
   ## use act_ckpt
-  - batch_size: 16 # BigEarthNet_S2
+  - batch_size: ${dataset.size_128_bs} # BigEarthNet_S2
     permute: false
-  - batch_size: 12 # TUM_128
-    num_workers: 0
-  - batch_size: 16 # MMSeg_YREB
-    num_workers: 0
-  - batch_size: 16 # DFC_2020
-    num_workers: 0
-  - batch_size: 5 # MMOT
+  - batch_size: ${dataset.size_128_bs} # TUM_128
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_128_bs} # MMSeg_YREB
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_128_bs} # DFC_2020
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # MMOT
     resize_before_transform: 512
     img_key: [npy]
     tgt_key: [img]
     keys_to_remove: [txt]
-  - batch_size: 5 # WorldView3, WorldView2
-    num_workers: 0
+  - batch_size: ${dataset.size_512_bs} # WorldView3, WorldView2
+    num_workers: ${dataset.min_workers}
     resize_before_transform: 512
-  - batch_size: 5 # QuickBird, WorldView4, IKONOS
-    num_workers: 0
+  - batch_size: ${dataset.size_512_bs} # QuickBird, WorldView4, IKONOS
+    num_workers: ${dataset.min_workers}
     resize_before_transform: 512
-  - batch_size: 5 # OHS
-    num_workers: 0
-  - batch_size: 5 # Houston
-    num_workers: 0
-  - batch_size: 5 # RGB, RS5M-512 pixel
+  - batch_size: ${dataset.size_512_bs} # OHS
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # Houston
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # RGB, RS5M-512 pixel
     img_key: auto
     tgt_key: img
     constraint_size: 65536
@@ -154,58 +162,58 @@ train_changed_kwargs_by_loader:
     num_workers: 2
     shuffle_within_workers: true
     shuffle_size: 100
-  - batch_size: 16 # HyperGlobal EO1
-  - batch_size: 16 # HyperGlobal GF5
-  - batch_size: 8 # hyspecnet11k
-    num_workers: 0
-  - batch_size: 5 # DryadHyper
-    num_workers: 0
-  - batch_size: 5 # MDAS-HySpex
-    num_workers: 0
-  - batch_size: 5 # MDAS-EeteS
-    num_workers: 0
-  - batch_size: 4 # conditions
+  - batch_size: ${dataset.size_128_bs} # HyperGlobal EO1
+  - batch_size: ${dataset.size_128_bs} # HyperGlobal GF5
+  - batch_size: ${dataset.size_256_bs} # hyspecnet11k
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # DryadHyper
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # MDAS-HySpex
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # MDAS-EeteS
+    num_workers: ${dataset.min_workers}
+  - batch_size: ${dataset.size_512_bs} # conditions
     resize_before_transform: 512
     img_key: [mlsd, sketch, hed, segmentation]
     keys_to_remove: [rgb.*]
-  - batch_size: 12 # neon
+  - batch_size: ${dataset.size_128_bs} # neon
     img_key: [hsi] # [hsi, rgb]
     tgt_key: [img]
     keys_to_remove: [rgb.*, metadata.jsonl]
-  - batch_size: 5 # satellogic
+  - batch_size: ${dataset.size_512_bs} # satellogic
     resize_before_transform: 512
     img_key: [img]
     keys_to_remove: [metadata.jsonl]
 
 val_changed_kwargs_by_loader:
-  - batch_size: 6
+  - batch_size: ${dataset.val_bs}
     permute: false
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6
-  - batch_size: 6 # RS5M
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs}
+  - batch_size: ${dataset.val_bs} # RS5M
     img_key: img_content
     tgt_key: img
     constraint_size: 65536
     resize_before_transform: 512
-  - batch_size: 4 # miniFrance
+  - batch_size: ${dataset.val_bs} # miniFrance
     resize_before_transform: 720
-  - batch_size: 6 # hyperglobal
-  - batch_size: 6 # rscaption-collection
+  - batch_size: ${dataset.val_bs} # hyperglobal
+  - batch_size: ${dataset.val_bs} # rscaption-collection
     resize_before_transform: 512
-  - batch_size: 6 # hyspecnet-11k
-  - batch_size: 6 # MMOT
+  - batch_size: ${dataset.val_bs} # hyspecnet-11k
+  - batch_size: ${dataset.val_bs} # MMOT
     resize_before_transform: 512
     img_key: npy
     tgt_key: img
-  - batch_size: 6
+  - batch_size: ${dataset.val_bs}
     resize_before_transform: 64
     img_key: hsi
     keys_to_remove: [rgb.*, metadata.jsonl]
@@ -215,12 +223,13 @@ train_loader:
   loader_type: webdataset
   paths: ${dataset.train_paths}
   basic_kwargs:
-    shuffle_size: -1
-    num_workers: 2
+    shuffle_size: ${dataset.shuffle_size}
+    num_workers: ${dataset.max_workers}
     resample: true
-    prefetch_factor: 4
-    shuffle_within_workers: true
+    prefetch_factor: ${dataset.prefetch_factor}
+    shuffle_within_workers: false
     quantile_img_clip: 1.0
+    pin_memory: true
   changed_kwargs_by_loader: ${dataset.train_changed_kwargs_by_loader}
   curriculum_type: linear
   curriculum_kwargs:
@@ -231,7 +240,7 @@ train_loader:
       - 0.2 # MMSeg_YREB
       - 0.3 # DFC_2020
       - 1.2 # MMOT
-      - 3.0 # WorldView3, WorldView2, DCF-2019, Spacenet
+      - 3.2 # WorldView3, WorldView2, DCF-2019, Spacenet
       - 3.0 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
       - 0.3 # OHS, 32 bands
       - 0.3 # Houston, 50 bands
@@ -252,7 +261,7 @@ train_loader:
       - 0.4 # MMSeg_YREB
       - 0.4 # DFC_2020
       - 0.4 # MMOT
-      - 1.5 # WorldView3, WorldView2, DCF-2019, Spacenet
+      - 1.5 # Fmow-full, WorldView3, WorldView2, DCF-2019, Spacenet
       - 1.5 # QuickBird, WorldView4, IKONOS, Spacenet, MDAS-Optical
       - 0.4 # OHS
       - 0.4 # Houston
@@ -274,9 +283,9 @@ val_loader:
   paths: ${dataset.val_paths}
   basic_kwargs:
     shuffle_size: -1
-    num_workers: 0
+    num_workers: ${dataset.min_workers}
     resample: true
-    prefetch_factor: null
+    prefetch_factor: ${dataset.prefetch_factor}
     shuffle_within_workers: false
     quantile_img_clip: 1.0 # 0.99 v.s. 1.0, may be not clip has better PSNR?
   changed_kwargs_by_loader: ${dataset.val_changed_kwargs_by_loader}

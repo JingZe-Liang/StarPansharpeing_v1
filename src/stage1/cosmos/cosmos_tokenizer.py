@@ -5,7 +5,7 @@ from collections import OrderedDict, namedtuple
 from dataclasses import asdict, dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Optional, no_type_check
+from typing import Any, Literal, NamedTuple, no_type_check
 
 import accelerate
 import numpy as np
@@ -266,9 +266,11 @@ class EncoderDecoderConfig:
     spatial_compression: int = 8
     act_checkpoint: bool = False
     use_residual_factor: bool = False
-    # downsampling
+    # resamples
     downsample_type: str = "PadConv"
     downsample_shortcut: Any = None  # str
+    upsample_type: str = "RepeatConv"
+    upsample_shortcut: Any = None  # str
     # patch size, patcher, and blocks
     patch_size: int = 1
     patch_method: str = "haar"
@@ -283,7 +285,7 @@ class EncoderDecoderConfig:
     moe_type: str = "tc"
     moe_token_mixer_type: str = "res_block"
     # padding and norm
-    padding_mode: str = "zeros"
+    padding_mode: str = "reflect"
     norm_type: str = "gn"
     norm_groups: int = 32
     downsample_manually_pad: bool = True

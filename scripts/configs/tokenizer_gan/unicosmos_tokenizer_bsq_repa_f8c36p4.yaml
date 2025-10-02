@@ -130,17 +130,18 @@ train:
   proj_dir: runs/stage1_cosmos_bsq/
   finetune_strategy: finetune_all
   max_grad_norm: 0.03
+  track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
-  max_steps: 400_000
+  max_steps: 1_000_000
   save_every: 500
   seperate_enc_dec: false
-  resume_path:
-  ema_load_path: runs/2025-09-30_00-30-01_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
+  resume_path: #runs/stage1_cosmos_bsq/2025-09-28_00-38-19_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_112
+  ema_load_path: runs/2025-09-30_00-30-01_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -149,21 +150,54 @@ train:
   tokenizer_optimizer:
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 3.0e-4
     weight_decay: 0.1
-    adamw_eps: 1.0e-8
+    adamw_eps: 1.0e-9
     ns_diff_abc: true
     ns_norm: false
     momentum: 0.9
     adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     adamw_wd: 0.
 
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1e-9
+    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
+
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
   disc_optimizer:
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # betas: ${tuple:[0.5, 0.999]}
+    # weight_decay: 1.0e-4
+    # foreach: true
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1e-9
+    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
+
     _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
+    lr: 3.0e-4
     weight_decay: 0.1
-    adamw_eps: 1.0e-8
+    adamw_eps: 1.0e-9
     ns_diff_abc: true
     ns_norm: false
     momentum: 0.9
@@ -190,8 +224,8 @@ train:
 
   log:
     run_comment: unicosmos_f${tokenizer.model.spatial_compression}c${tokenizer.model.latent_channels}p1_bsq_repa_${dataset.used}
-    log_with_time: True
-    visualize_every: 200
+    log_with_time: true
+    visualize_every: 500
     log_every: 10
 
   debug: true
