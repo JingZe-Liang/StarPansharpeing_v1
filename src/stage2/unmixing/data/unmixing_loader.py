@@ -68,7 +68,7 @@ def compute_init_em_abunds(
                 cache_name=cache_name,
                 fclsu_solver_kwargs=fclsu_solver_kwargs,
             )
-            sample["init_vca_endmembers"] = em_c_d
+            sample["init_vca_endmember"] = em_c_d
             sample["init_vca_abunds"] = fclsu_abunds_dhw
 
             nonlocal _last_hits
@@ -94,10 +94,13 @@ def get_unmixing_dataloader(
     resample: bool = True,
     precompute_em_abunds: bool = True,
     pin_memory=True,
+    cache=True,
 ):
     dataset = wds.WebDataset(
         wds_paths,
-        resampled=resample,  # no need `iter(dataloader)` for `next` function
+        resampled=resample
+        if not cache
+        else False,  # no need `iter(dataloader)` for `next` function
         shardshuffle=False,
         nodesplitter=wds.shardlists.single_node_only
         if not accelerate.state.PartialState().use_distributed
@@ -120,6 +123,7 @@ def get_unmixing_dataloader(
         dataset = dataset.map_dict(img=div_fn, abunds=div_fn)
     dataset = dataset.map_dict(img=img_clip, abunds=img_clip)
     # precompute endmembers and abundances using VCA + FCLSU
+    # smart caching the results using cache_solver_result()
     dataset = dataset.map(compute_init_em_abunds(precompute_em_abunds))
 
     dataloader = wds.WebLoader(
@@ -131,7 +135,32 @@ def get_unmixing_dataloader(
         shuffle=False,
     )
 
+    if cache:
+        dataset = cache_whole_dataloader(dataloader, resample)
+        dataloader = dataset()  # create generator
+
     return dataset, dataloader
+
+
+def cache_whole_dataloader(loader, resample=True):
+    samples = []
+    total = 0
+    for i, sample in enumerate(loader):
+        samples.append(sample)
+        if i % 10 == 0:
+            log(f"[Unmixing Dataset]: Cached {i} samples", level="debug")
+        total += sample["img"].shape[0]
+
+    def _cached_loader():
+        if resample:
+            while True:
+                for sample in samples:
+                    yield sample
+        else:
+            for sample in samples:
+                yield sample
+
+    return _cached_loader
 
 
 # * --- Test --- * #

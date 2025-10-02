@@ -1,7 +1,3 @@
-[submodule "src/stage1/WeTok"]
-    path = src/stage1/WeTok
-    url = https://github.com/zhuangshaobin/WeTok
-
 [submodule "src/stage1/perception_models"]
     path = src/stage1/perception_models
     url = https://github.com/facebookresearch/perception_models
@@ -102,8 +98,30 @@
     path = src/stage2/detections/AETNet
     url = https://github.com/ZhaoxuLi123/AETNet.git
 
+[submodule "src/stage1/one_d_tokenizer/semanticist/semanticist"]
+    path = src/stage1/one_d_tokenizer/semanticist/semanticist
+    url = https://github.com/visual-gen/semanticist.git
 
-# local dir
-# [submodule "src/stage2/generative/Sana"]
-#     path = src/stage2/generative/Sana
-#     url = https://github.com/NVlabs/Sana.git
+[submodule "src/stage1/one_d_tokenizer/FlowMo"]
+    path = src/stage1/one_d_tokenizer/FlowMo
+    url = https://github.com/kylesargent/FlowMo.git
+
+[submodule "src/stage1/VAEs/maskbit/maskbit"]
+	path = src/stage1/VAEs/maskbit/maskbit
+	url = https://github.com/markweberdev/maskbit.git
+
+[submodule "src/stage1/VAEs/LeanVAE"]
+	path = src/stage1/VAEs/LeanVAE
+	url = https://github.com/westlake-repl/LeanVAE.git
+
+[submodule "src/stage1/VAEs/unitok"]
+	path = src/stage1/VAEs/unitok
+	url = https://github.com/FoundationVision/UniTok.git
+
+[submodule "src/stage1/VAEs/WeTok"]
+	path = src/stage1/VAEs/WeTok
+	url = https://github.com/zhuangshaobin/WeTok.git
+
+[submodule "src/stage1/VAEs/SphereAR"]
+	path = src/stage1/VAEs/SphereAR
+	url = https://github.com/guolinke/SphereAR.git

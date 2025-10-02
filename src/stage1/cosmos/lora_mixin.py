@@ -20,6 +20,9 @@ from .tokenizer_inference import scale_shift_latent, un_scale_shift_latent
 
 # * --- Network utilites --- #
 
+# if using the diffbands loras, we need to change the conv_in and conv_out modules
+# if using the nested conv for conv in and out, the functions are not needed
+
 
 def get_conv_in_out_modules(
     current_model: nn.Module,

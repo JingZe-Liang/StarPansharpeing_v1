@@ -213,6 +213,44 @@ class DiffBandsInputConvIn(nn.Module):
         return h
 
 
+class AdaptiveInputConvLayer(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        padding: int = 0,
+        use_bias: bool = False,
+    ):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            dilation=dilation,
+            bias=use_bias,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+        x = nn.functional.conv2d(
+            x,
+            self.conv.weight[:, :in_channels],
+            self.conv.bias,
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+        return x
+
+
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator as in Pix2Pix
     --> see https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py
@@ -275,7 +313,9 @@ class NLayerDiscriminator(nn.Module):
         padw = 1
 
         conv_in = (
-            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw)
+            AdaptiveInputConvLayer(
+                input_nc, ndf, kernel_size=kw, stride=2, padding=padw
+            )
             if isinstance(input_nc, int)
             else DiffBandsInputConvIn(
                 band_lst=input_nc,

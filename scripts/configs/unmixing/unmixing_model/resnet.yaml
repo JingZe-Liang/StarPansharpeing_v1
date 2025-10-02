@@ -68,18 +68,13 @@ downstream_model:
     patch_size: 1 # if not slide window
 
   pixel_model:
-    _target_: src.stage2.unmixing.models.vitamin_conv.VitaminModel.create_model
-    stem_width: 64
-    embed_dim: [256, 256, 256]
-    depths: [2, 2, 2]
-    input_channel: ${dataset.consts.bands}
-    out_channel: ${dataset.consts.n_endmembers}
-    condition_channel: 256
+    _target_: src.stage2.unmixing.models.resnet.UnmixingResNet.create_model
+    in_channels: ${dataset.consts.bands}
+    out_channels: ${dataset.consts.n_endmembers}
+    cond_channels: 256
+    depths: [2, 4]
+    channels: [256, 256]
     abunds_restriction: softmax
-    conv_cfg:
-      expand_ratio: 2.0
-      act_layer: gelu
-      norm_layer: layernorm2d
 
   end_member_model:
     # _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberParameter

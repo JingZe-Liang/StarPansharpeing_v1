@@ -16,6 +16,7 @@ from src.utilities.logging import log
 
 from ...layers import (
     AttentionBlock,
+    LiteLA_GLUMB_Block,
     RotaryPositionEmbeddingPytorchV2,
     get_2d_sincos_pos_embed,
 )
@@ -28,7 +29,6 @@ class TransformerConfig:
     dim: int = 256
     depth: int = 8
     num_heads: int = 8
-    with_raw_img: bool = False
     mlp_ratio: float = 4.0
     drop: float = 0.0
     drop_path: float = 0.0
@@ -43,6 +43,8 @@ class TransformerConfig:
     mlp_norm_layer: str = "rmsnorm"
     act_layer: str = "swiglu"
     feature_layer_ids: list[int] | None = None
+    block_type: str = "AttentionBlock"  # or "LiteLA_GLUMB_Block"
+    mlp_type: str = "swiglu"  # or "glu_mb"
 
 
 class Transformer(nn.Module):
@@ -96,8 +98,22 @@ class Transformer(nn.Module):
         mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
         act_layer = get_act_layer(cfg.act_layer)
         for i in range(cfg.depth):
-            layers.append(
-                AttentionBlock(
+            if cfg.block_type == "LiteLA_GLUMB_Block":
+                block = LiteLA_GLUMB_Block(
+                    hidden_size=cfg.dim,
+                    mlp_ratio=cfg.mlp_ratio,
+                    drop_path=drop_path_rates[i],
+                    qk_norm=False,
+                    norm_type=cfg.norm_layer,
+                    linear_head_dim=32,
+                    mlp_type=cfg.mlp_type,
+                    ffn_drop=cfg.drop,
+                )
+                if cfg.mlp_type == "glu_mb":
+                    # fuse conv down to dim
+                    self.fused_conv = nn.Linear(cfg.dim * 2, cfg.dim)
+            elif cfg.block_type == "AttentionBlock":
+                block = AttentionBlock(
                     dim=cfg.dim,
                     mlp_ratio=cfg.mlp_ratio,
                     num_heads=cfg.num_heads,
@@ -105,13 +121,18 @@ class Transformer(nn.Module):
                     qk_norm=norm_layer,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
-                    drop_path=drop_path_rates[i]
-                    if isinstance(drop_path_rates, list)
-                    else cfg.drop_path,
+                    drop_path=(
+                        drop_path_rates[i]
+                        if isinstance(drop_path_rates, list)
+                        else cfg.drop_path
+                    ),
                     norm_layer=mlp_norm_layer,
                     act_layer=act_layer,
                 )
-            )
+            else:
+                raise ValueError(f"Unsupported block_type: {cfg.block_type}")
+
+            layers.append(block)
         self.layers = nn.ModuleList(layers)
         self.head = nn.Sequential(
             norm_layer(cfg.dim),
@@ -243,23 +264,24 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        noisy_latent: Float[Tensor, "b c_latent h w"],
+        latent: Float[Tensor, "b c_latent h w"],
         hyper_img: Float[Tensor, "b c_hyper H W"] | None = None,
         *,
         feature_layer_ids: list[int] | None = None,
     ) -> Tensor | tuple[Tensor, list[Tensor]]:
         # patch embedding
-        y = self.patch_embed(noisy_latent)
+        y = self.patch_embed(latent)
         latent_s = y.shape[1]
 
         # positional embedding
-        hw = torch.tensor(noisy_latent.shape[-2:]) // self.patch_size
+        hw = torch.tensor(latent.shape[-2:]) // self.patch_size
         pe = self.get_pe(tuple(hw), img_type="latent")
         if self.pos_embed_type == "sincos":
             assert torch.is_tensor(pe), "Positional embedding must be a tensor."
             y = y + pe.to(y)
             pe = None
 
+        # Hyper image pe
         if self.with_raw_img:
             assert hyper_img is not None
             y2 = self.raw_img_patcher(hyper_img)
@@ -270,13 +292,23 @@ class Transformer(nn.Module):
                 assert torch.is_tensor(pe2), "Positional embedding must be a tensor."
                 y2 = y2 + pe2.to(y2)
 
-            y = torch.cat([y, y2], dim=1)  # [bs, s1 + s2, c]
+            # cat
+            if (
+                self.cfg.block_type == "LiteLA_GLUMB_Block"
+                and self.cfg.mlp_type == "glu_mb"
+            ):
+                assert y.shape[:-1] == y2.shape[:-1], (
+                    f"{y.shape=} and {y2.shape=} to cat on channel dim."
+                )
+                y = self.fused_conv(torch.cat([y, y2], dim=-1))  # [bs, s, c]
+            else:
+                y = torch.cat([y, y2], dim=1)  # [bs, s1 + s2, c]
 
         # blocks
         feature_layer_ids_ = self.feature_layer_ids or feature_layer_ids
         features = []
         for i, layer in enumerate(self.layers):
-            y = layer(y, mask=None, pe=pe)
+            y = layer(y, mask=None, pe=pe, HW=hw)
             if feature_layer_ids_ is not None and i in feature_layer_ids_:
                 features.append(y)
 
@@ -329,9 +361,11 @@ def test_model():
             with_raw_img=True,
             raw_img_size=256,
             raw_img_chans=16,
-            raw_patch_size=4,
+            raw_patch_size=8,
             input_size=32,
-            patch_size=2,
+            patch_size=1,
+            block_type="LiteLA_GLUMB_Block",
+            mlp_type="swiglu",
         )
     )
     latent = torch.randn(2, 16, 32, 32)

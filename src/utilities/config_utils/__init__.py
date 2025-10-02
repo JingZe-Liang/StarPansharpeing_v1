@@ -1,8 +1,8 @@
 from pathlib import Path
+from types import CodeType
 
 import hydra
 from omegaconf import ListConfig, OmegaConf
-from types import CodeType
 
 from ..logging import log, once
 from .dict_config import (
@@ -66,6 +66,7 @@ def register_new_resolvers():
         "list":     lambda x: list(x),
         "tuple":    lambda x: tuple(x),
         "compile":  lambda x: compile(x, "<inject>", "exec"),
+        "dotlist":  lambda x: OmegaConf.from_dotlist(x.split(" ")),
     }
     # fmt: on
 

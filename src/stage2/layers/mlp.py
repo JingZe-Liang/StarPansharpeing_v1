@@ -1,10 +1,12 @@
 import functools
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers.helpers import to_2tuple
 
+from .conv import GLUMBConv
 from .norm_act import SwiGLUAct
 
 
@@ -51,7 +53,7 @@ class SwiGLU(nn.Module):
             nn.init.ones_(self.fc1_g.bias)
         nn.init.normal_(self.fc1_g.weight, std=1e-6)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x_gate = self.fc1_g(x)
         x = self.fc1_x(x)
         x = self.act(x_gate) * x
@@ -89,7 +91,7 @@ class ClipSwiGLUMlp(SwiGLU):
             nn.Parameter(torch.zeros(self.fc2.weight.shape[0])) if mlp_bias else None
         )
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x_gate = self.fc1_g(x)
         x = self.fc1_x(x)
         if isinstance(self.act, SwiGLUAct):
@@ -106,4 +108,21 @@ class ClipSwiGLUMlp(SwiGLU):
                 bias = self.mlp_bias[..., None, None]
             x += bias
         x = self.drop2(x)
+        return x
+
+
+class GLUMBConvMlp(GLUMBConv):
+    def forward(
+        self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None
+    ) -> torch.Tensor:
+        B, N, C = x.shape
+        if HW is None:
+            H = W = int(N**0.5)
+        else:
+            H, W = HW
+
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        x = super().forward(x)
+        x = x.reshape(B, C, N).permute(0, 2, 1)
+
         return x

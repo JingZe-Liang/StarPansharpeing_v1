@@ -1455,7 +1455,6 @@ class CosmosHyperspectralTokenizerTrainer:
             return strings
 
         n_round = 4
-
         strings = []
 
         # * tokenzier losses
@@ -1498,6 +1497,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     ],  # none is all to be selected
                     "kl": ["kl_loss"],
                     "fsq": ["fsq_loss"],  # is zero for FSQ
+                    "psd": ["kl_loss"],
                 }
 
                 _log_q = dict_round_to_list_str(
@@ -1700,6 +1700,8 @@ class CosmosHyperspectralTokenizerTrainer:
             )
 
         _set_all_model_modes(train=True)
+        self.tokenizer_optim.zero_grad()
+        self.disc_optim.zero_grad()
 
         if hasattr(self.tokenizer_optim, "train"):
             self.log_msg("set optimizer to train mode (support for splus optimizer)")
@@ -2025,7 +2027,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_bsq_f8c36p4"
+_key = "unicosmos_psd_f8c16p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2038,6 +2040,8 @@ _configs_dict = {
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p4": "unicosmos_tokenizer_f16c16p4",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
+    # psd kl vae
+    "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized

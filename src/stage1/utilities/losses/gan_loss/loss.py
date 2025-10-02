@@ -1,5 +1,6 @@
 import warnings
 from collections import namedtuple
+from types import SimpleNamespace
 from typing import Dict, Literal, NamedTuple
 
 import torch
@@ -345,7 +346,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
     ):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla", "non_saturate", "relative"]
-        assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", "fsq", None]
+        assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", "fsq", "psd", None]  # fmt: skip
         assert disc_network_type in [
             "patchgan",
             "patchgan_v2",
@@ -415,7 +416,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 codebook_enlarge_ratio=3,
                 codebook_enlarge_steps=2000,
             )
-        elif quantizer_type == "kl":
+        elif quantizer_type in ("kl", "psd"):
             default_quant_opts = dict(kl_weight=1e-6)
         else:
             default_quant_opts = None
@@ -667,7 +668,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         global_step: int,
     ) -> tuple[torch.Tensor, tuple[str, torch.Tensor]]:
         if isinstance(q_loss_breakdown, dict):
-            q_loss_breakdown = dict_to_namedtuple(q_loss_breakdown)
+            # q_loss_breakdown = dict_to_namedtuple(q_loss_breakdown)
+            q_loss_breakdown = SimpleNamespace(**q_loss_breakdown)
 
         if q_loss_breakdown is None or q_loss_total is None:
             return self.zero, dict()  # None dict info
@@ -753,8 +755,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "per_sample_entropy": q_loss_breakdown.per_sample_entropy,
                 }
 
-        # > kl =============
-        elif self.quantizer_type == "kl":
+        # > kl or psd =============
+        elif self.quantizer_type in ("kl", "psd"):
             q_loss = q_loss_total * self.quantizer_options["kl_weight"]
             logs = {"kl_loss": q_loss}
 
@@ -794,7 +796,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 ["quantizer_loss_weight"],
                 self.quantizer_options,
             )
-        elif self.quantizer_type == "kl":
+        elif self.quantizer_type in ("kl", "psd"):
             _assert_in_dict(
                 ["kl_weight"],
                 self.quantizer_options,

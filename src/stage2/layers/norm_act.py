@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
+from loguru import logger
 from timm.layers import create_act, create_norm
-from timm.layers.create_act import get_act_layer
-from timm.layers.create_norm import get_norm_layer
 
-from src.utilities.logging import log, once
+from src.utilities.logging import once
+
+from .ops.triton_rms_norm import TritonRMSNorm2dFunc
 
 
 class RMSNorm(nn.Module):
@@ -45,8 +47,57 @@ class Qwen3NextRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
-# Register custom norm
-create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm
+class TritonRMSNorm2d(nn.LayerNorm):
+    def zero_out(self):
+        nn.init.constant_(self.weight, 0)
+        nn.init.constant_(self.bias, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_numel = x.numel()
+        if input_numel >= 1 << 31:
+            num_chunks = (input_numel - 1) // (1 << 31) + 1
+            output = []
+            for x_chunk in x.chunk(num_chunks, dim=2):
+                output.append(
+                    TritonRMSNorm2dFunc.apply(
+                        x_chunk.contiguous(), self.weight, self.bias, self.eps
+                    )
+                )
+            output = torch.cat(output, dim=2)
+            return output
+        else:
+            return TritonRMSNorm2dFunc.apply(  # type: ignore
+                x.contiguous(), self.weight, self.bias, self.eps
+            )
+
+
+class AdaptiveGroupNorm(nn.Module):
+    def __init__(self, in_chan, cond_chan, num_groups=32, eps=1e-6):
+        super().__init__()
+        self.gn = nn.GroupNorm(
+            num_groups=num_groups, num_channels=in_chan, eps=eps, affine=False
+        )
+        self.gamma = nn.Linear(cond_chan, in_chan)
+        self.beta = nn.Linear(cond_chan, in_chan)
+        self.eps = eps
+
+    def forward(self, x, z: torch.Tensor):
+        B, C, _, _ = x.shape
+        fz = z.flatten(2)
+
+        # calcuate var for scale
+        scale = fz.var(dim=-1) + self.eps  # not unbias
+        scale = scale.sqrt()
+        scale = self.gamma(scale).view(B, C, 1, 1)
+
+        # calculate mean for bias
+        bias = fz.mean(dim=-1)
+        bias = self.beta(bias).view(B, C, 1, 1)
+
+        x = self.gn(x)
+        x = scale * x + bias
+
+        return x
 
 
 # * --- Activations --- * #
@@ -106,6 +157,7 @@ def _register_new_acts():
     }
     create_act._ACT_LAYER_DEFAULT.update(new_acts)
     create_act._ACT_LAYER_ME.update(new_acts)
+    logger.debug(f"[Timm registered new acts]: 'swiglu', 'poly_norm'")
 
 
 @once
@@ -117,11 +169,31 @@ def _register_new_norms():
     except ImportError:
         pass
 
+    create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
+    create_norm._NORM_MAP["flashrmsnorm"] = FlashRMSNorm  # type: ignore
+    create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
+    create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
+    logger.debug(
+        f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d']"
+    )
+
 
 _register_new_acts()
 _register_new_norms()
-log(
-    "[NormActRegister]: Register activation ('swiglu' and 'polynorm_act'), ",
-    "normalization ('flash_rms_norm')",
-    level="debug",
-)
+
+
+if __name__ == "__main__":
+    """
+        python -m src.stage2.layers.norm_act
+    """
+    import torch
+
+    x = torch.randn(1, 3, 224, 224).cuda()
+    model = create_norm.create_norm_layer("triton_rmsnorm2d", 3).cuda()
+    y = model(x)
+    print(y.shape)
+
+    # backward
+    y.sum().backward()
+    for p in model.parameters():
+        print(p.grad.shape)

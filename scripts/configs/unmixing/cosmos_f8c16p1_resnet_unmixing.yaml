@@ -7,7 +7,7 @@ defaults:
   # wrapper ==========
   - dataset: unmixing_collection
   - accelerator: base
-  - unmixing_model: vitamin
+  - unmixing_model: resnet
   # self ===============
   - _self_
 
@@ -17,7 +17,7 @@ defaults:
 
 dataset:
   cfgs:
-    used: DC
+    used: Jasper
     batch_size_train: 1
 
 ema:
@@ -56,7 +56,8 @@ train:
     lambda_pre: 0.0
     lambda_vol: 0.0
     lambda_sad: 0.0
-    lambda_abunds_physical: 1.0
+    lambda_abunds_physical: 0.1
+    recon_type: sad
 
   unmixing_optim:
     # _target_: torch.optim.AdamW
@@ -66,22 +67,22 @@ train:
     # eps: 1e-10
     # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
 
-    # _target_: heavyball.ForeachAdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1e-9
-    # betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    # caution: true
-    # mars: true
-    # foreach: true
-
-    _target_: heavyball.ForeachSOAP
+    _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 4.0e-4
-    eps: 1e-10
-    betas: ${tuple:[0.9, 0.99]}
-    weight_decay: 0.1
+    lr: 3.0e-4
+    weight_decay: 1.0e-4
+    eps: 1e-9
+    betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    caution: true
+    mars: true
+    foreach: true
+
+    # _target_: heavyball.ForeachSOAP
+    # _partial_: true
+    # lr: 4.0e-4
+    # eps: 1e-10
+    # betas: ${tuple:[0.9, 0.99]}
+    # weight_decay: 0.1
 
   unmixing_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup

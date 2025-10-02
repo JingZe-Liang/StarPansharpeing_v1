@@ -6,8 +6,6 @@ from cachetools.keys import hashkey
 from einx import rearrange
 from jaxtyping import Float
 
-from src.utilities.logging import log
-
 from .FCLSU import FCLSU
 from .VCA import vca, vca_torch, vca_torch_batch
 

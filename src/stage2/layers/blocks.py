@@ -1,9 +1,14 @@
-import torch as th
+from typing import Any, Callable, Optional, no_type_check
+
+import torch
+import torch as torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import (
     ConvMlp,
     LayerScale2d,
+    Mlp,
+    create_act_layer,
     create_conv2d,
     create_norm,
     create_norm_act_layer,
@@ -12,16 +17,35 @@ from timm.layers import (
     get_norm_layer,
 )
 from timm.layers.drop import DropPath
-from timm.layers.mlp import Mlp
-from timm.models.convnext import ConvNeXtStage
+from timm.models.convnext import ConvNeXtBlock
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from .attention import Attention, NatAttention1d, NatAttention2d, Qwen3SdpaAttention
-from .conv import MbConvLNBlock, Stem
-from .cross_attn import CrossAttention
+from .attention import (
+    Attention,
+    LiteLA,
+    LiteMLA,
+    NatAttention1d,
+    NatAttention2d,
+    Qwen3SdpaAttention,
+    SoftmaxAttention2D,
+)
+from .conv import (
+    ChannelAttentionResBlock,
+    GLUMBConv,
+    GLUResBlock,
+    MBConv,
+    MbConvLNBlock,
+    MBStem,
+    ResBlock,
+    ResBlockCondition,
+)
+from .cross_attn import CrossAttention, SoftmaxCrossAttention2D
+from .functional import ConditionalBlock, ResidualBlock
 from .layerscale import LayerScale
 from .mlp import ClipSwiGLUMlp, SwiGLU
+
+# Attentions and Blocks
 
 
 class AttentionBlock(nn.Module):
@@ -42,8 +66,9 @@ class AttentionBlock(nn.Module):
         norm_layer=nn.LayerNorm,
         mlp_norm_layer=nn.LayerNorm,
         act_layer=nn.SiLU,
-        layer_scale_value=1e-3,
+        layer_scale_value=1e-5,
         use_layerscale=False,
+        mlp_type: str = "swiglu",
     ):
         super().__init__()
         self.grad_checkpointing = False
@@ -97,14 +122,27 @@ class AttentionBlock(nn.Module):
             )
         self.norm2 = norm_layer(dim)
         hidden_dim = int(dim * mlp_ratio)
-        self.mlp = ClipSwiGLUMlp(
-            in_features=dim,
-            hidden_features=hidden_dim,
-            act_layer=act_layer,
-            drop=drop,
-            norm_layer=mlp_norm_layer,
-            use_conv=attn_type != "1d",
-        )
+        if mlp_type == "swiglu":
+            self.mlp = ClipSwiGLUMlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "mlp":
+            self.mlp = Mlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        else:
+            raise ValueError(f"mlp_type {mlp_type} is not supported")
+
         self.ls1 = (
             LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
         )
@@ -119,7 +157,7 @@ class AttentionBlock(nn.Module):
         x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
         return x
 
-    def forward(self, x, mask=None, pe=None):
+    def forward(self, x, mask=None, pe=None, **kwargs):
         if self.grad_checkpointing and self.training:
             return checkpoint(self.forward_, x, mask, pe, use_reentrant=False)
         else:
@@ -146,7 +184,7 @@ class MbConvStages(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.stem = Stem(
+        self.stem = MBStem(
             in_chs=in_chans,
             out_chs=stem_width,
         )
@@ -176,7 +214,7 @@ class MbConvStages(nn.Module):
 
         # interpolate the condition
         if cond is not None:
-            cond = th.nn.functional.interpolate(
+            cond = torch.nn.functional.interpolate(
                 cond, size=x.shape[2:], mode="bilinear", align_corners=False
             )
 
@@ -293,13 +331,13 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
             ),
         )
 
-    def _interp_as(self, x, tgt_sz: tuple | th.Size):
+    def _interp_as(self, x, tgt_sz: tuple | torch.Size):
         return F.interpolate(x, size=tgt_sz, mode="bilinear", align_corners=False)
 
     def _modulate(self, x, scale, shift):
         return x * (scale + 1) + shift
 
-    def forward(self, x, latent, ms_cond=None):
+    def forward(self, x, latent, ms_cond=None, **kwargs):
         def _closure(x, latent, ms_cond=None):
             if hasattr(self, "ms_conv_before_add") and ms_cond is not None:
                 ms_cond = self._interp_as(ms_cond, x.shape[2:])
@@ -350,7 +388,7 @@ class CrossAttentionBlock(nn.Module):
         self.q_pos = q_pos
         if self.q_pos:
             assert q_len is not None, "q_len must be specified if q_pos is True"
-            self.q_pos_embed = nn.Parameter(th.zeros(1, q_len, dim))
+            self.q_pos_embed = nn.Parameter(torch.zeros(1, q_len, dim))
         if self_attn_use_gated:
             self.self_attention = Qwen3SdpaAttention(
                 dim,
@@ -421,15 +459,309 @@ class CrossAttentionBlock(nn.Module):
         return x
 
 
+class LiteLA_GLUMB_Block(nn.Module):
+    def __init__(
+        self,
+        hidden_size,
+        n_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        drop_path: float = 0.0,
+        ffn_drop: float = 0.0,
+        qk_norm: bool = True,
+        mlp_acts=("silu", "silu", None),
+        linear_head_dim: int = 32,
+        norm_type: str = "flashrmsnorm",
+        mlp_type="glu_mb",
+    ):
+        super().__init__()
+        self.grad_checkpointing = False
+        from .mlp import GLUMBConvMlp
+
+        self.hidden_size = hidden_size
+        self.norm1 = create_norm_layer(norm_type, hidden_size, eps=1e-6)
+        self_num_heads = hidden_size // linear_head_dim
+        self.attn = LiteLA(
+            hidden_size, hidden_size, heads=self_num_heads, eps=1e-8, qk_norm=qk_norm
+        )
+        self.norm2 = create_norm_layer(norm_type, hidden_size, eps=1e-6)
+        if mlp_type == "glu_mb":
+            self.mlp = GLUMBConvMlp(
+                in_channels=hidden_size,
+                out_channels=hidden_size,
+                expand_ratio=mlp_ratio,
+                use_bias=(True, True, False),
+                norm=(None, None, None),
+                act_func=mlp_acts,
+            )
+        elif mlp_type == "swiglu":
+            self.mlp = ClipSwiGLUMlp(
+                in_features=hidden_size,
+                hidden_features=int(hidden_size * mlp_ratio),
+                out_features=hidden_size,
+                norm_layer=get_norm_layer(norm_type),
+                drop=ffn_drop,
+                use_conv=False,
+            )
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.scale_shift_table = nn.Parameter(
+            torch.randn(6, hidden_size) / hidden_size**0.5
+        )
+
+    def forward(self, x, mask=None, HW=None, pe=None, **kwargs):
+        def _closure(x, HW):
+            x = x + self.drop_path(self.attn(self.norm1(x), HW=HW))
+            x = x + self.drop_path(self.mlp(self.norm2(x), HW=HW))
+            return x
+
+        if self.grad_checkpointing and self.training:
+            return checkpoint(_closure, x, HW, use_reentrant=False)
+        else:
+            return _closure(x, HW)
+
+
+# * --- interface --- #
+
+IdentityLayer = nn.Identity  # alias
+
+
+# effiecient vit interface
+class EfficientViTBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        heads_ratio: float = 1.0,
+        dim=32,
+        expand_ratio: float = 4,
+        scales: tuple[int, ...] = (5,),
+        norm: str = "bn2d",
+        act_func: str = "hswish",
+        context_module: str = "LiteMLA",
+        local_module: str = "MBConv",
+        norm_qk: bool = False,
+        **kwargs,
+    ):
+        super(EfficientViTBlock, self).__init__()
+        if context_module == "LiteMLA":
+            self.context_module = ResidualBlock(
+                LiteMLA(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    heads_ratio=heads_ratio,
+                    dim=dim,
+                    norm=(None, norm),
+                    scales=scales,
+                    norm_qk=norm_qk,
+                ),
+                IdentityLayer(),
+            )
+        elif context_module == "SoftmaxAttention":
+            self.context_module = ResidualBlock(
+                SoftmaxAttention2D(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    heads_ratio=heads_ratio,
+                    dim=dim,
+                    norm=(None, norm),
+                    norm_qk=norm_qk,
+                ),
+                IdentityLayer(),
+            )
+        elif context_module == "Spatial2DNAT":
+            self.context_module = Spatial2DNATBlock(
+                dim=in_channels,
+                qk_norm=None if not norm_qk else "layernorm2d",
+                **kwargs,
+            )
+            # local module should be identity usually
+        else:
+            raise ValueError(f"context_module {context_module} is not supported")
+
+        if local_module == "MBConv":
+            self.local_module = ResidualBlock(
+                MBConv(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    expand_ratio=expand_ratio,
+                    use_bias=(True, True, False),
+                    norm=(None, None, norm),
+                    act_func=(act_func, act_func, None),
+                ),
+                IdentityLayer(),
+            )
+        elif local_module == "GLUMBConv":
+            self.local_module = ResidualBlock(
+                GLUMBConv(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    expand_ratio=expand_ratio,
+                    use_bias=(True, True, False),
+                    norm=(None, None, norm),
+                    act_func=(act_func, act_func, None),
+                ),
+                IdentityLayer(),
+            )
+        else:
+            raise NotImplementedError(f"local_module {local_module} is not supported")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.context_module(x)
+        x = self.local_module(x)
+        return x
+
+
+# *==============================================================
+# * Interface
+# *==============================================================
+
+
+def build_block(
+    block_type: str,
+    in_channels: int,
+    out_channels: int,
+    norm: Optional[str],
+    act: Optional[str],
+    cond_channels: Optional[int] = None,
+) -> nn.Module:
+    """
+    Composition of ResidualBlock with different main and shortcut blocks.
+    """
+    cfg = block_type.split("@")
+    block_name = cfg[0]
+    if block_name == "ResBlock":
+        assert in_channels == out_channels
+        if cond_channels is not None:
+            main_block = ResBlockCondition(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                cond_channels=cond_channels,
+                kernel_size=3,
+                stride=1,
+                use_bias=(True, False),
+                norm=(None, norm),
+                act_func=(act, None),
+            )
+        else:
+            main_block = ResBlock(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                stride=1,
+                use_bias=(True, False),
+                norm=(None, norm),
+                act_func=(act, None),
+            )
+        block = ResidualBlock(main_block, IdentityLayer())
+    elif block_name == "GLUResBlock":
+        assert in_channels == out_channels
+        # GLUResBlock@3
+        main_block = GLUResBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            gate_kernel_size=int(cfg[1]),
+            stride=1,
+            use_bias=(True, False),
+            norm=(None, norm),
+            act_func=(act, None),
+        )
+        block = ResidualBlock(main_block, IdentityLayer())
+    elif block_name == "ChannelAttentionResBlock":
+        assert in_channels == out_channels
+        # ChannelAttentionResBlock@SEModule@2
+        main_block = ChannelAttentionResBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=1,
+            use_bias=(True, False),
+            norm=(None, norm),
+            act_func=(act, None),
+            channel_attention_operation=cfg[1],
+            channel_attention_position=int(cfg[2]) if len(cfg) > 2 else 2,
+        )
+        block = ResidualBlock(main_block, IdentityLayer())
+    elif block_name == "GLUMBConv":
+        assert in_channels == out_channels
+        # GLUMBConv@4
+        main_block = GLUMBConv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            expand_ratio=float(cfg[1]),
+            use_bias=(True, True, False),
+            norm=(None, None, norm),
+            act_func=(act, act, None),
+        )
+        block = ResidualBlock(main_block, IdentityLayer())
+    elif block_name == "EViTGLU":
+        assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels, norm=norm, act_func=act, local_module="GLUMBConv", scales=()
+        )
+    elif block_name == "EViTNormQKGLU":
+        assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels,
+            norm=norm,
+            act_func=act,
+            local_module="GLUMBConv",
+            scales=(),
+            norm_qk=True,
+        )
+    elif block_name == "EViTS5GLU":
+        assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels, norm=norm, act_func=act, local_module="GLUMBConv", scales=(5,)
+        )
+    elif block_name == "ViTGLU":
+        assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels,
+            norm=norm,
+            act_func=act,
+            context_module="SoftmaxAttention",
+            local_module="GLUMBConv",
+        )
+    elif block_name == "ViTNAT":
+        assert in_channels == out_channels
+        # ViTNAT@8@1@1@8@4
+        if len(cfg) == 1:
+            # k_size, stride, dilation, n_heads, ffn_ratio
+            cfg = ["ViTNAT", "8", "1", "1", "8", "4"]  # defaults
+        block = EfficientViTBlock(
+            in_channels,
+            norm=norm,
+            act_func=act,
+            context_module="Spatial2DNAT",
+            local_module="GLUMBConv",
+            k_size=int(cfg[1]),
+            stride=int(cfg[2]),
+            dilation=int(cfg[3]),
+            n_heads=int(cfg[4]),
+            ffn_ratio=int(cfg[5]),
+        )
+    elif block_name == "ConvNext":
+        # ConvNext@7@4@1
+        block = ConvNeXtBlock(
+            in_channels,
+            in_channels,
+            kernel_size=int(cfg[1]),
+            stride=1,
+            mlp_ratio=float(cfg[2]),
+            conv_mlp=False,
+            use_grn=bool(int(cfg[3])),
+        )
+    elif block_name == "SoftmaxCrossAttention":
+        block = SoftmaxCrossAttention2D(
+            q_in_channels=in_channels,
+            kv_in_channels=int(cfg[1]),
+            out_channels=out_channels,
+            norm=(None, norm),
+        )
+    else:
+        raise ValueError(f"block_name {block_name} is not supported")
+    return block
+
+
 if __name__ == "__main__":
-    ca = CrossAttentionBlock(
-        256,
-        256,
-        n_q_heads=8,
-        n_kv_heads=8,
-        sa_gate_type="head_wise",
-        ca_gate_type="head_wise",
-    )
-    q = th.randn(2, 1024, 256)
-    mem = th.randn(2, 4096, 256)
-    print(ca(q, mem).shape)
+    # Test the build block function
+    ...
