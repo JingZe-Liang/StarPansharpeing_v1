@@ -1,5 +1,5 @@
 # ruff:noqa
-from .norm_act import Qwen3NextRMSNorm, RMSNorm, FlashRMSNorm
+from .norm_act import Qwen3NextRMSNorm, RMSNorm
 from .conv import (
     ConvNeXtBlock,
     MbConvLNBlock,

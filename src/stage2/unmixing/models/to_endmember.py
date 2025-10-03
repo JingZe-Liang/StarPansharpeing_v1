@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from jaxtyping import Float
+from loguru import logger
 
 
 @dataclass
@@ -18,8 +19,22 @@ class ToEndMemberConfig:
 
 
 class EndMemberBase(nn.Module, ABC):
+    _is_inited: bool = False
+
+    def init_endmembers(
+        self, init_value: Float[torch.Tensor, "channels num_endmember"]
+    ):
+        if self._is_inited:
+            logger.error(
+                "[Endmember Base]: Endmembers have already been initialized, skipping."
+            )
+            return
+        self._is_inited = True
+        self.init_endmembers_fn(init_value)
+        logger.info("[Endmember Base]: Endmembers initialized.")
+
     @abstractmethod
-    def init_endmembers(self, init_value: torch.Tensor):
+    def init_endmembers_fn(self, init_value: torch.Tensor):
         raise NotImplementedError
 
     @abstractmethod
@@ -39,6 +54,7 @@ class ToEndMemberConv(EndMemberBase):
     ):
         super(ToEndMemberConv, self).__init__()
         padding = kernel // 2
+        # Remove redundant is_inited flag as it's already handled by parent class
         self.decoder = nn.Conv2d(
             in_channels=num_endmember,
             out_channels=channels,
@@ -47,6 +63,7 @@ class ToEndMemberConv(EndMemberBase):
             padding=padding,
             bias=False,
         )
+
         self.apply_relu = apply_relu
         if init_value is not None:
             assert kernel == 1
@@ -60,7 +77,7 @@ class ToEndMemberConv(EndMemberBase):
             code = torch.nn.functional.relu(code)
         return code
 
-    def init_endmembers(
+    def init_endmembers_fn(
         self, init_value: Float[torch.Tensor, "channels num_endmember"]
     ):
         """Initialize endmembers with given values.
@@ -69,6 +86,7 @@ class ToEndMemberConv(EndMemberBase):
             init_value: Tensor containing endmember initialization values.
                        Should have shape (num_endmember, channels).
         """
+
         init_value.squeeze_(0)
 
         assert self.decoder.kernel_size[0] == 1, (
@@ -76,12 +94,20 @@ class ToEndMemberConv(EndMemberBase):
         )
         assert init_value.ndim == 2, "init_value must be 2D"
 
+        # Additional check: ensure we're not accidentally overwriting trained weights
+        # if self.decoder.weight.requires_grad and torch.sum(self.decoder.weight.data.abs()) > 1e-6:
+        #     logger.warning(
+        #         "[ToEndMemberConv]: Attempting to initialize endmembers on a decoder that "
+        #         "appears to be already trained. This might overwrite learned parameters."
+        #     )
+
         # channels, num_endmember, 1, 1
         self.decoder.weight.data.copy_(init_value[..., None, None])
 
     def get_endmember(self):
         # (num_endmember, channels)
-        endmember = self.decoder.weight.data.clamp_(min=0.0)
+        # Use non-in-place clamp to avoid modifying the original weights
+        endmember = torch.clamp(self.decoder.weight.data, min=0.0)
         endmember = endmember.squeeze(-2, -1).T
         return endmember
 
@@ -120,7 +146,7 @@ class ToEndMemberParameter(EndMemberBase):
 
         return code
 
-    def init_endmembers(
+    def init_endmembers_fn(
         self, init_value: Float[torch.Tensor, "channels num_endmember"]
     ):
         """Initialize endmembers with given values.
@@ -138,4 +164,5 @@ class ToEndMemberParameter(EndMemberBase):
         self.endmember.data.copy_(init_value)
 
     def get_endmember(self):
-        return self.endmember.data.clamp_(min=0.0).T
+        # Use non-in-place clamp to avoid modifying the original parameters
+        return torch.clamp(self.endmember.data, min=0.0).T

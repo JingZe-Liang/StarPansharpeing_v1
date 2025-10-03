@@ -65,10 +65,11 @@ def compute_init_em_abunds(
             em_c_d, fclsu_abunds_dhw = cached_solver(
                 sample["img"],
                 n_endmembers=n_em,
+                algo="sivm",
                 cache_name=cache_name,
                 fclsu_solver_kwargs=fclsu_solver_kwargs,
             )
-            sample["init_vca_endmember"] = em_c_d
+            sample["init_vca_endmembers"] = em_c_d
             sample["init_vca_abunds"] = fclsu_abunds_dhw
 
             nonlocal _last_hits

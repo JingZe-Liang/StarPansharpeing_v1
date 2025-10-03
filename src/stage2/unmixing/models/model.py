@@ -81,7 +81,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
         transfomer_out, _, abunds = (
             super().latent_to_pixel_fusion_forward(pixel_in, latent_in).values()
         )
-        recon = self.end_member_model(abunds)
+        recon = self.end_member_model(abunds).clip(0, 1)
         endmembers = self.end_member_model.get_endmember()  # type: ignore
 
         return {

@@ -1,0 +1,50 @@
+cfgs:
+  used: DC
+  train_bs: 1
+  val_bs: 1
+  window_size: -1 #128
+  stride: 64
+  num_workers: 1
+  pin_memory: true
+
+  val_window_size: 128
+  val_stride: 64
+
+bands:
+  Apex: 285
+  DC: 191
+  Houston: 170
+  Jasper: 198
+  Moffett: 184
+  Urban: 188
+  Samson: 156
+
+n_enbmembers:
+  Apex: 3
+  DC: 5
+  Houston: 7
+  Jasper: 4
+  Moffett: 3
+  Samson: 3
+  Urban: 4
+
+consts:
+  train_name: ${dataset.cfgs.used}
+  val_name: ${dataset.cfgs.used}
+  train_path: ${dataset.paths.${dataset.consts.train_name}}
+  val_path: ${dataset.paths.${dataset.consts.val_name}}
+  bands: ${dataset.bands.${dataset.cfgs.used}}
+  n_endmembers: ${dataset.n_enbmembers.${dataset.cfgs.used}}
+  rgb_channels: mean
+
+train_loader:
+  _target_: src.stage2.unmixing.data.unmixing_mat_loader.get_unmixing_mat_loader
+  ds_dir: data/Downstreams/UrbanUnmixing/mat
+  ds_name: ${dataset.consts.train_name}
+  batch_size: ${dataset.cfgs.train_bs}
+
+val_loader:
+  _target_: src.stage2.unmixing.data.unmixing_mat_loader.get_unmixing_mat_loader
+  ds_dir: data/Downstreams/UrbanUnmixing/mat
+  ds_name: ${dataset.consts.train_name}
+  batch_size: ${dataset.cfgs.train_bs}

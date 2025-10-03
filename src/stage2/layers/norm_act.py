@@ -1,6 +1,7 @@
+from functools import partial
+
 import torch
 import torch.nn as nn
-from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 from loguru import logger
 from timm.layers import create_act, create_norm
 
@@ -149,6 +150,22 @@ class SwiGLUAct(nn.Module):
 # Norm registration
 
 
+class ActLayerMeta(nn.Module):
+    def __init__(self, act_layer, name: str, **kwargs):
+        super().__init__()
+        self.act_layer = act_layer
+        self.name = name
+        self.kwargs = kwargs
+
+    def forward(self, x):
+        return self.act_layer(x, **self.kwargs)
+
+    def extra_repr(self):
+        words = self.name.split("_")
+        first_cap_name = "_".join([w.capitalize() for w in words])
+        return f"{first_cap_name}()"
+
+
 @once
 def _register_new_acts():
     new_acts = {
@@ -159,22 +176,53 @@ def _register_new_acts():
     create_act._ACT_LAYER_ME.update(new_acts)
     logger.debug(f"[Timm registered new acts]: 'swiglu', 'poly_norm'")
 
+    try:
+        from fla.modules.activations import fast_gelu_impl, swiglu, swish
+
+        get_act_layer = lambda act, name: partial(
+            ActLayerMeta, name=name, act_layer=act
+        )
+
+        fla_acts = {
+            "fla_swish": get_act_layer(swish, "fla_swish"),
+            "fla_silu": get_act_layer(swish, "fla_silu"),
+            "fla_fast_gelu": get_act_layer(fast_gelu_impl, "fla_fast_gelu"),
+            "fla_swiglu": get_act_layer(swiglu, "fla_swiglu"),
+        }
+
+        create_act._ACT_LAYER_DEFAULT.update(fla_acts)
+        create_act._ACT_LAYER_ME.update(fla_acts)
+
+        fla_act_names = list(fla_acts.keys())
+        logger.debug(f"[Timm registered FLA acts]: {', '.join(fla_act_names)}")
+    except ImportError:
+        logger.debug("[FLA not available, skipping FLA activation registration]")
+
 
 @once
 def _register_new_norms():
     try:
         from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 
-        create_norm._NORM_MAP.update({"flash_rms_norm": FlashRMSNorm})  # type: ignore
+        create_norm._NORM_MAP.update({"flashrmsnorm": FlashRMSNorm})  # type: ignore
+    except ImportError:
+        pass
+
+    try:
+        # from fla.modules import LayerNorm, RMSNorm
+        import fla.modules
+
+        create_norm._NORM_MAP.update(
+            {"flarmsnorm": fla.modules.RMSNorm, "flalayernorm": fla.modules.LayerNorm}
+        )
     except ImportError:
         pass
 
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
-    create_norm._NORM_MAP["flashrmsnorm"] = FlashRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
     create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
     logger.debug(
-        f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d']"
+        f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d'"
     )
 
 
@@ -186,14 +234,22 @@ if __name__ == "__main__":
     """
         python -m src.stage2.layers.norm_act
     """
-    import torch
+    # import torch
 
-    x = torch.randn(1, 3, 224, 224).cuda()
-    model = create_norm.create_norm_layer("triton_rmsnorm2d", 3).cuda()
-    y = model(x)
-    print(y.shape)
+    # x = torch.randn(1, 3, 224, 224).cuda()
+    # model = create_norm.create_norm_layer("triton_rmsnorm2d", 3).cuda()
+    # y = model(x)
+    # print(y.shape)
 
-    # backward
-    y.sum().backward()
-    for p in model.parameters():
-        print(p.grad.shape)
+    # # backward
+    # y.sum().backward()
+    # for p in model.parameters():
+    #     print(p.grad.shape)
+
+    layer = create_act.create_act_layer("fla_silu")
+    x = torch.randn(1, 256, 256).cuda()
+    y = layer(x)
+
+    y2 = nn.SiLU()(x)
+
+    print(torch.isclose(y, y2))

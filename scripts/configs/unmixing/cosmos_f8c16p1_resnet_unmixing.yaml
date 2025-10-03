@@ -17,15 +17,15 @@ defaults:
 
 dataset:
   cfgs:
-    used: Jasper
+    used: DC
     batch_size_train: 1
 
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
-  update_after_step: 1000
-  update_every: 2
+  beta: 0.95
+  update_after_step: 0
+  update_every: 1
   allow_different_devices: true
 
 train:
@@ -37,12 +37,12 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 1000
   visualize_every: 500
-  max_steps: 200_000
+  max_steps: 1500
   save_every: 1000
 
   to_neg_1_1: false
   online_tokenize: true
-  init_endmembers: True
+  init_endmembers: true
 
   resume_path:
   ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-25_19-16-29_f8c16p1_WV3_nafnet_wrapper/ema
@@ -56,26 +56,25 @@ train:
     lambda_pre: 0.0
     lambda_vol: 0.0
     lambda_sad: 0.0
-    lambda_abunds_physical: 0.1
-    recon_type: sad
+    lambda_abunds_physical: 0.0
+    recon_type: l1
 
   unmixing_optim:
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.0e-3
-    # weight_decay: 1.0e-4
-    # eps: 1e-10
-    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
-
-    _target_: heavyball.ForeachAdamW
+    _target_: torch.optim.AdamW
     _partial_: true
-    lr: 3.0e-4
+    lr: 1.0e-3
     weight_decay: 1.0e-4
-    eps: 1e-9
-    betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
-    mars: true
-    foreach: true
+    betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1e-9
+    # betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # mars: true
+    # foreach: true
 
     # _target_: heavyball.ForeachSOAP
     # _partial_: true

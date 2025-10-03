@@ -74,6 +74,7 @@ downstream_model:
     cond_channels: 256
     depths: [2, 4]
     channels: [256, 256]
+    residual_of_init_abunds: false
     abunds_restriction: softmax
 
   end_member_model:

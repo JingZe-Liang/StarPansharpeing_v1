@@ -1,4 +1,5 @@
 import inspect
+import os
 import re
 import sys
 import time
@@ -73,7 +74,7 @@ def print_custom_markup(text: str):
 @once
 def configure_logger(
     sink=None,
-    level="debug",
+    level=os.getenv("SHELL_LOG_LEVEL", "debug"),
     filter=None,
     removed=True,
     _auto_=True,  # reserved for once decorator
@@ -117,7 +118,7 @@ if __re_config_logger:
 
 def set_logger_file(
     file: Optional[Union[str, Path]] = None,
-    level: LogLevel = "debug",
+    level: LogLevel = os.getenv("FILE_LOG_LEVEL", "debug"),
     add_time: bool = True,
     mode="w",
     filter=None,

@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, field
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from timm.layers.create_norm import create_norm_layer
 from src.utilities.config_utils import dataclass_from_dict
 
 from ...layers import ConditionalBlock, build_block
+from ..traditional.pipe import cache_solver_result, vca_fclsu_nnls_solver
 
 
 def build_basic_conditional_block(
@@ -20,32 +22,6 @@ def build_basic_conditional_block(
     block_type: str = "ResBlock",
     norm="layernorm2d",
 ):
-    # main_blk = build_block(
-    #     block_type=block_type,
-    #     in_channels=in_channels,
-    #     out_channels=out_channels,
-    #     norm=norm,
-    #     act="silu",
-    # )
-    # logger.info(f"[Unmixing Block]: Built main block: {main_blk.__class__.__name__}")
-
-    # cond after the block
-    # cond_blk = ConditionalBlock(
-    #     main=main_blk,
-    #     condition_module=nn.Sequential(
-    #         create_conv2d(cond_channels, out_channels, kernel_size=1),
-    #         create_norm_act_layer(
-    #             "layernorm2d", out_channels, act_layer="silu", eps=1e-6
-    #         ),
-    #         create_conv2d(
-    #             out_channels, out_channels * 3, kernel_size=3, groups=out_channels
-    #         ),
-    #     ),
-    #     condition_types="modulate_3",
-    #     process_cond_before="interpolate_as_x",
-    #     dim=1,
-    # )
-
     cond_blk = build_block(
         block_type=block_type,
         in_channels=in_channels,
@@ -98,8 +74,9 @@ class UnmixingResNetConfig:
     depths: list[int]
     out_channels: int
     norm: str = "layernorm2d"
-    abunds_restriction: str = "softmax"
+    abunds_restriction: Optional[str] = None
     grad_checkpointing: bool = False
+    residual_of_init_abunds: bool = False
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "UnmixingResNetConfig":
@@ -168,6 +145,11 @@ class UnmixingResNet(nn.Module):
         # Abundance restriction layer
         self.abunds_restriction = self._create_abunds_restiction(cfg.abunds_restriction)
 
+        if cfg.residual_of_init_abunds:
+            self.traditional_solver = cache_solver_result(disable=False, size=1)
+
+        self.init_weights()
+
     def build_stages(self, depths: list[int], channels: list[int], cond_channel: int):
         stages = nn.ModuleDict()
         chan_prev = None
@@ -192,6 +174,24 @@ class UnmixingResNet(nn.Module):
             stages[f"stage_{i}"] = stage
         return stages
 
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                # nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+
+        if self.cfg.residual_of_init_abunds:
+            nn.init.zeros_(self.out_conv.weight)
+            if self.out_conv.bias is not None:
+                nn.init.zeros_(self.out_conv.bias)
+
+        logger.info("Model weights initialized.")
+
     def _create_abunds_restiction(self, restriction: str):
         if restriction == "softmax":
             return nn.Softmax(dim=1)
@@ -205,6 +205,7 @@ class UnmixingResNet(nn.Module):
             raise ValueError(f"{restriction} is not supported")
 
     def forward(self, x, cond, **kwargs):
+        xin = x.clone()
         x = self.stem(x)
         cond = self.cond_patcher(cond)
 
@@ -218,8 +219,27 @@ class UnmixingResNet(nn.Module):
                 x = stage_main(x, cond)
 
         x = self.out_conv(x)
+
+        if self.cfg.residual_of_init_abunds:
+            x = x + self._trad_solve(xin)
+
         x = self.abunds_restriction(x)
+
         return x
+
+    @torch.no_grad()
+    @torch.autocast("cuda", torch.float32, enabled=False)
+    def _trad_solve(self, x):
+        bs = x.shape[0]
+        abunds_solved = []
+        for i in range(bs):
+            xi = x[i]
+            _, abunds = self.traditional_solver(
+                xi, self.cfg.out_channels, vca_backend="numpy"
+            )
+            abunds_solved.append(abunds)
+        abunds_solved = torch.stack(abunds_solved, dim=0)
+        return abunds_solved.to(x)
 
     @classmethod
     def create_model(cls, **kwargs):
@@ -230,6 +250,7 @@ class UnmixingResNet(nn.Module):
 
 if __name__ == "__main__":
     """
+    python -m src.stage2.unmixing.models.resnet
     """
     x = torch.randn(1, 280, 256, 256).cuda()
     cond = torch.randn(1, 16, 32, 32).cuda()
@@ -242,6 +263,7 @@ if __name__ == "__main__":
         depths=[2, 4],
         out_channels=4,
         abunds_restriction="softmax",
+        residual_of_init_abunds=True,
     )
 
     # Create configuration from dictionary
@@ -261,10 +283,38 @@ if __name__ == "__main__":
     # Create model with configuration
     model = UnmixingResNet(cfg).cuda()
 
-    from fvcore.nn import parameter_count_table
+    adamw = torch.optim.AdamW(model.parameters(), lr=1e-1)
 
-    print("\nModel Summary:")
-    print(parameter_count_table(model))
-    with torch.autocast(device_type="cuda", dtype=torch.float16):
-        out = model(x, cond)
+    # from fvcore.nn import parameter_count_table
+
+    # print("\nModel Summary:")
+    # print(parameter_count_table(model))
+    # with torch.autocast(device_type="cuda", dtype=torch.float16):
+    #     out = model(x, cond)
+    # print("Model output shape:", out.shape)
+
+    # forward
+    out = model(x, cond)
     print("Model output shape:", out.shape)
+
+    adamw.zero_grad()
+    out.mean().backward()
+    adamw.step()
+
+    out2 = model(x, cond)
+
+    orig_ps = [p.clone() for p in model.parameters()]
+    model.zero_grad()
+    model.eval()
+
+    model.train()
+    out3 = model(x, cond)
+
+    for p1, p2 in zip(orig_ps, model.parameters()):
+        assert torch.isclose(p1, p2).all(), (
+            f"{p1.shape} - {p2.shape}, max diff: {(p1 - p2).abs().max()}"
+        )
+    print("Parameters are unchanged after eval/train switch.")
+
+    assert torch.isclose(out2, out3).all(), f"max diff: {(out2 - out3).abs().max()}"
+    print("Output is consistent after switching modes.")
