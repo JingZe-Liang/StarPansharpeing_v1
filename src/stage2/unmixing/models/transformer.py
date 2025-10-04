@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from einops import rearrange
-from jaxtyping import Array, Float
+from jaxtyping import Float
+from loguru import logger
 from timm.layers import get_act_layer, get_norm_layer
 
 # Attention, MLP
@@ -12,7 +14,6 @@ from timm.layers.pos_embed import resample_abs_pos_embed
 from torch import Tensor
 
 from src.utilities.config_utils import dataclass_from_dict
-from src.utilities.logging import log
 
 from ...layers import (
     AttentionBlock,
@@ -39,12 +40,12 @@ class TransformerConfig:
     raw_img_chans: int = 16
     raw_patch_size: int = 4
     pos_embed_type: str = "sincos"
-    norm_layer: str = "rmsnorm"
-    mlp_norm_layer: str = "rmsnorm"
-    act_layer: str = "swiglu"
-    feature_layer_ids: list[int] | None = None
+    norm_layer: str = "flarmsnorm"
+    mlp_norm_layer: str = "flarmsnorm"
+    act_layer: str = "gelu"
+    feature_layer_ids: Optional[list[int]] = None
     block_type: str = "AttentionBlock"  # or "LiteLA_GLUMB_Block"
-    mlp_type: str = "swiglu"  # or "glu_mb"
+    mlp_type: str = "mlp"  # or "glu_mb", "mlp", 'glumlp', 'swiglu'
 
 
 class Transformer(nn.Module):
@@ -128,6 +129,7 @@ class Transformer(nn.Module):
                     ),
                     norm_layer=mlp_norm_layer,
                     act_layer=act_layer,
+                    mlp_type=cfg.mlp_type,
                 )
             else:
                 raise ValueError(f"Unsupported block_type: {cfg.block_type}")
@@ -309,6 +311,7 @@ class Transformer(nn.Module):
         features = []
         for i, layer in enumerate(self.layers):
             y = layer(y, mask=None, pe=pe, HW=hw)
+            # logger.debug(f"Layer {i}: {y.norm()=}")
             if feature_layer_ids_ is not None and i in feature_layer_ids_:
                 features.append(y)
 
@@ -341,7 +344,7 @@ class Transformer(nn.Module):
             w = self.raw_img_patcher.proj.weight.data
             torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
-        log(f"[Unmixing Transformer] Initialized weights")
+        logger.info(f"[Unmixing Transformer] Initialized weights")
 
     @classmethod
     def create_model(cls, **kwargs):
@@ -364,12 +367,12 @@ def test_model():
             raw_patch_size=8,
             input_size=32,
             patch_size=1,
-            block_type="LiteLA_GLUMB_Block",
-            mlp_type="swiglu",
+            block_type="AttentionBlock",
+            mlp_type="mlp",
         )
-    )
-    latent = torch.randn(2, 16, 32, 32)
-    hyper_img = torch.randn(2, 16, 256, 256)
+    ).cuda()
+    latent = torch.randn(2, 16, 32, 32).cuda()
+    hyper_img = torch.randn(2, 16, 256, 256).cuda()
     out = model(latent, hyper_img)
     print(out.shape)
 

@@ -8,12 +8,14 @@ import torch
 import torch.nn as nn
 from loguru import logger as logging
 from peft import PeftConfig, PeftModel
+from torch.autograd import profiler
 from torch.nn.modules.module import _IncompatibleKeys
 
 from ..config_utils import function_config_to_basic_types
 from ..logging.print import log_print
 
 
+@profiler.record_function("load_weights_with_shape_check")
 def load_weights_with_shape_check(
     module: nn.Module,
     weights: dict,

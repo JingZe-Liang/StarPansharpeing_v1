@@ -7,7 +7,7 @@ from timm.layers import create_act, create_norm
 
 from src.utilities.logging import once
 
-from .ops.triton_rms_norm import TritonRMSNorm2dFunc
+from .rmsnorm_triton import TritonRMSNorm2dFunc
 
 
 class RMSNorm(nn.Module):
@@ -205,8 +205,8 @@ def _register_new_norms():
         from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 
         create_norm._NORM_MAP.update({"flashrmsnorm": FlashRMSNorm})  # type: ignore
-    except ImportError:
-        pass
+    except ImportError as e:
+        logger.warning(f"Flash Attention not available, skipping Flash RMSNorm: {e}.")
 
     try:
         # from fla.modules import LayerNorm, RMSNorm
@@ -216,7 +216,7 @@ def _register_new_norms():
             {"flarmsnorm": fla.modules.RMSNorm, "flalayernorm": fla.modules.LayerNorm}
         )
     except ImportError:
-        pass
+        logger.debug("FLA not available, skipping FLA norms registration")
 
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore

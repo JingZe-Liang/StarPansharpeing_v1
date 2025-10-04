@@ -32,7 +32,7 @@ from typing_extensions import Generator
 
 from src.data.window_slider import WindowSlider
 from src.stage2.layers.wrapper.tokenizer_wrapper import DownstreamModelTokenizerWrapper
-from src.stage2.unmixing.loss import UnmixingLoss
+from src.stage2.unmixing.loss import StagedUnmixingLoss
 from src.stage2.unmixing.metrics import (
     UnmixingMetrics,
     abunds_visualize,
@@ -42,7 +42,9 @@ from src.utilities.config_utils import (
     to_object as to_cont,  # register new resolvers at the same time
 )
 from src.utilities.logging import dict_round_to_list_str
+from src.utilities.logging.print import log_print
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
+from src.utilities.train_utils.optim import filter_no_wds_into_optim_groups
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import get_rgb_image
 
@@ -153,13 +155,15 @@ class UnmixingTrainer:
         self.train_state = StepsCounter(["train", "val"])
 
         # loss
-        self.unmixing_loss: UnmixingLoss
         if hasattr(self.train_cfg, "unmixing_loss"):
             self.unmixing_loss = hydra.utils.instantiate(self.train_cfg.unmixing_loss)
         else:
             # default loss - use UnmixingLoss with default weights
-            self.unmixing_loss = UnmixingLoss()
-        self.log_msg(f"use denoising loss: {self.unmixing_loss.__class__.__name__}")
+            self.unmixing_loss = StagedUnmixingLoss(
+                switch_step=0,
+                weights=dict(rec_loss=1.0, ab_phys=0.1, em_tv=0.1, ab_sparse=0.35),
+            )
+        self.log_msg(f"use unmixing loss: {self.unmixing_loss.__class__.__name__}")
 
         # initialize unmixing metrics
         self.unmixing_metrics = UnmixingMetrics()
@@ -188,23 +192,30 @@ class UnmixingTrainer:
             self.model.set_grad_checkpoint(True)
 
         # Initialize the model endmember using VCA
+        self._inited_endmember = False
         if self.train_cfg.init_endmembers:
             assert hasattr(self.model.downstream_model, "init_endmembers"), (
                 "The model does not support endmember initialization"
             )
-            self._inited_endmember = False
 
             # Return the a function that init the endmembers of the unmixing model
             # and then for other steps we skip the initialization
             def _model_init_EM_delayed(endmembers: Tensor):
-                if self._inited_endmember:
-                    return
-
                 endmembers.squeeze_(0)  # remove batch dim
                 assert endmembers.ndim == 2, "endmembers must be 2D"
-                if endmembers.shape[0] < endmembers.shape[1]:  # [c, d]
-                    endmembers = endmembers.T
+                if endmembers.shape[0] < endmembers.shape[1]:  # [c, em]
+                    endmembers = endmembers.T  # [em, c]
                 self.model.downstream_model.init_endmembers(endmembers)  # type: ignore
+
+                # init_em = (
+                #     self.model.downstream_model.end_member_model.get_endmember()
+                # )  # [em, c]
+                # breakpoint()
+                # assert torch.isclose(init_em, endmembers, atol=1e-4).all(), (
+                #     "endmember initialization failed, the init endmember is not the same as the given endmembers, "
+                #     f"but got max diff {torch.max(torch.abs(init_em - endmembers))}"
+                # )
+
                 self._inited_endmember = True
                 self.log_msg(
                     f"[Unmixing Model]: endmembers initialized with shape {endmembers.shape}"
@@ -379,7 +390,13 @@ class UnmixingTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
-        log_fn = getattr(self.logger, level.lower())
+        log_fn = partial(
+            log_print,
+            level=level.lower(),
+            only_rank_zero=only_rank_zero,
+            stack_level=3,
+            **kwargs,
+        )
 
         if only_rank_zero:
             if self.accelerator.is_main_process:
@@ -413,7 +430,17 @@ class UnmixingTrainer:
                     self.log_msg(
                         f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
                     )
-                    params = params_getter(with_name=False)
+                    params = params_getter(
+                        with_name=False if self.train_cfg.no_wd_name is None else True
+                    )
+                    # set the wd=0. param groups
+                    if (no_wd_name := self.train_cfg.no_wd_name) is not None:
+                        named_params = params_getter(with_name=True)
+                        self.log_msg(
+                            f"set no weight decay for params matching pattern: {no_wd_name}"
+                        )
+                        # Use the existing utility function to create parameter groups
+                        params = filter_no_wds_into_optim_groups(params, no_wd_name)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_model_params = (
@@ -600,6 +627,7 @@ class UnmixingTrainer:
         abunds_fcls: torch.Tensor | None = None,  # initial abundances
         endmember_gt: torch.Tensor | None = None,
         ema: bool = False,
+        grad=True,
     ) -> UnmixingModelOutput:
         """
         Forward pass through the unmixing model.
@@ -621,9 +649,11 @@ class UnmixingTrainer:
             Model output containing predictions and losses
         """
         model = self.model if not ema else self.ema_model
+        grad_ctx = torch.no_grad() if not grad else nullcontext()
         with self.accelerator.autocast():
             # Forward pass through the model to get unmixing results
-            model_output = model(img, img_latent)
+            with grad_ctx:
+                model_output = model(img, img_latent)
 
             pred_latent = model_output.get("amotized_model_out", None)
             recon = model_output["recon"]
@@ -639,6 +669,27 @@ class UnmixingTrainer:
                 endmembers=endmembers,
                 abunds_fcls=abunds_fcls,
             )
+
+            if self.get_global_step() == 0:
+                self.log_msg(f"Init the model and check the correctness")
+                self.visualize_unmixing_results(
+                    abunds,
+                    endmembers,
+                    endmember_gt,
+                    abunds_gt,
+                    img_name="tmp/unmixing_init_model_out",
+                )
+                self.visualize_unmixing_results(
+                    abunds_fcls,
+                    endmembers,
+                    endmember_gt,
+                    abunds_gt,
+                    img_name="tmp/unmixing_init_fcls",
+                )
+
+                import time
+
+                time.sleep(4)
 
         # Create log_losses dictionary
         log_losses = loss_dict
@@ -669,6 +720,17 @@ class UnmixingTrainer:
             # backward
             self.optim.zero_grad()
             self.accelerator.backward(out.unmixing_loss)
+            # debug: norm
+            # if self.global_step % 10 == 0:
+            #     endmember_m = self.model.downstream_model.end_member_model
+            #     for n, p in endmember_m.named_parameters():
+            #         if p.grad is not None:
+            #             grad_norm = p.grad.data.norm()
+            #             self.log_msg(
+            #                 f"{n} grad norm: {grad_norm} | {n} data: {p.data.mean(), p.data.min(), p.data.max()}",
+            #                 only_rank_zero=False,
+            #                 level="DEBUG",
+            #             )
             self.gradient_check(self.model)
             self.optim.step()
             self.sched.step()
@@ -721,7 +783,9 @@ class UnmixingTrainer:
             img_latent = batch["img_latent"].to(self.device, self.dtype)
 
         # Init model endmembers
-        self._model_em_init(batch["init_vca_endmembers"].to(self.device))
+        if not self._inited_endmember and self.train_cfg.init_endmembers:
+            self._model_em_init(batch["init_vca_endmembers"].to(self.device))
+            # self._model_em_init(batch["endmembers"].to(self.device))  # debug: use gt em
 
         # < Unmixing training step
         with self.accelerator.accumulate(self.model):
@@ -785,13 +849,27 @@ class UnmixingTrainer:
         _stop_train_and_save = False
         self.accelerator.wait_for_everyone()
 
+        self.model.train()
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
             self.train_step(batch)
 
             if self.global_step % self.val_cfg.val_duration == 0:
+                self.model.eval()
+                self.ema_model.ema_model.eval()
+                __ps = {n: p.clone() for n, p in self.model.named_parameters()}
+                self.optim.zero_grad()
                 self.val_loop()
+                self.model.train()
+                for (name, _p), (_, _p_val) in zip(
+                    __ps.items(), self.model.named_parameters()
+                ):
+                    if not torch.allclose(_p, _p_val, atol=1e-7):
+                        self.log_msg(
+                            f"{name} changed after val loop, max diff: {(_p - _p_val).abs().max()}",
+                            level="WARNING",
+                        )
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
@@ -838,7 +916,6 @@ class UnmixingTrainer:
                 "val_dataloader must be a generator"
             )
 
-    @torch.no_grad()
     def val_step(self, batch: BatchInput):
         """
         Execute one validation step for unmixing model.
@@ -870,21 +947,23 @@ class UnmixingTrainer:
             batch["abunds"],
             batch.get("init_vca_abunds", None),
             batch["endmembers"],
-            ema=True,
+            ema=False,
+            grad=False,
         )
 
         return out
 
+    @torch.inference_mode()
     def val_loop(self):
-        self.model.eval()
-
         val_iter = self._finite_val_loader()
         # Init loss dict metrics
         loss_metrics = {
             k: MeanMetric().to(self.device) for k in self.unmixing_loss.loss_names
         }
         loss_metrics_update = lambda log_losses: {
-            k: v.update(log_losses[k]) for k, v in loss_metrics.items()
+            k: v.update(log_losses[k])
+            for k, v in loss_metrics.items()
+            if k in log_losses
         }
 
         val_out = None
@@ -916,8 +995,6 @@ class UnmixingTrainer:
 
         metrics = self.get_metrics()
         loss_val = metrics_sync(loss_metrics, output_tensor_dict=True)
-        self.model.train()
-        self.optim.zero_grad()
 
         # Print out metrics
         _log_losses = self.format_log(loss_val)

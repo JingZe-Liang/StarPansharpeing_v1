@@ -7,6 +7,8 @@ import sys
 import numpy as np
 import torch
 
+from loguru import logger
+
 #############################################
 # Internal functions
 #############################################
@@ -73,7 +75,7 @@ def vca(Y, R, verbose=True, snr_input=0):
     if R < 0 or R > L:
         raise ValueError("ENDMEMBER parameter must be integer between 1 and L")
 
-    #############################################
+    #############################################``
     # SNR Estimates
     #############################################
 
@@ -88,11 +90,11 @@ def vca(Y, R, verbose=True, snr_input=0):
         SNR = estimate_snr(Y, y_m, x_p)
 
         if verbose:
-            print("SNR estimated = {}[dB]".format(SNR))
+            logger.debug("SNR estimated = {}[dB]".format(SNR))
     else:
         SNR = snr_input
         if verbose:
-            print("input SNR = {}[dB]\n".format(SNR))
+            logger.debug("input SNR = {}[dB]\n".format(SNR))
 
     SNR_th = 15 + 10 * np.log10(R)
 
@@ -103,7 +105,7 @@ def vca(Y, R, verbose=True, snr_input=0):
 
     if SNR < SNR_th:
         if verbose:
-            print("... Select proj. to R-1")
+            logger.debug("... Select proj. to R-1")
 
         d = R - 1
         if snr_input == 0:  # it means that the projection is already computed
@@ -124,7 +126,7 @@ def vca(Y, R, verbose=True, snr_input=0):
         y = np.vstack((x, c * np.ones((1, N))))
     else:
         if verbose:
-            print("... Select the projective proj.")
+            logger.debug("... Select the projective proj.")
 
         d = R
         Ud = np.linalg.svd(np.dot(Y, Y.T) / float(N))[0][
@@ -199,7 +201,7 @@ def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cud
            L: number of bands (channels)
            N: number of pixels
         R: int - number of endmembers to extract
-        verbose: bool - whether to print verbose output
+        verbose: bool - whether to logger.debug verbose output
         snr_input: float - input SNR in dB (0 for estimation)
         device: str - device to use ('cuda' or 'cpu')
 
@@ -242,11 +244,11 @@ def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cud
         SNR = estimate_snr_torch(Y, y_m, x_p)
 
         if verbose:
-            print(f"SNR estimated = {SNR.item():.2f}[dB]")
+            logger.debug(f"SNR estimated = {SNR.item():.2f}[dB]")
     else:
         SNR = torch.tensor(snr_input, device=device)
         if verbose:
-            print(f"input SNR = {SNR.item():.2f}[dB]")
+            logger.debug(f"input SNR = {SNR.item():.2f}[dB]")
 
     SNR_th = 15 + 10 * torch.log10(torch.tensor(R, dtype=torch.float32, device=device))
 
@@ -257,7 +259,7 @@ def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cud
 
     if SNR < SNR_th:
         if verbose:
-            print("... Select proj. to R-1")
+            logger.debug("... Select proj. to R-1")
 
         d = R - 1
         if snr_input == 0:
@@ -278,7 +280,7 @@ def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cud
         y = torch.vstack((x, c * torch.ones((1, N), device=device)))
     else:
         if verbose:
-            print("... Select the projective proj.")
+            logger.debug("... Select the projective proj.")
 
         d = R
         Y_cov = torch.mm(Y, Y.T) / float(N)
@@ -332,7 +334,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
             L: number of bands (channels), N: number of pixels
         R: int - number of endmembers to extract
         batch_size: int - batch size for processing
-        verbose: bool - whether to print verbose output
+        verbose: bool - whether to logger.debug verbose output
         snr_input: float - input SNR in dB (0 for estimation)
         device: str - device to use ('cuda' or 'cpu')
 
@@ -348,7 +350,9 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
         return vca_torch(Y, R, verbose, snr_input, device)
 
     if verbose:
-        print(f"Processing large dataset ({N} pixels) in batches of {batch_size}")
+        logger.debug(
+            f"Processing large dataset ({N} pixels) in batches of {batch_size}"
+        )
 
     # Process in batches for memory efficiency
     Y_batches = torch.split(Y, batch_size, dim=1)
@@ -357,7 +361,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
 
     for i, Y_batch in enumerate(Y_batches):
         if verbose:
-            print(f"Processing batch {i + 1}/{len(Y_batches)}")
+            logger.debug(f"Processing batch {i + 1}/{len(Y_batches)}")
 
         # Run VCA on batch
         Ae_batch, indice_batch, _ = vca_torch(
@@ -376,7 +380,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
 
     # Use original VCA on the combined candidates to select final endmembers
     if verbose:
-        print("Selecting final endmembers from candidates...")
+        logger.debug("Selecting final endmembers from candidates...")
 
     # Run VCA on candidate endmembers
     Ae_final, indice_final, Yp = vca_torch(
@@ -446,7 +450,7 @@ def test_vca_torch():
     """
     Test function to compare numpy and torch implementations
     """
-    print("Testing PyTorch VCA implementation...")
+    logger.debug("Testing PyTorch VCA implementation...")
 
     # Set seeds for reproducibility
     seed = 42
@@ -475,38 +479,38 @@ def test_vca_torch():
     Y_torch = torch.from_numpy(Y_np).float()
 
     # Run numpy version
-    print("Running numpy VCA...")
+    logger.debug("Running numpy VCA...")
     Ae_np, indice_np, Yp_np = vca(Y_np, R, verbose=False)
 
     # Run torch version with same seed
-    print("Running torch VCA...")
+    logger.debug("Running torch VCA...")
     Ae_torch, indice_torch, Yp_torch = vca_torch(Y_torch, R, verbose=False, snr_input=0)
 
     # Compare results
-    print(f"Results comparison:")
-    print(f"Numpy endmembers shape: {Ae_np.shape}")
-    print(f"Torch endmembers shape: {Ae_torch.shape}")
+    logger.debug(f"Results comparison:")
+    logger.debug(f"Numpy endmembers shape: {Ae_np.shape}")
+    logger.debug(f"Torch endmembers shape: {Ae_torch.shape}")
 
     # Find best matching between endmembers
     row_ind, col_ind, correlations = find_best_matching(Ae_np, Ae_torch.cpu().numpy())
 
-    print(f"\nOptimal matching results:")
+    logger.debug(f"\nOptimal matching results:")
     for i, (np_idx, torch_idx) in enumerate(zip(row_ind, col_ind)):
         corr = correlations[i]
-        print(
+        logger.debug(
             f"Match {i + 1}: NP endmember {np_idx} <-> Torch endmember {torch_idx}, correlation: {corr:.4f}"
         )
 
-    print(f"Average correlation: {np.mean(correlations):.4f}")
+    logger.debug(f"Average correlation: {np.mean(correlations):.4f}")
 
     # Also compare direct correspondence (without matching)
-    print(f"\nDirect correspondence (without matching):")
+    logger.debug(f"\nDirect correspondence (without matching):")
     direct_correlations = []
     for i in range(R):
         corr = np.corrcoef(Ae_np[:, i], Ae_torch[:, i].cpu().numpy())[0, 1]
         direct_correlations.append(corr)
-        print(f"Endmember {i + 1} correlation: {corr:.4f}")
-    print(f"Average direct correlation: {np.mean(direct_correlations):.4f}")
+        logger.debug(f"Endmember {i + 1} correlation: {corr:.4f}")
+    logger.debug(f"Average direct correlation: {np.mean(direct_correlations):.4f}")
 
     return Ae_np, Ae_torch, indice_np, indice_torch
 

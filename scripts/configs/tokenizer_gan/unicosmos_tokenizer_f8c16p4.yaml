@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
-  - tokenizer: uni_cosmos_f8c16p4
+  - tokenizer: uni_cosmos_f8c16p1_nested # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested]
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -23,6 +23,7 @@ accelerator:
     num_steps: 1
 
 vq_loss:
+  # disc_in_channels: ${dataset.channels}
   # perceptual loss
   perceptual_weight: 0.05
   # repa loss
@@ -86,8 +87,8 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_path: "" #runs/stage1_cosmos/2025-09-11_16-21-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
-  loading_type: null #pretrained
+  uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  loading_type: pretrained
 
   # augmentations
   latent_noise_prob: 0.0
@@ -110,7 +111,7 @@ tokenizer:
 
     # latents
     latent_channels: 16
-    z_channels: 16
+    z_channels: 256 # [256, 16]
 
     # train
     act_checkpoint: true
@@ -127,7 +128,7 @@ ema:
 
 train:
   tokenizer_name: uni_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}
-  proj_dir: runs/stage1_cosmos
+  proj_dir: runs/stage1_cosmos_nested
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 0.08
   track_metrics: false
@@ -136,7 +137,7 @@ train:
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  resume_path: runs/stage1_cosmos/2025-09-12_17-06-58_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/checkpoints/checkpoint_39
+  resume_path:
   ema_load_path: #runs/stage1_cosmos/2025-09-11_16-21-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false

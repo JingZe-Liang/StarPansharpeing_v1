@@ -17,15 +17,15 @@ defaults:
 
 dataset:
   cfgs:
-    used: Jasper
+    used: DC
     batch_size_train: 1
 
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
-  update_after_step: 1000
-  update_every: 2
+  beta: 0.95
+  update_after_step: 0
+  update_every: 1
   allow_different_devices: true
 
 train:
@@ -37,62 +37,76 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 1000
   visualize_every: 500
-  max_steps: 200_000
+  max_steps: 10_000
   save_every: 1000
+
+  no_wd_name:
+    - bias
+    - norm
+    - end_member_model
 
   to_neg_1_1: false
   online_tokenize: true
-  init_endmembers: True
+  init_endmembers: true
 
   resume_path:
   ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-25_19-16-29_f8c16p1_WV3_nafnet_wrapper/ema
 
   unmixing_loss:
-    # _target_: src.stage2.unmixing.loss.basic.UnmixingLoss
-    # weights: ${list:[1.0, 0.35, 0.1]}
-
     _target_: src.stage2.unmixing.loss.basic.StagedUnmixingLoss
     switch_step: 0
-    lambda_pre: 0.0
-    lambda_vol: 0.0
-    lambda_sad: 0.0
-    lambda_abunds_physical: 0.1
-    recon_type: sad
+    recon_type: l1
+    weights:
+      rec_loss: 1.0
+      ab_phys: 0.1
+      em_tv: 0.1
+      ab_sparse: 1.0e-5
+      # em_vol: 0.1
+      # em_spec: 0.01
 
   unmixing_optim:
+    _target_: src.utilities.optim.get_muon_optimizer
+    _partial_: true
+    lr: 5.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: true
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 1.0e-3
     # weight_decay: 1.0e-4
-    # eps: 1e-10
     # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
 
-    _target_: heavyball.ForeachAdamW
-    _partial_: true
-    lr: 3.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-9
-    betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
-    mars: true
-    foreach: true
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 6.0e-4
+    # weight_decay: 0.1
+    # eps: 1e-9
+    # betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
 
     # _target_: heavyball.ForeachSOAP
     # _partial_: true
     # lr: 4.0e-4
     # eps: 1e-10
     # betas: ${tuple:[0.9, 0.99]}
-    # weight_decay: 0.1
+    # weight_decay: 1.0e-5
 
   unmixing_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
     num_warmup_steps: 100
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 1
 
   log:
-    run_comment: f8c16p1_${dataset.cfgs.used}_unmixing_vitamin
+    run_comment: f8c16p1_${dataset.cfgs.used}_unmixing_resnet
     log_with_time: True
     log_every: 10
 

@@ -387,7 +387,7 @@ class UnmixingMetrics(torch.nn.Module):
         # Get ordered abundances using the ordering function
         ordered_endmembers, ordered_abundances, ordered_sad, match_dict = (
             UnmixingMetrics._order_endmembers_and_abundances(
-                endmembers, endmembers_gt, abundances
+                endmembers.detach(), endmembers_gt.detach(), abundances.detach()
             )
         )
 

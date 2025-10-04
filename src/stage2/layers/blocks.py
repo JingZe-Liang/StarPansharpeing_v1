@@ -6,8 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import (
     ConvMlp,
+    GluMlp,
     LayerScale2d,
     Mlp,
+    SwiGLU,
     create_act_layer,
     create_conv2d,
     create_norm,
@@ -43,7 +45,8 @@ from .conv import (
 from .cross_attn import CrossAttention, SoftmaxCrossAttention2D
 from .functional import ConditionalBlock, ResidualBlock
 from .layerscale import LayerScale
-from .mlp import ClipSwiGLUMlp, SwiGLU
+from .mlp import ClipSwiGLUMlp
+from .mlp import SwiGLU as SwiGLU_Custom
 
 # Attentions and Blocks
 
@@ -73,6 +76,8 @@ class AttentionBlock(nn.Module):
         super().__init__()
         self.grad_checkpointing = False
         self.norm1 = norm_layer(dim)
+
+        # Attention
         if attn_type == "1d":
             self.attn = Attention(
                 dim,
@@ -121,8 +126,10 @@ class AttentionBlock(nn.Module):
                 proj_drop=drop,
             )
         self.norm2 = norm_layer(dim)
+
+        # Mlp
         hidden_dim = int(dim * mlp_ratio)
-        if mlp_type == "swiglu":
+        if mlp_type == "swiglu_custom":
             self.mlp = ClipSwiGLUMlp(
                 in_features=dim,
                 hidden_features=hidden_dim,
@@ -139,6 +146,24 @@ class AttentionBlock(nn.Module):
                 drop=drop,
                 norm_layer=mlp_norm_layer,
                 use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "glumlp":
+            self.mlp = GluMlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=nn.SiLU,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "swiglu":
+            self.mlp = SwiGLU(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=nn.SiLU,
+                norm_layer=None,
+                bias=True,
+                drop=drop,
             )
         else:
             raise ValueError(f"mlp_type {mlp_type} is not supported")
@@ -495,6 +520,15 @@ class LiteLA_GLUMB_Block(nn.Module):
             )
         elif mlp_type == "swiglu":
             self.mlp = ClipSwiGLUMlp(
+                in_features=hidden_size,
+                hidden_features=int(hidden_size * mlp_ratio),
+                out_features=hidden_size,
+                norm_layer=get_norm_layer(norm_type),
+                drop=ffn_drop,
+                use_conv=False,
+            )
+        else:  # mlp
+            self.mlp = Mlp(
                 in_features=hidden_size,
                 hidden_features=int(hidden_size * mlp_ratio),
                 out_features=hidden_size,

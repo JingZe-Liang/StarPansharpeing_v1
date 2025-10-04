@@ -63,8 +63,9 @@ downstream_model:
     _target_: src.stage2.unmixing.models.transformer.Transformer.create_model
     in_dim: 16
     out_channels: 256
+    dim: 512
     num_heads: 8
-    mlp_ratio: 2.0
+    mlp_ratio: 3.0
     patch_size: 1 # if not slide window
 
   pixel_model:
@@ -72,22 +73,30 @@ downstream_model:
     in_channels: ${dataset.consts.bands}
     out_channels: ${dataset.consts.n_endmembers}
     cond_channels: 256
-    depths: [2, 4]
-    channels: [256, 256]
+    depths: [2, 2, 2]
+    channels: [256, 512, 512]
+    residual_of_init_abunds: false
     abunds_restriction: softmax
 
   end_member_model:
-    # _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberParameter
-    # apply_relu: true
-    # num_endmember: ${dataset.consts.n_endmembers}
-    # channels: ${dataset.consts.bands}
-    # init_value: null # left for trainer to initialize
-
-    _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberConv
+    _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberParameter
     apply_relu: true
     num_endmember: ${dataset.consts.n_endmembers}
     channels: ${dataset.consts.bands}
     init_value: null # left for trainer to initialize
+
+    # _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberMutliLinear
+    # apply_relu: true
+    # num_endmember: ${dataset.consts.n_endmembers}
+    # channels: ${dataset.consts.bands}
+    # n_layers: 5
+    # init_value: null # left for trainer to initialize
+
+    # _target_: src.stage2.unmixing.models.to_endmember.ToEndMemberConv
+    # apply_relu: true
+    # num_endmember: ${dataset.consts.n_endmembers}
+    # channels: ${dataset.consts.bands}
+    # init_value: null # left for trainer to initialize
 
   amotize_type: latent_to_pixel_fusion
   learn_decoder: false

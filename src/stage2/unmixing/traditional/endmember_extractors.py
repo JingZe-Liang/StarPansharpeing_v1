@@ -631,7 +631,7 @@ class SISAL(BaseExtractor):
 
                     Bk = Bk - (Q @ Y - Z)
                     if verbose == 3 or verbose == 4:
-                        logger.debug(
+                        logger.trace(
                             "||Q*Y-Z|| = {0:.4e}".format(lin.norm(Q.dot(Y) - Z))
                         )
 
@@ -641,7 +641,7 @@ class SISAL(BaseExtractor):
                     + tau * np.sum(hinge(Q @ Y))
                 )
                 if verbose == 3 or verbose == 4:
-                    logger.debug(
+                    logger.trace(
                         "MMiter = {0}, AL_iter, = {1},  f0_quad = {2:.4e}, f_quad = {3:.4e},".format(
                             k, i, f0_quad, f_quad
                         )
@@ -652,7 +652,7 @@ class SISAL(BaseExtractor):
                 if f0_quad >= f_quad:  # quadratic energy decreased
                     while f0_val < f_val:
                         if verbose == 3 or verbose == 4:
-                            logger.debug(
+                            logger.trace(
                                 "line search, MMiter = {0}, AL_iter, = {1},  f0_val = {2:.4e}, f_val = {3:.4e},".format(
                                     k, i, f0_val, f_val
                                 )
@@ -756,3 +756,21 @@ class SISAL_MATLAB(BaseExtractor):
         self.time = round(tac - tic, 2)
         logger.info(f"SISAL MATLAB took {self.time} seconds")
         return Ehat
+
+
+if __name__ == "__main__":
+    import os
+
+    x = np.random.rand(280, 256 * 256)
+    p = 4
+    extractor = SISAL()
+    E = extractor.extract_endmembers(x, p, seed=0)
+    print(E.shape)
+
+    extractor = VCA()
+    E = extractor.extract_endmembers(x, p, seed=0)
+    print(E.shape)
+
+    extractor = SiVM()
+    E = extractor.extract_endmembers(x, p, seed=0)
+    print(E.shape)
