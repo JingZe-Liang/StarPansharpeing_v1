@@ -738,7 +738,7 @@ class ContinuousImageTokenizer(nn.Module):
             elif self.quantizer_type == "psd":
                 mu = h[:, :-1]
                 kappa = h[:, -1]
-                mu = l2_norm(mu, dim=1)
+                # mu = l2_norm(mu, dim=1)
                 kappa = nn.functional.softplus(kappa) + 1.0
                 hq = self.quantizer(mu, kappa, dim=1)
                 loss = hq.kl_to_uniform()
@@ -1226,7 +1226,7 @@ def test_tokenizer_forward_backward(
     count_params=False,
     real_data: str | None = None,
     use_optim=False,
-    device="cuda:1",
+    device="cuda:0",
     base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
     lora_ckpt: list[str] | None = None,
     lora_changes_chans: dict[str, int] | None = None,
@@ -1263,21 +1263,18 @@ def test_tokenizer_forward_backward(
 
     torch.cuda.set_device(device)
 
-    if base_model_ckpt is None:
-        base_model_ckpt = ""
-
-    # default_multi_chans = [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
-    default_nested_chans = 500  # max hyperspectral chans in the training datasets
+    default_multi_chans = [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
+    # default_nested_chans = 500  # max hyperspectral chans in the training datasets
     config = {
         "model": {
             "attn_resolutions": [32],
             "channels": 128,
             "channels_mult": [2, 4, 4],
             "dropout": 0.0,
-            "in_channels": default_nested_chans,
+            "in_channels": default_multi_chans,
             "spatial_compression": 8,
             "num_res_blocks": 2,
-            "out_channels": default_nested_chans,
+            "out_channels": default_multi_chans,
             "resolution": 1024,
             "patch_size": 1,
             "patch_method": "haar",
@@ -1480,8 +1477,8 @@ def test_tokenizer_forward_backward(
 if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="",  # "runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="QB",
+        base_model_ckpt="runs/stage1_cosmos_psd/2025-10-03_14-20-29_cosmos_f8c16p1_unified_hyperspectral_psd/ema/tokenizer/model.safetensors",
+        real_data="RS5M",
         save_pca_vis=False,
         pca_type="z",
         is_lora=False,

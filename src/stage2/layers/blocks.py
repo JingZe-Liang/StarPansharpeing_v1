@@ -64,7 +64,7 @@ class AttentionBlock(nn.Module):
         attn_drop=0.0,
         drop_path=0.0,
         norm_layer=nn.LayerNorm,
-        mlp_norm_layer=nn.LayerNorm,
+        mlp_norm_layer=None,
         act_layer=nn.SiLU,
         layer_scale_value=1e-5,
         use_layerscale=False,

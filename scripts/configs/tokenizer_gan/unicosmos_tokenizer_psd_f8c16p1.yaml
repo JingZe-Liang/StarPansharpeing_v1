@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
-  - tokenizer: uni_cosmos_f8c16p1_nested
+  - tokenizer: uni_cosmos_f8c16p4
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -23,7 +23,7 @@ accelerator:
     num_steps: 1
 
 vq_loss:
-  disc_in_channels: 512 # nested max channels
+  # disc_in_channels: 512 # nested max channels
   # perceptual loss
   perceptual_weight: 0.05
   # repa loss
@@ -68,8 +68,8 @@ vq_loss:
   disc_num_layers: 3
   use_actnorm: false
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
-  disc_start_for_g: 2000
-  disc_start_for_d: 2000
+  disc_start_for_g: 1000
+  disc_start_for_d: 1000
   disc_loss: relative
   ssim_weight: 0.04
   disc_weight: 0.1
@@ -92,8 +92,8 @@ tokenizer:
   quantizer_type: psd
 
   # loading
-  uni_path: "runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors"
-  loading_type: pretrained
+  uni_path: #runs/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  loading_type: #pretrained
 
   # augmentations
   latent_noise_prob: 0.0
@@ -116,10 +116,10 @@ tokenizer:
 
     # latents
     latent_channels: 16
-    z_channels: 16
+    z_channels: 256
 
     # train
-    act_checkpoint: true
+    act_checkpoint: false
 
   channel_drop_config:
     drop_type: ${list:[4, 8, 12]}
@@ -136,13 +136,13 @@ train:
   proj_dir: runs/stage1_cosmos_psd
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 0.08
-  track_metrics: false
+  track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
-  visualize_every: 200
+  visualize_every: 500
   max_steps: 1_000_000
   save_every: 1000
-  resume_path:
+  resume_path: runs/stage1_cosmos_psd/2025-10-03_04-02-28_cosmos_f8c16p1_unified_hyperspectral_psd/checkpoints/checkpoint_27
   ema_load_path:
   compile_model: false
   only_load_tokenizer: false
@@ -160,61 +160,61 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
-    _target_: heavyball.ForeachAdamW
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
     lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-9
-    betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
-    foreach: true
+    weight_decay: 0.1
+    adamw_eps: 1.0e-9
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1e-9
+    # betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
 
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 1.0e-4
     # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.5, 0.95]
+    # eps: 1.0e-9
+    # betas: [0.95, 0.99]
     # foreach: true
 
   disc_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
-    _target_: heavyball.ForeachAdamW
+    _target_: src.utilities.optim.get_muon_optimizer
     _partial_: true
     lr: 4.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-9
-    betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
-    foreach: true
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1e-9
+    # betas: ${tuple:[0.95, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
 
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 1.0e-4
     # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.0, 0.9] #[0.9, 0.95]
+    # eps: 1.0e-9
+    # betas: [0.95, 0.99] #[0.9, 0.95]
     # foreach: true
 
   tokenizer_sched:

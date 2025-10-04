@@ -609,7 +609,7 @@ def get_fast_test_hyperspectral_data(
         "WV2": "data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar",
         "WV4": "data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar",
         "IKONOS": "data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar",
-        "RS5M": "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-0010.tar",
+        "RS5M": "data/RS5M/train/pub11-train-0010.tar",
         "BigEarthNetS2": "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
         "Xiongan": "data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar",
         "fmow_MS": "data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-{0069..0000}.tar",

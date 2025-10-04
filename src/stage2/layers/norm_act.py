@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm
 from loguru import logger
 from timm.layers import create_act, create_norm
 
@@ -170,7 +169,6 @@ def _register_new_norms():
         pass
 
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
-    create_norm._NORM_MAP["flashrmsnorm"] = FlashRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
     create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
     logger.debug(

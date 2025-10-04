@@ -5,12 +5,12 @@ dataset_names_to_img_size:
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 img_size: 512 # place holder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-size_128_bs: 16
-size_256_bs: 12
-size_512_bs: 5
+size_128_bs: 20
+size_256_bs: 14
+size_512_bs: 7
 val_bs: 12
-max_workers: 3
-min_workers: 2
+max_workers: 4
+min_workers: 3
 shuffle_size: 100
 prefetch_factor: 4
 

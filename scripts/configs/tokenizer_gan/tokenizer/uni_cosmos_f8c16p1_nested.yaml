@@ -9,9 +9,9 @@ model:
   num_res_blocks: 2
   out_channels: 512 # nested max channels
   resolution: 1024
-  z_channels: 16
-  act_checkpoint: true
+  z_channels: 256
   latent_channels: 16
+  act_checkpoint: false
   norm_type: gn
   norm_groups: 32
   block_name: res_block
