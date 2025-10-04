@@ -28,7 +28,7 @@ def vca_fclsu_nnls_solver(
     n_endmembers: int,
     vca_backend: str = "numpy",
     vca_batch_size: int = 4000,
-    algo: Literal["vca", "vca_custom", "sisal", "sivm"] = "vca",
+    algo: Literal["vca", "vca_custom", "sisal", "sivm"] = "sisal",
     fclsu_algo: Literal["fcls_custom", "fcls"] = "fcls_custom",
     fclsu_solver_kwargs: dict = {},
 ):

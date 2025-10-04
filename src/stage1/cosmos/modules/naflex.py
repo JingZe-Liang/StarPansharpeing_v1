@@ -9,6 +9,10 @@ from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
 from timm.models.naflexvit import NaFlexEmbeds, NaFlexVit
 
+from src.utilities.config_utils import function_config_to_basic_types
+
+from .norm import *  # register custom norms
+
 
 @dataclass
 class NaFlexVitCfg:
@@ -90,7 +94,7 @@ class NaFlexVitCfg:
     attn_pool_mlp_ratio: Optional[float] = None  # Override mlp_ratio for attention pool
 
     # Weight initialization
-    weight_init: str = ""  # Weight initialization scheme
+    weight_init: str = "jax"  # Weight initialization scheme
     fix_init: bool = True  # Apply weight initialization fix (scaling w/ layer index)
 
     # Embedding configuration
@@ -103,7 +107,9 @@ class NaFlexVitCfg:
     )
 
     # Layer implementations
-    norm_layer: Optional[str] = None  # Normalization layer for transformer blocks
+    norm_layer: Optional[str] = (
+        "flarmsnorm"  # Normalization layer for transformer blocks
+    )
     act_layer: Optional[str] = None  # Activation layer for MLP blocks
     block_fn: Optional[str] = None  # Transformer block implementation class name
     mlp_layer: Optional[str] = None  # MLP implementation class name
@@ -125,78 +131,62 @@ class NaFlexVitCfgAdpoted:
 
     img_size: int = 32
     in_chans: int = 16
-    patch_embed_dim: int = 16
-    out_chans: int = 256
-    patch_size: int = 2
+    z_dim: int = 256
+    out_chans: int = 16
+    out_2d_latent: bool = True
 
 
-class NaFlexVitAdpoted(NaFlexVit):
+class Transformer(NaFlexVit):
     def __init__(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
-        super().__init__(cfg, in_chans=cfg2.patch_embed_dim, img_size=cfg2.img_size)
+        super().__init__(cfg, in_chans=cfg2.z_dim, img_size=cfg2.img_size)
         self.cfg, self.cfg2 = cfg, cfg2
-        cfg.patch_size = 1  # force to be 1
-        self._build_input_patcher(cfg, cfg2)
         self._build_head(cfg, cfg2)
 
     def _build_head(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
         self.head = nn.Sequential(
             norm_layer(cfg.embed_dim),
-            nn.Linear(cfg.embed_dim, cfg2.out_chans * cfg2.patch_size**2, bias=True),
+            nn.Linear(cfg.embed_dim, cfg2.out_chans * cfg.patch_size**2, bias=True),
         )
 
-    def _build_input_patcher(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
-        patch_size = cfg2.patch_size
-
-        self.patch_size = to_2tuple(patch_size)
-        self.patch_embed = PatchEmbed(
-            img_size=cfg2.img_size,
-            patch_size=patch_size,
-            in_chans=cfg2.in_chans,
-            embed_dim=cfg2.patch_embed_dim,
-            bias=True,
-            strict_img_size=False,
-            output_fmt="NCHW",
-        )
-        self.fuse_stem = nn.Conv2d(cfg2.patch_embed_dim * 2, cfg2.patch_embed_dim, 1)
-
-    def unpatchify(self, x: torch.Tensor):
+    def unpatchify(self, x: torch.Tensor, hw=None):
         """
         x: (N, T, patch_size**2 * C)
         imgs: (N, H, W, C)
         """
         c = self.cfg2.out_chans
-        p = self.patch_size[0]
-        h = w = int(x.shape[1] ** 0.5)
-        assert h * w == x.shape[1]
+        p = self.cfg.patch_size
+        if hw is None:
+            h = w = int(x.shape[1] ** 0.5)
+            assert h * w == x.shape[1]
+        else:
+            h, w = hw
 
         x = einops.rearrange(
             x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
         )
         return x
 
-    def _forward_additional_patcher(self, ms, pan):
-        latents = (ms, pan)
-        ys = []
-        for latent in latents:
-            y = self.patch_embed(latent)
-            ys.append(y)
-
-        # fuse all latent
-        y = self.fuse_stem(torch.cat(ys, dim=1))
-        return y
-
-    def _forward_after_backbone(self, x):
+    def _forward_after_backbone(self, x, hw):
         x = self.head(x)
-        x = self.unpatchify(x)
+        if self.cfg2.out_2d_latent:
+            x = self.unpatchify(x, hw)
         return x
 
-    def forward(self, ms, pan):
-        x = self._forward_additional_patcher(ms, pan)
+    def forward(self, x):
+        hw = x.shape[-2:]
         x = self.forward_features(x)
         x = x[:, self.cfg.reg_tokens :]
-        x = self._forward_after_backbone(x)
+        x = self._forward_after_backbone(x, hw)
         return x
+
+    @function_config_to_basic_types
+    @staticmethod
+    def create_model(cfg1_kwargs: dict = {}, cfg2_kwargs: dict = {}):
+        cfg1 = NaFlexVitCfg(**cfg1_kwargs)
+        cfg2 = NaFlexVitCfgAdpoted(**cfg2_kwargs)
+        model = Transformer(cfg1, cfg2)
+        return model
 
 
 def test_naflex_vit_pansharpening_model():
@@ -214,14 +204,12 @@ def test_naflex_vit_pansharpening_model():
         img_size=32,
         in_chans=16,
         out_chans=256,
-        patch_size=2,
     )
 
-    ms = torch.randn(1, 16, 64, 64).cuda()
-    pan = torch.randn(1, 16, 64, 64).cuda()
+    x = torch.randn(1, 256, 32, 32).cuda()
 
-    model = NaFlexVitAdpoted(cfg, cfg2).cuda()
-    out = model(ms, pan)
+    model = Transformer(cfg, cfg2).cuda()
+    out = model(x)
     print(out.shape)  # [1, 256, 64, 64]
 
     out.mean().backward()
@@ -229,7 +217,7 @@ def test_naflex_vit_pansharpening_model():
     # Check parameters
     from fvcore.nn import FlopCountAnalysis, flop_count_table
 
-    flops = FlopCountAnalysis(model, (ms, pan))
+    flops = FlopCountAnalysis(model, (x,))
     print(flop_count_table(flops))
 
     # Check gradients
@@ -239,4 +227,7 @@ def test_naflex_vit_pansharpening_model():
 
 
 if __name__ == "__main__":
+    """
+    python -m src.stage1.cosmos.modules.naflex
+    """
     test_naflex_vit_pansharpening_model()

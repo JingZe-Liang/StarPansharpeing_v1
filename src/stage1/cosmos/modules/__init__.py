@@ -18,6 +18,7 @@ from enum import Enum
 from .distributions import GaussianDistribution, IdentityDistribution
 from .layers2d import Decoder, DecoderDiff, Encoder
 from .layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
+from .norm import PolyNormAct, Qwen3NextRMSNorm, RMSNorm, TritonRMSNorm2d
 from .quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
 from .unets.darwin_unet import UNet as DarwinUnet
 

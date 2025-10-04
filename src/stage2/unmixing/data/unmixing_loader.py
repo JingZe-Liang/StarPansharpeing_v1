@@ -65,7 +65,7 @@ def compute_init_em_abunds(
             em_c_d, fclsu_abunds_dhw = cached_solver(
                 sample["img"],
                 n_endmembers=n_em,
-                algo="sivm",
+                algo="sisal",
                 cache_name=cache_name,
                 fclsu_solver_kwargs=fclsu_solver_kwargs,
             )

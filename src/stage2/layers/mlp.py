@@ -42,6 +42,7 @@ try:
         warnings.warn('FLA is disabled (fused FFNs).')
 except ImportError:
     FLA_AVAILABLE = False
+logger.debug(f"[Mlp Fused Kernels]: XFORMERS_AVAILABLE: {XFORMERS_AVAILABLE}, FLA_AVAILABLE: {FLA_AVAILABLE}")
 # fmt: on
 
 

@@ -1,4 +1,3 @@
-import math
 import os
 import random
 import sys
@@ -49,7 +48,6 @@ from src.utilities.logging import log_print, set_logger_file
 from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter
-from src.utilities.train_utils.visualization import get_rgb_image
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -443,7 +441,7 @@ class CosmosHyperspectralTokenizerTrainer:
             format=log_format_in_cmd,
             level=os.getenv("SHELL_LOG_LEVEL", "DEBUG"),
             backtrace=True,
-            colorize=True,
+            colorize=bool(int(os.getenv("COLOR_LOG", "1"))),
         )
 
         # make log dir
@@ -904,10 +902,6 @@ class CosmosHyperspectralTokenizerTrainer:
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
         if is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim):
-            import heavyball
-
-            heavyball.utils.compile_mode = None
-
             self.log_msg(
                 f"use heavyball optimizer, it will compile the optimizer, "
                 "for efficience testing the scripts, disable the compilation.",
@@ -1969,19 +1963,32 @@ class CosmosHyperspectralTokenizerTrainer:
             recon = self.to_rgb(recon)
 
         _only_n = only_vis_n or 16
-        _n_row = min(4, int(math.sqrt(_only_n)))
-        to_img = lambda x: tensor_to_image(
-            make_grid(x[:_only_n], n_row=_n_row, padding=2)
-        )
-        vis_fn = lambda x: to_img(
-            get_rgb_image(x, self.dataset_cfg.rgb_channels, use_linstretch=False)
-        )
+        to_img = lambda x: tensor_to_image(make_grid(x[:_only_n], n_row=4, padding=2))
+        c = x.shape[1]
 
-        x_np = vis_fn(x)
+        # * --- hyperspectral image to rgb images --- #
+        def hyperspectral_to_rgb(x):
+            # is rgb or gray images
+            if c in (1, 3):
+                x_np = to_img(x)
+            elif isinstance(self.dataset_cfg.rgb_channels, Sequence):
+                rgb_channels = to_cont(self.dataset_cfg.rgb_channels)
+                x_np = to_img(x[:, rgb_channels])
+            elif callable(self.dataset_cfg.rgb_channels):
+                x_np = to_img(self.dataset_cfg.rgb_channels(x))
+            else:
+                raise ValueError(
+                    f"Unknown rgb_channels {self.dataset_cfg.rgb_channels},"
+                    f"typed {type(self.dataset_cfg.rgb_channels)}"
+                )
+
+            return x_np
+
+        x_np = hyperspectral_to_rgb(x)
 
         # cat original and reconstructed images
         if recon is not None:
-            recon_np = vis_fn(recon)
+            recon_np = hyperspectral_to_rgb(recon)
             img = np.concatenate([x_np, recon_np], axis=1)
         else:
             img = x_np
@@ -2020,7 +2027,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_psd_f8c16p1"
+_key = "unicosmos_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2088,9 +2095,11 @@ if __name__ == "__main__":
     )
     def main(cfg):
         if cli_args.only_rank_zero_catch:
-            catcher = logger.catch if is_rank_zero else nullcontext
+            catcher = (
+                partial(logger.catch, reraise=True) if is_rank_zero else nullcontext
+            )
         else:
-            catcher = logger.catch
+            catcher = partial(logger.catch, reraise=True)
 
         with catcher():
             trainer = CosmosHyperspectralTokenizerTrainer(cfg)

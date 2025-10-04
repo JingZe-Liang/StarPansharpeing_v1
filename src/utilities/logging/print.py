@@ -49,7 +49,7 @@ if __setup_console:
 
 
 def format_extra(record: dict[str, Any]):
-    if len(record["extra"]) == 0:
+    if record["extra"] is None or len(record["extra"]) == 0:
         record["extra"] = None
         return record
     extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
