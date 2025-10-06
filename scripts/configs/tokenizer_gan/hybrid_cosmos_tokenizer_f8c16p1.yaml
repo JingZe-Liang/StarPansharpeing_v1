@@ -1,0 +1,248 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer ==========
+  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - tokenizer: hybrid_cosmos_f8c16p1 # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested, hybrid_cosmos_f8c16p1]
+  - quantizer: quant
+  - accelerator: base
+  - vq_loss: remote_clip_RN50
+  # self ============
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+
+vq_loss:
+  disc_in_channels: 512 # int or ${dataset.channels}; nested or MoE convs
+  # perceptual loss
+  perceptual_weight: 0.05
+  # repa loss
+  repa_loss_weight: 0.02 # 0.1
+  repa_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 512 # null for no resize
+    dino_img_size: 512
+    dino_name: "dinov3_vitl16"
+    feature_resample_type: match_student
+    loss_type: am_radio
+    feature_normalize: false
+  # vf loss
+  vf_loss_weight:
+  vf_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean #${dataset.rgb_channels}
+    img_resize: 384
+    dino_img_size: 384
+    distmat_margin: 0.25
+    cos_margin: 0.5
+    dino_name: "dinov3_vitl16"
+  # gram loss
+  gram_loss_weight:
+  gram_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 384 # null for no resize
+    dino_img_size: 384
+    dino_name: "dinov3_vitl16"
+  # quantizer loss
+  quantizer_type:
+  quantizer_options:
+  # discriminator loss
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_ndf: 128
+  disc_num_layers: 3
+  use_actnorm: false
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_start_for_g: 2000
+  disc_start_for_d: 2000
+  disc_loss: relative
+  ssim_weight: 0.04
+  disc_weight: 0.1
+  reconstruction_loss_type: mse
+  # r1, r2 loss seems not necessary
+  # disc_reg_gamma: 1
+  # disc_reg_type: r1r2
+  # disc_reg_freq: 2
+
+tokenizer:
+  # CNN configuration
+  cnn_cfg:
+    # repa
+    use_repa_loss: true
+    use_vf_loss: false
+    hook_module: decoder.decoder.mid.block_2
+    vf_on_z_or_module: z # [z, module]
+    dino_feature_dim: 1024
+
+    # loading
+    enc_path: ""
+    dec_path: ""
+    uni_path: runs/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+    loading_type: pretrained
+
+    # quantization
+    norm_in_quant_conv: false
+    quantizer_type: null
+
+    # augmentations
+    latent_noise_prob: 0.0
+    use_channel_drop: false
+
+    channel_drop_config:
+      drop_type: ${list:[4, 8, 12]}
+      max_channels: ${tokenizer.cnn_cfg.model.latent_channels}
+      drop_prob: 0.5
+
+    # Model configuration (EncoderDecoderConfig)
+    model:
+      # Basic architecture
+      in_channels: 512 #${dataset.channels}
+      out_channels: 512 #${dataset.channels}
+      channels: 128
+      channels_mult: [2, 4, 4]
+      num_res_blocks: 2
+      attn_resolutions: [32]
+      dropout: 0.0
+      spatial_compression: 8
+
+      # latents - increased for hybrid model
+      latent_channels: 16
+      z_channels: 512 # [256, 16] -> Increased to match transformer
+
+      # norm and blocks
+      norm_type: gn
+      norm_groups: 32
+      block_name: res_block
+      moe_token_mixer_type: res_block
+      use_residual_factor: false
+
+      # others
+      patch_method: haar
+      patch_size: 1
+      attn_type: none
+      padding_mode: reflect # for boundary?
+
+      # train
+      act_checkpoint: false
+
+ema:
+  beta: 0.999
+  update_after_step: 1000
+  update_every: 2
+
+train:
+  tokenizer_name: hybrid_cosmos_f8c${tokenizer.cnn_cfg.model.latent_channels}p${tokenizer.cnn_cfg.model.patch_size}
+  proj_dir: runs/stage1_cosmos_hybrid
+  finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
+  max_grad_norm: 0.08
+  track_metrics: false
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 1_000_000
+  save_every: 1000
+  resume_path:
+  ema_load_path: #runs/stage1_cosmos/2025-09-11_16-21-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  compile_model: false
+  only_load_tokenizer: false
+  seperate_enc_dec: false
+  grad_check: false
+
+  # augmentations
+  aug_pipeline_train_obj: #decoder_deg
+  aug_pipeline:
+    # _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    # p: 0.1
+    # use_torch: true
+
+  finetune_cfg:
+    refine_decoder_head_n_layers: all
+    adapt_latent_n_layers: 0
+
+  tokenizer_optimizer:
+    _target_: src.utilities.optim.get_muon_optimizer
+    _partial_: true
+    lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.5, 0.95]
+    # foreach: true
+
+  disc_optimizer:
+    _target_: src.utilities.optim.get_muon_optimizer
+    _partial_: true
+    lr: 4.0e-4
+    weight_decay: 0.1
+    adamw_eps: 1.0e-8
+    ns_diff_abc: true
+    ns_norm: false
+    momentum: 0.9
+    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    adamw_wd: 0.
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-8
+    # betas: [0.0, 0.9] #[0.9, 0.95]
+    # foreach: true
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+
+  log:
+    run_comment: hybrid_cosmos_f8c${tokenizer.cnn_cfg.model.latent_channels}p${tokenizer.cnn_cfg.model.patch_size}_${dataset.used}_latent_noise=${tokenizer.cnn_cfg.latent_noise_prob}_channel_drop=${tokenizer.cnn_cfg.use_channel_drop}
+    log_with_time: True
+    visualize_every: 500
+    log_every: 10
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: 200 # val only `max_val_iters` batches

@@ -306,7 +306,7 @@ def visualize_hyperspectral_image(
     to_uint8=True,
     use_linstretch: bool = False,
     linstretch_tol: list[float] | None = None,
-) -> UInt[NDArray, "h w c"] | Float[NDArray, "h w c"] | list[Image.Image] | Image.Image:
+):
     """Visualize a hyperspectral image by converting it to RGB format.
 
     Args:
@@ -352,7 +352,10 @@ def visualize_hyperspectral_image(
         ]
         return pil_imgs[0] if len(pil_imgs) == 1 else pil_imgs
     else:
-        rgb_img = rgb_img.permute(1, 2, 0)  # (h, w, c)
+        if to_grid:
+            rgb_img = rgb_img.permute(1, 2, 0)  # (h, w, c)
+        else:
+            rgb_img = rgb_img.permute(0, 2, 3, 1)  # (b, h, w, c)
         if to_uint8:
             rgb_img = rgb_img.mul(255).to(torch.uint8)
         rgb_img = rgb_img.numpy()

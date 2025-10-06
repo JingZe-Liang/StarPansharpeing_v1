@@ -1,0 +1,38 @@
+consts:
+  train_chans: 50
+  val_chans: 50
+  train_bs: 64
+  val_bs: 1
+
+train_loader:
+  # Dataset configuration based on AETNet/train.py default parameters
+  _target_: src.stage2.detections.data.HAD100.HADDataset.create_dataloader
+  dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
+  sensor: aviris_ng
+  mask_class: zero
+  resize: 64
+  start_channel: 0
+  channel: ${dataset.consts.train_chans}
+  train_ratio: 1.0
+  norm_type: img
+  scale: 1.0
+  to_neg_1_1: false
+
+  # DataLoader configuration
+  batch_size: ${dataset.consts.train_bs}
+  shuffle: true
+  num_workers: 3
+  pin_memory: true
+  drop_last: true
+
+val_loader:
+  _target_: src.stage2.detections.data.HAD100.HADTestDataset.create_loader
+  dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
+  resize: 64 # also resize?
+  start_channel: 0
+  channel: ${dataset.consts.val_chans}
+  batch_size: ${dataset.consts.val_bs}
+  shuffle: false
+  num_workers: 3
+  pin_memory: true
+  drop_last: false

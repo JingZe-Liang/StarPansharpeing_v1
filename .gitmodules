@@ -125,3 +125,6 @@
 [submodule "src/stage1/VAEs/SphereAR"]
 	path = src/stage1/VAEs/SphereAR
 	url = https://github.com/guolinke/SphereAR.git
+[submodule "src/stage2/generative/DCGen"]
+	path = src/stage2/generative/DCGen
+	url = https://github.com/dc-ai-projects/DC-Gen.git

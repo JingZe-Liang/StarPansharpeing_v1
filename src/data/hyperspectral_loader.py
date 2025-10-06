@@ -1553,7 +1553,7 @@ if __name__ == "__main__":
         # ["data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar"],
         # ["data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar"],
         # ["data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar"],
-        ["data/Downstreams/UrbanUnmixing/splits/apex.tar"],
+        # ["data/Downstreams/UrbanUnmixing/splits/apex.tar"],
         # ["data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar"],
         # [
         #     "data_local/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar",
@@ -1562,7 +1562,7 @@ if __name__ == "__main__":
         # ],
         # ["data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar"],
         # ["data/MDAS-Optical/MDAS-Optical-4_bands-px_512-MSI-0000.tar"],
-        # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0101}.tar"],
+        ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
         # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
         # [p.as_posix() for p in Path("data/RS5M").glob("**/*.tar")]
@@ -1641,8 +1641,8 @@ if __name__ == "__main__":
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
     ]
-    test_batch_size = 2
-    test_num_workers = 0
+    test_batch_size = 1
+    test_num_workers = 1
     test_shuffle_size = -1
 
     loader_kwargs = dict(
@@ -1650,7 +1650,7 @@ if __name__ == "__main__":
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
-        to_neg_1_1=True,
+        to_neg_1_1=False,
         transform_prob=0.0,
         random_apply=(1, 2),
         pin_memory=False,
@@ -1658,7 +1658,7 @@ if __name__ == "__main__":
         remove_meta_data=False,
         resize_before_transform=None,
         shuffle_within_workers=False,
-        resample=True,
+        resample=False,
     )
     changed_kwargs = [
         # {"img_key": ["hsi", "rgb"]},
@@ -1671,7 +1671,7 @@ if __name__ == "__main__":
         #     "resample": False,
         # },
         # {"loader_type": "wids", "img_key": "auto", "tgt_key": "img"},
-        {"img_key": "auto"},
+        {"img_key": "auto", "permute": False},
         # {"img_key": ["img"], "keys_to_remove": ["metadata"]}
         # {"img_key": ["rgb"], "tgt_key": ["img"], "keys_to_remove": ["hsi"]},
         # {"img_key": "npy", "tgt_key": "img"},

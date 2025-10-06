@@ -46,8 +46,6 @@ from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from stage2.detections.loss.msgms_loss import MSGMSLoss
 
-heavyball = lazy_loader.load("heavyball")
-
 
 @dataclass
 class HADModelStepOutput:
@@ -479,6 +477,8 @@ class HyperHADTrainer:
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
         if is_heavyball_opt(model_opt):
+            import heavyball.utils
+
             heavyball.utils.compile_mode = None
             self.log_msg(
                 "use heavyball optimizer, it will compile the optimizer, "
@@ -798,19 +798,12 @@ class HyperHADTrainer:
                 )
                 break
 
-    def _finite_val_loader(self):
-        if self.val_dataloader is None:
-            raise ValueError("No validation dataloader found")
-
-        for batch in self.val_dataloader:
-            yield batch
-
     def get_val_loader_iter(self):
         if self.val_cfg.max_val_iters > 0:
             # create a new iterator for the validation loader
             # state in the loader generator
             if not hasattr(self, "_val_loader_iter"):
-                self._val_loader_iter = iter(self._finite_val_loader())
+                self._val_loader_iter = iter(self.val_dataloader)
 
             iterable_ = trange(
                 self.val_cfg.max_val_iters,
@@ -822,35 +815,34 @@ class HyperHADTrainer:
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
+            for _ in range(self.val_cfg.max_val_iters):
+                try:
+                    yield next(self._val_loader_iter)
+                except StopIteration:
+                    self._val_loader_iter = iter(self.val_dataloader)
+                    yield next(self._val_loader_iter)
         else:
-            iterable_ = self._finite_val_loader()
             self.log_msg(
                 f"[Val]: start validating with the whole val set", only_rank_zero=False
             )
+            for batch in self.val_dataloader:
+                yield batch
 
-        return iterable_
-
-    @torch.no_grad()
     def val_step(self, batch: dict):
         img_latent = self.get_tokenizer_encoded(batch)
         # forward the HAD network
-        anomaly_scores, *_ = self.forward_detection_model(
-            batch["img"], batch["gt"], img_latent
-        )
+        with torch.no_grad():
+            anomaly_scores, *_ = self.forward_detection_model(
+                batch["img"], batch["gt"], img_latent
+            )
         return anomaly_scores
 
     def val_loop(self):
         self.model.eval()
-
         loss_metrics = MeanMetric().to(device=self.device)
         val_iter = self.get_val_loader_iter()
         anomaly_scores = gt = None
-        for batch_or_idx in val_iter:  # type: ignore
-            if self.val_cfg.max_val_iters > 0:
-                batch = next(self._val_loader_iter)
-            else:
-                batch = batch_or_idx
-
+        for batch in val_iter:  # type: ignore
             batch = cast(dict[str, torch.Tensor], batch)
             gt = batch.get("gt", batch.get("gt_full", None))
             assert gt is not None, "gt or gt_full not found in the val batch"

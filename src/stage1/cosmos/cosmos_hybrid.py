@@ -1,0 +1,330 @@
+"""
+Hyperspectral Transformer Tokenizer with hybrid CNN / Transformer architecture.
+RMSNorm + SwiGLU + EVA attention with Rope.
+"""
+
+from typing import Any, List, NamedTuple, Optional, Tuple, Union
+
+import accelerate
+import einops
+import numpy as np
+import torch
+import torch.nn as nn
+from loguru import logger
+from torch import Tensor
+from typing_extensions import Annotated
+
+from src.utilities.config_utils import (
+    dataclass_from_dict,
+    function_config_to_basic_types,
+)
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
+
+from .cosmos_tokenizer import (
+    ContinuousImageTokenizer,
+    ContinuousTokenizerConfig,
+    EncoderDecoderConfig,
+)
+from .modules.layers2d import Decoder, Encoder
+from .modules.naflex import NaFlexVitCfg, NaFlexVitCfgAdpoted, Transformer
+
+
+class CosmosHybridTokenizer(ContinuousImageTokenizer):
+    _no_split_modules = ["EvaBlock", "ResnetBlock", "AttnBlock"]
+    _vf_on_z_or_module = "z"  # must be z if using this model
+
+    def __init__(
+        self,
+        cnn_cfg: ContinuousTokenizerConfig,
+        trans_enc_cfgs: Tuple[NaFlexVitCfg, NaFlexVitCfgAdpoted],
+        trans_dec_cfgs: Optional[Tuple[NaFlexVitCfg, NaFlexVitCfgAdpoted]] = None,
+    ):
+        # Set cnn_cfg before calling super().__init__
+        self.cnn_cfg = cnn_cfg
+        super().__init__(self.cnn_cfg)
+        self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
+        self._build_transformer(cnn_cfg, trans_enc_cfgs, trans_dec_cfgs)
+
+    def _build_transformer(self, cnn_cfg, trans_enc_cfgs, trans_dec_cfgs=None):
+        # cnn_cfg is already set as self.cnn_cfg in __init__
+        self.trans_enc_cfg1, self.trans_enc_cfg2 = (
+            trans_enc_cfgs[0],
+            trans_enc_cfgs[1],
+        )
+        # Transformer Encoder and Decoder
+        self.semantic_enc_transformer = Transformer(
+            self.trans_enc_cfg1, self.trans_enc_cfg2
+        )
+        self.semantic_enc_transformer.set_grad_checkpointing(self.grad_checkpointing)
+
+        self.semantic_transformer_dec = None
+        if trans_dec_cfgs is not None:
+            self.trans_dec_cfg1, self.trans_dec_cfg2 = trans_dec_cfgs
+            self.semantic_transformer_dec = Transformer(
+                self.trans_dec_cfg1, self.trans_dec_cfg2
+            )
+            self.semantic_transformer_dec.set_grad_checkpointing(
+                self.grad_checkpointing
+            )
+
+    def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
+        """Init the model from the pretrained only CNN weights."""
+        weights = accelerate.utils.load_state_dict(uni_tokenizer_path)
+
+        # Directly load all weights if specified
+        if directly_load:
+            missing_ks, unexp_ks = load_weights_with_shape_check(
+                self, weights, load_strategy="search"
+            )
+            if len(missing_ks) > 0 or len(unexp_ks) > 0:
+                logger.warning(
+                    f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}"
+                )
+            logger.info(f"Finished directly loading pretrained weights.")
+            return
+
+        # Filter out the cnn and transformer's keys
+        cnn_enc_ws, cnn_dec_ws, trans_ws = {}, {}, {}
+        for k, v in weights.items():
+            if k.startswith("encoder"):
+                cnn_enc_ws[k[8:]] = v
+            if k.startswith("decoder"):
+                cnn_dec_ws[k[8:]] = v
+            elif k.startswith("semantic_enc_transformer"):
+                trans_ws[k] = v
+
+        # Load CNN Cosmos tokenizer weights
+        logger.info(f"Loading CNN Cosmos tokenizer weights ...")
+        missing_k, unexp_k = load_weights_with_shape_check(self.encoder, cnn_enc_ws)
+        if len(missing_k) > 0 or len(unexp_k) > 0:
+            logger.warning(
+                f"CNN Encoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
+            )
+
+        missing_k, unexp_k = load_weights_with_shape_check(self.decoder, cnn_dec_ws)
+        if len(missing_k) > 0 or len(unexp_k) > 0:
+            logger.warning(
+                f"CNN Decoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
+            )
+
+        logger.info(f"Loading semantic Transformer weights ...")
+        # Load Transformer weights
+        if len(trans_ws) != 0:
+            missing_k, unexp_k = self.semantic_enc_transformer.load_state_dict(
+                trans_ws, strict=False
+            )
+            if len(missing_k) > 0 or len(unexp_k) > 0:
+                logger.warning(
+                    f"Transformer Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
+                )
+
+        logger.info(f"Finished loading pretrained weights.")
+
+    def encode(
+        self, x, use_quantizer=None
+    ) -> Union[Tuple[Tensor, Tensor, Union[dict, NamedTuple]], Tensor]:
+        """Encode the image into latent.
+        Output the latent tensor or latent, quantizer loss and loss breakdowns
+        if has a quantizer.
+        """
+        z = self.encoder.encoder(x)
+        z = self.semantic_enc_transformer(z)
+        h = self.encoder.quant_conv(z)
+
+        # Quantization
+        maybe_q_ret = self.apply_quantizer(h, z, use_quantizer)
+        if isinstance(maybe_q_ret, tuple):
+            h, q_loss, loss_breakdown = maybe_q_ret
+            # NOTE: if quantizer is used, the aug z is not applied
+            return h, q_loss, loss_breakdown
+
+        # z augmentions
+        h = self.latent_aug(maybe_q_ret)
+        return h
+
+    def decode(
+        self,
+        h: Union[torch.Tensor, tuple],
+        inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
+        clamp=False,
+    ) -> Union[Tensor, Tuple[Tensor, Tensor, Union[dict, Tensor]]]:
+        """Decode the latent into the corresponding channels image.
+        Output the reconstructed image or recon, quantizer loss and loss breakdowns.
+        """
+        q_loss = loss_breakdown = None
+        if self.quantizer_type is not None and isinstance(h, (tuple, list)):
+            h, q_loss, loss_breakdown = h
+        else:
+            assert torch.is_tensor(h), "z should be the (quantized) latent"
+
+        # Decoder
+        chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
+
+        # Apply semantic transformer decoder if it exists
+        if self.semantic_transformer_dec is not None:
+            h = self.semantic_transformer_dec(h)
+
+        # Decode using the CNN decoder
+        dec = self.decoder(h, chan)  # [b, c, h, w]
+
+        if clamp:
+            dec = dec.clamp(-1, 1)
+        if self.quantizer_type is not None:
+            return dec, q_loss, loss_breakdown
+        else:
+            return dec
+
+    @classmethod
+    @function_config_to_basic_types
+    def create_model(
+        cls,
+        cnn_cfg,
+        trans_enc_cfg1,
+        trans_enc_cfg2,
+        trans_dec_cfg1=None,
+        trans_dec_cfg2=None,
+    ):
+        cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
+        trans_enc_cfg = (
+            dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg1),
+            dataclass_from_dict(NaFlexVitCfgAdpoted, trans_enc_cfg2),
+        )
+        trans_dec_cfg = None
+        if trans_dec_cfg1 is not None and trans_dec_cfg2 is not None:
+            trans_dec_cfg = (
+                dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg1),
+                dataclass_from_dict(NaFlexVitCfgAdpoted, trans_dec_cfg2),
+            )
+
+        return cls(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+
+
+def test_model_forward_backward():
+    """Test the forward and backward pass of the CosmosHybridTokenizer model.
+
+    This function creates a model, tests forward pass in both eval and train modes,
+    and verifies that gradients are computed correctly during backward pass.
+    """
+    # Check if CUDA is available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    if device.type == "cpu":
+        print("Warning: CUDA is not available, running on CPU. This may be slow.")
+    # Create the model with correct configuration structure
+    cnn_cfg = {
+        "model": {
+            "resolution": 256,
+            "in_channels": 3,
+            "z_channels": 512,
+            "channels": 128,  # Base channels
+            "channels_mult": [2, 4, 4],  # Channel multiplier
+            "num_res_blocks": 2,
+            "attn_resolutions": [32],
+            "dropout": 0.0,
+            "spatial_compression": 8,  # Default spatial compression
+            "patch_size": 1,  # Default patch size
+            "block_name": "res_block",  # Default block type
+            "norm_type": "gn",  # Default normalization
+            "norm_groups": 32,  # Default number of groups
+        },
+        "quantizer_type": None,  # No quantizer for basic test
+    }
+
+    trans_enc_cfg1 = {
+        "embed_dim": 512,
+        "depth": 8,
+        "num_heads": 8,
+        "mlp_ratio": 4.0,
+        "qkv_bias": True,
+        "patch_size": 1,  # Force to be 1 as per NaFlexVitCfg
+        "norm_layer": "flashrmsnorm",  # Use Flash RMSNorm for compatibility
+        "pos_embed": "learned",  # Use learned position embeddings
+        "pos_embed_grid_size": (32, 32),  # Grid size for position embedding
+    }
+
+    trans_enc_cfg2 = {
+        "img_size": 32,  # Expected by NaFlexVitCfgAdpoted
+        "z_dim": 512,  # Should match z_channels from transformer
+        "out_chans": 512,  # Output channels
+    }
+
+    model = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg1, trans_enc_cfg2)
+    model = model.to(device)  # Move model to device (CUDA or CPU)
+    model.eval()
+    print("Model created successfully!")
+
+    # Create dummy input data
+    batch_size = 2
+    x = torch.randn(batch_size, 3, 256, 256).to(device)  # Move input to device
+    print(f"Input shape: {x.shape}")
+
+    # Forward pass in eval mode
+    with torch.no_grad():
+        encoded = model.encode(x)
+        if isinstance(encoded, tuple):
+            encoded_tensor, q_loss, loss_breakdown = encoded
+            print(f"Encoded shape: {encoded_tensor.shape}")
+            print(f"Quantizer loss: {q_loss}")
+        else:
+            encoded_tensor = encoded
+            print(f"Encoded shape: {encoded_tensor.shape}")
+            q_loss = None
+
+        # Decode with proper input shape
+        decoded = model.decode(encoded_tensor, x.shape)
+        if isinstance(decoded, tuple):
+            decoded_tensor, dec_q_loss, dec_loss_breakdown = decoded
+            print(f"Decoded shape: {decoded_tensor.shape}")
+        else:
+            decoded_tensor = decoded
+            print(f"Decoded shape: {decoded_tensor.shape}")
+
+    # Test training mode
+    model.train()
+
+    # Forward pass with gradients
+    encoded = model.encode(x)
+    if isinstance(encoded, tuple):
+        encoded_tensor, q_loss, loss_breakdown = encoded
+    else:
+        encoded_tensor = encoded
+        q_loss = None
+
+    decoded = model.decode(encoded_tensor, x.shape)
+    if isinstance(decoded, tuple):
+        decoded_tensor, dec_q_loss, dec_loss_breakdown = decoded
+    else:
+        decoded_tensor = decoded
+
+    # Backward and check the gradients
+    target = torch.randn_like(decoded_tensor)
+    loss = torch.nn.functional.mse_loss(decoded_tensor, target)
+
+    # Add quantizer loss if present
+    if q_loss is not None:
+        loss += q_loss
+
+    loss.backward()
+    print(f"Backward pass completed successfully!")
+    print(f"Total loss: {loss.item()}")
+
+    # Check if gradients are computed
+    gradient_count = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.grad is not None:
+                has_gradients = True
+                gradient_count += 1
+            else:
+                print(f"Parameter {name} has no gradient!")
+
+    print(f"Total parameters with gradients: {gradient_count}")
+
+    return loss.item()
+
+
+if __name__ == "__main__":
+    """
+    python -m src.stage1.cosmos.cosmos_hybrid
+    """
+    test_model_forward_backward()

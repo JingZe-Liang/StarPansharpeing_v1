@@ -127,7 +127,7 @@ class HADDataset(Dataset):
         train_ratio=1,
         norm_type: str = "img",
         scale: float = 1.0,  # 0.1,
-        to_neg_1_1=True,
+        to_neg_1_1=False,
     ):
         self.dataset_path = dataset_path
         self.mask_class = mask_class
@@ -196,7 +196,7 @@ class HADDataset(Dataset):
             paste = paste[:, :, : self.channel]
             # paste = (paste - np.min(paste)) / (np.max(paste) - np.min(paste)) * 2 - 1
             # paste = paste * 0.1
-            paste = self.normlize(paste)
+            paste = self.normalize(paste)
             paste = self.transform(paste)
             x_m = mask * x + (1 - mask) * paste
         elif self.mask_class == "image":
@@ -312,6 +312,55 @@ class HADDataset(Dataset):
 
         return train_list, paste_list
 
+    
+    @classmethod
+    def create_dataloader(
+        cls,
+        dataset_path="data/Downstreams/HAD/HAD100",
+        sensor="aviris_ng",
+        mask_class="zero",
+        resize=64,
+        start_channel=0,
+        channel=50,
+        train_ratio=1,
+        norm_type: str = "img",
+        scale: float = 1.0,  # 0.1,
+        to_neg_1_1=False,
+        **loader_kwargs,
+    ):
+        # Set default DataLoader parameters if not provided
+        default_loader_kwargs = {
+            'batch_size': 16,
+            'shuffle': True,
+            'num_workers': 4,
+            'pin_memory': True,
+            'drop_last': True
+        }
+
+        # Update with user-provided kwargs
+        default_loader_kwargs.update(loader_kwargs)
+
+        # Create dataset instance with provided parameters
+        dataset = cls(
+            dataset_path=dataset_path,
+            sensor=sensor,
+            mask_class=mask_class,
+            resize=resize,
+            start_channel=start_channel,
+            channel=channel,
+            train_ratio=train_ratio,
+            norm_type=norm_type,
+            scale=scale,
+            to_neg_1_1=to_neg_1_1
+        )
+
+        # Create dataloader
+        dataloader = torch.utils.data.DataLoader(
+            dataset, **default_loader_kwargs
+        )
+
+        return dataset, dataloader
+
 
 class HADTestDataset(Dataset):
     def __init__(self, dataset_path="./", resize=64, start_channel=0, channel=100):
@@ -367,6 +416,58 @@ class HADTestDataset(Dataset):
         gt_img = [os.path.join(gt_dir, img_name + ".png") for img_name in img_name_list]
         assert len(test_img) == len(gt_img), "number of test img and gt should be same"
         return test_img, gt_img
+
+    @classmethod
+    def create_loader(cls, dataset_path="./", resize=64, start_channel=0, channel=100, **loader_kwargs):
+        """
+        Create a complete dataset and dataloader for HAD100 anomaly detection testing.
+
+        Parameters
+        ----------
+        dataset_path : str
+            Path to the HAD100 dataset
+        resize : int
+            Resize images to this size
+        start_channel : int
+            Starting channel index
+        channel : int
+            Number of spectral channels to use
+        **loader_kwargs
+            Additional arguments for DataLoader (batch_size, shuffle, num_workers, etc.)
+
+        Returns
+        -------
+        dataset : HADTestDataset
+            The created dataset instance
+        dataloader : torch.utils.data.DataLoader
+            The created dataloader instance
+        """
+        # Set default DataLoader parameters if not provided (based on train.py defaults)
+        default_loader_kwargs = {
+            'batch_size': 1,
+            'shuffle': False,
+            'num_workers': 4,
+            'pin_memory': True,
+            'drop_last': False
+        }
+
+        # Update with user-provided kwargs
+        default_loader_kwargs.update(loader_kwargs)
+
+        # Create dataset instance with provided parameters
+        dataset = cls(
+            dataset_path=dataset_path,
+            resize=resize,
+            start_channel=start_channel,
+            channel=channel
+        )
+
+        # Create dataloader
+        dataloader = torch.utils.data.DataLoader(
+            dataset, **default_loader_kwargs
+        )
+
+        return dataset, dataloader
 
 
 def test_loader():

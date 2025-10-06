@@ -999,8 +999,14 @@ class UnmixingTrainer:
         # Print out metrics
         _log_losses = self.format_log(loss_val)
         _log_metrics = self.format_log(metrics)
+        self.log_msg(
+            "\n\n===================== Unmixing Validation ====================="
+        )
         self.log_msg(f"[Val Unmixing Loss]: {_log_losses}")
         self.log_msg(f"[Val Unmixing Metrics]: {_log_metrics}")
+        self.log_msg(
+            "===============================================================\n\n"
+        )
 
         assert val_out is not None
         if self.accelerator.is_main_process:

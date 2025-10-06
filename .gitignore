@@ -118,6 +118,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+env.toml
 
 # Spyder project settings
 .spyderproject
@@ -149,12 +150,13 @@ runs/
 tmp/
 .ruff_cache/
 .vscode/
-.claude/
-.continue/
+
 *.png
 *.jpg
 **.pt
 **.pth
+
+# weight dirs
 src/stage2/generative/tools/conditions/caption/weights/*
 src/stage2/generative/tools/conditions/ckpts
 src/stage1/utilities/losses/dinov3/weights/*
@@ -162,10 +164,15 @@ src/stage1/utilities/losses/dinov3/weights
 src/stage1/sana_dcae/pretrained/*
 src/stage1/sana_dcae/pretrained
 src/stage2/generative/tools/conditions/caption/Qwen25_VL
+src/stage2/generative/tools/conditions/caption/caption_weights
+
+# AI related
 QWEN.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/
 
 compressed_output/
-env.toml
 
 # history
 .history/

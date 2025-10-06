@@ -2,6 +2,7 @@ import inspect
 import random
 import warnings
 from collections import OrderedDict, namedtuple
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from itertools import chain
 from pathlib import Path
@@ -312,7 +313,7 @@ class ContinuousTokenizerConfig:
     random_quant: float = 0.0
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
-    norm_in_quant_conv = False
+    norm_in_quant_conv: bool = False
     # loading related
     enc_path: Optional[str] = ""
     dec_path: Optional[str] = ""
@@ -416,7 +417,9 @@ class ContinuousImageTokenizer(nn.Module):
                 f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}",
                 "debug",
             )
-            enc_jit, dec_jit = self.load_pretrained(enc_path, dec_path, tokenizer_cfg)  # type: ignore
+            enc_jit, dec_jit = self.load_pretrained(
+                enc_path=enc_path, dec_path=dec_path, tokenizer_cfg=tokenizer_cfg
+            )  # type: ignore
 
             # split the encoder and decoder
             encoder, quant_conv = enc_jit[0], enc_jit[1]
@@ -440,9 +443,34 @@ class ContinuousImageTokenizer(nn.Module):
                     assert enc_path == "" and dec_path == "", (
                         "norm_in_quant_conv is not supported for pretrained settings, train it from scratch"
                     )
-                self.load_pretrained(
-                    enc_path, dec_path, uni_tokenizer_path=uni_tokenizer_path
+
+                # loading may slow, profile it.
+                verbose = False
+                profile = False
+                profiler = (
+                    torch.profiler.profile(
+                        activities=[
+                            torch.profiler.ProfilerActivity.CPU,
+                        ],
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=True,
+                    )
+                    if profile
+                    else nullcontext()
                 )
+                with profiler:
+                    self.load_pretrained(
+                        enc_path=enc_path,
+                        dec_path=dec_path,
+                        uni_tokenizer_path=uni_tokenizer_path,
+                    )
+                if verbose and isinstance(profiler, torch.profiler.profile):
+                    log_print(
+                        prof.key_averages().table(
+                            sort_by="self_cpu_time_total", row_limit=10
+                        )
+                    )
 
         # token channel drop
         self.use_channel_drop = cfg.use_channel_drop
@@ -547,12 +575,14 @@ class ContinuousImageTokenizer(nn.Module):
         if self._use_repa_loss:
             if self._vf_on_z_or_module == "module":
                 self._repa_proj = build_mlp(
-                    512,
+                    512,  # rely on the module channels
                     self._dino_feature_dim,
                     self._dino_feature_dim,
                 )
             else:
                 self._repa_proj = build_mlp(
+                    # if is z: rely on the z channels
+                    # else is the latent channel proj.
                     self.model_cfg.z_channels
                     if self.cfg.cache_type == "z"
                     else self.model_cfg.latent_channels,

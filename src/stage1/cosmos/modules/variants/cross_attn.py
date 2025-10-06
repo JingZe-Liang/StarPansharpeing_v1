@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Callable
 
 import torch
@@ -5,6 +6,7 @@ import torch.nn as nn
 from jaxtyping import Float
 from timm.layers import create_norm
 from torch import Tensor
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
@@ -81,6 +83,12 @@ create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm
 
 
 class CrossAttention(nn.Module):
+    config = SimpleNamespace(
+        {
+            "_attn_implementation": "flash_attention_2",
+        }
+    )  # for flash_attention_2 config
+
     def __init__(
         self,
         dim: int,
@@ -93,6 +101,7 @@ class CrossAttention(nn.Module):
         proj_drop=0.0,
         use_gate=True,
         norm_eps=1e-6,
+        attn_implem="sdpa",
     ):
         super().__init__()
         self.ctx_dim = ctx_dim if ctx_dim is not None else dim
@@ -129,7 +138,9 @@ class CrossAttention(nn.Module):
         self.attn_drop = attn_drop
 
         self.is_causal = False
-        self._attn_implementation = "sdpa"
+        self._attn_implementation = (
+            attn_implem  # flash_attention_2, spda, flex_attention
+        )
 
     def _qkv_proj(
         self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None
@@ -158,18 +169,27 @@ class CrossAttention(nn.Module):
 
         return q_states, k_states, v_states, gate
 
-    def _attention(self, q, k, v, mask=None):
-        attn_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
-        attn_out, attn_weights = attn_interface(
-            self,
-            q,
-            k,
-            v,
-            mask,
-            dropout_p=self.attn_drop if self.training else 0.0,
-            is_causal=self.is_causal,
-            scaling=self.scale,
-        )
+    def _attention(self, q, k, v, mask: Tensor | BlockMask | None = None):
+        if self._attn_implementation == "flex_attention":
+            # not compiled: transformers == 4.57.0
+            assert isinstance(mask, BlockMask) or mask is None, (
+                f"mask must be BlockMask or None, got {type(mask)}"
+            )
+            attn_out, attn_weights = flex_attention(
+                q, k, v, block_mask=mask, return_lse=False, enable_gqa=True
+            )
+        else:
+            attn_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
+            attn_out, attn_weights = attn_interface(
+                self,
+                q,
+                k,
+                v,
+                mask,
+                dropout=self.attn_drop if self.training else 0.0,
+                is_causal=self.is_causal,
+                scaling=self.scale,
+            )
         return attn_out, attn_weights
 
     def forward(
@@ -179,7 +199,7 @@ class CrossAttention(nn.Module):
         rope: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]  # callable rope class
         | tuple[Tensor, Tensor]  # tuple of cos, sin
         | None = None,
-        mask: Tensor | None = None,
+        mask: Tensor | BlockMask | None = None,
     ):
         B, N1, C = x.shape
         q_hidden_shape = (B, N1)

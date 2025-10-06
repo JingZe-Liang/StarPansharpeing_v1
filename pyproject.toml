@@ -32,19 +32,60 @@ dependencies = [
     "natten",                      # Optional
     "lazy_loader",
     "rich_argparse",
-    "omegaconf",
     "hydra-core",
     "segmentation_models_pytorch",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0", "ty>=0.0.1"]
+dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0", "ty>=0.0.1", "yamllint>=1.35.0"]
 
 [project.scripts]
 wids-index = "data.wids_index:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.yaml]
+# YAML formatting and validation configuration
+
+# yamllint configuration
+[tool.yamllint]
+extend = false
+ignore = ["data/**", "data_local/**", ".git/**", "**/__pycache__/**"]
+
+[tool.yamllint.rules]
+# Line length rule
+line_length = { max = 120, allow_non_breakable_inline_mappings = true }
+# Braces and brackets
+braces = { min_spaces_inside = 0, max_spaces_inside = 1 }
+brackets = { min_spaces_inside = 0, max_spaces_inside = 1 }
+# Indentation
+indentation = { spaces = 2, indent_sequences = true, check_multi_line_lines = false }
+# Comments
+comments = { min_spaces_from_content = 1, ignore_shebangs = true, require_starting_space = false }
+# Empty values
+empty_values = { forbid_in_block_mappings = true }
+# Hyphens
+hyphens = { max_spaces_after = 1 }
+# Key duplication check
+key_duplicates = { forbid = true }
+# New line at end of file
+new_line_at_end_of_file = { enable = true }
+# New lines
+new_lines = { type = "unix" }
+# Trailing spaces
+trailing_spaces = { enable = true }
+# Truthy values
+truthy = { allowed_values = [
+    "true",
+    "false",
+    "on",
+    "off",
+    "yes",
+    "no",
+], check_keys = true }
+# Document start
+document-start = { present = false }
 
 [tool.ruff]
 target-version = "py312"

@@ -4,12 +4,18 @@ from typing import List, Optional, Tuple, Union
 import einops
 import torch
 import torch.nn as nn
+from loguru import logger
 from timm.layers.create_norm import get_norm_layer
 from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
+from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed_sincos import build_fourier_pos_embed
 from timm.models.naflexvit import NaFlexEmbeds, NaFlexVit
 
-from src.utilities.config_utils import function_config_to_basic_types
+from src.utilities.config_utils import (
+    dataclass_from_dict,
+    function_config_to_basic_types,
+)
 
 from .norm import *  # register custom norms
 
@@ -24,7 +30,7 @@ class NaFlexVitCfg:
     """
 
     # Architecture parameters
-    patch_size: Union[int, Tuple[int, int]] = 1  # force to be 1
+    patch_size: int = 1  # force to be 1
     embed_dim: int = 768
     depth: int = 12
     num_heads: int = 12
@@ -130,10 +136,15 @@ class NaFlexVitCfgAdpoted:
     """
 
     img_size: int = 32
-    in_chans: int = 16
     z_dim: int = 256
     out_chans: int = 16
     out_2d_latent: bool = True
+    unpatch_size: Optional[int] = None  # if None, use patch_size
+    compile_model: bool = False
+
+    # for cross-attention
+    cross_attn_tokens: int = -1
+    cross_attn_ratio: float = 0.5
 
 
 class Transformer(NaFlexVit):
@@ -142,11 +153,18 @@ class Transformer(NaFlexVit):
         self.cfg, self.cfg2 = cfg, cfg2
         self._build_head(cfg, cfg2)
 
+        if cfg2.compile_model:
+            logger.info(f"[Naflex Transformer]: Compiling model ...")
+            for i in range(len(self.blocks)):
+                self.blocks[i] = torch.compile(self.blocks[i])
+            self.head = torch.compile(self.head)
+
     def _build_head(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
+        self.unpatch_size = cfg2.unpatch_size or cfg.patch_size
         self.head = nn.Sequential(
             norm_layer(cfg.embed_dim),
-            nn.Linear(cfg.embed_dim, cfg2.out_chans * cfg.patch_size**2, bias=True),
+            nn.Linear(cfg.embed_dim, cfg2.out_chans * self.unpatch_size**2, bias=True),
         )
 
     def unpatchify(self, x: torch.Tensor, hw=None):
@@ -155,7 +173,7 @@ class Transformer(NaFlexVit):
         imgs: (N, H, W, C)
         """
         c = self.cfg2.out_chans
-        p = self.cfg.patch_size
+        p = self.unpatch_size
         if hw is None:
             h = w = int(x.shape[1] ** 0.5)
             assert h * w == x.shape[1]
@@ -183,14 +201,14 @@ class Transformer(NaFlexVit):
     @function_config_to_basic_types
     @staticmethod
     def create_model(cfg1_kwargs: dict = {}, cfg2_kwargs: dict = {}):
-        cfg1 = NaFlexVitCfg(**cfg1_kwargs)
-        cfg2 = NaFlexVitCfgAdpoted(**cfg2_kwargs)
+        cfg1 = dataclass_from_dict(NaFlexVitCfg, cfg1_kwargs)
+        cfg2 = dataclass_from_dict(NaFlexVitCfgAdpoted, cfg2_kwargs)
         model = Transformer(cfg1, cfg2)
         return model
 
 
 def test_naflex_vit_pansharpening_model():
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
     cfg = NaFlexVitCfg(
         embed_dim=512,
         depth=8,
@@ -199,11 +217,12 @@ def test_naflex_vit_pansharpening_model():
         pos_embed="learned",
         pos_embed_grid_size=(32, 32),
         reg_tokens=8,
+        patch_size=2,
     )
     cfg2 = NaFlexVitCfgAdpoted(
         img_size=32,
-        in_chans=16,
         out_chans=256,
+        unpatch_size=1,
     )
 
     x = torch.randn(1, 256, 32, 32).cuda()

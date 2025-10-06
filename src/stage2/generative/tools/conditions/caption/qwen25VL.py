@@ -23,14 +23,16 @@ max_tokens = 300
 default_prompt = f"""
 You will act as a remote sensing analyst to describe the content of the image.
 Please provide a detailed description of the image in 1 to 3 sentences, including the following aspects:
-1. The general content of the image, such as the type of scene (e.g., urban, rural, forest, water body, etc.).
+1. The general content of the remote sensing image, such as the type of scene (e.g., urban, rural, forest, water body, etc.).
 2. The specific objects or features present in the image, such as buildings, roads, vegetation, water bodies, etc.
 3. The spatial distribution of the objects or features, such as their arrangement, placements, density, and patterns.
 4. Any other relevant information that can help understand the image, such as the time of capture, weather conditions, or any notable geographical feature or events.
 Please ensure that your description is clear, concise, and informative, the total words should **not exceed {max_tokens}**.
+The image provided to you is a remote sensing image from a satellite. NOT a normal photo. the photo is taken from a top-down view.
 Do not use the markdown format.
 Do not use the bullet points or numbered lists.
-Do not include any personal opinions or subjective views.
+All reponse and answers must be in English, NO other languages.
+Do not include any personal opinions or subjective views. 
 """
 
 
@@ -46,9 +48,9 @@ def img_to_base64(img: np.ndarray | str | Image.Image) -> str:
         img.save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-    assert (
-        img.ndim == 3 and img.dtype == np.uint8
-    ), "Image must be a 3D numpy array with dtype uint8."
+    assert img.ndim == 3 and img.dtype == np.uint8, (
+        "Image must be a 3D numpy array with dtype uint8."
+    )
     img_bytes = io.BytesIO()
     Image.fromarray(img).save(img_bytes, format="PNG")
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
@@ -64,9 +66,9 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
     if denorm:
         img = (img * 255).astype(np.uint8)
 
-    assert (
-        img.ndim == 3 and img.dtype == np.uint8
-    ), "Image must be a 3D numpy array with dtype uint8."
+    assert img.ndim == 3 and img.dtype == np.uint8, (
+        "Image must be a 3D numpy array with dtype uint8."
+    )
 
     return Image.fromarray(img).convert("RGB")
 
@@ -223,7 +225,7 @@ def get_qwen25vl_max_api(max_current_tasks=5):
             content = response.choices[0].message.content
             return content if content is not None else ""
         except Exception as e:
-            log(f"Error in image_captioning: {e}", level='error')
+            log(f"Error in image_captioning: {e}", level="error")
             return ""
 
     semaphore = asyncio.Semaphore(max_current_tasks)
@@ -246,7 +248,9 @@ def get_qwen25vl_max_api(max_current_tasks=5):
                 if isinstance(single_img, np.ndarray):
                     img_list.append(array_img_to_pil(single_img))
                 elif isinstance(single_img, str):
-                    assert os.path.exists(single_img), f"Image path {single_img} does not exist."
+                    assert os.path.exists(single_img), (
+                        f"Image path {single_img} does not exist."
+                    )
                     img_list.append(single_img)
                 elif isinstance(single_img, Image.Image):
                     img_list.append(single_img)
@@ -304,9 +308,9 @@ if __name__ == "__main__":
         end_time = time.time()
 
         for i, res in enumerate(results):
-            print(f"Image {i+1} result: {res}")
+            print(f"Image {i + 1} result: {res}")
         print(f"Time taken for 3 images: {end_time - start_time:.2f} seconds")
-        print(f"Average time per image: {(end_time - start_time)/3:.2f} seconds")
+        print(f"Average time per image: {(end_time - start_time) / 3:.2f} seconds")
     else:
         print(f"Test image not found: {img_path}")
         print("Please provide a valid image path for testing.")

@@ -1218,7 +1218,7 @@ class CosmosHyperspectralTokenizerTrainer:
     def gradient_check(self, model: nn.Module):
         # check nan gradient
         if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
+            self.train_cfg, "grad_check", False
         ):
             for name, param in model.named_parameters():
                 if param.requires_grad:
@@ -2027,7 +2027,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "cosmos_hybrid_f8c16p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2042,6 +2042,9 @@ _configs_dict = {
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # psd kl vae
     "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
+    # hybrid ae
+    "cosmos_hybrid_f8c16p1": "hybrid_cosmos_tokenizer_f8c16p1",
+    "cosmos_hybrid_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized
