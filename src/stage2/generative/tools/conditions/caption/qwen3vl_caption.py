@@ -65,7 +65,7 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
         img = (img * 255).astype(np.uint8)
 
     assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
+        f"Image must be a 3D numpy array with dtype uint8, but got shape {img.shape} and dtype {img.dtype}."
     )
 
     return Image.fromarray(img).convert("RGB")
@@ -123,7 +123,7 @@ def get_qwen3vl_model(
         """
         if isinstance(img, np.ndarray):
             # to PIL Image
-            img = array_img_to_pil(img)
+            img = array_img_to_pil(img, denorm=True)
         elif isinstance(img, str):
             assert os.path.exists(img), f"Image path {img} does not exist."
         else:
@@ -228,7 +228,7 @@ def main_process_dataloader_img(
         prompt=default_prompt,
         encode=False,
         device=device,
-        stream=False,
+        stream=True,
     )
     # 1, 2, 4, 7
     # save caption to file
@@ -237,6 +237,7 @@ def main_process_dataloader_img(
     for res in tqdm(
         captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels),
         desc="Captioning ...",
+        disable=True
     ):
         img_id = res["id"][0]
         caption = res["caption"]

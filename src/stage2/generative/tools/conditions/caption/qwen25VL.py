@@ -4,6 +4,7 @@ import io
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import toml
@@ -15,6 +16,7 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, Text
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
 
 from src.utilities.logging import log
+from src.utilities.train_utils.visualization import get_rgb_image
 
 setattr(Qwen2_5_VLVisionAttention, "is_causal", False)
 type InputImageType = str | np.ndarray | Image.Image
@@ -73,7 +75,7 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
     return Image.fromarray(img).convert("RGB")
 
 
-local_qwen_ckpt = "src/stage2/generative/tools/conditions/caption/weights/Qwen2.5VL"
+local_qwen_ckpt = "/Data/ZiHanCao/checkpoints/Qwen/Qwen2___5-VL-7B-Instruct"
 remote_qwen_ckpt = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 
@@ -89,10 +91,6 @@ def get_qwen25vl_model(
     # model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     #     "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
     # )
-
-    from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import (
-        gemma2_caption_encode,
-    )
 
     # We recommend enabling flash_attention_2 for better acceleration and memory saving, especially in multi-image and video scenarios.
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -115,6 +113,10 @@ def get_qwen25vl_model(
 
     text_encode_func = None
     if encode:
+        from src.stage2.generative.tools.conditions.caption.gemma2_caption_encode import (
+            gemma2_caption_encode,
+        )
+
         text_encode_func = gemma2_caption_encode(device=device, return_truncated=True)
         print(f"Loaded Gemma2 text encoder from {ckpt}")
 
@@ -122,7 +124,7 @@ def get_qwen25vl_model(
         if isinstance(img, np.ndarray):
             # img = array_img_to_base64(img)
             # to PIL Image
-            img = array_img_to_pil(img)
+            img = array_img_to_pil(img, denorm=True)
         elif isinstance(img, str):
             assert os.path.exists(img), f"Image path {img} does not exist."
         else:
@@ -192,6 +194,112 @@ def get_qwen25vl_model(
         }
 
     return model, process_img
+
+
+def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "mean"):
+    """
+    Process images from a dataloader and generate captions.
+
+    Args:
+        dl: Dataloader that yields samples with 'img' and '__key__' fields
+        process_img: Function to process images and generate captions
+        rgb_channels: Channel selection for RGB conversion
+
+    Yields:
+        dict: Dictionary containing image id, image data, and caption results
+    """
+
+    for sample in dl:
+        img = sample["img"]
+        assert img.ndim == 4, f"Image batch must be 4D numpy array, got {img.ndim}D."
+        assert img.shape[0] == 1, (
+            f"Only support batch size 1 for captioning, got {img.shape[0]}."
+        )
+        img_id = sample["__key__"]
+
+        # to RGB
+        if img.ndim == 4 and img.shape[1] == 3:
+            img_rgb = img
+        else:
+            img_rgb = get_rgb_image(
+                img, rgb_channels=rgb_channels, use_linstretch=True
+            )  # (bs, c, h, w)
+        img = img_rgb[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3) numpy array
+
+        results = process_img(img)
+
+        yield {
+            "id": img_id,
+            "image": img,
+            "caption": results["caption"],
+            "caption_feature": results["caption_feature"],
+            "attention_mask": results["attention_mask"],
+            "valid_length": results["valid_length"],
+        }
+
+
+def main_process_dataloader_img(
+    dl,
+    rgb_channels: list[int] | str = "mean",
+    save_dir: str = "tmp/captions_qwen25vl",
+    device="cuda",
+    file_type: str = "jsonl",
+):
+    """
+    Main function to process images from a dataloader and save captions.
+
+    Args:
+        dl: Dataloader that yields samples with 'img' and '__key__' fields
+        rgb_channels: Channel selection for RGB conversion
+        save_dir: Directory to save caption files
+        device: Device to run the model on
+        file_type: File type to save captions ('txt' or 'jsonl')
+    """
+    import os
+
+    try:
+        import jsonlines as jsl
+    except ImportError:
+        raise ImportError(
+            "jsonlines package is required for saving captions in jsonl format"
+        )
+
+    from loguru import logger
+    from tqdm import tqdm
+
+    model, process_img = get_qwen25vl_model(
+        ckpt=local_qwen_ckpt,
+        max_tokens=max_tokens,
+        prompt=default_prompt,
+        encode=False,
+        device=device,
+        stream=True,
+    )
+
+    # Create save directory
+    os.makedirs(save_dir, exist_ok=True)
+
+    for res in tqdm(
+        captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels),
+        desc="Captioning ...",
+        disable=True,
+    ):
+        img_id = res["id"][0] if isinstance(res["id"], list) else res["id"]
+        caption = res["caption"]
+        logger.info(f"Image ID: {img_id}\nCaption: {caption}\n" + "-" * 60)
+
+        if file_type == "txt":
+            file_path = os.path.join(save_dir, f"{img_id}.txt")
+            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(file_path, "w") as f:
+                f.write(caption)
+        elif file_type == "jsonl":
+            file_path = os.path.join(save_dir, f"{img_id}.jsonl")
+            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+            with jsl.open(file_path, mode="w") as writer:
+                writer.write({"id": img_id, "caption": caption})
+        else:
+            raise ValueError(f"Invalid file type: {file_type}")
 
 
 def get_qwen25vl_max_api(max_current_tasks=5):
@@ -282,35 +390,32 @@ if __name__ == "__main__":
 
     import PIL.Image as Image
 
-    # Initialize the API
-    process_img = get_qwen25vl_max_api()
+    # Test dataloader functionality if possible
+    from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 
-    # Test with single image
-    img_path = "data/YuZhongDataset/OpenEarthMap/OpenEarthMap_wo_xBD/abancay/images/abancay_1.tif"
-    if os.path.exists(img_path):
-        img = Image.open(img_path).convert("RGB")
-        img_array = np.array(img)
+    # Test with a sample dataloader
+    print("\nTesting dataloader functionality...")
+    tar_file = "data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"
+    if os.path.exists(tar_file):
+        _, dl = get_hyperspectral_dataloaders(
+            wds_paths=tar_file,
+            batch_size=1,
+            num_workers=1,
+            to_neg_1_1=False,
+            permute=True,
+            resample=False,
+            per_channel_norm=False,
+        )
 
-        print("Testing single image...")
-        start_time = time.time()
-        result = process_img(img_array)
-        end_time = time.time()
-        print(f"Single image result: {result}")
-        print(f"Time taken: {end_time - start_time:.2f} seconds")
-
-        # Test with multiple images (concurrent processing)
-        print("\nTesting multiple images (concurrent)...")
-        # Explicitly type the list to help type checker
-        images: list[np.ndarray] = [img_array] * 3  # Same image 3 times for testing
-
-        start_time = time.time()
-        results = process_img(images)
-        end_time = time.time()
-
-        for i, res in enumerate(results):
-            print(f"Image {i + 1} result: {res}")
-        print(f"Time taken for 3 images: {end_time - start_time:.2f} seconds")
-        print(f"Average time per image: {(end_time - start_time) / 3:.2f} seconds")
+        print("Successfully created dataloader. Testing captioning...")
+        # Use the main_process_dataloader_img function to process the dataloader
+        main_process_dataloader_img(
+            dl,
+            rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
+            save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions/",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            file_type="jsonl",
+        )
+        print("Dataloader captioning test completed.")
     else:
-        print(f"Test image not found: {img_path}")
-        print("Please provide a valid image path for testing.")
+        print(f"Sample tar file not found: {tar_file}")

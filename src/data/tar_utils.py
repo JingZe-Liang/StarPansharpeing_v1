@@ -7,13 +7,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
-from natsort import natsorted
 import numpy as np
 import PIL
 import PIL.Image
 import tifffile
 import webdataset as wds
-from skimage.io import imread
+from natsort import natsorted
 from tqdm import tqdm
 
 from src.utilities.logging import log_print
@@ -426,7 +425,7 @@ def get_content_from_member(tar_reader: tarfile.TarFile, member: tarfile.TarInfo
         return None
 
 
-def get_tar_member_iter(tar_reader: tarfile.TarFile, sort=True):
+def get_tar_member_iter(tar_reader: tarfile.TarFile, sort=False):
     if not sort:
         while True:
             member = tar_reader.next()
@@ -475,14 +474,20 @@ def create_tar_info(member_name: str, member_content: bytes, other_kwargs: dict 
 
 def write_tar_file(
     tar_writer: tarfile.TarFile,
-    file: tarfile.TarInfo | str | Path,
-    content: bytes,
+    file: tarfile.TarInfo | str | Path | None = None,
+    content: bytes | None = None,
+    arcname: str | None = None,
 ):
+    assert file is not None or content is not None, (
+        "Either file or content must be provided."
+    )
     if isinstance(file, tarfile.TarInfo):
+        if arcname is not None:
+            file.name = arcname
         if content is not None:
             tar_writer.addfile(file, io.BytesIO(content))
     elif isinstance(file, (str, Path)):
-        tar_writer.add(file)
+        tar_writer.add(file, arcname=arcname)
     else:
         raise ValueError(f"Invalid file type: {type(file)}")
 
