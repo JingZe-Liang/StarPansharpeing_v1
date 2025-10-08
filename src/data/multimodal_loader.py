@@ -226,6 +226,8 @@ class MultimodalityDataloader:
                     modality_sample.update(self._extract_keys(sample, ext_key, None))
                 elif self.getitem_type == GetitemType.EXTRACTED:
                     modality_sample[name] = self._extract_without_extension(sample)
+                elif self.getitem_type == GetitemType.STRUCTURED:
+                    modality_sample[name] = self._extract_without_extension(sample)
                 else:
                     raise ValueError(
                         f"Invalid getitem_type {self.getitem_type}, must be 'flat', 'extracted' or 'structured'"
@@ -382,7 +384,7 @@ class MultimodalityDataloader:
         return_classed_dict: bool | None = None,
         extracted_keys: list[list[tuple[str, str]]] | None = None,
         batch_size: int = 32,
-        num_workers: int = 1,
+        num_workers: int = 0,
         shuffle_size: int = 100,
         drop_last: bool = False,
         **kwargs,

@@ -486,6 +486,8 @@ def write_tar_file(
             file.name = arcname
         if content is not None:
             tar_writer.addfile(file, io.BytesIO(content))
+        else:
+            log_print(f"No content provided for {file}", level="warning")
     elif isinstance(file, (str, Path)):
         tar_writer.add(file, arcname=arcname)
     else:

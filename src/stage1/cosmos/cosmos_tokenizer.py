@@ -396,7 +396,7 @@ class ContinuousImageTokenizer(nn.Module):
         dec_path = cfg.dec_path
         uni_tokenizer_path = cfg.uni_path
 
-        self.register_buffer("dummy_param", torch.tensor(0))
+        self.register_buffer("dummy_param", torch.tensor(0), persistent=False)
 
         # 4. Encoder and Decoder
         # pretrained encoder and decoder
@@ -431,7 +431,7 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             # encoder and decoder
             # not combine the encoder, for FSDP wrap
-            encoder, decoder = self._build_encoder_decoder(model_cfg)
+            encoder, decoder = self._build_encoder_decoder(cfg, model_cfg)
             quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
 
             self.encoder = self.encoder_jit(encoder, quant_conv)
@@ -467,7 +467,7 @@ class ContinuousImageTokenizer(nn.Module):
                     )
                 if verbose and isinstance(profiler, torch.profiler.profile):
                     log_print(
-                        prof.key_averages().table(
+                        profiler.key_averages().table(
                             sort_by="self_cpu_time_total", row_limit=10
                         )
                     )
@@ -490,7 +490,7 @@ class ContinuousImageTokenizer(nn.Module):
             f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}."
         )
 
-    def _build_encoder_decoder(self, model_cfg: EncoderDecoderConfig):
+    def _build_encoder_decoder(self, cfg, model_cfg: EncoderDecoderConfig):
         model_kwargs = asdict(model_cfg)
         encoder = Encoder(**model_kwargs)
         decoder = Decoder(**model_kwargs)

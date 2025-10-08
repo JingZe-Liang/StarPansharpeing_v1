@@ -243,7 +243,7 @@ def load_repa_dino_v3_model(
 
     assert weight_path is not None, f"{weight_path=} does not exists"
     log_print(
-        f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path} "
+        f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}."
     )
     assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
     sys.path.append(str(repo_dir))

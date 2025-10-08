@@ -388,7 +388,7 @@ def wids_image_decode(
     norm_type: str = "clip_zero_div",
     quantile_clip=1.0,
     mannual_img_min_max=None,
-    _disable_norm=True,
+    _disable_norm=False,
 ) -> Dict[str, Any]:
     def img_process_fn(img, key: str, resize=resize):
         img = img.astype(np.float32)
@@ -420,7 +420,7 @@ def wids_image_decode(
         # Normalize image
         if not _disable_norm:
             img = img.type(torch.float32)  # ensure float32
-            img = norm_img_(
+            img, *_ = norm_img_(
                 img,
                 norm_type=norm_type,
                 per_channel=per_channel,
@@ -522,7 +522,7 @@ def wids_caption_embed_decode(
     caption_json_key: str | None = None
     features_key: str | None = None
     for k in _keys:
-        if "caption" in k and k.endswith((".json", ".txt")):
+        if "caption" in k and k.endswith((".json", ".jsonl", ".txt")):
             caption_json_key = k
         elif "features" in k and k.endswith(".safetensors"):
             features_key = k
@@ -530,30 +530,37 @@ def wids_caption_embed_decode(
     assert caption_json_key is not None or features_key is not None, (
         "Sample must contain either caption JSON or features key."
     )
-    caption_json_key = cast(str, caption_json_key)
-    features_key = cast(str, features_key)
 
     # caption text
-    caption = json_decode_io(sample.pop(caption_json_key).getvalue())
-    assert caption is not None, "Caption JSON decoding failed."
-    sample["caption"] = caption["caption"]
-    sample["valid_length"] = int(caption["valid_length"])
-
-    # features and mask
-    embeds = safetensors_decode_io(
-        sample.pop(features_key).getvalue(), return_dict=True
-    )
-    embeds = cast(dict[str, torch.Tensor], embeds)
-    # pad right
-    cap_f = embeds["caption_feature"].squeeze(0)  # [n, d]
-    if cap_f.shape[0] < max_length:
-        cap_f_pad = torch.nn.functional.pad(
-            cap_f, (0, 0, 0, max_length - cap_f.shape[0]), value=0.0
+    if caption_json_key is not None:
+        caption = json_decode_io(sample.pop(caption_json_key).getvalue())
+        assert caption is not None, "Caption JSON decoding failed."
+        sample["caption"] = caption["caption"]
+        sample["valid_length"] = int(
+            caption.get("valid_length", len(sample["caption"]))
         )
     else:
-        cap_f_pad = cap_f[:, :max_length]
-    sample["caption_feature"] = cap_f_pad  # bfloat16
+        raise ValueError("Captions not found.")
 
+    # features
+    embeds = {}
+    if features_key is not None:
+        embeds = safetensors_decode_io(
+            sample.pop(features_key).getvalue(), return_dict=True
+        )
+        # pad right
+        cap_f = embeds["caption_feature"].squeeze(0)  # [n, d]
+        if cap_f.shape[0] < max_length:
+            cap_f_pad = torch.nn.functional.pad(
+                cap_f, (0, 0, 0, max_length - cap_f.shape[0]), value=0.0
+            )
+        else:
+            cap_f_pad = cap_f[:, :max_length]
+        sample["caption_feature"] = cap_f_pad  # bfloat16
+    else:
+        sample["caption_feature"] = None
+
+    # text mask
     if "attention_mask" in embeds:
         sample["attention_mask"] = embeds["attention_mask"].float()  # [max_length,]
     else:

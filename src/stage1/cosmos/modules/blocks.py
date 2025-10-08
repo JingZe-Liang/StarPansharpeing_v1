@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
-from timm.layers import create_conv2d
+from timm.layers import create_act_layer, create_conv2d
 from timm.layers.drop import DropPath
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
@@ -87,23 +87,23 @@ def get_same_padding(kernel_size: int | tuple[int, ...]):
 
 
 # register activation function here
-REGISTERED_ACT_DICT: dict[str, type | partial] = {
-    "relu": nn.ReLU,
-    "relu6": nn.ReLU6,
-    "hswish": nn.Hardswish,
-    "silu": nn.SiLU,
-    "gelu": partial(nn.GELU, approximate="tanh"),
-}
+# REGISTERED_ACT_DICT: dict[str, type | partial] = {
+#     "relu": nn.ReLU,
+#     "relu6": nn.ReLU6,
+#     "hswish": nn.Hardswish,
+#     "silu": nn.SiLU,
+#     "gelu": partial(nn.GELU, approximate="tanh"),
+# }
 
 
-def build_act(name: str | None, **kwargs) -> Optional[nn.Module]:
-    if name in REGISTERED_ACT_DICT:
-        assert name is not None
-        act_cls = REGISTERED_ACT_DICT[name]
-        kwargs = extract_needed_kwargs(kwargs, act_cls)
-        return act_cls(**kwargs)
-    else:
-        return None
+# def build_act(name: str | None, **kwargs) -> Optional[nn.Module]:
+#     if name in REGISTERED_ACT_DICT:
+#         assert name is not None
+#         act_cls = REGISTERED_ACT_DICT[name]
+#         kwargs = extract_needed_kwargs(kwargs, act_cls)
+#         return act_cls(**kwargs)
+#     else:
+#         return None
 
 
 # * --- Convolutional Layers --- #
@@ -142,7 +142,8 @@ class ConvLayer(nn.Module):
             padding_mode=padding_mode,
         )
         self.norm = Normalize(in_channels=out_channels, norm_type=norm)
-        self.act = build_act(act_func)
+        # self.act = build_act(act_func)
+        self.act = create_act_layer(act_func)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.dropout is not None:
@@ -221,7 +222,8 @@ class ResidualBlock(nn.Module):
         self.pre_norm = pre_norm
         self.main = main
         self.shortcut = shortcut
-        self.post_act = build_act(post_act)
+        # self.post_act = build_act(post_act)
+        self.post_act = create_act_layer(post_act)
 
     @_compile_decorator
     def forward_main(self, x: torch.Tensor) -> torch.Tensor:
@@ -265,7 +267,8 @@ class GLUMBConv(nn.Module):
             round(in_channels * expand_ratio) if mid_channels is None else mid_channels
         )
 
-        self.glu_act = build_act(act_func[1], inplace=False)
+        # self.glu_act = build_act(act_func[1], inplace=False)
+        self.glu_act = create_act_layer(act_func[1], inplace=False)
         self.inverted_conv = ConvLayer(
             in_channels,
             mid_channels * 2,
@@ -481,7 +484,8 @@ class LiteMLA(nn.Module):
                 for scale in scales
             ]
         )
-        self.kernel_func = build_act(kernel_func, inplace=False)
+        # self.kernel_func = build_act(kernel_func, inplace=False)
+        self.kernel_func = create_act_layer(kernel_func, inplace=False)
 
         self.proj = ConvLayer(
             total_dim * (1 + len(scales)),
@@ -1159,7 +1163,7 @@ class AdaptiveOutputConvLayer(nn.Module):
         x = nn.functional.conv2d(
             x,
             self.conv.weight[:out_channels],
-            self.conv.bias[:out_channels],
+            self.conv.bias[:out_channels] if self.conv.bias is not None else None,
             self.conv.stride,
             self.conv.padding,
             self.conv.dilation,

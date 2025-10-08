@@ -4,7 +4,8 @@ from typing import Literal, Sequence, cast
 import numpy as np
 import torch
 import webdataset as wds
-from torch import Tensor
+from kornia.augmentation import AugmentationSequential, RandomResizedCrop
+from torch import Tensor, is_tensor
 from typing_extensions import deprecated
 
 from data.multimodal_loader import MultimodalityDataloader
@@ -123,6 +124,22 @@ class GenerativeMMDataloader(MultimodalityDataloader):
             If False, return a list of condition latents.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._size = size = kwargs.pop("size", None)
+        self.img_post_processor = None
+        if size is not None:
+            self.img_post_processor = AugmentationSequential(
+                RandomResizedCrop(
+                    tuple(size) if isinstance(size, (tuple, list)) else (size, size),
+                    scale=(0.8, 1.0),
+                    ratio=(3 / 4, 4 / 3),
+                    keepdim=True,
+                ),
+                data_keys=["image"],
+            )
+
     def before_init_datasets(self):
         assert self.getitem_type == "structured", (
             "GenerativeMMDataloader requires getitem_type to be 'structured'"
@@ -134,49 +151,92 @@ class GenerativeMMDataloader(MultimodalityDataloader):
         mask = torch.arange(self.max_length, device=valid_length.device) < valid_length
         return mask.float()
 
+    def _post_process_img_conditions(self, *imgs, params=None):
+        if self.img_post_processor is None:
+            return imgs, None
+
+        imgs = list(imgs)
+        for i, img in enumerate(imgs):
+            img = self.img_post_processor(img, params=params)
+            imgs[i] = img
+
+        return imgs[0] if len(imgs) == 1 else imgs, self.img_post_processor._params
+
     def after_getitem(
         self, sample: dict
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, str | Tensor | int]]:
-        # sana train loader compatibility
-        # [latent or images, encoded text, text mask, data_info: control_signal]
-
-        # NOTE: compactibility with SANA train loader !!
+        """
+        sana train loader compatibility
+        [latent or images, encoded text, text mask, data_info: control_signal]
+        NOTE: compactibility with SANA train loader !!
+        """
 
         # captions
-        y_lc = sample["captions"]["caption_feature"]
+        # nan is empty if the tar file does not have
+        y_lc = sample["captions"].get("caption_feature", torch.nan)
         y_text = sample["captions"]["caption"]
-        y_mask_l = sample["captions"]["attention_mask"]  # self.get_y_mask(sample)
+        y_mask_l = sample["captions"].get("attention_mask", torch.nan)
         data_info = {
             "y_text": y_text,
             "valid_length": sample["captions"]["valid_length"],
         }
 
         # latent image
+        # Return the image or the latent
         if "image_latent" in sample:
-            latent_chw = torch.as_tensor(
-                sample["image_latent"]
-            )  # TODO: fix this when is structured sample
+            latent_chw = torch.as_tensor(sample["image_latent"])
+            # !! Warning: if crop the image, the latent crop is not correct, since
+            # !! vae(crop(img)) != crop(vae(img))
+            if self._size is not None:
+                raise RuntimeError("Crop is not supported for image_latent")
         else:
             latent_chw = torch.as_tensor(sample["pixel_image"]["img"])
+        latent_chw, _params = self._post_process_img_conditions(latent_chw)
 
         # conditions images or latents
         if "condition_latent" in sample:
             cond_latent_chw = [
                 torch.as_tensor(x)
                 for x in sample["condition_latent"]
-                if isinstance(x, np.ndarray)
+                if isinstance(x, (np.ndarray, torch.Tensor)) and x.ndim == 3
             ]
             if self.other_kwargs.get("stack_cond_latent", False):
                 latent_chw = torch.stack(
                     [latent.squeeze(0) for latent in cond_latent_chw],
                     dim=0,
                 )
-            data_info["control_signal"] = cond_latent_chw
+            cond_latent_chw = cast(Tensor | list[Tensor], cond_latent_chw)
+            if torch.is_tensor(cond_latent_chw):
+                cond_latent_chw = (cond_latent_chw,)
+            cond_latent_chw, _params = self._post_process_img_conditions(
+                *cond_latent_chw, params=_params
+            )
+            data_info["control_signal"] = cond_latent_chw  # list of Tensor
         elif "condition_image" in sample:
-            cond_img_chw = sample["condition_image"]
+            cond_img_chw_dict = sample["condition_image"]
+            cond_img_chw = [
+                x
+                for n, x in cond_img_chw_dict.items()
+                if not n.startswith("__")
+                and isinstance(x, (np.ndarray, torch.Tensor))
+                and x.ndim == 3
+            ]
+            if self.other_kwargs.get("stack_cond_imgs", False):
+                cond_img_chw = torch.stack(
+                    [torch.as_tensor(x).squeeze(0) for x in cond_img_chw],
+                    dim=0,
+                )
+            cond_img_chw = cast(Tensor | list[Tensor], cond_img_chw)
+            if torch.is_tensor(cond_img_chw):
+                cond_img_chw = (cond_img_chw,)
+            cond_img_chw, _params = self._post_process_img_conditions(
+                *cond_img_chw, params=_params
+            )
             data_info["control_signal"] = cond_img_chw  # list of Tensor
         else:
-            raise RuntimeError("No condition image or latent provided")
+            raise ValueError(
+                f"No condition image or latent provided, got keys: {sample.keys()}"
+            )
 
         return latent_chw, y_lc, y_mask_l, data_info
 
@@ -413,18 +473,19 @@ if __name__ == "__main__":
         "batch_size": 2,
         "num_workers": 0,
         "getitem_type": "structured",
+        "size": 512,
     }
     wids_paths = [
         {
-            "captions": "data/DCF_2020/condition_captions/indexshard.json",
-            "condition_image": "data/DCF_2020/conditions/shardindex.json",
-            "pixel_image": "data/DCF_2020/hyper_images/shardindex.json",
+            "captions": "data/LoveDA/condition_captions/shardindex.json",
+            "condition_image": "data/LoveDA/conditions/shardindex.json",
+            "pixel_image": "data/LoveDA/hyper_images/shardindex.json",
         },
-        {
-            "captions": "data/DCF_2019/condition_captions/shardindex.json",
-            "condition_image": "data/DCF_2019/conditions/shardindex.json",
-            "pixel_image": "data/DCF_2019/hyper_images/shardindex.json",
-        },
+        # {
+        #     "captions": "data/DCF_2019/condition_captions/shardindex.json",
+        #     "condition_image": "data/DCF_2019/conditions/shardindex.json",
+        #     "pixel_image": "data/DCF_2019/hyper_images/shardindex.json",
+        # },
     ]
     _, loader = get_multimodal_loaders_with_different_backends_v2(
         wids_paths,
@@ -434,4 +495,3 @@ if __name__ == "__main__":
 
     for sample in loader:
         print(sample.keys())
-        print(sample["captions"])

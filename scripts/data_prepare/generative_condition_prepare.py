@@ -37,6 +37,7 @@ def prepare_fn(
     condition_save_format: Literal["png", "jpg", "safetensors"] = "png",
     caption_save_format: Literal["txt", "json"] = "json",
     save_attn_mask: bool = False,
+    use_linstretch=False,
 ):
     total_n = 0
     for ds, num in zip_longest(datasets, nums):
@@ -48,6 +49,7 @@ def prepare_fn(
             device="cuda",
             to_pil=to_pil,  # type: ignore
             resume_from=resume_from,
+            use_linstretch=use_linstretch,
         )
 
         # Note: Since we don't know the total count, we'll use an unbounded progress bar
@@ -236,6 +238,7 @@ def webdataset_conditions_prepare(
     resume_from: str | None = None,
     relative_data_dir: str = "conditions",
     save_attn_mask: bool = False,
+    use_linstretch=False,
 ):
     """
     Process webdataset to generate condition images and captions.
@@ -260,7 +263,7 @@ def webdataset_conditions_prepare(
     log_print(f"Starting condition preparation for dataset: {tar_name}")
     log_print(f"Output directory: {base_dir}")
     log_print(f"Conditions: {conditions}")
-    log_print(f"RGB channels: {rgb_channels}")
+    log_print(f"RGB channels: {rgb_channels}, use linstretch: {use_linstretch}")
     log_print(f"Device: {device}")
     torch.cuda.set_device(device)  # Set the device for torch operations
 
@@ -289,6 +292,7 @@ def webdataset_conditions_prepare(
             condition_save_format=condition_save_format,
             caption_save_format=caption_save_format,
             save_attn_mask=save_attn_mask,
+            use_linstretch=use_linstretch,
         )
     except Exception as e:
         log_print(f"Error: {e}", level="critical")
@@ -392,6 +396,7 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
         caption_save_format=cfg.processor.get("caption_save_format", "txt"),
         resume_from=cfg.processor.get("resume_from", None),
         relative_data_dir=cfg.processor.get("relative_data_dir", "conditions"),
+        use_linstretch=cfg.processor.get("use_linstretch", False),
     )
 
     log_print(
@@ -714,69 +719,26 @@ def concate_tars(*src_tars, output_tar: str, repeat_find=True):
 
 
 if __name__ == "__main__":
-    # > utilities re-tar the conditions
-    # comp_conditions_hyper_images_names(
-    #     "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0002.tar",
-    #     # "data/BigEarthNet_S2/conditions/tmp",
-    #     condition_tar="data/BigEarthNet_S2/conditions/BigEarthNet_data_0002.tar",
-    # )
-    # exit()
-
-    # stems, names = list_tar_hyper_images(
-    #     "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar",
-    #     [
-    #         "S2_tiff_jp2k_80_S2A_MSIL2A_20171201T112431_N9999_R037_T29SNB_18_00",
-    #         "S2_tiff_jp2k_80_S2B_MSIL2A_20180525T094029_N9999_R036_T35VNL_90_84",
-    #     ],
-    #     stop_until_find=True,
-    #     sort=False,
-    # )
-
-    # re_tar_from_dir(
-    #     stems,
-    #     "data/BigEarthNet_S2/conditions/tmp",
-    #     output_file="data/BigEarthNet_S2/conditions/0000-re_tar.tar",
-    #     condition_names=["hed", "segmentation", "sketch", "mlsd", "rgb"],
-    # )
-
-    # concate_tars(
-    #     *list(Path("data/EarthView/hyper_images/satellogic").glob("thread_*/*.tar")),
-    #     output_tar="data/EarthView/hyper_images/satellogic_shard1.tar",
-    # )
-
-    # exit()
-
-    # > re tar files
-    # re_tar_from_dir(
-    #     "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0001.tar",
-    #     conditions_dir="data/BigEarthNet_S2/conditions/tmp01",
-    #     output_file="data/BigEarthNet_S2/conditions/BigEarthNet_data_0001_re_tar.tar",
-    #     condition_names=["hed", "segmentation", "sketch", "mlsd"],
-    # )
-    # exit(0)
-
     # > hydra or args condition preparation
     import sys
+
+    from loguru import logger
 
     if len(sys.argv) > 1 and sys.argv[1] == "--hydra":
         # Remove the --hydra flag and run with Hydra
         sys.argv = [sys.argv[0]] + sys.argv[2:]
 
         @hydra.main(
-            config_path="../scripts/configs/condition_preparation",
+            config_path="../configs/condition_preparation",
             config_name="hyperspectral_full",
             version_base=None,
         )
         def hydra_main(cfg: DictConfig) -> None:
-            from loguru import logger
-
             with logger.catch():
                 main_with_hydra_config(cfg)
 
         hydra_main()
     else:
         # Run with command line arguments
-        from loguru import logger
-
         with logger.catch():
             main_with_args()

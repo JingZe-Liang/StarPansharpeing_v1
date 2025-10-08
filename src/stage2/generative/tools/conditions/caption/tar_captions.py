@@ -13,7 +13,11 @@ from tarfile import TarFile
 from loguru import logger
 from tqdm import tqdm
 
-from src.data.tar_utils import get_tar_member_iter, write_tar_file
+from src.data.tar_utils import (
+    get_content_from_member,
+    get_tar_member_iter,
+    write_tar_file,
+)
 
 
 def tar_captions():
@@ -47,34 +51,52 @@ def tar_captions():
 
 
 def filter_only_captions():
-    caption_tar_path: str = ""
-    new_caption_tar_path: str = ""
+    caption_tar_path: str = (
+        "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000.tar"
+    )
+    new_caption_tar_path: str = (
+        "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000_new.tar"
+    )
     caption_ext: str = ".caption.json"
 
     caption_tar_reader = TarFile(name=caption_tar_path, mode="r")
     new_caption_tar_writer = TarFile(name=new_caption_tar_path, mode="w")
 
     is_caption_n = 0
-    for member in (
-        tbar := tqdm(
-            get_tar_member_iter(caption_tar_reader, sort=False),
-            desc="Filtering captions ...",
-        )
-    ):
-        if member.name.endswith(caption_ext):
-            write_tar_file(
-                tar_writer=new_caption_tar_writer,
-                file=member,
+    try:
+        for member in (
+            tbar := tqdm(
+                get_tar_member_iter(caption_tar_reader, sort=False),
+                desc="Filtering captions ...",
             )
-            is_caption_n += 1
-
-        tbar.set_postfix({"is_caption_n": is_caption_n})
-    caption_tar_reader.close()
-    new_caption_tar_writer.close()
+        ):
+            if member.name.endswith(caption_ext):
+                write_tar_file(
+                    tar_writer=new_caption_tar_writer,
+                    file=member,
+                    content=get_content_from_member(caption_tar_reader, member),
+                )
+                is_caption_n += 1
+            tbar.set_postfix({"is_caption_n": is_caption_n})
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+    finally:
+        caption_tar_reader.close()
+        new_caption_tar_writer.close()
 
     logger.success(f"New caption tar file saved to {new_caption_tar_path}")
 
 
 if __name__ == "__main__":
-    tar_captions()
+    # tar_captions()
     # filter_only_captions()
+
+    captions_with_embeds = [
+        # 'data/QuickBird/condition_captions/QuickBird-4_bands-px_256-MSI-0000.tar',
+        # 'data/WorldView2/condition_captions/WorldView2-8_bands-px_256-MSI-0000.tar',
+        "data/BigEarthNet_S2/condition_captions/BigEarthNet_data_0000.tar",
+        "data/BigEarthNet_S2/condition_captions/BigEarthNet_data_0001.tar",
+    ]
+
+    new_captions = [p.replace(".tar", "_new.tar") for p in captions_with_embeds]
+    filter_multiple_captions(captions_with_embeds, new_captions)

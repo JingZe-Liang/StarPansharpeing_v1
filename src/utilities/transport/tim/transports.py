@@ -1,3 +1,5 @@
+# Abstract methods
+from abc import abstractmethod
 from typing import Optional
 
 import torch
@@ -24,15 +26,19 @@ class Transport:
         self.w_start = w_start
         self.w_end = w_end
 
-    def sample_t(self, batch_size, dtype, device):
+    @abstractmethod
+    def sample_t(self, batch_size, dtype, device) -> torch.Tensor:
         pass
 
-    def c_noise(self, t: torch.Tensor):
+    @abstractmethod
+    def c_noise(self, t: torch.Tensor) -> torch.Tensor:
         pass
 
-    def interpolant(self, t: torch.Tensor):
+    @abstractmethod
+    def interpolant(self, t: torch.Tensor) -> torch.Tensor:
         pass
 
+    @abstractmethod
     def target(
         self,
         x_t: torch.Tensor,
@@ -44,12 +50,19 @@ class Transport:
         dF_dv_dt: torch.Tensor,
         F_t_cond: torch.Tensor,
         F_t_uncond: torch.Tensor,
-    ):
+        enhance_target: bool,
+    ) -> torch.Tensor:
         pass
 
+    @abstractmethod
     def from_x_t_to_x_r(
-        self, x_t: torch.Tensor, t: torch.Tensor, r: torch.Tensor, F: torch.Tensor
-    ):
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        r: torch.Tensor,
+        F: torch.Tensor,
+        s_ratio: float,
+    ) -> torch.Tensor:
         pass
 
 

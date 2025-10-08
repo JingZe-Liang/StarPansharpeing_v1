@@ -18,6 +18,7 @@ from src.stage2.generative.tools.conditions.sketch import SketchDetector
 from src.stage2.generative.tools.conditions.uniformer import SAMDetector
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
+from src.utilities.train_utils.visualization import get_rgb_image
 
 
 def rsshow(I, scale=0.005):
@@ -165,6 +166,7 @@ def prepare_condition_from_webdataset(
     device="cuda",
     to_pil: bool = True,
     resume_from: str | None = None,
+    use_linstretch: bool = False,
 ):
     if conditions == "all":
         conditions = ["hed", "segmentation", "sketch", "mlsd", "caption"]
@@ -215,17 +217,8 @@ def prepare_condition_from_webdataset(
 
         # img is batched
         assert img.shape[0] == 1, "Only single image input is supported."
-        # to numpy
-        img = img.cpu().numpy()[0]
-        # extract RGB channels
-        if rgb_channels is None:
-            assert img.shape[0] == 3, "Image must have 3 channels."
-        elif rgb_channels == "mean":
-            c_3 = img.shape[0] // 3
-            bands = [img[i * c_3 : (i + 1) * c_3, :, :].mean(0) for i in range(3)]
-            img = np.stack(bands, axis=0)
-        else:
-            img = img[rgb_channels]
+        img = get_rgb_image(img, rgb_channels, use_linstretch=use_linstretch)
+        img = img.squeeze(0).cpu().numpy()  # remove batch dim
         img = img.transpose(1, 2, 0)  # Convert to HWC format
         # not to_neg_1_1
         img = (img * 255.0).astype(np.uint8)

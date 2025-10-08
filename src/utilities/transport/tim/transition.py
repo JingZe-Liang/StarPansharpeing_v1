@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from .transports import Transport
 
@@ -43,6 +44,7 @@ class TransitionSchedule:
         weight_time_type: str = "constant",
         weight_time_tangent: bool = False,
         weight_time_sigmoid: bool = False,
+        use_proj_loss: bool = False,
     ):
         self.transport = transport
         self.diffusion_ratio = diffusion_ratio
@@ -53,6 +55,7 @@ class TransitionSchedule:
         self.weight_time_type = weight_time_type
         self.weight_time_tangent = weight_time_tangent
         self.weight_time_sigmoid = weight_time_sigmoid
+        self.use_proj_loss = use_proj_loss
 
     def sample_t_and_r(self, batch_size, dtype, device):
         t_1 = self.transport.sample_t(batch_size=batch_size, dtype=dtype, device=device)
@@ -80,7 +83,7 @@ class TransitionSchedule:
         alpha_t, sigma_t, d_alpha_t, d_sigma_t = self.transport.interpolant(t)
         x_t = alpha_t * x + sigma_t * z
         v_t = d_alpha_t * x + d_sigma_t * z
-        return x_t, v_t, t, r, n_diffusion
+        return x_t, v_t, t, r, n_diffusion, (alpha_t, sigma_t), (d_alpha_t, d_sigma_t)
 
     def model_forward(self, model, x_t, t, r, model_kwargs, rng_state):
         # model_input
@@ -112,7 +115,7 @@ class TransitionSchedule:
 
         def model_jvp(x_t, t, r):
             model_kwargs["attn_type"] = "vanilla_attn"
-            model_kwargs["jvp"] = True
+            model_kwargs["derivative"] = True
             t_input = self.transport.c_noise(t.flatten())
             r_input = self.transport.c_noise(r.flatten())
             return model(x_t, t_input, r_input, **model_kwargs)
@@ -131,21 +134,22 @@ class TransitionSchedule:
         if n_diffusion == x.size(0):
             return 0
         _dF_dv_dt = torch.zeros_like(x)
+
         # only calculate the dF_dv_dt when t!=r
         x, z, t, r = x[n_diffusion:], z[n_diffusion:], t[n_diffusion:], r[n_diffusion:]
         for k, v in model_kwargs.items():
             if isinstance(v, torch.Tensor):
                 model_kwargs[k] = model_kwargs[k][n_diffusion:]
         model_kwargs["return_zs"] = False
-        model_kwargs["jvp"] = True
+        model_kwargs["derivative"] = True
 
-        def xfunc(t):
+        def xfunc(t) -> torch.Tensor:
             alpha_t, sigma_t, _, _ = self.transport.interpolant(t)
             x_t = alpha_t * x + sigma_t * z
             return self.model_forward(model, x_t, t, r, model_kwargs, rng_state)
 
-        epsilon = self.differential_epsilon
-        fc1_dt = 1 / (2 * epsilon)
+        epsilon = self.differential_epsilon  # d_eps
+        fc1_dt = 1 / (2 * epsilon)  # 0.5 / d_eps
         dF_dv_dt = xfunc(t + epsilon) * fc1_dt - xfunc(t - epsilon) * fc1_dt
         _dF_dv_dt[n_diffusion:] = dF_dv_dt
         return _dF_dv_dt
@@ -154,11 +158,13 @@ class TransitionSchedule:
         with torch.no_grad():
             t_input = self.transport.c_noise(t.flatten())
             if self.transport.w_cond > 0:
+                # with conditions
                 F_t_cond = self.model_forward(
                     model, x_t, t_input, t_input, model_kwargs, rng_state
                 )
             else:
                 F_t_cond = 0
+            # without conditions
             F_t_uncond = self.model_forward(
                 model, x_t, t_input, t_input, null_kwargs, rng_state
             )
@@ -207,11 +213,16 @@ class TransitionSchedule:
         null_kwargs={},
     ):
         # prepare model input
-        x_t, v_t, t, r, n_diffusion = self.prepare_input(batch_size, x, z)
-
+        x_t, v_t, t, r, n_diffusion, _, d_coef_t = self.prepare_input(batch_size, x, z)
         rng_state = torch.cuda.get_rng_state()
+
         # get prediction
-        F_pred, h_proj = self.model_forward(model, x_t, t, r, model_kwargs, rng_state)
+        out = self.model_forward(model, x_t, t, r, model_kwargs, rng_state)
+        if isinstance(out, (list, tuple)):
+            F_pred, h_proj = out
+        else:
+            F_pred = out
+
         # get target
         if self.derivative_type == "jvp":
             dF_dv_dt = self.jvp_derivative(
@@ -229,6 +240,10 @@ class TransitionSchedule:
             enhance_target = True
         else:
             F_t_cond, F_t_uncond, enhance_target = 0, 0, False
+
+        # loss target
+        # :: v_t = eps - x; or v_t = (eps - x) + w1 * v_t + w2 * F_t_cond + (1 - w1 - w2) * F_t_uncond
+        # :: tgt = v_t - delta_t * dF_dv_dt
         F_target = self.transport.target(
             x_t, v_t, x, z, t, r, dF_dv_dt, F_t_cond, F_t_uncond, enhance_target
         )
@@ -236,6 +251,19 @@ class TransitionSchedule:
         denoising_loss = torch.nan_to_num(
             denoising_loss, nan=0, posinf=1e5, neginf=-1e5
         )
+
+        # back to x0
+        v_t_pred = F_pred + (t - r) * dF_dv_dt
+        x_pred = (v_t_pred - d_coef_t[1] * z) / d_coef_t[0]
+
+        breakdowns = {
+            "v_t": v_t,
+            "dF_dv_dt": dF_dv_dt,
+            "F_target": F_target,
+            "F_pred": F_pred,
+            "t_r": (t, r),
+            "x0_pred": x_pred,
+        }
 
         if use_dir_loss:
             directional_loss = mean_flat(
@@ -252,9 +280,12 @@ class TransitionSchedule:
         weighted_loss = weight * denoising_loss
         weighted_loss = weighted_loss.mean()
 
-        proj_loss = mean_flat(1 - torch.cosine_similarity(h_proj, h_target, dim=-1))
-        proj_loss = torch.nan_to_num(proj_loss, nan=0, posinf=1e5, neginf=-1e5)
-        proj_loss = proj_loss.mean()
+        if h_target is not None:
+            proj_loss = mean_flat(1 - torch.cosine_similarity(h_proj, h_target, dim=-1))
+            proj_loss = torch.nan_to_num(proj_loss, nan=0, posinf=1e5, neginf=-1e5)
+            proj_loss = proj_loss.mean()
+        else:
+            proj_loss = torch.tensor(0.0).to(weighted_loss)
 
         loss_dict = dict(
             weighted_loss=weighted_loss.detach().item(),
@@ -262,7 +293,7 @@ class TransitionSchedule:
             proj_loss=proj_loss.detach().item(),
         )
 
-        return weighted_loss, proj_loss, loss_dict
+        return weighted_loss, proj_loss, loss_dict, breakdowns
 
     def forward_with_cfg(
         self, model, x_t, t, r, y, y_null, cfg_scale, cfg_low, cfg_high
@@ -297,6 +328,7 @@ class TransitionSchedule:
         cfg_high=1.0,
         stochasticity_ratio=0.0,
         sample_type: str = "transition",  # 'transition', diffusion
+        progress_bar=True,
     ):
         _dtype = z.dtype
         t_steps = torch.linspace(T_max, T_min, num_steps + 1, dtype=torch.float64).to(z)
@@ -305,7 +337,11 @@ class TransitionSchedule:
 
         x_cur = deepcopy(z).to(torch.float64)
         samples = [z]
-        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+        for i, (t_cur, t_next) in tqdm(
+            enumerate(zip(t_steps[:-1], t_steps[1:])),
+            total=num_steps,
+            disable=not progress_bar,
+        ):
             # x_{N} -> x_{N-1} -> ... -> x_{n+1} -> x_{n} -> x_{n-1} -> ... -> x_{1} -> x_{0}
             if sample_type == "transition":
                 _t_next = t_next
@@ -335,3 +371,57 @@ class TransitionSchedule:
             x_cur = x_next
 
         return torch.stack(samples, dim=0).to(torch.float32)
+
+
+def test_scheduler():
+    from torch import nn
+
+    from .transports import OT_FM
+
+    transport = OT_FM(
+        P_mean=0.0,
+        P_std=1.6,
+        sigma_d=1.0,
+    )
+    transition = TransitionSchedule(
+        transport=transport,
+        diffusion_ratio=0.5,
+        consistency_ratio=0.1,
+        derivative_type="dde",
+        differential_epsilon=0.005,
+        weight_time_type="sqrt",
+        weight_time_tangent=True,
+    )
+
+    class Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = nn.Conv2d(16, 16, 3, 1, 1)
+
+        def forward(self, x, t, r, **kwargs):
+            return self.fc(x)
+
+    network = Net()
+
+    latent = torch.randn(1, 16, 32, 32)
+    noises = torch.randn_like(latent)
+    loss, proj_loss, loss_d = transition(
+        network,
+        network,
+        network,
+        32,
+        latent,
+        noises,
+        {},
+        use_dir_loss=True,
+    )
+
+    print(loss)
+    print(loss_d.keys())
+
+
+if __name__ == "__main__":
+    """
+    python -m src.utilities.transport.tim.transition
+    """
+    test_scheduler()

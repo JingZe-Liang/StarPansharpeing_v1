@@ -32,21 +32,6 @@ from src.stage1.utilities.losses.gan_loss.hyperspectral_percep_loss import (
 )
 from src.utilities.train_utils.state import StepsCounter
 
-to_cont = partial(OmegaConf.to_container, resolve=True)
-# omegaconf resolver
-OmegaConf.register_new_resolver("eval", lambda x: eval(x))
-OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
-
-
-## TODO:
-# 1. add diffusion, rectify flow, or inductive momentum matching to the decoder
-# 2. add BSQ or LFQ to discretize
-# 3. add rectify flow for continuous latents; maskbit or maskgit for discrete latents
-
-# 1. diffusion or rectified flow latents (slots) |-----> w/ or w/o kl (continuous)  --> diffusion/flow/imm/mar/autoregess+diffusion loss
-#                                                |-----> bsq (discrete)             --> maskbit/maskgit/maskgen/
-#                                                |-----> vq (discrete)              --> autoregressive/maskgit
-
 
 class DiffusiveHyperspectralTokenizerTrainer:
     def __init__(self, cfg: DictConfig):

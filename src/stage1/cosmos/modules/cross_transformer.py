@@ -206,6 +206,7 @@ class CrossAttentionBlock(nn.Module):
 
 @dataclass
 class CrossTransformer1DConfig:
+    # Transformer configs
     dim: int = 512
     depth: int = 8
     heads: int = 8

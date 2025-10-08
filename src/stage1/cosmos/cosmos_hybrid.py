@@ -43,9 +43,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.cnn_cfg = cnn_cfg
         super().__init__(self.cnn_cfg)
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
-        self._build_transformer(cnn_cfg, trans_enc_cfgs, trans_dec_cfgs)
+        self._build_transformer_encoder(cnn_cfg, trans_enc_cfgs, trans_dec_cfgs)
 
-    def _build_transformer(self, cnn_cfg, trans_enc_cfgs, trans_dec_cfgs=None):
+    def _build_transformer_encoder(self, cnn_cfg, trans_enc_cfgs, trans_dec_cfgs=None):
         # cnn_cfg is already set as self.cnn_cfg in __init__
         self.trans_enc_cfg1, self.trans_enc_cfg2 = (
             trans_enc_cfgs[0],

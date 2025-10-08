@@ -316,7 +316,10 @@ class PansharpeningNAFNet(nn.Module):
             nn.Conv2d(embed_dim // 4, embed_dim, 3, 1, 1),
         )
         head_out = nn.Conv2d(embed_dim, out_chan, 1)
-        ms_shortcut = create_conv2d(embed_dim, embed_dim, 1)
+        # ms_shortcut = create_conv2d(embed_dim, embed_dim, 1)
+        ms_shortcut = create_unpatcher(
+            embed_dim, embed_dim, patch_size=self.cfg.patch_size
+        )
 
         head = nn.ModuleDict()
         head["head_conv"] = head_conv

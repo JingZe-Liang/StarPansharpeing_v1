@@ -1,3 +1,8 @@
+"""
+GAN, diffusion tokenizer loss functions.
+GAN loss, REPA, VF losses.
+"""
+
 import warnings
 from collections import namedtuple
 from types import SimpleNamespace
@@ -497,6 +502,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.lecam_ema = LeCAM_EMA()
 
         # * discriminator
+        self.use_disc = disc_weight > 0.0
         if disc_network_type.lower() == "patchgan":
             self.discriminator = NLayerDiscriminator(
                 input_nc=disc_in_channels,
@@ -664,7 +670,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
     def _q_loss(
         self,
         q_loss_total: torch.Tensor,
-        q_loss_breakdown: NamedTuple | Dict,
+        q_loss_breakdown: NamedTuple | Dict | SimpleNamespace,
         global_step: int,
     ) -> tuple[torch.Tensor, tuple[str, torch.Tensor]]:
         if isinstance(q_loss_breakdown, dict):
@@ -1030,7 +1036,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         )
         d_weight = 1.0
         g_loss: torch.Tensor = self.zero  # type: ignore
-        if disc_factor > 0:
+        if disc_factor > 0 and self.use_disc:
             with torch.autocast(device_type="cuda", dtype=inputs.dtype):
                 if cond is None:
                     assert not self.disc_conditional
@@ -1122,22 +1128,24 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     torch.cat((reconstructions, cond), dim=1)
                 )
 
-        disc_factor = adopt_weight(
-            self.disc_factor, global_step, threshold=self.disc_iter_start_for_d
-        )
         disc_loss_out = self.zero
-        if self.lecam_loss_weight is not None:
-            self.lecam_ema.update(logits_real, logits_fake)
-            lecam_loss = lecam_reg(logits_real, logits_fake, self.lecam_ema)
-            lecam_loss = lecam_loss * self.lecam_loss_weight
-            if disc_factor > 0.0:
-                disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
-            d_loss = disc_factor * disc_loss_out + lecam_loss
-        else:
-            lecam_loss = self.zero
-            if disc_factor > 0.0:
-                disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
-            d_loss = disc_factor * disc_loss_out
+        lecam_loss = self.zero
+        d_loss = self.zero
+        if self.use_disc:
+            disc_factor = adopt_weight(
+                self.disc_factor, global_step, threshold=self.disc_iter_start_for_d
+            )
+            if self.lecam_loss_weight is not None:
+                self.lecam_ema.update(logits_real, logits_fake)
+                lecam_loss = lecam_reg(logits_real, logits_fake, self.lecam_ema)
+                lecam_loss = lecam_loss * self.lecam_loss_weight
+                if disc_factor > 0.0:
+                    disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
+                d_loss = disc_factor * disc_loss_out + lecam_loss
+            else:
+                if disc_factor > 0.0:
+                    disc_loss_out = self.discriminator_loss(logits_real, logits_fake)
+                d_loss = disc_factor * disc_loss_out
 
         # r1 regularization loss from stylegan 2
         # for stablized training
@@ -1145,7 +1153,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         non-sature loss: real logits: +5, fake logits: -5
         hinge loss: logits_real >> logits_fake; logits_real: (1., 2.), logits_fake: (-1., -2.)
         """
-        if _use_r1_or_r2_loss:
+        r1_loss_scale = self.zero
+        r2_loss_scale = self.zero
+        if _use_r1_or_r2_loss and self.use_disc:
             # TODO: fix it
             # raise RuntimeError("use r1 reg, debugging ...")
             if self.disc_reg_type == "r1":
@@ -1164,9 +1174,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 # r1_loss as (r1, r2) loss
                 r1_loss_scale = r1_loss.detach() * self.disc_reg_gamma / 2
                 r2_loss_scale = r2_loss.detach() * self.disc_reg_gamma / 2
-        else:
-            r1_loss_scale = self.zero
-            r2_loss_scale = self.zero
 
         log = self._train_disc_log_form(
             split=split,
