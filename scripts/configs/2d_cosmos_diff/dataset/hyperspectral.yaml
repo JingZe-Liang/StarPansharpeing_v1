@@ -1,61 +1,331 @@
-used: MMSeg_YREB
-shuffle_size: 100
+used: WV3
+shuffle_size: -1
 num_workers: 3
+prefetch_factor: 6
+shuffle_within_workers: false
 
 dataset_names_to_bs:
-  MMSeg_YREB: 18
+  MMSeg_YREB: 32
   DCF_2019: 32
+  DFC_2020: 32
+  GID_GF2: 32
+  DryadHyper: 32
+  MUSLI: 32
+  Houston: 7
+  WV3: 32
+  QB: 12
+  GF1: 16
+  WDC: 16
+  CD_224: 5
+  CD_242: 5
+  OSCD: 5
+  Apex: 2
+  DC: 2
+  Houston_unmixing: 2
+  Jasper: 2
+  Moffett: 2
+  Urban: 2
+  Samson: 2
+  Oil_leak: 2
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
   DCF_2019: 8
+  DFC_2020: 13
+  GID_GF2: 3
+  DryadHyper: 224
+  MUSLI: 438
+  Houston: 50
+  WV3: 8
+  OHS: 32
+  QB: 4
+  GF1: 4
+  IKONOS: 4
+  WDC: 191
+  Xiongan: 256
+  WHU_Hi: 270
+  CD_224: 224
+  CD_242: 242
+  OSCD: 13
+  Apex: 285
+  DC: 191
+  Houston_unmixing: 170
+  Jasper: 198
+  Moffett: 184
+  Urban: 188
+  Samson: 156
+  Oil_leak: 224
 
 dataset_names_to_rgb_channels:
-  MMSeg_YREB: [4, 3, 2]
-  DCF_2019: [4, 2, 0]
+  MMSeg_YREB: ${list:[4, 3, 2]}
+  DCF_2019: ${list:[5, 3, 2]}
+  DCF_2020: ${list:[9, 6, 3]}
+  GID_GF2: ${list:[3, 2, 1]}
+  DryadHyper: ${list:[90, 60, 40]}
+  Houston: ${list:[40, 20, 10]}
+  DFC_2020: ${list:[9, 6, 4]}
+  MUSLI: ${list:[66, 38, 16]}
+  WV3: ${list:[5, 3, 2]}
+  OHS: ${list:[18, 11, 6]}
+  QB: ${list:[2, 1, 0]}
+  GF1: ${list:[2, 1, 0]}
+  IKONOS: ${list:[2, 1, 0]}
+  WDC: ${list:[19, 13, 8]}
+  Xiongan: ${list:[29, 19, 9]}
+  WHU_Hi: ${list:[29,19,9]}
+  CD_224: ${list:[49,39,29]}
+  CD_242: ${list:[49,39,29]}
+  OSCD: ${list:[3,2,1]}
+  DC: mean
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
   DCF_2019: 512
+  DCF_2020: 256
+  GID_GF2: 512
+  DryadHyper: 128
+  DFC_2020: 256
+  Houston: 512
+  MUSLI: 512
+  WV3: 512
+  OHS: 512
+  QB: 512
+  GF1: 512
+  IKONOS: 512
+  WDC: 160
+  Xiongan: 256
+  WHU_Hi: 256
+  CD_224: 128
+  CD_242: 128
+  OSCD: 512
+  DC: 256
+  Jasper: 256
+  Apex: 256
+  Houston_unmixing: 256
+  Moffett: 256
+  Urban: 256
+  Samson: 256
+  Oil_leak: 256
+
+WDC_train:
+  - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
+
+WDC_val:
+  - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
 
 MMSeg_YREB_train:
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0000.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0001.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0002.tar
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+  - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0000..0003}.tar
 
 MMSeg_YREB_val:
-  - data/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
+  - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
 
 DCF_2019_train:
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0000.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0001.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0002.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0003.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0004.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0005.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0006.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0007.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0008.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0009.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0011.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0012.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0013.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0014.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0015.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0016.tar
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0000..0017}.tar
+
+DFC_2020_train:
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0000..0002}.tar
+
+Houston_train:
+  - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+
+Houston_val:
+  - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
+
+DryadHyper_train:
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-{0000..0002}.tar
+
+GID_GF2_train:
+  - - data/GID-GF2/hyper_images/GID-GF2-train-3_bands-px_512-MSI-{0000..0003}.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
+  - - data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-{0000..0001}.tar
+
+GF1_train:
+  - - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
+  - - data/Gaofen1/hyper_images/Gaofen-1-PAN-1_bands-px_512-MSI-0000.tar
+
+GF1_val:
+  - - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
+  - - data/Gaofen1/hyper_images/Gaofen-1-PAN-1_bands-px_512-MSI-0000.tar
+
+MUSLI_train:
+  - - data/hyper_images/MUSLI_safetensors/safetensors
+
+WV3_train:
+  - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
+
+WV3_val:
+  - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/WorldView3/hyper_images/WorldView3-PAN-1_bands-px_512-MSI-0000.tar
+
+QB_train:
+  - - data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+  - - data/QuickBird/hyper_images/QuickBird-PAN-1_bands-px_512-MSI-0000.tar
+
+QB_val:
+  - - data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+  - - data/QuickBird/hyper_images/QuickBird-PAN-1_bands-px_512-MSI-0000.tar
+
+IKONOS_train:
+  - - data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  - - data/IKONOS/hyper_images/IKONOS-PAN-1_bands-px_512-MSI-0000.tar
+
+IKONOS_val:
+  - - data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  - - data/IKONOS/hyper_images/IKONOS-PAN-1_bands-px_512-MSI-0000.tar
+
+DFC_2020_val:
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+
+MUSLI_val:
+  - - data/hyper_images/MUSLI_safetensors/safetensors
+
+DryadHyper_val:
+  - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
+
+GID_GF2_val:
+  - - data/GID-GF2/hyper_images/GID-GF2-val-3_bands-px_512-MSI-0000.tar
 
 DCF_2019_val:
-  - data/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0015..0017}.tar
 
+OHS_train:
+  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0000..0015}.tar
+
+OHS_val:
+  - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-{0012..0015}.tar
+
+Xiongan_train:
+  - - data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar
+
+Xiongan_val:
+  - - data/Downstreams/ClassificationCollection/hyper_images/Xiongan-256bands-px_256-0000.tar
+
+WHU_Hi_train:
+  - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
+
+WHU_Hi_val:
+  - - data/Downstreams/ClassificationCollection/hyper_images/WHU-Hi-270bands-px_256-0000.tar
+
+# Change detection: hermiston (242), bayArea, Farmland, SantaBarbara (224)
+CD_224_train:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-224bands-px_128-0000.tar
+
+CD_224_val:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-224bands-px_128-0000.tar
+
+CD_242_train:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-0000.tar
+
+CD_242_val:
+  - - data/Downstreams/ChangeDetection/hyper_images/CD-Collections-242bands-px_128-0000.tar
+
+OSCD_train:
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
+
+OSCD_val:
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
+  - - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
+
+# Unmixing datasets
+Apex_train:
+  - - data/Downstreams/UrbanUnmixing/splits/apex.tar # 285
+Apex_val:
+  - - data/Downstreams/UrbanUnmixing/splits/apex.tar
+
+DC_train:
+  - - data/Downstreams/UrbanUnmixing/splits/DC.tar # 191
+DC_val:
+  - - data/Downstreams/UrbanUnmixing/splits/DC.tar
+
+Houston_unmixing_train: # same name
+  - - data/Downstreams/UrbanUnmixing/splits/houston_170.tar # 170
+Houston_unmixing_val:
+  - - data/Downstreams/UrbanUnmixing/splits/houston_170.tar
+
+Jasper_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Jasper.tar # 198
+Jasper_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Jasper.tar
+
+Moffett_train:
+  - - data/Downstreams/UrbanUnmixing/splits/moffett.tar # 184
+Moffett_val:
+  - - data/Downstreams/UrbanUnmixing/splits/moffett.tar
+
+Urban_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Urban_188.tar # 188
+Urban_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Urban_188.tar
+
+Samson_train:
+  - - data/Downstreams/UrbanUnmixing/splits/Samson.tar # 156
+Samson_val:
+  - - data/Downstreams/UrbanUnmixing/splits/Samson.tar
+
+# Segmentation
+
+Oil_leak_train:
+  - - data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_Image.tar
+Oil_leak_val:
+  - - data/Downstreams/OilLeackage/tif/OilLeackage-224bands-px_512_Image.tar
+
+# if is lora -------------
+channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+# ------------------------
 train_name: ${dataset.used}_train
 val_name: ${dataset.used}_val
 wds_path_train: ${dataset[${dataset.train_name}]}
 wds_path_val: ${dataset[${dataset.val_name}]}
-channels: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
+dataset_channel: ${dataset.dataset_names_to_n_channels[${dataset.used}]}
 batch_size_train: ${dataset.dataset_names_to_bs[${dataset.used}]}
-batch_size_val: 4
-rgb_channels: ${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
+batch_size_val: 8
+rgb_channels: null #${dataset.dataset_names_to_rgb_channels[${dataset.used}]}
 img_size: ${dataset.dataset_names_to_img_size[${dataset.used}]}
+hyper_transforms_lst:
+  - grayscale
+  - rotation
+  - cutmix
+  - horizontal_flip
+  - vertical_flip
+transform_prob: 0.5
+random_apply: [1, 2]
+loader_type: webdataset
+to_neg_1_1: true
+
+# function entry
+train_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  paths: ${dataset.wds_path_train}
+  loader_type: ${dataset.loader_type}
+  basic_kwargs:
+    batch_size: ${dataset.batch_size_train}
+    num_workers: ${dataset.num_workers}
+    prefetch_factor: ${dataset.prefetch_factor}
+    shuffle_within_workers: ${dataset.shuffle_within_workers}
+    resample: true
+    check_channels_n: ${dataset.dataset_channel}
+    quantile_img_clip: 1.0
+    per_channel_norm: false
+    random_one_key: false
+    resize_before_transform: 256
+    # keys_to_remove: ["gt"]
+    keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]
+
+val_loader:
+  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
+  paths: ${dataset.wds_path_val}
+  basic_kwargs:
+    batch_size: ${dataset.batch_size_val}
+    num_workers: 0
+    prefetch_factor: null
+    shuffle_within_workers: false
+    resample: true
+    check_channels_n: ${dataset.dataset_channel}
+    quantile_img_clip: 1.0
+    per_channel_norm: false
+    random_one_key: false
+    resize_before_transform: 256
+    # keys_to_remove: ["gt"]
+    keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]

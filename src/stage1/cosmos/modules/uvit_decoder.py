@@ -17,7 +17,7 @@ import torch.nn as nn
 from timm.layers.create_act import create_act_layer
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from typing_extensions import Annotated
+from typing_extensions import Annotated, Any
 
 from src.utilities.config_utils import dataclass_from_dict
 
@@ -36,11 +36,11 @@ from .t_blocks.embeddings import (
 from .t_blocks.transformer_block import TransformerBlock, VisionTransformer
 from .t_blocks.utils import init_weights, init_zero
 
+# * --- Config --- #
 
-# Config
 @dataclass
 class UViTDecoderConfig:
-    in_channels: int = 3
+    in_channels: Any = 3  # int or list[int]
     z_dim: int = 4
     channels: int = 128
     ch_mult: tuple = (1, 2, 4, 4)
@@ -64,8 +64,7 @@ class UViTDecoderConfig:
     use_act_ckpt: bool = False
 
 
-# Model
-
+# * --- Model --- #
 
 class UViTDecoder(nn.Module):
     # fmt: off
@@ -132,7 +131,7 @@ class UViTDecoder(nn.Module):
         ### Input ###
         z_conv_in = nn.Conv2d(z_dim, channels, kernel_size=3, padding=1)
         if isinstance(in_channels, (list, tuple)):
-            noise_conv_in = DiffBandsInputConvOut(
+            noise_conv_in = DiffBandsInputConvIn(
                 in_channels, channels, padding_mode="reflect"
             )
         else:
@@ -365,13 +364,19 @@ class UViTDecoder(nn.Module):
 
             if use_act_ckpt:
                 x = checkpoint(
-                    upsample_block, x, t_emb, res_samples, ctx_emb, use_reentrant=False
+                    upsample_block,
+                    x,
+                    res_samples,
+                    t_emb,
+                    None,
+                    ctx_emb,
+                    use_reentrant=False,
                 )
             else:
                 x = upsample_block(
                     hidden_states=x,
-                    temb=t_emb,
                     res_hidden_states_tuple=res_samples,
+                    temb=t_emb,
                     ctx_emb=ctx_emb,
                 )
         return x
@@ -386,7 +391,7 @@ class UViTDecoder(nn.Module):
         x: Tensor,
         t,
         r=None,
-        z: Tensor = None,
+        z: Tensor | None = None,
         inp_shape: Annotated[torch.Size | int, "bs,c,h,w or c"] | None = None,
         return_zs=False,  # always be False
         derivative=False,
@@ -532,20 +537,10 @@ def test_uvit_decoder():
         # Test forward pass with different modes
         decoder.eval()
         with torch.no_grad():
-            # Test mode 1: with t only
-            print("Testing forward with t only...")
-            output1 = decoder(x, t, z=z)
-            print(f"Output shape (t only): {output1.shape}")
-
             # Test mode 2: with t and r
             print("Testing forward with t and r...")
             output2 = decoder(x, t, r=r, z=z)
             print(f"Output shape (t, r): {output2.shape}")
-
-            # Test mode 3: with None z (should use null_cond_h)
-            print("Testing forward with None z...")
-            output3 = decoder(x, t, r=r, z=None)
-            print(f"Output shape (None z): {output3.shape}")
 
         # Test training mode with gradient
         print("Testing training mode with gradient...")

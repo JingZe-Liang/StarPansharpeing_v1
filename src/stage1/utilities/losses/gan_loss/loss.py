@@ -304,13 +304,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
         disc_start_for_g: int = 0,
         disc_start_for_d: int = 0,
         disc_factor: float = 1.0,
-        disc_weight: float = 1.0,
+        disc_weight: float = 1.0,  # 0.0 or None for disable the GAN loss
         disc_reg_freq: int = 0,
         disc_reg_type: str = "r1",
         disc_reg_r1: float = 10,
         disc_reg_gamma: float = 10,
         # disc network cfg
-        disc_network_type: str = "patchgan",
+        disc_network_type: str | None = "patchgan",
         disc_input_size: int = 256,
         disc_in_channels: int = 3,
         disc_num_layers: int = 3,
@@ -329,6 +329,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # generator loss
         reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "mse",
         reconstruction_weight: float = 1.0,
+        # None for adaptive loss weight using the tokenizer last layer gradient
+        # mul at the tokenizer G_loss
         gen_loss_weight: float | None = None,
         # quantizer losses
         quantizer_type: str | None = None,
@@ -387,7 +389,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
         if force_not_use_recon_loss:
-            logger.warning(
+            logger.info(
                 "[VQ fn loss]: not use reconstruction loss, "
                 "make sure you will compute this main loss elsewhere"
             )
@@ -502,7 +504,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.lecam_ema = LeCAM_EMA()
 
         # * discriminator
-        self.use_disc = disc_weight > 0.0
+        self.use_disc = disc_weight > 0.0 or disc_weight is not None
         if disc_network_type.lower() == "patchgan":
             self.discriminator = NLayerDiscriminator(
                 input_nc=disc_in_channels,
@@ -555,6 +557,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 ResamplingFilter=[1, 2, 1],
                 BlocksPerStage=[2, 2, 4, 4],
                 ExpansionFactor=2,
+            )
+        elif disc_network_type is None:
+            self.discriminator = None
+            assert not self.use_disc, (
+                f"Discriminator is not used (weight={disc_weight}) but "
+                "set disc_network_type to {disc_network_type}"
             )
         else:
             raise ValueError(f"Unsupported discriminator type: {disc_network_type}")
@@ -994,7 +1002,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         if self.force_not_use_recon_loss:
             assert outer_recon_loss is not None, "outer_recon_loss is None"
             recon_loss = outer_recon_loss
-            ssim_loss = self.zero
+            ssim_loss = self.zero  # no ssim loss when using outer recon loss
         else:
             recon_loss_d = self._reconstruction_loss(inputs, reconstructions)
             recon_loss = recon_loss_d["recon_loss"] * self.reconstruction_weight
@@ -1055,7 +1063,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     g_loss = self.generator_loss(logits_fake)
 
             d_weight *= self._gen_loss_weight_fn(nll_loss, g_loss, last_layer)
-        d_weight *= self.discriminator_weight
+        d_weight *= self.discriminator_weight  # mul disc weight
         if not self.training:
             real_g_loss = disc_factor * g_loss
         g_loss = d_weight * disc_factor * g_loss
@@ -1196,8 +1204,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         reconstructions: torch.Tensor,
         optimizer_idx: int,
         global_step: int,
-        q_loss_breakdown: NamedTuple | Dict | None = None,
+        q_loss_breakdown: NamedTuple | dict | None = None,
         q_loss_total: torch.Tensor | None = None,
+        # compute the outer recon loss, compatible with flow tokenizer
         outer_recon_loss: torch.Tensor | None = None,
         last_layer: nn.Parameter | torch.Tensor | None = None,
         enc_last_layer: nn.Parameter | None = None,

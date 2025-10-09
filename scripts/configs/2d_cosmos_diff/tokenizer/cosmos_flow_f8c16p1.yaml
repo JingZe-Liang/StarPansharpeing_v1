@@ -1,0 +1,67 @@
+_target_: src.stage1.cosmos.cosmos_uvit_flow.CosmosFlowTokenizer.create_model
+tokenizer_cfg:
+  ## Baisc configurations
+  # repa
+  use_repa_loss: true
+  use_vf_loss: false
+  hook_module: decoder.decoder.mid.block_2
+  vf_on_z_or_module: z # [z, module]
+  dino_feature_dim: 1024
+  # loading
+  enc_path: ""
+  dec_path: ""
+  uni_path: ""
+  loading_type: null
+  # quant
+  norm_in_quant_conv: false
+  act_checkpoint: true
+  ## CNN encoder
+  model:
+    attn_resolutions: [32]
+    channels: 128
+    channels_mult: [2, 4, 4]
+    dropout: 0.0
+    in_channels: ${dataset.channels}
+    spatial_compression: 8
+    num_res_blocks: 2
+    out_channels: ${dataset.channels}
+    resolution: 1024
+    act_checkpoint: true
+    z_channels: 256
+    latent_channels: 16
+    norm_type: gn
+    norm_groups: 32
+    block_name: res_block
+    moe_token_mixer_type: res_block
+    hidden_factor: 4
+    use_residual_factor: false
+    # others
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
+    padding_mode: reflect # for boundary?
+    # wrap_fsdp_last_layer: false
+  ## Flow Decoder
+  decoder:
+    in_channels: ${dataset.channels}
+    z_dim: 256
+    channels: 128
+    layers_per_block: 2
+    num_attention_heads: 4
+    mid_nlayers: 4
+    dropout: 0.0
+    image_size: [64, 64]
+## Transport / Diffusion / Flow matching
+transport:
+  _target_: src.utilities.transport.tim.OT_FM
+  P_mean: 0.0
+  P_std: 1.6
+  sigma_d: 1.0
+## Scheduler
+transition_schedule_kwargs:
+  diffusion_ratio: 0.5
+  consistency_ratio: 0.1
+  derivative_type: dde
+  differential_epsilon: 0.005
+  weight_time_type: sqrt
+  weight_time_tangent: true

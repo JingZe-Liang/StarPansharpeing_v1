@@ -193,6 +193,7 @@ warn_return_any = false
 warn_unused_configs = true
 python_version = "3.12"
 allow_untyped_globals = true
+disable_error_code = ["import-untyped"]
 
 [[tool.mypy.overrides]]
 module = [

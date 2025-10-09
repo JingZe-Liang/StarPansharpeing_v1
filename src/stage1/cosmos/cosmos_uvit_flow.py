@@ -4,7 +4,7 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, NamedTuple, Optional, Tuple, Union, override
+from typing import Any, Literal, NamedTuple, Optional, Tuple, TypedDict, Union, override
 
 import accelerate
 import torch
@@ -30,6 +30,12 @@ from .modules import blocks as cosmos_block
 from .modules.layers2d import Decoder, Encoder
 from .modules.naflex import NaFlexVitCfg, NaFlexVitCfgAdpoted, Transformer
 from .modules.uvit_decoder import UViTDecoder, UViTDecoderConfig
+
+LossOutput = TypedDict(
+    "LossOutput",
+    {"flow_loss": torch.Tensor, "q_loss": torch.Tensor},
+)
+type DecoderOutput = tuple[Tensor, LossOutput, dict | None]
 
 
 @dataclass
@@ -152,9 +158,9 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         x: torch.Tensor,
         h: Union[torch.Tensor, tuple],
         inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
-        mode="step",
+        mode: Literal["step", "loop"] = "step",
         clamp=False,
-        ema_model: Optional["CosmosFlowTokenizer"] | None = None,
+        ema_model: Optional["CosmosFlowTokenizer"] = None,
         sample_kwargs: dict = dict(
             num_steps=8,
             stochasticity_ratio=0.0,
@@ -162,7 +168,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
             cfg_scale=1.0,
         ),
         ret_trajectory=False,
-    ):
+    ) -> DecoderOutput:
         """Decode the latent into the corresponding channels image.
         Output the reconstructed image or recon, quantizer loss and loss breakdowns.
         """
@@ -175,7 +181,11 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         assert torch.is_tensor(h), "h should be the (quantized) latent"
 
         # Decoder channels
-        chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
+        chan = (
+            inp_shape[1]
+            if isinstance(inp_shape, (torch.Size, tuple, list))
+            else inp_shape
+        )
 
         # Unquantization conv
         h = unquant_conv(h)
@@ -238,7 +248,14 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
             losses = {"flow_loss": flow_loss, "q_loss": q_loss}
             return recon, losses, q_loss_breakdown
         else:
-            return recon, {"flow_loss": flow_loss}, None
+            return (
+                recon,
+                {
+                    "flow_loss": flow_loss,
+                    "q_loss": torch.tensor(0.0, device=x.device),
+                },
+                None,
+            )
 
     @override
     def forward(
@@ -254,7 +271,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
             cfg_scale=1.0,
         ),
         ret_trajectory: bool = False,
-    ):
+    ) -> DecoderOutput:
         """Forward pass of the CosmosFlowTokenizer.
 
         Args:
@@ -285,6 +302,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         return dec
 
     @classmethod
+    @override
     @function_config_to_basic_types
     def create_model(
         cls,

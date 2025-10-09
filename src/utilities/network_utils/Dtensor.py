@@ -49,9 +49,7 @@ def safe_dtensor_operation(
     if not isinstance(tensor, DTensor):
         return tensor
 
-    state = PartialState()
-    device = state.device
-
+    device = PartialState().device
     if tensor._local_tensor.device != device:
         tensor._local_tensor = tensor._local_tensor.to(device)
 
