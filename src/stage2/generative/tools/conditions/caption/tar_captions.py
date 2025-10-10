@@ -50,19 +50,16 @@ def tar_captions():
     logger.success(f"Caption tar file saved to {caption_tar_save_path}")
 
 
-def filter_only_captions():
-    caption_tar_path: str = (
-        "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000.tar"
-    )
-    new_caption_tar_path: str = (
-        "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000_new.tar"
-    )
-    caption_ext: str = ".caption.json"
-
+def filter_only_captions(
+    caption_tar_path: str = "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000.tar",
+    new_caption_tar_path: str = "data/LoveDA/condition_captions/LoveDA-3_bands-px_1024-0000_new.tar",
+    caption_ext: str = ".caption.json",
+):
     caption_tar_reader = TarFile(name=caption_tar_path, mode="r")
     new_caption_tar_writer = TarFile(name=new_caption_tar_path, mode="w")
 
     is_caption_n = 0
+    any_error = False
     try:
         for member in (
             tbar := tqdm(
@@ -80,11 +77,28 @@ def filter_only_captions():
             tbar.set_postfix({"is_caption_n": is_caption_n})
     except Exception as e:
         logger.error(f"Error occurred: {e}")
+        any_error = True
     finally:
         caption_tar_reader.close()
         new_caption_tar_writer.close()
 
-    logger.success(f"New caption tar file saved to {new_caption_tar_path}")
+    if any_error:
+        logger.error(
+            f"Error occurred during filtering captions, processed {is_caption_n} captions."
+        )
+    else:
+        logger.success(f"New caption tar file saved to {new_caption_tar_path}.")
+
+
+def filter_multiple_captions(
+    caption_tar_paths: list[str],
+    new_caption_tar_paths: list[str],
+    caption_ext: str = ".caption.json",
+):
+    assert len(caption_tar_paths) == len(new_caption_tar_paths)
+
+    for ctp, nctp in zip(caption_tar_paths, new_caption_tar_paths):
+        filter_only_captions(ctp, nctp, caption_ext)
 
 
 if __name__ == "__main__":

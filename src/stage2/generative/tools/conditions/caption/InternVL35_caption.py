@@ -48,7 +48,7 @@ NOT a normal photo. the photo is taken from a top-down view.
 Do not use the markdown format.
 Do not use the bullet points or numbered lists.
 All reponse and answers must be in English, NO other languages.
-Do not include any personal opinions or subjective views. 
+Do not include any personal opinions or subjective views.
 <image>\n
 Now, please provide your description based on the image.
 """
@@ -380,28 +380,33 @@ def main_process_dataloader_img(
 
 if __name__ == "__main__":
     # Test dataloader functionality if possible
+    from braceexpand import braceexpand
+
     from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
-    tar_file = "data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"
-    if os.path.exists(tar_file):
-        _, dl = get_hyperspectral_dataloaders(
-            wds_paths=tar_file,
-            batch_size=1,
-            num_workers=1,
-            to_neg_1_1=False,
-            permute=True,
-            resample=False,
-            per_channel_norm=False,
+    tar_file = list(
+        braceexpand(
+            "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0003..0006}.tar"
         )
+    )
+    _, dl = get_hyperspectral_dataloaders(
+        wds_paths=tar_file,
+        batch_size=1,
+        num_workers=1,
+        to_neg_1_1=False,
+        permute=True,
+        resample=False,
+        per_channel_norm=False,
+    )
 
     print("Successfully created dataloader. Testing captioning...")
     # Use the main_process_dataloader_img function to process the dataloader
     main_process_dataloader_img(
         dl,
         rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
-        save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions",
+        save_dir="data/BigEarthNet_S2/condition_captions/0003-0006",
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",
         file_type="jsonl",
