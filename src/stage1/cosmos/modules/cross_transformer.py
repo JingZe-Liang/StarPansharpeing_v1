@@ -57,6 +57,7 @@ class Attention(Attention_):
         scale_norm: bool = False,
         proj_bias: bool = True,
         attn_type: str = "sdpa",
+        is_causal: bool = False,
     ):
         super().__init__(
             dim,
@@ -73,7 +74,7 @@ class Attention(Attention_):
             proj_bias,
         )
         self.attn_implem = attn_type
-        self.is_causal = False
+        self.is_causal = is_causal
 
     def forward(
         self, x, rope: Tensor | None = None, mask: BlockMask | Tensor | None = None

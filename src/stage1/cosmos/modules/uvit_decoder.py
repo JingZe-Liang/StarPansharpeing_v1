@@ -38,6 +38,7 @@ from .t_blocks.utils import init_weights, init_zero
 
 # * --- Config --- #
 
+
 @dataclass
 class UViTDecoderConfig:
     in_channels: Any = 3  # int or list[int]
@@ -65,6 +66,7 @@ class UViTDecoderConfig:
 
 
 # * --- Model --- #
+
 
 class UViTDecoder(nn.Module):
     # fmt: off

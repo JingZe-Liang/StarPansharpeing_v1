@@ -3,6 +3,9 @@ from typing import Any, Literal, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from cv2 import mean
+from einops import rearrange
+from timm.layers import create_norm_act_layer
 
 from src.utilities.logging import log_print
 
@@ -234,6 +237,28 @@ class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
         x = x.repeat_interleave(self.repeats, dim=1)
         x = F.pixel_shuffle(x, self.factor)
         return x
+
+
+# * --- Mingtok functional --- #
+
+
+class MingtokDownsampleShortCut(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        norm_act: tuple[str, str] = ("layernorm", "gelu"),
+    ):
+        self.out_channels = out_channels
+        self.norm_act = create_norm_act_layer(norm_act[0], in_channels, norm_act[1])
+        self.proj_out = nn.Linear(in_channels, out_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # shortcut: mean out
+        x_ = rearrange(x, "b l (c h) -> b l c h", c=self.out_channels).mean(dim=-1)
+        x = self.norm_act(x)
+        x = self.proj_out(x)
+        return x + x_
 
 
 # * --- Upsample and downsample entries --- #
