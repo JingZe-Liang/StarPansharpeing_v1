@@ -148,7 +148,7 @@ def save_jit_model(
 def load_jit_model_shape_matched(
     jit_model_path: str,
     tokenizer_config: dict,
-    device: str = "cuda",
+    device: str | torch.device = "cuda",
     part: str = "encoder",
 ):
     """Loads a JIT-compiled PyTorch model with shape matching checks.

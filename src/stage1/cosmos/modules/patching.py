@@ -27,8 +27,11 @@ For example, 4x downsampling can be done by 2x Haar and additional 2x Haar, and 
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from einops.layers.torch import Rearrange
+from timm.layers import create_conv2d
 
 _WAVELETS = {
     "haar": torch.tensor([0.7071067811865476, 0.7071067811865476]),
@@ -354,3 +357,29 @@ class UnPatcher3D(UnPatcher):
         )
         x = x[:, :, self.patch_size - 1 :, ...]
         return x
+
+
+def create_unpatcher(
+    chan: int,
+    out_chan: int,
+    patch_size: int = 1,
+    lora_rank_ratio: int = 0,
+    kernel_size=3,
+    **conv_kwargs,
+):
+    out_patch_chan = out_chan * (patch_size**2)
+    is_lora = lora_rank_ratio > 0
+    if is_lora:
+        unpatcher_conv = nn.Sequential(
+            create_conv2d(chan, chan // lora_rank_ratio, 1),
+            create_conv2d(
+                chan // lora_rank_ratio, out_patch_chan, kernel_size, **conv_kwargs
+            ),
+        )
+    else:
+        unpatcher_conv = create_conv2d(chan, out_patch_chan, kernel_size, **conv_kwargs)
+    rearranger = Rearrange(
+        "bs (c p1 p2) h w -> bs c (h p1) (w p2)", p1=patch_size, p2=patch_size
+    )
+    patcher = nn.Sequential(unpatcher_conv, rearranger)
+    return patcher

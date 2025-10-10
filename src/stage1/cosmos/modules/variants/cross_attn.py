@@ -79,14 +79,12 @@ class Qwen3NextRMSNorm(nn.Module):
 
 
 # Register custom norm
-create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm
+create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore 
 
 
 class CrossAttention(nn.Module):
     config = SimpleNamespace(
-        {
-            "_attn_implementation": "flash_attention_2",
-        }
+        _attn_implementation="flash_attention_2"
     )  # for flash_attention_2 config
 
     def __init__(

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable, cast
 
 import accelerate
+import accelerate.utils
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, set_peft_model_state_dict

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, NamedTuple, Optional, Tuple, TypedDict, Union, override
 
 import accelerate
+import accelerate.utils
 import torch
 from loguru import logger
 from torch import Tensor
@@ -74,7 +75,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         model_cfg.act_checkpoint = cfg.act_checkpoint
         cfg.decoder.use_act_ckpt = cfg.act_checkpoint
 
-        encoder = Encoder(**asdict(model_cfg))  # CNN encoder
+        encoder = Encoder(**asdict(model_cfg))  # CNN encoder # type: ignore
         # The decoder is Flow UViT decoder
         decoder = UViTDecoder(**asdict(cfg.decoder))  # UViT decoder
         return encoder, decoder
@@ -261,7 +262,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
     def forward(
         self,
         input: torch.Tensor,
-        dec_mode: str = "step",
+        dec_mode: Literal["step", "loop"] = "step",
         clamp: bool = False,
         ema_model: Optional["CosmosFlowTokenizer"] | None = None,
         sample_kwargs: dict = dict(

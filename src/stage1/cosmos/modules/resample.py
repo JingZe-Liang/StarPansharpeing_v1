@@ -249,15 +249,46 @@ class MingtokDownsampleShortCut(nn.Module):
         out_channels: int,
         norm_act: tuple[str, str] = ("layernorm", "gelu"),
     ):
+        super().__init__()
         self.out_channels = out_channels
         self.norm_act = create_norm_act_layer(norm_act[0], in_channels, norm_act[1])
         self.proj_out = nn.Linear(in_channels, out_channels)
+        assert in_channels % out_channels == 0, (
+            f"in_channels must be divisible by out_channels, "
+            f"but got in_channels={in_channels} and out_channels={out_channels}"
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (b, l, in_channels)
+        """
         # shortcut: mean out
         x_ = rearrange(x, "b l (c h) -> b l c h", c=self.out_channels).mean(dim=-1)
         x = self.norm_act(x)
         x = self.proj_out(x)
+        return x + x_
+
+
+class MingtokUpsampleAverage(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.proj_in = nn.Linear(in_channels, out_channels)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        assert out_channels % in_channels == 0, (
+            f"out_channels must be divisible by in_channels, "
+            f"but got in_channels={in_channels} and out_channels={out_channels}"
+        )
+        self.rep_factor = self.out_channels // self.in_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (bs, len_x, in_channels)
+        """
+        bs, l, _ = x.shape
+        # repeat interleave
+        x_ = x[..., None].repeat_interleave(self.rep_factor, dim=-1).view(bs, l, -1)
+        x = self.proj_in(x)
         return x + x_
 
 
@@ -380,3 +411,18 @@ def build_downsample_block(
     else:
         raise ValueError(f"shortcut {shortcut} is not supported for downsample")
     return block
+
+
+if __name__ == "__main__":
+    """
+    python -m src.stage1.cosmos.modules.resample
+    """
+    # downsample = MingtokDownsampleShortCut(256, 16)
+    # x = torch.randn(1, 512, 256)
+    # y = downsample(x)
+    # print(y.shape)
+
+    upsample = MingtokUpsampleAverage(16, 256)
+    x = torch.randn(1, 512, 16)
+    y = upsample(x)
+    print(y.shape)
