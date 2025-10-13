@@ -6,7 +6,7 @@ GAN loss, REPA, VF losses.
 import warnings
 from collections import namedtuple
 from types import SimpleNamespace
-from typing import Dict, Literal, NamedTuple
+from typing import Dict, Literal, NamedTuple, Union, Optional
 
 import torch
 import torch.distributed.tensor as dtensor
@@ -1204,7 +1204,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         reconstructions: torch.Tensor,
         optimizer_idx: int,
         global_step: int,
-        q_loss_breakdown: NamedTuple | dict | None = None,
+        q_loss_breakdown: Union[NamedTuple, dict, None] = None,
         q_loss_total: torch.Tensor | None = None,
         # compute the outer recon loss, compatible with flow tokenizer
         outer_recon_loss: torch.Tensor | None = None,

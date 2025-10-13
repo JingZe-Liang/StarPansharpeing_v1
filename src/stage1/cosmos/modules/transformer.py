@@ -18,6 +18,7 @@ from einops.layers.torch import Rearrange
 from flash_attn.layers.rotary import (
     RotaryEmbedding as FlashAttnRotaryEmbedding,  # type: ignore
 )
+from jaxtyping import Float
 from loguru import logger
 from timm.layers import (
     DropPath,
@@ -34,6 +35,7 @@ from timm.layers.pos_embed_sincos import (
     get_mixed_freqs,
     get_mixed_grid,
 )
+from timm.models.naflexvit import get_init_weights_vit, named_apply
 from timm.models.vision_transformer import VisionTransformer
 from torch import Tensor
 from torch.nn.attention.flex_attention import (
@@ -45,6 +47,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Annotated
 
+from .blocks import AdaptiveInputConvLayer, AdaptiveOutputConvLayer
 from .mask import random_masking_mae, random_masking_no_drop
 from .patching import create_unpatcher
 from .resample import MingtokDownsampleShortCut, MingtokUpsampleAverage
@@ -55,6 +58,22 @@ from .rope import (
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
+
+
+class AdaptivePatchEmbedding(PatchEmbed):
+    def __init__(self, in_chans, embed_dim, patch_size: int, **kwargs):
+        super().__init__(
+            in_chans=in_chans, embed_dim=embed_dim, patch_size=patch_size, **kwargs
+        )
+        self.proj = AdaptiveInputConvLayer(
+            in_chans,
+            embed_dim,
+            patch_size,
+            patch_size,
+            padding=0,
+            use_bias=kwargs.get("bias", True),
+            mode="interp",  # ['slice', 'interp']
+        )
 
 
 class Attention(Attention_):
@@ -386,6 +405,7 @@ class AttentionBlock(nn.Module):
         self.use_gate = use_gate
         self.layer_idx = layer_idx
 
+        self.sa: GatedAttention | Attention
         if self.use_gate:
             self.sa = GatedAttention(
                 dim,
@@ -676,6 +696,7 @@ class TransformerTokenizer(nn.Module):
         out_chan=None,
         img_size=384,
         patch_size=16,
+        out_patch_size=1,
         depth=12,
         num_heads=8,
         mlp_ratio=4.0,
@@ -693,6 +714,7 @@ class TransformerTokenizer(nn.Module):
         mask_train_ratio=0.0,
         last_norm: str | None = None,
         is_causal=False,
+        patcher_type: str = "patch_embedder",
     ):
         super().__init__()
         self.in_chan = in_chan
@@ -700,29 +722,38 @@ class TransformerTokenizer(nn.Module):
         self.grad_checkpointing = False
 
         # Patch embedding
-        self.patch_embed = PatchEmbed(
-            (img_size, img_size),  # placeholder, not used
-            patch_size=patch_size,
-            in_chans=in_chan,
-            embed_dim=embed_dim,
-            strict_img_size=False,
-            output_fmt="NLC",
-        )
-        self.patch_size = patch_size
-        self.grid_size = self.patch_embed.grid_size
-        self.n_patches = self.patch_embed.num_patches
+        if patcher_type == "patch_embedder":
+            self.patch_embed = AdaptivePatchEmbedding(
+                img_size=(img_size, img_size),  # placeholder, not used
+                patch_size=patch_size,
+                in_chans=in_chan,
+                embed_dim=embed_dim,
+                strict_img_size=False,
+                output_fmt="NLC",
+            )
+            self.patch_size = patch_size
+            self.grid_size = self.patch_embed.grid_size
+            self.n_patches = self.patch_embed.num_patches
+        elif patcher_type == "linear":
+            # Input tensor is 1D Tensor
+            self.patch_embed = nn.Linear(in_chan, embed_dim)
+            self.patch_size = 1
+            self.grid_size = (img_size, img_size)
+            self.n_patches = img_size * img_size
+        else:
+            raise ValueError(f"Unknown patcher type: {patcher_type}")
 
         # Projections
         # Encoder: forward output downsample layer
         # Decoder: forward input upsample layer
         input_proj_type = projections.get("input", None)
         output_proj_type = projections.get("output", None)
-        if input_proj_type == "ds_shortcut":
+        if output_proj_type == "ds_shortcut":  # for encoder
             input_proj = MingtokDownsampleShortCut(in_chan, embed_dim)
         else:
             input_proj = nn.Identity()
-        if output_proj_type == "us_average":
-            output_proj = MingtokDownsampleShortCut(embed_dim, in_chan)
+        if input_proj_type == "us_average":  # for decoder
+            output_proj = MingtokUpsampleAverage(embed_dim, in_chan)
         else:
             output_proj = nn.Identity()
         self.projections = nn.ModuleDict(
@@ -731,7 +762,7 @@ class TransformerTokenizer(nn.Module):
 
         # Layers
         layers = []
-        drop_path_ps = torch.linspace(0, drop_path, depth)
+        drop_path_ps = torch.linspace(0, drop_path, depth).tolist()
         for i in range(depth):
             block = AttentionBlock(
                 dim=embed_dim,
@@ -744,7 +775,7 @@ class TransformerTokenizer(nn.Module):
                 is_causal=is_causal,
             )
             layers.append(block)
-        self.blocks = nn.ModuleList(layers)
+        self.layers = nn.ModuleList(layers)
 
         # Positional embeddings
         self.pe_type = pe_type
@@ -769,7 +800,7 @@ class TransformerTokenizer(nn.Module):
             )  # buffer: (1, 1, max_seq_len, head_dim*2)
             self.rope_cat: nn.Buffer
         else:
-            self.rope, self.pe = None
+            self.rope, self.pe = None, None
 
         # Register tokens
         self.reg_tokens = None
@@ -784,16 +815,21 @@ class TransformerTokenizer(nn.Module):
         self.out_chan = out_chan
         if head is not None:
             assert out_chan is not None, "out_chan must be specified if head is used"
-            self.head = nn.Sequential(
-                nn.Linear(embed_dim, out_chan * (patch_size**2)),
-                Rearrange(
-                    "... (h w) (c p1 p2) -> ... c (h p1) (w p2)",
-                    p1=patch_size,
-                    p2=patch_size,
-                    c=out_chan,
-                ),
+            assert out_patch_size is not None, (
+                "out_patch_size must be specified if head is used"
             )
             self.head_required = True
+            if head == "linear":
+                self.head = nn.Linear(embed_dim, out_chan * (out_patch_size**2))
+            else:
+                raise ValueError(f"Unknown head type: {head}")
+        else:
+            # head is None, but the out_chan is not None
+            if out_chan is not None:
+                logger.warning(
+                    f"[Transformer Tokenizer] out_chan is specified but head is not. "
+                    "This is not recommended. Please set 'head'."
+                )
 
         # Mask token
         self.mask_train_ratio = mask_train_ratio
@@ -807,11 +843,18 @@ class TransformerTokenizer(nn.Module):
             assert self.pe_type != "rope", "Rope PE not supported for mask training"
             self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.mask_token, std=0.02)
+            logger.info(
+                f"[Transformer Tokenizer] Mask training enabled with ratio {mask_train_ratio}"
+            )
 
         # Last norm
         self.last_norm = None
         if last_norm is not None:
             self.last_norm = create_norm_layer(last_norm, embed_dim)
+
+        # Initialize weights
+        named_apply(get_init_weights_vit("jax", head_bias=0.0), self)
+        logger.info("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
 
     def _get_masked_x(self, x):
         if self.mask_training:
@@ -856,9 +899,20 @@ class TransformerTokenizer(nn.Module):
         x = self.projections["input_proj"](x)
         return x
 
-    def _forward_get_tokens(self, x):
-        bs, c, h, w = x.shape
-        x = self.patch_embed(x)  # (bs, n, dim)
+    def _forward_get_tokens(self, x, hw=None):
+        if x.ndim == 4:
+            bs, c, h, w = x.shape if hw is None else (*x.shape[:2], *hw)
+            x = self.patch_embed(x)  # (bs, n, dim)
+        elif x.ndim == 3:
+            bs, l, c = x.shape
+            if hw is None:
+                h = w = int(math.sqrt(l))
+            else:
+                h, w = hw
+            x = self.patch_embed(x)
+        else:
+            raise ValueError(f"Unsupported input shape: {x.shape}")
+
         x, rope = self._with_pos_embed(
             x, hw=(h // self.patch_size, w // self.patch_size)
         )
@@ -868,11 +922,26 @@ class TransformerTokenizer(nn.Module):
             x = torch.cat([reg_tokens, x], dim=1)  # (bs, n+n_reg, dim)
         return x, rope
 
-    def forward_features(self, x):
-        gx_h, gx_w = x.shape[-2] // self.patch_size, x.shape[-1] // self.patch_size
+    def forward_features(
+        self, x: Float[Tensor, "b c h w or b l c"], hw: tuple[int, int] | None = None
+    ):
+        # Get grid size
+        if hw is None:
+            # x grid size
+            gx_h, gx_w = (
+                x.shape[-2] // self.patch_size,
+                x.shape[-1] // self.patch_size
+                if x.ndim == 4
+                else (
+                    int(math.sqrt(x.shape[1])) // self.patch_size,
+                    int(math.sqrt(x.shape[1])) // self.patch_size,
+                ),
+            )
+        else:
+            gx_h, gx_w = hw[0] // self.patch_size, hw[1] // self.patch_size
 
         # Embed patches
-        x, rope = self._forward_get_tokens(x)  # (bs, n+n_reg, dim)
+        x, rope = self._forward_get_tokens(x, hw)  # (bs, n+n_reg, dim)
 
         # Projection in
         x = self._forward_proj_in(x)
@@ -881,7 +950,7 @@ class TransformerTokenizer(nn.Module):
         x, mask, ids_restore = self._get_masked_x(x)
 
         # Layers
-        for blk in self.blocks:
+        for blk in self.layers:
             if self.grad_checkpointing and self.training:
                 x = checkpoint(blk, x, rope, None, use_reentrant=False)
             else:
@@ -902,18 +971,28 @@ class TransformerTokenizer(nn.Module):
         }
         return out
 
-    def _to_output(self, x, grid_size: tuple[int, int], ret_2d_tokens=False):
+    def _to_output(
+        self,
+        x,
+        grid_size: tuple[int, int] | torch.Tensor | torch.Size,
+        ret_2d_tokens=False,
+    ):
         # Reshape into 2d img
         reshape_flag = self.head_required and ret_2d_tokens
 
         if not self.head_required and ret_2d_tokens:
             x = rearrange(x, "... (h w) c -> ... c h w", h=grid_size[0], w=grid_size[1])
         else:
+            x = self.head(x)  # (bs, n, out_chan)
             if ret_2d_tokens:
-                x = self.head(x)  # reshape inside
-            else:
-                # warning: x shape (bs, l, (c * p ** 2))
-                x = self.head[0](x)  # only linear layer
+                x = rearrange(
+                    x,
+                    "... (h w) (c p1 p2) -> ... c (h p1) (w p2)",
+                    h=grid_size[0],
+                    w=grid_size[1],
+                    p1=self.patch_size,
+                    p2=self.patch_size,
+                )
         return x
 
     def forward(self, x: torch.Tensor, ret_2d_tokens=False, ret_all=True):
@@ -936,7 +1015,15 @@ if __name__ == "__main__":
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.modules.transformer
     """
     transformer = (
-        TransformerTokenizer(3, 512, 3, pe_type="learn", drop_path=0.2, is_causal=True, mask_train_ratio=0.5)
+        TransformerTokenizer(
+            3,
+            512,
+            3,
+            pe_type="learn",
+            drop_path=0.2,
+            is_causal=True,
+            mask_train_ratio=0.5,
+        )
         .cuda()
         .to(dtype=torch.bfloat16)
     )

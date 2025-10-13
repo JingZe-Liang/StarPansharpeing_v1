@@ -329,7 +329,7 @@ class TransitionSchedule:
         stochasticity_ratio=0.0,
         sample_type: str = "transition",  # 'transition', diffusion
         progress_bar=True,
-    ):
+    ) -> torch.Tensor:
         _dtype = z.dtype
         t_steps = torch.linspace(T_max, T_min, num_steps + 1, dtype=torch.float64).to(z)
         cfg_low = cfg_low * T_max

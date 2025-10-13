@@ -383,3 +383,4 @@ def create_unpatcher(
     )
     patcher = nn.Sequential(unpatcher_conv, rearranger)
     return patcher
+

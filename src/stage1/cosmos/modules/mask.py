@@ -49,7 +49,7 @@ def random_masking_no_drop(
         # shaped as (D,)
         mask_token = mask_token.unsqueeze(0).unsqueeze(0)
     assert mask_token.shape == (1, 1, D)
-    
+
     # sort noise for each sample
     noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
     ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove

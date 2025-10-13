@@ -1100,25 +1100,50 @@ class AdaptiveInputConvLayer(nn.Module):
         stride: int = 1,
         dilation: int = 1,
         groups: int = 1,
+        padding: int | None = None,
         use_bias: bool = False,
+        mode: Literal["slice", "interp"] = "slice",
     ):
         super().__init__()
-        self.conv = create_conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
+        conv_kwargs = dict(
             stride=stride,
             groups=groups,
             dilation=dilation,
             bias=use_bias,
         )
+        if padding is not None:
+            # if padding not set, the create_conv2d will use same padding
+            conv_kwargs["padding"] = padding
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            **conv_kwargs,
+        )
+        self.mode = mode
 
     @no_type_check
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         in_channels = x.shape[1]
+        if in_channels == self.conv.weight.shape[1]:
+            return self.conv(x)
+
+        if self.mode == "slice":
+            w = self.conv.weight[:, :in_channels]
+        elif self.mode == "interp":
+            c_out, c_in, k, k = (w := self.conv.weight).shape
+            # c_in -> in_channels
+            w_i = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
+            w_i = torch.nn.functional.interpolate(
+                w_i, size=(c_out, in_channels), mode="bicubic", align_corners=False
+            )
+            w = rearrange(w_i, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+        else:
+            raise ValueError(f"Unknown mode {self.mode}")
+
         x = nn.functional.conv2d(
             x,
-            self.conv.weight[:, :in_channels],
+            w,
             self.conv.bias,
             self.conv.stride,
             self.conv.padding,
@@ -1141,18 +1166,27 @@ class AdaptiveOutputConvLayer(nn.Module):
         stride: int = 1,
         dilation: int = 1,
         groups: int = 1,
+        padding: int | None = None,
         use_bias: bool = False,
+        mode: Literal["slice", "interp"] = "slice",
     ):
         super().__init__()
-        self.conv = create_conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
+        conv_kwargs = dict(
             stride=stride,
             groups=groups,
             dilation=dilation,
             bias=use_bias,
         )
+        if padding is not None:
+            conv_kwargs["padding"] = padding
+
+        self.conv = create_conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            **conv_kwargs,
+        )
+        self.mode = mode
 
     @no_type_check
     def forward(
@@ -1160,6 +1194,34 @@ class AdaptiveOutputConvLayer(nn.Module):
     ) -> torch.Tensor:
         if out_channels is None:
             out_channels = self.conv.out_channels
+
+        if out_channels == self.conv.weight.shape[0]:
+            return self.conv(x)
+
+        b = self.conv.bias
+        if self.mode == "slice":
+            w = self.conv.weight[:out_channels]
+            if b:
+                b = b[:out_channels]
+        elif self.mode == "interp":
+            c_out, c_in, k, k = (w := self.conv.weight).shape
+            # c_out -> out_channels
+            w_i = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
+            w_i = torch.nn.functional.interpolate(
+                w_i, size=(out_channels, c_in), mode="bicubic", align_corners=False
+            )
+            w = rearrange(w_i, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+            # (c_out,)
+            if b:
+                b = torch.nn.functional.interpolate(
+                    b[None, :, None],  # (1, c_out, 1)
+                    size=(out_channels,),
+                    mode="linear",
+                    align_corners=False,
+                )[0, :, 0]
+        else:
+            raise ValueError(f"Unknown mode {self.mode}")
+
         x = nn.functional.conv2d(
             x,
             self.conv.weight[:out_channels],
@@ -1833,3 +1895,20 @@ class FinalLayer(nn.Module):
         x = self.norm_final(x) * (1 + scale) + shift
         x = self.conv(x)
         return x
+
+
+if __name__ == "__main__":
+    """
+    python -m src.stage1.cosmos.modules.blocks
+    """
+    adaptive_in_layer = AdaptiveInputConvLayer(
+        in_channels=256,
+        out_channels=16,
+        mode="interp",
+        kernel_size=8,
+        stride=8,
+        padding=0,
+    )
+    x = torch.randn(1, 128, 64, 64)
+    y = adaptive_in_layer(x)
+    print(y.shape)

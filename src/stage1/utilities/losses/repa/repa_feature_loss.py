@@ -3,7 +3,8 @@ import sys
 import warnings
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence, TypeVar, cast, overload
+from types import MethodType
+from typing import Any, Callable, Literal, Optional, Sequence, TypeVar, cast, overload
 
 import numpy as np
 import timm
@@ -20,9 +21,23 @@ from torch import Tensor, is_tensor
 from torch.distributed.tensor import DTensor, Shard
 from torch.utils.file_baton import FileBaton
 from torchvision.transforms import Normalize
+from transformers import (
+    AutoModel,
+    AutoProcessor,
+    BitsAndBytesConfig,
+    Siglip2Model,
+    Siglip2VisionModel,
+    SiglipImageProcessor,
+    SiglipProcessor,
+)
+from transformers.modeling_outputs import BaseModelOutput
+from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionTransformer
 
 from src.stage1.utilities.losses.gan_loss.utils import get_rgb_channels_for_model
-from src.stage1.utilities.losses.repa.feature_pca import feature_pca_torch
+from src.stage1.utilities.losses.repa.feature_pca import (
+    feature_pca_sk,
+    feature_pca_torch,
+)
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
@@ -34,7 +49,6 @@ DINOV3_TO_NUM_LAYERS = {
     "dinov3_vith16plus": 32,
     "dinov3_vit7b16": 40,
 }
-
 DINOv3_INTERACTION_INDEXES = {
     "dinov3_vits16": [2, 5, 8, 11],
     "dinov3_vits16plus": [2, 5, 8, 11],
@@ -43,6 +57,23 @@ DINOv3_INTERACTION_INDEXES = {
     "dinov3_vith16plus": [4, 16, 19, 31],
     "dinov3_vit7b16": [9, 19, 29, 39],
 }
+
+# Siglip2 collections
+# https://huggingface.co/collections/google/siglip2-67b5dcef38c175486e240107
+SIGLIP2_INTERACTION_INDEXES = {
+    "google/siglip2-base-patch16-512": [2, 5, 8, 11],
+    "google/siglip2-large-patch16-512": [5, 11, 17, 23],
+    "google/siglip2-base-patch16-naflex": [2, 5, 8, 11],
+    "google/siglip2-large-patch16-naflex": [5, 11, 17, 23],
+    "google/siglip2-so400m-patch14-224": [
+        5,
+        11,
+        17,
+        23,
+    ],  # patch=[14,16]; shape=[224,384,512]
+    "google/siglip2-so400m-patch16-naflex": [7, 16, 22, 26],  # naflex backbone
+}
+SIGLIP2_FEATURE_INDEX: list[int] | None = None
 
 
 def interpolate_features_2d(x: Tensor, tgt_size: tuple[int, ...] | torch.Size):
@@ -285,6 +316,102 @@ def load_repa_dino_v2_model(
     return model  # type: ignore[return-value]
 
 
+def _siglip_vit_encoder_forward_features_patcher(
+    self,
+    inputs_embeds,
+    attention_mask: Optional[torch.Tensor] = None,
+    **kwargs,
+):
+    output_last_hs = kwargs.pop("output_hidden_states", False)
+    index = []
+
+    global SIGLIP2_FEATURE_INDEX
+    if output_last_hs:
+        index = SIGLIP2_FEATURE_INDEX
+        assert index is not None, "Siglip2 feature index is not set"
+
+    hidden_states = inputs_embeds
+    features = []
+    for i, encoder_layer in enumerate(self.layers):
+        hidden_states = encoder_layer(hidden_states, attention_mask, **kwargs)
+        if output_last_hs and i in index:
+            features.append(hidden_states)
+    return BaseModelOutput(
+        last_hidden_state=hidden_states,
+        hidden_states=features if len(features) > 0 else None,
+    )
+
+
+def load_siglip2_model(
+    name="google/siglip2-so400m-patch16-naflex",
+    use_bnb=False,
+    attn_implem="sdpa",
+    use_automodel=True,
+    cache_dir=None,
+) -> tuple[Siglip2VisionTransformer, SiglipProcessor]:
+    if use_bnb:
+        bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+    else:
+        bnb_config = None
+
+    if not use_automodel:
+        # model, processor = None, None
+        raise NotImplementedError("AutoModel is not supported yet")
+    else:
+        model = AutoModel.from_pretrained(
+            name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            attn_implementation=attn_implem,
+            cache_dir=cache_dir,
+        )
+        # remove the text model
+        model.text_model = None
+        vision_model = model.vision_model
+        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir)
+
+    model = cast(Siglip2VisionModel, model)
+
+    global SIGLIP2_FEATURE_INDEX
+    SIGLIP2_FEATURE_INDEX = SIGLIP2_INTERACTION_INDEXES[name]
+    log_print(f"[Siglip2]: using feature index {SIGLIP2_FEATURE_INDEX}")
+
+    # Override the forward_features method
+    vision_model.encoder.forward = MethodType(
+        _siglip_vit_encoder_forward_features_patcher, vision_model.encoder
+    )
+
+    return vision_model, processor  # type: ignore[return-value]
+
+
+def _siglip_processor_patcher(
+    processor: SiglipProcessor,
+    interp_pe=False,
+    size: dict | int | None = None,
+    do_resize: bool | None = None,
+    max_num_patches: int | None = None,
+):
+    if size is not None:
+        if isinstance(size, int):
+            size = {"height": size, "width": size}
+        processor.image_processor.size = size
+    if do_resize is not None:
+        processor.image_processor.do_resize = do_resize
+
+    def _processor(*args, **kwargs):
+        if max_num_patches is not None:
+            kwargs["max_num_patches"] = max_num_patches
+
+        kwargs.setdefault("return_tensors", "pt")
+        inputs = processor(*args, **kwargs)
+        inputs["attention_mask"] = inputs.pop("pixel_attention_mask", None)
+        if interp_pe:
+            inputs["interpolate_pos_encoding"] = True
+        return inputs
+
+    return _processor
+
+
 def load_repa_encoder(
     model_name: str = "dinov2_vitb14",
     weight_path: str | Path | None = None,
@@ -311,6 +438,12 @@ def load_repa_encoder(
             model_name,
             compile=compile,
         )
+    elif version == "siglip2":
+        assert weight_path is not None, (
+            "weight_path should not be None when loading Siglip2 model"
+        )
+        model, processor = load_siglip2_model(weight_path)
+        return model, processor
     else:
         raise ValueError(f"Unknown DINO/PE version {version}")
 
@@ -338,7 +471,7 @@ class REPALoss(torch.nn.Module):
         dino_fixed_bs: int | None = None,
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
-        dino_type: str = "torch",  # [torch, timm]
+        dino_type: str = "torch",  # [torch, timm, siglip2]
         dino_name="dinov3_vitl16",
         dino_version: int = 3,
         dino_pretrained_path: str | None = None,
@@ -444,12 +577,24 @@ class REPALoss(torch.nn.Module):
             self.dino_name = dino_name
             if baton.try_acquire():
                 try:
-                    self.repa_encoder = load_repa_encoder(**load_kwargs)
+                    repa_encoder = load_repa_encoder(**load_kwargs)
                 finally:
                     baton.release()
             else:
                 baton.wait()
-                self.repa_encoder = load_repa_encoder(**load_kwargs)
+                repa_encoder = load_repa_encoder(**load_kwargs)
+            if isinstance(repa_encoder, tuple):
+                self.repa_encoder = repa_encoder[0]
+                processor = repa_encoder[1]
+                # do resize in the processor
+                max_n_patches = (dino_img_size // 16) ** 2
+                self.processor = _siglip_processor_patcher(
+                    processor,
+                    interp_pe=False,
+                    # size=(dino_img_size, dino_img_size),
+                    max_num_patches=max_n_patches,
+                )
+
             self.repa_encoder.image_size = dino_img_size
             self.repa_encoder = self.repa_encoder.to(dtype)
             self.repa_encoder.requires_grad_(False)
@@ -505,11 +650,96 @@ class REPALoss(torch.nn.Module):
             "img dim must be 4d and have 3 channels"
         )
         img = self.normalize(img)
-
         return img
 
-    @torch.autocast("cuda", torch.bfloat16)
     def _forward_features(
+        self, x: dict | Tensor, get_interm_feats=False, detach=True, **kwargs
+    ):
+        if self.dino_type == "siglip2":
+            assert isinstance(x, dict), "inputs must be a dict for Siglip2 model"
+            return self._forward_siglip_features(x, get_interm_feats, detach=detach)
+        else:
+            assert is_tensor(x), "inputs must be a tensor for DINOv2/v3 model"
+            return self._forward_dino_features(
+                x, get_interm_feats, detach=detach, **kwargs
+            )
+
+    @torch.autocast("cuda", torch.bfloat16)
+    def _forward_siglip_features(
+        self, inputs: dict, get_interm_feats=False, detach=True
+    ):
+        assert self.dino_type == "siglip2", (
+            "dino_type must be 'siglip2' when using Siglip2 model"
+        )
+
+        # image is the output of the processor
+        _is_naflex = False
+        if "spatial_shapes" in inputs:
+            shapes = inputs["spatial_shapes"]  # (bs, 2)
+            _is_naflex = True
+        else:
+            shapes = inputs["pixel_values"].shape  # (bs, c, h, w)
+        model_out_ = self.repa_encoder(**inputs)  # Tensor (bs, n, c) or (bs, c, h, w)
+
+        out_feats: Tensor | list[Tensor]
+        if get_interm_feats:
+            out_feats = model_out_.hidden_states  # list of Tensor
+        else:
+            out_feats = model_out_.last_hidden_state  # Tensor
+
+        n_feats = 1
+        if isinstance(out_feats, list):
+            n_feats = len(out_feats)
+
+        # Post-processing
+        # Per-tensor process
+        bs = inputs["pixel_values"].shape[0]
+
+        def _per_tensor_process(feat: Tensor):
+            if _is_naflex:
+                feat_valid = []
+                for i in range(n_feats):
+                    # Usually, the batch of tensor has the same shape and
+                    # valid length, but in general, we keep the for-loop
+                    s = shapes[i]  # (2,): mean h, w
+                    n_patches_i = s.prod().item()
+                    h_sample = (
+                        feat[i, :n_patches_i].view(1, *s, -1).permute(0, 3, 1, 2)
+                    )  # (1, c, h, w)
+                    feat_valid.append(h_sample)  # 2d feature
+                # Stack back to a tensor
+                feat = torch.stack(feat_valid, dim=0)  # (bs, c, h, w)
+            else:
+                # assert feat.ndim == 4, f"Siglip2 (not naflex version) output feature must be 4d but got {feat.ndim}d"
+                if feat.ndim == 3:
+                    # Reshape back to 2d
+                    h = w = int(math.sqrt(feat.shape[1]))
+                    feat = rearrange(feat, "b (h w) c -> b c h w", h=h, w=w)
+            return feat
+
+        if get_interm_feats:
+            # is a list of features
+            img_feats = [
+                _per_tensor_process(feat) for feat in out_feats
+            ]  # 2d list features
+        else:
+            img_feats = _per_tensor_process(out_feats)  # 2d features
+
+        # Detach and retun 1 feature out?
+        if isinstance(img_feats, list) and len(img_feats) == 1:
+            img_feats = img_feats[-1]
+        else:
+            log_print(
+                f"[REPA Loss]: Siglip2 returned {len(img_feats)} features, use the last one.",
+                once=True,
+                level="warning",
+            )
+            img_feats = img_feats[-1]
+
+        return img_feats
+
+    @torch.autocast("cuda", torch.bfloat16)
+    def _forward_dino_features(
         self, img, get_interm_feats=False, detach=True
     ) -> Tensor | list[Tensor]:
         img = self._to_dtensor(img)
@@ -540,24 +770,27 @@ class REPALoss(torch.nn.Module):
             )  # (bs, c, h, w)
         else:
             raise ValueError(
-                f"Unknown dino_type: {self.dino_type}. Must be 'torch' or 'timm'."
+                f"Unknown model type: {self.dino_type}. Must be 'torch', 'timm', or 'siglip2'"
             )
 
+        # Dtensor to Tensor
         if isinstance(img_feats, DTensor):
             img_feats = img_feats.full_tensor()
         elif isinstance(img_feats, (tuple, list)) and isinstance(img_feats[0], DTensor):
+            img_feats = list(img_feats)
             for i, img_feat in enumerate(img_feats):
                 img_feats[i] = img_feat.full_tensor()
 
+        # Detach all tensors
         if detach:
-            if torch.is_tensor(img_feats):
+            if isinstance(img_feats, Tensor):
                 img_feats = img_feats.detach()
             elif isinstance(img_feats, (tuple, list)):
                 img_feats = [f.detach() for f in img_feats]
 
         return img_feats
 
-    def _resize_img(self, img, size):
+    def _resize_img(self, img, size) -> Any:
         assert img.shape[1] == 3, (
             f"img must be rgb images but got image shaped as {img.shape}"
         )
@@ -594,6 +827,8 @@ class REPALoss(torch.nn.Module):
         detach=True,
     ):
         img_size = tuple(img.shape[-2:])
+        bs = img.shape[0]
+        assert img.ndim == 4, f"img must be 4d tensor but got {img.ndim}d"
 
         # Use the reusable function to handle RGB channel selection
         img = get_rgb_channels_for_model(
@@ -603,24 +838,43 @@ class REPALoss(torch.nn.Module):
             pca_fn=feature_pca_torch if self.rgb_channels == "pca" else None,
         )
 
-        # Resize image
-        img = self._resize_img(img, img_size)
+        # Resize image / Preprocess image
+        inputs = None
+        if hasattr(self, "processor"):  # Siglip2 processor
+            if self.img_is_neg1_1:
+                img = (img + 1) / 2
+            # make 1d patches nor downsample by AutoProcessor
+            inputs = self.processor(images=img)["pixel_values"]
+        else:
+            inputs = self._resize_img(img, img_size)
 
         # loop to get the features
-        if self.dino_fixed_bs is None or img.shape[0] < self.dino_fixed_bs:
-            img_feats = self._forward_features(img, get_interm_feats, detach)
+        if self.dino_fixed_bs is None or bs < self.dino_fixed_bs:
+            img_feats = self._forward_features(
+                inputs,
+                detach=detach,
+                get_interm_feats=get_interm_feats,
+            )
         else:
+            # TODO: add support for siglip2
+            assert self.dino_type != "siglip2", (
+                "Siglip2 model does not support fixed batch size inference"
+            )
+
             # macro-batch-size inference
-            img_feats = []
+            img_feats: list[torch.Tensor] = []
             ret_lst = False
             for i in range(0, img.shape[0], self.dino_fixed_bs):
                 img_mb = img[i : i + self.dino_fixed_bs]
                 img_feats_mb = list(
-                    self._forward_features(img_mb, get_interm_feats, detach)
+                    self._forward_features(
+                        img_mb, get_interm_feats=get_interm_feats, detach=detach
+                    )
                 )  # 4 feature if is a list
                 if isinstance(img_feats_mb, (tuple, list)):
                     ret_lst = True
-                img_feats.append(img_feats_mb)
+                img_feats.append(img_feats_mb)  # type: ignore[list-item]
+
             if ret_lst:
                 n_feats = len(img_feats[0])
                 for i in range(n_feats):
@@ -1155,5 +1409,76 @@ def test_gram_loss():
             # print(f"{gram_loss=}")
 
 
+def test_siglip2_model():
+    import math
+
+    import lovely_tensors as lt
+    import requests
+    from einops import rearrange
+    from PIL import Image
+
+    lt.monkey_patch()
+    model, processor = load_siglip2_model(
+        name="google/siglip2-so400m-patch16-naflex",
+        cache_dir="/home/user/zihancao/Checkpoints/",
+    )
+    # url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+    image = Image.open("000000039769.jpg")
+    print(image.size)
+    model = model.cuda()
+
+    # inputs = processor(
+    #     # text="",
+    #     images=[image],
+    #     do_rescale=True,
+    #     # max_num_patches=1024,
+    #     return_tensors="pt",
+    # )
+    processor_ = _siglip_processor_patcher(
+        processor,
+        interp_pe=False,
+        # do_resize=False,
+        # size=(512, 512),
+        max_num_patches=2048,  # 32 * 32
+    )
+    inputs = processor_(images=image)
+    x = inputs["pixel_values"] = inputs["pixel_values"].cuda()
+    mask = shapes = None
+    if "attention_mask" in inputs:
+        mask = inputs["attention_mask"] = inputs["attention_mask"].cuda()
+        shapes = inputs["spatial_shapes"]
+    # inputs["interpolate_pos_encoding"] = True
+
+    with torch.autocast("cuda", torch.bfloat16):
+        with torch.no_grad():
+            model_out = model(**inputs)
+            last_hidden_state = model_out.last_hidden_state
+    print(last_hidden_state.shape)
+
+    if "attention_mask" in inputs:
+        # mask: bs, n; pixel_values: bs, n, c;
+        hiddens_2d = []
+        for i in range(last_hidden_state.shape[0]):
+            n = shapes[i].prod()
+            hs = last_hidden_state[i, :n].view(1, *shapes[i], -1)  # (1, h, w, c)
+            hs_2d = hs.permute(0, 3, 1, 2)  # (1, c, h, w)
+            hiddens_2d.append(hs_2d)
+        last_hidden_state = hiddens_2d[0]
+    if last_hidden_state.ndim == 3:
+        # square image
+        last_hidden_state = rearrange(
+            last_hidden_state,
+            "b (h w) c -> b c h w",
+            h=int(math.sqrt(last_hidden_state.shape[1])),
+        )
+
+    # xx = feature_pca_torch(xx, 3)
+    xx = feature_pca_sk(last_hidden_state, 3)
+    xx = (xx - xx.min()) / (xx.max() - xx.min())
+    xx.rgb.fig.savefig("siglip2_so400m_patch16_feat.png")
+    print("test_siglip2_model done.")
+
+
 if __name__ == "__main__":
-    test_gram_loss()
+    # test_gram_loss()
+    test_siglip2_model()
