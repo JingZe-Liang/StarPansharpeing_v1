@@ -1201,7 +1201,7 @@ class AdaptiveOutputConvLayer(nn.Module):
         b = self.conv.bias
         if self.mode == "slice":
             w = self.conv.weight[:out_channels]
-            if b:
+            if b is not None:
                 b = b[:out_channels]
         elif self.mode == "interp":
             c_out, c_in, k, k = (w := self.conv.weight).shape
@@ -1212,7 +1212,7 @@ class AdaptiveOutputConvLayer(nn.Module):
             )
             w = rearrange(w_i, "k1 k2 c_out c_in -> c_out c_in k1 k2")
             # (c_out,)
-            if b:
+            if b is not None:
                 b = torch.nn.functional.interpolate(
                     b[None, :, None],  # (1, c_out, 1)
                     size=(out_channels,),
@@ -1236,6 +1236,124 @@ class AdaptiveOutputConvLayer(nn.Module):
     @property
     def weight(self):
         return self.conv.weight
+
+
+class AdaptiveInputLinearLayer(nn.Module):
+    def __init__(
+        self, in_features: int, out_features: int, bias: bool = True, mode="slice"
+    ):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.mode = mode
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_features = x.shape[-1]
+        if in_features == self.linear.weight.shape[1]:
+            return self.linear(x)
+
+        if self.mode == "slice":
+            w = self.linear.weight[:, :in_features]
+        elif self.mode == "interp":
+            out_f, in_f = (w := self.linear.weight).shape
+            w_i = w.unsqueeze(0).unsqueeze(0)  # 1, 1, out_f, in_f
+            w_i = torch.nn.functional.interpolate(
+                w_i, size=(out_f, in_features), mode="bicubic", align_corners=False
+            )
+            w = w_i.squeeze(0, 1)
+        else:
+            raise ValueError(f"Unknown mode {self.mode}")
+
+        b = self.linear.bias
+        return F.linear(x, w, b)
+
+class AdaptiveOutputLinearLayer(nn.Module):
+    def __init__(
+        self, in_features: int, out_features: int, bias: bool = True, mode: str = "slice"
+    ):
+        """
+        Adaptive output linear layer that can adjust output features dynamically.
+        
+        This layer allows for dynamic adjustment of output features during forward pass,
+        supporting either slicing or interpolation modes for weight adaptation.
+
+        Parameters
+        ----------
+        in_features : int
+            Number of input features
+        out_features : int
+            Maximum number of output features
+        bias : bool, default=True
+            Whether to include bias term
+        mode : str, default="slice"
+            Mode for adapting weights: "slice" or "interp"
+        """
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.mode = mode
+
+    def forward(
+        self, x: torch.Tensor, out_features: int | None = None
+    ) -> torch.Tensor:
+        """
+        Forward pass with adaptive output features.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor
+        out_features : int | None, default=None
+            Desired number of output features. If None, uses the full output dimension.
+            
+        Returns
+        -------
+        torch.Tensor
+            Output tensor with specified number of features
+        """
+        if out_features is None:
+            out_features = self.linear.out_features
+
+        if out_features == self.linear.weight.shape[0]:
+            return self.linear(x)
+
+        w = self.linear.weight
+        b = self.linear.bias
+        
+        if self.mode == "slice":
+            # Slice the weights and bias to desired output size
+            w = w[:out_features]
+            if b is not None:
+                b = b[:out_features]
+        elif self.mode == "interp":
+            # Interpolate weights to desired output size
+            out_f, in_f = w.shape
+            w_i = w.unsqueeze(0).unsqueeze(0)  # 1, 1, out_f, in_f
+            w_i = torch.nn.functional.interpolate(
+                w_i, size=(out_features, in_f), mode="bicubic", align_corners=False
+            )
+            w = w_i.squeeze(0, 1)
+            
+            # Interpolate bias if present
+            if b is not None:
+                b = torch.nn.functional.interpolate(
+                    b[None, :, None],  # (1, out_f, 1)
+                    size=(out_features,),
+                    mode="linear",
+                    align_corners=False,
+                )[0, :, 0]
+        else:
+            raise ValueError(f"Unknown mode {self.mode}")
+
+        return F.linear(x, w, b)
+
+    @property
+    def weight(self):
+        """Get the weight tensor of the underlying linear layer."""
+        return self.linear.weight
+
+    @property
+    def bias(self):
+        """Get the bias tensor of the underlying linear layer."""
+        return self.linear.bias
 
 
 # * --- MoEs 2D --- #

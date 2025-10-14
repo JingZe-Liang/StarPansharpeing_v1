@@ -29,7 +29,7 @@ from .cosmos_tokenizer import (
 )
 from .modules import blocks as cosmos_block
 from .modules.layers2d import Decoder, Encoder
-from .modules.naflex import NaFlexVitCfg, NaFlexVitCfgAdpoted, Transformer
+from .modules.naflex import NaFlexVitCfg, Transformer
 from .modules.uvit_decoder import UViTDecoder, UViTDecoderConfig
 
 LossOutput = TypedDict(
@@ -52,6 +52,7 @@ class UViTTokenizerConfig(ContinuousTokenizerConfig):
 class CosmosFlowTokenizer(ContinuousImageTokenizer):
     _no_split_modules = ["EvaBlock", "ResnetBlock", "AttnBlock"]
     _vf_on_z_or_module = "z"  # must be z if using this model
+    supported_cached_hiddens: list[str] = ["z", "sem_z"]
 
     def __init__(
         self,
@@ -59,14 +60,14 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         transport: Transport,
         transition_schedule_kwargs: dict = {},
         # Additional semantic transformer encoders
-        trans_enc_cfgs: Optional[Tuple[NaFlexVitCfg, NaFlexVitCfgAdpoted]] = None,
-        trans_dec_cfgs: Optional[Tuple[NaFlexVitCfg, NaFlexVitCfgAdpoted]] = None,
+        trans_enc_cfg: Optional[NaFlexVitCfg] = None,
+        trans_dec_cfg: Optional[NaFlexVitCfg] = None,
     ):
         self.tokenizer_cfg = tokenizer_cfg
         super().__init__(tokenizer_cfg)
 
         self.grad_checkpointing = self.tokenizer_cfg.act_checkpoint
-        self._build_transformer_encoder(tokenizer_cfg, trans_enc_cfgs, trans_dec_cfgs)
+        self._build_transformer_encoder(tokenizer_cfg, trans_enc_cfg, trans_dec_cfg)
         self._build_transition_schedule(transport, transition_schedule_kwargs)
 
     def _build_encoder_decoder(
@@ -87,30 +88,23 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         )
 
     def _build_transformer_encoder(
-        self, tokenizer_cfg, trans_enc_cfgs=None, trans_dec_cfgs=None
+        self, tokenizer_cfg, trans_enc_cfg=None, trans_dec_cfg=None
     ):
-        if trans_enc_cfgs is not None:
-            self.trans_enc_cfg1, self.trans_enc_cfg2 = (
-                trans_enc_cfgs[0],
-                trans_enc_cfgs[1],
-            )
+        # Store transformer configurations
+        self.trans_enc_cfg = trans_enc_cfg
+        self.trans_dec_cfg = trans_dec_cfg
 
         # Transformer Encoder and Decoder
         self.semantic_enc_transformer = None
-        if trans_enc_cfgs is not None:
-            self.semantic_enc_transformer = Transformer(
-                self.trans_enc_cfg1, self.trans_enc_cfg2
-            )
+        if trans_enc_cfg is not None:
+            self.semantic_enc_transformer = Transformer(trans_enc_cfg)
             self.semantic_enc_transformer.set_grad_checkpointing(
                 self.grad_checkpointing
             )
 
         self.semantic_transformer_dec = None
-        if trans_dec_cfgs is not None:
-            self.trans_dec_cfg1, self.trans_dec_cfg2 = trans_dec_cfgs
-            self.semantic_transformer_dec = Transformer(
-                self.trans_dec_cfg1, self.trans_dec_cfg2
-            )
+        if trans_dec_cfg is not None:
+            self.semantic_transformer_dec = Transformer(trans_dec_cfg)
             self.semantic_transformer_dec.set_grad_checkpointing(
                 self.grad_checkpointing
             )
@@ -138,13 +132,21 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
         """
-        z = self.encoder.encoder(x)
+        z_low_lvl = self.encoder.encoder(x)
+        z_semantic = z_low_lvl
         if self.semantic_enc_transformer is not None:
-            z = self.semantic_enc_transformer(z)
-        h = self.encoder.quant_conv(z)
+            z_semantic = self.semantic_enc_transformer(z_low_lvl)
+        h = self.encoder.quant_conv(z_semantic)
 
         # Quantization
-        maybe_q_ret = self.apply_quantizer(h, z, use_quantizer)
+        maybe_q_ret = self.apply_quantizer(
+            h, z_semantic, use_quantizer, cache_type=None
+        )  # Disable cache z or h
+
+        # Do cache here
+        self.z = z_low_lvl
+        self.sem_z = z_semantic
+
         if isinstance(maybe_q_ret, tuple):
             h, q_loss, loss_breakdown = maybe_q_ret
             # NOTE: if quantizer is used, the aug z is not applied
@@ -310,24 +312,16 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         tokenizer_cfg,
         transport,
         transition_schedule_kwargs={},
-        trans_enc_cfg1=None,
-        trans_enc_cfg2=None,
-        trans_dec_cfg1=None,
-        trans_dec_cfg2=None,
+        trans_enc_cfg=None,
+        trans_dec_cfg=None,
     ):
         tokenizer_cfg = dataclass_from_dict(UViTTokenizerConfig, tokenizer_cfg)
-        trans_enc_cfg = None
-        if trans_enc_cfg1 is not None and trans_enc_cfg2 is not None:
-            trans_enc_cfg = (
-                dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg1),
-                dataclass_from_dict(NaFlexVitCfgAdpoted, trans_enc_cfg2),
-            )
-        trans_dec_cfg = None
-        if trans_dec_cfg1 is not None and trans_dec_cfg2 is not None:
-            trans_dec_cfg = (
-                dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg1),
-                dataclass_from_dict(NaFlexVitCfgAdpoted, trans_dec_cfg2),
-            )
+
+        # Convert transformer configs if provided
+        if trans_enc_cfg is not None:
+            trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
+        if trans_dec_cfg is not None:
+            trans_dec_cfg = dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg)
 
         return cls(
             tokenizer_cfg,

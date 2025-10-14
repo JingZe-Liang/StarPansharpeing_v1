@@ -243,6 +243,10 @@ class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
 
 
 class MingtokDownsampleShortCut(nn.Module):
+    """
+    Mingtok encoder output projection layer
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -270,6 +274,10 @@ class MingtokDownsampleShortCut(nn.Module):
 
 
 class MingtokUpsampleAverage(nn.Module):
+    """
+    Mingtok decoder input projection layer
+    """
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.proj_in = nn.Linear(in_channels, out_channels)
@@ -280,6 +288,10 @@ class MingtokUpsampleAverage(nn.Module):
             f"but got in_channels={in_channels} and out_channels={out_channels}"
         )
         self.rep_factor = self.out_channels // self.in_channels
+        assert self.out_channels % self.in_channels == 0, (
+            f"out_channels must be divisible by in_channels, "
+            f"but got in_channels={in_channels} and out_channels={out_channels}"
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

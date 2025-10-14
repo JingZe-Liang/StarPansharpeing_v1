@@ -208,6 +208,7 @@ class Encoder(nn.Module):
         norm_groups: int = 32,
         downsample_manually_pad: bool = True,
         resample_norm_keep: bool = False,
+        adaptive_mode: str = "slice",
         **ignore_kwargs,
     ):
         super().__init__()
@@ -261,6 +262,7 @@ class Encoder(nn.Module):
                 in_channels=in_channels,
                 out_channels=channels,
                 use_bias=True,
+                mode=adaptive_mode,
             )
 
             # NOTE: normally a conv
@@ -344,7 +346,9 @@ class Encoder(nn.Module):
         )
 
     @no_type_check
-    def forward(self, x: torch.Tensor, ret_interm_feats=False) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, ret_interm_feats: bool | tuple | list = False
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         x = self.patcher(x)
         feats = []
 
@@ -357,7 +361,10 @@ class Encoder(nn.Module):
                     h = self.down[i_level].attn[i_block](h)
             if i_level < self.num_downsamples:
                 h = self.down[i_level].downsample(h)
-            if ret_interm_feats:
+            if ret_interm_feats is True or (
+                isinstance(ret_interm_feats, (tuple, list))
+                and i_level in ret_interm_feats
+            ):
                 feats.append(h)
         # middle
         h = self.mid.block_1(h)
@@ -406,6 +413,7 @@ class Decoder(nn.Module):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
+        adaptive_mode: str = "slice",
         **ignore_kwargs,
     ):
         super().__init__()
@@ -532,6 +540,7 @@ class Decoder(nn.Module):
                 in_channels=block_in,
                 out_channels=out_ch,
                 use_bias=True,
+                mode=adaptive_mode,
             )
 
         # fsdp warpper, but not used

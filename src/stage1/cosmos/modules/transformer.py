@@ -47,7 +47,11 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Annotated
 
-from .blocks import AdaptiveInputConvLayer, AdaptiveOutputConvLayer
+from .blocks import (
+    AdaptiveInputConvLayer,
+    AdaptiveOutputConvLayer,
+    AdaptiveOutputLinearLayer,
+)
 from .mask import random_masking_mae, random_masking_no_drop
 from .patching import create_unpatcher
 from .resample import MingtokDownsampleShortCut, MingtokUpsampleAverage
@@ -63,7 +67,11 @@ from .variants.mlp import SwiGLU
 class AdaptivePatchEmbedding(PatchEmbed):
     def __init__(self, in_chans, embed_dim, patch_size: int, **kwargs):
         super().__init__(
-            in_chans=in_chans, embed_dim=embed_dim, patch_size=patch_size, **kwargs
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            strict_img_size=False,
+            **kwargs,
         )
         self.proj = AdaptiveInputConvLayer(
             in_chans,
@@ -711,10 +719,14 @@ class TransformerTokenizer(nn.Module):
         pe_type="learn",  # ['learn', 'rope']
         rope_kwargs={},
         head: str | None = None,
-        mask_train_ratio=0.0,
+        ## MAE masks
+        mask_train_ratio=0.0,  # MAE encoder
+        mask_refill: bool = False,  # MAE decoder
+        mask_drop_type: str = "mae",  # MAE drop, or no drop
         last_norm: str | None = None,
         is_causal=False,
         patcher_type: str = "patch_embedder",
+        with_cls_token: bool = False,
     ):
         super().__init__()
         self.in_chan = in_chan
@@ -746,16 +758,14 @@ class TransformerTokenizer(nn.Module):
         # Projections
         # Encoder: forward output downsample layer
         # Decoder: forward input upsample layer
-        input_proj_type = projections.get("input", None)
-        output_proj_type = projections.get("output", None)
-        if output_proj_type == "ds_shortcut":  # for encoder
-            input_proj = MingtokDownsampleShortCut(in_chan, embed_dim)
-        else:
-            input_proj = nn.Identity()
-        if input_proj_type == "us_average":  # for decoder
-            output_proj = MingtokUpsampleAverage(embed_dim, in_chan)
-        else:
-            output_proj = nn.Identity()
+        input_proj_type = projections.get("input", None)  # decoder
+        output_proj_type = projections.get("output", None)  # encoder
+        input_proj = output_proj = nn.Identity()
+        if output_proj_type == "ds_shortcut":
+            output_proj = MingtokDownsampleShortCut(in_chan, embed_dim)
+
+        if input_proj_type == "us_average":
+            input_proj = MingtokUpsampleAverage(in_chan, embed_dim)
         self.projections = nn.ModuleDict(
             {"input_proj": input_proj, "output_proj": output_proj}
         )
@@ -773,6 +783,7 @@ class TransformerTokenizer(nn.Module):
                 attn_type=attn_type,
                 drop_path=drop_path_ps[i],
                 is_causal=is_causal,
+                layer_idx=i,
             )
             layers.append(block)
         self.layers = nn.ModuleList(layers)
@@ -780,13 +791,15 @@ class TransformerTokenizer(nn.Module):
         # Positional embeddings
         self.pe_type = pe_type
         if pe_type == "learn":
-            pe_2d = get_2d_sincos_pos_embed(  # [grid_size*grid_size, embed_dim]
+            pe_2d = get_2d_sincos_pos_embed(  # [cls_token+n_reg_tokens+grid_size*grid_size, embed_dim]
                 embed_dim,
                 grid_size=self.grid_size,
-                cls_token=False,
                 pe_interpolation=1.0,
+                cls_token=self.n_reg_tokens > 0 or with_cls_token,
+                extra_tokens=self.n_reg_tokens + int(with_cls_token),
             )
-            self.pe = nn.Parameter(torch.as_tensor(pe_2d), requires_grad=True)
+            pe_2d = torch.as_tensor(pe_2d)
+            self.pe = nn.Parameter(pe_2d, requires_grad=True)
         elif pe_type == "rope":
             self.rope = RotaryEmbeddingCat(
                 dim=embed_dim // num_heads,
@@ -799,6 +812,10 @@ class TransformerTokenizer(nn.Module):
                 "rope_cat", rope_cat[None, None], persistent=False
             )  # buffer: (1, 1, max_seq_len, head_dim*2)
             self.rope_cat: nn.Buffer
+            # Add cls token and register token PE
+            self.pe_cls_reg = nn.Parameter(
+                torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
+            )
         else:
             self.rope, self.pe = None, None
 
@@ -809,10 +826,17 @@ class TransformerTokenizer(nn.Module):
             self.reg_tokens = nn.Parameter(torch.zeros(1, n_reg_tokens, embed_dim))
             nn.init.trunc_normal_(self.reg_tokens, std=0.02)
 
+        # Class token
+        self.with_cls_token = with_cls_token
+        if self.with_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            nn.init.trunc_normal_(self.cls_token, std=0.02)
+
         # Head
         self.head = nn.Identity()
         self.head_required = False
         self.out_chan = out_chan
+        self.out_patch_size = out_patch_size
         if head is not None:
             assert out_chan is not None, "out_chan must be specified if head is used"
             assert out_patch_size is not None, (
@@ -821,6 +845,15 @@ class TransformerTokenizer(nn.Module):
             self.head_required = True
             if head == "linear":
                 self.head = nn.Linear(embed_dim, out_chan * (out_patch_size**2))
+            elif head == "norm_linear":
+                self.head = nn.Sequential(
+                    create_norm_layer(norm_layer, embed_dim),
+                    nn.Linear(embed_dim, out_chan * (out_patch_size**2)),
+                )
+            elif head == "adaptive_linear":
+                self.head = AdaptiveOutputLinearLayer(
+                    embed_dim, out_chan * (out_patch_size**2), mode="interp"
+                )
             else:
                 raise ValueError(f"Unknown head type: {head}")
         else:
@@ -833,13 +866,15 @@ class TransformerTokenizer(nn.Module):
 
         # Mask token
         self.mask_train_ratio = mask_train_ratio
-        self.mask_training = mask_train_ratio > 0.0
+        self.mask_training = mask_train_ratio > 0.0 or mask_refill
+        self.mask_drop_type = mask_drop_type
         if self.mask_training:
             # Different from the original MAE that differ the encoder and decoder,
             # encoder takes ONLY UNMASKED tokens, and the decoder add them back
             # Here, we only mask the input tokens with a learnable mask token but
             # do not drop the masked tokens.
 
+            # TODO: RoPE, theoretically support, but I haven't implemented it yet.
             assert self.pe_type != "rope", "Rope PE not supported for mask training"
             self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.mask_token, std=0.02)
@@ -857,14 +892,33 @@ class TransformerTokenizer(nn.Module):
         logger.info("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
 
     def _get_masked_x(self, x):
-        if self.mask_training:
-            x, mask, ids_restore = random_masking_no_drop(
-                x, self.mask_train_ratio, self.mask_token
-            )
+        if self.mask_train_ratio > 0:
+            # is MAE encoder
+            if self.mask_drop_type == "mae":
+                x, mask, ids_restore = random_masking_mae(x, self.mask_train_ratio)
+            else:
+                x, mask, ids_restore = random_masking_no_drop(
+                    x, self.mask_train_ratio, self.mask_token
+                )
         else:
             x, mask, ids_restore = x, None, None
 
         return x, mask, ids_restore
+
+    def _refill_masked_x(self, x, mask, ids_restore):
+        """the original x are masked and dropped"""
+        mask_learned = getattr(self, "mask_token", None)
+        assert mask_learned is not None, (
+            "mask_token must be init when using this class as MAE decoder"
+        )
+        ids_restore = ids_restore[..., None].repeat(1, 1, x.shape[2])
+        mask_learned_expand = mask_learned.repeat(
+            x.shape[0], ids_restore.shape[1] + self.n_reg_tokens - x.shape[1], 1
+        )
+        x_ = torch.cat([x[:, self.n_reg_tokens :], mask_learned_expand], dim=1)
+        x_ = torch.gather(x_, dim=1, index=ids_restore)  # unshuffle
+        x = torch.cat([x[:, : self.n_reg_tokens], x_], dim=1)
+        return x
 
     def _with_pos_embed(self, x, hw: tuple | None = None):
         if self.pe_type == "learn":
@@ -878,7 +932,7 @@ class TransformerTokenizer(nn.Module):
             l_cur = hp * wp
             pe_1lc = self.pe[None]
             if l_cur != self.n_patches:
-                pe_1lc = resample_abs_pos_embed(
+                pe_1lc = resample_abs_pos_embed(  # type: ignore
                     pe_1lc,  # (1, l, dim)
                     num_prefix_tokens=0,  # TODO: add register tokens support
                     new_size=(hp, wp),
@@ -892,10 +946,12 @@ class TransformerTokenizer(nn.Module):
             return x, None
 
     def _forward_proj_out(self, x):
+        # Encoder proj out: image -> backbone -> output proj
         x = self.projections["output_proj"](x)
         return x
 
     def _forward_proj_in(self, x):
+        # Decoder proj in: latent -> input proj -> backbone -> reconstruction
         x = self.projections["input_proj"](x)
         return x
 
@@ -916,7 +972,7 @@ class TransformerTokenizer(nn.Module):
         x, rope = self._with_pos_embed(
             x, hw=(h // self.patch_size, w // self.patch_size)
         )
-        # Register tokens get no pe
+        # Register tokens get no PE
         if self.n_reg_tokens > 0 and self.reg_tokens is not None:
             reg_tokens = self.reg_tokens.repeat(bs, 1, 1)  # (bs, n_reg, dim)
             x = torch.cat([reg_tokens, x], dim=1)  # (bs, n+n_reg, dim)
@@ -928,15 +984,16 @@ class TransformerTokenizer(nn.Module):
         # Get grid size
         if hw is None:
             # x grid size
-            gx_h, gx_w = (
-                x.shape[-2] // self.patch_size,
-                x.shape[-1] // self.patch_size
-                if x.ndim == 4
-                else (
+            if x.ndim == 4:
+                gx_h, gx_w = (
+                    x.shape[-2] // self.patch_size,
+                    x.shape[-1] // self.patch_size,
+                )
+            else:
+                gx_h, gx_w = (
                     int(math.sqrt(x.shape[1])) // self.patch_size,
                     int(math.sqrt(x.shape[1])) // self.patch_size,
-                ),
-            )
+                )
         else:
             gx_h, gx_w = hw[0] // self.patch_size, hw[1] // self.patch_size
 
@@ -955,7 +1012,11 @@ class TransformerTokenizer(nn.Module):
                 x = checkpoint(blk, x, rope, None, use_reentrant=False)
             else:
                 x = blk(x, rope=rope)
+
+        # Projection in
         x = self._forward_proj_out(x)
+
+        # Norm
         x = x if self.last_norm is None else self.last_norm(x)
         x_norm = x[:, self.n_reg_tokens :, :]  # remove reg tokens
 
@@ -987,7 +1048,7 @@ class TransformerTokenizer(nn.Module):
             if ret_2d_tokens:
                 x = rearrange(
                     x,
-                    "... (h w) (c p1 p2) -> ... c (h p1) (w p2)",
+                    "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
                     h=grid_size[0],
                     w=grid_size[1],
                     p1=self.patch_size,
@@ -995,7 +1056,15 @@ class TransformerTokenizer(nn.Module):
                 )
         return x
 
-    def forward(self, x: torch.Tensor, ret_2d_tokens=False, ret_all=True):
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        ret_2d_tokens=False,
+        ret_all=True,
+        mask: Optional[torch.Tensor] = None,
+        id_store: Optional[torch.Tensor] = None,
+    ):
         out = self.forward_features(x)  # (bs, n, dim)
         x = out["x_norm_patch_tokens"]
         x = self._to_output(x, grid_size=out["grid_size"], ret_2d_tokens=ret_2d_tokens)
