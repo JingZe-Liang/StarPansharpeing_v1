@@ -1,5 +1,5 @@
 # Configuration for hyperspectral data condition preparation
-# Specifically designed for MMSeg_YREB dataset
+# Specifically designed for hyperspectral dataset
 # @package _global_
 
 hydra:
@@ -69,8 +69,8 @@ processor:
   save_original_rgb: false # 保存原始RGB图像用于对比
   condition_save_format: "jpg" # 条件图像保存为PNG格式
   caption_save_format: "json" # 描述保存为文本文件
-  resume_from: #S2_tiff_jp2k_80_S2A_MSIL2A_20170617T113321_N9999_R080_T29UPU_30_45
-  relative_data_dir: conditions
+  resume_from: JPEGImages/loveDAPoca_2348_1_0
+  relative_data_dir: conditions_2
   count_tar_num: false
   save_attn_mask: false
   use_linstretch: false

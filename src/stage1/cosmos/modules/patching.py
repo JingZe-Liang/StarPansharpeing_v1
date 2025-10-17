@@ -26,12 +26,20 @@ For example, 4x downsampling can be done by 2x Haar and additional 2x Haar, and 
    [3, 256, 256] -> [12, 128, 128] -> [48, 64, 64]
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from timm.layers import create_conv2d
+from fvcore.nn import parameter_count
+from jaxtyping import Float
+from loguru import logger
+from timm.layers import PatchEmbed, create_conv2d
+from torch import Tensor
+
+from .blocks import AdaptiveInputConvLayer, AdaptiveOutputConvLayer
 
 _WAVELETS = {
     "haar": torch.tensor([0.7071067811865476, 0.7071067811865476]),
@@ -384,3 +392,205 @@ def create_unpatcher(
     patcher = nn.Sequential(unpatcher_conv, rearranger)
     return patcher
 
+
+class AdaptivePatchEmbedding(PatchEmbed):
+    def __init__(self, in_chans, embed_dim, patch_size: int, **kwargs):
+        super().__init__(
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            strict_img_size=False,
+            **kwargs,
+        )
+        self.proj = AdaptiveInputConvLayer(
+            in_chans,
+            embed_dim,
+            patch_size,
+            patch_size,
+            padding=0,
+            use_bias=kwargs.get("bias", True),
+            mode="interp",  # ['slice', 'interp']
+        )
+
+
+class AdaptiveProgressivePatchEmbedding(PatchEmbed):
+    def __init__(
+        self,
+        in_chans,
+        embed_dim,
+        progressive_dims: list[int],
+        patch_size: int,
+        adaptive_mode: str = "interp",
+        **kwargs,
+    ):
+        super().__init__(
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            strict_img_size=False,
+            **kwargs,
+        )
+        n_scales = math.log2(patch_size)
+        assert n_scales.is_integer(), "Patch size must be power of 2."
+        self.n_scales = int(n_scales)
+
+        self.progressive_dims = progressive_dims
+
+        # in_chans -> p_dim[0] -> p_dim[1] -> ... -> embed_dim
+        #          2x down     2x down     -> ... -> (log2 patch_size)x down
+        # log2(patch_size) == len(progressive_dims) + 1
+        assert len(self.progressive_dims) == self.n_scales - 1, (
+            f"Length of progressive_dims must be {self.n_scales - 1}, "
+            f"but got {len(self.progressive_dims)}"
+        )
+
+        # Override self.proj
+        dims = [in_chans] + self.progressive_dims + [embed_dim]
+        patchers = []
+        for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
+            if i == 0:
+                patcher = AdaptiveInputConvLayer(
+                    in_dim,
+                    out_dim,
+                    2,
+                    2,
+                    padding=0,
+                    use_bias=kwargs.get("bias", True),
+                    mode=adaptive_mode,  # ['slice', 'interp']
+                )
+            else:
+                patcher = nn.Conv2d(in_dim, out_dim, kernel_size=2, stride=2, padding=0)
+            patchers.append(patcher)
+            logger.debug(
+                f"[AdaptiveProgressivePatchEmbedding] Patch embedding stage {i}: {in_dim} -> {out_dim} with 2x downsample, "
+                f"params: {parameter_count(patcher)[''] / 1024}k"
+            )
+        self.proj = nn.Sequential(*patchers)
+
+
+class AdaptiveProgressivePatchUnembedding(nn.Module):
+    def __init__(
+        self,
+        in_chans,
+        out_chans,
+        progressive_dims: list[int],
+        patch_size: int,
+        adaptive_mode: str = "interp",
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        n_scales = math.log2(patch_size)
+        assert n_scales.is_integer(), "Patch size must be power of 2."
+        self.n_scales = int(n_scales)
+
+        self.progressive_dims = progressive_dims
+
+        # in_chans -> p_dim[0] -> p_dim[1] -> ... -> embed_dim
+        #          2x up     2x up     -> ... -> (log2 patch_size)x up
+        # log2(patch_size) == len(progressive_dims) + 1
+        assert len(self.progressive_dims) == self.n_scales - 1, (
+            f"Length of progressive_dims must be {self.n_scales - 1}, "
+            f"but got {len(self.progressive_dims)}"
+        )
+
+        dims = [in_chans] + self.progressive_dims + [out_chans]
+        unpatchers = []
+        for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
+            # pixel shuffle
+            unpatcher = nn.Linear(in_dim, out_dim * 4)
+            unpatchers.append(unpatcher)
+            logger.debug(
+                f"[AdaptiveProgressivePatchUnembedding] Patch Unembedding stage {i}: {in_dim} -> {out_dim} with 2x upsample, "
+                f"params: {str(parameter_count(unpatcher)[''] / 1024)}k"
+            )
+
+        adaptive_out = AdaptiveOutputConvLayer(
+            out_dim,
+            out_dim,
+            1,
+            1,
+            padding=0,
+            use_bias=True,
+            mode=adaptive_mode,  # ['slice', 'interp']
+        )
+        unpatchers.append(adaptive_out)
+        logger.debug(
+            f"[AdaptiveProgressivePatchUnembedding] Final adaptive output conv layer: {out_dim} -> {out_dim}, "
+            f"params: {parameter_count(adaptive_out)[''] / 1024}k"
+        )
+        self.unpatchers = nn.ModuleList(unpatchers)
+
+    def forward(self, x: Float[Tensor, "b l c"], out_shape: torch.Size | tuple):
+        # out_shape: (b, c, h, w) or (c, h, w)
+        c, h, w = out_shape[-3:]
+        xh, xw = h // self.patch_size, w // self.patch_size
+        x = rearrange(x, "b (h w) c -> b h w c", h=xh, w=xw)
+
+        # np = nw = patch_size
+        for layer in self.unpatchers[:-1]:
+            x = layer(x)
+            x = rearrange(x, "b h w (c p1 p2) -> b (h p1) (w p2) c", p1=2, p2=2)
+
+        x = x.permute(0, -1, 1, 2)  # b, c, h, w
+        x = self.unpatchers[-1](x, c)  # to out channels
+        return x
+
+    def init_weights(self, zero_out_adaptive_layer=False):
+        patcher_backbone = self.unpatchers[:-1]
+        patcher_adaptive_last = self.unpatchers[-1]
+        for m in patcher_backbone.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        # last adaptive layer
+        patcher_adaptive_last.init_weights(zero_out=zero_out_adaptive_layer)
+
+
+# * --- Test --- #
+
+
+def test_adaptive_progressive_unpatcher():
+    batch_size = 2
+    in_chans = 300
+    out_chans = 300
+    progressive_dims = [320, 448, 512]
+    embed_dim = 768
+    patch_size = 16
+    height = 256
+    width = 256
+
+    x = torch.randn(batch_size, 301, height, width)
+
+    patcher = AdaptiveProgressivePatchEmbedding(
+        in_chans,
+        embed_dim=embed_dim,
+        progressive_dims=progressive_dims,
+        patch_size=patch_size,
+        adaptive_mode="interp",
+    )
+    unpatcher = AdaptiveProgressivePatchUnembedding(
+        in_chans=embed_dim,
+        out_chans=out_chans,
+        progressive_dims=progressive_dims[::-1],
+        patch_size=patch_size,
+        adaptive_mode="interp",
+    )
+
+    patches = patcher(x)
+    print("Patches shape:", patches.shape)
+
+    unpatched = unpatcher(patches, out_shape=(batch_size, 301, height, width))
+    print("Unpatched shape:", unpatched.shape)
+
+
+if __name__ == "__main__":
+    """
+    LOVELY_TENSORS=1 python -m src.stage1.cosmos.modules.patching
+    """
+    with logger.catch():
+        test_adaptive_progressive_unpatcher()

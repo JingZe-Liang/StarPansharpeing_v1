@@ -10,35 +10,35 @@ from .integrators import ode, sde
 from .utils import mean_flat
 
 
-class ModelType(enum.Enum):
+class ModelType(str, enum.Enum):
     """
     Which type of output the model predicts.
     """
 
-    NOISE = enum.auto()  # the model predicts epsilon
-    SCORE = enum.auto()  # the model predicts \nabla \log p(x)
-    VELOCITY = enum.auto()  # the model predicts v(x)
-    X1 = enum.auto()
+    NOISE = "noise"  # the model predicts epsilon
+    SCORE = "score"  # the model predicts \nabla \log p(x)
+    VELOCITY = "velocity"  # the model predicts v(x)
+    X1 = "x1"
 
 
-class PathType(enum.Enum):
+class PathType(str, enum.Enum):
     """
     Which type of path to use.
     """
 
-    LINEAR = enum.auto()
-    GVP = enum.auto()
-    VP = enum.auto()
+    LINEAR = "linear"
+    GVP = "gvp"
+    VP = "vp"
 
 
-class WeightType(enum.Enum):
+class WeightType(str, enum.Enum):
     """
     Which type of weighting to use.
     """
 
-    NONE = enum.auto()
-    VELOCITY = enum.auto()
-    LIKELIHOOD = enum.auto()
+    NONE = "none"
+    VELOCITY = "velocity"
+    LIKELIHOOD = "likelihood"
 
 
 class Transport:

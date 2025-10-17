@@ -10,6 +10,7 @@ import einops
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from loguru import logger
 from torch import Tensor
@@ -39,36 +40,42 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     sem_z: Tensor | None = None
     supported_cached_hiddens: List[str] = ["z", "sem_z"]
     cache_layers: dict[str, int | list[int]] = {
-        "low_level": -1,
+        "low_level": [0, 1, 2],
         "semantic": [2, 5, 8, 11],  # 12 layers of encoder
     }
+    low_lvl_repa_proj_chans: int | list[int] = []
 
     def __init__(
         self,
         cnn_cfg: ContinuousTokenizerConfig,
         trans_enc_cfg: NaFlexVitCfg,
         trans_dec_cfg: Optional[NaFlexVitCfg] = None,
+        *,
+        distillation_kwargs: dict[str, Any] = {},
     ):
-        # Set cnn_cfg before calling super().__init__
         self.cnn_cfg = cnn_cfg
+        self.trans_enc_cfg = trans_enc_cfg
+        self.trans_dec_cfg = trans_dec_cfg
+        self.distillation_kwargs = distillation_kwargs
+
         super().__init__(self.cnn_cfg)
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
 
     def _build_transformers(self, cnn_cfg, trans_enc_cfg, trans_dec_cfg=None):
         # cnn_cfg is already set as self.cnn_cfg in __init__
-        self.trans_enc_cfg = trans_enc_cfg
         # Transformer Encoder and Decoder
         self.semantic_enc_transformer = Transformer(self.trans_enc_cfg)
         self.semantic_enc_transformer.set_grad_checkpointing(self.grad_checkpointing)
+        logger.info(f"Init semantic transformer encoder.")
 
         self.semantic_transformer_dec = None
         if trans_dec_cfg is not None:
-            self.trans_dec_cfg = trans_dec_cfg
             self.semantic_transformer_dec = Transformer(self.trans_dec_cfg)
             self.semantic_transformer_dec.set_grad_checkpointing(
                 self.grad_checkpointing
             )
+            logger.info(f"Init semantic transformer decoder.")
 
     def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
         """Init the model from the pretrained only CNN weights."""
@@ -127,14 +134,39 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         logger.info(f"Finished loading pretrained weights.")
 
-    def encode(
-        self, x, use_quantizer=None
-    ) -> Union[Tuple[Tensor, Tensor, Union[dict, NamedTuple]], Tensor]:
+    @staticmethod
+    def _interp_max_size_features(feats: list[Tensor]):
+        """"""
+        breakpoint()
+        max_size = torch.max(torch.tensor([f.shape[-2:] for f in feats]), dim=0).values
+        max_size = tuple(max_size.tolist())
+        interp_feats = []
+        for f in feats:
+            if f.shape[-2:] != max_size:
+                f = F.interpolate(
+                    f, size=max_size, mode="bilinear", align_corners=False
+                )
+            interp_feats.append(f)
+        return interp_feats
+
+    def encode(self, x, use_quantizer=None):
         """Encode the image into latent.
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
         """
-        z_low_lvl = self.encoder.encoder(x)  # keep the last layer to cache
+        last_hidden_cached = self.cache_layers["low_level"] == -1
+        low_lvl_out = self.encoder.encoder(
+            x, ret_interm_feats=not last_hidden_cached
+        )  # keep the last layer to cache
+        if last_hidden_cached:
+            z_low_lvl = low_lvl_out
+            cache_low_lvl = z_low_lvl
+        else:
+            z_low_lvl, cache_low_lvl = low_lvl_out
+            cache_low_lvl = self._interp_max_size_features(cache_low_lvl)
+            # cache_low_lvl = torch.stack(cache_low_lvl, dim=0)
+
+        # Forward semantic transformer encoder
         if not self.training or self.cache_layers["semantic"] == -1:
             # if not training, just normally forward the model
             z_semantic = self.semantic_enc_transformer(z_low_lvl)
@@ -157,7 +189,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 hw=self.semantic_enc_transformer._get_output_shape(z_low_lvl),
             )
             # Stack the intermidates features: [n_cache_layers, b, c, h, w]
-            cache_semantic = torch.stack(cache_semantic, dim=0)
+            # cache_semantic = torch.stack(cache_semantic, dim=0)
+
+        # Apply CNN encoder - semantic transformer encoder - quant conv
         h = self.encoder.quant_conv(z_semantic)
 
         # Quantization
@@ -166,7 +200,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         )  # Disable cache z or h
 
         # Do cache here
-        self.z = z_low_lvl  # [b, c, h, w]
+        self.z = cache_low_lvl  # [b, c, h, w]
         self.sem_z = cache_semantic
 
         if isinstance(maybe_q_ret, tuple):
@@ -196,12 +230,15 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
+        # Apply Post-quant conv - semantic transformer decoder - CNN decoder
+        h = self.decoder.quant_conv(h)
+
         # Apply semantic transformer decoder if it exists
         if self.semantic_transformer_dec is not None:
             h = self.semantic_transformer_dec(h)
 
         # Decode using the CNN decoder
-        dec = self.decoder(h, chan)  # [b, c, h, w]
+        dec = self.decoder.decoder(h, chan)  # [b, c, h, w]
 
         if clamp:
             dec = dec.clamp(-1, 1)
@@ -220,7 +257,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     ):
         cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
         trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
-        trans_dec_cfg = None
         if trans_dec_cfg is not None:
             trans_dec_cfg = dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg)
 
@@ -238,36 +274,67 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         return low_lvl_z_proj, sem_z_proj
 
     def _build_feature_align_mlp(self):
-        assert self._use_repa_loss and self._vf_on_z_or_module == "z"
-        # Low-level projection
-        low_lvl_z_proj = build_mlp(
-            self.cnn_cfg.model.z_channels,
-            self._dino_feature_dim,
-            self._dino_feature_dim,
+        assert self._vf_on_z_or_module == "z", (
+            f"Only support z for _vf_on_z_or_modulebut got {self._vf_on_z_or_module}"
         )
-        # Semantic projection
-        sem_cache_layers = self.cache_layers["semantic"]
-        is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
-        _basic_proj = build_mlp(
-            self.trans_enc_cfg.embed_dim,
-            self._dino_feature_dim,
-            self._dino_feature_dim,
-        )
-        if is_multi_layer_cached:
-            sem_z_proj = nn.Sequential(
-                # n_cache_layers, bs -> n_cache_layers * bs
-                Rearrange("nc bs ... -> (nc bs) ..."),
-                _basic_proj,
-                Rearrange("(nc bs) ... -> nc bs ...", nc=len(sem_cache_layers)),
+
+        if self._use_repa_loss:
+            # Low-level projection
+            self.low_lvl_repa_proj_is_multi = isinstance(
+                self.cache_layers["low_level"], (tuple, list)
             )
-        else:
-            sem_z_proj = _basic_proj
-        self._repa_proj = nn.ModuleDict(
-            {
-                "low_lvl_repa_proj": low_lvl_z_proj,
-                "sem_repa_proj": sem_z_proj,
-            }
-        )
+            if not self.low_lvl_repa_proj_is_multi:
+                low_lvl_z_proj = build_mlp(
+                    self.cnn_cfg.model.z_channels,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
+                )
+            else:
+                assert len(self.low_lvl_repa_proj_chans) == len(
+                    self.cache_layers["low_level"]
+                ), (
+                    f"Length of low_lvl_repa_proj_chans {len(self.low_lvl_repa_proj_chans)} "
+                    f"should match length of cached low level layers "
+                    f"{len(self.cache_layers['low_level'])}"
+                )
+
+                low_lvl_z_proj = nn.ModuleList()
+                for i in range(len(self.cache_layers["low_level"])):
+                    proj_ = build_mlp(
+                        self.low_lvl_repa_proj_chans[i],
+                        self._dino_feature_dim,
+                        self._dino_feature_dim,
+                    )
+                    low_lvl_z_proj.append(proj_)
+
+            # Semantic projection
+            sem_cache_layers = self.cache_layers["semantic"]
+            is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
+            self.sem_repa_proj_is_multi = is_multi_layer_cached
+
+            if is_multi_layer_cached:
+                sem_z_proj = nn.ModuleList()
+                for _ in range(len(sem_cache_layers)):
+                    sem_z_proj.append(
+                        build_mlp(
+                            # since the transformer embedding layer has the same channels
+                            self.trans_enc_cfg.embed_dim,
+                            self._dino_feature_dim,
+                            self._dino_feature_dim,
+                        )
+                    )
+            else:
+                sem_z_proj = build_mlp(
+                    self.trans_enc_cfg.embed_dim,
+                    self._dino_feature_dim,
+                    self._dino_feature_dim,
+                )
+            self._repa_proj = nn.ModuleDict(
+                {
+                    "low_lvl_repa_proj": low_lvl_z_proj,
+                    "sem_repa_proj": sem_z_proj,
+                }
+            )
 
 
 def test_model_forward_backward():
@@ -290,11 +357,12 @@ def test_model_forward_backward():
         "model": {
             "resolution": 256,
             "in_channels": 3,
-            "z_channels": 512,
+            "z_channels": 512,  # Connect encoder and decoder
+            "latent_channels": 16,
             "channels": 128,  # Base channels
             "channels_mult": [2, 4, 4],  # Channel multiplier
             "num_res_blocks": 2,
-            "attn_resolutions": [32],
+            "attn_resolutions": [],
             "dropout": 0.0,
             "spatial_compression": 8,  # Default spatial compression
             "patch_size": 1,  # Default patch size
@@ -303,36 +371,61 @@ def test_model_forward_backward():
             "norm_groups": 32,  # Default number of groups
         },
         "quantizer_type": None,  # No quantizer for basic test
+        "vf_on_z_or_module": "z",  # Visual feature on z
+        "use_repa_loss": True,
+        "dino_feature_dim": 1024,
+        "cache_type": "h",
     }
 
     trans_enc_cfg = {
-        "embed_dim": 512,
-        "depth": 12,
-        "num_heads": 8,
+        "embed_dim": 1024,
+        "depth": 12,  # vit intern 300m -> embed_dim=1024, depth=24, num_heads=16
+        "num_heads": 12,
         "mlp_ratio": 4.0,
         "qkv_bias": True,
-        "patch_size": 1,  # Force to be 1 as per NaFlexVitCfg
+        "patch_size": 2,
         "norm_layer": "rmsnorm",  # Use Flash RMSNorm for compatibility
         "pos_embed": "learned",  # Use learned position embeddings
         "pos_embed_grid_size": (32, 32),  # Grid size for position embedding
         # Additional required fields from merged configuration
         "img_size": 32,  # Expected by NaFlexVitCfg
-        "z_dim": 512,  # Should match z_channels from transformer
+        "in_chans": 512,  # Should match z_channels from transformer
         "out_chans": 512,  # Output channels
+        "unpatch_size": 1,  # 2->1
+        "reg_tokens": 4,
     }
 
-    model = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg)
+    trans_dec_cfg = {
+        "embed_dim": 1024,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": True,
+        "patch_size": 1,
+        "norm_layer": "rmsnorm",  # Use Flash RMSNorm for compatibility
+        "pos_embed": "learned",  # Use learned position embeddings
+        "pos_embed_grid_size": (32, 32),  # Grid size for position embedding
+        # Additional required fields from merged configuration
+        "img_size": 32,  # Expected by NaFlexVitCfg
+        "in_chans": 512,  # Latent channels after post quant conv
+        "out_chans": 512,  # Output channels: z channels
+        "unpatch_size": 2,  # 1->2
+        "reg_tokens": 0,
+    }
+
+    model = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
     model = model.to(device)  # Move model to device (CUDA or CPU)
     model.eval()
     logger.info("Model created successfully!")
+    model.set_grad_checkpointing(enabled=True)
 
     # Print parameter table using fvcore
     logger.info("Model parameter table:")
     logger.info(parameter_count_table(model))
 
     # Create dummy input data
-    batch_size = 2
-    x = torch.randn(batch_size, 3, 256, 256).to(device)  # Move input to device
+    batch_size = 4
+    x = torch.randn(batch_size, 3, 512, 512).to(device)  # Move input to device
     logger.info(f"Input shape: {x.shape}")
 
     # Forward pass in eval mode
@@ -353,6 +446,11 @@ def test_model_forward_backward():
         logger.info(f"  z (CNN encoder output): {model.z}")
         logger.info(f"  sem_z (semantic transformer output): {model.sem_z}")
 
+        # Projection z and sem_z
+        low_lvl_z_proj, sem_z_proj = model.get_repa_feauture()
+        logger.info(f"Projected low-level z shape: {low_lvl_z_proj.shape}")
+        logger.info(f"Projected semantic z shape: {sem_z_proj.shape}")
+
         # Decode with proper input shape
         decoded = model.decode(encoded_tensor, x.shape)
         if isinstance(decoded, tuple):
@@ -364,6 +462,7 @@ def test_model_forward_backward():
 
     # Test training mode
     model.train()
+    optim = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     # Forward pass with gradients
     encoded = model.encode(x)
@@ -388,8 +487,14 @@ def test_model_forward_backward():
         loss += q_loss
 
     loss.backward()
+    optim.step()
+    # optim.zero_grad()
     logger.info(f"Backward pass completed successfully!")
     logger.info(f"Total loss: {loss.item()}")
+
+    import time
+
+    time.sleep(10)
 
     # Check if gradients are computed
     gradient_count = 0
@@ -413,5 +518,5 @@ if __name__ == "__main__":
     """
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_hybrid
     """
-    with logger.catch(reraise=True):
+    with logger.catch():
         test_model_forward_backward()

@@ -5,6 +5,7 @@ import math
 import os
 import sys
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 from threading import Thread
 
@@ -273,7 +274,9 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
     return Image.fromarray(img).convert("RGB")
 
 
-def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "mean"):
+def captioning_dataloader_img(
+    dl, process_img, rgb_channels: list[int] | str = "mean", resume_from=None
+):
     """
     Process images from a dataloader and generate captions.
 
@@ -285,7 +288,9 @@ def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "
     Yields:
         dict: Dictionary containing image id, image data, and caption results
     """
-
+    skipped = 0
+    processed = 0
+    resumed = not resume_from is not None  # str: False; None: True
     for sample in dl:
         img = sample["img"]
         assert img.ndim == 4, f"Image batch must be 4D numpy array, got {img.ndim}D."
@@ -294,7 +299,37 @@ def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "
         )
         img_id = sample["__key__"]
 
-        # to RGB
+        if isinstance(resume_from, str):
+            if img_id[0] == resume_from:
+                resumed = True
+            else:
+                skipped += 1
+                logger.debug(
+                    f"Skipping {img_id[0]} until {resume_from}. Skipped {skipped} files."
+                )
+                yield {
+                    "id": img_id,
+                    "processed": processed,
+                    "skipped": skipped,
+                    "is_skipped": True,
+                }
+                continue
+            if resume_from is not None and resumed:
+                logger.info(f"Resuming from {img_id[0]}.")
+        elif isinstance(resume_from, set):
+            if img_id[0] in resume_from:
+                skipped += 1
+                # logger.debug(f"Skipping {img_id[0]}. Skipped {skipped} files.")
+                # continue  # skip already processed files
+                yield {
+                    "id": img_id,
+                    "processed": processed,
+                    "skipped": skipped,
+                    "is_skipped": True,
+                }
+                continue
+
+        # Convert to RGB
         if img.ndim == 4 and img.shape[1] == 3:
             img_rgb = img
         else:
@@ -306,11 +341,16 @@ def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "
         results_g = process_img(img)
         results = next(results_g)
 
+        processed += 1
+
         yield {
             "id": img_id,
             "image": img,
             "caption": results["caption"],
             "valid_length": results["valid_length"],
+            "skipped": skipped,
+            "processed": processed,
+            "is_skipped": False,
         }
 
 
@@ -320,6 +360,7 @@ def main_process_dataloader_img(
     save_dir: str = "tmp/captions_qwen25vl",
     device="cuda",
     file_type: str = "jsonl",
+    resume_from: set | str | None = None,
 ):
     """
     Main function to process images from a dataloader and save captions.
@@ -349,38 +390,69 @@ def main_process_dataloader_img(
         prompt=default_prompt,
         encode=False,
         device=device,
-        stream=True,
+        stream=False,
     )
 
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
 
-    for res in tqdm(
-        captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels),
+    tbar: tqdm = tqdm(  # type: ignore
+        captioning_dataloader_img(
+            dl, process_img, rgb_channels=rgb_channels, resume_from=resume_from
+        ),
         desc="Captioning ...",
-        disable=True,
-    ):
-        img_id = res["id"][0] if isinstance(res["id"], list) else res["id"]
-        caption = res["caption"]
-        logger.info(f"Image ID: {img_id}\nCaption: {caption}\n" + "-" * 60)
+        total=410475,
+        disable=False,
+    )
 
-        if file_type == "txt":
-            file_path = os.path.join(save_dir, f"{img_id}.txt")
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "w") as f:
-                f.write(caption)
-        elif file_type == "jsonl":
-            file_path = os.path.join(save_dir, f"{img_id}.jsonl")
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            with jsl.open(file_path, mode="w") as writer:
-                writer.write({"id": img_id, "caption": caption})
-        else:
-            raise ValueError(f"Invalid file type: {file_type}")
+    for res in tbar:
+        tbar.set_postfix(
+            {
+                "Processed": res["processed"],
+                "Skipped": res["skipped"],
+                "Is_Skipped": res["is_skipped"],
+            }
+        )
+        tbar.set_description(f"Id: {res['id'][0]}")
+
+        if not res["is_skipped"]:
+            img_id = res["id"][0] if isinstance(res["id"], list) else res["id"]
+            caption = res["caption"]
+            # logger.info(f"Image ID: {img_id}\nCaption: {caption}\n" + "-" * 60)
+
+            if file_type == "txt":
+                file_path = os.path.join(save_dir, f"{img_id}.txt")
+                Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(file_path, "w") as f:
+                    f.write(caption)
+            elif file_type == "jsonl":
+                file_path = os.path.join(save_dir, f"{img_id}.jsonl")
+                Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+                with jsl.open(file_path, mode="w") as writer:
+                    writer.write({"id": img_id, "caption": caption})
+            else:
+                raise ValueError(f"Invalid file type: {file_type}")
 
 
 if __name__ == "__main__":
     # Test dataloader functionality if possible
     from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
+
+    _resumed = True
+    resumed_set = None
+
+    if _resumed:
+        saved_resume_path = "data/RemoteSAM270k/RemoteSAM-270K/captions/JPEGImages"
+        assert Path(saved_resume_path).exists(), (
+            f"Resume path {saved_resume_path} does not exist."
+        )
+        saved_jsonl_files = list(Path(saved_resume_path).glob("*"))
+        # remove extensions
+        resumed_set = set(  # 'JPEGImages/xxx'
+            "/".join(saved_resume_path.with_suffix("").parts[-2:])
+            for saved_resume_path in saved_jsonl_files
+        )
+        logger.info(f"Already processed files: {len(resumed_set)}")
 
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
@@ -394,6 +466,8 @@ if __name__ == "__main__":
             permute=True,
             resample=False,
             per_channel_norm=False,
+            shuffle_size=-1,
+            transform_prob=0.0,
         )
 
     print("Successfully created dataloader. Testing captioning...")
@@ -405,4 +479,5 @@ if __name__ == "__main__":
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",
         file_type="jsonl",
+        resume_from=resumed_set,
     )

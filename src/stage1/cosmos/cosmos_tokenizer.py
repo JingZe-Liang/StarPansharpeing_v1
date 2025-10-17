@@ -1265,6 +1265,14 @@ class ContinuousImageTokenizer(nn.Module):
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
         return cls(cfg)
 
+    def set_grad_checkpointing(self, enabled: bool = True):
+        for m in self.modules():
+            if hasattr(m, "grad_checkpointing"):
+                m.grad_checkpointing = enabled
+                log_print(
+                    f"set grad_checkpointing={enabled} for {m.__class__.__name__}"
+                )
+
 
 # * --- test --- * #
 

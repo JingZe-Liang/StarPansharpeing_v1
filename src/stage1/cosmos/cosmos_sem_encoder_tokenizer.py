@@ -178,6 +178,8 @@ class Dinov3RAE(nn.Module):
         self.encoder_patch_size = self.encoder.patch_embed.patch_size[0]
         dec_cfg = cfg.decoder_cfg
         lw_up_cfg = cfg.light_upsampler_cfg
+
+        # FIXME: Should add encoder too, the patcher is too large when using nested conv.
         self.decoder = TransformerTokenizer(
             in_chan=dec_cfg.in_chan,  # dino out channels
             embed_dim=dec_cfg.embed_dim,
@@ -231,6 +233,8 @@ class Dinov3RAE(nn.Module):
         named_apply(init_weights_vit_jax_custom, self.decoder)
         named_apply(init_weights_convnext, self.light_upsampler)
         logger.info(f"[Dinov3RAE]: init the decoder and light upsampler weights done.")
+
+        # Self-distillation
 
     def _make_encoder_patch_embeder_adaptive(self, cfg):
         encoder_patcher = self.encoder.patch_embed

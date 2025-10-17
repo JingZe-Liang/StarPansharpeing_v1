@@ -18,6 +18,7 @@ from einops.layers.torch import Rearrange
 from flash_attn.layers.rotary import (
     RotaryEmbedding as FlashAttnRotaryEmbedding,  # type: ignore
 )
+from fvcore.nn import parameter_count
 from jaxtyping import Float
 from loguru import logger
 from timm.layers import (
@@ -53,7 +54,11 @@ from .blocks import (
     AdaptiveOutputLinearLayer,
 )
 from .mask import random_masking_mae, random_masking_no_drop
-from .patching import create_unpatcher
+from .patching import (
+    AdaptivePatchEmbedding,
+    AdaptiveProgressivePatchEmbedding,
+    create_unpatcher,
+)
 from .resample import MingtokDownsampleShortCut, MingtokUpsampleAverage
 from .rope import (
     get_1d_sincos_pos_embed_from_grid,
@@ -62,26 +67,6 @@ from .rope import (
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
-
-
-class AdaptivePatchEmbedding(PatchEmbed):
-    def __init__(self, in_chans, embed_dim, patch_size: int, **kwargs):
-        super().__init__(
-            in_chans=in_chans,
-            embed_dim=embed_dim,
-            patch_size=patch_size,
-            strict_img_size=False,
-            **kwargs,
-        )
-        self.proj = AdaptiveInputConvLayer(
-            in_chans,
-            embed_dim,
-            patch_size,
-            patch_size,
-            padding=0,
-            use_bias=kwargs.get("bias", True),
-            mode="interp",  # ['slice', 'interp']
-        )
 
 
 class Attention(Attention_):
@@ -106,6 +91,9 @@ class Attention(Attention_):
         attn_type: str = "sdpa",
         is_causal: bool = False,
     ):
+        norm_layer = (
+            get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
+        )
         super().__init__(
             dim,
             num_heads,
@@ -115,7 +103,7 @@ class Attention(Attention_):
             attn_drop,
             proj_drop,
             attn_head_dim,
-            get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer,
+            norm_layer,
             qk_norm,
             scale_norm,
             proj_bias,
@@ -1083,22 +1071,23 @@ if __name__ == "__main__":
     """
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.modules.transformer
     """
-    transformer = (
-        TransformerTokenizer(
-            3,
-            512,
-            3,
-            pe_type="learn",
-            drop_path=0.2,
-            is_causal=True,
-            mask_train_ratio=0.5,
-        )
-        .cuda()
-        .to(dtype=torch.bfloat16)
-    )
-    x = torch.randn(2, 3, 224, 224).cuda()
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        y, out = transformer(x, ret_2d_tokens=True, ret_all=True)
-    print("transformer ouput: ", y)
-    for k, v in out.items():
-        print("{:<20}: {}".format(k, str(v)))
+    # transformer = (
+    #     TransformerTokenizer(
+    #         3,
+    #         512,
+    #         3,
+    #         pe_type="learn",
+    #         drop_path=0.2,
+    #         is_causal=True,
+    #         mask_train_ratio=0.5,
+    #     )
+    #     .cuda()
+    #     .to(dtype=torch.bfloat16)
+    # )
+    # x = torch.randn(2, 3, 224, 224).cuda()
+    # with torch.autocast("cuda", dtype=torch.bfloat16):
+    #     y, out = transformer(x, ret_2d_tokens=True, ret_all=True)
+    # print("transformer ouput: ", y)
+    # for k, v in out.items():
+    #     print("{:<20}: {}".format(k, str(v)))
+    pass

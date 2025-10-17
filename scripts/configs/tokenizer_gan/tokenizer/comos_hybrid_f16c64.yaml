@@ -1,0 +1,61 @@
+_target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
+
+# CNN encoder x8
+# Transformer encoder x2
+# Downsample total x16
+
+# F16C64 VAE tokenizer
+
+# Parameters: 300M base model
+
+cnn_cfg:
+  model:
+    resolution: 256
+    in_channels: 3
+    z_channels: 512
+    latent_channels: 64
+    channels: 128
+    channels_mult: [2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: []
+    dropout: 0.0
+    spatial_compression: 8
+    patch_size: 1
+    block_name: res_block
+    norm_type: gn
+    norm_groups: 32
+  quantizer_type: null
+  vf_on_z_or_module: z
+  use_repa_loss: true
+  dino_feature_dim: 1024
+  cache_type: h
+
+trans_enc_cfg:
+  embed_dim: 768
+  depth: 12
+  num_heads: 8
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 2
+  norm_layer: rmsnorm
+  pos_embed: learned
+  pos_embed_grid_size: [32, 32]
+  img_size: 32
+  in_chans: 512
+  out_chans: 512
+  unpatch_size: 1
+
+trans_dec_cfg:
+  embed_dim: 768
+  depth: 12
+  num_heads: 8
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 1
+  norm_layer: rmsnorm
+  pos_embed: learned
+  pos_embed_grid_size: [32, 32]
+  img_size: 32
+  in_chans: 512
+  out_chans: 512
+  unpatch_size: 2

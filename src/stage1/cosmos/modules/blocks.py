@@ -3,6 +3,7 @@ import os
 from functools import partial, wraps
 from inspect import isclass
 from typing import (
+    Annotated,
     Any,
     Callable,
     Literal,
@@ -22,8 +23,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
+from einops.layers.torch import Rearrange
 from timm.layers import create_act_layer, create_conv2d
 from timm.layers.drop import DropPath
+from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 
@@ -1091,6 +1094,42 @@ class DiffBandsInputConvOut(nn.Module):
 # * --- Nested Diffbands conv --- #
 
 
+def _kernel_norm(
+    w: Annotated[Tensor, "c_out c_in k k"],
+    kernel_norm: str | None,
+    dim: Literal["c_in", "c_out"] = "c_in",
+) -> Annotated[Tensor, "c_out c_in k k"]:
+    if kernel_norm is None:
+        return w
+
+    if kernel_norm == "softmax":
+        # Apply softmax on input channel dimension
+        dim_ = 1 if dim == "c_in" else 0
+        w = F.softmax(w, dim=dim_)
+        return w
+
+    elif kernel_norm == "layernorm":
+        w_shape = w.shape
+        if dim == "c_in":
+            w = w.reshape(*w.shape[:2], -1).permute(0, 2, 1)  # c_out, (k*k), c_in
+            w = F.layer_norm(w, [w.shape[-1]])  # normalize on c_in dimension
+            return w.permute(0, 2, 1).reshape(w_shape)  # c_out, c_in, k, k
+        else:
+            w = w.reshape(*w.shape[2:], -1).permute(1, 2, 0)  # c_in, (k*k) c_out
+            w = F.layer_norm(w, [w.shape[-1]])  # normalize on c_out dimension
+            return w.permute(2, 1, 0).reshape(w_shape)  # c_out, c_in, k, k
+
+    elif kernel_norm == "weight_std":
+        dim_ = 1 if dim == "c_in" else 0
+        # Weight standardization: normalize to zero mean and unit std
+        mean = w.mean(dim=dim_, keepdim=True)  # mean over c_in dimension
+        std = w.std(dim=dim_, keepdim=True) + 1e-5  # std over c_in dimension
+        return (w - mean) / std
+
+    else:
+        raise ValueError(f"Unknown kernel_norm type: {kernel_norm}")
+
+
 class AdaptiveInputConvLayer(nn.Module):
     def __init__(
         self,
@@ -1102,55 +1141,101 @@ class AdaptiveInputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp"] = "slice",
+        mode: Literal["slice", "interp", "interp_proj"] = "slice",
+        k_hidden: int | None = None,
+        kernel_norm: str | None = None,
     ):
         super().__init__()
         conv_kwargs = dict(
-            stride=stride,
-            groups=groups,
-            dilation=dilation,
-            bias=use_bias,
+            stride=stride, groups=groups, dilation=dilation, bias=use_bias
         )
         if padding is not None:
             # if padding not set, the create_conv2d will use same padding
             conv_kwargs["padding"] = padding
-        self.conv = create_conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            **conv_kwargs,
-        )
+
+        self.conv = create_conv2d(in_channels, out_channels, kernel_size, **conv_kwargs)
         self.mode = mode
+        self.kernel_norm = kernel_norm
 
-    @no_type_check
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_channels = x.shape[1]
-        if in_channels == self.conv.weight.shape[1]:
-            return self.conv(x)
-
-        if self.mode == "slice":
-            w = self.conv.weight[:, :in_channels]
-        elif self.mode == "interp":
-            c_out, c_in, k, k = (w := self.conv.weight).shape
-            # c_in -> in_channels
-            w_i = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
-            w_i = torch.nn.functional.interpolate(
-                w_i, size=(c_out, in_channels), mode="bicubic", align_corners=False
+        if mode == "interp_proj":
+            # (bs, c, k1, k2) img -> (c_out, c_in, k1, k2) kernel
+            # kernel -> (c_out, k1*k2, c_in) -> Linear(in_channels, k_hidden) -> k_hidden -> c_in -> (c_out, k1*k2, c_in)
+            k_hidden = k_hidden or in_channels
+            self.kernel_proj = nn.ModuleList(
+                [
+                    nn.Linear(in_channels, k_hidden, bias=use_bias),
+                    nn.Linear(k_hidden, in_channels),
+                ]
             )
-            w = rearrange(w_i, "k1 k2 c_out c_in -> c_out c_in k1 k2")
-        else:
-            raise ValueError(f"Unknown mode {self.mode}")
 
-        x = nn.functional.conv2d(
+        self.forward_mappings = dict(
+            slice=self._slice_forward,
+            interp=self._interp_forward,
+            interp_proj=self._interp_proj_forward,
+        )
+
+    def _forward_conv_with_wb(self, x, w, b):
+        x = nn.functional.conv2d(  # type: ignore
             x,
             w,
-            self.conv.bias,
+            b,
             self.conv.stride,
             self.conv.padding,
             self.conv.dilation,
             self.conv.groups,
         )
         return x
+
+    def _slice_forward(self, x):
+        w = self.conv.weight[:, : x.shape[1]]
+        w = _kernel_norm(w, self.kernel_norm, "c_in")
+        x = self._forward_conv_with_wb(x, w, self.conv.bias)
+        return x
+
+    def _interp_forward(self, x, w: Tensor | None = None):
+        in_channels = x.shape[1]
+        if w is None:
+            w: Tensor = self.conv.weight
+
+        c_out, c_in, k1, k2 = w.shape
+        # c_in -> in_channels
+        w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
+        w = torch.nn.functional.interpolate(
+            w, size=(c_out, in_channels), mode="bicubic", align_corners=False
+        )
+        w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+        # Conv
+        w = _kernel_norm(w, self.kernel_norm, "c_in")
+        x = self._forward_conv_with_wb(x, w, self.conv.bias)
+        return x
+
+    def _interp_proj_forward(self, x):
+        in_channels = x.shape[1]
+        lin1, lin2 = self.kernel_proj
+
+        # weights
+        w: Tensor = self.conv.weight
+        c_out, c_in, k1, k2 = w.shape
+
+        # weight projection
+        w = rearrange(w, "c_out c_in k1 k2 -> c_out (k1 k2) c_in")
+        w = lin1(w)  # c_out, (k1*k2), k_hidden
+        w = lin2(w)  # c_out, (k1*k2), c_in
+        w = rearrange(w, "c_out (k1 k2) c_in -> c_out c_in k1 k2", k1=k1, k2=k2)
+
+        # Interpolation
+        return self._interp_forward(x, w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+
+        # Native case
+        if in_channels == self.conv.weight.shape[1]:
+            w = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
+            return self._forward_conv_with_wb(x, w, self.conv.bias)
+
+        # Adaptive cases
+        return self.forward_mappings[self.mode](x)
 
     @property
     def weight(self):
@@ -1168,7 +1253,9 @@ class AdaptiveOutputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp"] = "slice",
+        mode: Literal["slice", "interp", "interp_proj"] = "slice",
+        k_hidden: int | None = None,
+        kernel_norm: str | None = None,
     ):
         super().__init__()
         conv_kwargs = dict(
@@ -1187,55 +1274,150 @@ class AdaptiveOutputConvLayer(nn.Module):
             **conv_kwargs,
         )
         self.mode = mode
+        self.kernel_norm = kernel_norm
 
-    @no_type_check
+        if mode == "interp_proj":
+            # For output channels, we project the output channel dimension
+            # (c_out, c_in, k1, k2) kernel -> (c_out, k1*k2, c_in) -> Linear(c_out, k_hidden) -> k_hidden -> c_out -> (c_out, k1*k2, c_in)
+            k_hidden = k_hidden or out_channels
+            self.kernel_proj = nn.ModuleList(
+                [
+                    nn.Linear(out_channels, k_hidden, bias=use_bias),
+                    nn.Linear(k_hidden, out_channels),
+                ]
+            )
+
+        # Initialize forward mappings
+        self.forward_mappings = {
+            "slice": self._slice_forward,
+            "interp": self._interp_forward,
+            "interp_proj": self._interp_proj_forward,
+        }
+
+    def _forward_conv_with_wb(self, x, w, b):
+        """Perform convolution with custom weights and bias"""
+        return nn.functional.conv2d(  # type: ignore
+            x,
+            w,
+            b,
+            self.conv.stride,
+            self.conv.padding,
+            self.conv.dilation,
+            self.conv.groups,
+        )
+
+    def _slice_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        """Forward method for slice mode"""
+        assert out_channels <= self.conv.out_channels, (
+            "In slice mode, out_channels must be less than or equal to the original out_channels, "
+            f"got {out_channels=} > {self.conv.out_channels=}"
+        )
+
+        w = self.conv.weight[:out_channels]
+        w = _kernel_norm(w, self.kernel_norm, "c_out")
+        b = self.conv.bias[:out_channels] if self.conv.bias is not None else None
+        return self._forward_conv_with_wb(x, w, b)
+
+    def _interp_forward(
+        self,
+        x: torch.Tensor,
+        out_channels: int,
+        w: torch.Tensor | None = None,
+        b: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward method for interpolation mode"""
+        c_in = x.shape[1]
+        if w is None:
+            c_out, _, k1, k2 = self.conv.weight.shape
+            w = self.conv.weight
+
+        # Interpolate weights from c_out to out_channels
+        w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
+        w = torch.nn.functional.interpolate(
+            w, size=(out_channels, c_in), mode="bicubic", align_corners=False
+        )
+        w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+
+        # Interpolate bias if present
+        b = None
+        if self.conv.bias is not None:
+            # (b) -> (1,1,b)
+            b = torch.nn.functional.interpolate(
+                self.conv.bias[None, None],
+                size=(out_channels,),
+                mode="linear",
+                align_corners=False,
+            )[0, 0]
+
+        # Apply kernel normalization
+        w = _kernel_norm(w, self.kernel_norm, "c_out")
+        return self._forward_conv_with_wb(x, w, b)
+
+    def _interp_proj_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        """Forward method for interpolation with projection mode"""
+        c_out, c_in, k1, k2 = self.conv.weight.shape
+
+        # weight projection - similar to input layer but for output channels
+        w = rearrange(self.conv.weight, "c_out c_in k1 k2 -> c_in (k1 k2) c_out")
+        lin1, lin2 = self.kernel_proj
+        w = lin1(w)  # c_in, (k1*k2), k_hidden
+        w = lin2(w)  # c_in, (k1*k2), c_out
+        w = rearrange(w, "c_in (k1 k2) c_out -> k1 k2 c_out c_in", k1=k1, k2=k2)
+
+        # Interpolate from c_out to out_channels
+        w = torch.nn.functional.interpolate(
+            w, size=(out_channels, c_in), mode="bicubic", align_corners=False
+        )
+        w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+
+        # Interpolate bias if present
+        b = None
+        if self.conv.bias is not None:
+            b = torch.nn.functional.interpolate(
+                self.conv.bias[None, None],
+                size=(out_channels,),
+                mode="linear",
+                align_corners=False,
+            )[0, 0]
+
+        # Apply kernel normalization
+        w = _kernel_norm(w, self.kernel_norm, "c_out")
+
+        return self._forward_conv_with_wb(x, w, b)
+
     def forward(
         self, x: torch.Tensor, out_channels: Optional[int] = None
     ) -> torch.Tensor:
         if out_channels is None:
             out_channels = self.conv.out_channels
 
+        # Native case - if output channels match, use direct convolution
         if out_channels == self.conv.weight.shape[0]:
-            return self.conv(x)
+            w = self.conv.weight
+            w = _kernel_norm(w, self.kernel_norm, "c_out")
+            return self._forward_conv_with_wb(x, w, self.conv.bias)
 
-        b = self.conv.bias
-        if self.mode == "slice":
-            w = self.conv.weight[:out_channels]
-            if b is not None:
-                b = b[:out_channels]
-        elif self.mode == "interp":
-            c_out, c_in, k, k = (w := self.conv.weight).shape
-            # c_out -> out_channels
-            w_i = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
-            w_i = torch.nn.functional.interpolate(
-                w_i, size=(out_channels, c_in), mode="bicubic", align_corners=False
-            )
-            w = rearrange(w_i, "k1 k2 c_out c_in -> c_out c_in k1 k2")
-            # (c_out,)
-            if b is not None:
-                b = torch.nn.functional.interpolate(
-                    b[None, :, None],  # (1, c_out, 1)
-                    size=(out_channels,),
-                    mode="linear",
-                    align_corners=False,
-                )[0, :, 0]
-        else:
-            raise ValueError(f"Unknown mode {self.mode}")
-
-        x = nn.functional.conv2d(
-            x,
-            self.conv.weight[:out_channels],
-            self.conv.bias[:out_channels] if self.conv.bias is not None else None,
-            self.conv.stride,
-            self.conv.padding,
-            self.conv.dilation,
-            self.conv.groups,
-        )
-        return x
+        # Adaptive cases - use mapping
+        return self.forward_mappings[self.mode](x, out_channels)
 
     @property
     def weight(self):
         return self.conv.weight
+
+    def init_weights(self, zero_out=False):
+        # init conv
+        if zero_out:
+            nn.init.zeros_(self.conv.weight)
+        else:
+            nn.init.xavier_normal_(self.conv.weight)
+        if self.conv.bias is not None:
+            nn.init.zeros_(self.conv.bias)
+
+        if self.mode == "interp_proj":
+            for lin in self.kernel_proj:
+                torch.nn.init.trunc_normal_(lin.weight, std=0.02)
+                if lin.bias is not None:
+                    torch.nn.init.zeros_(lin.bias)
 
 
 class AdaptiveInputLinearLayer(nn.Module):
@@ -1266,49 +1448,22 @@ class AdaptiveInputLinearLayer(nn.Module):
         b = self.linear.bias
         return F.linear(x, w, b)
 
+
 class AdaptiveOutputLinearLayer(nn.Module):
     def __init__(
-        self, in_features: int, out_features: int, bias: bool = True, mode: str = "slice"
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        mode: str = "slice",
     ):
-        """
-        Adaptive output linear layer that can adjust output features dynamically.
-        
-        This layer allows for dynamic adjustment of output features during forward pass,
-        supporting either slicing or interpolation modes for weight adaptation.
-
-        Parameters
-        ----------
-        in_features : int
-            Number of input features
-        out_features : int
-            Maximum number of output features
-        bias : bool, default=True
-            Whether to include bias term
-        mode : str, default="slice"
-            Mode for adapting weights: "slice" or "interp"
-        """
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features, bias=bias)
         self.mode = mode
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
 
-    def forward(
-        self, x: torch.Tensor, out_features: int | None = None
-    ) -> torch.Tensor:
-        """
-        Forward pass with adaptive output features.
-        
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor
-        out_features : int | None, default=None
-            Desired number of output features. If None, uses the full output dimension.
-            
-        Returns
-        -------
-        torch.Tensor
-            Output tensor with specified number of features
-        """
+        assert mode in ("slice", "interp"), f'mode must be one of "slice", "interp""'
+
+    def forward(self, x: torch.Tensor, out_features: int | None = None) -> torch.Tensor:
         if out_features is None:
             out_features = self.linear.out_features
 
@@ -1317,7 +1472,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
 
         w = self.linear.weight
         b = self.linear.bias
-        
+
         if self.mode == "slice":
             # Slice the weights and bias to desired output size
             w = w[:out_features]
@@ -1331,7 +1486,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
                 w_i, size=(out_features, in_f), mode="bicubic", align_corners=False
             )
             w = w_i.squeeze(0, 1)
-            
+
             # Interpolate bias if present
             if b is not None:
                 b = torch.nn.functional.interpolate(
@@ -2017,6 +2172,7 @@ class FinalLayer(nn.Module):
 
 if __name__ == "__main__":
     """
+    export LOVELY_TENSORS=1
     python -m src.stage1.cosmos.modules.blocks
     """
     adaptive_in_layer = AdaptiveInputConvLayer(
@@ -2026,7 +2182,22 @@ if __name__ == "__main__":
         kernel_size=8,
         stride=8,
         padding=0,
+        kernel_norm="layernorm",
     )
     x = torch.randn(1, 128, 64, 64)
     y = adaptive_in_layer(x)
+    print(y.shape)
+
+    print("-" * 60)
+
+    adaptive_out_layer = AdaptiveOutputConvLayer(
+        in_channels=386,
+        out_channels=32,
+        mode="interp_proj",
+        kernel_size=3,
+        stride=1,
+        padding=1,
+    )
+    x = torch.randn(1, 386, 64, 64)
+    y = adaptive_out_layer(x, out_channels=16)
     print(y.shape)

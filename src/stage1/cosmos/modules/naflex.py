@@ -128,7 +128,7 @@ class NaFlexVitCfg:
 
     #  Tokenization related
     img_size: int = 32
-    z_dim: int = 256
+    in_chans: int = 256
     out_chans: int = 16
     out_2d_latent: bool = True
     unpatch_size: Optional[int] = None  # if None, use patch_size
@@ -141,7 +141,7 @@ class NaFlexVitCfg:
 
 class Transformer(NaFlexVit):
     def __init__(self, cfg: NaFlexVitCfg):
-        super().__init__(cfg, in_chans=cfg.z_dim, img_size=cfg.img_size)
+        super().__init__(cfg, in_chans=cfg.in_chans, img_size=cfg.img_size)
         self.cfg = cfg
         self._build_head(cfg)
 
@@ -196,6 +196,7 @@ class Transformer(NaFlexVit):
             out_hw = (torch.tensor(hw) // self.patch_size * self.unpatch_size).tolist()
         else:
             out_hw = hw
+        return out_hw
 
     def forward(self, x):
         # Output HW

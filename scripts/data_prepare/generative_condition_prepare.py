@@ -684,14 +684,12 @@ def concate_tars(*src_tars, output_tar: str, repeat_find=True):
             log_print("merged tar:{}".format(tar.name))
 
             tar_files = read_tar_filenames_safe(tar_path=tar_file, close_tar=True)
-
-            for i, (member, file_data) in (
-                tbar := tqdm(
-                    enumerate(extract_tar_files_safe(tar=tar, close_tar=False)),
-                    total=len(tar_files),
-                    desc="Merging tar members",
-                )
-            ):
+            tbar: tqdm = tqdm(
+                enumerate(extract_tar_files_safe(tar=tar, close_tar=False)),
+                total=len(tar_files),
+                desc="Merging tar members",
+            )
+            for i, (member, file_data) in tbar:
                 if repeat_find:
                     if member.name in s:
                         log_print(

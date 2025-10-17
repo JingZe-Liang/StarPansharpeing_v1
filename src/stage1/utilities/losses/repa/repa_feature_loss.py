@@ -1,21 +1,28 @@
 import math
 import sys
-import warnings
-from functools import lru_cache, partial
+from functools import partial
 from pathlib import Path
 from types import MethodType
-from typing import Any, Callable, Literal, Optional, Sequence, TypeVar, cast, overload
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    Sequence,
+    cast,
+    no_type_check,
+    overload,
+)
 
-import einx
+import lovely_tensors as lt
 import numpy as np
 import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import AcceleratorState
-from einops import einsum, rearrange, reduce
+from einops import rearrange
 from jaxtyping import Float
-from numpy.typing import NDArray
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers.create_norm_act import get_norm_act_layer
 from torch import Tensor, is_tensor
@@ -26,9 +33,7 @@ from transformers import (
     AutoModel,
     AutoProcessor,
     BitsAndBytesConfig,
-    Siglip2Model,
     Siglip2VisionModel,
-    SiglipImageProcessor,
     SiglipProcessor,
 )
 from transformers.modeling_outputs import BaseModelOutput
@@ -42,6 +47,7 @@ from src.stage1.utilities.losses.repa.feature_pca import (
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging.print import log_print
 
+# fmt: off
 DINOV3_TO_NUM_LAYERS = {
     "dinov3_vits16": 12,
     "dinov3_vits16plus": 12,
@@ -66,25 +72,36 @@ SIGLIP2_INTERACTION_INDEXES = {
     "google/siglip2-large-patch16-512": [5, 11, 17, 23],
     "google/siglip2-base-patch16-naflex": [2, 5, 8, 11],
     "google/siglip2-large-patch16-naflex": [5, 11, 17, 23],
-    "google/siglip2-so400m-patch14-224": [
-        5,
-        11,
-        17,
-        23,
-    ],  # patch=[14,16]; shape=[224,384,512]
+    "google/siglip2-so400m-patch14-224": [5, 11, 17, 23],  # patch=[14,16]; shape=[224,384,512]
     "google/siglip2-so400m-patch16-naflex": [7, 16, 22, 26],  # naflex backbone
 }
 SIGLIP2_FEATURE_INDEX: list[int] | None = None
+# fmt: on
+
+# types
+type InterpType = tuple[int, ...] | torch.Size
 
 
-def interpolate_features_2d_stacked(x, tgt_size: tuple[int, ...] | torch.Size):
-    n_stacked = x.shape[0]
-    for i in range(n_stacked):
-        x[i] = interpolate_features_2d(x[i], tgt_size)
+def interpolate_features_2d_stacked(
+    x: Tensor | list[Tensor], tgt_size: InterpType | list[InterpType]
+) -> Tensor | list[Tensor]:
+    assert is_tensor(x) or isinstance(x, list), (
+        f"feature shape should be [layers, bs, c, h, w] or list of [bs, c, h, w] but got {type(x)}"
+    )
+    if is_tensor(x):
+        assert x.ndim == 5
+
+    n_ft = len(x)
+    for i in range(n_ft):
+        x[i] = interpolate_features_2d(
+            x[i],
+            tgt_size if not isinstance(tgt_size, list) else tgt_size[i],
+        )
+
     return x
 
 
-def interpolate_features_2d(x: Tensor, tgt_size: tuple[int, ...] | torch.Size):
+def interpolate_features_2d(x: Tensor, tgt_size: InterpType) -> Tensor:
     B, D, H, W = x.shape
     H_tgt, W_tgt = tgt_size
 
@@ -126,8 +143,20 @@ def mean_flat(x: Tensor):
     return x.mean(dim=list(range(1, len(x.shape))))
 
 
-def norm_feature(feat: Tensor, dim=1):
-    return F.normalize(feat, dim=dim)
+def rearrange_lst(
+    x: list[Tensor] | Tensor, pattern: str, **pattern_kwargs: dict[str, int]
+):
+    if isinstance(x, list):
+        return [rearrange(f, pattern, **pattern_kwargs) for f in x]
+    else:
+        return rearrange(x, pattern, **pattern_kwargs)
+
+
+def norm_feature(feat: Tensor | list[Tensor], dim=1):
+    if isinstance(feat, list):
+        return [F.normalize(f, dim=dim) for f in feat]
+    else:
+        return F.normalize(feat, dim=dim)
 
 
 def build_mlp(
@@ -154,16 +183,22 @@ def next_divisble_of_y(x, y):
     return math.ceil(x / y) * y
 
 
-def repa_loss_(feature_teacher, feature_student, dim=-1):
-    assert feature_teacher.shape == feature_student.shape
-    return -torch.sum(feature_teacher * feature_student, dim=dim)
+def is_list_tuple(x):
+    return isinstance(x, (list, tuple))
 
 
-def am_ratio_spatial_loss(feature_teacher, feature_student, dim=-1):
+def repa_loss_(feature_teacher, feature_student, dim=1):
     assert feature_teacher.shape == feature_student.shape
-    un_sim = 1 - torch.cosine_similarity(feature_teacher, feature_student, dim=1)
+    return -torch.sum(feature_teacher * feature_student, dim=dim).mean()
+
+
+def am_ratio_spatial_loss(feature_teacher, feature_student, dim=1):
+    # b, c, l
+    assert feature_teacher.shape == feature_student.shape
+    un_sim = 1 - torch.cosine_similarity(feature_teacher, feature_student, dim=dim)
     smooth_l1 = F.smooth_l1_loss(feature_teacher, feature_student)
-    return un_sim + smooth_l1 * 0.1
+    loss = un_sim.mean() + smooth_l1 * 0.1
+    return loss
 
 
 def token_relation_loss(
@@ -207,7 +242,111 @@ def token_relation_loss(
     loss = F.mse_loss(relation_t, relation_s)
     return loss
 
-    loss = F.mse_loss(relation_t, relation_s)
+
+def multiple_features_apply(
+    function: Callable,
+    feature_teacher,
+    feature_student,
+    disable=False,
+    **kwargs,
+):
+    if disable:
+        return function(feature_teacher, feature_student, **kwargs)
+
+    assert len(feature_teacher) == len(feature_student), (
+        "Teacher and student feature lists/Tensors should have the same length"
+    )
+    loss = 0.0
+    for ft, fs in zip(feature_teacher, feature_student):
+        loss += function(ft, fs, **kwargs)
+    loss = loss / len(feature_teacher)
+    return loss
+
+
+def hier_distillation_loss(
+    feature_teacher,
+    feature_student,
+    dim: int = -2,
+    beta: float = 2.0,
+    implem: str = "new",
+):
+    """Hierarchical distillation loss for multi-layer feature alignment.
+
+    This function computes a weighted distillation loss across multiple layers,
+    where higher layers get higher base weights and the weights are further
+    adjusted based on the dissimilarity between teacher and student features.
+
+    Parameters
+    ----------
+    feature_teacher : Tensor or list[Tensor]
+        Teacher features with shape (layers, bs, c, l) or list of [bs, c, l]
+    feature_student : Tensor or list[Tensor]
+        Student features with same structure as teacher features
+    dim : int, optional
+        Dimension along which to compute cosine similarity. Default is -2 (channel dim).
+    beta : float, optional
+        Temperature parameter for weight adjustment. Higher values increase
+        the influence of dissimilarity on weights. Default is 2.0.
+    implem : str, optional
+        Implementation method: "legacy" or "new". Default is "new".
+
+    Returns
+    -------
+    Tensor
+        Computed hierarchical distillation loss (scalar).
+
+    Note
+    ----
+    Assumes input features are in format [bs, c, l] where dim=-2 corresponds
+    to the channel dimension for cosine similarity computation.
+    """
+    # Assertions
+    is_lst = is_list_tuple(feature_teacher) and is_list_tuple(feature_student)
+    is_stacked = is_tensor(feature_teacher) and is_tensor(feature_student)
+    assert is_lst or is_stacked, (
+        "feature_teacher and feature_student should be lists or tensors"
+    )
+    layers_n = len(feature_teacher)
+    assert layers_n == len(feature_student), (
+        "Teacher and student should have the same number of layers"
+    )
+
+    device = (
+        feature_teacher.device
+        if is_tensor(feature_teacher)
+        else feature_teacher[0].device
+    )
+    weight_base = (
+        torch.arange(1, layers_n + 1, dtype=torch.float32, device=device) / layers_n
+    )
+
+    # Compatibility: if the feature size are different across layers, use list form
+    if is_stacked:
+        feature_teacher = feature_teacher.unbind(dim=0)
+        feature_student = feature_student.unbind(dim=0)
+
+    cosine_sims = []
+    for i in range(layers_n):
+        ft, fs = feature_teacher[i], feature_student[i]
+        if implem == "legacy":
+            t_norm = F.normalize(ft, p=2, dim=dim)  # (bs, c, l)
+            s_norm = F.normalize(fs, p=2, dim=dim)  # (bs, c, l)
+            cosine_sim_map = (t_norm * s_norm).sum(dim=dim)  # (bs, l)
+        else:
+            cosine_sim_map = F.cosine_similarity(ft, fs, dim=dim)  # (bs, l)
+        cosine_sims.append(cosine_sim_map)
+    cosine_sims = torch.stack(cosine_sims, dim=0)
+    unsim_loss: Tensor = 1.0 - cosine_sims.mean(dim=(1, 2))  # (layers,)
+
+    if implem == "legacy":
+        un_sim_exp = (beta * unsim_loss).exp()
+        w_per_layer = weight_base * un_sim_exp
+        w_per_layer = w_per_layer / (w_per_layer.sum() + 1e-6)
+    else:
+        w_per_layer = weight_base * torch.softmax(beta * unsim_loss, dim=0)
+
+    loss = (w_per_layer * unsim_loss).sum()
+
     return loss
 
 
@@ -365,7 +504,7 @@ def load_repa_dino_v2_model(
         )
     if compile:
         model = torch.compile(model)
-        log_print(f"[Dino v2 model]: compiled model done")
+        log_print("[Dino v2 model]: compiled model done")
     return model  # type: ignore[return-value]
 
 
@@ -526,7 +665,7 @@ class REPALoss(torch.nn.Module):
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
         dino_type: str = "torch",  # [torch, timm, siglip2]
-        dino_name="dinov3_vitl16",
+        dino_name: str = "dinov3_vitl16",
         dino_version: int = 3,
         dino_pretrained_path: str | None = None,
         dino_pretrained_on: str | Literal["satellite", "web"] | None = "satellite",
@@ -589,9 +728,14 @@ class REPALoss(torch.nn.Module):
         self.feature_normalize = feature_normalize
         self.loss_type = loss_type
         self.feature_resample_type = feature_resample_type
-        assert loss_type in ["repa_original", "am_ratio_spatial", "token_relation"], (
+        assert loss_type in [
+            "repa_original",
+            "am_ratio_spatial",
+            "token_relation",
+            "hier_distillation",
+        ], (
             f"loss_type {loss_type} not supported, must be in "
-            f"['repa_original', 'am_ratio_spatial', 'token_relation']"
+            f"['repa_original', 'am_ratio_spatial', 'token_relation', 'hier_distillation']"
         )
 
         if isinstance(img_resize, (tuple, list)):
@@ -781,6 +925,7 @@ class REPALoss(torch.nn.Module):
                 _per_tensor_process(feat) for feat in out_feats
             ]  # 2d list features
         else:
+            out_feats = cast(Tensor, out_feats)
             img_feats = _per_tensor_process(out_feats)  # 2d features
 
         # Detach and return 1 feature out?
@@ -957,39 +1102,49 @@ class REPALoss(torch.nn.Module):
         self, teacher_feat: list[Tensor], student_feat: list[Tensor]
     ) -> tuple[list[Tensor], list[Tensor]]: ...
 
-    def _interp_teacher_or_student_features(self, teacher_feat, student_feat):
-        is_feat_lst = isinstance(teacher_feat, (tuple, list)) or teacher_feat.ndim == 5
+    def _interp_teacher_or_student_features(
+        self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]
+    ):
+        # Feature list or stacked feature
+        is_t_feat_lst = (
+            isinstance(teacher_feat, (tuple, list)) or teacher_feat.ndim == 5
+        )
+        is_s_feat_lst = (
+            isinstance(student_feat, (tuple, list)) or student_feat.ndim == 5
+        )
+        is_feat_lst = is_t_feat_lst and is_s_feat_lst
+        is_s_stacked = is_t_stacked = False
         if is_feat_lst:
-            assert isinstance(student_feat, (tuple, list)) or student_feat.ndim == 5, (
-                f"if teacher_feat is a list, student_feat must be a list or stacked tensor too, "
-                f"but got {type(student_feat)} and {len(student_feat)=}"
-            )
             assert len(teacher_feat) == len(student_feat), (
-                f"len(teacher_feat) != len(student_feat), {len(teacher_feat)}, {len(student_feat)}"
+                f"len(teacher_feat) != len(student_feat), {len(teacher_feat)=}, {len(student_feat)=}"
             )
+            assert (
+                (is_feat_stacked := is_tensor(teacher_feat))
+                and (is_feat_stacked := is_tensor(student_feat))
+                or (
+                    isinstance(teacher_feat, (tuple, list))
+                    and isinstance(student_feat, (tuple, list))
+                )
+            ), "all list features or all stacked features"
+        is_feat_stacked = is_s_stacked and is_t_stacked
 
         # Match teacher features to student features
         if self.feature_resample_type == "match_student":
 
             def _interp_feat_match_stu(t_feat, s_feat):
                 st_ndim = s_feat.ndim
-                assert st_ndim in (3, 4, 5), "student feature must be 1d or 2d feature"
-                func_mapping_ = {
-                    3: interpolate_features_1d,
-                    4: interpolate_features_2d,
-                    5: interpolate_features_2d_stacked,
-                }
-                tgt_size = s_feat.shape[-2:] if st_ndim in (4, 5) else s_feat.shape[-2]
+                assert st_ndim in (3, 4), "student feature must be 1d or 2d feature"
+                func_mapping_ = {3: interpolate_features_1d, 4: interpolate_features_2d}
+                tgt_size = s_feat.shape[-2:] if st_ndim == 4 else s_feat.shape[-2]
                 t_feat = func_mapping_[st_ndim](t_feat, tgt_size)
                 return t_feat
 
             if is_feat_lst:
-                _is_stacked = isinstance(teacher_feat, torch.Tensor)
                 teacher_feat = [
                     _interp_feat_match_stu(t_feat, s_feat)
                     for t_feat, s_feat in zip(teacher_feat, student_feat)
                 ]
-                if _is_stacked:
+                if is_feat_stacked:
                     teacher_feat = torch.stack(teacher_feat)
             else:
                 teacher_feat = _interp_feat_match_stu(teacher_feat, student_feat)
@@ -997,6 +1152,7 @@ class REPALoss(torch.nn.Module):
         else:  # student feature matched to teacher feature
 
             def _interp_feat_match_tch(t_feat, s_feat):
+                # tgt size is the teacher feature size
                 if self.c_dim_first:
                     _tgt_sz = t_feat.shape[-2:]
                     interpolate_fn = interpolate_features_2d
@@ -1011,15 +1167,21 @@ class REPALoss(torch.nn.Module):
                     _interp_feat_match_tch(t_feat, s_feat)
                     for t_feat, s_feat in zip(teacher_feat, student_feat)
                 ]
+                if is_feat_stacked:
+                    student_feat = torch.stack(student_feat)
             else:
                 student_feat = _interp_feat_match_tch(teacher_feat, student_feat)
 
+        # one layer feature case: [bs, c, h, w] or [bs, l, c]
+        # multiple layer feature case: [n_layers, bs, c, h, w] or [n_layers, bs, l, c] or list of which
         return teacher_feat, student_feat
 
-    def repa_loss(self, teacher_feat: Tensor, student_feat: Tensor):
+    def repa_loss(
+        self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]
+    ):
         # [bs, l, c] or [bs, c, h, w]
         # 1. interpolate
-        teacher_feat, student_feat = self._interp_teacher_or_student_features(
+        teacher_feat, student_feat = self._interp_teacher_or_student_features(  # type: ignore
             teacher_feat, student_feat
         )
 
@@ -1028,46 +1190,73 @@ class REPALoss(torch.nn.Module):
         # tokenizer feature
         """
         some featup upsampling methods
+        see: FeatUp, LoftUp, AnyUp
 
         self.featup: nn.Module
         teacher_feat = self.featup(teacher_feat)
         """
 
         # flatten the model feature
+        # FIXME: no used, removed this
         student_feat = self.projector(student_feat)
 
         # 3. repa loss
         # stack all n_feature and bs dim together
         if self.c_dim_first:
-            dim = 1
-            rarg_pattn = "... c h w -> (...) c (h w)"
+            rarg_pattn = "... c h w -> ... c (h w)"
         else:
-            dim = -1
-            rarg_pattn = "... h w c -> (...) (h w) c"
-
-        teacher_feat = rearrange(teacher_feat, rarg_pattn)
-        student_feat = rearrange(student_feat, rarg_pattn)
+            rarg_pattn = "... h w c -> ... c (h w)"
+        teacher_feat = rearrange_lst(teacher_feat, rarg_pattn)
+        student_feat = rearrange_lst(student_feat, rarg_pattn)
 
         # 3.1 Whether to keep the feature magnitude
-        if self.feature_normalize:
+        dim = -2
+        if self.feature_normalize and not self.loss_type == "hier_distillation":
             teacher_feat = norm_feature(teacher_feat, dim=dim)
             student_feat = norm_feature(student_feat, dim=dim)
 
-        assert teacher_feat.shape == student_feat.shape, (
-            "img_feat and model_feat must have the same shape to compute the repa loss, "
-            f"but got {tuple(teacher_feat.shape)} and {tuple(student_feat.shape)}"
+        # Shape assertion
+        _assertion_msg = (
+            lambda tf,
+            sf: f"img_feat and model_feat must have the same shape to compute the repa loss, "
+            f"but got {tuple(tf.shape)} and {tuple(sf.shape)}"
         )
+        if isinstance(teacher_feat, Tensor) and isinstance(student_feat, Tensor):
+            assert teacher_feat.shape == student_feat.shape, _assertion_msg(
+                teacher_feat, student_feat
+            )
+        else:  # both are list
+            for t_feat, s_feat in zip(teacher_feat, student_feat):
+                assert t_feat.shape == s_feat.shape, _assertion_msg(t_feat, s_feat)
 
         # 3.2 loss
-        if self.loss_type == "repa_original":
-            repa_loss = repa_loss_(teacher_feat, student_feat, dim=dim)
-        elif self.loss_type == "am_ratio":
-            repa_loss = am_ratio_spatial_loss(teacher_feat, student_feat, dim=dim)
-        elif self.loss_type == "token_relation":
-            repa_loss = token_relation_loss(teacher_feat, student_feat, dim=dim)
+        if self.loss_type == "hier_distillation":
+            # hier_distillation_loss needs all list features for weighted computation
+            repa_loss = hier_distillation_loss(teacher_feat, student_feat, dim=dim)
         else:
-            raise ValueError(f"Unknown repa loss type {self.loss_type}")
-        return repa_loss.mean()
+            # Other loss functions use multiple_features_apply
+            loss_functions = {
+                "repa_original": repa_loss_,
+                "am_ratio": am_ratio_spatial_loss,
+                "token_relation": token_relation_loss,
+            }
+
+            if self.loss_type not in loss_functions:
+                raise ValueError(f"Unknown repa loss type {self.loss_type}")
+
+            loss_fn = loss_functions[self.loss_type]
+
+            # Use multiple_features_apply with disable=False for list inputs
+            # For single tensor inputs, disable multiple_features_apply and call directly
+            repa_loss = multiple_features_apply(
+                loss_fn,
+                teacher_feat,
+                student_feat,
+                disable=not is_list_tuple(teacher_feat),
+                dim=dim,
+            )
+
+        return repa_loss
 
     def forward(self, img: Tensor, student_feature: Tensor):
         teacher_feat = self._encode_img(img)
@@ -1080,12 +1269,14 @@ class REPALoss(torch.nn.Module):
         repa_loss = self.repa_loss(teacher_feat, student_feature)
         return repa_loss
 
+    @no_type_check
     def named_parameters(self, *args, **kwargs):
         if self.build_proj:
             return self.projector.named_parameters(*args, **kwargs)
         else:
             return []
 
+    @no_type_check
     def parameters(self, *args, **kwargs):
         if self.build_proj:
             return self.projector.parameters(*args, **kwargs)
@@ -1100,7 +1291,7 @@ class REPALoss(torch.nn.Module):
             pass
 
         if to_dt:
-            dm = self.repa_encoder.patch_embed.proj.weight.device_mesh
+            dm = self.repa_encoder.patch_embed.proj.weight.device_mesh  # type: ignore
             img = DTensor.from_local(img, dm, placements=(Shard(0),))
 
         return img
@@ -1396,7 +1587,6 @@ def test_dinov3_pca():
     model = model.cuda().to(torch.bfloat16)
     model.requires_grad_(False)
 
-    import numpy as np
     import PIL.Image
 
     img = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/YuZhongDataset/LoveDA/Train/Rural/images_png/157.png"
@@ -1483,8 +1673,6 @@ def test_gram_loss():
 def test_siglip2_model():
     import math
 
-    import lovely_tensors as lt
-    import requests
     from einops import rearrange
     from PIL import Image
 

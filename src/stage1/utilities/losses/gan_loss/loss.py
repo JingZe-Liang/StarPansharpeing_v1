@@ -1235,6 +1235,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         enc_last_layer: nn.Parameter | None = None,
         cond: torch.Tensor | None = None,
         tokenizer_feat: torch.Tensor | None = None,
+        # tokenizer distillation feature (low-level and semantic)
+        tokenizer_feat2: torch.Tensor | None = None,
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
     ):
@@ -1302,6 +1304,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 q_loss_total=q_loss_total,
                 outer_recon_loss=outer_recon_loss,
                 tokenizer_feat=tokenizer_feat,
+                tokenizer_feat2=tokenizer_feat2,
                 enc_last_layer=enc_last_layer,
             )
 
