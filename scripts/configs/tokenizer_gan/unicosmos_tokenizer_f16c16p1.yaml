@@ -26,18 +26,18 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 224 # null for no resize
-    dino_img_size: 224
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 224
+    repa_model_name: "dinov3_vitl16"
   # vf loss
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
     img_resize: 224
-    dino_img_size: 224
+    repa_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
-    dino_name: "dinov3_vitl16"
+    repa_model_name: "dinov3_vitl16"
   # gram loss
   gram_loss_weight: 0.1
   gram_loss_options:
@@ -45,8 +45,8 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 224 # null for no resize
-    dino_img_size: 224
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 224
+    repa_model_name: "dinov3_vitl16"
   # quantizer loss
   quantizer_type:
   quantizer_options:

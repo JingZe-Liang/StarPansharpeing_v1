@@ -100,8 +100,8 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
-    dino_img_size: 512
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 512
+    repa_model_name: "dinov3_vitl16"
     loss_type: am_radio
     feature_normalize: false
   vf_loss_weight:
@@ -110,10 +110,10 @@ vq_loss:
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
     img_resize: 224
-    dino_img_size: 224
+    repa_img_size: 224
     distmat_margin: 0.25
     cos_margin: 0.5
-    dino_name: "dinov3_vitl16"
+    repa_model_name: "dinov3_vitl16"
   quantizer_type:
   quantizer_options:
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]

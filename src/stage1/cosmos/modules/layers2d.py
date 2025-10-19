@@ -58,6 +58,10 @@ from .patching import Patcher, UnPatcher
 from .resample import build_downsample_block, build_upsample_block
 
 
+def is_list_tuple(x: Any) -> bool:
+    return isinstance(x, (list, tuple))
+
+
 @deprecated(
     "this class does not work with FSDP, please specify the FSDP wrapped module directly"
     "and the accelerator will handle the wrapping automatically"
@@ -349,6 +353,11 @@ class Encoder(nn.Module):
     def forward(
         self, x: torch.Tensor, ret_interm_feats: bool | tuple | list = False
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """
+        x: [bs, c, h, w], input images.
+        ret_interm_feats: bool or list/tuple of int, intermidates features from given indices (list or tuple)
+            or all encoder features, and additional middle block feauture.
+        """
         x = self.patcher(x)
         feats = []
 
@@ -362,15 +371,18 @@ class Encoder(nn.Module):
             if i_level < self.num_downsamples:
                 h = self.down[i_level].downsample(h)
             if ret_interm_feats is True or (
-                isinstance(ret_interm_feats, (tuple, list))
-                and i_level in ret_interm_feats
+                is_list_tuple(ret_interm_feats) and i_level in ret_interm_feats
             ):
                 feats.append(h)
+
         # middle
         h = self.mid.block_1(h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
-        if ret_interm_feats:
+        if ret_interm_feats is True or (
+            # -1 is the middle block
+            is_list_tuple(ret_interm_feats) and -1 == ret_interm_feats[-1]
+        ):
             feats.append(h)
 
         # end

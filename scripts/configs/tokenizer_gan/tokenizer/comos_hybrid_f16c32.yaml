@@ -5,13 +5,12 @@ _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 # Downsample total x16
 
 # F16C64 VAE tokenizer
-
-# Parameters: 300M base model
+# Parameters: 500M base model
 
 cnn_cfg:
   model:
     resolution: 256
-    in_channels: 3
+    in_channels: 384 # nested channels
     z_channels: 512
     latent_channels: 64
     channels: 128
@@ -24,6 +23,7 @@ cnn_cfg:
     block_name: res_block
     norm_type: gn
     norm_groups: 32
+    adaptive_mode: interp
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: true
@@ -31,9 +31,9 @@ cnn_cfg:
   cache_type: h
 
 trans_enc_cfg:
-  embed_dim: 768
+  embed_dim: 1024
   depth: 12
-  num_heads: 8
+  num_heads: 16
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
@@ -44,11 +44,12 @@ trans_enc_cfg:
   in_chans: 512
   out_chans: 512
   unpatch_size: 1
+  reg_tokens: 4
 
 trans_dec_cfg:
-  embed_dim: 768
+  embed_dim: 1024
   depth: 12
-  num_heads: 8
+  num_heads: 16
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 1
@@ -59,3 +60,8 @@ trans_dec_cfg:
   in_chans: 512
   out_chans: 512
   unpatch_size: 2
+  reg_tokens: 0
+
+distillation_kwargs:
+  dino_feature_dim: 1024
+  semantic_feature_dim: 1024 # 1024 for vit large; 1152 for vit naflex

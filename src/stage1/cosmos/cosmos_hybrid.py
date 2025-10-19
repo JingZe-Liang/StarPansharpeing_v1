@@ -39,11 +39,12 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     z: Tensor | None = None
     sem_z: Tensor | None = None
     supported_cached_hiddens: List[str] = ["z", "sem_z"]
-    cache_layers: dict[str, int | list[int]] = {
-        "low_level": [0, 1, 2],
+    cache_layers: dict[str, list[int]] = {
+        "low_level": [0, 1, 2, -1],  # -1 means middle layer
         "semantic": [2, 5, 8, 11],  # 12 layers of encoder
     }
-    low_lvl_repa_proj_chans: int | list[int] = []
+    low_lvl_repa_proj_chans: list[int] = []
+    _semantic_feature_dim: int = 1152
 
     def __init__(
         self,
@@ -57,10 +58,38 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.trans_enc_cfg = trans_enc_cfg
         self.trans_dec_cfg = trans_dec_cfg
         self.distillation_kwargs = distillation_kwargs
+        self._dino_feature_dim = distillation_kwargs.get("dino_feature_dim", 1024)
+        self._semantic_feature_dim = distillation_kwargs.get("semantic_feature_dim", 1152)  # fmt: skip
+        self.cache_layers = distillation_kwargs.get("cache_layers", self.cache_layers)
 
         super().__init__(self.cnn_cfg)
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+
+    def _set_low_level_proj_chans(self):
+        cache_index = self.cache_layers["low_level"]
+        if not isinstance(cache_index, list):
+            self.low_lvl_repa_proj_chans = []
+            return
+
+        # low-level repa proj channels
+        base_chans = self.cnn_cfg.model.channels
+        channels_mult = self.cnn_cfg.model.channels_mult
+        in_ch_mult = (1,) + tuple(channels_mult)
+        n_res = len(channels_mult)
+        for i_level in range(n_res):
+            in_chan, out_chan = (
+                base_chans * in_ch_mult[i_level],
+                base_chans * channels_mult[i_level],
+            )
+            if i_level in cache_index:
+                self.low_lvl_repa_proj_chans.append(out_chan)
+        # add mid block
+        if -1 == cache_index[-1]:
+            self.low_lvl_repa_proj_chans.append(out_chan)
+            logger.info(
+                f"Low-level repa projection channels: {self.low_lvl_repa_proj_chans}"
+            )
 
     def _build_transformers(self, cnn_cfg, trans_enc_cfg, trans_dec_cfg=None):
         # cnn_cfg is already set as self.cnn_cfg in __init__
@@ -137,7 +166,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
         """"""
-        breakpoint()
         max_size = torch.max(torch.tensor([f.shape[-2:] for f in feats]), dim=0).values
         max_size = tuple(max_size.tolist())
         interp_feats = []
@@ -154,21 +182,26 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
         """
+        # Low-level encoder
+        cache_low_lvl = None
         last_hidden_cached = self.cache_layers["low_level"] == -1
-        low_lvl_out = self.encoder.encoder(
-            x, ret_interm_feats=not last_hidden_cached
-        )  # keep the last layer to cache
-        if last_hidden_cached:
-            z_low_lvl = low_lvl_out
-            cache_low_lvl = z_low_lvl
+        if self.training:
+            low_lvl_out = self.encoder.encoder(
+                x, ret_interm_feats=not last_hidden_cached
+            )
+            if last_hidden_cached:
+                z_low_lvl = low_lvl_out
+                cache_low_lvl = z_low_lvl
+            elif isinstance(low_lvl_out, (list, tuple)):
+                z_low_lvl, cache_low_lvl = low_lvl_out
         else:
-            z_low_lvl, cache_low_lvl = low_lvl_out
-            cache_low_lvl = self._interp_max_size_features(cache_low_lvl)
-            # cache_low_lvl = torch.stack(cache_low_lvl, dim=0)
+            z_low_lvl = self.encoder.encoder(x)
 
         # Forward semantic transformer encoder
-        if not self.training or self.cache_layers["semantic"] == -1:
-            # if not training, just normally forward the model
+        cache_semantic = None
+        if not self.training:  # is eval
+            z_semantic = self.semantic_enc_transformer(z_low_lvl)
+        elif self.cache_layers["semantic"] == -1:
             z_semantic = self.semantic_enc_transformer(z_low_lvl)
             cache_semantic = z_semantic
         else:
@@ -184,6 +217,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 )
             )
             # Add head forward
+            z_semantic = z_semantic[:, self.trans_enc_cfg.reg_tokens :]
             z_semantic = self.semantic_enc_transformer._forward_after_backbone(
                 z_semantic,
                 hw=self.semantic_enc_transformer._get_output_shape(z_low_lvl),
@@ -254,26 +288,61 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         cnn_cfg,
         trans_enc_cfg,
         trans_dec_cfg=None,
+        distillation_kwargs: dict | None = None,
     ):
         cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
         trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
         if trans_dec_cfg is not None:
             trans_dec_cfg = dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg)
 
-        return cls(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+        return cls(
+            cnn_cfg,
+            trans_enc_cfg,
+            trans_dec_cfg,
+            distillation_kwargs=distillation_kwargs or {},
+        )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
-    def get_repa_feauture(self):
+    def get_repa_feature(
+        self,
+    ) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]] | None:
+        if not self._use_repa_loss:
+            return None
+        elif not self.training:
+            # is not training, do not proj since we do not need to train using repa features
+            return None
+
         # z and sem_z
         z, sem_z = self.z, self.sem_z
         assert self._vf_on_z_or_module == "z"
         assert z is not None and sem_z is not None, "No cached z or sem_z"
 
-        low_lvl_z_proj = self._repa_proj["low_lvl_repa_proj"](z)
-        sem_z_proj = self._repa_proj["sem_repa_proj"](sem_z)
+        if self.low_lvl_repa_proj_is_multi:
+            assert isinstance(z, list)
+            low_lvl_z_proj = [
+                self._repa_proj["low_lvl_repa_proj"][i](z[i])
+                for i in range(len(self.low_lvl_repa_proj_chans))
+            ]
+        else:
+            assert torch.is_tensor(z)
+            low_lvl_z_proj = self._repa_proj["low_lvl_repa_proj"](z)
+
+        if self.sem_repa_proj_is_multi:
+            assert isinstance(sem_z, list)
+            sem_z_proj = [
+                self._repa_proj["sem_repa_proj"][i](sem_z[i]) for i in range(len(sem_z))
+            ]
+        else:
+            assert torch.is_tensor(sem_z)
+            sem_z_proj = self._repa_proj["sem_repa_proj"](sem_z)
+
+        # return tuple of Tensors or list of Tensors
         return low_lvl_z_proj, sem_z_proj
 
     def _build_feature_align_mlp(self):
+        # Set the low-level cache layers for the feature alignment
+        self._set_low_level_proj_chans()
+
         assert self._vf_on_z_or_module == "z", (
             f"Only support z for _vf_on_z_or_modulebut got {self._vf_on_z_or_module}"
         )
@@ -311,7 +380,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             sem_cache_layers = self.cache_layers["semantic"]
             is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
             self.sem_repa_proj_is_multi = is_multi_layer_cached
-
             if is_multi_layer_cached:
                 sem_z_proj = nn.ModuleList()
                 for _ in range(len(sem_cache_layers)):
@@ -319,15 +387,15 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                         build_mlp(
                             # since the transformer embedding layer has the same channels
                             self.trans_enc_cfg.embed_dim,
-                            self._dino_feature_dim,
-                            self._dino_feature_dim,
+                            self._semantic_feature_dim,
+                            self._semantic_feature_dim,
                         )
                     )
             else:
                 sem_z_proj = build_mlp(
                     self.trans_enc_cfg.embed_dim,
-                    self._dino_feature_dim,
-                    self._dino_feature_dim,
+                    self._semantic_feature_dim,
+                    self._semantic_feature_dim,
                 )
             self._repa_proj = nn.ModuleDict(
                 {
@@ -356,7 +424,7 @@ def test_model_forward_backward():
     cnn_cfg = {
         "model": {
             "resolution": 256,
-            "in_channels": 3,
+            "in_channels": 300,
             "z_channels": 512,  # Connect encoder and decoder
             "latent_channels": 16,
             "channels": 128,  # Base channels
@@ -380,7 +448,7 @@ def test_model_forward_backward():
     trans_enc_cfg = {
         "embed_dim": 1024,
         "depth": 12,  # vit intern 300m -> embed_dim=1024, depth=24, num_heads=16
-        "num_heads": 12,
+        "num_heads": 16,
         "mlp_ratio": 4.0,
         "qkv_bias": True,
         "patch_size": 2,
@@ -398,7 +466,7 @@ def test_model_forward_backward():
     trans_dec_cfg = {
         "embed_dim": 1024,
         "depth": 12,
-        "num_heads": 12,
+        "num_heads": 16,
         "mlp_ratio": 4.0,
         "qkv_bias": True,
         "patch_size": 1,
@@ -413,7 +481,9 @@ def test_model_forward_backward():
         "reg_tokens": 0,
     }
 
-    model = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+    model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
+        cnn_cfg, trans_enc_cfg, trans_dec_cfg
+    )
     model = model.to(device)  # Move model to device (CUDA or CPU)
     model.eval()
     logger.info("Model created successfully!")
@@ -425,7 +495,7 @@ def test_model_forward_backward():
 
     # Create dummy input data
     batch_size = 4
-    x = torch.randn(batch_size, 3, 512, 512).to(device)  # Move input to device
+    x = torch.randn(batch_size, 10, 128, 128).to(device)  # Move input to device
     logger.info(f"Input shape: {x.shape}")
 
     # Forward pass in eval mode
@@ -447,9 +517,9 @@ def test_model_forward_backward():
         logger.info(f"  sem_z (semantic transformer output): {model.sem_z}")
 
         # Projection z and sem_z
-        low_lvl_z_proj, sem_z_proj = model.get_repa_feauture()
-        logger.info(f"Projected low-level z shape: {low_lvl_z_proj.shape}")
-        logger.info(f"Projected semantic z shape: {sem_z_proj.shape}")
+        low_lvl_z_proj, sem_z_proj = model.get_repa_feature()
+        logger.info(f"Projected low-level z shape: {low_lvl_z_proj}")
+        logger.info(f"Projected semantic z shape: {sem_z_proj}")
 
         # Decode with proper input shape
         decoded = model.decode(encoded_tensor, x.shape)
@@ -492,10 +562,6 @@ def test_model_forward_backward():
     logger.info(f"Backward pass completed successfully!")
     logger.info(f"Total loss: {loss.item()}")
 
-    import time
-
-    time.sleep(10)
-
     # Check if gradients are computed
     gradient_count = 0
     n_params = 0
@@ -518,5 +584,8 @@ if __name__ == "__main__":
     """
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_hybrid
     """
+    import lovely_tensors as lt
+
+    lt.monkey_patch()
     with logger.catch():
         test_model_forward_backward()

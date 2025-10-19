@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
-  - tokenizer: hybrid_cosmos_f8c16p1 # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested, hybrid_cosmos_f8c16p1]
+  - tokenizer: comos_hybrid_f16c32
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -33,11 +33,27 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
-    dino_img_size: 512
-    dino_name: "dinov3_vitl16"
-    feature_resample_type: match_student
-    loss_type: am_radio
+    repa_img_size: 512
+    repa_model_type: dinov3
+    repa_model_name: "dinov3_vitl16"
+    feature_resample_type: match_teacher
+    loss_type: hier_distillation
     feature_normalize: false
+    get_hier_teacher_feature: true
+  # semantic distillatin loss
+  sem_distill_weight: 0.02
+  sem_distill_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 512 # null for no resize
+    repa_img_size: 512
+    repa_model_type: siglip2
+    repa_model_name: "google/siglip2-large-patch16-512"
+    feature_resample_type: match_teacher
+    loss_type: hier_distillation
+    feature_normalize: false
+    get_hier_teacher_feature: true
   # vf loss
   vf_loss_weight:
   vf_loss_options:
@@ -45,10 +61,10 @@ vq_loss:
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
     img_resize: 384
-    dino_img_size: 384
+    repa_img_size: 384
     distmat_margin: 0.25
     cos_margin: 0.5
-    dino_name: "dinov3_vitl16"
+    repa_model_name: "dinov3_vitl16"
   # gram loss
   gram_loss_weight:
   gram_loss_options:
@@ -56,8 +72,8 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 384 # null for no resize
-    dino_img_size: 384
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 384
+    repa_model_name: "dinov3_vitl16"
   # quantizer loss
   quantizer_type:
   quantizer_options:
@@ -78,70 +94,23 @@ vq_loss:
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
 
-tokenizer:
-  # repa
-  use_repa_loss: true
-  use_vf_loss: false
-  hook_module: decoder.decoder.mid.block_2
-  vf_on_z_or_module: z # [z, module]
-  dino_feature_dim: 1024
-
-  # loading
-  uni_path: "" # Start from scratch for hybrid model
-  loading_type: null
-
-  # augmentations
-  latent_noise_prob: 0.0
-  use_channel_drop: false
-
-  # blocks
-  model:
-    norm_type: gn
-    norm_groups: 32
-    block_name: res_block
-    moe_token_mixer_type: res_block
-    hidden_factor: 4
-    use_residual_factor: false
-    # others
-    patch_method: haar
-    patch_size: 1
-    attn_type: none
-    padding_mode: reflect # for boundary?
-    # latents - increased for hybrid model
-    latent_channels: 16
-    z_channels: 512 # [256, 16] -> Increased to match transformer
-    # train
-    act_checkpoint: true
-
-  trans_enc_cfg1:
-    pos_embed_grid_size: ${tuple:[32, 32]} # Grid size for position embedding
-    patch_size: 2
-
-  trans_enc_cfg2:
-    img_size: 32
-    unpatch_size: 1
-
-  channel_drop_config:
-    drop_type: ${list:[4, 8, 12]}
-    max_channels: ${tokenizer.model.latent_channels}
-    drop_prob: 0.5
-
 ema:
   beta: 0.999
   update_after_step: 1000
   update_every: 2
 
 train:
-  tokenizer_name: hybrid_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}
+  tokenizer_name: hybrid_cosmos_f16c32
   proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 0.08
-  track_metrics: false
+  track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
+  grad_checkpoint: true
   resume_path:
   ema_load_path: #runs/stage1_cosmos/2025-09-11_16-21-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
@@ -222,7 +191,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_latent_noise=${tokenizer.latent_noise_prob}_channel_drop=${tokenizer.use_channel_drop}
+    run_comment: hybrid_cosmos_f16c32
     log_with_time: True
     visualize_every: 500
     log_every: 10

@@ -259,7 +259,7 @@ class ChannelDropConfig:
 
 @dataclass
 class EncoderDecoderConfig:
-    in_channels: Any = 16
+    in_channels: Any = 16  # in or list[int]
     out_channels: Any = 16
     channels: int = 128
     channels_mult: list[int] = field(default_factory=lambda: [2, 4, 4])
@@ -296,6 +296,8 @@ class EncoderDecoderConfig:
     norm_groups: int = 32
     downsample_manually_pad: bool = True
     resample_norm_keep: bool = False
+    # adaptive conv
+    adaptive_mode: str = "interp"
 
 
 @dataclass

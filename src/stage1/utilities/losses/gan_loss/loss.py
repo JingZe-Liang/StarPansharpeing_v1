@@ -449,10 +449,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.use_repa = True
             if (
                 self.use_perceptual_loss
-                and repa_loss_options["dino_name"] == perceptual_model
+                and repa_loss_options["repa_model_name"] == perceptual_model
             ):
                 logger.info(
-                    f"Perceptual loss shares the same model with REPA: {repa_loss_options['dino_name']}"
+                    f"Perceptual loss shares the same model with REPA: {repa_loss_options['repa_model_name']}"
                 )
                 repa_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.repa_loss = REPALoss(**repa_loss_options).cuda()
@@ -469,10 +469,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
             if (
                 self.use_perceptual_loss
-                and vf_loss_options["dino_name"] == perceptual_model
+                and vf_loss_options["repa_model_name"] == perceptual_model
             ):
                 logger.info(
-                    f"Perceptual loss shares the same model with VF loss: {vf_loss_options['dino_name']}"
+                    f"Perceptual loss shares the same model with VF loss: {vf_loss_options['repa_model_name']}"
                 )
                 vf_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.vf_loss = VFLoss(**vf_loss_options).cuda()
@@ -498,13 +498,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
             repa_encoder = None
             if (
                 self.use_repa
-                and repa_loss_options["dino_name"] == gram_loss_options["dino_name"]
+                and repa_loss_options["repa_model_name"]
+                == gram_loss_options["repa_model_name"]
             ):
                 gram_loss_options["repa_encoder"] = self.repa_loss.repa_encoder
                 repa_encoder = self.repa_loss.repa_encoder
             elif (
                 self.use_vf
-                and vf_loss_options["dino_name"] == gram_loss_options["dino_name"]
+                and vf_loss_options["repa_model_name"]
+                == gram_loss_options["repa_model_name"]
             ):
                 repa_encoder = self.vf_loss.repa_encoder
             gram_loss_options["repa_encoder"] = repa_encoder
@@ -893,6 +895,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss: torch.Tensor | None = None,
         real_g_loss: torch.Tensor | None = None,
         repa_loss: torch.Tensor | None = None,
+        sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
@@ -909,6 +912,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "ssim_loss": ssim_loss.detach().mean(),
                 "perceptual_loss": percep_loss.detach().mean(),
                 "repa_loss": repa_loss.detach().mean(),
+                "sem_dist_loss": sem_dist_loss.detach().mean(),
                 "vf_loss": vf_loss.detach().mean(),
                 "gram_loss": gram_loss.detach().mean(),
                 "d_weight": self.zero,
@@ -926,6 +930,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "gram_loss": gram_loss.detach().mean(),
                     "ssim_loss": ssim_loss.detach().mean(),
                     "repa_loss": repa_loss.detach().mean(),
+                    "sem_dist_loss": sem_dist_loss.detach().mean(),
                     "vf_loss": vf_loss.detach().mean(),
                     # discriminator loss
                     "d_weight": disc_weight,
@@ -1106,6 +1111,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             reconstruction_loss=recon_loss,
             gen_loss=g_loss,
             repa_loss=repa_loss,
+            sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,

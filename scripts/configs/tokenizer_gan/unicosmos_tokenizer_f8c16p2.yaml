@@ -36,7 +36,7 @@ vq_loss:
     build_proj: false
     rgb_channels: random
     img_resize: 224
-    dino_img_size: 224
+    repa_img_size: 224
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
   use_actnorm: false
@@ -54,7 +54,7 @@ tokenizer:
   act_checkpoint: false
   force_not_attn: true
   use_channel_drop: false
-  patch_size: 2  # [2, 4]
+  patch_size: 2 # [2, 4]
   enc_path:
   dec_path:
   uni_tokenizer_path: runs/stage1_cosmos/cosmos_f8c16p2_Drayd_band_224/tokenizer/model.safetensors
