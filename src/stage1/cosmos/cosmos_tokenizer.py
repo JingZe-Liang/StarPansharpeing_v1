@@ -259,7 +259,7 @@ class ChannelDropConfig:
 
 @dataclass
 class EncoderDecoderConfig:
-    in_channels: Any = 16
+    in_channels: Any = 16  # in or list[int]
     out_channels: Any = 16
     channels: int = 128
     channels_mult: list[int] = field(default_factory=lambda: [2, 4, 4])
@@ -296,6 +296,8 @@ class EncoderDecoderConfig:
     norm_groups: int = 32
     downsample_manually_pad: bool = True
     resample_norm_keep: bool = False
+    # adaptive conv
+    adaptive_mode: str = "interp"
 
 
 @dataclass
@@ -348,6 +350,7 @@ class ContinuousImageTokenizer(nn.Module):
     # state
     _hook_feature: torch.Tensor | None = None
     z: torch.Tensor | None = None  # the latent z
+    supported_cached_hiddens: list[str] = ["z"]
 
     def __init__(self, cfg: ContinuousTokenizerConfig):
         super().__init__()
@@ -725,76 +728,81 @@ class ContinuousImageTokenizer(nn.Module):
             # Or decided by the input arg
             return use_quantizer
 
-    def apply_quantizer(self, h, z, use_quantizer=None):
-        _use_quantizer = self._use_quantizer(use_quantizer)
-        # TODO: Cache z or h; affect the repa mlp projection
+    def _has_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
+        h_dtype = h.dtype
+        # h_clone = h.clone()
+        h = h.float()  # quantizers are in float32
 
+        if self.quantizer_type == "bsq":
+            # here must be l2-normed
+            h = nn.functional.normalize(h, dim=1)
+            # TODO: bsq not supported channel drop
+            hq, bsq_loss, loss_breakdown = self.quantizer(h)
+            res = hq.to(h_dtype), bsq_loss, loss_breakdown
+
+        elif self.quantizer_type == "kl":
+            m_, logvar_ = h.chunk(2, dim=1)
+            posterior = self.quantizer((m_, logvar_))
+            kl_loss = posterior.kl()
+            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            h = posterior.sample()
+            loss_breakdown = KLLossBreakDown(
+                posterior=posterior,
+                mean=m_,
+                logvar=logvar_,
+            )
+
+            if self.use_channel_drop:
+                h, _ = self.channel_drop(h)
+            res = h.to(h_dtype), kl_loss, loss_breakdown
+
+        elif self.quantizer_type == "fsq":
+            # dummy loss
+            fsq_loss = torch.tensor(0.0).to(h)
+            loss_breakdown = {"fsq_loss": fsq_loss}
+            hq, indices = self.quantizer(h)
+            res = hq.to(h_dtype), fsq_loss, loss_breakdown
+
+        elif self.quantizer_type == "psd":
+            mu = h[:, :-1]
+            kappa = h[:, -1]
+            # mu = l2_norm(mu, dim=1)
+            kappa = nn.functional.softplus(kappa) + 1.0
+            hq = self.quantizer(mu, kappa, dim=1)
+            loss = hq.kl_to_uniform()
+            # reparameterization
+            h = hq.rsample()
+            h = h * (self.latent_channels**0.5)
+            psd_loss = loss.mean()
+            res = h.to(h_dtype), psd_loss, {"kl_loss": psd_loss}
+
+        else:
+            raise RuntimeError("can not reach here")
+
+        # Cache the latent
+        # TODO: fix the discreate quantizer
+        if self.cfg.cache_type == "z":
+            self._training_latent_cache(z, use_quantizer, cache_type)
+        else:
+            self._training_latent_cache(res[0], use_quantizer, cache_type)
+
+        return res
+
+    def _no_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
+        # Do no quantization, but cache the latent
+        cached_ = z if self.cfg.cache_type == "z" else h
+        self._training_latent_cache(cached_, use_quantizer, cache_type)
+        return h
+
+    def apply_quantizer(self, h, z, use_quantizer=None, cache_type="z"):
+        # TODO: Cache z or h; affect the repa mlp projection
+        _use_quantizer = self._use_quantizer(use_quantizer)
         # Quantization
         if _use_quantizer:
-            h_dtype = h.dtype
-            # h_clone = h.clone()
-            h = h.float()  # quantizers are in float32
-
-            if self.quantizer_type == "bsq":
-                # here must be l2-normed
-                h = nn.functional.normalize(h, dim=1)
-                # TODO: bsq not supported channel drop
-                hq, bsq_loss, loss_breakdown = self.quantizer(h)
-                res = hq.to(h_dtype), bsq_loss, loss_breakdown
-
-            elif self.quantizer_type == "kl":
-                m_, logvar_ = h.chunk(2, dim=1)
-                posterior = self.quantizer((m_, logvar_))
-                kl_loss = posterior.kl()
-                kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-                h = posterior.sample()
-                loss_breakdown = KLLossBreakDown(
-                    posterior=posterior,
-                    mean=m_,
-                    logvar=logvar_,
-                )
-
-                if self.use_channel_drop:
-                    h, _ = self.channel_drop(h)
-                res = h.to(h_dtype), kl_loss, loss_breakdown
-
-            elif self.quantizer_type == "fsq":
-                # dummy loss
-                fsq_loss = torch.tensor(0.0).to(h)
-                loss_breakdown = {"fsq_loss": fsq_loss}
-                hq, indices = self.quantizer(h)
-                res = hq.to(h_dtype), fsq_loss, loss_breakdown
-
-            elif self.quantizer_type == "psd":
-                mu = h[:, :-1]
-                kappa = h[:, -1]
-                # mu = l2_norm(mu, dim=1)
-                kappa = nn.functional.softplus(kappa) + 1.0
-                hq = self.quantizer(mu, kappa, dim=1)
-                loss = hq.kl_to_uniform()
-                # reparameterization
-                h = hq.rsample()
-                h = h * (self.latent_channels**0.5)
-                psd_loss = loss.mean()
-                res = h.to(h_dtype), psd_loss, {"kl_loss": psd_loss}
-
-            else:
-                raise RuntimeError("can not reach here")
-
-            # Cache the latent
-            # TODO: fix the discreate quantizer
-            if self.cfg.cache_type == "z":
-                self._training_latent_cache(z, _use_quantizer)
-            else:
-                self._training_latent_cache(res[0], _use_quantizer)
-
-            return res
-
+            return self._has_quantizer_applied_fn(h, z, _use_quantizer, cache_type)
         # Autoencoder
         else:
-            cached_ = z if self.cfg.cache_type == "z" else h
-            self._training_latent_cache(cached_, _use_quantizer)
-            return h
+            return self._no_quantizer_applied_fn(h, z, _use_quantizer, cache_type)
 
     def latent_aug(self, h):
         if self.training:
@@ -811,14 +819,26 @@ class ContinuousImageTokenizer(nn.Module):
 
         return h
 
-    def _training_latent_cache(self, z: Tensor, use_quantizer: bool):
+    def _training_latent_cache(
+        self,
+        cached_tensor: Tensor,
+        use_quantizer: bool | None = None,
+        cache_type: str = "z",
+    ):
+        if cache_type is None or cache_type == "none":
+            # No cache
+            return
+
+        assert cache_type in self.supported_cached_hiddens, (
+            f"cache_type {cache_type} not supported, only {self.supported_cached_hiddens} are supported"
+        )
         # not use_quantizer, save the unquantized latent
         if self.training:
             # Save latent if is AE
             if hasattr(self, "_vf_proj") or hasattr(self, "_repa_proj"):
-                self.z = z  # save latent z for repa or vf loss
+                setattr(self, cache_type, cached_tensor)
             else:
-                self.z = None
+                setattr(self, cache_type, None)
 
     def encode_with_itermediate_features(self, x, use_quantizer=None):
         z, feats = self.encoder.encoder(x, ret_interm_feats=True)
@@ -828,6 +848,8 @@ class ContinuousImageTokenizer(nn.Module):
         q_loss = loss_breakdown = None
         if isinstance(maybe_q_encoded, tuple):
             encoded, q_loss, loss_breakdown = maybe_q_encoded
+        else:
+            encoded = h
         return dict(
             encoded=encoded,
             itermediate_feats=feats,
@@ -1244,6 +1266,14 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
         return cls(cfg)
+
+    def set_grad_checkpointing(self, enabled: bool = True):
+        for m in self.modules():
+            if hasattr(m, "grad_checkpointing"):
+                m.grad_checkpointing = enabled
+                log_print(
+                    f"set grad_checkpointing={enabled} for {m.__class__.__name__}"
+                )
 
 
 # * --- test --- * #

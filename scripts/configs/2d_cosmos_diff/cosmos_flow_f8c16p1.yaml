@@ -33,8 +33,8 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
-    dino_img_size: 512
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 512
+    repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_student
     loss_type: am_radio
     feature_normalize: false
@@ -45,10 +45,10 @@ vq_loss:
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
     img_resize: 384
-    dino_img_size: 384
+    repa_img_size: 384
     distmat_margin: 0.25
     cos_margin: 0.5
-    dino_name: "dinov3_vitl16"
+    repa_model_name: "dinov3_vitl16"
   # gram loss
   gram_loss_weight:
   gram_loss_options:
@@ -56,8 +56,8 @@ vq_loss:
     build_proj: false
     rgb_channels: mean
     img_resize: 384 # null for no resize
-    dino_img_size: 384
-    dino_name: "dinov3_vitl16"
+    repa_img_size: 384
+    repa_model_name: "dinov3_vitl16"
   # quantizer loss
   quantizer_type:
   quantizer_options:
@@ -126,7 +126,7 @@ ema:
   beta: 0.999
   update_after_step: 1000
   update_every: 2
-  
+
 train:
   tokenizer_name: cosmos_flow_f8c${tokenizer.tokenizer_cfg.model.latent_channels}p${tokenizer.tokenizer_cfg.model.patch_size}
   proj_dir: runs/stage1_cosmos_nested

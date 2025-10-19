@@ -171,6 +171,7 @@ QWEN.md
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+.clinerules/
 
 compressed_output/
 

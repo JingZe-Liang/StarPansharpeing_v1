@@ -6,7 +6,7 @@ GAN loss, REPA, VF losses.
 import warnings
 from collections import namedtuple
 from types import SimpleNamespace
-from typing import Dict, Literal, NamedTuple
+from typing import Dict, Literal, NamedTuple, Optional, Union
 
 import torch
 import torch.distributed.tensor as dtensor
@@ -337,6 +337,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # repa loss
         repa_loss_weight: float | None = None,
         repa_loss_options: dict = {},
+        # semantic loss
+        sem_distill_weight: float | None = None,
+        sem_distill_options: dict = {},
         # vf loss
         vf_loss_weight: float | None = None,
         vf_loss_options: dict = {},
@@ -442,22 +445,21 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * repa loss
         self.repa_loss_weight = repa_loss_weight
         self.use_repa = False
-        # breakpoint()
         if repa_loss_weight is not None and repa_loss_weight > 0:
             self.use_repa = True
             if (
                 self.use_perceptual_loss
-                and repa_loss_options["dino_name"] == perceptual_model
+                and repa_loss_options["repa_model_name"] == perceptual_model
             ):
                 logger.info(
-                    f"Perceptual loss shares the same model with REPA: {repa_loss_options['dino_name']}"
+                    f"Perceptual loss shares the same model with REPA: {repa_loss_options['repa_model_name']}"
                 )
                 repa_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.repa_loss = REPALoss(**repa_loss_options).cuda()
             logger.info(f"[repa loss]: {self.repa_loss}")
             logger.info(f"[vq loss]: repa loss used, weighted {self.repa_loss_weight}")
 
-        # * visual foudation loss
+        # * visual foundation loss
         self.vf_loss_weight = vf_loss_weight
         self.use_vf = False
         if vf_loss_weight is not None and vf_loss_weight > 0:
@@ -467,14 +469,26 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
             if (
                 self.use_perceptual_loss
-                and vf_loss_options["dino_name"] == perceptual_model
+                and vf_loss_options["repa_model_name"] == perceptual_model
             ):
                 logger.info(
-                    f"Perceptual loss shares the same model with VF loss: {vf_loss_options['dino_name']}"
+                    f"Perceptual loss shares the same model with VF loss: {vf_loss_options['repa_model_name']}"
                 )
                 vf_loss_options["repa_encoder"] = self.perceptual_loss.percep_model
             self.vf_loss = VFLoss(**vf_loss_options).cuda()
             logger.info(f"[vq loss]: vf loss used, weighted {self.vf_loss_weight}")
+
+        # * semantic distillation loss
+        self.sd_loss_weight = sem_distill_weight
+        self.use_sem_distill = False
+        if sem_distill_weight is not None and sem_distill_weight > 0:
+            self.use_sem_distill = True
+            # semantic distill loss uses Siglip2 model
+            self.sem_distill_loss = REPALoss(**sem_distill_options)
+            logger.info(
+                f"[vq loss]: semantic distill loss used, weighted {self.sd_loss_weight}"
+            )
+            self.sd_loss = self.sem_distill_loss.cuda()
 
         # * gram loss
         self.gram_loss_weight = gram_loss_weight
@@ -484,13 +498,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
             repa_encoder = None
             if (
                 self.use_repa
-                and repa_loss_options["dino_name"] == gram_loss_options["dino_name"]
+                and repa_loss_options["repa_model_name"]
+                == gram_loss_options["repa_model_name"]
             ):
                 gram_loss_options["repa_encoder"] = self.repa_loss.repa_encoder
                 repa_encoder = self.repa_loss.repa_encoder
             elif (
                 self.use_vf
-                and vf_loss_options["dino_name"] == gram_loss_options["dino_name"]
+                and vf_loss_options["repa_model_name"]
+                == gram_loss_options["repa_model_name"]
             ):
                 repa_encoder = self.vf_loss.repa_encoder
             gram_loss_options["repa_encoder"] = repa_encoder
@@ -879,6 +895,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss: torch.Tensor | None = None,
         real_g_loss: torch.Tensor | None = None,
         repa_loss: torch.Tensor | None = None,
+        sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
@@ -895,6 +912,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "ssim_loss": ssim_loss.detach().mean(),
                 "perceptual_loss": percep_loss.detach().mean(),
                 "repa_loss": repa_loss.detach().mean(),
+                "sem_dist_loss": sem_dist_loss.detach().mean(),
                 "vf_loss": vf_loss.detach().mean(),
                 "gram_loss": gram_loss.detach().mean(),
                 "d_weight": self.zero,
@@ -912,6 +930,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "gram_loss": gram_loss.detach().mean(),
                     "ssim_loss": ssim_loss.detach().mean(),
                     "repa_loss": repa_loss.detach().mean(),
+                    "sem_dist_loss": sem_dist_loss.detach().mean(),
                     "vf_loss": vf_loss.detach().mean(),
                     # discriminator loss
                     "d_weight": disc_weight,
@@ -988,8 +1007,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
         cond: torch.Tensor | None = None,
         q_loss_total: torch.Tensor | None = None,
         outer_recon_loss: torch.Tensor | None = None,
-        tokenizer_feat: torch.Tensor
-        | None = None,  # repa projected or z (latent) vf projected
+        # repa projected or z (latent) vf projected
+        tokenizer_feat: torch.Tensor | None = None,
+        # for semantic distillation
+        tokenizer_feat2: torch.Tensor | None = None,
         enc_last_layer: nn.Parameter | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
         # generator update
@@ -1030,6 +1051,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
         if self.use_vf:
             vf_loss = self.vf_loss(inputs, tokenizer_feat, nll_loss, enc_last_layer)
             vf_loss = vf_loss * self.vf_loss_weight  # vf weight is 0.1 by default
+
+        # * semantic distillation loss
+        sem_dist_loss = self.zero
+        if self.use_sem_distill:
+            assert tokenizer_feat2 is not None, "tokenizer_feat2 is None"
+            sem_dist_loss = self.sd_loss(inputs, tokenizer_feat2)
+            sem_dist_loss = sem_dist_loss * self.sd_loss_weight
 
         # * gram loss
         if self.use_gram:
@@ -1072,7 +1100,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss, q_loss_logs = self._q_loss(q_loss_total, q_loss_breakdown, global_step)
 
         # * basic losses
-        loss = nll_loss + g_loss + repa_loss + vf_loss
+        loss = nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss
 
         # * form logs
         log = self._train_generator_log_form(
@@ -1083,6 +1111,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             reconstruction_loss=recon_loss,
             gen_loss=g_loss,
             repa_loss=repa_loss,
+            sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,
@@ -1204,7 +1233,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         reconstructions: torch.Tensor,
         optimizer_idx: int,
         global_step: int,
-        q_loss_breakdown: NamedTuple | dict | None = None,
+        q_loss_breakdown: Union[NamedTuple, dict, None] = None,
         q_loss_total: torch.Tensor | None = None,
         # compute the outer recon loss, compatible with flow tokenizer
         outer_recon_loss: torch.Tensor | None = None,
@@ -1212,6 +1241,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         enc_last_layer: nn.Parameter | None = None,
         cond: torch.Tensor | None = None,
         tokenizer_feat: torch.Tensor | None = None,
+        # tokenizer distillation feature (low-level and semantic)
+        tokenizer_feat2: torch.Tensor | None = None,
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
     ):
@@ -1279,6 +1310,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 q_loss_total=q_loss_total,
                 outer_recon_loss=outer_recon_loss,
                 tokenizer_feat=tokenizer_feat,
+                tokenizer_feat2=tokenizer_feat2,
                 enc_last_layer=enc_last_layer,
             )
 

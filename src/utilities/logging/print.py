@@ -48,13 +48,35 @@ if __setup_console:
     setup_console()
 
 
-def format_extra(record: dict[str, Any]):
-    if record["extra"] is None or len(record["extra"]) == 0:
-        record["extra"] = None
+def format_extra(record: dict[str, Any], preserve_keys: list[str] | None = ["tqdm"]):
+    if record["extra"] is None:
         return record
-    extras = " ".join(f"{k}={v}" for k, v in record["extra"].items())
-    record["extra"] = None  # remove extras and put into message
-    record["message"] = f"[{extras}] {record['message']}"
+
+    if len(record["extra"]) == 0:
+        return {}
+
+    if preserve_keys is not None:
+        extras_to_msg = {}
+        extras_preserve = {}
+        for k, v in record["extra"].items():
+            if k in preserve_keys:
+                extras_preserve[k] = v
+            else:
+                extras_to_msg[k] = v
+    else:
+        extras_to_msg = record["extra"]
+        extras_preserve = {}
+    # Set to record
+    record["extra"] = extras_preserve
+
+    if len(extras_to_msg) > 0:
+        # Dict extras to msg
+        extras_msg = " ".join(f"{k}={v}" for k, v in extras_to_msg.items())
+        # Add extra dict string to msg
+        record["message"] = f"[{extras_msg}] {record['message']}"
+
+    # print(record["extra"])
+    # print("----------")
     return record
 
 
@@ -71,12 +93,54 @@ def print_custom_markup(text: str):
     _console.print(processed_text, markup=True, highlight=False, end="")
 
 
+def filter_cat(filters: list[Callable[[dict[str, Any]], bool] | None]):
+    def cat_filters(record):
+        for f in filters:
+            if f is None:
+                continue
+
+            if not f(record):
+                return False
+        return True
+
+    return cat_filters
+
+
+def log_level_range_filters(
+    level_range: tuple[LogLevel, LogLevel],
+) -> Callable[[dict[str, Any]], bool]:
+    level_order = {
+        "TRACE": 10,
+        "DEBUG": 20,
+        "INFO": 30,
+        "WARNING": 40,
+        "ERROR": 50,
+        "CRITICAL": 60,
+    }
+
+    min_level_value = level_order.get(level_range[0].upper(), 0)
+    max_level_value = level_order.get(level_range[1].upper(), 60)
+
+    def level_filter(record: dict[str, Any]) -> bool:
+        level_name = (
+            record["level"].name
+            if hasattr(record["level"], "name")
+            else record["level"]
+        )
+        record_level_value = level_order.get(level_name.upper(), 0)
+        return min_level_value <= record_level_value <= max_level_value
+
+    return level_filter
+
+
 @once
 def configure_logger(
     sink=None,
     level=os.getenv("SHELL_LOG_LEVEL", "debug"),
     filter=None,
+    add_tqdm_filter=False,
     removed=True,
+    main_log_lvl_range=None,
     _auto_=True,  # reserved for once decorator
 ):
     global __re_config_logger, _console, logger
@@ -103,19 +167,59 @@ def configure_logger(
     else:
         colorize = True
 
+    # Filter concate
+    main_ft: list[Callable[[dict[str, Any]], bool] | None] = []
+
+    # Add level range filter if specified
+    if main_log_lvl_range is not None:
+        lvl_rng_ft = log_level_range_filters(main_log_lvl_range)
+        main_ft.append(lvl_rng_ft)
+
+    # Add custom filter if provided
+    if filter is not None:
+        main_ft.append(filter)
+
+    # Add tqdm filter if specified
+    if add_tqdm_filter:
+        main_ft.append(lambda record: "tqdm" not in record["extra"])
+
+    # Combine all filters
+    if len(main_ft) != 0:
+        main_log_filter = filter_cat(main_ft)
+    else:
+        main_log_filter = None
+
+    # Main logger
+    fmt = (
+        "<green>{time:HH:mm:ss}</green> "
+        "- {level.icon} <level>[{level:^6}] {file.name}:{line}</level> "
+        "- <level>{message}</level>"
+    )
     handler = logger.add(
         sink,
         level=level.upper(),
         enqueue=False,
         colorize=colorize,
-        format=(
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}] {file.name}:{line}</level> "
-            "- <level>{message}</level>"
-        ),
-        filter=filter,
+        format=fmt,
+        filter=main_log_filter,
     )
     logger = logger.patch(format_extra)
+
+    # Tqdm logger
+    if add_tqdm_filter:
+        from tqdm import tqdm
+
+        # Add a handler for tqdm-specific logs that uses tqdm.write to avoid conflicts
+        logger.add(
+            sink=lambda msg: tqdm.write(msg, end=""),
+            level=level.upper(),
+            filter=lambda record: "tqdm" in record["extra"],
+            format=fmt,
+            colorize=colorize,
+            enqueue=False,
+        )
+        # Only log this message if it doesn't have tqdm binding to avoid infinite recursion
+        logger.info("Add tqdm write logger.")
 
     return handler
 
@@ -130,6 +234,7 @@ def set_logger_file(
     add_time: bool = True,
     mode="w",
     filter=None,
+    main_log_lvl_range=None,
 ):
     global logger
 
@@ -160,6 +265,24 @@ def set_logger_file(
 
     Path(file).parent.mkdir(parents=True, exist_ok=True)
 
+    # Combine filters
+    file_filters = []
+
+    # Add level range filter if specified
+    if main_log_lvl_range is not None:
+        level_range_filter = log_level_range_filters(main_log_lvl_range)
+        file_filters.append(level_range_filter)
+
+    # Add custom filter if provided
+    if filter is not None:
+        file_filters.append(filter)
+
+    # Combine all filters
+    if file_filters:
+        final_filter = filter_cat(file_filters)
+    else:
+        final_filter = None
+
     handler = logger.add(
         file,
         format=log_format_in_file,
@@ -169,7 +292,7 @@ def set_logger_file(
         backtrace=True,
         colorize=False,
         mode=mode,
-        filter=filter,
+        filter=final_filter,
     )
     logger = logger.patch(format_extra)
 
@@ -448,13 +571,40 @@ if __name__ == "__main__":
     """
         python -m src.utilities.logging.print
     """
-    with logger.contextualize(user="test_user"):
-        log_print("Hello, World!")
+    # Reconfigure logger to avoid conflicts when run as module
+    configure_logger(add_tqdm_filter=True, removed=True, _auto_=False)
 
-    log_print(
-        "This is a debug message",
-        level="debug",
-        this_is_a_context=1,
+    from tqdm import tqdm
+
+    for i in (tbar := tqdm(range(10), desc="Test tqdm to stdout")):
+        time.sleep(0.1)
+        logger.bind(tqdm=True).info(f"Processing item {i}")
+
+    configure_logger(
+        add_tqdm_filter=True,
+        removed=True,
+        _auto_=False,
+        main_log_lvl_range=("info", "error"),
     )
-    logger.info("---------")
-    logger.debug("This is a debug message without using log_print")
+
+    logger.trace("This is a trace message that should be filtered out.")
+    logger.info("This is an info message.")
+    logger.error("This is an error message.")
+    logger.critical("This is a critical message that should be filtered out.")
+
+    # Test file logger with level range filter
+    log_file = "tmp/test_level_range.log"
+    set_logger_file(
+        log_file,
+        level="debug",
+        main_log_lvl_range=("info", "warning"),
+    )
+
+    logger.debug("This debug message should not appear in file.")
+    logger.info("This info message should appear in file.")
+    logger.warning("This warning message should appear in file.")
+    logger.error("This error message should not appear in file.")
+
+    print(
+        f"\nCheck the log file at {log_file} to verify level filtering works for file output."
+    )

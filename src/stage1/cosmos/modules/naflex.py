@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import einops
 import torch
@@ -113,9 +113,7 @@ class NaFlexVitCfg:
     )
 
     # Layer implementations
-    norm_layer: Optional[str] = (
-        "flarmsnorm"  # Normalization layer for transformer blocks
-    )
+    norm_layer: Optional[str] = "rmsnorm"  # Normalization layer for transformer blocks
     act_layer: Optional[str] = None  # Activation layer for MLP blocks
     block_fn: Optional[str] = None  # Transformer block implementation class name
     mlp_layer: Optional[str] = None  # MLP implementation class name
@@ -128,15 +126,9 @@ class NaFlexVitCfg:
     # Variable patch size support
     enable_patch_interpolator: bool = True  # Enable dynamic patch size support
 
-
-@dataclass
-class NaFlexVitCfgAdpoted:
-    """
-    Adpoted from timm.models.naflexvit.NaFlexVitCfg
-    """
-
+    #  Tokenization related
     img_size: int = 32
-    z_dim: int = 256
+    in_chans: int = 256
     out_chans: int = 16
     out_2d_latent: bool = True
     unpatch_size: Optional[int] = None  # if None, use patch_size
@@ -148,23 +140,24 @@ class NaFlexVitCfgAdpoted:
 
 
 class Transformer(NaFlexVit):
-    def __init__(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
-        super().__init__(cfg, in_chans=cfg2.z_dim, img_size=cfg2.img_size)
-        self.cfg, self.cfg2 = cfg, cfg2
-        self._build_head(cfg, cfg2)
+    def __init__(self, cfg: NaFlexVitCfg):
+        super().__init__(cfg, in_chans=cfg.in_chans, img_size=cfg.img_size)
+        self.cfg = cfg
+        self._build_head(cfg)
 
-        if cfg2.compile_model:
+        if cfg.compile_model:
             logger.info(f"[Naflex Transformer]: Compiling model ...")
             for i in range(len(self.blocks)):
                 self.blocks[i] = torch.compile(self.blocks[i])
             self.head = torch.compile(self.head)
 
-    def _build_head(self, cfg: NaFlexVitCfg, cfg2: NaFlexVitCfgAdpoted):
+    def _build_head(self, cfg: NaFlexVitCfg):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
-        self.unpatch_size = cfg2.unpatch_size or cfg.patch_size
+        self.patch_size = cfg.patch_size
+        self.unpatch_size = cfg.unpatch_size or cfg.patch_size
         self.head = nn.Sequential(
             norm_layer(cfg.embed_dim),
-            nn.Linear(cfg.embed_dim, cfg2.out_chans * self.unpatch_size**2, bias=True),
+            nn.Linear(cfg.embed_dim, cfg.out_chans * self.unpatch_size**2, bias=True),
         )
 
     def unpatchify(self, x: torch.Tensor, hw=None):
@@ -172,7 +165,7 @@ class Transformer(NaFlexVit):
         x: (N, T, patch_size**2 * C)
         imgs: (N, H, W, C)
         """
-        c = self.cfg2.out_chans
+        c = self.cfg.out_chans
         p = self.unpatch_size
         if hw is None:
             h = w = int(x.shape[1] ** 0.5)
@@ -181,29 +174,48 @@ class Transformer(NaFlexVit):
             h, w = hw
 
         x = einops.rearrange(
-            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
+            x,
+            "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)",
+            h=h // p,
+            w=w // p,
+            p1=p,
+            p2=p,
+            c=c,
         )
         return x
 
     def _forward_after_backbone(self, x, hw):
         x = self.head(x)
-        if self.cfg2.out_2d_latent:
+        if self.cfg.out_2d_latent:
             x = self.unpatchify(x, hw)
         return x
 
-    def forward(self, x):
+    def _get_output_shape(self, x):
         hw = x.shape[-2:]
+        if self.cfg.unpatch_size is not None:
+            out_hw = (torch.tensor(hw) // self.patch_size * self.unpatch_size).tolist()
+        else:
+            out_hw = hw
+        return out_hw
+
+    def forward(self, x):
+        # Output HW
+        out_hw = self._get_output_shape(x)
+
+        # Features
         x = self.forward_features(x)
         x = x[:, self.cfg.reg_tokens :]
-        x = self._forward_after_backbone(x, hw)
+
+        # Head
+        x = self._forward_after_backbone(x, out_hw)
+
         return x
 
     @function_config_to_basic_types
     @staticmethod
-    def create_model(cfg1_kwargs: dict = {}, cfg2_kwargs: dict = {}):
-        cfg1 = dataclass_from_dict(NaFlexVitCfg, cfg1_kwargs)
-        cfg2 = dataclass_from_dict(NaFlexVitCfgAdpoted, cfg2_kwargs)
-        model = Transformer(cfg1, cfg2)
+    def create_model(**overrides):
+        cfg = dataclass_from_dict(NaFlexVitCfg, overrides)
+        model = Transformer(cfg)
         return model
 
 
@@ -218,35 +230,96 @@ def test_naflex_vit_pansharpening_model():
         pos_embed_grid_size=(32, 32),
         reg_tokens=8,
         patch_size=2,
-    )
-    cfg2 = NaFlexVitCfgAdpoted(
         img_size=32,
         out_chans=256,
-        unpatch_size=1,
+        unpatch_size=2,
+        z_dim=256,
     )
 
     x = torch.randn(1, 256, 32, 32).cuda()
 
-    model = Transformer(cfg, cfg2).cuda()
-    out = model(x)
-    print(out.shape)  # [1, 256, 64, 64]
+    model = Transformer(cfg).cuda()
 
+    # Test standard forward
+    print("=== Testing standard forward ===")
+    out = model(x)
+    print(f"Standard forward output shape: {out.shape}")  # [1, 256, 64, 64]
+
+    # Test forward_intermediates
+    print("\n=== Testing forward_intermediates ===")
+
+    # Test with different indices configurations
+    test_configs = [
+        {"indices": None, "desc": "all layers"},
+        {"indices": [2, 4, 6], "desc": "specific layers [2,4,6]"},
+        {"indices": 3, "desc": "last 3 layers"},
+        {"indices": [0, 7], "desc": "first and last layers"},
+    ]
+
+    for config in test_configs:
+        print(f"\n--- Testing {config['desc']} ---")
+        try:
+            result = model.forward_intermediates(
+                x,
+                indices=config["indices"],
+                return_prefix_tokens=True,
+                norm=True,
+                output_fmt="NCHW",
+                output_dict=True,
+            )
+
+            if isinstance(result, dict):
+                print(f"Output keys: {list(result.keys())}")
+                if "image_features" in result:
+                    print(f"Final features shape: {result['image_features'].shape}")
+                if "image_intermediates" in result:
+                    intermediates = result["image_intermediates"]
+                    print(f"Number of intermediate layers: {len(intermediates)}")
+                    for i, feat in enumerate(intermediates):
+                        print(
+                            f"  Layer {config['indices'][i] if config['indices'] is not None and isinstance(config['indices'], list) else i}: {feat.shape}"
+                        )
+                if "image_intermediates_prefix" in result:
+                    prefix_intermediates = result["image_intermediates_prefix"]
+                    print(
+                        f"Prefix intermediates shape: {[p.shape for p in prefix_intermediates]}"
+                    )
+            else:
+                print(f"Return type: {type(result)}")
+
+        except Exception as e:
+            print(f"Error with {config['desc']}: {e}")
+
+    # Test gradient computation
+    print("\n=== Testing gradient computation ===")
     out.mean().backward()
 
-    # Check parameters
-    from fvcore.nn import FlopCountAnalysis, flop_count_table
-
-    flops = FlopCountAnalysis(model, (x,))
-    print(flop_count_table(flops))
-
     # Check gradients
+    missing_grads = []
     for name, param in model.named_parameters():
         if param.requires_grad and param.grad is None:
-            print(f"Parameter {name} has no gradient!")
+            missing_grads.append(name)
+
+    if missing_grads:
+        print(f"Parameters without gradients: {missing_grads}")
+    else:
+        print("All parameters have gradients!")
+
+    # Check FLOPs
+    print("\n=== Computing FLOPs ===")
+    try:
+        from fvcore.nn import FlopCountAnalysis, flop_count_table
+
+        flops = FlopCountAnalysis(model, (x,))
+        print(flop_count_table(flops))
+    except ImportError:
+        print("fvcore not available, skipping FLOP analysis")
 
 
 if __name__ == "__main__":
     """
+    export LOVELY_TENSORS=1
     python -m src.stage1.cosmos.modules.naflex
     """
-    test_naflex_vit_pansharpening_model()
+    with logger.catch():
+        test_naflex_vit_pansharpening_model()

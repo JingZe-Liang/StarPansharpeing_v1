@@ -57,7 +57,7 @@ vq_loss:
     build_proj: false
     rgb_channels: random
     img_resize:
-    dino_img_size: 224
+    repa_img_size: 224
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan]
   disc_ndf: 128
   use_actnorm: false

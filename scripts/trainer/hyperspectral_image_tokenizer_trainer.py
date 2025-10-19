@@ -313,6 +313,11 @@ class CosmosHyperspectralTokenizerTrainer:
                     f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
                 )
 
+            # Gradient checkpointing
+            if self.train_cfg.grad_checkpoint:
+                self.tokenizer.set_grad_checkpointing()
+                self.log_msg("Set tokenizer gradient checkpointing enabled")
+
             # the params
             self.log_msg(
                 f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}"
@@ -1114,13 +1119,25 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # repa or vf feature
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
-        if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
-            _unwrap_tok, "_use_repa_loss", False
+        if (
+            hasattr(_unwrap_tok, "get_repa_feature")
+            and getattr(_unwrap_tok, "_use_repa_loss", False)
+            and _unwrap_tok.training
         ):
             repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
             assert repa_feature is not None, "repa_feature is None"
-            out_d["repa_feature"] = repa_feature
-
+            if torch.is_tensor(repa_feature):
+                out_d["repa_feature"] = repa_feature
+            elif isinstance(repa_feature, (tuple, list)):
+                assert len(repa_feature) == 2, (
+                    "only support two repa features (low level and semantic features distillation)."
+                )
+                out_d["repa_feature"] = repa_feature[0]
+                out_d["semantic_feature"] = repa_feature[1]
+            else:
+                raise ValueError(
+                    f"Unknown repa_feature type {type(repa_feature)}, only support tensor, tuple or list."
+                )
         elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
             _unwrap_tok, "_use_vf_loss", False
         ):
@@ -1144,8 +1161,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         optim_idx = 0 if train_tokenizer else 1  # tokenizer -> 0, discriminator -> 1
 
-        if (tok_feat := out_d.get("repa_feature", None)) is None:
-            tok_feat = out_d.get("vf_feature", None)
+        repa_low_lvl_feat = semantic_feat = None
+        # repa or vf feature (low-level feature alignment)
+        if (repa_low_lvl_feat := out_d.get("repa_feature", None)) is None:
+            repa_low_lvl_feat = out_d.get("vf_feature", None)
+        # semantic feature (high-level feature alignment)
+        if "semantic_feature" in out_d:
+            semantic_feat = out_d.get("semantic_feature", None)
 
         # loss
         with self.accelerator.autocast():
@@ -1155,7 +1177,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 reconstructions=out_d["recon"],
                 q_loss_total=out_d.get("q_loss", None),
                 q_loss_breakdown=out_d.get("q_info", None),
-                tokenizer_feat=tok_feat,
+                tokenizer_feat=repa_low_lvl_feat,
+                tokenizer_feat2=semantic_feat,
                 last_layer=self.get_last_layer(mode="dec"),
                 enc_last_layer=self.get_last_layer(mode="enc"),
                 global_step=self.global_step,
@@ -1386,7 +1409,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
-            else:  # > normal AE training pipeline
+            else:  # normal AE training pipeline
                 out_d = self.forward_tokenizer(x)  # no augmentation
                 # train tokenizer and discriminator
                 tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
@@ -1466,6 +1489,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 _selects.extend(["repa_loss"])
             if self.vq_loss_fn.use_vf:
                 _selects.extend(["vf_loss"])
+            if self.vq_loss_fn.use_sem_distill:
+                _selects.extend(["sem_dist_loss"])
 
             _log_token = dict_round_to_list_str(
                 log_token_loss,
@@ -1548,21 +1573,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
-            try:
-                self.train_step(batch)
-            except Exception as e:
-                # debug here
-                self.log_msg(
-                    f"Training failed, batch keys are {batch.keys()}", level="debug"
-                )
-                for k, v in batch.items():
-                    if torch.is_tensor(v):
-                        self.log_msg(
-                            f"{k} shape: {v.shape}", only_rank_zero=False, level="debug"
-                        )
-                    else:
-                        self.log_msg(f"{k}: {v}", only_rank_zero=False, level="debug")
-                raise e
+            self.train_step(batch)
 
             if (
                 self.global_step % self.val_cfg.val_duration == 0
@@ -2027,7 +2038,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "cosmos_hybrid_f8c16p1"
+_key = "hybrid_cosmos_f16c32p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2042,9 +2053,9 @@ _configs_dict = {
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # psd kl vae
     "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
+    # TODO: flow decoder or flow head decoder AE
     # hybrid ae
-    "cosmos_hybrid_f8c16p1": "hybrid_cosmos_tokenizer_f8c16p1",
-    "cosmos_hybrid_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
+    "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized

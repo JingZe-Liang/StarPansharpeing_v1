@@ -717,6 +717,21 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return emb
 
 
+def resample_1d_pe(pe: Tensor, target_len: int) -> Tensor:
+    if pe.shape[1] < target_len:
+        # (l, dim)
+        pe = torch.nn.functional.interpolate(
+            pe.transpose(0, 1)[None, ..., None],  # (1, dim, l, 1)
+            size=(target_len, 1),
+            mode="bicubic",
+            align_corners=False,
+        )
+        pe = pe.squeeze(0, -1).transpose(0, 1)  # (l, dim)
+    elif pe.shape[1] > target_len:
+        pe = pe[:target_len]
+    return pe
+
+
 # * --- Axes PE --- #
 
 

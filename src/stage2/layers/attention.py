@@ -281,14 +281,6 @@ class Qwen3SdpaAttention(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        # if layer_idx is None:
-        #     log(
-        #         f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will "
-        #         "to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
-        #         "when creating this class.",
-        #         warn_once=True,
-        #     )
-
         self.hidden_size = hidden_size
         self.num_heads = num_attention_heads
         self.head_dim = head_dim or self.hidden_size // self.num_heads

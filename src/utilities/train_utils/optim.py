@@ -15,7 +15,7 @@ def filter_params_by_name(params: dict[str, nn.Parameter], regex: str):
     return {name: param for name, param in params.items() if pattern.search(name)}
 
 
-@profiler.record_function("filter_no_wds_into_optim_groups")
+@profiler.record_function("filter_no_wds_into_optim_groups")  # type: ignore
 def filter_no_wds_into_optim_groups(
     params: Iterable[tuple[str, nn.Parameter]]
     | dict[str, nn.Parameter]

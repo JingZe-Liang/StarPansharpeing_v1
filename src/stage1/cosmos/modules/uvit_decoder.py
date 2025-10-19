@@ -94,6 +94,7 @@ class UViTDecoder(nn.Module):
         vit_act_fn: str = "geglu",
         layers_per_block=2,
         num_attention_heads: Optional[int] = None,
+        total_resolutions: int = 8,
         dropout=0.0,
         norm_num_groups=32,
         time_scale_shift=True,
@@ -103,16 +104,17 @@ class UViTDecoder(nn.Module):
         eps=1e-5,
         ada_norm=True,
         learned_pos_embed=False,
-        image_size=None,
+        image_size: int | None = None,
         relative_pos_embed=True,
         time_cond_type="t-r",
         init: Optional[Mapping] = None,
         use_act_ckpt: bool = False,
+        **_kwargs,
     ):
         ### Config ###
         self.out_dim = in_channels
         self.ada_norm = ada_norm
-        self.use_act_ckpt = use_act_ckpt
+        self.grad_checkpointing = use_act_ckpt
 
         # Compute appropriate number of channels for each level, adjust for GroupNorm
         self.ch_level = [
@@ -171,6 +173,10 @@ class UViTDecoder(nn.Module):
             )
 
         ### Down blocks ###
+        assert (n_resamples := math.log2(total_resolutions)) % 1 == 0, (
+            "total_resamples should be a power of 2"
+        )
+        n_resamples = int(n_resamples)
         self.down_blocks = nn.ModuleList([])
         output_channel = channels
         for i_level, ch in enumerate(self.ch_level):
@@ -186,7 +192,8 @@ class UViTDecoder(nn.Module):
                         out_channels=output_channel,
                         temb_channels=time_embed_dim,
                         dropout=dropout[i_level],
-                        add_downsample=not is_final_block,
+                        add_downsample=not is_final_block
+                        and (i_level < n_resamples),  # FIXME: add downsample earlier?
                         resnet_act_fn=act_fn,
                         resnet_groups=norm_num_groups,
                         time_scale_shift=time_scale_shift,
@@ -197,7 +204,7 @@ class UViTDecoder(nn.Module):
                 )
 
         # Mid block ###
-        down_scale = (2 ** (len(self.ch_level) - 1),)
+        down_scale = total_resolutions  # (2 ** (len(self.ch_level) - 1),)
         self.mid_block = UViTMiddleTransformer(
             inner_dim=output_channel,
             dropout=dropout[-1],
@@ -210,7 +217,7 @@ class UViTDecoder(nn.Module):
             ada_norm=ada_norm,
             ada_emb_dim=channels,
             learned_pos_embed=learned_pos_embed,
-            sample_size=(image_size[0] // down_scale[0], image_size[1] // down_scale[0])
+            sample_size=(image_size // down_scale, image_size // down_scale)
             if learned_pos_embed
             else None,
             relative_pos_embed=relative_pos_embed,
@@ -241,7 +248,7 @@ class UViTDecoder(nn.Module):
                         temb_channels=time_embed_dim,
                         resolution_idx=i_level,
                         dropout=dropout[-i_level - 1],
-                        add_upsample=(not is_final_block),
+                        add_upsample=(not is_final_block) and (i_level < n_resamples),
                         resnet_act_fn=act_fn,
                         resnet_groups=norm_num_groups,
                         time_scale_shift=time_scale_shift,
@@ -381,7 +388,7 @@ class UViTDecoder(nn.Module):
                     temb=t_emb,
                     ctx_emb=ctx_emb,
                 )
-        return x
+        return x  # type: ignore[return-value]
 
     def _forward_mids(self, x, t_emb, ctx_emb, use_act_ckpt=False):
         # TODO: middle transformer need to conditioned on t_emb and z.
@@ -420,7 +427,7 @@ class UViTDecoder(nn.Module):
             ctx_emb = self.ada_ctx_proj(z)
 
         ### Forward pass ###
-        use_act_ckpt = self.use_act_ckpt and self.training and not derivative
+        use_act_ckpt = self.grad_checkpointing and self.training and not derivative
 
         # 1. Time embedding
         if r is not None:
@@ -443,6 +450,9 @@ class UViTDecoder(nn.Module):
         x = self.conv_out(x, out_chan)
 
         return x
+
+    def set_grad_checkpointing(self, enable=True):
+        self.grad_checkpointing = enable
 
 
 class UViTMiddleTransformer(VisionTransformer):

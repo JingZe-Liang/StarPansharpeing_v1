@@ -16,7 +16,7 @@ prefetch_factor: 4
 
 train_paths:
   #> multispectral datasets
-  - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0000}.tar
+  - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0006..0000}.tar
   - - data/TUM_128/hyper_images/TUM_128_data_{0006..0000}.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0003..0000}.tar
   - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar

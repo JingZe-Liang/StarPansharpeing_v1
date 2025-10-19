@@ -202,7 +202,7 @@ class TwoDimDiffusionSlots(nn.Module):
                     f"[Quantizer]: Logit Laplace Loss is not implemented yet,"
                     "it will not take any effect"
                 )
-            self.quantizer = BinarySphericalQuantizer(**kwargs)
+            self.quantizer = BinarySphericalQuantizer(**kwargs)  # type: ignore
         elif quantizer_type == "kl":
             self.kl_weight = quantizer_kwargs.get("kl_weight", 1e-6)
             logvar_init = quantizer_kwargs.get("logvar_init", 0.0)

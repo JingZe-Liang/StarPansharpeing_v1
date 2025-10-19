@@ -76,3 +76,36 @@ def register_new_resolvers():
 
 
 register_new_resolvers()
+
+# Disable OmegaConf loggings
+
+import os
+
+os.environ["HYDRA_FULKLY_LOG"] = "0"  # set to 1 if necessary
+os.environ["HYDRA_JOB_NAME"] = "app"
+
+
+from hydra import compose, initialize_config_dir
+from hydra.core.config_store import ConfigStore
+from hydra.core.global_hydra import GlobalHydra
+
+
+@once
+def clear_hydra_self_config():
+    GlobalHydra.instance().clear()
+    config_store = ConfigStore.instance()
+    config_store.store(
+        name="no_logging_config",
+        node={
+            "hydra": {
+                "output_subdir": None,
+                "run": {"dir": "."},
+                "hydra_logging": None,
+                "job_logging": None,
+                "help": {"app_name": "my_app"},
+            }
+        },
+    )
+
+
+# clear_hydra_self_config()
