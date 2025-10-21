@@ -47,6 +47,7 @@ from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file
 from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter
 
 
@@ -1905,11 +1906,21 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 # Load combined model
                 self.log_msg(f"loading bin or safetensors checkpoint into model ...")
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.tokenizer),
-                    _assume_path,
-                    strict=strict,
-                )
+                try:
+                    accelerate.utils.load_checkpoint_in_model(
+                        self.accelerator.unwrap_model(self.tokenizer),
+                        _assume_path,
+                        strict=strict,
+                    )
+                except Exception as e:
+                    self.log_msg(
+                        f"loading bin or safetensors checkpoint into tokenizer failed: {e}, "
+                        f"trying to load partial of the weights ..."
+                    )
+                    load_weights_with_shape_check(
+                        self.accelerator.unwrap_model(self.tokenizer),
+                        _assume_path,
+                    )
 
         # Load discriminator to online model
         if (
@@ -1921,12 +1932,22 @@ class CosmosHyperspectralTokenizerTrainer:
             ]
             and not self.train_cfg.only_load_tokenizer
         ):
-            accelerate.utils.load_checkpoint_in_model(
-                self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
-                ema_path / "discriminator",
-                strict=strict,
-            )
-            # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
+            try:
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    ema_path / "discriminator",
+                    strict=strict,
+                )
+                # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth")
+            except Exception as e:
+                self.log_msg(
+                    f"loading discriminator checkpoint into model failed: {e}, "
+                    f"trying to load partial of the weights ..."
+                )
+                load_weights_with_shape_check(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    ema_path / "discriminator",
+                )
 
         # Load quantizer if exists
         if (

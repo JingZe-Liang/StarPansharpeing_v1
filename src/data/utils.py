@@ -468,6 +468,71 @@ def quantile_clip_(
     return img
 
 
+def sigma_clip_(
+    img: Float[Tensor, "... c h w"],
+    sigma: float = 3.0,
+    per_channel: bool = False,
+    clip_mode: str = "both",
+    eps: float = 1e-8,
+):
+    """
+    Clip outlier values using the 3-sigma rule.
+
+    This function applies the 3-sigma principle to remove outliers by clipping
+    values that are more than the specified number of standard deviations from the mean.
+
+    Args:
+        img: Input image tensor with shape (..., c, h, w)
+        sigma: Number of standard deviations to use as threshold (default: 3.0)
+        per_channel: Whether to compute mean and std per channel (default: False)
+        clip_mode: Clipping mode - "both", "min", or "max" (default: "both")
+        eps: Small epsilon value to avoid division by zero (default: 1e-8)
+
+    Returns:
+        torch.Tensor: Image tensor with outlier values clipped
+
+    Example:
+        >>> img = torch.randn(1, 3, 224, 224)
+        >>> clipped_img = sigma_clip_(img, sigma=3.0)
+    """
+    if sigma <= 0:
+        return img
+
+    # Calculate mean and standard deviation
+    dims = (-3, -2, -1) if not per_channel else (-2, -1)
+    mean = img.mean(dim=dims, keepdim=True)
+    std = img.std(dim=dims, keepdim=True)
+
+    # Handle case where std is 0 (constant image)
+    if std.max().item() < eps:
+        return img
+
+    # Calculate sigma boundaries
+    sigma_bounds = sigma * std
+
+    if clip_mode == "both":
+        min_val = mean - sigma_bounds
+        max_val = mean + sigma_bounds
+    elif clip_mode == "min":
+        min_val = mean - sigma_bounds
+        max_val = None
+    elif clip_mode == "max":
+        min_val = None
+        max_val = mean + sigma_bounds
+    else:
+        raise ValueError(f"Unknown clip_mode: {clip_mode}")
+
+    # Expand dimensions to match img
+    if min_val is not None:
+        min_val = add_n_dim_last_as(min_val, img)
+    if max_val is not None:
+        max_val = add_n_dim_last_as(max_val, img)
+
+    # Clip the image
+    img = img.clamp_(min_val, max_val)
+    return img
+
+
 def img_normalize_to_zero_one_(
     img: Float[Tensor, "... c h w"],
     norm_type: str = "clip_zero_div",
@@ -522,18 +587,31 @@ def norm_img_(
     to_neg_1_1=True,
     mannual_img_min_max: tuple[float, float] | None = None,
     q_clip: Annotated[float, "0.0-1.0"] = 1.0,
+    sigma_clip: float = 0.0,
     eps: float = 1e-8,
 ):
-    # quantile clip -> normalization -> to (0, 1) or (-1, 1)
+    # sigma clip/quantile clip -> normalization -> to (0, 1) or (-1, 1)
 
     # 1. Add the channel dim to form h, w, c shape
-    if is_dim2 := img.ndim == 2:
+    is_dim2 = img.ndim == 2
+    if is_dim2:
         # is h, w image
         img.unsqueeze_(0)  # add channel dim if ndim == 2
 
-    # 2. Quantile clip
+    # 2. Sigma clipping or quantile clipping
     is_ch_3 = img.shape[0] == 3
     use_quantile_clip = q_clip < 1.0 and not is_ch_3  # ignore RGB image, always use max
+    use_sigma_clip = (
+        sigma_clip > 0.0 and not is_ch_3
+    )  # ignore RGB image for sigma clipping
+
+    assert not (use_quantile_clip and use_sigma_clip), (
+        "Use either quantile clipping or sigma clipping or not used both"
+    )
+    if use_sigma_clip:
+        img = sigma_clip_(
+            img, sigma=sigma_clip, per_channel=per_channel, clip_mode="both", eps=eps
+        )
     if use_quantile_clip:
         img = quantile_clip_(
             img, quantile=q_clip, per_channel=per_channel, clip_mode="both"
@@ -573,6 +651,7 @@ def norm_img(
     norm_type: Literal["clip_zero_div", "min_max", "z_score"] = "clip_zero_div",
     per_channel: bool = False,
     quantile_clip: float = 1.0,
+    sigma_clip: float = 0.0,
     mannual_img_min_max: tuple[float, float] | None = None,
     norm_info_add_in_sample: bool = False,
 ):
@@ -591,8 +670,12 @@ def norm_img(
                  or (B, H, W, C) to (B, C, H, W) (default: True)
         check_nan: Whether to replace NaN/Inf values with 0 (default: False)
         on_device: Whether to move tensors to CUDA device (default: False)
-        clip_zero: Whether to clip negative values to 0 (default: True)
+        norm_type: Normalization type - "clip_zero_div", "min_max", or "z_score" (default: "clip_zero_div")
         per_channel: Whether to normalize per-channel instead of globally (default: False)
+        quantile_clip: Quantile clipping threshold (0.0-1.0, default: 1.0, disabled)
+        sigma_clip: Sigma clipping threshold for 3-sigma rule (default: 0.0, disabled)
+        mannual_img_min_max: Manual min-max values for normalization (default: None)
+        norm_info_add_in_sample: Whether to add normalization info to sample (default: False)
 
     Returns:
         dict: The processed sample with normalized images. Returns None if image
@@ -655,6 +738,7 @@ def norm_img(
             to_neg_1_1=to_neg_1_1,
             mannual_img_min_max=mannual_img_min_max,
             q_clip=quantile_clip,
+            sigma_clip=sigma_clip,
             eps=1e-8,
         )
 

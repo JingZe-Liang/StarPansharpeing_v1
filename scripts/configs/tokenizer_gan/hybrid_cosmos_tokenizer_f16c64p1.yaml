@@ -24,7 +24,7 @@ accelerator:
 
 tokenizer:
   model:
-    latent_channels: 32
+    latent_channels: 64
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}
@@ -195,7 +195,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c32
+    run_comment: hybrid_cosmos_f16c64
     log_with_time: True
     visualize_every: 500
     log_every: 10

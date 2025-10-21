@@ -415,6 +415,14 @@ def main_process_dataloader_img(
         )
         tbar.set_description(f"Id: {res['id'][0]}")
 
+        processed_resumed_n = (
+            res["processed"]
+            + res["skipped"]
+            + (len(resume_from) if isinstance(resume_from, (set, list)) else 0)
+        )
+        tbar.n = processed_resumed_n
+        tbar.refresh()
+
         if not res["is_skipped"]:
             img_id = res["id"][0] if isinstance(res["id"], list) else res["id"]
             caption = res["caption"]

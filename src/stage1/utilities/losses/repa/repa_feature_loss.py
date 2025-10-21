@@ -592,7 +592,7 @@ def load_siglip2_model(
         # remove the text model
         model.text_model = None
         vision_model = model.vision_model
-        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir)
+        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir, local_files_only=local_files_only)
 
     model = cast(Siglip2VisionModel, model)
 

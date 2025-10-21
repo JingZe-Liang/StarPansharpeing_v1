@@ -9,10 +9,10 @@ size_128_bs: 20
 size_256_bs: 14
 size_512_bs: 7
 val_bs: 12
-max_workers: 4
-min_workers: 3
+max_workers: 5
+min_workers: 4
 shuffle_size: 100
-prefetch_factor: 4
+prefetch_factor: 6
 
 train_paths:
   #> multispectral datasets

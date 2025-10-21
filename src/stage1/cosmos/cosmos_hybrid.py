@@ -40,7 +40,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     sem_z: Tensor | None = None
     supported_cached_hiddens: List[str] = ["z", "sem_z"]
     cache_layers: dict[str, list[int]] = {
-        "low_level": [0, 1, 2, -1],  # -1 means middle layer
+        "low_level": [0, 1, 2, -1],  # -1 means middle layercao20011002
         "semantic": [2, 5, 8, 11],  # 12 layers of encoder
     }
     low_lvl_repa_proj_chans: list[int] = []
