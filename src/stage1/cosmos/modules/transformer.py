@@ -1037,7 +1037,7 @@ class TransformerTokenizer(nn.Module):
             else:
                 x = blk(x, rope=rope)
             if i in index:
-                intermidates.append(x[:, self.n_reg_tokens:)
+                intermidates.append(x[:, self.n_reg_tokens :])
 
         # Projection in
         x = self._forward_proj_out(x)

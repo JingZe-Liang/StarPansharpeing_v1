@@ -35,6 +35,7 @@ from typing_extensions import deprecated
 from src.data.codecs import (
     img_decode_io,
     json_decode_io,
+    npz_decode_io,
     safetensors_decode_io,
     string_decode_io,
     tiff_decode_io,
@@ -419,6 +420,7 @@ def get_hyperspectral_dataloaders(
     # decode
     default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
+        wds.handle_extension("npz", npz_decode_io),
         # webdataset read safetensors in tar, can not suit the memmap for fast loading
         wds.handle_extension("safetensors", safetensors_decode_io),
         wds.handle_extension("jpg png img_content", img_decode_io),
@@ -1639,14 +1641,15 @@ if __name__ == "__main__":
         # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
-        ["data/RemoteSAM270k/RemoteSAM-270K/shardindex.json"]
+        # ["data/RemoteSAM270k/RemoteSAM-270K/shardindex.json"]
+        ["data2/DynamicEarth/hyper_images/DynamicEarth-4_bands-px_512-1-0000.tar"]
     ]
     test_batch_size = 1
     test_num_workers = 0
     test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type="wids",
+        loader_type="webdataset",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1726,13 +1729,12 @@ if __name__ == "__main__":
     step_counter = StepsCounter(["train"])
     test_ds, test_loader = get_hyperspectral_img_loaders_with_different_backends_v2(
         test_wds_path,
-        loader_type="wids",
+        loader_type="webdataset",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=False,
         shuffle_loaders=False,
     )
-    breakpoint()
 
     from tqdm import tqdm
 
@@ -1745,10 +1747,14 @@ if __name__ == "__main__":
     tbar = tqdm()
     import matplotlib.pyplot as plt
     import PIL.Image
+    import lovely_tensors as lt
+    
+    lt.monkey_patch()
 
     i = 0
     while True:
         sample = next(test_loader)
         i += 1
         tbar.update(1)
-        print(sample["img"].shape)
+        # print(sample["img"].shape)
+        sample['img'][:, [0,1,2]].rgb.fig.savefig(f"tmp/{i}.png")

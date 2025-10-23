@@ -139,7 +139,7 @@ def is_sequence_shape(shape: Any) -> bool:
     return isinstance(shape, (torch.Size, list, tuple))
 
 
-def get_chan_from_shape(shape: torch.Size | tuple | list | int) -> int:
+def get_chan_from_shape(shape: torch.Size | tuple[int, ...] | list[int] | int) -> int:
     if is_sequence_shape(shape):
         return shape[1]
     else:
@@ -754,12 +754,12 @@ class FlowTokenizer(nn.Module):
         clamp=False,
         ema_model: Optional[Self] = None,
         sample_kwargs: dict = dict(
-            # tim sample kwargs
+            ## tim sample kwargs
             num_steps=8,
             stochasticity_ratio=0.0,
             sample_type="transition",
             cfg_scale=1.0,
-            # fm sample kwargs
+            ## fm sample kwargs
             # sampling_method="Euler",
             # diffusion_form="SBDM",
             # diffusion_norm=1.0,
@@ -767,7 +767,7 @@ class FlowTokenizer(nn.Module):
             # last_step_size=0.04,
             # num_steps=250,
             # temperature=1.0,
-            # manually sampling kwargs
+            ## manually sampling kwargs
             # sample_steps=10,
             # schedule='linear',
             # cfg=2.0,
@@ -863,6 +863,14 @@ class FlowTokenizer(nn.Module):
                 logger.info(
                     f"Set grad_checkpointing={enable} for {module.__class__.__name__}"
                 )
+
+    @classmethod
+    def create_model(cls, cfg):
+        """Create a FlowTokenizer model from configuration."""
+        # Update the defaults
+        cfg = OmegaConf.merge(tokenizer_cfg_default, cfg)
+        model = cls(cfg)
+        return model
 
 
 # * --- Test --- #

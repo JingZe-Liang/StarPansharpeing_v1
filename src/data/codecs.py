@@ -271,6 +271,7 @@ def safetensors_decode_io(
     safetensors_bytes: bytes,
     to_device=False,
     return_dict=False,
+    ret_keys: list[str] | str | bool | None = None,
 ) -> dict[str, torch.Tensor] | torch.Tensor:
     """Decodes safetensors formatted bytes into a dictionary of PyTorch tensors."""
     # Directly loads the tensors from bytes.
@@ -283,18 +284,23 @@ def safetensors_decode_io(
             data_dict[key] = tensor.to(torch.device("cuda"))
 
     if not return_dict:
+        # deprecated
         return data_dict[list(data_dict.keys())[0]]  # assume only one key
-    return data_dict
+    return extract_keys_from_data(data_dict, ret_keys=return_dict)
 
 
-def npz_decode_io(npz_bytes: bytes) -> Dict[str, np.ndarray]:
+def npz_decode_io(
+    npz_bytes: bytes,
+    *,
+    ret_keys: list[str] | str | bool | None = None,
+) -> Dict[str, np.ndarray]:
     """Decodes NPZ file formatted bytes into a dictionary of NumPy arrays."""
     with io.BytesIO(npz_bytes) as buffer:
         # load returns a dictionary, potentially including header info
         npz_dict: Dict[str, Any] = np.load(buffer, allow_pickle=True)
-
         data_dict = {k: v.copy() for k, v in npz_dict.items() if not k.startswith("__")}
-    return data_dict
+
+    return extract_keys_from_data(data_dict, ret_keys=ret_keys)
 
 
 def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
@@ -306,6 +312,21 @@ def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
 
 def npy_decode_io(npy_bytes: bytes) -> np.ndarray:
     return np.load(io.BytesIO(npy_bytes))
+
+
+def extract_keys_from_data(
+    data_dict: dict, ret_keys: list[str] | str | bool | None = None
+):
+    if isinstance(ret_keys, str):
+        return data_dict[ret_keys]
+    elif isinstance(ret_keys, list):
+        return {k: data_dict[k] for k in ret_keys}
+    elif ret_keys is False:
+        # false mean return the first one value
+        k = list(data_dict.keys())[0]
+        return data_dict[k]
+    else:  # true or none
+        return data_dict
 
 
 # * --- wids codecs --- #
@@ -491,7 +512,7 @@ def wids_latent_decode(sample: dict[str, Any], return_dict=False):
     # three types of latents: npz, safetensors, and npy
 
     call_fns = {
-        "npz": npz_decode_io,
+        "npz": partial(npz_decode_io, ret_keys=return_dict),
         "safetensors": partial(safetensors_decode_io, return_dict=return_dict),
         "npy": npy_codec_io,
     }
