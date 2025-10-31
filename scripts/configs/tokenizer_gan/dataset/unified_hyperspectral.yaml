@@ -144,10 +144,10 @@ train_changed_kwargs_by_loader:
     img_key: [npy]
     tgt_key: [img]
     keys_to_remove: [txt]
-  - batch_size: ${dataset.size_512_bs} # WorldView3, WorldView2
+  - batch_size: ${dataset.size_512_bs} # WorldView3, WorldView2: 8bands
     num_workers: ${dataset.min_workers}
     resize_before_transform: 512
-  - batch_size: ${dataset.size_512_bs} # QuickBird, WorldView4, IKONOS
+  - batch_size: ${dataset.size_512_bs} # QuickBird, WorldView4, IKONOS: 4bands
     num_workers: ${dataset.min_workers}
     resize_before_transform: 512
   - batch_size: ${dataset.size_512_bs} # OHS

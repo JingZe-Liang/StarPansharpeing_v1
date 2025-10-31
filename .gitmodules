@@ -131,5 +131,5 @@
 	url = https://github.com/dc-ai-projects/DC-Gen.git
 
 [submodule "src/stage2/generative/min_pi_flow"]
-    path = src/stage2/generative/min_pi_flow
-    url = https://github.com/enkeejunior1/min-pi-flow.git
+	path = src/stage2/generative/min_pi_flow
+	url = https://github.com/enkeejunior1/min-pi-flow.git

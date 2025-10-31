@@ -31,7 +31,6 @@ PreservedKeys: list[LiteralString] = [
     "tqdm",
     "once",
     "log_once",
-    "log_once",
     "warn_once",
     "once_pattern",
     "not_rank0_print",
@@ -410,7 +409,7 @@ def set_logger_file(
 
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
-        "- <level>[{level}]</level> "
+        "- <level>[{level:^6}]</level> "
         "- <cyan>{file}:{line}</cyan> "
         "- <level>{message}</level>"
     )

@@ -1028,7 +1028,7 @@ def large_image_resizer_clipper(
             ratio=(0.75, 1.333),
             p=1.0,
             keepdim=True,
-            cropping_mode="resample",
+            cropping_mode="slice",  # resample
         )
     elif op_for_large == "resize":
         clipper = Resize(tgt_size, antialias=True, p=1, keepdim=True)

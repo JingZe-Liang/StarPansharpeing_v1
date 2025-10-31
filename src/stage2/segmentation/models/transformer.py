@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,7 @@ from torch import Tensor
 from ...layers import (
     AttentionBlock,
     RotaryPositionEmbeddingPytorchV2,
+    SwiGLU,
     get_2d_sincos_pos_embed,
 )
 
@@ -332,6 +334,6 @@ if __name__ == "__main__":
     # out = model(x)
     # print(out.shape)  # Expected shape: (1, 16, 32, 32)
 
-    block = NatAttention(128).cuda()
-    x = torch.randn(1, 128, 32, 32).cuda()
-    print(block(x).shape)
+    # block = NatAttention(128).cuda()
+    # x = torch.randn(1, 128, 32, 32).cuda()
+    # print(block(x).shape)

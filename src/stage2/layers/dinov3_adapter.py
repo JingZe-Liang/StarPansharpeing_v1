@@ -557,11 +557,49 @@ class DINOv3_Adapter(nn.Module):
         dw_ratios=[2, 1, 0.5],
         with_cp=True,
         use_bn=True,
+        freeze_backbone=True,
     ):
         super(DINOv3_Adapter, self).__init__()
+
+        embed_dim = self._setup_backbone(
+            backbone,
+            pretrain_size,
+            interaction_indexes,
+            add_vit_feature,
+            freeze_backbone,
+        )
+
+        self._setup_interactions(
+            embed_dim=embed_dim,
+            interaction_indexes=self.interaction_indexes,
+            pretrain_size=pretrain_size,
+            conv_inplane=conv_inplane,
+            n_points=n_points,
+            deform_num_heads=deform_num_heads,
+            drop_path_rate=drop_path_rate,
+            init_values=init_values,
+            with_cffn=with_cffn,
+            cffn_ratio=cffn_ratio,
+            deform_ratio=deform_ratio,
+            add_vit_feature=add_vit_feature,
+            use_extra_extractor=use_extra_extractor,
+            dw_ratios=dw_ratios,
+            with_cp=with_cp,
+            use_bn=use_bn,
+        )
+
+    def _setup_backbone(
+        self,
+        backbone,
+        pretrain_size: int,
+        interaction_indexes: list[int],
+        add_vit_feature=True,
+        freeze_backbone=True,
+    ):
         self.backbone = backbone
         # Important: we freeze the backbone
-        self.backbone.requires_grad_(False)
+        if freeze_backbone:
+            self.backbone.requires_grad_(False)
 
         self.pretrain_size = (pretrain_size, pretrain_size)
         self.interaction_indexes = interaction_indexes
@@ -572,6 +610,27 @@ class DINOv3_Adapter(nn.Module):
         print("interaction_indexes", self.interaction_indexes)
         print("patch_size", self.patch_size)
 
+        return embed_dim
+
+    def _setup_interactions(
+        self,
+        embed_dim: int,
+        interaction_indexes=[9, 19, 29, 39],
+        pretrain_size=512,
+        conv_inplane=64,
+        n_points=4,
+        deform_num_heads=16,
+        drop_path_rate=0.3,
+        init_values=0.0,
+        with_cffn=True,
+        cffn_ratio=0.25,
+        deform_ratio=0.5,
+        add_vit_feature=True,
+        use_extra_extractor=True,
+        dw_ratios=[2, 1, 0.5],
+        with_cp=True,
+        use_bn=True,
+    ):
         block_fn = InteractionBlockWithCls
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
         self.spm = SpatialPriorModule(
@@ -673,6 +732,15 @@ class DINOv3_Adapter(nn.Module):
         c4 = c4 + self.level_embed[2]
         return c2, c3, c4
 
+    def _forward_backbone_intermediate_features(self, x):
+        with torch.autocast("cuda", torch.bfloat16):
+            with torch.no_grad():
+                all_layers = self.backbone.get_intermediate_layers(
+                    x, n=self.interaction_indexes, return_class_token=True
+                )
+
+        return all_layers
+
     def forward(self, x):
         x = self._input_norm(x)  # for input is 0-1
         deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
@@ -688,18 +756,16 @@ class DINOv3_Adapter(nn.Module):
         H_toks, W_toks = x.shape[2] // self.patch_size, x.shape[3] // self.patch_size
         bs, C, h, w = x.shape
 
-        with torch.autocast("cuda", torch.bfloat16):
-            with torch.no_grad():
-                all_layers = self.backbone.get_intermediate_layers(
-                    x, n=self.interaction_indexes, return_class_token=True
-                )
-
+        all_layers = self._forward_backbone_intermediate_features(x)
+        others = None
+        if isinstance(all_layers, tuple):
+            all_layers, others = all_layers
         bs, _, dim = all_layers[0][0].shape  # [x, cls] per layer out
 
         outs = list()
         for i, layer in enumerate(self.interactions):
             x, cls = all_layers[i]
-            print(f"{x.shape=}, {cls.shape=}, ")
+            # print(f"{x.shape=}, {cls.shape=}, ")
             _, c, _ = layer(
                 x,
                 c,
@@ -746,7 +812,10 @@ class DINOv3_Adapter(nn.Module):
         f3 = self.norm3(c3)
         f4 = self.norm4(c4)
 
-        return {"1": f1, "2": f2, "3": f3, "4": f4}
+        ret = {"1": f1, "2": f2, "3": f3, "4": f4}
+        if others is None:
+            return ret
+        return ret, others
 
 
 class UpsampleBlock(nn.Module):

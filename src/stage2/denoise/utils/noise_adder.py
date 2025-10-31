@@ -163,6 +163,7 @@ class UniHSINoiseAdderKornia(IntensityAugmentationBase2D):
         return noisy_img_th
 
 
+# Alias
 def get_tokenizer_trainer_noise_adder(p=0.1, is_neg_1_1=True, use_torch=True):
     return UniHSINoiseAdderKornia(
         noise_type="complex",

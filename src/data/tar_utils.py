@@ -406,7 +406,7 @@ def extract_member_from_tar(
         else:
             return get_content_from_member(tar_reader, member)
     else:
-        print(f"Member {member_name} not found in tar file")
+        print(f"Member {member} not found in tar file")
         return False
 
 

@@ -1,30 +1,311 @@
 import io
 import json
+import os
 import warnings
+from contextlib import suppress
 from functools import partial
-from typing import Any, Dict, Literal, cast
+from io import BytesIO
+from typing import Any, Dict, Literal
 
 import numpy as np
 import scipy.io
 import tifffile
 import torch
 import yaml
+from loguru import logger
 from PIL import Image
 from safetensors.torch import load as load_safetensors
 from safetensors.torch import save as save_safetensors
+from streaming.base.format.mds import encodings
+from streaming.base.format.mds.encodings import Encoding
 from timm.layers.helpers import to_2tuple
 
 from src.utilities.logging import log_print
 
 from .utils import norm_img_
 
-# --- Encoding Functions ---
+NV_IMAGE_DECODE_ENABLED = False
+try:
+    from nvidia import nvimgcodec
+
+    NV_IMAGE_DECODE_ENABLED = True
+    # if the loader has prefetch_factor > 0
+    # gpu decode will take more gpu memory
+    # decoder
+    nvimg_gpu_dec_backends = dict(
+        backends=[
+            nvimgcodec.Backend(nvimgcodec.GPU_ONLY, load_hint=0.5),
+            nvimgcodec.Backend(nvimgcodec.HYBRID_CPU_GPU),
+        ]
+    )
+    nvimg_cpu_dec_backends = dict(backend_kinds=[nvimgcodec.CPU_ONLY])
+    # encoder
+    logger.debug("Nvidia Image Codec is enabled.")
+except ImportError:
+    pass
+
+
+# *==============================================================
+# * MDS and Litdata Serializers
+# *==============================================================
+
+# MDS streaming codecs
+
+
+class TiffEncoding(Encoding):
+    def encode(self, img):
+        if isinstance(img, bytes):
+            return img
+        with BytesIO() as b:
+            tifffile.imwrite(b, img)
+            return b.getvalue()
+
+    def decode(self, byte_data):
+        with BytesIO(byte_data) as b:
+            img = tifffile.imread(b)
+            return img
+
+
+def _nvimg_encode(
+    img: np.ndarray | Image.Image | torch.Tensor,
+    nv_encoder: "nvimgcodec.Encoder",
+    codec: Literal[
+        "png", "bmp", "tiff", "jpeg", "jpeg2k", "pnm", "tiff", "webp"
+    ] = "jpeg",
+    quality: int = 95,
+) -> bytes:
+    if quality == 100:
+        encode_params = nvimgcodec.EncoderParams(
+            quality_type=nvimgcodec.QualityType.LOSSLESS
+        )
+    else:
+        encode_params = nvimgcodec.EncodeParams(
+            quality_type=nvimgcodec.QualityType.QUALITY,
+            quality_value=quality,
+        )
+
+    if codec == "jpeg2k" and quality < 100:
+        # jpeg2k must be encoded to YCC to be able to use quality
+        encode_params.color_spec = nvimgcodec.ColorSpec.YCC
+
+    # Encode
+    is_cuda = False
+    if isinstance(img, torch.Tensor):
+        is_cuda = img.device.type == "cuda"
+    elif isinstance(img, Image.Image):
+        img = np.asarray(img)
+
+    img = nvimgcodec.as_image(img)
+    encoded = nv_encoder.encode(img, encode_params)
+    return encoded
+
+
+def _nvimg_decode(
+    img: bytes,
+    nv_decoder: "nvimgcodec.Decoder",
+    is_uint16: bool = False,
+    on_device: bool = False,
+):
+    if is_uint16:
+        decoded_params = nvimgcodec.DecodeParams(allow_any_depth=True)
+        decoded = torch.as_tensor(nv_decoder.decode(img, decoded_params))
+    else:
+        decoded = torch.as_tensor(nv_decoder.decode(img))
+
+    if decoded.device.type != "cuda" and on_device:
+        decoded = decoded.cuda(non_blocking=True)
+
+    return decoded
+
+
+class NVImageEncoding(Encoding):
+    def __init__(self):
+        assert NV_IMAGE_DECODE_ENABLED, "NVIDIA 3rd party nvimgcodec is not installed."
+        self.encoder = nvimgcodec.Encoder()
+        self.decoder = nvimgcodec.Decoder(**nvimg_gpu_dec_backends)
+        self._fallback_cpu_decoder = nvimgcodec.Decoder(**nvimg_cpu_dec_backends)
+        self._on_device = False
+
+    def encode(self, img: np.ndarray | torch.Tensor | Image.Image) -> bytes:
+        log_print(
+            "nvImageCodec encoding is not stable, use it by your own risk.",
+            "warning",
+            warn_once=True,
+        )
+        return _nvimg_encode(img, self.encoder, codec="jpeg", quality=95)
+
+    def _nvgpu_decode(self, img: bytes):
+        return _nvimg_decode(
+            img,
+            self.decoder,
+            is_uint16=False,
+            on_device=self._on_device,
+        )
+
+    def _nvcpu_decode(self, img: bytes):
+        return _nvimg_decode(
+            img,
+            self._fallback_cpu_decoder,
+            is_uint16=False,
+            on_device=self._on_device,
+        )
+
+    def _fallback_pil_decode(self, img: bytes):
+        # fall back totally back to PIL decoder
+        with BytesIO(img) as f:
+            img_data = np.asarray(Image.open(f))
+            img_th = torch.as_tensor(img_data)
+            if self._on_device:
+                img_th = img_th.cuda(non_blocking=True)
+            return img_th
+
+    def decode(self, img: bytes):
+        try:
+            return self._nvgpu_decode(img)
+        except Exception as e:
+            log_print(
+                f"NVImageCodec GPU decoding failed: {e}, fallback to CPU decoder.",
+                "warning",
+                warn_once=True,
+            )
+            try:
+                return self._nvcpu_decode(img)
+            except Exception as e:
+                log_print(
+                    f"CPU decoder failed: {e}, fallback to PIL decoder.",
+                    "warning",
+                    warn_once=True,
+                )
+                return self._fallback_pil_decode(img)
+
+
+class SkipLargeJpegImageEncoding(encodings.JPEG):
+    def _is_super_large_img(self, img: Image.Image):
+        size = img.size[0] * img.size[1]
+        _8k = 1024 * 8
+        if size > _8k**2:
+            return True
+        return False
+
+    def decode(self, data: bytes):
+        # return img_decode_io(data)
+        with Image.open(BytesIO(data)) as img:
+            if self._is_super_large_img(img):
+                logger.warning(f"Skipping large image: {img.size}")
+                return None
+            return np.array(img.convert("RGB"))
+
+
+# litdata serializers
+
+import jsonlines as jsonl
+from litdata.streaming import serializers
+
+
+class JsonlSerializer(serializers.Serializer):
+    """Serializer for JSONL (JSON Lines) format."""
+
+    def serialize(self, obj: dict) -> tuple[bytes, str]:
+        """Serialize a dictionary to JSONL bytes format."""
+        buf = io.BytesIO()
+        writer = jsonl.Writer(buf)
+        writer.write(obj)
+        writer.close()
+        return buf.getvalue(), "jsonl"
+
+    def deserialize(self, byte_data: bytes) -> dict | list[dict]:
+        """Deserialize JSONL bytes back to a dictionary or list of dictionaries."""
+        text_data = byte_data.decode("utf-8").strip()
+
+        if not text_data:
+            return {}
+
+        lines = text_data.split("\n")
+        objects = [json.loads(line) for line in lines if line.strip()]
+
+        if len(objects) == 1:
+            return objects[0]
+        else:
+            return objects
+
+    def can_serialize(self, data: Any) -> bool:
+        """Check if the data can be serialized as JSONL."""
+        return isinstance(data, dict)
+
+
+class TiffFileSerializer(serializers.TIFFSerializer):
+    def deserialize(self, data: bytes) -> torch.Tensor:
+        """Deserialize bytes into an object."""
+        arr = super().deserialize(data)
+        # additional transport like in JPEGSerializer
+        if arr.ndim == 3:
+            arr = arr.transpose([-1, 0, 1])
+        return torch.from_numpy(arr)
+
+
+class JPEGGeneralSerializer(serializers.JPEGSerializer):
+    def _force_to_rgb(self, arr: np.ndarray | torch.Tensor):
+        if arr.shape[0] == 4:
+            # png with alpha channel
+            logger.debug(
+                f"Warning: 4 channels, shape {arr.shape} -> change to 3 RGB channels."
+            )
+            arr = arr[:3]
+        return arr
+
+    def deserialize(self, data: bytes) -> torch.Tensor | None:
+        """Deserialize bytes into an object."""
+        # filtering and libpng C lib warnings
+        saved_stdout = os.dup(1)
+        saved_stderr = os.dup(2)
+
+        try:
+            devnull = os.open("/dev/null", os.O_WRONLY)
+            os.dup2(devnull, 1)  # stdout
+            os.dup2(devnull, 2)  # stderr
+            os.close(devnull)
+
+            with suppress(RuntimeError):
+                # torchvision decode failed
+                arr = super().deserialize(data)
+                arr = self._force_to_rgb(arr)
+                return arr
+
+            # Use general PIL decoder
+            arr = img_decode_io(data)
+
+            if arr is None:
+                return None
+            elif arr.ndim == 3:
+                arr = arr.transpose([-1, 0, 1])
+
+            arr = self._force_to_rgb(arr)
+
+            return torch.from_numpy(arr)
+        finally:
+            # Restore stdout and stderr
+            os.dup2(saved_stdout, 1)
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stdout)
+            os.close(saved_stderr)
+
+
+serializers._SERIALIZERS["jsonl"] = JsonlSerializer()  # type: ignore
+serializers._SERIALIZERS["tifffile"] = TiffFileSerializer()
+serializers._SERIALIZERS["jpeg"] = JPEGGeneralSerializer()
+logger.debug("Registered JsonlSerializer for litdata")
+logger.debug("Modified TiffFileSerializer for litdata")
+logger.debug("Modified JPEGGeneralSerializer for litdata")
+
+
+# *==============================================================
+# * Utilities
+# *==============================================================
 
 
 def py_obj_to_jsonl(metadata: dict):
     buffer = io.BytesIO()
     buffer.write(json.dumps(metadata).encode("utf-8") + b"\n")
-
     return buffer.getvalue()
 
 
@@ -119,7 +400,12 @@ def safetensors_codec_io(data_dict: Dict[str, torch.Tensor]) -> bytes:
 def img_decode_io(img_bytes: bytes):
     with warnings.catch_warnings(record=True) as w:
         try:
-            img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+            with io.BytesIO(img_bytes) as f:
+                img = Image.open(f)
+                # remove icc profile to avoid libpng print info
+                # see https://github.com/ultralytics/ultralytics/issues/339#issuecomment-1691086802
+                img.info.pop("icc_profile", None)
+                img = np.array(img.convert("RGB"))
 
             for warning in w:
                 if issubclass(warning.category, Image.DecompressionBombWarning):
@@ -138,9 +424,6 @@ def img_decode_io(img_bytes: bytes):
             return img
         except Image.DecompressionBombError as e:
             log_print(f"Too large image: {e}", "warning", warn_once=True)
-            return None
-        except Exception as e:
-            log_print(f"Error decoding image: {e}", "error")
             return None
 
 
@@ -212,7 +495,7 @@ def tiff_decode_io(
                         maxworkers=__max_workers,  # Example max workers
                     )
                 return output_array
-            except Exception as e:
+            except Exception:
                 # Fallback to the simpler method if any error occurs during the 'out' optimization path
                 # You might want to log the error 'e' for debugging purposes
                 # print(f"Warning: Failed to use 'out' parameter optimization: {e}. Falling back.")
@@ -514,7 +797,7 @@ def wids_latent_decode(sample: dict[str, Any], return_dict=False):
     call_fns = {
         "npz": partial(npz_decode_io, ret_keys=return_dict),
         "safetensors": partial(safetensors_decode_io, return_dict=return_dict),
-        "npy": npy_codec_io,
+        "npy": npy_decode_io,
     }
 
     keys = list(sample.keys())
@@ -564,7 +847,7 @@ def wids_caption_embed_decode(
         raise ValueError("Captions not found.")
 
     # features
-    embeds = {}
+    embeds: dict[str, torch.Tensor] = {}
     if features_key is not None:
         embeds = safetensors_decode_io(
             sample.pop(features_key).getvalue(), return_dict=True

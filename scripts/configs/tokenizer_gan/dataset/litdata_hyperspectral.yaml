@@ -1,0 +1,149 @@
+_target_: ...
+paths:
+  rgb_path:
+    3bands_512:
+      - [
+          "data/AerialVG/LitData_hyper_images",
+          "data/CityBench-CityData/LitData_hyper_images",
+          "data/GID-GF2/LitData_hyper_images",
+          "data/LoveDA/LitData_hyper_images",
+          "data/miniFrance/LitData_hyper_images",
+          "data/Multispectral-Spacenet-series/LitData_hyper_images_3bands",
+          "data/OpenEarthMap/LitData_hyper_images",
+          "data/RefSegRS/LitData_hyper_images",
+          "data/RS5M/LitData_images_train",
+          "data/RS5M/LitData_images_val",
+          "data/RSCaptions/LitData_hyper_images",
+          "data/uavid/LitData_hyper_images",
+          "data2/Disaterm3/LitData_hyper_images",
+          "data/Fmow_rgb/LitData_hyper_images",
+          "data2/InriaAerialLabelingDataset/LitData_hyper_images",
+          "data2/RemoteSAM270k/LitData_hyper_images",
+          "data2/SkyDiffusion/LitData_images",
+          "data2/TEOChatlas/LitData_images_train",
+          "data2/TEOChatlas/LitData_images_eval",
+          "data2/UDD/LitData_hyper_images",
+          "data2/VDD/LitData_hyper_images",
+        ]
+      - resize_before_transform: 512
+        is_cycled: true
+
+  multispectral_paths:
+    4bands_512:
+      - [
+          "data2/Multispectral-FMow-full/LitData_hyper_images_4bands",
+          "data/Gaofen1/LitData_hyper_images",
+          # "data/QuickBird/LitData_hyper_images",
+          # "data/IKONOS/LitData_hyper_images",
+          # "data/WorldView4/LitData_hyper_images",
+          "data/MDAS-Optical/LitData_hyper_images",
+        ]
+      - resize_before_transform: 512
+        is_cycled: true
+
+    8bands_512:
+      - [
+          "data/Multispectral-Spacenet-series/LitData_hyper_images_8bands",
+          "data2/Multispectral-FMow-full/LitData_hyper_images_8bands",
+          # "data/WorldView2/LitData_hyper_images",
+          # "data/WorldView3/LitData_hyper_images",
+          "data2/DCF_2019/LitData_hyper_images",
+          "data/MMOT/LitData_hyper_images",
+        ]
+      - resize_before_transform: 512
+        is_cycled: true
+
+    10bands_128:
+      - ["data2/TUM_128/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    12bands_128:
+      - ["data/MMSeg_YREB/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    13bands_128:
+      - ["data2/DCF_2020/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    bigearth_13bands_chw_128:
+      - ["data2/BigEarthNet_S2/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    32bands_512:
+      - ["data/OHS/LitData_hyper_images"]
+      - resize_before_transform: 512
+        is_cycled: true
+
+    50bands_512:
+      - ["data/Houston/LitData_hyper_images"]
+      - resize_before_transform: 512
+        is_cycled: true
+
+  hyperspectral_paths:
+    150bands_128:
+      - ["data/HyperGlobal/LitData_hyper_images_GF5"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    175bands_128:
+      - ["data/hyspecnet11k/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    224bands_128:
+      - ["data/DryadHyper/LitData_hyper_images"]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    368bands_256:
+      - ["data/MDAS-HySpex/LitData_hyper_images"]
+      - resize_before_transform: 256
+        is_cycled: true
+
+    369bands_128:
+      - [
+          "data/EarthView/LitData_neon",
+        ]
+      - resize_before_transform: 128
+        is_cycled: true
+
+    438bands_512:
+      - ["data/MUSLI/LitData_hyper_images"]
+      - resize_before_transform: 512
+        is_cycled: true
+
+size_based_batch_sizes:
+  128: 16
+  256: 12
+  512: 8
+
+combined_kwargs:
+  batching_method: per_stream
+  weights: [1, 1, 1]
+
+sub_combined_kwargs:
+  - batching_method: stratified
+  - batching_method: per_stream
+    weights: [1, 1, 0.4, 0.5, 0.5, 1., 0.4, 0.3]
+  - batching_method: per_stream
+    weights: [1, 1, 1, 1, 1, 1]
+
+loader_kwargs:
+  - batch_size: 5
+    num_workers: 12
+    persistent_workers: true
+    prefetch_factor: 4
+  - batch_size: 8
+    num_workers: 12
+    persistent_workers: true
+    prefetch_factor: 4
+  - batch_size: 18
+    num_workers: 12
+    persistent_workers: true
+    prefetch_factor: null
+
+chained_loader_kwargs:

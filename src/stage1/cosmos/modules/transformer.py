@@ -8,7 +8,7 @@ Features:
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import List, Optional, Tuple, Type, Union
+from typing import Callable, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,7 @@ from timm.layers.pos_embed_sincos import (
 from timm.models.naflexvit import get_init_weights_vit, named_apply
 from timm.models.vision_transformer import VisionTransformer
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import (
     BlockMask,
     create_block_mask,
@@ -69,6 +70,46 @@ from .rope import (
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
 
+JVP_FLASH_ATTN_ENABLED = False
+try:
+    from jvp_flash_attention.jvp_attention import JVPAttn
+    from jvp_flash_attention.jvp_attention import attention as jvp_attention
+
+except ImportError:
+    JVP_FLASH_ATTN_ENABLED = False
+
+
+def _jvp_math_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    # assert dropout == 0, "Dropout is not supported for JVP Attention"
+    with sdpa_kernel(SDPBackend.MATH):
+        return F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attention_mask,
+            dropout,
+        ), None
+
+
+def _jvp_flash_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    assert dropout == 0, "Dropout is not supported for JVP Attention"
+    x = jvp_attention(query, key, value, attn_mask=attention_mask)
+    return x, None
+
 
 class Attention(Attention_):
     config = SimpleNamespace(
@@ -91,6 +132,7 @@ class Attention(Attention_):
         proj_bias: bool = True,
         attn_type: str = "sdpa",
         is_causal: bool = False,
+        jvp=False,
     ):
         norm_layer = (
             get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
@@ -111,6 +153,19 @@ class Attention(Attention_):
         )
         self.attn_implem = attn_type
         self.is_causal = is_causal
+        self.jvp = jvp
+
+        self._all_attention_functions = ALL_ATTENTION_FUNCTIONS
+        if jvp and not JVP_FLASH_ATTN_ENABLED:
+            logger.warning(
+                "JVP Flash Attention is not enabled. Please install it by running `pip install jvp_flash_attention` "
+                "or the flash attention will not be used and fall back to math attention kernel."
+            )
+            self._all_attention_functions["jvp_math_attention"] = _jvp_math_attention
+            self.attn_implem = "jvp_math_attention"
+        elif jvp and JVP_FLASH_ATTN_ENABLED:
+            self._all_attention_functions["jvp_flash_attention"] = _jvp_flash_attention
+            self.attn_implem = "jvp_flash_attention"
 
     def forward(
         self,
@@ -150,7 +205,10 @@ class Attention(Attention_):
             attention_mask, BlockMask
         ):
             attention_mask = attention_mask.to_dense()
-        x, _ = ALL_ATTENTION_FUNCTIONS[self.attn_implem](
+
+        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+        assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
+        x, _ = attention_function_(
             self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p
         )
 

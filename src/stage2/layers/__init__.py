@@ -47,3 +47,4 @@ from .blocks import (
 )
 from .resample import create_downsample_layer, create_upsample_layer
 from .utils import pack_one, unpack_one
+from .dinov3_adapter import DINOv3_Adapter, DINOv3_Adapter_MS_Down

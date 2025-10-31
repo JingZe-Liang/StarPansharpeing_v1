@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
   - tokenizer: comos_hybrid_f16c32
   - quantizer: quant
   - accelerator: base
@@ -23,8 +23,9 @@ accelerator:
     num_steps: 1
 
 tokenizer:
-  model:
-    latent_channels: 64
+  cnn_cfg:
+    model:
+      latent_channels: 64
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}
@@ -90,7 +91,7 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.04
+  ssim_weight: 0.0
   disc_weight: 0.1
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
@@ -107,7 +108,7 @@ train:
   tokenizer_name: hybrid_cosmos_f16c32
   proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 0.08
+  max_grad_norm: 3.0
   track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
@@ -115,8 +116,8 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: true
-  resume_path: runs/stage1_cosmos_hybrid/2025-10-19_21-55-32_hybrid_cosmos_f16c32/checkpoints/checkpoint_27
-  ema_load_path:
+  resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -133,42 +134,72 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: src.utilities.optim.get_muon_triton_optimizer
     _partial_: true
-    lr: 4.0e-4 # Reduced learning rate for hybrid model stability
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    general_defaults:
+      lr: 4.0e-4
+    muon_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.1
+      momentum: 0.95
+    adamw_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+      betas: [0.9, 0.95]
+
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
-    # betas: [0.5, 0.95]
-    # foreach: true
+    # betas: [0.95, 0.99]
+    # # foreach: true
+    # fused: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: src.utilities.optim.get_muon_triton_optimizer
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    general_defaults:
+      lr: 4.0e-4
+    muon_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.1
+      momentum: 0.95
+    adamw_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+      betas: [0.9, 0.95]
+
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
     # betas: [0.0, 0.9] #[0.9, 0.95]
-    # foreach: true
+    # # foreach: true
+    # fused: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

@@ -1,8 +1,10 @@
 import io
 import math
+from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from glob import glob
+from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence, cast
 
@@ -17,6 +19,9 @@ import spectral
 import tifffile
 import torch
 import webdataset as wds
+from litdata import optimize
+from litdata.processing.data_processor import ALL_DONE
+from litdata.streaming.writer import BinaryWriter
 from PIL import Image
 from scipy.io import loadmat
 from torchvision.io import read_video, video_reader
@@ -24,7 +29,10 @@ from tqdm import tqdm
 
 from src.utilities.logging.print import catch_any, configure_logger, log, logger
 
-configure_logger(sink="tmp/run.log", level="debug", auto=False, removed=False)
+configure_logger(
+    sink="tmp/run.log", level="debug", _auto_=False, removed=True, add_tqdm_filter=True
+)
+logger = logger.bind(tqdm=True)
 
 Image.MAX_IMAGE_PIXELS = None  # disable the warning for large images
 
@@ -63,6 +71,10 @@ BANDS_NAME = [
 
 # global index that saved images count
 total_img_saved_count = 0
+
+
+def _litdate_identity(idx):
+    return idx
 
 
 def background_is_all_zero(
@@ -984,7 +996,7 @@ def tiff_decoder(key, x):
 
 
 def clip_img_to_webdataset(
-    sink,
+    sink: wds.ShardWriter | wds.TarWriter | BinaryWriter,
     img_path: str | Path,
     img_clip_size: tuple[int, int] = (512, 512),
     img_stride: tuple[int, int] = (512, 512),
@@ -1000,6 +1012,7 @@ def clip_img_to_webdataset(
     force_save_dtype: str | np.dtype = "auto",
     add_global_index: bool = False,
     assert_channel_n: int | None = None,
+    dataset_type: str = "webdataset",
 ):
     def slide_image_and_save(img, img_name):
         if process_img_type == "clip":
@@ -1081,22 +1094,49 @@ def clip_img_to_webdataset(
             )
             saved_ext = save_backend if save_backend not in ("jpeg", "JPEG") else "jpg"
 
-            sink.write(
-                {
+            nonlocal sink
+            if dataset_type == "webdataset":
+                sink.write(
+                    {
+                        "__key__": saved_name,
+                        f"{IMG_SAVE_NAME}.{saved_ext}": img_saver_backend_compact_with_wds(
+                            patch,
+                            save_backend,
+                            **save_kwargs,
+                        ),
+                    }
+                )
+            elif dataset_type == "litdata":
+                data = {
                     "__key__": saved_name,
-                    f"{IMG_SAVE_NAME}.{saved_ext}": img_saver_backend_compact_with_wds(
+                    "img": img_saver_backend_compact_with_wds(
                         patch,
                         save_backend,
                         **save_kwargs,
                     ),
                 }
-            )
+                sink = cast(Queue, sink)
+                sink.put(data)
+            elif dataset_type == "litdata_bin":
+                # webdataset-like writer api
+                data = {
+                    "__key__": saved_name,
+                    "img": img_saver_backend_compact_with_wds(
+                        patch,
+                        save_backend,
+                        **save_kwargs,
+                    ),
+                }
+                sink.add_item(total_img_saved_count, data)
+            else:
+                raise ValueError(f"Unknown dataset type: {dataset_type}")
 
             n_patches += 1
 
         if patch is None:
             logger.warning(f"Image {img_name} has no valid patches, skipping saving.")
             return 0, img.shape, (None, None)
+
         return n_patches, img.shape, patch.shape
 
     img_name = Path(img_path).stem
@@ -1127,7 +1167,7 @@ def clip_img_to_webdataset(
 
 @catch_any()
 def loop_dataset_tif_MSI_images_to_webdataset(
-    webdataset_pattern: str,
+    save_pattern_or_path: str,
     dataset_root: str | Path | list[str | Path] | None = None,
     msi_files: list[str | Path] | Iterable | None = None,
     img_clip_size: tuple[int, int] = (512, 512),
@@ -1149,6 +1189,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     delete_file: bool = False,
     channel_n: int | None = None,  # assert the channel number of the image
     use_shard_writter: bool = True,
+    dataset_type: str = "webdataset",
 ):
     if dataset_root is not None:
         if isinstance(dataset_root, (str, Path)):
@@ -1172,32 +1213,32 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     logger.info(f"found {len(msi_files)} MSI files")
 
     # make output dir
-    Path(webdataset_pattern).parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"make output dir {Path(webdataset_pattern).parent.as_posix()}")
+    Path(save_pattern_or_path).parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"make output dir {Path(save_pattern_or_path).parent.as_posix()}")
 
-    # write to webdataset
-    if use_shard_writter:
-        writter_fn = lambda: wds.ShardWriter(webdataset_pattern, maxsize=max_size)
-    else:
-        writter_fn = lambda: wds.TarWriter(webdataset_pattern)
-    with writter_fn() as sink:
+    # write to webdataset or litdata
+    def _runner(sink):
+        run_main_kwargs = dict(
+            img_clip_size=img_clip_size,
+            img_stride=img_stride,
+            img_resize=img_resize,
+            process_img_type=process_img_type,
+            save_backend=save_backend,
+            transpose=read_transpose,
+            read_fn_kwargs=read_fn_kwargs,
+            save_kwargs=save_kwargs,
+            rescale=img_rescale,
+            force_save_dtype=force_save_dtype,
+            assert_channel_n=channel_n,
+            add_global_index=add_global_index,
+            dataset_type=dataset_type,
+        )
         for msi_file in (tbar := tqdm(msi_files, disable=not tqdm_or_not)):
             msi_file = cast(Path, msi_file)  # ensure msi_file is Path type
             n_patches, shape, patch_shape = clip_img_to_webdataset(
                 sink,
                 img_path=msi_file,
-                img_clip_size=img_clip_size,
-                img_stride=img_stride,
-                img_resize=img_resize,
-                process_img_type=process_img_type,
-                save_backend=save_backend,
-                transpose=read_transpose,
-                read_fn_kwargs=read_fn_kwargs,
-                save_kwargs=save_kwargs,
-                rescale=img_rescale,
-                force_save_dtype=force_save_dtype,
-                assert_channel_n=channel_n,
-                add_global_index=add_global_index,
+                **run_main_kwargs,
             )
             if delete_file:
                 Path(msi_file).unlink(missing_ok=True)
@@ -1206,8 +1247,55 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 tbar.set_description(
                     f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}, {delete_file=}"
                 )
+        if dataset_type == "litdata":
+            logger.info("Writing to LitData done.")
+            # Stop sign
+            sink.put(ALL_DONE)
+        elif dataset_type == "litdata_bin":
+            # done and merge
+            sink.done()
+            sink.merge()
+            logger.info("LitData binary writte done and merge index file.")
 
-    logger.info(f"webdataset written to {webdataset_pattern}")
+    if dataset_type == "webdataset":
+        if use_shard_writter:
+            writter_fn = lambda: wds.ShardWriter(save_pattern_or_path, maxsize=max_size)
+        else:
+            writter_fn = lambda: wds.TarWriter(save_pattern_or_path)
+
+        with writter_fn() as sink:
+            _runner(sink)
+
+    elif dataset_type == "litdata":
+        q = Queue(maxsize=200)
+
+        # produce data process
+        producer = Process(target=_runner, args=(q,), daemon=True)
+        producer.start()
+
+        # litdata optimized
+        optimize(
+            fn=_litdate_identity,
+            queue=q,
+            output_dir=save_pattern_or_path,
+            num_workers=1,
+            chunk_bytes="256MB",
+            mode="append",
+            start_method="fork",
+        )
+        producer.join()
+    elif dataset_type == "litdata_bin":
+        writer = BinaryWriter(
+            cache_dir=save_pattern_or_path,
+            chunk_bytes="512Mb",
+        )
+
+        _runner(writer)
+
+    else:
+        raise ValueError(f"Unsupported dataset_type: {dataset_type}")
+
+    logger.info(f"webdataset written to {save_pattern_or_path}")
 
 
 def test_webdatasets(tar_file_paths: list[str]):
@@ -1639,14 +1727,15 @@ if __name__ == "__main__":
         # Dynamic Earth Dataset, 1024px original, clip into 512px
         path = "/home/user/zihancao/Dataset/DynamicEarthNet/planet"
         all_msi_files_s = list(Path(path).rglob("**/PF-SR/*.tif"))
-        webdataset_pts = (
-            "data2/DynamicEarth/hyper_images/DynamicEarth-4_bands-px_512-1-%04d.tar"
-        )
+        # webdataset_pts = (
+        #     "data2/DynamicEarth/hyper_images/DynamicEarth-4_bands-px_512-1-%04d.tar"
+        # )
+        webdataset_pts = "data2/DynamicEarth/LitData_hyper_images"
         func_kwargs = {
             "process_img_type": "clip",
             "img_clip_size": (512, 512),
             "img_stride": (512, 512),
-            "img_rescale": 'add_min,0.999,both',
+            "img_rescale": "add_min,0.999,both",
             "save_backend": "tiff",
             "save_kwargs": {
                 "tiff_compression_type": "jpeg2000",
@@ -1656,6 +1745,7 @@ if __name__ == "__main__":
             "read_fn_kwargs": {
                 "tiff_bands_seperated": False,
             },
+            "dataset_type": "litdata_bin",
         }
         logger.info(f"Found {len(all_msi_files_s)} images.")
 
@@ -1670,7 +1760,7 @@ if __name__ == "__main__":
         )
         for wds_pt, all_msi_files in zip(webdataset_pts, all_msi_files_s):
             loop_dataset_tif_MSI_images_to_webdataset(
-                webdataset_pattern=wds_pt,
+                save_pattern_or_path=wds_pt,
                 msi_files=all_msi_files,
                 save_backend=func_kwargs.pop("save_backend", "jpeg"),
                 **func_kwargs,
