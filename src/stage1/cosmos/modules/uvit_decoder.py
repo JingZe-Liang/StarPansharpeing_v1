@@ -139,7 +139,7 @@ class UViTDecoder(nn.Module):
                 in_channels, channels, padding_mode="reflect"
             )
         else:
-            noise_conv_in = AdaptiveInputConvLayer(in_channels, channels)
+            noise_conv_in = AdaptiveInputConvLayer(in_channels, channels, mode="interp")
         fused_conv = nn.Conv2d(
             channels * 2, channels, kernel_size=3, padding=1, groups=channels
         )
@@ -268,7 +268,9 @@ class UViTDecoder(nn.Module):
                 in_channels, channels, padding_mode="reflect"
             )
         else:
-            self.conv_out = AdaptiveOutputConvLayer(channels, in_channels)
+            self.conv_out = AdaptiveOutputConvLayer(
+                channels, in_channels, mode="interp"
+            )
 
         ### Null condition h ###
         self.null_cond_h = nn.Parameter(torch.randn(1, z_dim, 1, 1) * 0.2)
@@ -437,13 +439,13 @@ class UViTDecoder(nn.Module):
         # 2. Down blocks
         x, enc_res = self._forward_downs(x, t_emb, ctx_emb, use_act_ckpt=use_act_ckpt)
 
-        # 4. Mid block
+        # 3. Mid block
         x = self._forward_mids(x, t_emb, ctx_emb, use_act_ckpt=use_act_ckpt)
 
-        # 5. Up blocks
+        # 4. Up blocks
         x = self._forward_ups(x, t_emb, ctx_emb, enc_res, use_act_ckpt=use_act_ckpt)
 
-        # 6. Output
+        # 5. Output
         if self.conv_norm_out:
             x = self.conv_norm_out(x)
         x = self.conv_out_act(x)

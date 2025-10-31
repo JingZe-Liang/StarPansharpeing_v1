@@ -8,7 +8,7 @@ Features:
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import List, Optional, Tuple, Type, Union
+from typing import Callable, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,7 @@ from timm.layers.pos_embed_sincos import (
 from timm.models.naflexvit import get_init_weights_vit, named_apply
 from timm.models.vision_transformer import VisionTransformer
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import (
     BlockMask,
     create_block_mask,
@@ -57,6 +58,7 @@ from .mask import random_masking_mae, random_masking_no_drop
 from .patching import (
     AdaptivePatchEmbedding,
     AdaptiveProgressivePatchEmbedding,
+    AdaptiveProgressivePatchUnembedding,
     create_unpatcher,
 )
 from .resample import MingtokDownsampleShortCut, MingtokUpsampleAverage
@@ -67,6 +69,46 @@ from .rope import (
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
+
+JVP_FLASH_ATTN_ENABLED = False
+try:
+    from jvp_flash_attention.jvp_attention import JVPAttn
+    from jvp_flash_attention.jvp_attention import attention as jvp_attention
+
+except ImportError:
+    JVP_FLASH_ATTN_ENABLED = False
+
+
+def _jvp_math_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    # assert dropout == 0, "Dropout is not supported for JVP Attention"
+    with sdpa_kernel(SDPBackend.MATH):
+        return F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attention_mask,
+            dropout,
+        ), None
+
+
+def _jvp_flash_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    assert dropout == 0, "Dropout is not supported for JVP Attention"
+    x = jvp_attention(query, key, value, attn_mask=attention_mask)
+    return x, None
 
 
 class Attention(Attention_):
@@ -90,6 +132,7 @@ class Attention(Attention_):
         proj_bias: bool = True,
         attn_type: str = "sdpa",
         is_causal: bool = False,
+        jvp=False,
     ):
         norm_layer = (
             get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
@@ -110,6 +153,19 @@ class Attention(Attention_):
         )
         self.attn_implem = attn_type
         self.is_causal = is_causal
+        self.jvp = jvp
+
+        self._all_attention_functions = ALL_ATTENTION_FUNCTIONS
+        if jvp and not JVP_FLASH_ATTN_ENABLED:
+            logger.warning(
+                "JVP Flash Attention is not enabled. Please install it by running `pip install jvp_flash_attention` "
+                "or the flash attention will not be used and fall back to math attention kernel."
+            )
+            self._all_attention_functions["jvp_math_attention"] = _jvp_math_attention
+            self.attn_implem = "jvp_math_attention"
+        elif jvp and JVP_FLASH_ATTN_ENABLED:
+            self._all_attention_functions["jvp_flash_attention"] = _jvp_flash_attention
+            self.attn_implem = "jvp_flash_attention"
 
     def forward(
         self,
@@ -149,7 +205,10 @@ class Attention(Attention_):
             attention_mask, BlockMask
         ):
             attention_mask = attention_mask.to_dense()
-        x, _ = ALL_ATTENTION_FUNCTIONS[self.attn_implem](
+
+        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+        assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
+        x, _ = attention_function_(
             self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p
         )
 
@@ -715,6 +774,9 @@ class TransformerTokenizer(nn.Module):
         is_causal=False,
         patcher_type: str = "patch_embedder",
         with_cls_token: bool = False,
+        # others
+        patch_prog_dims: list[int] | None = None,
+        unpatch_prog_dims: list[int] | None = None,
     ):
         super().__init__()
         self.in_chan = in_chan
@@ -722,15 +784,27 @@ class TransformerTokenizer(nn.Module):
         self.grad_checkpointing = False
 
         # Patch embedding
-        if patcher_type == "patch_embedder":
-            self.patch_embed = AdaptivePatchEmbedding(
-                img_size=(img_size, img_size),  # placeholder, not used
-                patch_size=patch_size,
-                in_chans=in_chan,
-                embed_dim=embed_dim,
-                strict_img_size=False,
-                output_fmt="NLC",
-            )
+        if patcher_type in ("patch_embedder", "progressive_patch_embedder"):
+            if patcher_type == "progressive_patch_embedder":
+                assert patch_prog_dims is not None, (
+                    "patch_prog_dims must be provided for progressive patch embedding"
+                )
+                self.patch_embed = AdaptiveProgressivePatchEmbedding(
+                    img_size=(img_size, img_size),  # placeholder, not used
+                    patch_size=patch_size,
+                    progressive_dims=patch_prog_dims,
+                    in_chans=in_chan,
+                    embed_dim=embed_dim,
+                    output_fmt="NLC",
+                )
+            else:
+                self.patch_embed = AdaptivePatchEmbedding(
+                    img_size=(img_size, img_size),  # placeholder, not used
+                    patch_size=patch_size,
+                    in_chans=in_chan,
+                    embed_dim=embed_dim,
+                    output_fmt="NLC",
+                )
             self.patch_size = patch_size
             self.grid_size = self.patch_embed.grid_size
             self.n_patches = self.patch_embed.num_patches
@@ -823,6 +897,7 @@ class TransformerTokenizer(nn.Module):
         # Head
         self.head = nn.Identity()
         self.head_required = False
+        self.head_type = head
         self.out_chan = out_chan
         self.out_patch_size = out_patch_size
         if head is not None:
@@ -841,6 +916,20 @@ class TransformerTokenizer(nn.Module):
             elif head == "adaptive_linear":
                 self.head = AdaptiveOutputLinearLayer(
                     embed_dim, out_chan * (out_patch_size**2), mode="interp"
+                )
+            elif head == "adaptive_unpatcher":
+                assert unpatch_prog_dims is not None, (
+                    "unpatch_prog_dims must be provided for adaptive unpatcher head"
+                )
+                assert out_patch_size > 1, (
+                    f"out_patch_size must be >1 for unpatcher head"
+                )
+                self.head = AdaptiveProgressivePatchUnembedding(
+                    embed_dim,
+                    out_chan,
+                    unpatch_prog_dims,
+                    out_patch_size,
+                    adaptive_mode="interp",
                 )
             else:
                 raise ValueError(f"Unknown head type: {head}")
@@ -967,7 +1056,10 @@ class TransformerTokenizer(nn.Module):
         return x, rope
 
     def forward_features(
-        self, x: Float[Tensor, "b c h w or b l c"], hw: tuple[int, int] | None = None
+        self,
+        x: Float[Tensor, "b c h w or b l c"],
+        hw: tuple[int, int] | None = None,
+        get_intermidates: list[int] | None = None,
     ):
         # Get grid size
         if hw is None:
@@ -995,11 +1087,15 @@ class TransformerTokenizer(nn.Module):
         x, mask, ids_restore = self._get_masked_x(x)
 
         # Layers
-        for blk in self.layers:
+        intermidates = []
+        index = get_intermidates or []
+        for i, blk in enumerate(self.layers):
             if self.grad_checkpointing and self.training:
                 x = checkpoint(blk, x, rope, None, use_reentrant=False)
             else:
                 x = blk(x, rope=rope)
+            if i in index:
+                intermidates.append(x[:, self.n_reg_tokens :])
 
         # Projection in
         x = self._forward_proj_out(x)
@@ -1017,6 +1113,7 @@ class TransformerTokenizer(nn.Module):
             "grid_size": (gx_h, gx_w),
             "mask": mask,
             "ids_restore": ids_restore,
+            "intermidates": intermidates if len(intermidates) > 0 else None,
         }
         return out
 
@@ -1025,14 +1122,12 @@ class TransformerTokenizer(nn.Module):
         x,
         grid_size: tuple[int, int] | torch.Tensor | torch.Size,
         ret_2d_tokens=False,
+        out_shape=None,
     ):
         # Reshape into 2d img
         reshape_flag = self.head_required and ret_2d_tokens
 
-        if not self.head_required and ret_2d_tokens:
-            x = rearrange(x, "... (h w) c -> ... c h w", h=grid_size[0], w=grid_size[1])
-        else:
-            x = self.head(x)  # (bs, n, out_chan)
+        def to_out_2d(x):
             if ret_2d_tokens:
                 x = rearrange(
                     x,
@@ -1042,6 +1137,23 @@ class TransformerTokenizer(nn.Module):
                     p1=self.patch_size,
                     p2=self.patch_size,
                 )
+            return x
+
+        if not self.head_required and ret_2d_tokens:
+            x = rearrange(x, "... (h w) c -> ... c h w", h=grid_size[0], w=grid_size[1])
+        else:
+            if self.head_type in ("linear", "norm_linear"):
+                x = self.head(x)  # (bs, n, out_chan)
+                x = to_out_2d(x)
+            elif self.head_type == "adaptive_linear":
+                assert out_shape is not None
+                x = self.head(x, out_shape * self.patch_size**2)
+                x = to_out_2d(x)
+            elif self.head_type == "adaptive_unpatcher":
+                # Adaptive unpatcher
+                x = self.head(x, out_shape)
+                if not ret_2d_tokens:
+                    logger.warning("Adaptive unpatcher alwarys return 2d tokens")
         return x
 
     def forward(
@@ -1050,14 +1162,23 @@ class TransformerTokenizer(nn.Module):
         *,
         ret_2d_tokens=False,
         ret_all=True,
+        get_intermidates=None,
+        out_shape: torch.Size | tuple | None = None,
         mask: Optional[torch.Tensor] = None,
         id_store: Optional[torch.Tensor] = None,
     ):
-        out = self.forward_features(x)  # (bs, n, dim)
+        out = self.forward_features(
+            x, get_intermidates=get_intermidates
+        )  # (bs, n, dim)
         x = out["x_norm_patch_tokens"]
-        x = self._to_output(x, grid_size=out["grid_size"], ret_2d_tokens=ret_2d_tokens)
+        x = self._to_output(
+            x,
+            grid_size=out["grid_size"],
+            ret_2d_tokens=ret_2d_tokens,
+            out_shape=out_shape,
+        )
 
-        if not ret_all:
+        if not ret_all and get_intermidates is None:
             return x
         else:
             out["head_out"] = x

@@ -33,6 +33,7 @@ from .mars import MARS
 from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
+from .muon_triton import Muon as MuonTriton
 from .sana_came import CAME8BitWrapper, CAMEWrapper, Lion
 
 # add to torch.serialization.safe_globals
@@ -49,6 +50,7 @@ torch.serialization.add_safe_globals(
         KronMars,
         MARS,
         Muon,
+        MuonTriton,
         MounFSDP_v2,
         MounFSDP_v1,
         CAME,
@@ -70,10 +72,60 @@ if _dino_imported:
 
 
 # Muon optimizer parameters getter
-from typing import Iterable
+from typing import Any, Iterable
+
+from ..config_utils import function_config_to_basic_types
 
 
+@function_config_to_basic_types
 def get_muon_optimizer(named_parameters: Iterable, **other_muon_kwargs):
     muon_p, adamw_p = Muon.clear_muon_adamw_params(named_parameters)
 
     return Muon(muon_params=muon_p, adamw_params=adamw_p, **other_muon_kwargs)
+
+
+@function_config_to_basic_types
+def get_muon_triton_optimizer(
+    named_parameters: Iterable,
+    general_defaults: dict[str, Any] | None = None,
+    muon_defaults: dict[str, Any] | None = None,
+    adamw_defaults: dict[str, Any] | None = None,
+):
+    """
+    Create a MuonTriton optimizer with separate configurations for Muon and AdamW parameters.
+
+    Parameters
+    ----------
+    named_parameters : Iterable
+        Iterable of named model parameters to optimize
+    general_defaults : dict[str, Any]
+        General default configuration for all parameters
+    muon_defaults : dict[str, Any] | None, optional
+        Specific defaults for Muon optimizer (2D+ parameters)
+    adamw_defaults : dict[str, Any] | None, optional
+        Specific defaults for AdamW optimizer (1D parameters)
+
+    Returns
+    -------
+    MuonTriton
+        Configured MuonTriton optimizer instance
+    """
+    gp = MuonTriton.clear_muon_adamw_params(named_parameters)
+
+    # Set general defaults as base configuration
+    if general_defaults is None:
+        general_defaults = {}
+
+    gp[0].update(general_defaults)
+    gp[1].update(general_defaults)
+
+    # Override with muon-specific defaults
+    if muon_defaults is not None:
+        gp[0].update(muon_defaults)
+
+    # Override with adamw-specific defaults
+    if adamw_defaults is not None:
+        gp[1].update(adamw_defaults)
+
+    optim = MuonTriton(gp, defaults=general_defaults)
+    return optim

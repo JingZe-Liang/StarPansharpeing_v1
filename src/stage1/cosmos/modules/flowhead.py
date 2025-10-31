@@ -1,6 +1,7 @@
 import ast
 import math
 import random
+from typing import Any, Literal, Optional, Self
 
 import torch
 import torch.nn as nn
@@ -11,8 +12,13 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from tqdm import tqdm
 
+# Flow matching and tim transition
 from src.utilities.transport.flow_matching.transport import Sampler, Transport
+from src.utilities.transport.tim.transition import TransitionSchedule, get_delta_embed
+from src.utilities.transport.tim.transports import OT_FM
+from src.utilities.transport.tim.transports import Transport as TimTransport
 
+from .blocks import AdaptiveOutputLinearLayer
 from .patching import (
     AdaptiveProgressivePatchEmbedding,
     AdaptiveProgressivePatchUnembedding,
@@ -21,6 +27,17 @@ from .patching import (
 
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
+
+
+def is_sequence_shape(shape: Any) -> bool:
+    return isinstance(shape, (torch.Size, list, tuple))
+
+
+def get_chan_from_shape(shape: torch.Size | tuple | list | int) -> int:
+    if is_sequence_shape(shape):
+        return shape[1]
+    else:
+        return shape
 
 
 def l2p_transform_tensor(x, patch_size, img_size):
@@ -44,7 +61,7 @@ def l2p_transform_tensor(x, patch_size, img_size):
     return x
 
 
-class FlowDecoderHead(nn.Module):
+class Unpatcher(nn.Module):
     """to 2d head: blc -> bchw"""
 
     def __init__(
@@ -54,6 +71,7 @@ class FlowDecoderHead(nn.Module):
         patch_size=14,
         img_size=224,
         head_type="once",
+        module_by_time=False,
         **prog_kwargs,
     ):
         super().__init__()
@@ -61,17 +79,32 @@ class FlowDecoderHead(nn.Module):
         self.patch_size = patch_size
         self.img_size = img_size
 
-        # TODO: add time embedding like FinalLayer
         if head_type == "progressive":
-            self.unpatcher = AdaptiveProgressivePatchUnembedding(
+            assert "progressive_dims" in prog_kwargs, (
+                f"progressive_dims must be provided for progressive unpatching"
+            )
+            self.unpatcher = AdaptiveProgressivePatchUnembedding(  # type: ignore
                 in_chans=in_chans,
                 out_chans=out_chans,
                 patch_size=patch_size,
+                adaptive_mode="interp",
                 **prog_kwargs,
             )
-        else:
+        elif head_type == "once":
             self.unpatcher = nn.Linear(in_chans, out_chans * patch_size * patch_size)
-            # self.unpatcher = FinalLayer(in_chans, out_chans * patch_size * patch_size)
+        elif head_type == "once_adaptive":
+            self.unpatcher = AdaptiveOutputLinearLayer(
+                in_chans, out_chans, bias=True, mode="interp"
+            )
+        else:
+            raise NotImplementedError(f"head_type {head_type} not implemented")
+
+        # Time modulation
+        self.module_by_time = module_by_time
+        if module_by_time:
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(), nn.Linear(in_chans, 2 * in_chans, bias=True)
+            )
 
     def init_weights(self):
         # zero out?
@@ -82,11 +115,20 @@ class FlowDecoderHead(nn.Module):
         else:
             self.unpatcher.init_weights(True)
 
-    def forward(self, x_blc, out_shape: torch.Size | tuple | None = None):
-        if self.head_type == "once":
+    def forward(self, x_blc, c=None, out_shape: torch.Size | tuple | None = None):
+        # time modulation
+        if c is not None and self.module_by_time:
+            shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+            x_blc = modulate(x_blc, shift, scale)
+
+        if self.head_type[:4] == "once":
             # NOTE:
             # does not support dynamic out channels
             # if is a rgb image decoding, select this in most cases
+            if self.head_type == "once_adaptive":
+                assert out_shape is not None, (
+                    "out_shape must be provided for once_adaptive unpatching"
+                )
             x_blc = self.unpatcher(x_blc)
             img_size = out_shape[-2:] if out_shape is not None else self.img_size
             return l2p_transform_tensor(
@@ -141,6 +183,8 @@ class TimestepEmbedder(nn.Module):
         return embedding
 
     def forward(self, t):
+        # rescale t
+        t = t * 1000
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(
             self.mlp[0].weight.dtype
         )
@@ -216,6 +260,7 @@ class SimpleMLPAdaLN(nn.Module):
         z_channels,
         num_res_blocks,
         grad_checkpointing=False,
+        time_cond_type="t",
     ):
         super().__init__()
 
@@ -225,9 +270,22 @@ class SimpleMLPAdaLN(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.grad_checkpointing = grad_checkpointing
 
+        # times
         self.time_embed = TimestepEmbedder(model_channels)
-        self.cond_embed = nn.Linear(z_channels, model_channels)
+        self.time_cond_type = time_cond_type
+        self.use_delta_embed = time_cond_type in [
+            "t-r",
+            "r",
+            "t,t-r",
+            "r,t-r",
+            "t,r,t-r",
+        ]
+        self.delta_t_embed = None
+        if self.use_delta_embed:
+            self.delta_t_embed = TimestepEmbedder(model_channels)
 
+        # projections
+        self.cond_embed = nn.Linear(z_channels, model_channels)
         self.input_proj = nn.Linear(in_channels, model_channels)
 
         res_blocks = []
@@ -263,20 +321,24 @@ class SimpleMLPAdaLN(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def forward(self, x, t, c):
+    def forward(self, x, t: Tensor | tuple[Tensor, Tensor], c=None):
         """
         Apply the model to an input batch.
         :param x: an [N x C] Tensor of inputs.
-        :param t: a 1-D batch of timesteps.
+        :param t: a 1-D batch of timesteps or (t, r) in tim scheduling.
         :param c: conditioning from AR transformer.
         :return: an [N x C] Tensor of outputs.
         """
         x = self.input_proj(x)
-        t = self.time_embed(t)
         c = self.cond_embed(c)
+        t = get_delta_embed(
+            t,
+            time_proj=self.time_embed,
+            delta_t_proj=self.delta_t_embed,
+            time_cond_type=self.time_cond_type,
+        )
 
         y = t + c
-
         if self.grad_checkpointing and not torch.jit.is_scripting():
             for block in self.res_blocks:
                 x = checkpoint(block, x, y)
@@ -284,7 +346,7 @@ class SimpleMLPAdaLN(nn.Module):
             for block in self.res_blocks:
                 x = block(x, y)
 
-        return self.final_layer(x, y)
+        return self.final_layer(x, y), y
 
 
 class FlowDecoder(nn.Module):
@@ -298,11 +360,14 @@ class FlowDecoder(nn.Module):
         width,
         grad_checkpointing=False,
         num_sampling_steps="10",
+        time_cond_type="t",
         train_schedule="fat_lognormal",
         use_cfg=False,
+        cfg_prob: float = 0.5,
         patch_size=14,
         img_size=224,
         head_type="once",
+        head_kwargs: dict = {},  # progressive dims
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -314,6 +379,7 @@ class FlowDecoder(nn.Module):
         self.num_sampling_steps = int(num_sampling_steps)
         self.head_type = head_type
         self.tgt_chan_patched = target_channels * patch_size * patch_size
+        self.cfg_prob = cfg_prob
 
         # mlp head (latent to pixel)
         self.in_channels = self.tgt_chan_patched
@@ -324,13 +390,15 @@ class FlowDecoder(nn.Module):
             z_channels=z_channels,
             num_res_blocks=depth,
             grad_checkpointing=grad_checkpointing,
+            time_cond_type=time_cond_type,
         )
-        self.head = FlowDecoderHead(
+        self.head = Unpatcher(
             in_chans=width,
             out_chans=target_channels,
             patch_size=patch_size,
             img_size=img_size,
             head_type=head_type,
+            **head_kwargs,
         )
 
         # Scheduler
@@ -351,8 +419,10 @@ class FlowDecoder(nn.Module):
         z, x, (b, l, _) = self._to_bl_c(z_blc, xt_bchw)  # (b * l, c)
         # expand t
         t = repeat(t, "b -> (b l)", l=l)  # (b * l, )
-        x_hidden_blc = self.net(x, 1000 * t, z)  # time-dependent
-        x_bchw = self.head(x_hidden_blc.reshape(b, l, -1), out_shape=(chan, *img_size))
+        x_hidden_blc, y = self.net(x, t, z)  # time-dependent
+        x_bchw = self.head(
+            x_hidden_blc.reshape(b, l, -1), y, out_shape=(chan, *img_size)
+        )
 
         return x_bchw
 
@@ -382,18 +452,18 @@ class FlowDecoder(nn.Module):
         z_blc,
         x_bchw=None,
         inp_shape: tuple | list | torch.Size | None = None,
-        mode: str = "step",
+        mode: str = "train",
         sample_kwargs={},
     ) -> dict | Tensor:
         # x is 2d image: b, c, h, w
         # z is 1d latent: b, l, c from transformer, l = h * w / (p ** 2)
 
         # x, z: [b*n, c]
-        if mode == "step":
+        if mode == "train":
             assert x_bchw is not None, "Input x must be provided in step mode"
             # is training
             zc = z_blc
-            if self.use_cfg and random.random() < 0.5:
+            if self.use_cfg and random.random() < self.cfg_prob:
                 zc = torch.zeros_like(zc)
             terms = self.transport.training_losses(
                 self._forward_fn,
@@ -416,6 +486,7 @@ class FlowDecoder(nn.Module):
         self,
         z,
         inp_shape: tuple | list | torch.Size,
+        sample_steps=None,
         schedule="linear",
         cfg=1.0,
         cfg_interval=None,
@@ -425,7 +496,7 @@ class FlowDecoder(nn.Module):
         c_x, h, w = inp_shape[-3:]
         assert h * w // (self.patch_size**2) == n
 
-        sample_steps = self.num_sampling_steps
+        sample_steps = sample_steps or self.num_sampling_steps
 
         # get all timesteps ts and intervals Δts
         if schedule == "linear":
@@ -435,7 +506,7 @@ class FlowDecoder(nn.Module):
             dts = torch.ones_like(ts) * (1.0 / sample_steps)
         elif schedule.startswith("pow"):  # "pow_0.25"
             p = float(schedule.split("_")[1])
-            ts = torch.arange(0, sample_steps + 1).flip(0) ** (
+            ts = torch.arange(0, sample_steps + 1).flip(0) ** (  # type: ignore
                 1 / p
             ) / sample_steps ** (1 / p)
             dts = ts[:-1] - ts[1:]
@@ -489,9 +560,155 @@ class FlowDecoder(nn.Module):
         return sampled_image
 
 
+class TimFlowDecoder(nn.Module):
+    """Tim Flow Decoder with t,r time embeddings"""
+
+    def __init__(
+        self,
+        target_channels,  # base channel
+        z_channels,
+        depth,
+        width,
+        grad_checkpointing=False,
+        time_cond_type="t,t-r",
+        use_cfg=False,
+        cfg_prob: float = 0.5,
+        patch_size=14,
+        img_size=224,
+        head_type="once",
+        head_kwargs: dict = {},
+        # tim flow matching kwargs
+        fm_kwargs={},
+        transition_schedule_kwargs={},
+    ):
+        super().__init__()
+        # decoder
+        self.flow_decoder = FlowDecoder(
+            target_channels,
+            z_channels,
+            depth,
+            width,
+            grad_checkpointing,
+            use_cfg=use_cfg,
+            cfg_prob=cfg_prob,
+            patch_size=patch_size,
+            time_cond_type=time_cond_type,
+            img_size=img_size,
+            head_type=head_type,
+            head_kwargs=head_kwargs,
+        )
+        delattr(self.flow_decoder, "sampler")
+        delattr(self.flow_decoder, "transport")
+
+        # FM transport and scheduler
+        self.transport = OT_FM(**fm_kwargs)
+        self.transition_schedule = TransitionSchedule(
+            self.transport,
+            **transition_schedule_kwargs,
+        )
+        self.null_cond_h = nn.Parameter(torch.zeros(1, 1, z_channels))
+
+    def forward(
+        self, xt_bchw, t, r, z_blc, inp_shape=None, return_zs=False, derivative=False
+    ):
+        chan = xt_bchw.shape[1]
+        img_size = xt_bchw.shape[-2:]
+
+        # to bl_c
+        z, x, (b, l, _) = self.flow_decoder._to_bl_c(z_blc, xt_bchw)  # (b * l, c)
+
+        # expand t and r
+        t = repeat(t, "b -> (b l)", l=l)  # (b * l, )
+        r = repeat(r, "b -> (b l)", l=l)  # (b * l, )
+
+        x_hidden_blc, zt_cond = self.flow_decoder.net(x, (t, r), z)  # time-dependent
+        x_bchw = self.flow_decoder.head(
+            x_hidden_blc.reshape(b, l, -1), zt_cond, out_shape=(chan, *img_size)
+        )
+
+        return x_bchw
+
+    def training_loss(
+        self,
+        z_blc,  # condition
+        x_bchw,  # clean image
+        inp_shape: tuple | list | torch.Size | None = None,
+        ema_model: Optional[Self] = None,
+        clamp: bool = False,
+    ):
+        if self.transition_schedule.transport.enhance_target:
+            assert ema_model is not None, "EMA model is required for enhance_target"
+            assert hasattr(self, "null_cond_h"), (
+                "The decoder must have null_cond_h for CFG"
+            )
+        assert x_bchw is not None, "Input x must be provided in step mode"
+
+        noise = torch.randn_like(x_bchw)
+        bs, l = z_blc.shape[:2]
+        z_null_cond = self.null_cond_h.expand(bs, l, -1)
+        flow_loss, _, loss_dict, breakdowns = self.transition_schedule(
+            self,
+            ema_model if ema_model is not None else None,
+            self,
+            batch_size=z_blc.shape[0],
+            x=x_bchw,
+            z=noise,
+            model_kwargs={"inp_shape": inp_shape, "z_blc": z_blc},
+            ema_kwargs={"inp_shape": inp_shape, "z_blc": z_null_cond},
+        )
+        recon = breakdowns["x0_pred"]
+        if clamp:
+            recon = recon.clamp(-1, 1)
+
+        losses = {"flow_loss": flow_loss}
+        return recon, losses
+
+    @torch.no_grad()
+    def sample(
+        self,
+        z_blc,
+        inp_shape: torch.Size | tuple,
+        clamp=False,
+        sample_kwargs: dict = dict(
+            num_steps=8,
+            stochasticity_ratio=0.0,
+            sample_type="transition",
+            cfg_scale=1.0,
+            progress_bar=True,
+        ),
+        ret_trajectory=False,
+    ):
+        x_init = torch.randn(inp_shape).to(z_blc)
+        null_cond_h = self.null_cond_h.expand(*z_blc.shape[:2], -1)
+        recon: Tensor = self.transition_schedule.sample(
+            self,
+            # start sampling noise
+            z=x_init,
+            # conditions
+            y=z_blc,
+            y_null=null_cond_h,  # since no CFG, y_null is None
+            T_max=1.0,
+            **sample_kwargs,
+        )
+        if not ret_trajectory:
+            recon = recon[-1]
+
+        if clamp:
+            recon = recon.clamp(-1, 1)
+
+        return recon
+
+
 def test_flow_head():
     flow_head = FlowDecoder(
-        3, 16, depth=2, width=768, num_sampling_steps="10", patch_size=16
+        3,
+        16,
+        depth=2,
+        width=768,
+        num_sampling_steps="10",
+        patch_size=16,
+        head_type="progressive",
+        head_kwargs={"progressive_dims": [256, 128, 64]},
     )
 
     # 16 * 16 = 256
@@ -517,6 +734,43 @@ def test_flow_head():
         print(sampled)
 
 
+def test_tim_flow_head():
+    flow_head = TimFlowDecoder(
+        3,
+        16,
+        depth=6,
+        width=768,
+        patch_size=16,
+        head_type="progressive",
+        head_kwargs={"progressive_dims": [256, 128, 64]},
+    )
+
+    # 16 * 16 = 256
+    # output shape: [2, 3, 256, 256]
+    x = torch.randn(2, 3, 256, 256)
+    z = torch.randn(2, 256, 16)
+    recon, loss = flow_head.training_loss(z, x, x.shape, None, False)
+    print(recon, loss)
+
+    # sample
+    z = torch.randn(2, 256, 16)
+    with torch.no_grad():
+        sampled = flow_head.sample(
+            z,
+            inp_shape=x.shape,
+            clamp=False,
+            sample_kwargs={
+                "num_steps": 20,
+                "stochasticity_ratio": 0.0,
+                "sample_type": "transition",
+                "cfg_scale": 3.0,
+                "progress_bar": True,
+            },
+            ret_trajectory=False,
+        )
+        print(sampled)
+
+
 if __name__ == "__main__":
     """
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.modules.flowhead
@@ -524,4 +778,5 @@ if __name__ == "__main__":
     from loguru import logger
 
     with logger.catch():
-        test_flow_head()
+        # test_flow_head()
+        test_tim_flow_head()

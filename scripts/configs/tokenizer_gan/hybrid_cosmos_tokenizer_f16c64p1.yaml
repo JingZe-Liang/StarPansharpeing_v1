@@ -5,8 +5,8 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
-  - tokenizer: hybrid_cosmos_f8c16p1 # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested, hybrid_cosmos_f8c16p1]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
+  - tokenizer: comos_hybrid_f16c32
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -23,8 +23,9 @@ accelerator:
     num_steps: 1
 
 tokenizer:
-  model:
-    latent_channels: 32
+  cnn_cfg:
+    model:
+      latent_channels: 64
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}
@@ -107,15 +108,16 @@ train:
   tokenizer_name: hybrid_cosmos_f16c32
   proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 0.08
-  track_metrics: false
+  max_grad_norm: 3.0
+  track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-09-11_16-21-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  grad_checkpoint: true
+  resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -132,42 +134,72 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: src.utilities.optim.get_muon_triton_optimizer
     _partial_: true
-    lr: 4.0e-4 # Reduced learning rate for hybrid model stability
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    general_defaults:
+      lr: 4.0e-4
+    muon_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.1
+      momentum: 0.95
+    adamw_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+      betas: [0.9, 0.95]
+
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
-    # betas: [0.5, 0.95]
-    # foreach: true
+    # betas: [0.95, 0.99]
+    # # foreach: true
+    # fused: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: src.utilities.optim.get_muon_triton_optimizer
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    general_defaults:
+      lr: 4.0e-4
+    muon_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.1
+      momentum: 0.95
+    adamw_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+      betas: [0.9, 0.95]
+
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
     # betas: [0.0, 0.9] #[0.9, 0.95]
-    # foreach: true
+    # # foreach: true
+    # fused: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -194,7 +226,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c32
+    run_comment: hybrid_cosmos_f16c64
     log_with_time: True
     visualize_every: 500
     log_every: 10

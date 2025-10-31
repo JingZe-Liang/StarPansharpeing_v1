@@ -1,12 +1,20 @@
+"""
+Print and log functions using loguru.
+
+env:
+    COLOR_LOG: 0/1, whether to colorize the log output to shell (default: 1).
+    SHELL_LOG_LEVEL: str, the logger's level. (default: "DEBUG").
+"""
+
 import inspect
 import os
 import re
 import sys
 import time
 from contextlib import ContextDecorator
-from functools import wraps
+from functools import lru_cache, partial, wraps
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Dict, Literal, LiteralString, Optional, Union
 
 import torch.distributed as dist
 from beartype import beartype
@@ -15,8 +23,18 @@ from rich.console import Console
 
 from .functions import default, once
 
+type Record = Dict[str, Any]
+
 # Define a type hint for allowed log levels
 LogLevel = Literal["trace", "debug", "info", "warning", "error", "critical"] | str
+PreservedKeys: list[LiteralString] = [
+    "tqdm",
+    "once",
+    "log_once",
+    "warn_once",
+    "once_pattern",
+    "not_rank0_print",
+]
 __warn_once_set = set()
 __warn_once_pattern_set = set()
 
@@ -35,6 +53,18 @@ logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
 
 
+def is_true(x):
+    return x in (True, 1, "true", "True")
+
+
+def is_false(x):
+    return not is_true(x)
+
+
+def is_none(x):
+    return x in (None, "none", "None")
+
+
 # Setup console
 @once
 def setup_console(_auto_=True):
@@ -48,7 +78,149 @@ if __setup_console:
     setup_console()
 
 
-def format_extra(record: dict[str, Any], preserve_keys: list[str] | None = ["tqdm"]):
+def is_rank_zero() -> bool:
+    """
+    Check if the current process is the main process (rank 0).
+    This is useful for distributed training scenarios.
+
+    Returns:
+        bool: True if the current process is rank 0, False otherwise.
+    """
+    # Assuming rank 0 is the main process
+    if dist.is_initialized():
+        return dist.get_rank() == 0
+    else:
+        return True
+
+
+@lru_cache(maxsize=1)
+def get_dist_rank() -> tuple[bool, int]:
+    return (
+        dist.is_initialized(),
+        dist.get_rank() if dist.is_initialized() else 0,
+    )
+
+
+def print_custom_markup(text: str):
+    processed_text = text.replace("</", "[/")
+    processed_text = processed_text.replace("<", "[")
+    processed_text = processed_text.replace(">", "]")
+
+    global _console
+    assert _console is not None, (
+        "Console is not initialized. Call setup_console() first."
+    )
+    _console.print(processed_text, markup=True, highlight=False, end="")
+
+
+def rank0_filter(record: Record) -> bool:
+    if record["extra"] is None:
+        return True
+    proc_id = get_dist_rank()[1]
+    mannual_proc_print = record["extra"].get("not_rank0_print", False)
+
+    if proc_id == 0 or is_true(mannual_proc_print):
+        if mannual_proc_print:
+            record["extra"]["proc"] = proc_id
+        return True
+    return False
+
+
+def process_id_patcher(record: Record):
+    if record["extra"] is None:
+        record["extra"] = {}
+
+    record["extra"]["proc"] = get_dist_rank()[1]
+    return record
+
+
+def print_once_filter(record: Record):
+    if record["extra"] is None:
+        return True
+
+    # flags
+    is_once_ = record["extra"].get("once", False)
+    is_log_once_ = record["extra"].get("log_once", False)
+    is_warn_once_ = record["extra"].get("warn_once", False)
+    log_once = is_once_ or is_log_once_ or is_warn_once_
+    # pattern
+    once_pattern = record["extra"].get("once_pattern", None)
+
+    if log_once or once_pattern is not None:
+        record["level"] = "warning" if is_warn_once_ else record["level"]
+        msg = record["message"]
+
+        global __warn_once_pattern_set, __warn_once_set
+
+        if once_pattern is not None:
+            if any(
+                re.search(stored_pattern, msg)
+                for stored_pattern in __warn_once_pattern_set
+            ):
+                # matched in stored patterns or in __once_pattern_set
+                # filter out
+                return False
+            __warn_once_pattern_set.add(once_pattern)
+        else:
+            if msg in __warn_once_set:
+                return False
+            __warn_once_set.add(msg)
+
+    # not filter out
+    return True
+
+
+def filter_cat(filters: list[Callable[[Record], bool] | None]):
+    def cat_filters(record):
+        for f in filters:
+            if f is None:
+                continue
+
+            if not f(record):
+                return False
+        return True
+
+    return cat_filters
+
+
+def log_level_range_filters(
+    level_range: tuple[LogLevel, LogLevel],
+) -> Callable[[Record], bool]:
+    level_order = {
+        "TRACE": 10,
+        "DEBUG": 20,
+        "INFO": 30,
+        "WARNING": 40,
+        "ERROR": 50,
+        "CRITICAL": 60,
+    }
+
+    min_level_value = level_order.get(level_range[0].upper(), 0)
+    max_level_value = level_order.get(level_range[1].upper(), 60)
+
+    def level_filter(record: Record) -> bool:
+        level_name = (
+            record["level"].name
+            if hasattr(record["level"], "name")
+            else record["level"]
+        )
+        record_level_value = level_order.get(level_name.upper(), 0)
+        return min_level_value <= record_level_value <= max_level_value
+
+    return level_filter
+
+
+def tqdm_undisrupt_print_filter(record: Record):
+    if record["extra"] is None:
+        return True
+
+    # let added tqdm logger to print, disable the main logger
+    # bind tqdm=True, return False
+    # is not set, tqdm=False, return True
+    return is_false(record["extra"].get("tqdm", False))
+
+
+def format_extra_patcher(record: Record, preserve_keys=PreservedKeys):
     if record["extra"] is None:
         return record
 
@@ -75,77 +247,70 @@ def format_extra(record: dict[str, Any], preserve_keys: list[str] | None = ["tqd
         # Add extra dict string to msg
         record["message"] = f"[{extras_msg}] {record['message']}"
 
-    # print(record["extra"])
-    # print("----------")
     return record
 
 
-# Configure logger
-def print_custom_markup(text: str):
-    processed_text = text.replace("</", "[/")
-    processed_text = processed_text.replace("<", "[")
-    processed_text = processed_text.replace(">", "]")
+def add_logger_filtes_(
+    only_rank_one: bool,
+    main_log_lvl_range: tuple | None,
+    add_tqdm_filter: bool,
+    add_print_once_filter: bool,
+    filters: list[Callable] | Callable | None = None,
+):
+    # Filter concate
+    main_ft: list[Callable[[Record], bool] | None] = []
 
-    global _console
-    assert _console is not None, (
-        "Console is not initialized. Call setup_console() first."
-    )
-    _console.print(processed_text, markup=True, highlight=False, end="")
+    # Add level range filter if specified
+    if main_log_lvl_range is not None:
+        lvl_rng_ft = log_level_range_filters(main_log_lvl_range)
+        main_ft.append(lvl_rng_ft)
 
+    # Rank 0 filter
+    if only_rank_one:
+        main_ft.append(rank0_filter)
 
-def filter_cat(filters: list[Callable[[dict[str, Any]], bool] | None]):
-    def cat_filters(record):
-        for f in filters:
-            if f is None:
-                continue
+    # Add tqdm filter if specified
+    if add_tqdm_filter:
+        main_ft.append(tqdm_undisrupt_print_filter)
 
-            if not f(record):
-                return False
-        return True
+    if add_print_once_filter:
+        main_ft.append(print_once_filter)
 
-    return cat_filters
+    # Add custom filter if provided
+    if filters is not None:
+        if callable(filters):
+            main_ft.append(filters)
+        else:
+            main_ft.extend(filters)
 
+    # Combine all filters
+    if len(main_ft) != 0:
+        main_log_filter = filter_cat(main_ft)
+    else:
+        main_log_filter = None
 
-def log_level_range_filters(
-    level_range: tuple[LogLevel, LogLevel],
-) -> Callable[[dict[str, Any]], bool]:
-    level_order = {
-        "TRACE": 10,
-        "DEBUG": 20,
-        "INFO": 30,
-        "WARNING": 40,
-        "ERROR": 50,
-        "CRITICAL": 60,
-    }
-
-    min_level_value = level_order.get(level_range[0].upper(), 0)
-    max_level_value = level_order.get(level_range[1].upper(), 60)
-
-    def level_filter(record: dict[str, Any]) -> bool:
-        level_name = (
-            record["level"].name
-            if hasattr(record["level"], "name")
-            else record["level"]
-        )
-        record_level_value = level_order.get(level_name.upper(), 0)
-        return min_level_value <= record_level_value <= max_level_value
-
-    return level_filter
+    return main_log_filter
 
 
 @once
 def configure_logger(
     sink=None,
-    level=os.getenv("SHELL_LOG_LEVEL", "debug"),
-    filter=None,
-    add_tqdm_filter=False,
+    level: str = os.getenv("SHELL_LOG_LEVEL", "debug"),
+    filters: list[Callable] | Callable | None = None,
     removed=True,
-    main_log_lvl_range=None,
+    main_log_lvl_range: tuple | None = None,
+    only_rank_one=False,
+    print_rank_info=False,
+    add_print_once_filter=True,
+    add_tqdm_filter=False,
+    *,
     _auto_=True,  # reserved for once decorator
 ):
     global __re_config_logger, _console, logger
 
     __re_config_logger = False
+
+    # * --- Sinks --- #
 
     if _console is not None:
         # sink = lambda msg: _console.print(msg, markup=True, highlight=False, end="")
@@ -160,34 +325,23 @@ def configure_logger(
     if removed:
         logger.remove()
 
+    colorize = True
     if "COLOR_LOG" in os.environ:
-        colorize = bool(int(os.getenv("COLOR_LOG")))
+        colorize = is_true(os.getenv("COLOR_LOG", "1").lower())
     elif is_file:
         colorize = False
-    else:
-        colorize = True
 
-    # Filter concate
-    main_ft: list[Callable[[dict[str, Any]], bool] | None] = []
+    # * --- Filters --- #
 
-    # Add level range filter if specified
-    if main_log_lvl_range is not None:
-        lvl_rng_ft = log_level_range_filters(main_log_lvl_range)
-        main_ft.append(lvl_rng_ft)
+    main_log_filter = add_logger_filtes_(
+        only_rank_one=only_rank_one,
+        main_log_lvl_range=main_log_lvl_range,
+        add_tqdm_filter=add_tqdm_filter,
+        add_print_once_filter=add_print_once_filter,
+        filters=filters,
+    )
 
-    # Add custom filter if provided
-    if filter is not None:
-        main_ft.append(filter)
-
-    # Add tqdm filter if specified
-    if add_tqdm_filter:
-        main_ft.append(lambda record: "tqdm" not in record["extra"])
-
-    # Combine all filters
-    if len(main_ft) != 0:
-        main_log_filter = filter_cat(main_ft)
-    else:
-        main_log_filter = None
+    # * --- Formatter and logger configuration --- #
 
     # Main logger
     fmt = (
@@ -203,7 +357,37 @@ def configure_logger(
         format=fmt,
         filter=main_log_filter,
     )
-    logger = logger.patch(format_extra)
+
+    # * --- Patchers --- #
+
+    # add not preserved extra patcher
+    if print_rank_info:
+        logger = logger.patch(process_id_patcher)
+    logger = logger.patch(format_extra_patcher)
+
+    # Tqdm logger
+    if add_tqdm_filter:
+        from tqdm import tqdm
+
+        tqdm_logger_filter = add_logger_filtes_(
+            only_rank_one=only_rank_one,
+            main_log_lvl_range=main_log_lvl_range,
+            add_tqdm_filter=False,  # disable the tqdm fileter
+            add_print_once_filter=add_print_once_filter,
+            filters=[lambda record: "tqdm" in record["extra"]],
+        )
+
+        # Add a handler for tqdm-specific logs that uses tqdm.write to avoid conflicts
+        logger.add(
+            sink=lambda msg: tqdm.write(msg, end=""),
+            level=level.upper(),
+            filter=tqdm_logger_filter,
+            format=fmt,
+            colorize=colorize,
+            enqueue=False,
+        )
+        # Only log this message if it doesn't have tqdm binding to avoid infinite recursion
+        logger.info("Add tqdm write logger.")
 
     # Tqdm logger
     if add_tqdm_filter:
@@ -235,12 +419,13 @@ def set_logger_file(
     mode="w",
     filter=None,
     main_log_lvl_range=None,
+    add_print_once_filter=True,
 ):
     global logger
 
     log_format_in_file = (
         "<green>[{time:MM-DD HH:mm:ss}]</green> "
-        "- <level>[{level}]</level> "
+        "- <level>[{level:^6}]</level> "
         "- <cyan>{file}:{line}</cyan> "
         "- <level>{message}</level>"
     )
@@ -265,23 +450,13 @@ def set_logger_file(
 
     Path(file).parent.mkdir(parents=True, exist_ok=True)
 
-    # Combine filters
-    file_filters = []
-
-    # Add level range filter if specified
-    if main_log_lvl_range is not None:
-        level_range_filter = log_level_range_filters(main_log_lvl_range)
-        file_filters.append(level_range_filter)
-
-    # Add custom filter if provided
-    if filter is not None:
-        file_filters.append(filter)
-
-    # Combine all filters
-    if file_filters:
-        final_filter = filter_cat(file_filters)
-    else:
-        final_filter = None
+    file_filter = add_logger_filtes_(
+        only_rank_one=False,
+        main_log_lvl_range=main_log_lvl_range,
+        add_tqdm_filter=False,
+        add_print_once_filter=add_print_once_filter,
+        filters=filter,
+    )
 
     handler = logger.add(
         file,
@@ -292,9 +467,9 @@ def set_logger_file(
         backtrace=True,
         colorize=False,
         mode=mode,
-        filter=final_filter,
+        filter=file_filter,
     )
-    logger = logger.patch(format_extra)
+    logger = logger.patch(format_extra_patcher)
 
     log_print(
         f"Set logger to log to file: {file} with level {level}, handler id: {handler}",
@@ -304,26 +479,22 @@ def set_logger_file(
     return handler
 
 
-def is_rank_zero() -> bool:
-    """
-    Check if the current process is the main process (rank 0).
-    This is useful for distributed training scenarios.
+# *==============================================================
+# * function calling
+# *==============================================================
 
-    Returns:
-        bool: True if the current process is rank 0, False otherwise.
-    """
-    # Assuming rank 0 is the main process
-    if dist.is_initialized():
-        return dist.get_rank() == 0
-    else:
-        return True
+"""
+Usages:
+    calling the log_print function or it's alias log function
 
-
-def get_dist_rank() -> tuple[bool, int]:
-    return (
-        dist.is_initialized(),
-        dist.get_rank() if dist.is_initialized() else 0,
-    )
+Or directly calling logger._log or trace, debug, info, warning, error, critical methods,
+with record['extra'] values:
+    extras:
+        - tqdm: used when in a tqdm context, prevent loguru from breaking the progress bar
+        - not_rank0_print: used as filter indicator, print all processes even not rank 0
+        - once, warn_once, log_once: used to indicate only log once
+        - once_pattern: used to indicate only log once with pattern matching
+"""
 
 
 @beartype
@@ -338,7 +509,7 @@ def log_print(
     opt_record: bool = False,
     opt_lazy: bool = False,
     opt_raw: bool = False,
-    patch_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    patch_fn: Callable[[Record], Record] | None = None,
     context: dict[str, Any] | None = None,
     **other_context,
 ) -> None:
@@ -567,44 +738,65 @@ def print_info_if_raise(ret_all_stacks_info=False):
     return inner
 
 
+# * --- Test --- #
+
+
+def _test_print(rank, is_mp=False):
+    if is_mp:
+        dist.init_process_group(
+            backend="gloo",
+            init_method="tcp://localhost:23456",
+            rank=rank,
+            world_size=2,
+        )
+        print("Initialized process group for rank", rank)
+        import accelerate
+
+        accelerator = accelerate.Accelerator()
+    # Reconfigure logger to avoid conflicts when run as module
+    configure_logger(
+        level="debug",
+        add_tqdm_filter=True,
+        removed=True,
+        only_rank_one=True,
+        print_rank_info=False,
+        _auto_=False,
+    )
+
+    print("Configured logger")
+    # print(f"I am process {rank}")
+    logger.info(f"i am process {rank}", not_rank0_print=True)
+
+    # Test tqdm
+    from tqdm import tqdm
+
+    for i in tqdm(range(10)):
+        time.sleep(0.3)
+        logger.bind(tqdm=True).info(f"Processing item {i} in rank {rank}")
+
+    if is_mp:
+        accelerator.wait_for_everyone()
+
+    # Print other levels
+    logger.debug(f"Debug message from rank {rank}")
+    logger.warning(f"Warning message from rank {rank}", once=True)
+    logger.warning(f"Warning message from rank {rank}", once=True)  # not print
+    logger.error(f"Error message from rank {rank}")
+
+    # Extras
+    logger.bind(user="zihan").info("iam zihan")
+    logger.info("this is a normal info log", time="2025-10-23")
+
+    if is_mp:
+        dist.destroy_process_group()
+
+
 if __name__ == "__main__":
     """
         python -m src.utilities.logging.print
     """
-    # Reconfigure logger to avoid conflicts when run as module
-    configure_logger(add_tqdm_filter=True, removed=True, _auto_=False)
 
-    from tqdm import tqdm
+    import torch.multiprocessing as mp
 
-    for i in (tbar := tqdm(range(10), desc="Test tqdm to stdout")):
-        time.sleep(0.1)
-        logger.bind(tqdm=True).info(f"Processing item {i}")
-
-    configure_logger(
-        add_tqdm_filter=True,
-        removed=True,
-        _auto_=False,
-        main_log_lvl_range=("info", "error"),
-    )
-
-    logger.trace("This is a trace message that should be filtered out.")
-    logger.info("This is an info message.")
-    logger.error("This is an error message.")
-    logger.critical("This is a critical message that should be filtered out.")
-
-    # Test file logger with level range filter
-    log_file = "tmp/test_level_range.log"
-    set_logger_file(
-        log_file,
-        level="debug",
-        main_log_lvl_range=("info", "warning"),
-    )
-
-    logger.debug("This debug message should not appear in file.")
-    logger.info("This info message should appear in file.")
-    logger.warning("This warning message should appear in file.")
-    logger.error("This error message should not appear in file.")
-
-    print(
-        f"\nCheck the log file at {log_file} to verify level filtering works for file output."
-    )
+    mp.spawn(partial(_test_print, is_mp=True), nprocs=2)
+    # _test_print(0, False)

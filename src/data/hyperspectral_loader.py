@@ -13,19 +13,6 @@ import torch
 import torch.distributed
 import webdataset as wds
 import wids
-from kornia.augmentation import (
-    AugmentationSequential,
-    CenterCrop,
-    RandomBoxBlur,
-    RandomChannelShuffle,
-    RandomCutMixV2,
-    RandomHorizontalFlip,
-    RandomResizedCrop,
-    RandomRotation,
-    RandomSharpness,
-    RandomVerticalFlip,
-)
-from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from natsort import natsorted
 from safetensors.torch import load_file
 from timm.layers.helpers import to_2tuple
@@ -35,6 +22,7 @@ from typing_extensions import deprecated
 from src.data.codecs import (
     img_decode_io,
     json_decode_io,
+    npz_decode_io,
     safetensors_decode_io,
     string_decode_io,
     tiff_decode_io,
@@ -65,8 +53,6 @@ from src.data.utils import (
     wids_filter_img_size,
     wids_img_size_filter_by_parquet_index,
 )
-from src.data.utils import remove_meta_data as remove_meta_data_fn
-from src.data.wids_samplers import IndexFilteredDistributedSampler, IndexFilteredSampler
 from src.stage2.denoise.utils.noise_adder import (
     UniHSINoiseAdderKornia,
     get_tokenizer_trainer_noise_adder,
@@ -75,12 +61,16 @@ from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 from src.utilities.train_utils.state import StepsCounter
 
+from .augmentations import HyperRandomGrayScale, hyper_transform
+from .utils import remove_meta_data as remove_meta_data_fn
+from .wids_samplers import IndexFilteredDistributedSampler, IndexFilteredSampler
+
 __compile_collate_fn = False
 if __compile_collate_fn:
     torch._dynamo.config.recompile_limit = 20
 
 type WebdatasetPath = str | list[str] | list[list[str]]
-type SupportedLoaderType = Literal["webdataset", "folder", "wids"]
+type SupportedLoaderType = Literal["webdataset", "folder", "wids", "mds"]
 
 import hashlib
 
@@ -130,110 +120,6 @@ def get_dict_tensor_mapper(to_neg_1_1=True):
         return {"img": img, "img_max": img_max}
 
     return wds_to_dict_tensor_mapper
-
-
-class HyperRandomGrayScale(IntensityAugmentationBase2D):
-    """Randomly convert hyperspectral images to grayscale.
-
-    This augmentation randomly converts hyperspectral images to grayscale by computing
-    the mean across all channels and repeating it for all channels. This preserves
-    the original tensor shape while simulating grayscale appearance.
-
-    Args:
-        p (float): Probability of applying the grayscale transformation. Defaults to 0.5.
-    """
-
-    def __init__(self, p=0.5):
-        super().__init__(p)
-
-    def apply_transform(self, input, params, flags, transform=None):
-        """Apply grayscale transformation to input tensor.
-
-        Args:
-            input (Tensor): Input tensor of shape (B, C, H, W) where B is batch size,
-                C is number of channels, H is height, and W is width.
-            params: Parameters for the transformation (unused in this implementation).
-            flags: Flags for the transformation (unused in this implementation).
-            transform: Additional transform parameters (unused in this implementation).
-
-        Returns:
-            Tensor: Grayscale version of input tensor with the same shape (B, C, H, W).
-        """
-        assert input.ndim == 4
-        c = input.shape[1]
-        gray = input.mean(dim=1, keepdim=True).repeat_interleave(c, dim=1)
-        return gray
-
-
-def hyper_transform(
-    op_list: tuple[str, ...],
-    probs: tuple[float, ...] | float = 0.5,
-    random_apply: int | tuple[int] = 2,
-    default_img_size: int = 256,
-):
-    """Create a hyper-spectral image augmentation transform function.
-
-    This function creates a configurable data augmentation pipeline for hyperspectral images
-    using various image transformations. The transformations are applied sequentially with
-    specified probabilities.
-
-    Args:
-        op_list (tuple[str, ...]): List of augmentation operations to apply.
-            Supported operations: 'grayscale', 'channel_shuffle', 'sharpness',
-            'rotation', 'horizontal_flip', 'vertical_flip', 'cutmix', 'blur',
-            'center_crop', 'resized_crop'.
-        probs (tuple[float, ...] | float): Probability of applying each operation.
-            If float, same probability is used for all operations. Defaults to 0.5.
-        random_apply (int | tuple[int]): Number of operations to randomly apply.
-            If tuple, specifies the range. Defaults to 2.
-        default_img_size (int): Default image size for crop operations. Defaults to 256.
-
-    Returns:
-        function: A transform function that applies the specified augmentations to input data.
-    """
-    if isinstance(probs, float):
-        probs: tuple[float, ...] = tuple([probs] * len(op_list))
-    assert len(probs) == len(op_list), (  # type: ignore
-        "Number of probabilities must match number of operations."
-    )
-
-    _default_size: tuple[int, int] = to_n_tuple(default_img_size, 2)
-
-    _op_list_cls = dict(
-        grayscale=lambda p: HyperRandomGrayScale(p=p),
-        channel_shuffle=lambda p: RandomChannelShuffle(p=p),
-        sharpness=lambda p: RandomSharpness(p=p, sharpness=(0.5, 1.0)),
-        rotation=lambda p: RandomRotation((-30, 30), p=p),
-        horizontal_flip=lambda p: RandomHorizontalFlip(p=p),
-        vertical_flip=lambda p: RandomVerticalFlip(p=p),
-        cutmix=lambda p: RandomCutMixV2(num_mix=1, p=p, cut_size=(0.4, 0.6)),
-        blur=lambda p: RandomBoxBlur((3, 3), p=p),
-        center_crop=lambda p: CenterCrop(_default_size, p=p),
-        resized_crop=lambda p: RandomResizedCrop(
-            _default_size, scale=(0.5, 1.0), ratio=(0.75, 1.333), p=p
-        ),
-    )
-
-    ops = []
-    for op_str, prob in zip(op_list, probs):
-        op = _op_list_cls[op_str]
-        ops.append(op(prob))
-
-    op_seq = AugmentationSequential(
-        *ops,
-        data_keys=["input"],
-        random_apply=(
-            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply  # type: ignore
-        ),
-        same_on_batch=False,
-        keepdim=True,
-    )
-
-    def dict_mapper(x):
-        x = op_seq(x)
-        return x
-
-    return dict_mapper
 
 
 @torch.no_grad()
@@ -306,6 +192,7 @@ def get_hyperspectral_dataloaders(
     # image key in the sample dictionary
     img_key: str | list[str] = "auto",
     tgt_key: str | list[str] | None = None,
+    force_no_norm: bool = False,
     keys_to_remove: str | list[str] | None = None,
     random_one_key: bool = False,
     quantile_img_clip: Annotated[float, "0.0<f<1.0"] = 1.0,
@@ -419,6 +306,7 @@ def get_hyperspectral_dataloaders(
     # decode
     default_decoder = [
         wds.handle_extension("tif tiff", tiff_decode_io),
+        wds.handle_extension("npz", npz_decode_io),
         # webdataset read safetensors in tar, can not suit the memmap for fast loading
         wds.handle_extension("safetensors", safetensors_decode_io),
         wds.handle_extension("jpg png img_content", img_decode_io),
@@ -478,18 +366,19 @@ def get_hyperspectral_dataloaders(
         dataset = dataset.map(_sz_filter_fn)
 
     # norm
-    dataset = dataset.map(
-        partial(
-            norm_img,
-            to_neg_1_1=to_neg_1_1,
-            norm_keys=tgt_key,
-            permute=permute,
-            check_nan=check_nan,
-            per_channel=per_channel_norm,
-            quantile_clip=quantile_img_clip,
-            mannual_img_min_max=mannual_img_min_max,
+    if not force_no_norm:
+        dataset = dataset.map(
+            partial(
+                norm_img,
+                to_neg_1_1=to_neg_1_1,
+                norm_keys=tgt_key,
+                permute=permute,
+                check_nan=check_nan,
+                per_channel=per_channel_norm,
+                quantile_clip=quantile_img_clip,
+                mannual_img_min_max=mannual_img_min_max,
+            )
         )
-    )
 
     # channel check
     if check_channels_n is not None:
@@ -1533,6 +1422,9 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
 
 
 if __name__ == "__main__":
+    """
+    python -m src.data.hyperspectral_loader
+    """
     import glob
 
     from src.utilities.logging import set_logger_file
@@ -1564,7 +1456,7 @@ if __name__ == "__main__":
         # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0000.tar"],
         # ["data/MDAS-HySpex/MDAS-HySpex-368_bands-px_256-MSI-{0000..0003}.tar"],
         # ["data/TUM_128/hyper_images/TUM_128_data_{0000..0006}.tar"],
-        # [p.as_posix() for p in Path("data/RS5M").glob("**/*.tar")]
+        [p.as_posix() for p in Path("data/RS5M").glob("**/*.tar")]
         # ["/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/shardindex.json"]
         # [
         #     "/HardDisk/ZiHanCao/datasets/RS5M/train/pub11-train-{0000..0031}.tar",
@@ -1625,7 +1517,7 @@ if __name__ == "__main__":
         # ["data/Multispectral-Spacenet-series/05_SN6_buildings_PS-RGB.tar"]
         # ["data/Multispectral-Spacenet-series/00_SN1_buildings_3band.tar"],
         # ["data/Multispectral-Spacenet-series/02_SN7_buildings_images.tar"]
-        # ["data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"]
+        # ["data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"],
         # ["data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-0010.tar"],
         # [
         #     ["data/RS5M/train/pub11-train-0006.tar"],
@@ -1636,13 +1528,14 @@ if __name__ == "__main__":
         # ["data/WDC/hyper_images/Washington_DC_mall-191_bands-px_160-0000.tar"]
         # ["data/Downstreams/UrbanUnmixing/Urban_188_em4_init.tar"]
         # ["data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar"]
-        # ["data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar"]
+        # ["data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0000..0006}.tar"]
         # ["data/EarthView/hyper_images/neon/neon-{0000..0013}.tar"]
         # ["data/MUSLI/hyper_images/shardindex.json"]
-        ["data/RemoteSAM270k/RemoteSAM-270K/shardindex.json"]
+        # ["data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"]
+        # ["data2/DynamicEarth/hyper_images/DynamicEarth-4_bands-px_512-1-0000.tar"]
     ]
-    test_batch_size = 1
-    test_num_workers = 0
+    test_batch_size = 16
+    test_num_workers = 32
     test_shuffle_size = -1
 
     loader_kwargs = dict(
@@ -1650,13 +1543,13 @@ if __name__ == "__main__":
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
-        to_neg_1_1=False,
-        transform_prob=0.0,
+        to_neg_1_1=True,
+        transform_prob=0.4,
         random_apply=(1, 2),
         pin_memory=False,
-        prefetch_factor=2,
+        prefetch_factor=4,
         remove_meta_data=False,
-        resize_before_transform=None,
+        resize_before_transform=512,
         shuffle_within_workers=False,
         resample=False,
     )
@@ -1743,12 +1636,24 @@ if __name__ == "__main__":
 
     test_loader = iter(test_loader)
     tbar = tqdm()
+    import time
+
+    import lovely_tensors as lt
     import matplotlib.pyplot as plt
     import PIL.Image
 
+    lt.monkey_patch()
+
     i = 0
+    t1 = time.time()
+    print("Start testing loader...")
     while True:
         sample = next(test_loader)
         i += 1
         tbar.update(1)
-        print(sample["img"].shape)
+        # print(sample["img"].shape)
+        # sample['img'][:, [0,1,2]].rgb.fig.savefig(f"tmp/{i}.png")
+
+        # if i > 500:
+        #     print(f"Done. Time: {time.time() - t1}s")
+        #     break

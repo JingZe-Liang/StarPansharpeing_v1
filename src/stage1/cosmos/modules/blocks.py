@@ -1448,6 +1448,11 @@ class AdaptiveInputLinearLayer(nn.Module):
         b = self.linear.bias
         return F.linear(x, w, b)
 
+    def init_weight(self):
+        nn.init.trunc_normal_(self.linear.weight, 0.02)
+        if self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
+
 
 class AdaptiveOutputLinearLayer(nn.Module):
     def __init__(
@@ -1499,6 +1504,14 @@ class AdaptiveOutputLinearLayer(nn.Module):
             raise ValueError(f"Unknown mode {self.mode}")
 
         return F.linear(x, w, b)
+
+    def init_weights(self, zero_out=False):
+        if zero_out:
+            nn.init.zeros_(self.linear.weight)
+        else:
+            nn.init.trunc_normal_(self.linear.weight, 0.02)
+        if self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
 
     @property
     def weight(self):

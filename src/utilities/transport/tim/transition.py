@@ -1,7 +1,9 @@
 from copy import deepcopy
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 from tqdm import tqdm
 
 from .transports import Transport
@@ -371,6 +373,47 @@ class TransitionSchedule:
             x_cur = x_next
 
         return torch.stack(samples, dim=0).to(torch.float32)
+
+
+# Network utils
+
+
+def get_delta_embed(
+    ts: tuple | torch.Tensor,
+    time_proj: nn.Module,
+    delta_t_proj: nn.Module | None = None,
+    time_cond_type: Literal["t-r", "r", "t,r", "t,t-r", "r,t-r", "t,r,t-r"] = "t-r",
+) -> torch.Tensor:
+    use_delta_t_embed = delta_t_proj is not None
+
+    if isinstance(ts, (list, tuple)):
+        t, r = ts
+    else:
+        assert not use_delta_t_embed, "timestep should be a tuple of (t, r)"
+        t = ts
+        return time_proj(t)
+
+    if use_delta_t_embed:
+        delta_embedder = delta_t_proj
+    else:
+        delta_embedder = time_proj
+    assert delta_embedder is not None
+
+    if time_cond_type == "t-r":
+        delta_embed = delta_embedder(t - r)
+    elif time_cond_type == "r":
+        delta_embed = delta_embedder(r)
+    elif time_cond_type == "t,r":
+        delta_embed = time_proj(t) + delta_embedder(r)
+    elif time_cond_type == "t,t-r":
+        delta_embed = time_proj(t) + delta_embedder(t - r)
+    elif time_cond_type == "r,t-r":
+        delta_embed = time_proj(r) + delta_embedder(t - r)
+    elif time_cond_type == "t,r,t-r":
+        delta_embed = time_proj(t) + time_proj(r) + delta_embedder(t - r)
+    else:
+        raise NotImplementedError(f"Time cond type {time_cond_type} not implemented")
+    return delta_embed
 
 
 def test_scheduler():

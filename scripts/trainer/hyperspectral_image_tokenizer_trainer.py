@@ -34,7 +34,6 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from src.data.hyperspectral_loader import (
-    get_hyperspectral_dataloaders,
     get_hyperspectral_img_loaders_with_different_backends,
 )
 from src.stage1.cosmos.inference.utils import (
@@ -46,8 +45,7 @@ from src.stage1.utilities.train.network import (
     get_parameters_encoder_frozen,
 )
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import log_print, set_logger_file
-from src.utilities.logging.print import print_info_if_raise
+from src.utilities.logging import log_print
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter
@@ -335,7 +333,7 @@ class CosmosHyperspectralTokenizerTrainer:
         )
 
         if self.aug_pipe is not None:
-            self.log_msg(f"[Tokenizer]: using augmentation pipeline")
+            self.log_msg("[Tokenizer]: using augmentation pipeline")
             assert self.aug_pipeline_train_obj in [
                 "decoder_clean",
                 "decoder_deg",
@@ -659,7 +657,7 @@ class CosmosHyperspectralTokenizerTrainer:
         # quantizer
         if self.use_quantizer and self.sep_enc_dec:
             quant_params = list(self.quantizer.parameters())
-            self.log_msg(f"[Optim]: add quantizer params into optimizer")
+            self.log_msg("[Optim]: add quantizer params into optimizer")
             for quant_p in quant_params:
                 self.log_msg(f"[Optim]: quantizer param - {quant_p.shape}")
         else:
@@ -845,7 +843,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 assert isinstance(params, list)
                 params += quant_params
         else:
-            raise NotImplementedError(f"not implemented")
+            raise NotImplementedError("not implemented")
 
         return params
 
@@ -867,7 +865,7 @@ class CosmosHyperspectralTokenizerTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter: Callable):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -911,7 +909,7 @@ class CosmosHyperspectralTokenizerTrainer:
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
         if is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim):
             self.log_msg(
-                f"use heavyball optimizer, it will compile the optimizer, "
+                "use heavyball optimizer, it will compile the optimizer, "
                 "for efficience testing the scripts, disable the compilation.",
                 level="WARNING",
             )
@@ -1006,9 +1004,11 @@ class CosmosHyperspectralTokenizerTrainer:
             self.accelerator.prepare(self.antideg_net, self.antideg_net_optim)
 
         # dataloaders
-        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
-            self.train_dataloader, self.val_dataloader
-        )
+        # NOTE: if is litdata loader, it will automatically handle the world_size dispatch and sampler
+        # do not prepare loaders
+        # self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+        #     self.train_dataloader, self.val_dataloader
+        # )
         (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
             self.tokenizer_sched, self.disc_sched
         )
@@ -1567,6 +1567,8 @@ class CosmosHyperspectralTokenizerTrainer:
         while True:
             for batch in self.train_dataloader:
                 batch = self._randomly_batch_sample_key(batch)
+                if batch is None or batch.get("img", None) is None:
+                    continue
                 yield batch
 
     def train_loop(self):
@@ -1607,6 +1609,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         for batch in self.val_dataloader:
             batch = self._randomly_batch_sample_key(batch)
+            if batch is None or batch.get("img", None) is None:
+                continue
             yield batch
 
     def val_step(self, batch: dict) -> torch.Tensor:
@@ -1745,11 +1749,11 @@ class CosmosHyperspectralTokenizerTrainer:
                     is_main_process=self.accelerator.is_main_process,
                 )
 
-            self.log_msg(f"[State]: save peft (only lora layers) model")
+            self.log_msg("[State]: save peft (only lora layers) model")
 
     def save_ema(self):
         if self.no_ema:
-            self.log_msg(f"use deepspeed or FSDP, do have EMA model to save")
+            self.log_msg("use deepspeed or FSDP, do have EMA model to save")
             return
 
         ema_path = self.proj_dir / "ema"
@@ -1907,7 +1911,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     raise RuntimeError("load FSDP or LoRA weights failed")
             else:
                 # Load combined model
-                self.log_msg(f"loading bin or safetensors checkpoint into model ...")
+                self.log_msg("loading bin or safetensors checkpoint into model ...")
                 try:
                     accelerate.utils.load_checkpoint_in_model(
                         self.accelerator.unwrap_model(self.tokenizer),
@@ -1973,7 +1977,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # clear the accelerator model registration
         self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
+            "[Load EMA]: clear the accelerator registrations and re-prepare training"
         )
 
     def resume(self, path: str):
@@ -2076,10 +2080,10 @@ _configs_dict = {
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # psd kl vae
     "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
-    # hybrid ae
-    "nested_cosmos_f8c16p1": "nested_cosmos_tokenizer_f8c16p1",  # pure cnn backbone
-    "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",  # hybrid cnn-transformer backbone
     # TODO: flow decoder or flow head decoder AE
+    # hybrid ae
+    "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
+    "hybrid_cosmos_f16c64p1": "hybrid_cosmos_tokenizer_f16c64p1",
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized

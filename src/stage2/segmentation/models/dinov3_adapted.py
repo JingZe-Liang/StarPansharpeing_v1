@@ -8,8 +8,6 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
 
-sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
-
 from src.stage1.utilities.losses.repa import (
     load_repa_dino_v3_model as load_dino_v3_model,
 )

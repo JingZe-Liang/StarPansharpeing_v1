@@ -10,10 +10,12 @@ import torch
 import webdataset as wds
 import wids
 from braceexpand import braceexpand
+from litdata.streaming.writer import BinaryWriter
 from natsort import natsorted
 from PIL import Image
 from tqdm import tqdm
 
+from data.tar_utils import TarSinkManager
 from src.data.codecs import rgb_codec_io, safetensors_codec_io
 from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 from src.stage2.generative.tools.condition_prepare import (
@@ -30,7 +32,7 @@ def prepare_fn(
     conditions,
     rgb_channels,
     relative_data_dir,
-    sink_man,
+    sink_man: TarSinkManager | BinaryWriter,
     resume_from: str | None = None,
     save_original_rgb: bool = False,
     to_pil: bool = False,
@@ -38,6 +40,7 @@ def prepare_fn(
     caption_save_format: Literal["txt", "json"] = "json",
     save_attn_mask: bool = False,
     use_linstretch=False,
+    dataset_type: str = "webdataset",
 ):
     total_n = 0
     for ds, num in zip_longest(datasets, nums):
@@ -68,22 +71,28 @@ def prepare_fn(
                 continue
 
             # Get the sample key from the original webdataset sample
-            sample_key = sample.get("__key__", None)
-            url = sample.get("__url__", None)
-            tar_name = Path(url[0]).name
-            tar_rel_path = f"{rel_data_dir}/{tar_name}"
-            sink = sink_man.get_sink(tar_name, tar_rel_path)
+            if dataset_type == "webdataset":
+                sample_key = sample.get("__key__", None)
+                url = sample.get("__url__", None)
+                tar_name = Path(url[0]).name
+                tar_rel_path = f"{rel_data_dir}/{tar_name}"
+                sink = sink_man.get_sink(tar_name, tar_rel_path)
 
-            assert url is not None, (
-                "Sample does not have a URL which should not be happened."
-            )
-            assert sample_key is not None, (
-                "Sample does not have a key which should not be happened."
-            )
-
-            # Prepare the output dictionary for webdataset
-            assert len(sample_key) == 1, "Sample key must be a single string."
-            output_sample = {"__key__": sample_key[0]}
+                assert url is not None, (
+                    "Sample does not have a URL which should not be happened."
+                )
+                assert sample_key is not None, (
+                    "Sample does not have a key which should not be happened."
+                )
+                # Prepare the output dictionary for webdataset
+                assert len(sample_key) == 1, "Sample key must be a single string."
+                output_sample = {"__key__": sample_key[0]}
+            elif dataset_type == "litdata":
+                sink: BinaryWriter = sink_man
+                sample_key = sample.get("__key__", str(total_n))
+                output_sample = {"__key__": sample_key}
+            else:
+                raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
             # > Save original RGB image if requested
             if save_original_rgb and "img" in sample:
@@ -111,7 +120,10 @@ def prepare_fn(
 
                 # Save as PNG
                 rgb_image = Image.fromarray(img)
-                output_sample["rgb.jpg"] = rgb_image
+                if dataset_type == "webdataset":
+                    output_sample["rgb.jpg"] = rgb_image
+                elif dataset_type == "litdata_bin":
+                    output_sample["rgb"] = rgb_image
 
             # > Process and save condition images or captions
             for condition_name, condition_output in condition_data.items():
@@ -133,7 +145,7 @@ def prepare_fn(
                         ).encode("utf-8")
                     else:
                         raise ValueError(
-                            f"Unsupported condition type: {condition_type}"
+                            f"Unsupported condition type: {condition_name}"
                         )
 
                     embeds, mask = (
@@ -167,7 +179,11 @@ def prepare_fn(
                             condition_output = np.array(condition_output)
 
                     if condition_save_format == "png":
-                        output_sample[f"{condition_name}.png"] = (
+                        if dataset_type == "webdataset":
+                            key_ = f"{condition_name}.png"
+                        else:
+                            key_ = condition_name
+                        output_sample[key_] = (
                             condition_output
                             if isinstance(condition_output, Image.Image)
                             else Image.fromarray(condition_output)
@@ -175,7 +191,11 @@ def prepare_fn(
                     elif condition_save_format == "jpg":
                         if isinstance(condition_output, Image.Image):
                             # compression jpeg quality
-                            output_sample[f"{condition_name}.jpg"] = rgb_codec_io(
+                            if dataset_type == "webdataset":
+                                key_ = f"{condition_name}.jpg"
+                            else:
+                                key_ = condition_name
+                            output_sample[key_] = rgb_codec_io(
                                 img=np.array(condition_output)
                                 if isinstance(condition_output, Image.Image)
                                 else condition_output,
@@ -203,22 +223,25 @@ def prepare_fn(
 
             # Write the processed sample to tar
             if output_sample:
-                sink.write(output_sample)
+                if dataset_type == "webdataset":
+                    sink.write(output_sample)
+                    progress_bar.set_description(f"tar: {tar_name}")
+                else:
+                    sink.add_item(total_n, output_sample)
                 total_n += 1
 
                 # Update progress bar description periodically
                 progress_bar.set_postfix({"samples_processed": total_n})
-                progress_bar.set_description(f"tar: {tar_name}")
-                # if total_n % 100 == 0:
-                #     progress_bar.set_postfix({"samples_processed": total_n})
-                #     log_print(f"Processed {total_n} samples.")
             else:
                 log_print(
                     f"Empty output for sample {sample_key}, skipping.", level="warning"
                 )
 
-            # log_print(f"{total_n} samples written to {base_dir}/{tar_rel_path}")
         progress_bar.close()
+        if dataset_type == "litdata":
+            sink.done()
+            sink.merge()
+            logger.info("Finished writing litdata binary.")
 
     return total_n
 
@@ -239,6 +262,7 @@ def webdataset_conditions_prepare(
     relative_data_dir: str = "conditions",
     save_attn_mask: bool = False,
     use_linstretch=False,
+    dataset_type: str = "webdataset",
 ):
     """
     Process webdataset to generate condition images and captions.
@@ -267,7 +291,10 @@ def webdataset_conditions_prepare(
     log_print(f"Device: {device}")
     torch.cuda.set_device(device)  # Set the device for torch operations
 
-    sink_man = TarSinkManager(base_dir)
+    if dataset_type == "litdata":
+        sink_man = BinaryWriter(base_dir, chunk_bytes="512Mb")
+    else:
+        sink_man = TarSinkManager(base_dir)
 
     if not isinstance(datasets, list):
         datasets = [datasets]
@@ -293,12 +320,16 @@ def webdataset_conditions_prepare(
             caption_save_format=caption_save_format,
             save_attn_mask=save_attn_mask,
             use_linstretch=use_linstretch,
+            dataset_type=dataset_type,
         )
     except Exception as e:
         log_print(f"Error: {e}", level="critical")
     finally:
-        log_print(f"Closing all sinks ...")
-        sink_man.close_all()
+        if dataset_type == "litdata":
+            log_print(f"Finalizing litdata binary writer ...")
+        else:
+            log_print(f"Closing all sinks ...")
+            sink_man.close_all()
 
     log_print(f"Finished processing.")
     return total_n
@@ -340,9 +371,11 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
     if "_target_" in cfg.data:
         nums = None
         _, input_dataloader = hydra.utils.instantiate(cfg.data)
-        log_print(f"Setting up WebDataset pipeline: {cfg.data.wds_paths}")
+        log_print(f"Setting up dataset pipeline: {cfg.data.wds_paths}")
 
     elif isinstance(cfg.data, (str, list, ListConfig)):
+        # TODO: add litdata dataset support
+
         if isinstance(cfg.data, str):
             if Path(cfg.data).is_dir():
                 cfg.data = [str(p) for p in Path(cfg.data).glob("*.tar")]
@@ -354,7 +387,7 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
         data_s = natsorted(data_s)  # Sort the dataset paths naturally
 
         nums = [] if cfg.processor.count_tar_num else None
-        log_print(f"Set up WebDataset pipeline: {data_s}")
+        log_print(f"Set up dataset pipeline: {data_s}")
         for path in data_s:
             if cfg.processor.count_tar_num:
                 nums = cast(list[int], nums)
@@ -397,6 +430,7 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
         resume_from=cfg.processor.get("resume_from", None),
         relative_data_dir=cfg.processor.get("relative_data_dir", "conditions"),
         use_linstretch=cfg.processor.get("use_linstretch", False),
+        dataset_type=cfg.processor.get("dataset_type", "webdataset"),
     )
 
     log_print(

@@ -9,13 +9,11 @@ from timm.layers.create_norm_act import create_norm_act_layer, get_norm_act_laye
 from timm.layers.squeeze_excite import SqueezeExcite
 from torch import Tensor
 
-from src.stage1.utilities.losses.dinov3.dinov3.eval.segmentation.models.backbone.dinov3_adapter import (
-    DINOv3_Adapter,
-)
 from src.stage1.utilities.losses.dinov3.dinov3.models.vision_transformer import (
     DinoVisionTransformer,
 )
 
+from ...layers import DINOv3_Adapter
 from .vitamin_conv import MbConvSeqentialCond
 
 
@@ -322,7 +320,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.dropout_op = dropout_op
         self.dropout_op_kwargs = dropout_op_kwargs
 
-        in_ch = self.dinov3_adapter.backbone.embed_dim
+        in_ch = self.dinov3_adapter.embed_dim
 
         self.fapm = FAPM(
             in_ch,
@@ -344,9 +342,15 @@ class DINOv3EncoderAdapter(nn.Module):
         self.strides = [[2, 2]] * len(target_channels)
         self.kernel_sizes = [[3, 3]] * len(target_channels)
 
-    def forward(self, x: Float[Tensor, "b 3 h w"]) -> list[Tensor]:
+    def forward(self, x: Float[Tensor, "b 3 h w"]):
         H, W = x.shape[-2:]
         feats = self.dinov3_adapter(x)
+
+        others = None
+        if isinstance(feats, tuple):
+            # assert len(feats) == 2
+            feats, others = feats
+
         keys = ["1", "2", "3", "4"]
         x_list = [feats[k] for k in keys]
 
@@ -359,7 +363,11 @@ class DINOv3EncoderAdapter(nn.Module):
             target = (H // (2**i), W // (2**i))
             y = self.ups[i](y, target)
             skips.append(y)
-        return skips
+
+        if others is None:
+            return skips
+
+        return skips, others
 
     def compute_conv_feature_map_size(self, input_size):
         return 0

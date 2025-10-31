@@ -838,17 +838,17 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         # Tokenizer forward
         with self.accelerator.autocast():
             other_kwargs = {
-                "dec_mode": "step",
+                "dec_mode": "train",
                 "ema_model": self.ema_tokenizer.ema_model if ema else None,
             }
             if is_testing:
                 self.tokenizer.eval()
                 # Prepare for the sampling kwargs
                 other_kwargs.update(
-                    dict(
-                        dec_mode="loop",
-                        sampling_kwargs=to_cont(self.cfg.model_sampling),
-                    )
+                    {
+                        "dec_mode": "sample",
+                        "sampling_kwargs": to_cont(self.cfg.model_sampling),
+                    }
                 )
             latent = None
             self.tokenizer.forward  # debug: fast jump
@@ -897,8 +897,13 @@ class CosmosFlowHyperspectralTokenizerTrainer:
 
         optim_idx = 0 if train_tokenizer else 1  # tokenizer -> 0, discriminator -> 1
 
-        if (tok_feat := out_d.get("repa_feature", None)) is None:
+        tok_feat = out_d.get("repa_feature", None)
+        if tok_feat is None:
             tok_feat = out_d.get("vf_feature", None)
+
+        tok_feat1, tok_feat2 = tok_feat, None
+        if isinstance(tok_feat, (list, tuple)):
+            tok_feat1, tok_feat2 = tok_feat
 
         # loss
         with self.accelerator.autocast():
@@ -908,7 +913,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 reconstructions=out_d["recon"],
                 q_loss_total=out_d.get("q_loss", None),
                 q_loss_breakdown=out_d.get("q_info", None),
-                tokenizer_feat=tok_feat,
+                tokenizer_feat=tok_feat1,
+                tokenizer_feat2=tok_feat2,
                 last_layer=self.get_last_layer(mode="dec"),
                 enc_last_layer=self.get_last_layer(mode="enc"),
                 outer_recon_loss=out_d["flow_loss"],  # * diffusion / flow loss
