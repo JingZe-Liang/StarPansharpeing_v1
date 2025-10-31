@@ -34,7 +34,7 @@ from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
 remote_path = "OpenGVLab/InternVL3_5-8B"
-local_path = "src/stage2/generative/tools/conditions/caption/caption_weights/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
+local_path = "src/stage2/generative/tools/conditions/caption/weights/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
 max_tokens = 300
 default_prompt = f"""
 You will act as a remote sensing analyst to describe the content of the image.
@@ -401,7 +401,7 @@ def main_process_dataloader_img(
             dl, process_img, rgb_channels=rgb_channels, resume_from=resume_from
         ),
         desc="Captioning ...",
-        total=410475,
+        total=83818,  # 83814 + 83699 + 83834 + 46849,
         disable=False,
     )
 
@@ -414,6 +414,13 @@ def main_process_dataloader_img(
             }
         )
         tbar.set_description(f"Id: {res['id'][0]}")
+        processed_resumed_n = (
+            res["processed"]
+            + res["skipped"]
+            + (len(resume_from) if isinstance(resume_from, (set, list)) else 0)
+        )
+        tbar.n = processed_resumed_n
+        tbar.refresh()
 
         if not res["is_skipped"]:
             img_id = res["id"][0] if isinstance(res["id"], list) else res["id"]
@@ -440,54 +447,45 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 
-    _resumed = True
+    _resumed = False
     resumed_set = None
 
     if _resumed:
-        saved_resume_path = "data/RemoteSAM270k/RemoteSAM-270K/captions/JPEGImages"
+        saved_resume_path = "data/BigEarthNet_S2/condition_captions/0001"
         assert Path(saved_resume_path).exists(), (
             f"Resume path {saved_resume_path} does not exist."
         )
         saved_jsonl_files = list(Path(saved_resume_path).glob("*"))
         # remove extensions
-        resumed_set = set(  # 'JPEGImages/xxx'
-            "/".join(saved_resume_path.with_suffix("").parts[-2:])
-            for saved_resume_path in saved_jsonl_files
+        # resumed_set = set(  # 'JPEGImages/xxx'
+        #     "/".join(saved_resume_path.with_suffix("").parts[-2:])
+        #     for saved_resume_path in saved_jsonl_files
+        # )
+        resumed_set = set(
+            saved_resume_path.stem for saved_resume_path in saved_jsonl_files
         )
         logger.info(f"Already processed files: {len(resumed_set)}")
 
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
-    tar_file = "data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"
-    if os.path.exists(tar_file):
-        _, dl = get_hyperspectral_dataloaders(
-            wds_paths=tar_file,
-            batch_size=1,
-            num_workers=1,
-            to_neg_1_1=False,
-            permute=True,
-            resample=False,
-            per_channel_norm=False,
-            shuffle_size=-1,
-            transform_prob=0.0,
-        )
-    )
+    tar_file = "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar"
     _, dl = get_hyperspectral_dataloaders(
         wds_paths=tar_file,
         batch_size=1,
         num_workers=1,
         to_neg_1_1=False,
-        permute=True,
+        permute=False,
         resample=False,
         per_channel_norm=False,
+        shuffle_size=-1,
+        transform_prob=0.0,
     )
-
     print("Successfully created dataloader. Testing captioning...")
     # Use the main_process_dataloader_img function to process the dataloader
     main_process_dataloader_img(
         dl,
         rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
-        save_dir="data/BigEarthNet_S2/condition_captions/0003-0006",
+        save_dir="data/OpenEarthMap/captions",
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",
         file_type="jsonl",

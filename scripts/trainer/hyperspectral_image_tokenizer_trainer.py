@@ -37,7 +37,9 @@ from src.data.hyperspectral_loader import (
     get_hyperspectral_dataloaders,
     get_hyperspectral_img_loaders_with_different_backends,
 )
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage1.cosmos.inference.utils import (
+    load_jit_model_shape_matched,
+)
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.utilities.train.network import (
     get_model_learnable_params,
@@ -47,6 +49,7 @@ from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file
 from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter
 
 
@@ -1905,11 +1908,21 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 # Load combined model
                 self.log_msg(f"loading bin or safetensors checkpoint into model ...")
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.tokenizer),
-                    _assume_path,
-                    strict=strict,
-                )
+                try:
+                    accelerate.utils.load_checkpoint_in_model(
+                        self.accelerator.unwrap_model(self.tokenizer),
+                        _assume_path,
+                        strict=strict,
+                    )
+                except Exception as e:
+                    self.log_msg(
+                        f"loading bin or safetensors checkpoint into tokenizer failed: {e}, "
+                        f"trying to load partial of the weights ..."
+                    )
+                    load_weights_with_shape_check(
+                        self.accelerator.unwrap_model(self.tokenizer),
+                        _assume_path,
+                    )
 
         # Load discriminator to online model
         if (
@@ -1921,12 +1934,22 @@ class CosmosHyperspectralTokenizerTrainer:
             ]
             and not self.train_cfg.only_load_tokenizer
         ):
-            accelerate.utils.load_checkpoint_in_model(
-                self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
-                ema_path / "discriminator",
-                strict=strict,
-            )
-            # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth"))
+            try:
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    ema_path / "discriminator",
+                    strict=strict,
+                )
+                # self.train_state.load_state_dict(torch.load(ema_path / "train_state.pth")
+            except Exception as e:
+                self.log_msg(
+                    f"loading discriminator checkpoint into model failed: {e}, "
+                    f"trying to load partial of the weights ..."
+                )
+                load_weights_with_shape_check(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    ema_path / "discriminator",
+                )
 
         # Load quantizer if exists
         if (
@@ -2038,7 +2061,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "hybrid_cosmos_f16c32p1"
+_key = "nested_cosmos_f8c16p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2053,9 +2076,10 @@ _configs_dict = {
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
     # psd kl vae
     "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
-    # TODO: flow decoder or flow head decoder AE
     # hybrid ae
-    "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
+    "nested_cosmos_f8c16p1": "nested_cosmos_tokenizer_f8c16p1",  # pure cnn backbone
+    "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",  # hybrid cnn-transformer backbone
+    # TODO: flow decoder or flow head decoder AE
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized

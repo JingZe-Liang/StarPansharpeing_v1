@@ -23,6 +23,7 @@ model:
   patch_size: 1
   attn_type: none
   padding_mode: reflect # for boundary?
+  adaptive_mode: interp
   # wrap_fsdp_last_layer: false
 # repa
 use_repa_loss: true

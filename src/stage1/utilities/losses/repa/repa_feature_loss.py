@@ -1248,7 +1248,7 @@ class REPALoss(torch.nn.Module):
             # Other loss functions use multiple_features_apply
             loss_functions = {
                 "repa_original": repa_loss_,
-                "am_ratio": am_ratio_spatial_loss,
+                "am_ratio_spatial": am_ratio_spatial_loss,
                 "token_relation": token_relation_loss,
             }
 
