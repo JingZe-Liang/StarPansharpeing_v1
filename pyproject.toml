@@ -8,7 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.12, <=3.13"
 dependencies = [
     "numpy>=1.21.0",
-    "torch>=2.6.0",
+    "torch>=2.8.0",
     "transformers>=4.55.4",
     "timm>=1.0.19",
     "accelerate>=1.10.1",
@@ -255,8 +255,9 @@ bad-param-name-override = false
 index-out-of-bounds = "error"
 unused-ignore-comment = "ignore"
 redundant-cast = "ignore"
-possibly-unbound-attribute = "error"
-possibly-unbound-import = "error"
+unresolved-attribute = "ignore"
+# possibly-unbound-attribute = "error"
+# possibly-unbound-import = "error"
 
 # [tool.ty.environment]
 # root = ["./src", "./scripts"]

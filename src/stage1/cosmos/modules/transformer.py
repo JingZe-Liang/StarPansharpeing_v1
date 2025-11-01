@@ -244,7 +244,10 @@ class GatedAttention(nn.Module):
         elementwise_attn_output_gate: bool = False,
         is_causal: bool = False,
         num_prefix_tokens: int = 0,
+        attn_type: str = "sdpa",
         layer_idx: Optional[int] = None,
+        *,
+        jvp=False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -297,6 +300,19 @@ class GatedAttention(nn.Module):
             self.k_norm = create_norm_layer(norm_layer, self.head_dim, eps=rms_norm_eps)
 
         # self.rotary_emb = Qwen3RotaryEmbedding(config=self.config)
+
+        self.attn_implem = attn_type
+        self._all_attention_functions = ALL_ATTENTION_FUNCTIONS
+        if jvp and not JVP_FLASH_ATTN_ENABLED:
+            logger.warning(
+                "JVP Flash Attention is not enabled. Please install it by running `pip install jvp_flash_attention` "
+                "or the flash attention will not be used and fall back to math attention kernel."
+            )
+            self._all_attention_functions["jvp_math_attention"] = _jvp_math_attention
+            self.attn_implem = "jvp_math_attention"
+        elif jvp and JVP_FLASH_ATTN_ENABLED:
+            self._all_attention_functions["jvp_flash_attention"] = _jvp_flash_attention
+            self.attn_implem = "jvp_flash_attention"
 
     # Adapted from Qwen3Attention.forward
     def forward(
@@ -419,15 +435,30 @@ class GatedAttention(nn.Module):
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         # is_causal = True if causal_mask is None and q_len > 1 else False
 
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
+        # attn_output = torch.nn.functional.scaled_dot_product_attention(
+        #     query_states,
+        #     key_states,
+        #     value_states,
+        #     dropout_p=self.attention_dropout if self.training else 0.0,
+        #     is_causal=self.is_causal,
+        #     enable_gqa=True,
+        #     attn_mask=attention_mask,
+        # )
+
+        # Jvp supported flash attention
+        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+        assert attention_function_ is not None, (
+            f"Attention implementation {self.attn_implem} not found in available attention functions."
+        )
+        attn_output, _ = attention_function_(
+            self,
             query_states,
             key_states,
             value_states,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=self.is_causal,
-            enable_gqa=True,
-            attn_mask=attention_mask,
+            attention_mask=attention_mask,
+            dropout=self.attention_dropout if self.training else 0.0,
         )
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
             attn_output = attn_output * torch.sigmoid(gate_score)
@@ -455,6 +486,7 @@ class AttentionBlock(nn.Module):
         ffn_drop=0.0,
         use_gate=True,
         layer_idx=None,
+        jvp=False,
     ):
         super().__init__()
         self.use_gate = use_gate
@@ -472,7 +504,9 @@ class AttentionBlock(nn.Module):
                 elementwise_attn_output_gate=False,
                 is_causal=is_causal,
                 num_prefix_tokens=0,
+                attn_type=attn_type,
                 layer_idx=layer_idx,
+                jvp=jvp,
             )
         else:
             self.sa = Attention(
@@ -485,6 +519,7 @@ class AttentionBlock(nn.Module):
                 proj_drop=proj_drop,
                 attn_type=attn_type,
                 is_causal=is_causal,
+                jvp=jvp,
             )
         self.ffn = SwiGLU(
             in_features=dim,
@@ -761,7 +796,7 @@ class TransformerTokenizer(nn.Module):
         norm_layer="rmsnorm",
         drop_path=0.0,
         attn_type="sdpa",
-        n_reg_tokens=0,
+        n_reg_tokens: int = 0,
         projections={"input": None, "output": None},
         pe_type="learn",  # ['learn', 'rope']
         rope_kwargs={},
@@ -771,7 +806,7 @@ class TransformerTokenizer(nn.Module):
         mask_refill: bool = False,  # MAE decoder
         mask_drop_type: str = "mae",  # MAE drop, or no drop
         last_norm: str | None = None,
-        is_causal=False,
+        is_causal: bool = False,
         patcher_type: str = "patch_embedder",
         with_cls_token: bool = False,
         # others
@@ -781,7 +816,8 @@ class TransformerTokenizer(nn.Module):
         super().__init__()
         self.in_chan = in_chan
         self.embedded_dim = embed_dim
-        self.grad_checkpointing = False
+        self.n_reg_tokens: int = n_reg_tokens
+        self.grad_checkpointing: bool = False
 
         # Patch embedding
         if patcher_type in ("patch_embedder", "progressive_patch_embedder"):
@@ -851,12 +887,17 @@ class TransformerTokenizer(nn.Module):
         self.layers = nn.ModuleList(layers)
 
         # Positional embeddings
-        self.pe_type = pe_type
+        self.pe_type: str = pe_type
+        self.rope: RotaryEmbeddingCat | None
+        self.pe: nn.Parameter | None
+
         if pe_type == "learn":
             pe_2d = get_2d_sincos_pos_embed(  # [cls_token+n_reg_tokens+grid_size*grid_size, embed_dim]
                 embed_dim,
                 grid_size=self.grid_size,
                 pe_interpolation=1.0,
+                # TODO: if the proxy task need cls token (e.g, constrastive learning)
+                # this will need to be changed
                 cls_token=self.n_reg_tokens > 0 or with_cls_token,
                 extra_tokens=self.n_reg_tokens + int(with_cls_token),
             )
@@ -882,24 +923,25 @@ class TransformerTokenizer(nn.Module):
             self.rope, self.pe = None, None
 
         # Register tokens
-        self.reg_tokens = None
-        self.n_reg_tokens = n_reg_tokens
+        self.reg_tokens: nn.Parameter | None = None
+        self.n_reg_tokens: int = n_reg_tokens
         if n_reg_tokens > 0:
             self.reg_tokens = nn.Parameter(torch.zeros(1, n_reg_tokens, embed_dim))
             nn.init.trunc_normal_(self.reg_tokens, std=0.02)
 
         # Class token
-        self.with_cls_token = with_cls_token
+        self.with_cls_token: bool = with_cls_token
         if self.with_cls_token:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.cls_token, std=0.02)
 
         # Head
         self.head = nn.Identity()
-        self.head_required = False
-        self.head_type = head
-        self.out_chan = out_chan
-        self.out_patch_size = out_patch_size
+        self.head_required: bool = False
+        self.head_type: str | None = head
+        self.out_chan: int = out_chan
+        self.out_patch_size: int = out_patch_size
+
         if head is not None:
             assert out_chan is not None, "out_chan must be specified if head is used"
             assert out_patch_size is not None, (
@@ -966,7 +1008,7 @@ class TransformerTokenizer(nn.Module):
 
         # Initialize weights
         named_apply(get_init_weights_vit("jax", head_bias=0.0), self)
-        logger.info("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
+        logger.debug("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
 
     def _get_masked_x(self, x):
         if self.mask_train_ratio > 0:
@@ -1095,6 +1137,7 @@ class TransformerTokenizer(nn.Module):
             else:
                 x = blk(x, rope=rope)
             if i in index:
+                # TODO: will this return the cls or reg tokens?
                 intermidates.append(x[:, self.n_reg_tokens :])
 
         # Projection in

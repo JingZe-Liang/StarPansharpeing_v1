@@ -1923,7 +1923,9 @@ class CosmosHyperspectralTokenizerTrainer:
                     )
                     load_weights_with_shape_check(
                         self.accelerator.unwrap_model(self.tokenizer),
-                        _assume_path,
+                        accelerate.utils.load_state_dict(
+                            ema_path / "model.safetensors"
+                        ),
                     )
 
         # Load discriminator to online model
@@ -1950,7 +1952,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
                 load_weights_with_shape_check(
                     self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
-                    ema_path / "discriminator",
+                    accelerate.utils.load_state_dict(
+                        ema_path / "discriminator" / "model.safetensors"
+                    ),
                 )
 
         # Load quantizer if exists

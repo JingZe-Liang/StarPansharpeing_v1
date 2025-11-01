@@ -317,7 +317,8 @@ def captioning_dataloader_img(
             if resume_from is not None and resumed:
                 logger.info(f"Resuming from {img_id[0]}.")
         elif isinstance(resume_from, set):
-            if img_id[0] in resume_from:
+            img_id_0 = 'JPEGImages/' + img_id[0]  # litdata specific
+            if img_id_0 in resume_from:
                 skipped += 1
                 # logger.debug(f"Skipping {img_id[0]}. Skipped {skipped} files.")
                 # continue  # skip already processed files
@@ -465,25 +466,41 @@ if __name__ == "__main__":
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
     tar_file = "data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"
-    if os.path.exists(tar_file):
-        _, dl = get_hyperspectral_dataloaders(
-            wds_paths=tar_file,
-            batch_size=1,
-            num_workers=1,
+    litdata_dir = "data2/RemoteSAM270k/LitData_hyper_images"
+
+    if litdata_dir is not None:
+        from src.data.litdata_hyperloader import ImageStreamingDataset
+        from litdata.streaming import StreamingDataLoader
+
+        ds = ImageStreamingDataset(
+            input_dir=litdata_dir,
+            resize_before_transform=None,
             to_neg_1_1=False,
-            permute=True,
-            resample=False,
-            per_channel_norm=False,
-            shuffle_size=-1,
-            transform_prob=0.0,
+            force_to_rgb=True,
         )
+        dl = StreamingDataLoader(ds, batch_size=1, num_workers=6, shuffle=False)
+        
+    # if os.path.exists(tar_file):
+    #     _, dl = get_hyperspectral_dataloaders(
+    #         wds_paths=tar_file,
+    #         batch_size=1,
+    #         num_workers=1,
+    #         to_neg_1_1=False,
+    #         permute=True,
+    #         resample=False,
+    #         per_channel_norm=False,
+    #         shuffle_size=-1,
+    #         transform_prob=0.0,
+    #     )
+    # else:
+    #     raise ValueError(f"Tar file {tar_file} does not exist.")
 
     print("Successfully created dataloader. Testing captioning...")
     # Use the main_process_dataloader_img function to process the dataloader
     main_process_dataloader_img(
         dl,
         rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
-        save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions",
+        save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions/tmp",
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",
         file_type="jsonl",

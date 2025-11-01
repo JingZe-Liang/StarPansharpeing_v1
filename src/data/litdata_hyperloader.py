@@ -356,10 +356,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
     def _norm_img(self, sample):
         """Normalize the image in the sample."""
         sample = norm_img(
-            sample,
-            permute=False,
-            to_neg_1_1=self.to_neg_1_1,
-            **self.norm_options,
+            sample, permute=False, to_neg_1_1=self.to_neg_1_1, **self.norm_options
         )
         return sample
 
@@ -906,7 +903,98 @@ def collate_fn_skip_none(
     return inner
 
 
-def create_hyper_image_litdata_loader():
+@function_config_to_basic_types
+def create_hyper_image_litdata_flatten_paths_loader(
+    paths: dict[str, dict],
+    weights: list[float | int] | None = None,
+    stream_ds_kwargs: dict = {
+        "transform_prob": 0.0,
+        "resize_before_transform": 256,
+        "shuffle": False,
+        "is_cycled": True,
+        "is_hwc": True,
+    },
+    loader_kwargs: dict = {
+        "batch_size": 8,
+        "num_workers": 16,
+        "persistent_workers": True,
+        "prefetch_factor": None,
+        "shuffle": False,
+    },
+    macro_sampled_batch_size: dict[int, int] = {
+        128: 16,
+        256: 12,
+        512: 6,
+    },
+):
+    paths_dict = {}
+    # Flatten all files
+    for name, path_dict in paths.items():
+        for sub_name, path_kwgs in path_dict.items():
+            paths_dict[sub_name] = path_kwgs
+
+    dataset = []
+    for name, (paths, kwargs) in paths_dict.items():
+        stream_ds_kwargs_ = stream_ds_kwargs.copy()
+        stream_ds_kwargs_.update(kwargs)
+        ds = ImageStreamingDataset.create_dataset(
+            input_dir=paths,
+            combined_kwargs={"batching_method": "per_stream"},
+            **stream_ds_kwargs_,
+        )
+        dataset.append(ds)
+        logger.info(f"Create dataset for {name} with paths: {paths}")
+
+    # composite
+    ds_total = IndexedCombinedStreamingDataset(
+        combined_is_cycled=True,
+        datasets=dataset,
+        weights=[1.0] * len(dataset) if weights is None else weights,
+        iterate_over_all=False,
+        seed=2025,
+        batching_method="per_stream",
+    )
+
+    loader_kwargs["collate_fn"] = collate_fn_skip_none(1000)
+    dl = SizeBasedBatchsizeStreamingDataloader(
+        ds_total,
+        size_based_batch_sizes=macro_sampled_batch_size,
+        cache_minor=True,
+        **loader_kwargs,
+    )
+
+    # statistics
+    # from tqdm import tqdm
+
+    # from src.utilities.logging import configure_logger
+
+    # configure_logger(_auto_=False, add_tqdm_filter=True)
+
+    # bands_info_n = {}
+    # print("Start testing...")
+    # for i, sample in tqdm(  # type: ignore
+    #     enumerate(dl),
+    #     # total=len(ds_total) // dl.batch_size,
+    # ):
+    #     if i == 0 and "__key__" not in sample:
+    #         print(sample.keys())
+
+    #     chan = sample["img"].shape[1]
+    #     if chan not in bands_info_n:
+    #         bands_info_n[chan] = 0
+    #     bands_info_n[chan] += sample["img"].shape[0]
+
+    #     # logger.debug(f"Batch {i}: shape {sample['img'].shape=}")
+    #     if i % 10 == 0:
+    #         logger.info(
+    #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
+    #             tqdm=True,
+    #         )
+
+    return dataset, dl
+
+
+def __test_create_hyper_image_litdata_loader():
     from .path_consts import HYPERSPECTRAL_PATHS, MULTISPECTRAL_PATHS, RGB_PATHS
 
     stream_ds_kwargs = {
@@ -1004,97 +1092,6 @@ def create_hyper_image_litdata_loader():
     return ds, dl
 
 
-@function_config_to_basic_types
-def create_hyper_image_litdata_flatten_paths_loader(
-    paths: dict[str, dict],
-    weights: list[float | int] | None = None,
-    stream_ds_kwargs: dict = {
-        "transform_prob": 0.0,
-        "resize_before_transform": 256,
-        "shuffle": False,
-        "is_cycled": True,
-        "is_hwc": True,
-    },
-    loader_kwargs: dict = {
-        "batch_size": 8,
-        "num_workers": 16,
-        "persistent_workers": True,
-        "prefetch_factor": None,
-        "shuffle": False,
-    },
-    macro_sampled_batch_size: dict[int, int] = {
-        128: 16,
-        256: 12,
-        512: 6,
-    },
-):
-    paths_dict = {}
-    # Flatten all files
-    for name, path_dict in paths.items():
-        for sub_name, path_kwgs in path_dict.items():
-            paths_dict[sub_name] = path_kwgs
-
-    dataset = []
-    for name, (paths, kwargs) in paths_dict.items():
-        stream_ds_kwargs_ = stream_ds_kwargs.copy()
-        stream_ds_kwargs_.update(kwargs)
-        ds = ImageStreamingDataset.create_dataset(
-            input_dir=paths,
-            combined_kwargs={"batching_method": "per_stream"},
-            **stream_ds_kwargs_,
-        )
-        dataset.append(ds)
-        logger.info(f"Create dataset for {name} with paths: {paths}")
-
-    # composite
-    ds_total = IndexedCombinedStreamingDataset(
-        combined_is_cycled=True,
-        datasets=dataset,
-        weights=[1.0] * len(dataset) if weights is None else weights,
-        iterate_over_all=False,
-        seed=2025,
-        batching_method="per_stream",
-    )
-
-    loader_kwargs["collate_fn"] = collate_fn_skip_none(1000)
-    dl = SizeBasedBatchsizeStreamingDataloader(
-        ds_total,
-        size_based_batch_sizes=macro_sampled_batch_size,
-        cache_minor=True,
-        **loader_kwargs,
-    )
-
-    # statistics
-    # from tqdm import tqdm
-
-    # from src.utilities.logging import configure_logger
-
-    # configure_logger(_auto_=False, add_tqdm_filter=True)
-
-    # bands_info_n = {}
-    # print("Start testing...")
-    # for i, sample in tqdm(  # type: ignore
-    #     enumerate(dl),
-    #     # total=len(ds_total) // dl.batch_size,
-    # ):
-    #     if i == 0 and "__key__" not in sample:
-    #         print(sample.keys())
-
-    #     chan = sample["img"].shape[1]
-    #     if chan not in bands_info_n:
-    #         bands_info_n[chan] = 0
-    #     bands_info_n[chan] += sample["img"].shape[0]
-
-    #     # logger.debug(f"Batch {i}: shape {sample['img'].shape=}")
-    #     if i % 10 == 0:
-    #         logger.info(
-    #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
-    #             tqdm=True,
-    #         )
-
-    return dataset, dl
-
-
 def test_index_file_litdata_loader():
     index_file = "data/RS5M/LitData_images_val/val_index.json"
     input_dir = "data/RS5M/LitData_images_val/"
@@ -1113,6 +1110,27 @@ def test_index_file_litdata_loader():
     )
 
 
+def __test_normal_image_loader():
+    path = "data2/DynamicEarth/LitData_hyper_images"
+    stream_ds_kwargs = {
+        "transform_prob": 0.0,
+        "resize_before_transform": 512,
+        "is_cycled": False,
+    }
+    ds = ImageStreamingDataset.create_dataset(
+        input_dir=path,
+        combined_kwargs={"batching_method": "stratified"},
+        **stream_ds_kwargs,
+    )
+    loader_kwargs = {
+        "batch_size": 4,
+        "num_workers": 2,
+    }
+    dl = StreamingDataLoader(ds, **loader_kwargs)
+    for sample in dl:
+        print(sample["img"].shape)
+
+
 if __name__ == "__main__":
     """
     python -m src.data.litdata_hyperloader
@@ -1121,17 +1139,18 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
+    __test_normal_image_loader()
 
-    from omegaconf import OmegaConf
+    # from omegaconf import OmegaConf
 
-    cfg = OmegaConf.load(
-        "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
-        # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
-    )
+    # cfg = OmegaConf.load(
+    #     "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
+    #     # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
+    # )
 
-    logger.info(cfg.train_loader.paths)
-    create_hyper_image_litdata_flatten_paths_loader(
-        paths=cfg.train_loader.paths,
-        # weights=cfg.train_loader.weights,
-        loader_kwargs=cfg.train_loader.loader_kwargs,
-    )
+    # logger.info(cfg.train_loader.paths)
+    # create_hyper_image_litdata_flatten_paths_loader(
+    #     paths=cfg.train_loader.paths,
+    #     # weights=cfg.train_loader.weights,
+    #     loader_kwargs=cfg.train_loader.loader_kwargs,
+    # )

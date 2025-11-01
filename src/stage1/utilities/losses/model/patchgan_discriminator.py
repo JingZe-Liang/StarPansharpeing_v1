@@ -1,13 +1,18 @@
 import functools
 from collections.abc import Sequence
 from functools import partial, wraps
+from typing import Annotated, Literal, Union
 
 import torch
 import torch.nn as nn
+from einops import rearrange
+from loguru import logger
+from timm.layers import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer
+from torch import Tensor
+import torch.nn.functional as F
 
-from src.utilities.logging import log_print
 from src.utilities.network_utils import null_decorator_no_any_kwgs
 
 compile_forward_fn = False
@@ -15,6 +20,42 @@ if compile_forward_fn:
     _compile_decorator = torch.compile
 else:
     _compile_decorator = null_decorator_no_any_kwgs
+
+
+def _kernel_norm(
+    w: Annotated[Tensor, "c_out c_in k k"],
+    kernel_norm: str | None,
+    dim: Literal["c_in", "c_out"] = "c_in",
+) -> Annotated[Tensor, "c_out c_in k k"]:
+    if kernel_norm is None:
+        return w
+
+    if kernel_norm == "softmax":
+        # Apply softmax on input channel dimension
+        dim_ = 1 if dim == "c_in" else 0
+        w = F.softmax(w, dim=dim_)
+        return w
+
+    elif kernel_norm == "layernorm":
+        w_shape = w.shape
+        if dim == "c_in":
+            w = w.reshape(*w.shape[:2], -1).permute(0, 2, 1)  # c_out, (k*k), c_in
+            w = F.layer_norm(w, [w.shape[-1]])  # normalize on c_in dimension
+            return w.permute(0, 2, 1).reshape(w_shape)  # c_out, c_in, k, k
+        else:
+            w = w.reshape(*w.shape[2:], -1).permute(1, 2, 0)  # c_in, (k*k) c_out
+            w = F.layer_norm(w, [w.shape[-1]])  # normalize on c_out dimension
+            return w.permute(2, 1, 0).reshape(w_shape)  # c_out, c_in, k, k
+
+    elif kernel_norm == "weight_std":
+        dim_ = 1 if dim == "c_in" else 0
+        # Weight standardization: normalize to zero mean and unit std
+        mean = w.mean(dim=dim_, keepdim=True)  # mean over c_in dimension
+        std = w.std(dim=dim_, keepdim=True) + 1e-5  # std over c_in dimension
+        return (w - mean) / std
+
+    else:
+        raise ValueError(f"Unknown kernel_norm type: {kernel_norm}")
 
 
 class ActNorm(nn.Module):
@@ -124,6 +165,7 @@ class DiscriminatorLayer(torch.nn.Sequential):
                     stride=2,
                     padding=padw,
                     bias=use_bias,
+                    padding_mode="reflect",
                 ),
                 norm_layer(ndf * nf_mult),
                 nn.LeakyReLU(0.2),
@@ -189,10 +231,10 @@ class DiffBandsInputConvIn(nn.Module):
                 padding=padw,
             )
 
-            log_print(
+            logger.info(
                 f"[Disc] set conv to hidden module and buffer for channel {c}", "debug"
             )
-        # log_print(f"[Disc] diffbands input convs: {self.in_modules}")
+        # logger.info(f"[Disc] diffbands input convs: {self.in_modules}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
@@ -222,33 +264,111 @@ class AdaptiveInputConvLayer(nn.Module):
         stride: int = 1,
         dilation: int = 1,
         groups: int = 1,
-        padding: int = 0,
+        padding: int | None = None,
         use_bias: bool = False,
+        mode: Literal["slice", "interp", "interp_proj"] = "slice",
+        k_hidden: int | None = None,
+        kernel_norm: str | None = None,
     ):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
+        conv_kwargs = dict(
             stride=stride,
-            padding=padding,
             groups=groups,
             dilation=dilation,
             bias=use_bias,
+            padding_mode="reflect",
+        )
+        if padding is not None:
+            # if padding not set, the create_conv2d will use same padding
+            conv_kwargs["padding"] = padding
+
+        self.conv = create_conv2d(in_channels, out_channels, kernel_size, **conv_kwargs)
+        self.mode = mode
+        self.kernel_norm = kernel_norm
+
+        if mode == "interp_proj":
+            # (bs, c, k1, k2) img -> (c_out, c_in, k1, k2) kernel
+            # kernel -> (c_out, k1*k2, c_in) -> Linear(in_channels, k_hidden) -> k_hidden -> c_in -> (c_out, k1*k2, c_in)
+            k_hidden = k_hidden or in_channels
+            self.kernel_proj = nn.ModuleList(
+                [
+                    nn.Linear(in_channels, k_hidden, bias=use_bias),
+                    nn.Linear(k_hidden, in_channels),
+                ]
+            )
+
+        self.forward_mappings = dict(
+            slice=self._slice_forward,
+            interp=self._interp_forward,
+            interp_proj=self._interp_proj_forward,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_channels = x.shape[1]
-        x = nn.functional.conv2d(
+    def _forward_conv_with_wb(self, x, w, b):
+        x = nn.functional.conv2d(  # type: ignore
             x,
-            self.conv.weight[:, :in_channels],
-            self.conv.bias,
+            w,
+            b,
             self.conv.stride,
             self.conv.padding,
             self.conv.dilation,
             self.conv.groups,
         )
         return x
+
+    def _slice_forward(self, x):
+        w = self.conv.weight[:, : x.shape[1]]
+        w = _kernel_norm(w, self.kernel_norm, "c_in")
+        x = self._forward_conv_with_wb(x, w, self.conv.bias)
+        return x
+
+    def _interp_forward(self, x, w: Tensor | None = None):
+        in_channels = x.shape[1]
+        if w is None:
+            w: Tensor = self.conv.weight
+
+        c_out, c_in, k1, k2 = w.shape
+        # c_in -> in_channels
+        w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
+        w = torch.nn.functional.interpolate(
+            w, size=(c_out, in_channels), mode="bicubic", align_corners=False
+        )
+        w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
+        # Conv
+        w = _kernel_norm(w, self.kernel_norm, "c_in")
+        x = self._forward_conv_with_wb(x, w, self.conv.bias)
+        return x
+
+    def _interp_proj_forward(self, x):
+        in_channels = x.shape[1]
+        lin1, lin2 = self.kernel_proj
+
+        # weights
+        w: Tensor = self.conv.weight
+        c_out, c_in, k1, k2 = w.shape
+
+        # weight projection
+        w = rearrange(w, "c_out c_in k1 k2 -> c_out (k1 k2) c_in")
+        w = lin1(w)  # c_out, (k1*k2), k_hidden
+        w = lin2(w)  # c_out, (k1*k2), c_in
+        w = rearrange(w, "c_out (k1 k2) c_in -> c_out c_in k1 k2", k1=k1, k2=k2)
+
+        # Interpolation
+        return self._interp_forward(x, w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+
+        # Native case
+        if in_channels == self.conv.weight.shape[1]:
+            w = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
+            return self._forward_conv_with_wb(x, w, self.conv.bias)
+
+        # Adaptive cases
+        return self.forward_mappings[self.mode](x)
+
+    @property
+    def weight(self):
+        return self.conv.weight
 
 
 class NLayerDiscriminator(nn.Module):
@@ -299,7 +419,7 @@ class NLayerDiscriminator(nn.Module):
         else:
             use_bias = norm_layer != nn.BatchNorm2d
 
-        log_print(
+        logger.info(
             "[NLayerDisc] config: "
             f"input_nc={input_nc}, "
             f"ndf={ndf}, "
@@ -312,17 +432,27 @@ class NLayerDiscriminator(nn.Module):
         kw = 4
         padw = 1
 
-        conv_in = (
-            AdaptiveInputConvLayer(
-                input_nc, ndf, kernel_size=kw, stride=2, padding=padw
+        if isinstance(input_nc, int):
+            # AdaptiveInputConvLayer(
+            #     input_nc, ndf, kernel_size=kw, stride=2, padding=padw
+            # )
+            conv_in = AdaptiveInputConvLayer(
+                input_nc,
+                ndf,
+                kernel_size=kw,
+                stride=2,
+                padding=padw,
+                mode="interp",
             )
-            if isinstance(input_nc, int)
-            else DiffBandsInputConvIn(
+            logger.info("[NLayerDisc]: use interp conv kernel for input conv")
+        else:
+            conv_in = DiffBandsInputConvIn(
                 band_lst=input_nc,
                 hidden_dim=ndf,
                 basic_module="conv_norm_act",
             )
-        )
+            logger.info("[NLayerDisc]: use chan-choice conv for input conv")
+
         sequence = [
             conv_in,
             nn.LeakyReLU(0.2),

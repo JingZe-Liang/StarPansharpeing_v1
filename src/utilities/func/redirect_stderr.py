@@ -8,7 +8,7 @@ while filtering out specific warnings like libpng warnings and loguru debug mess
 import os
 import sys
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Generator
 
 
 @contextmanager
@@ -187,3 +187,28 @@ def create_standard_redirect_context(output_file: str = "tmp/stderr.txt") -> Any
     filter_patterns = ["libpng warning: iCCP: known incorrect sRGB profile"]
 
     return redirect_stdout_stderr_to_file(output_file, filter_patterns)
+
+
+@contextmanager
+def suppress_stdout_stderr() -> Generator[None, None, None]:
+    """Context manager to suppress stdout and stderr by redirecting to /dev/null."""
+    # Save original file descriptors
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+
+    try:
+        # Open /dev/null
+        devnull = os.open("/dev/null", os.O_WRONLY)
+        # Redirect stdout and stderr to /dev/null
+        os.dup2(devnull, 1)  # stdout
+        os.dup2(devnull, 2)  # stderr
+        os.close(devnull)
+
+        yield  # Execute code in the context
+
+    finally:
+        # Restore original stdout and stderr
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)

@@ -35,6 +35,7 @@ from kornia.utils.image import tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp._fully_shard import FSDPModule
@@ -77,7 +78,7 @@ ForwardTokOutput = TypedDict(
         "recon": torch.Tensor,
         "flow_loss": torch.Tensor,
         "q_dict": QuantOutput,
-        "repa_feature": NotRequired[torch.Tensor],
+        "repa_feature": NotRequired[torch.Tensor | tuple[Tensor, Tensor]],
         "vf_feature": NotRequired[torch.Tensor],
         "aug_x": NotRequired[torch.Tensor],
     },
@@ -358,12 +359,12 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.logger.remove()
         log_format_in_file = (
             "<green>[{time:MM-DD HH:mm:ss}]</green> "
-            "- <level>[{level}]</level> "
+            "- <level>[{level:^6}]</level> "
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
+            "- {level.icon} <level>[{level:^6}] {file.name}:{line}</level>"
             "- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
@@ -387,12 +388,12 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 backtrace=True,
                 colorize=False,
             )
-        else:
-            # monkey patch
-            lt.monkey_patch()
-            logger.warning(
-                "lovely tensor will slow down the training, use this only for debug"
-            )
+        # else:
+        #     # monkey patch
+        #     lt.monkey_patch()
+        #     logger.warning(
+        #         "lovely tensor will slow down the training, use this only for debug"
+        #     )
 
         self.logger.add(
             sys.stderr,
@@ -523,7 +524,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             **kwargs,
         )
 
-        def log_it(*msg, **kwargs):P
+        def log_it(*msg, **kwargs):
             msg_string = str_msg(*msg)
             _log_fn(msg_string, **kwargs)
 
@@ -768,9 +769,11 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             self.accelerator.prepare(self.antideg_net, self.antideg_net_optim)
 
         # dataloaders
-        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
-            self.train_dataloader, self.val_dataloader
-        )
+        if getattr(self.cfg.train, "prepare_dl", True):
+            self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+                self.train_dataloader, self.val_dataloader
+            )
+
         (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
             self.tokenizer_sched, self.disc_sched
         )
@@ -891,16 +894,14 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         split: str = "train",
         ema: bool = False,
     ):
-        if ema:
+        if ema and self.use_disc:
             _non_ema_disc = self.vq_loss_fn.discriminator
             self.vq_loss_fn.discriminator = self.ema_vq_disc.ema_model
 
         optim_idx = 0 if train_tokenizer else 1  # tokenizer -> 0, discriminator -> 1
 
-        tok_feat = out_d.get("repa_feature", None)
-        if tok_feat is None:
-            tok_feat = out_d.get("vf_feature", None)
-
+        # get repa features for distillation
+        tok_feat = out_d.get("repa_feature", out_d.get("vf_feature", None))
         tok_feat1, tok_feat2 = tok_feat, None
         if isinstance(tok_feat, (list, tuple)):
             tok_feat1, tok_feat2 = tok_feat
@@ -926,10 +927,14 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             if train_tokenizer:
                 loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
             else:
+                assert self.use_disc, (
+                    "Discriminator is not used but trying to train it."
+                )
                 loss = disc_train_loss_d["disc_loss"]
 
         # back
-        if ema:
+        if ema and self.use_disc:
+            assert self.vq_loss_fn.discriminator is not None
             self.vq_loss_fn.discriminator = _non_ema_disc
 
         return loss, log_disc

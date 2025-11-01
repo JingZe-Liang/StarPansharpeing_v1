@@ -263,6 +263,8 @@ class UViTDecoder(nn.Module):
             num_channels=channels, num_groups=norm_num_groups, eps=eps
         )
         self.conv_out_act = create_act_layer(act_fn)
+        assert self.conv_out_act is not None, f"Unsupported act fn: {act_fn}"
+        
         if isinstance(in_channels, (list, tuple)):
             self.conv_out = DiffBandsInputConvOut(
                 in_channels, channels, padding_mode="reflect"
