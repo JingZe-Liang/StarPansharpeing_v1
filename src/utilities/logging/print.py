@@ -51,6 +51,7 @@ logger.level("INFO", icon="ℹ️ ", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
+logger.level("NOTE", icon="💡", color="<magenta><bold>", no=40)
 
 
 def is_true(x):

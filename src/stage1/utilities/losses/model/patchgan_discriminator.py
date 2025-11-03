@@ -5,13 +5,14 @@ from typing import Annotated, Literal, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from loguru import logger
 from timm.layers import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer
+from timm.layers.weight_init import lecun_normal_, trunc_normal_
 from torch import Tensor
-import torch.nn.functional as F
 
 from src.utilities.network_utils import null_decorator_no_any_kwgs
 
@@ -325,6 +326,7 @@ class AdaptiveInputConvLayer(nn.Module):
         in_channels = x.shape[1]
         if w is None:
             w: Tensor = self.conv.weight
+        assert w is not None, "weights should not be None"
 
         c_out, c_in, k1, k2 = w.shape
         # c_in -> in_channels
@@ -453,10 +455,7 @@ class NLayerDiscriminator(nn.Module):
             )
             logger.info("[NLayerDisc]: use chan-choice conv for input conv")
 
-        sequence = [
-            conv_in,
-            nn.LeakyReLU(0.2),
-        ]
+        sequence = [conv_in, nn.LeakyReLU(0.2)]
         nf_mult = 1
         nf_mult_prev = 1
         for n in range(1, n_layers):  # gradually increase the number of filters
@@ -494,15 +493,28 @@ class NLayerDiscriminator(nn.Module):
         ]  # output 1 channel prediction map
         self.main = nn.Sequential(*sequence)
 
-        self.apply(self.weight_init)
+        self.weight_init()
 
-    def weight_init(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.normal_(m.weight.data, 0.0, 0.02)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-            nn.init.normal_(m.weight.data, 1.0, 0.02)
-            if hasattr(m, "bias") and m.bias is not None:
-                nn.init.constant_(m.bias.data, 0)
+    def weight_init(self):
+        def _basic_init(m):
+            if isinstance(m, nn.Conv2d):
+                # nn.init.normal_(m.weight.data, 0.0, 0.02)
+                lecun_normal_(m.weight)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                # nn.init.normal_(m.weight.data, 1.0, 0.02)
+                trunc_normal_(m.weight, std=0.02)
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.constant_(m.bias.data, 0)
+
+        self.apply(_basic_init)
+
+        # last layer zero out
+        _last_layer = self.main[-1]
+        _last_layer.weight.data.zero_()
+        if _last_layer.bias is not None:
+            _last_layer.bias.data.zero_()
+
+        logger.info(f"[NLayerDisc] init the discriminator.")
 
     @_compile_decorator
     def forward(self, input):

@@ -30,6 +30,7 @@ from transformers import (
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
 
+from src.utilities.func.redirect_stderr import suppress_stdout_stderr
 from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
@@ -210,14 +211,15 @@ def get_intervl35_model(
             )
 
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            response = model.chat(
-                tokenizer,
-                pixel_values,
-                question,
-                generation_config,
-                history=None,
-                return_history=False,
-            )
+            with suppress_stdout_stderr():
+                response = model.chat(
+                    tokenizer,
+                    pixel_values,
+                    question,
+                    generation_config,
+                    history=None,
+                    return_history=False,
+                )
 
         gen_txt = ""
         if stream:
@@ -317,7 +319,7 @@ def captioning_dataloader_img(
             if resume_from is not None and resumed:
                 logger.info(f"Resuming from {img_id[0]}.")
         elif isinstance(resume_from, set):
-            img_id_0 = 'JPEGImages/' + img_id[0]  # litdata specific
+            img_id_0 = "JPEGImages/" + img_id[0]  # litdata specific
             if img_id_0 in resume_from:
                 skipped += 1
                 # logger.debug(f"Skipping {img_id[0]}. Skipped {skipped} files.")
@@ -469,8 +471,9 @@ if __name__ == "__main__":
     litdata_dir = "data2/RemoteSAM270k/LitData_hyper_images"
 
     if litdata_dir is not None:
-        from src.data.litdata_hyperloader import ImageStreamingDataset
         from litdata.streaming import StreamingDataLoader
+
+        from src.data.litdata_hyperloader import ImageStreamingDataset
 
         ds = ImageStreamingDataset(
             input_dir=litdata_dir,
@@ -479,7 +482,7 @@ if __name__ == "__main__":
             force_to_rgb=True,
         )
         dl = StreamingDataLoader(ds, batch_size=1, num_workers=6, shuffle=False)
-        
+
     # if os.path.exists(tar_file):
     #     _, dl = get_hyperspectral_dataloaders(
     #         wds_paths=tar_file,

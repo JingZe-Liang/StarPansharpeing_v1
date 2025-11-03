@@ -595,6 +595,8 @@ def test_forward_pca():
     )
     logger.info(str(cfg))
 
+    logger.log('NOTE', f'Rope type: {cfg.trans_enc_cfg.rope_type}')
+
     model = CosmosHybridTokenizer.create_model(
         cnn_cfg=cfg.cnn_cfg,
         trans_enc_cfg=cfg.trans_enc_cfg,
@@ -604,14 +606,14 @@ def test_forward_pca():
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data("RS5M")
+    dl = get_fast_test_hyperspectral_data("MMSeg")
 
-    import accelerate
+    # import accelerate
 
-    accelerate.utils.load_checkpoint_in_model(
-        model,
-        "runs/stage1_cosmos_hybrid/2025-10-20_22-55-45_hybrid_cosmos_f16c32/ema/tokenizer/model.safetensors",
-    )
+    # accelerate.utils.load_checkpoint_in_model(
+    #     model,
+    #     "runs/stage1_cosmos_hybrid/2025-11-02_02-02-53_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors",
+    # )
 
     sample = next(iter(dl))
     img = sample["img"].to("cuda", torch.bfloat16)
@@ -621,11 +623,14 @@ def test_forward_pca():
     model = model.to(torch.bfloat16)
 
     with torch.no_grad():
-        output = model.encode(img)
-        z, sem_z = model.z, model.sem_z
-        logger.info(f"z shape: {z.shape}, sem_z shape: {sem_z.shape}")
-        z_pca = [feature_pca_sk(z_i.cpu().float(), 3) for z_i in z]
-        sem_z_pca = [feature_pca_sk(sem_z_i.cpu().float(), 3) for sem_z_i in sem_z]
+        output = model(img)
+        
+    print(output)
+        
+        # z, sem_z = model.z, model.sem_z
+        # logger.info(f"z shape: {z.shape}, sem_z shape: {sem_z.shape}")
+        # z_pca = [feature_pca_sk(z_i.cpu().float(), 3) for z_i in z]
+        # sem_z_pca = [feature_pca_sk(sem_z_i.cpu().float(), 3) for sem_z_i in sem_z]
 
         # ... plot
 

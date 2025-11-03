@@ -21,6 +21,7 @@ from inspect import Parameter, isclass, isfunction, signature
 from typing import Any, Literal
 
 import numpy as np
+import timm.layers as tl
 import torch
 import torch.nn as nn
 from einops import pack, rearrange, unpack
@@ -210,11 +211,9 @@ class AdaptiveGroupNorm32(nn.Module):
 
 def Normalize(
     in_channels,
-    norm_type: str
-    | Literal["gn", "bn2d", "ln2d", "rms_native", "rms_triton", "unit_vec_norm", "none"]
-    | None = "gn",
+    norm_type: str | None = "gn",
     **norm_kwargs,
-):
+) -> nn.Module | Callable:
     if norm_type == "gn":
         return torch.nn.GroupNorm(
             num_channels=in_channels,
@@ -222,10 +221,13 @@ def Normalize(
             affine=True,
             num_groups=norm_kwargs.get("num_groups", 32),
         )
+
     elif norm_type == "bn2d":
         cls = torch.nn.BatchNorm2d
-    elif norm_type == "ln2d":
+    elif norm_type == "ln2dcompiled":
         cls = LayerNorm2d
+    elif norm_type == "ln2d":
+        cls = tl.LayerNorm2d
     elif norm_type == "unit_vec_norm":
         return partial(
             unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4)
@@ -234,6 +236,8 @@ def Normalize(
         cls = RMSNorm2d
     elif norm_type == "rms_triton":
         cls = TritonRMSNorm2d
+    elif norm_type == "rmsnorm2d":
+        cls = tl.RmsNorm2d
     elif norm_type in (None, "none"):
         return torch.nn.Identity()
     else:

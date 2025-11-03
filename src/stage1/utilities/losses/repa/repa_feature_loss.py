@@ -109,9 +109,7 @@ def interpolate_features_2d(x: Tensor, tgt_size: InterpType) -> Tensor:
     if H == H_tgt and W == W_tgt:
         return x
     else:
-        return F.interpolate(
-            x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False
-        )
+        return F.interpolate(x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False)
 
 
 def interpolate_features_1d(x, target_len: int):
@@ -565,7 +563,7 @@ def load_siglip2_model(
     attn_implem="sdpa",  # 'sdpa' or 'flash_attention_2'
     use_automodel=True,
     cache_dir=None,
-    local_files_only=False,
+    local_files_only=True,
 ) -> tuple[Siglip2VisionTransformer, SiglipProcessor]:
     if use_bnb:
         bnb_config = BitsAndBytesConfig(load_in_4bit=True)
@@ -592,7 +590,9 @@ def load_siglip2_model(
         # remove the text model
         model.text_model = None
         vision_model = model.vision_model
-        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir, local_files_only=local_files_only)
+        processor = AutoProcessor.from_pretrained(
+            name, cache_dir=cache_dir, local_files_only=local_files_only
+        )
 
     model = cast(Siglip2VisionModel, model)
 
@@ -766,9 +766,9 @@ class REPALoss(torch.nn.Module):
         if repa_encoder is not None:
             self.repa_encoder = repa_encoder
         else:
-            baton = FileBaton(
-                "/tmp/repa_model_loading.lock"
-            )  # Use a file baton to ensure single process access
+            # baton = FileBaton(
+            #     "/tmp/repa_model_loading.lock"
+            # )  # Use a file baton to ensure single process access
             # load repa encoder in multiprocessing context
             if dino_version == 3:
                 self.dino_type = "torch"
@@ -783,14 +783,15 @@ class REPALoss(torch.nn.Module):
             self.repa_model_name = repa_model_name
 
             # Baton load
-            if baton.try_acquire():
-                try:
-                    repa_encoder = load_repa_encoder(**load_kwargs)
-                finally:
-                    baton.release()
-            else:
-                baton.wait()
-                repa_encoder = load_repa_encoder(**load_kwargs)
+            # if baton.try_acquire():
+            #     try:
+            #         repa_encoder = load_repa_encoder(**load_kwargs)
+            #     finally:
+            #         baton.release()
+            # else:
+            #     baton.wait()
+            #     repa_encoder = load_repa_encoder(**load_kwargs)
+            repa_encoder = load_repa_encoder(**load_kwargs)
 
             # Image processor for Siglip2
             if isinstance(repa_encoder, tuple):

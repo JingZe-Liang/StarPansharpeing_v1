@@ -326,7 +326,8 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
             )
 
         logger.info(
-            f"[LPIPS Hyperspectral]: using {percep_model.__class__.__name__} model for extracting features for LPIPS loss"
+            f"[LPIPS Hyperspectral]: using {self.percep_model.__class__.__name__} model "
+            f"for extracting features for LPIPS loss"
         )
 
         self.assertions()

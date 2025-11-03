@@ -1853,7 +1853,7 @@ class ResnetBlock(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         out_channels = in_channels if out_channels is None else out_channels
-        padding_mode = kwargs.get("padding_mode", "zeros")
+        padding_mode = kwargs.get("padding_mode", "reflect")
         norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
         self.use_dico_cca = kwargs.get("use_dico_cca", False)

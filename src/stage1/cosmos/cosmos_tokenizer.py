@@ -294,7 +294,7 @@ class EncoderDecoderConfig:
     padding_mode: str = "reflect"
     norm_type: str = "gn"
     norm_groups: int = 32
-    downsample_manually_pad: bool = True
+    downsample_manually_pad: bool = False  # FIXME: True originally
     resample_norm_keep: bool = False
     # adaptive conv
     adaptive_mode: str = "interp"

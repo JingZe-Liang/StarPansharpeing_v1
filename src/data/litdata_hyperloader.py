@@ -222,7 +222,7 @@ class _BaseStreamingDataset(StreamingDataset):
 
         if is_cycled:
             ds = SingleCycleStreamingDataset(dataset=ds)
-            logger.debug(f"Create a cycled dataset for input dir: {input_dir}")
+            # logger.debug(f"Create a cycled dataset for input dir: {input_dir}")
 
         return ds
 
@@ -1111,10 +1111,10 @@ def test_index_file_litdata_loader():
 
 
 def __test_normal_image_loader():
-    path = "data2/DynamicEarth/LitData_hyper_images"
+    path = "data2/HyperspectralEarth/LitData_hyper_images"
     stream_ds_kwargs = {
         "transform_prob": 0.0,
-        "resize_before_transform": 512,
+        "resize_before_transform": 128,
         "is_cycled": False,
     }
     ds = ImageStreamingDataset.create_dataset(

@@ -210,7 +210,7 @@ class Encoder(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
-        downsample_manually_pad: bool = True,
+        downsample_manually_pad: bool = False,  # FIXME: True orginally
         resample_norm_keep: bool = False,
         adaptive_mode: str = "slice",
         **ignore_kwargs,
