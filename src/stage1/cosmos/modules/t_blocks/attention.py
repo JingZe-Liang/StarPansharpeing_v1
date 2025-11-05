@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from timm.layers import apply_rot_embed_cat
 
 from .ada_norms import get_norm_layer
 
@@ -40,7 +41,7 @@ class Attention(nn.Module):
         dropout: float = 0.0,
         attn_drop: float = 0.0,
         bias: bool = False,
-        qk_norm: Optional[str] = None,
+        qk_norm: Optional[str] = "rmsnorm",
         cross_attention_norm: Optional[str] = None,
         out_bias: bool = True,
         eps: float = 1e-5,
@@ -48,6 +49,9 @@ class Attention(nn.Module):
         is_causal: bool = False,
         rescale_output_factor: float = 1.0,
         residual_connection: bool = False,
+        *,
+        delta_t_aware: bool = False,
+        delta_t_dim: int | None = None,
     ):
         super().__init__()
 
@@ -96,6 +100,12 @@ class Attention(nn.Module):
         self.to_k = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
 
+        self.delta_t_aware = delta_t_aware
+        if delta_t_aware:
+            self.to_q_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+            self.to_k_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+            self.to_v_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+
         self.out_proj = nn.Linear(inner_dim, out_dim, bias=out_bias)
         self.out_drop = nn.Dropout(dropout)
 
@@ -107,6 +117,8 @@ class Attention(nn.Module):
         cross_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states=None,  # For compatibility with transformers
+        delta_emb: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert encoder_hidden_states is None, "encoder_hidden_states should be None"
         residual = hidden_states
@@ -134,22 +146,40 @@ class Attention(nn.Module):
                 batch_size, self.heads, -1, attention_mask.shape[-1]
             )
 
+        ######## Q, K, V #########
         query = self.to_q(hidden_states)
-
         if cross_hidden_states is None:
             cross_hidden_states = hidden_states
         elif self.norm_cross:
             cross_hidden_states = self.norm_cross_hidden_states(cross_hidden_states)
-
         key = self.to_k(cross_hidden_states)
         value = self.to_v(cross_hidden_states)
+
+        # Add delta t awareness
+        if self.delta_t_aware and delta_emb is not None:
+            delta_query = self.to_q_delta(delta_emb)[:, None]
+            delta_key = self.to_k_delta(delta_emb)[:, None]
+            delta_value = self.to_v_delta(delta_emb)[:, None]
+
+            query = query + delta_query
+            key = key + delta_key
+            value = value + delta_value
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // self.heads
 
+        # bs, nheads, seq_len, head_dim
         query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
         key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+
+        # rope
+        if rope is not None:
+            assert tuple(rope.shape[-2:]) == (sequence_length, head_dim * 2), (
+                f"rope shape {tuple(rope.shape[-2:])} does not match needed shape {(sequence_length, head_dim * 2)}"
+            )
+            query = apply_rot_embed_cat(query, rope)
+            key = apply_rot_embed_cat(key, rope)
 
         if self.norm_q is not None:
             query = self.norm_q(query)

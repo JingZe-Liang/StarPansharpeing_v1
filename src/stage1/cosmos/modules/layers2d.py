@@ -193,6 +193,7 @@ class Encoder(nn.Module):
             "PadConv", "Conv", "ConvPixelUnshuffle"
         ] = "PadConv",  # used in original cosmos tokenizer
         downsample_shortcut: Literal["averaging"] | None = None,
+        downsample_kwargs: dict = {"padconv_use_manually_pad": False},
         # patch size, patcher, and blocks
         patch_size: int = 4,
         patch_method: str = "haar",
@@ -210,7 +211,7 @@ class Encoder(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
-        downsample_manually_pad: bool = False,  # FIXME: True orginally
+        # downsample_manually_pad: bool = False,  # FIXME: True orginally
         resample_norm_keep: bool = False,
         adaptive_mode: str = "slice",
         **ignore_kwargs,
@@ -325,8 +326,9 @@ class Encoder(nn.Module):
                     block_in,
                     shortcut=downsample_shortcut,
                     padding_mode=padding_mode,
-                    padconv_use_manually_pad=downsample_manually_pad,
                     norm_keep=resample_norm_keep,
+                    **downsample_kwargs,
+                    # padconv_use_manually_pad=downsample_manually_pad,
                 )
                 curr_res = curr_res // 2
             self.down.append(down)
@@ -410,6 +412,7 @@ class Decoder(nn.Module):
             "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
         ] = "RepeatConv",
         upsample_shortcut: Literal["duplicating"] | None = None,
+        upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
@@ -531,6 +534,7 @@ class Decoder(nn.Module):
                     shortcut=upsample_shortcut,
                     padding_mode=padding_mode,
                     norm_keep=resample_norm_keep,
+                    **upsample_kwargs,
                 )
                 curr_res = curr_res * 2
             self.up.insert(0, up)

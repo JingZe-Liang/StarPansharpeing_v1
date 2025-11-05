@@ -3,6 +3,7 @@ from functools import wraps
 from typing import Any
 
 from beartype import beartype
+from easydict import EasyDict
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 
@@ -27,6 +28,14 @@ def to_object_recursive(config: Iterable):
         return [to_object_recursive(item) for item in config]
 
     return config
+
+
+def to_easydict_recursive(config: Iterable):
+    """
+    Recursively convert a DictConfig or ListConfig to a EasyDict object.
+    """
+    py_obj = to_object_recursive(config)
+    return EasyDict(py_obj)
 
 
 def kwargs_to_basic_types(

@@ -331,7 +331,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         reconstruction_weight: float = 1.0,
         # None for adaptive loss weight using the tokenizer last layer gradient
         # mul at the tokenizer G_loss
-        gen_loss_weight: float | None = None,
+        gen_loss_weight: float | None = None,  # None means adaptive weight
         # quantizer losses
         quantizer_type: str | None = None,
         # repa loss
@@ -363,6 +363,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             "stylegan",
             "stylegan3d",
             "r3gan",
+            None,
+            "none",
         ]
         if force_not_use_recon_loss:
             assert reconstruction_loss_type in ["l1", "mse", "dwt"]
@@ -437,7 +439,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * perceptual loss
         self.use_perceptual_loss = False
         perceptual_model = perceptual_options.get("percep_model")
-        if perceptual_weight > 0 and perceptual_model is not None:
+        if (
+            perceptual_weight is not None
+            and perceptual_weight > 0
+            and perceptual_model is not None
+        ):
             self.use_perceptual_loss = True
             self.perceptual_loss = LPIPSHyperpspectralLoss(**perceptual_options).cuda()
         self.perceptual_weight = perceptual_weight
@@ -520,8 +526,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.lecam_ema = LeCAM_EMA()
 
         # * discriminator
-        self.use_disc = disc_weight > 0.0 or disc_weight is not None
-        if disc_network_type.lower() == "patchgan":
+        self.use_disc = disc_weight > 0.0 and disc_weight is not None
+        logger.log("NOTE", f"[VQ fn loss]: using discriminator {self.use_disc}")
+        if disc_network_type.lower() in ("none", None):
+            self.discriminator = None
+            assert not self.use_disc, (
+                f"Discriminator is not used (weight={disc_weight}) but "
+                "set disc_network_type to {disc_network_type}"
+            )
+        elif disc_network_type.lower() == "patchgan":
             self.discriminator = NLayerDiscriminator(
                 input_nc=disc_in_channels,
                 n_layers=disc_num_layers,
@@ -574,12 +587,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 BlocksPerStage=[2, 2, 4, 4],
                 ExpansionFactor=2,
             )
-        elif disc_network_type is None:
-            self.discriminator = None
-            assert not self.use_disc, (
-                f"Discriminator is not used (weight={disc_weight}) but "
-                "set disc_network_type to {disc_network_type}"
-            )
         else:
             raise ValueError(f"Unsupported discriminator type: {disc_network_type}")
 
@@ -613,12 +620,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # assertions
         self.can_not_comp_adp_loss = (
-            self.force_not_use_recon_loss and self.perceptual_weight < 0.0
+            self.force_not_use_recon_loss and self.perceptual_weight <= 0.0
         )
         if self.can_not_comp_adp_loss and self.gen_loss_weight is None:
             raise ValueError(
-                "can not compute adaptive loss weight when ",
-                "force_not_use_recon_loss=True and perceptual_weight<0.0",
+                "can not compute adaptive loss weight when "
+                "force_not_use_recon_loss=True and perceptual_weight<=0.0",
             )
 
         # zero buffer

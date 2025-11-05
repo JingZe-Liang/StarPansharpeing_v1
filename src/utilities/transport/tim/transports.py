@@ -126,7 +126,7 @@ class OT_FM(Transport):
             )
             v_t = w_gt * v_t + w_cond * F_t_cond + (1 - w_gt - w_cond) * F_t_uncond
         F_target = v_t - (t - r) * dF_dv_dt
-        return F_target
+        return v_t, F_target
 
     def from_x_t_to_x_r(
         self,

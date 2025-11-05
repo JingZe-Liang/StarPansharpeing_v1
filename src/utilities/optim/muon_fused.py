@@ -80,13 +80,13 @@ class MuonFSDP(Muon):
                 # conv, linear weights, and other 2D+ parameters
                 if p.ndim >= 2 and name not in ignored_keys_for_muon:
                     muon_params.append(p)
-                    logger.debug(f"Muon params: {name} - shaped: {tuple(p.shape)}")
+                    # logger.debug(f"Muon params: {name} - shaped: {tuple(p.shape)}")
                 # bias, norm weights, embeddings, lm heads (for nlp tasks), and other 1D parameters
                 else:
                     oned_params.append(p)
-                    logger.debug(
-                        f"{oned_param_algo} params: {name} - shaped: {tuple(p.shape)}"
-                    )
+                    # logger.debug(
+                    #     f"{oned_param_algo} params: {name} - shaped: {tuple(p.shape)}"
+                    # )
             else:
                 logger.debug(f"{name} is not requires_grad")
 

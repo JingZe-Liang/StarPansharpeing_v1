@@ -1,8 +1,7 @@
 import re
 
 import torch as th
-
-from src.utilities.logging import log_print
+from loguru import logger
 
 
 def get_parameters_module_frozen(
@@ -53,9 +52,7 @@ def get_parameters_module_frozen(
             any(re.match(pattern, n) for pattern in frozen_module)
             or not p.requires_grad
         ):
-            log_print(
-                f"[Params]: skip the param: <u>{n}</u>, {no_grad_required=}", "debug"
-            )
+            logger.debug(f"[Params]: skip the param: <u>{n}</u>, {no_grad_required=}")
             if no_grad_required:
                 p.requires_grad_(False)
             continue
@@ -74,9 +71,7 @@ def get_model_learnable_params(model: th.nn.Module, with_name=True):
     for n, p in model.named_parameters():
         if p.requires_grad:
             trainable_ps[n] = p
-            log_print(f"Parameter <green>{n}</> is learnable", "debug")
-        # else:
-        #     log_print(f"Parameter <green>{n}</> is not learnable, skip it.", "debug")
+            # logger.debug(f"Parameter {n} is learnable")
 
     if with_name:
         return trainable_ps

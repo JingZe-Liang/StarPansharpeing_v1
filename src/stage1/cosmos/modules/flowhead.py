@@ -14,11 +14,14 @@ from tqdm import tqdm
 
 # Flow matching and tim transition
 from src.utilities.transport.flow_matching.transport import Sampler, Transport
-from src.utilities.transport.tim.transition import TransitionSchedule, get_delta_embed
+from src.utilities.transport.tim.transition import (
+    TransitionSchedule,
+    get_delta_time_embed,
+)
 from src.utilities.transport.tim.transports import OT_FM
 from src.utilities.transport.tim.transports import Transport as TimTransport
 
-from .blocks import AdaptiveOutputLinearLayer
+from .blocks import AdaptiveInputLinearLayer, AdaptiveOutputLinearLayer
 from .patching import (
     AdaptiveProgressivePatchEmbedding,
     AdaptiveProgressivePatchUnembedding,
@@ -261,6 +264,7 @@ class SimpleMLPAdaLN(nn.Module):
         num_res_blocks,
         grad_checkpointing=False,
         time_cond_type="t",
+        first_lin_type="interp_lin",
     ):
         super().__init__()
 
@@ -286,7 +290,12 @@ class SimpleMLPAdaLN(nn.Module):
 
         # projections
         self.cond_embed = nn.Linear(z_channels, model_channels)
-        self.input_proj = nn.Linear(in_channels, model_channels)
+        if first_lin_type == "linear":
+            self.input_proj = nn.Linear(in_channels, model_channels)
+        else:
+            self.input_proj = AdaptiveInputLinearLayer(
+                in_channels, model_channels, mode=first_lin_type
+            )
 
         res_blocks = []
         for i in range(num_res_blocks):
@@ -295,9 +304,9 @@ class SimpleMLPAdaLN(nn.Module):
         self.res_blocks = nn.ModuleList(res_blocks)
         self.final_layer = FinalLayer(model_channels, out_channels)
 
-        self.initialize_weights()
+        self.init_weights()
 
-    def initialize_weights(self):
+    def init_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -391,6 +400,7 @@ class FlowDecoder(nn.Module):
             num_res_blocks=depth,
             grad_checkpointing=grad_checkpointing,
             time_cond_type=time_cond_type,
+            first_lin_type="interp",
         )
         self.head = Unpatcher(
             in_chans=width,
@@ -417,8 +427,11 @@ class FlowDecoder(nn.Module):
 
         # to bl_c
         z, x, (b, l, _) = self._to_bl_c(z_blc, xt_bchw)  # (b * l, c)
+
         # expand t
         t = repeat(t, "b -> (b l)", l=l)  # (b * l, )
+
+        # model
         x_hidden_blc, y = self.net(x, t, z)  # time-dependent
         x_bchw = self.head(
             x_hidden_blc.reshape(b, l, -1), y, out_shape=(chan, *img_size)
@@ -476,7 +489,7 @@ class FlowDecoder(nn.Module):
             #     sampling_method="Euler",
             #     num_steps=10,
             #     clip_for_x1_pred=True,
-        #     progress=False,
+            #     progress=False,
             # )
             assert inp_shape is not None, "inp_shape must be provided in sample mode"
             return self.sample(z_blc, inp_shape, **sample_kwargs)
@@ -491,6 +504,7 @@ class FlowDecoder(nn.Module):
         cfg=1.0,
         cfg_interval=None,
         tbar=False,
+        **_kwargs,
     ):
         b, n, c_z = z.shape
         c_x, h, w = inp_shape[-3:]
@@ -534,7 +548,10 @@ class FlowDecoder(nn.Module):
 
         null_z = z.clone() * 0.0 if cfg != 1.0 else None
         for i, (t, dt) in tqdm(
-            enumerate((zip(ts, dts))), disable=not tbar, total=sample_steps
+            enumerate((zip(ts, dts))),
+            disable=not tbar,
+            total=sample_steps,
+            leave=False,
         ):
             timesteps = torch.tensor([t] * b).to(z.device)
 
@@ -697,6 +714,9 @@ class TimFlowDecoder(nn.Module):
             recon = recon.clamp(-1, 1)
 
         return recon
+
+
+##### Test
 
 
 def test_flow_head():

@@ -591,7 +591,7 @@ def test_forward_pca():
     )
 
     cfg = OmegaConf.load(
-        "scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml"
+    "scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml"
     )
     logger.info(str(cfg))
 

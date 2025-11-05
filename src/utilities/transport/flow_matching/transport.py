@@ -436,7 +436,7 @@ class Sampler:
             def _sample_fn_loop(
                 x0,
                 model_fn,
-                **model_kwargs,
+                **model_kwargs
             ):
                 # simple euler method
                 xt = x0.clone()

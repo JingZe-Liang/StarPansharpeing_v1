@@ -10,7 +10,8 @@ _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 cnn_cfg:
   model:
     resolution: 512
-    in_channels: 384 # nested channels
+    in_channels: 512 # nested channels !!
+    out_channels: 512 # nested channels !!
     z_channels: 512
     latent_channels: 64
     channels: 128
@@ -24,7 +25,11 @@ cnn_cfg:
     norm_type: gn
     norm_groups: 32
     adaptive_mode: interp
-    downsample_manually_pad: false
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    # downsample_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: true

@@ -7,6 +7,7 @@ Features:
 
 import math
 from dataclasses import dataclass
+from inspect import isclass
 from types import SimpleNamespace
 from typing import Callable, List, Optional, Tuple, Type, Union
 
@@ -25,6 +26,8 @@ from timm.layers import (
     DropPath,
     LayerScale,
     PatchEmbed,
+    create_act_layer,
+    create_norm_act_layer,
     create_norm_layer,
     get_norm_layer,
 )
@@ -32,11 +35,13 @@ from timm.layers.attention import AttentionRope as Attention_
 from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.layers.pos_embed_sincos import (
     RotaryEmbeddingCat,
+    RotaryEmbeddingDinoV3,
     apply_rot_embed_cat,
+    create_rope_embed,
     get_mixed_freqs,
     get_mixed_grid,
 )
-from timm.models.naflexvit import get_init_weights_vit, named_apply
+from timm.models.naflexvit import NaFlexRopeIterator, get_init_weights_vit, named_apply
 from timm.models.vision_transformer import VisionTransformer
 from torch import Tensor
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -133,6 +138,7 @@ class Attention(Attention_):
         attn_type: str = "sdpa",
         is_causal: bool = False,
         jvp=False,
+        delta_t_aware: bool = False,
     ):
         norm_layer = (
             get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
@@ -154,6 +160,9 @@ class Attention(Attention_):
         self.attn_implem = attn_type
         self.is_causal = is_causal
         self.jvp = jvp
+        self.delta_t_aware = delta_t_aware
+        if delta_t_aware:
+            self.qkv_delta_t = nn.Linear(dim, dim * 3)
 
         self._all_attention_functions = ALL_ATTENTION_FUNCTIONS
         if jvp and not JVP_FLASH_ATTN_ENABLED:
@@ -172,6 +181,7 @@ class Attention(Attention_):
         x,
         rope: Tensor | None = None,
         attention_mask: BlockMask | Tensor | None = None,
+        delta_t_emb: Tensor | None = None,
     ):
         B, N, C = x.shape
 
@@ -180,26 +190,45 @@ class Attention(Attention_):
             qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
         else:
-            q = (
-                self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
-            )  # B, num_heads, N, C
+            # B, num_heads, N, C
+            q = self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
             k = self.k_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
             v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
 
+        # Meanflow delta-time (t-r) awareness
+        if self.delta_t_aware and delta_t_emb is not None:
+            qkv_delta = self.qkv_delta_t(delta_t_emb)
+            qd, kd, vd = qkv_delta.reshape(B, -1, 3, self.num_heads, -1).permute(
+                2, 0, 3, 1, 4
+            )
+            q, k, v = q + qd, k + kd, v + vd
+
+        # QK-norm
         q, k = self.q_norm(q), self.k_norm(k)
 
         if rope is not None:
             npt = self.num_prefix_tokens
             # (bs, nhead, n, head_dim)
-            rope_q = rope[:, :, :N]  # N is the sequence length
-            rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
+            if rope.shape[-2] != N:
+                logger.warning(f"Rope shape mismatch: {rope.shape}[-2] != {N}")
+                rope_q = rope[:, :, :N]  # N is the sequence length
+                rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
+            else:
+                rope_q = rope
+                rope_k = rope
 
+            # Rotate them
             q = torch.cat(
                 [q[:, :, :npt, :], apply_rot_embed_cat(q[:, :, npt:, :], rope_q)], dim=2
             ).type_as(v)
             k = torch.cat(
                 [k[:, :, :npt, :], apply_rot_embed_cat(k[:, :, npt:, :], rope_k)], dim=2
             ).type_as(v)
+        elif callable(rope):
+            # rope is callable module, not support reg tokens
+            raise NotImplementedError("Not test the callable rope yet.")
+            # q = rope(q)
+            # k = rope(k)
 
         if self.attn_implem != "flex_attention" and isinstance(
             attention_mask, BlockMask
@@ -334,6 +363,7 @@ class GatedAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
+        ###### Attention gate
         if self.headwise_attn_output_gate:
             # bs, l, nh * hd + nh -> bs, l, n_kvh, (nh * hd + nh) / n_kvh
             # if n_kvh = hd -> bs, l, nh, hd + 1
@@ -381,10 +411,12 @@ class GatedAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         kv_len = key_states.shape[2]
 
+        ###### QK-norm
         if self.use_qk_norm:
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
+        ####### Rope
         if rope is not None:  # (seq_max_l, head_dim)
             npt = self.num_prefix_tokens
             # (bs, nhead, n, head_dim)
@@ -484,7 +516,7 @@ class AttentionBlock(nn.Module):
         is_causal=False,
         mlp_ratio=4,
         ffn_drop=0.0,
-        use_gate=True,
+        use_gate=False,
         layer_idx=None,
         jvp=False,
     ):
@@ -541,8 +573,120 @@ class AttentionBlock(nn.Module):
             f"attn_type={attn_type}; FFN {self.ffn.__class__.__name__} with fused_type={fused_type}"
         )
 
-    def forward(self, x, rope=None):
+        self._forward_type = "attention_block"
+
+    def _forward_attention_block(self, x, rope=None):
         x = x + self.dp1(self.ls1(self.sa(self.norm1(x), rope=rope)))
+        x = x + self.dp2(self.ls2(self.ffn(self.norm2(x))))
+        return x
+
+    def forward(self, *args, **kwargs):
+        forward_fn = f"_forward_{self._forward_type}"
+        return getattr(self, forward_fn)(*args, **kwargs)
+
+
+class AttentionBlockCondition(AttentionBlock):
+    def __init__(
+        self,
+        dim,
+        n_heads,
+        time_embed_dim,
+        cxt_embed_dim,
+        n_kv_heads=None,
+        qkv_bias=False,
+        norm_layer="rmsnorm",
+        attn_drop=0.0,
+        drop_path=0.0,
+        proj_drop=0.0,
+        fused_type=None,
+        attn_type="sdpa",
+        qk_norm=True,
+        is_causal=False,
+        mlp_ratio=4,
+        ffn_drop=0.0,
+        use_gate=False,
+        layer_idx=None,
+        jvp=False,
+    ):
+        super().__init__(
+            dim,
+            n_heads,
+            n_kv_heads,
+            qkv_bias,
+            norm_layer,
+            attn_drop,
+            drop_path,
+            proj_drop,
+            fused_type,
+            attn_type,
+            qk_norm,
+            is_causal,
+            mlp_ratio,
+            ffn_drop,
+            use_gate,
+            layer_idx,
+            jvp,
+        )
+        self.time_embed_dim = time_embed_dim
+        self.ctx_embed_dim = cxt_embed_dim
+
+        ## Add time embedding, context embedding
+        self.t_proj = nn.Sequential(
+            create_act_layer("silu"), nn.Linear(self.time_embed_dim, dim)
+        )
+        self.ctx_proj = nn.Linear(self.ctx_embed_dim, dim)
+        self.cond_proj = nn.Sequential(
+            create_norm_act_layer("rmsnorm", dim, "silu"), nn.Linear(dim, dim * 2)
+        )
+
+        self._forward_type = "condition_attention_block"
+
+    def _get_hw(self, x, inp_shape=None):
+        if inp_shape is not None:
+            h, w = inp_shape[-2:]
+        else:
+            L = x.shape[1]
+            h = w = int(math.sqrt(L))
+
+        return h, w
+
+    def _interp_z_to_x(self, x, z, inp_shape=None):
+        if z.shape[1] == x.shape[1]:
+            return z
+
+        h, w = self._get_hw(x, inp_shape)
+        z_h, z_w = self._get_hw(z, None)
+
+        # to 2d
+        z_2d = rearrange(z, "b (zh zw) c -> b c zh zw", zh=z_h, zw=z_w)
+        x_2d = rearrange(x, "b (xh xw) c -> b c xh xw", xh=h, xw=w)
+        # interpolate
+        z_2d_interp = F.interpolate(
+            z_2d,
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        # to 1d
+        z_1d = rearrange(z_2d_interp, "b c zh zw -> b (zh zw) c")
+        return z_1d
+
+    def _forward_condition_attention_block(self, x, t, z, inp_shape=None, rope=None):
+        # interpolate z into x
+        z_emb = self.ctx_proj(z)
+        z_emb = self._interp_z_to_x(x, z_emb, inp_shape)
+
+        # add time and context embedding
+        t_emb = self.t_proj(t)[..., None, None]
+        cond = self.cond_proj(t_emb + z_emb)
+        c_scale, c_shift = torch.chunk(cond, 2, dim=-1)
+
+        # AdaLN
+        x = self.norm1(x)
+        x = x * (1 + c_scale) + c_shift
+
+        # Attention + FFN
+        x = x + self.dp1(self.ls1(self.sa(x, rope=rope)))
         x = x + self.dp2(self.ls2(self.ffn(self.norm2(x))))
         return x
 
@@ -796,8 +940,10 @@ class TransformerTokenizer(nn.Module):
         norm_layer="rmsnorm",
         drop_path=0.0,
         attn_type="sdpa",
+        attn_blk_type="AttentionBlock",
         n_reg_tokens: int = 0,
         projections={"input": None, "output": None},
+        additional_pe=False,
         pe_type="learn",  # ['learn', 'rope']
         rope_kwargs={},
         head: str | None = None,
@@ -871,8 +1017,12 @@ class TransformerTokenizer(nn.Module):
         # Layers
         layers = []
         drop_path_ps = torch.linspace(0, drop_path, depth).tolist()
+        attn_cls = {
+            "AttentionBlock": AttentionBlock,
+            "AttentionBlockCondition": AttentionBlockCondition,
+        }[attn_blk_type]
         for i in range(depth):
-            block = AttentionBlock(
+            block = attn_cls(
                 dim=embed_dim,
                 n_heads=num_heads,
                 qkv_bias=qkv_bias,
@@ -888,11 +1038,14 @@ class TransformerTokenizer(nn.Module):
 
         # Positional embeddings
         self.pe_type: str = pe_type
-        self.rope: RotaryEmbeddingCat | None
+        self.rope: RotaryEmbeddingCat | RotaryEmbeddingDinoV3 | None
         self.pe: nn.Parameter | None
+        self._rope_is_mixed = False
+        self.additional_pe = additional_pe
 
-        if pe_type == "learn":
-            pe_2d = get_2d_sincos_pos_embed(  # [cls_token+n_reg_tokens+grid_size*grid_size, embed_dim]
+        if pe_type == "learn" or additional_pe:
+            # [cls_token + n_reg_tokens + grid_size*grid_size, embed_dim]
+            pe_2d = get_2d_sincos_pos_embed(
                 embed_dim,
                 grid_size=self.grid_size,
                 pe_interpolation=1.0,
@@ -903,28 +1056,34 @@ class TransformerTokenizer(nn.Module):
             )
             pe_2d = torch.as_tensor(pe_2d)
             self.pe = nn.Parameter(pe_2d, requires_grad=True)
-        elif pe_type == "rope":
-            self.rope = RotaryEmbeddingCat(
-                dim=embed_dim // num_heads,
-                temperature=rope_kwargs.get("rope_theta", 10000.0),
-                max_res=img_size,
-                feat_shape=list(self.grid_size),
+
+        elif pe_type.startswith("rope"):
+            # rope, rope_cat, rope_mixed, rope_dinov3
+            if pe_type == "rope":
+                _rope_type_create = "cat"
+            else:
+                _rope_type_create = pe_type.split("_")[1]
+            _rope_kwargs = dict(
+                dim=embed_dim,
+                num_heads=num_heads,
+                device="cuda",
+                dtype=torch.float64,
             )
-            rope_cat = self.rope.get_embed()  # (max_seq_len, head_dim * 2)
-            self.register_buffer(
-                "rope_cat", rope_cat[None, None], persistent=False
-            )  # buffer: (1, 1, max_seq_len, head_dim*2)
-            self.rope_cat: nn.Buffer
-            # Add cls token and register token PE
-            self.pe_cls_reg = nn.Parameter(
-                torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
-            )
+            if _rope_type_create == "mixed":
+                _rope_kwargs["depth"] = depth
+                self._rope_is_mixed = True
+            self.rope = create_rope_embed(_rope_type_create, **_rope_kwargs)
         else:
             self.rope, self.pe = None, None
 
+        # Add cls token and register token PE
+        if pe_type.startswith("rope"):
+            self.pe_cls_reg = nn.Parameter(
+                torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
+            )
+
         # Register tokens
         self.reg_tokens: nn.Parameter | None = None
-        self.n_reg_tokens: int = n_reg_tokens
         if n_reg_tokens > 0:
             self.reg_tokens = nn.Parameter(torch.zeros(1, n_reg_tokens, embed_dim))
             nn.init.trunc_normal_(self.reg_tokens, std=0.02)
@@ -994,7 +1153,9 @@ class TransformerTokenizer(nn.Module):
             # do not drop the masked tokens.
 
             # TODO: RoPE, theoretically support, but I haven't implemented it yet.
-            assert self.pe_type != "rope", "Rope PE not supported for mask training"
+            assert not self.pe_type.startswith("rope"), (
+                "Rope PE not supported for mask training"
+            )
             self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.mask_token, std=0.02)
             logger.info(
@@ -1039,16 +1200,84 @@ class TransformerTokenizer(nn.Module):
         x = torch.cat([x[:, : self.n_reg_tokens], x_], dim=1)
         return x
 
+    def _get_naflex_rope_embed(
+        self,
+        B: int,
+        grid_sizes: list[tuple[int, int]],
+        l_cur: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        """Variable grid_sizes in a batch of images: naflex mode"""
+        assert self.rope is not None
+        assert len(grid_sizes) == B, f"{len(grid_sizes)=} != {B=}"
+        # hp, wp = grid_size
+        # grid_size -> list of batch indices
+        size_to_indices: dict[tuple, list[int]] = {}
+        unique_sizes: list[tuple] = []  # unique grid size tuples
+        # Do not support the naflex mode
+        for bi, grid_size in enumerate(grid_sizes):  # [(hp, wp)] * x.shape[0]
+            if grid_size not in size_to_indices:
+                size_to_indices[grid_size] = []
+                unique_sizes.append(grid_size)
+            size_to_indices[grid_size].append(bi)
+
+        if self._rope_is_mixed:
+            rope_embeds = NaFlexRopeIterator(
+                self.rope,
+                size_to_indices,
+                unique_sizes,
+                batch_size=B,
+                seq_len=l_cur,
+                dtype=dtype,
+                device=device,
+            )
+
+        # create the rope embeddings with different grid sizes
+        rope_embeds = torch.zeros(
+            B, l_cur, self.rope.dim * 2, dtype=dtype, device=device
+        )
+        if hasattr(self.rope, "get_batch_embeds"):
+            # Rope cat
+            unique_embeds = self.rope.get_batch_embeds(unique_sizes)
+            for grid_size, embed, batch_indices in zip(
+                unique_sizes, unique_embeds, size_to_indices.values()
+            ):
+                h, w = grid_size
+                actual_len = h * w
+                for bi in batch_indices:
+                    rope_embeds[bi, :actual_len] = embed[:actual_len]
+        else:
+            # Rope dinov3
+            # Generate each unique size separately and assign
+            for grid_size, batch_indices in size_to_indices.items():
+                rope_embed = self.rope.get_embed(shape=grid_size)
+                h, w = grid_size
+                actual_len = h * w
+                for bi in batch_indices:
+                    rope_embeds[bi, :actual_len] = rope_embed[:actual_len]
+
+        return rope_embeds
+
+    def _get_standard_rope_embed(self, grid_size: tuple[int, int], l_cur: int):
+        """Per-batch generate the rope embeddings"""
+        assert self.rope is not None
+        rope_embeds = self.rope.get_embed(shape=grid_size)
+        # logger.log("NOTE", f"create the rope embeds shaped as {rope_embeds.shape}")
+        return rope_embeds[None, None]
+
     def _with_pos_embed(self, x, hw: tuple | None = None):
-        if self.pe_type == "learn":
-            hp, wp = (
-                hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
-            )
-            assert hp.is_integer() and wp.is_integer(), (
-                f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
-            )
-            hp, wp = int(hp), int(wp)
-            l_cur = hp * wp
+        hp, wp = (
+            hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
+        )
+        assert hp.is_integer() and wp.is_integer(), (
+            f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
+        )
+        hp, wp = int(hp), int(wp)
+        l_cur = hp * wp
+        if hasattr(self, "pe"):
+            # TODO: add naflex mode support
+            assert self.pe is not None, f"PE is None"
             pe_1lc = self.pe[None]
             if l_cur != self.n_patches:
                 pe_1lc = resample_abs_pos_embed(  # type: ignore
@@ -1059,8 +1288,10 @@ class TransformerTokenizer(nn.Module):
                 )
             x = x + pe_1lc
             return x, None  # x, and rope is None
-        elif self.pe_type == "rope" and self.rope is not None:
-            return x, self.rope_cat
+        elif self.pe_type.startswith("rope") and self.rope is not None:
+            # NOTE: not supports the naflex mode yet.
+            rope_embeds = self._get_standard_rope_embed((hp, wp), l_cur)
+            return x, rope_embeds
         else:
             return x, None
 
@@ -1132,10 +1363,23 @@ class TransformerTokenizer(nn.Module):
         intermidates = []
         index = get_intermidates or []
         for i, blk in enumerate(self.layers):
-            if self.grad_checkpointing and self.training:
-                x = checkpoint(blk, x, rope, None, use_reentrant=False)
+            # Rope
+            if self._rope_is_mixed:
+                # need to regenerate rope for each layer
+                if isinstance(rope, NaFlexRopeIterator):
+                    rope_ = next(rope)
+                elif torch.is_tensor(rope):
+                    # is standard rope [bs, depth, nheads, seq_len, dim]
+                    rope_ = rope[:, i]
             else:
-                x = blk(x, rope=rope)
+                rope_ = rope
+
+            # Blocks
+            if self.grad_checkpointing and self.training:
+                x = checkpoint(blk, x, rope_, use_reentrant=False)
+            else:
+                x = blk(x, rope=rope_)
+
             if i in index:
                 # TODO: will this return the cls or reg tokens?
                 intermidates.append(x[:, self.n_reg_tokens :])
@@ -1147,17 +1391,17 @@ class TransformerTokenizer(nn.Module):
         x = x if self.last_norm is None else self.last_norm(x)
         x_norm = x[:, self.n_reg_tokens :, :]  # remove reg tokens
 
+        # fmt: off
         out = {
             "x_norm_patch_tokens": x_norm,  # patch tokens
             "x_prenorm": x,
-            "x_reg_tokens": x[:, : self.n_reg_tokens, :]
-            if self.n_reg_tokens > 0
-            else None,
+            "x_reg_tokens": x[:, : self.n_reg_tokens, :] if self.n_reg_tokens > 0 else None,
             "grid_size": (gx_h, gx_w),
             "mask": mask,
             "ids_restore": ids_restore,
             "intermidates": intermidates if len(intermidates) > 0 else None,
         }
+        # fmt: on
         return out
 
     def _to_output(
@@ -1235,23 +1479,23 @@ if __name__ == "__main__":
     """
     LOVELY_TENSORS=1 python -m src.stage1.cosmos.modules.transformer
     """
-    # transformer = (
-    #     TransformerTokenizer(
-    #         3,
-    #         512,
-    #         3,
-    #         pe_type="learn",
-    #         drop_path=0.2,
-    #         is_causal=True,
-    #         mask_train_ratio=0.5,
-    #     )
-    #     .cuda()
-    #     .to(dtype=torch.bfloat16)
-    # )
-    # x = torch.randn(2, 3, 224, 224).cuda()
-    # with torch.autocast("cuda", dtype=torch.bfloat16):
-    #     y, out = transformer(x, ret_2d_tokens=True, ret_all=True)
-    # print("transformer ouput: ", y)
-    # for k, v in out.items():
-    #     print("{:<20}: {}".format(k, str(v)))
-    pass
+    transformer = (
+        TransformerTokenizer(
+            3,
+            512,
+            3,
+            pe_type="rope_dinov3",
+            drop_path=0.2,
+            is_causal=False,
+            mask_train_ratio=0.0,
+        )
+        .cuda()
+        .to(dtype=torch.bfloat16)
+    )
+    x = torch.randn(2, 3, 224, 224).cuda()
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        y, out = transformer(x, ret_2d_tokens=True, ret_all=True)
+    print("transformer ouput: ", y)
+    for k, v in out.items():
+        print("{:<20}: {}".format(k, str(v)))
+    # pass

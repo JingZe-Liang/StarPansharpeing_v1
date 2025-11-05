@@ -140,7 +140,7 @@ train_loader:
 
   macro_sampled_batch_size:
     128: 24
-    256: 14
+    256: 18
     512: 9
 
   loader_kwargs:

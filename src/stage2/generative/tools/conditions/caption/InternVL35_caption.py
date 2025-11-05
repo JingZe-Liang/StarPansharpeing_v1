@@ -28,7 +28,6 @@ from transformers import (
     TextIteratorStreamer,
     TextStreamer,
 )
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
 
 from src.utilities.func.redirect_stderr import suppress_stdout_stderr
 from src.utilities.logging import log

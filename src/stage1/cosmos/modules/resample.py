@@ -395,10 +395,12 @@ def build_downsample_block(
     shortcut: None | Literal["averaging"] = None,
     padding_mode: str = "zeros",
     *,
-    padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
     norm_type: str | None = None,
     norm_keep: bool = False,
+    # padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
+    **kwargs,
 ) -> nn.Module:
+    padconv_use_manually_pad = kwargs.pop("padconv_use_manually_pad", True)
     logger.info(
         f"[build_downsample_block] {block_type=}, "
         f"{in_channels=}, "

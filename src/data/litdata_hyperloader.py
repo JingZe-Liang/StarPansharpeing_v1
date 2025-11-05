@@ -157,6 +157,10 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
 
 
 class _BaseStreamingDataset(StreamingDataset):
+    """
+    Fixed index file name support.
+    """
+
     def __init__(self, *args, **kwargs) -> None:
         input_dir = Path(kwargs.pop("input_dir"))
         index_file_name = None
@@ -379,32 +383,8 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             return new_sample
         return sample
 
-    def __getitem__(self, idx):
-        d = super().__getitem__(idx)
-
-        d = self._conditions_select_random_one(d)
-        # skip the none or undecoded value
-        if self._img_key not in d:
-            logger.error(
-                f"Image key {self._img_key} not found in sample: {d['__key__']} "
-                f"existing keys are {d.keys()}"
-            )
-            return None
-        if d[self._img_key] is None or isinstance(d[self._img_key], bytes):
-            logger.warning(f"Skip the {type(d[self._img_key])} value: {d['__key__']}")
-            return None
-
-        _orig_img_shape = d[self._img_key].shape
-
-        # Image transformation and augmentation
-        d = self._pil_to_tensor(d)
-        d = self._crop_resize(d)
-        d = self._norm_img(d)
-        d = self._augment(d)
-        d = self._degrade(d)
-        # if not 'per_stream' shuffle, make sure each stream has the same keys
-        d = self._filter_only_img(d)
-
+    def __check_chans_for_hyper_images(self, d, orig_img_shape: torch.Size, idx: int):
+        """Check the number of channels for hyper images"""
         assert d["img"].shape[0] in [
             3,
             4,
@@ -421,7 +401,40 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             242,
             368,
             369,
-        ], f"{d['img'].shape=}, {_orig_img_shape=}, {d['__key__']=}, {idx=}"
+        ], f"{d['img'].shape=}, {orig_img_shape=}, {d['__key__']=}, {idx=}"
+
+    def _skip_undecode(self, d):
+        # skip the none or undecoded value
+        if self._img_key not in d:
+            logger.error(
+                f"Image key {self._img_key} not found in sample: {d['__key__']} "
+                f"existing keys are {d.keys()}"
+            )
+            return None
+        if d[self._img_key] is None or isinstance(d[self._img_key], bytes):
+            logger.warning(f"Skip the {type(d[self._img_key])} value: {d['__key__']}")
+            return None
+
+        return d
+
+    def __getitem__(self, idx):
+        d = super().__getitem__(idx)
+
+        d = self._conditions_select_random_one(d)
+        d = self._skip_undecode(d)
+
+        _orig_img_shape = d[self._img_key].shape
+
+        # Image transformation and augmentation
+        d = self._pil_to_tensor(d)
+        d = self._crop_resize(d)
+        d = self._norm_img(d)
+        d = self._augment(d)
+        d = self._degrade(d)
+        # if not 'per_stream' shuffle, make sure each stream has the same keys
+        d = self._filter_only_img(d)
+
+        self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
 
         return d
 
@@ -1092,7 +1105,7 @@ def __test_create_hyper_image_litdata_loader():
     return ds, dl
 
 
-def test_index_file_litdata_loader():
+def __test_index_file_litdata_loader():
     index_file = "data/RS5M/LitData_images_val/val_index.json"
     input_dir = "data/RS5M/LitData_images_val/"
 
@@ -1111,7 +1124,36 @@ def test_index_file_litdata_loader():
 
 
 def __test_normal_image_loader():
+    from litdata.streaming.serializers import BytesSerializer, StringSerializer
+
     path = "data2/HyperspectralEarth/LitData_hyper_images"
+    stream_ds_kwargs = {
+        "transform_prob": 0.0,
+        "resize_before_transform": 128,
+        "is_cycled": False,
+    }
+    # serializers = {
+    #     "__key__": StringSerializer(),
+    #     "img": BytesSerializer(),
+    # }
+    ds = ImageStreamingDataset.create_dataset(
+        input_dir=path,
+        combined_kwargs={"batching_method": "per_stream"},
+        # serializers=serializers,
+        **stream_ds_kwargs,
+    )
+    loader_kwargs = {
+        "batch_size": 4,
+        "num_workers": 2,
+    }
+
+    dl = StreamingDataLoader(ds, **loader_kwargs)
+    for sample in dl:
+        print(sample["img"].shape)
+
+
+def __test_get_item_key():
+    path = "data2/RemoteSAM270k/LitData_hyper_images"
     stream_ds_kwargs = {
         "transform_prob": 0.0,
         "resize_before_transform": 128,
@@ -1119,16 +1161,13 @@ def __test_normal_image_loader():
     }
     ds = ImageStreamingDataset.create_dataset(
         input_dir=path,
-        combined_kwargs={"batching_method": "stratified"},
+        combined_kwargs={"batching_method": "per_stream"},
+        # serializers=serializers,
         **stream_ds_kwargs,
     )
-    loader_kwargs = {
-        "batch_size": 4,
-        "num_workers": 2,
-    }
-    dl = StreamingDataLoader(ds, **loader_kwargs)
-    for sample in dl:
-        print(sample["img"].shape)
+
+    for i in range(len(ds)):
+        print(ds[i]["__key__"])
 
 
 if __name__ == "__main__":
@@ -1139,7 +1178,8 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
-    __test_normal_image_loader()
+    # __test_normal_image_loader()
+    __test_get_item_key()
 
     # from omegaconf import OmegaConf
 

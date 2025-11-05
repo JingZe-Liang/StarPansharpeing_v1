@@ -1,19 +1,23 @@
 """
 Mingtok-like three-stage tokenizer with low-level and semantic-level feature alignment.
 
-TODO: add ∂-flow head.
+1. add t-dependent decoder (flow transformer decoder + flow head)
+2. fix flow UViT decoder
+    2.1 fix time t-r conditioning embedder (in utilities)
+3. add alpha-flow
 """
 
 import math
+import random
 from functools import partial
-from typing import Any, List, Optional, no_type_check
+from typing import Any, List, Optional, cast, no_type_check
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from jaxtyping import Float
 from loguru import logger
-from omegaconf.omegaconf import OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from timm.layers import (
     create_norm_act_layer,
     create_norm_layer,
@@ -33,10 +37,17 @@ from typing_extensions import (
     Union,
 )
 
-from src.utilities.config_utils import to_object_recursive
+from src.utilities.config_utils import to_easydict_recursive, to_object_recursive
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
+from src.utilities.transport.flow_matching.transport import (
+    Sampler,
+)
+from src.utilities.transport.flow_matching.transport import (
+    Transport as FM_Transport,
+)
 from src.utilities.transport.tim.transition import TransitionSchedule
-from src.utilities.transport.tim.transports import OT_FM, Transport
+from src.utilities.transport.tim.transports import OT_FM
+from src.utilities.transport.tim.transports import Transport as Tim_Transport
 
 from .modules import Attention, AttentionBlock, TransformerTokenizer
 from .modules.flowhead import FlowDecoder, TimFlowDecoder
@@ -55,9 +66,7 @@ DecoderOutput: TypeAlias = tuple[Tensor, LossOutput]
 # *==============================================================
 
 
-def _create_default_mingtok_cfg(
-    flow_head_type: str = "tim", decoder_type: str = "flow_head"
-):
+def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvit"):
     """Create a default configuration for Mingtok-like tokenizer model.
     Returns:
         OmegaConf: Default configuration object.
@@ -65,19 +74,23 @@ def _create_default_mingtok_cfg(
     total_resolution: N downsampled times of the original image size.
     """
     ########### Encoder and decoder
+    # CNN encoder and decoder
+    # f16c64
+
     enc_str: str = (
-        "in_chan=3 embed_dim=512 depth=12 patch_size=16 out_patch_size=1 mlp_ratio=4.0 "
+        "in_chan=512 embed_dim=768 depth=12 num_heads=12 patch_size=16 out_patch_size=1 mlp_ratio=4.0 "
         "norm_layer='rmsnorm' drop_path=0.1 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
-        "last_norm='rmsnorm' z_dim=256 latent_dim=16 img_size=512 head='linear' "
-        "n_reg_tokens=4 mask_ratio_train=0.0 attn_type='sdpa'"
+        "last_norm='rmsnorm' z_dim=512 latent_dim=32 img_size=512 patcher_type='progressive_patch_embedder' "
+        "patch_prog_dims=[386,386,512] "
+        "n_reg_tokens=0 mask_ratio_train=0.0 attn_type='sdpa'"
     )
     enc_cfg = OmegaConf.from_dotlist(enc_str.split(" "))
 
     dec_str: str = (
-        "in_chan=16 embed_dim=512 depth=12 patch_size=1 mlp_ratio=4.0 "
+        "in_chan=32 embed_dim=1024 out_chan=1024 depth=12 num_heads=16 patch_size=1 mlp_ratio=4.0 "
         "norm_layer='rmsnorm' drop_path=0.1 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
-        "last_norm='rmsnorm' out_chan=512 img_size=32 head='linear' "
-        "n_reg_tokens=4 mask_ratio_train=0.0 is_causal=False attn_type='sdpa'"
+        "last_norm='rmsnorm' img_size=32 head='linear' "
+        "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=false attn_type='sdpa'"
     )
     dec_cfg = OmegaConf.from_dotlist(dec_str.split(" "))
 
@@ -86,11 +99,14 @@ def _create_default_mingtok_cfg(
 
     ## * Tim flow config
     tim_trans_kwargs_str = (
-        "diffusion_ratio=0.5 consistency_ratio=0.1 weight_time_tangent=True "
+        "diffusion_ratio=0.5 consistency_ratio=0.1 weight_time_tangent=true "
         "differential_epsilon=0.005 derivative_type='dde' weight_time_type='sqrt'"
     )
     tim_trans_kwargs_cfg = OmegaConf.from_dotlist(tim_trans_kwargs_str.split(" "))
-    tim_transport_str = "P_mean=0.0 P_std=1.0 sigma_d=1.0 enhance_target=false"
+    tim_transport_str = (
+        "P_mean=0.0 P_std=1.0 sigma_d=1.0 enhance_target=true "
+        "w_gt=1.0 w_cond=0.75 w_start=0.3 w_end=0.8"
+    )
     tim_transport_cfg = OmegaConf.from_dotlist(tim_transport_str.split(" "))
 
     # * FM config
@@ -102,63 +118,83 @@ def _create_default_mingtok_cfg(
     ## * UViT config
     # TODO: add fm config
     uvit_flow_str: str = (
-        "in_chan=3 z_dim=512 channels=128 ch_mult=[1,1,2,2,4] act_fn='silu' "
-        "vit_act_fn='geglu' layers_per_block=2 num_attention_heads=8 "
-        "dropout=0.0 norm_num_groups=32 time_scale_shift=True "
-        "mid_nlayers=12 mid_theta=100.0 eps=1e-5 ada_norm=True "
-        "learned_pos_embed=False image_size=null relative_pos_embed=False "
-        "time_cond_type='t-r' init=null use_act_ckpt=False total_resolutions=16 "
-        "img_size=512"
+        "in_chan=512 z_dim=1024 channels=128 ch_mult=[1,1,2,4,8] act_fn='silu' "
+        "vit_act_fn='silu' layers_per_block=2 num_attention_heads=8 "
+        "dropout=0.0 norm_num_groups=32 time_scale_shift=true "
+        "mid_nlayers=12 mid_theta=100.0 eps=1e-5 ada_norm=true "
+        "learned_pos_embed=false relative_pos_embed=false "
+        f"time_cond_type={'t' if flow_type == 'fm' else 't-r'} "
+        "init=null use_act_ckpt=true total_resolutions=16 "
+        f"img_size=512 flow_type={flow_type} cfg_prob=0.2"
     )
     uvit_flow_cfg = OmegaConf.from_dotlist(uvit_flow_str.split(" "))
     # NOTE: only supports tim flow yet.
-    uvit_flow_cfg.transition_schedule = tim_trans_kwargs_cfg
-    uvit_flow_cfg.transport = tim_transport_cfg
+    if flow_type == "tim":
+        uvit_flow_cfg.transition_schedule = tim_trans_kwargs_cfg
+        uvit_flow_cfg.transport = tim_transport_cfg
+    elif flow_type == "fm":
+        # raise NotImplementedError("flow type fm not implemented yet.")
+        pass
 
     ##* flow head config
     flow_head_str: str = (
-        # Transformer tokenizer kwargs
-        "in_chan=512 embed_dim=768 depth=12 patch_size=1 mlp_ratio=4.0 "
-        "norm_layer='rmsnorm' drop_path=0.1 pe_type='learn' rope_kwargs={} "
-        "last_norm='rmsnorm' out_chan=512 img_size=32 head='linear' "
-        "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=False attn_type='sdpa' "
+        # Transformer decoder kwargs
+        "in_chan=768 embed_dim=768 depth=12 num_heads=12 patch_size=1 mlp_ratio=4.0 "
+        "norm_layer='rmsnorm' drop_path=0.1 pe_type=rope rope_kwargs.rope_theta=10000.0 "
+        "last_norm='rmsnorm' out_chan=512 decoder_img_size=32 head='linear' "
+        "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=false attn_type='sdpa' "
         # Flow decoder kwargs
-        "target_channels=3 z_channels=512 flow_depth=6 flow_width=768 "
-        "patch_size=16 img_size=512 grad_checkpointing=False use_cfg=False "
-        "head_type='once' head_kwargs={} cfg_prob=0.5 total_resolutions=16 "
-        f"flow_type={flow_head_type} "
+        "target_channels=512 z_channels=512 flow_depth=6 flow_width=768 "
+        "patch_size=16 flow_img_size=512 grad_checkpointing=false use_cfg=false "
+        "head_type='progressive' head_kwargs.progressive_dims=[512,384,384] cfg_prob=0.5 total_resolutions=16 "
+        f"flow_type={flow_type} "
     )
     flow_head_cfg = OmegaConf.from_dotlist(flow_head_str.split(" "))
-    if flow_head_type == "tim":
+    if flow_type == "tim":
         flow_head_cfg.fm_kwargs = tim_transport_cfg
         flow_head_cfg.transition_schedule_kwargs = tim_trans_kwargs_cfg
     else:
         flow_head_cfg.fm_kwargs = fm_kwargs_cfg
 
+    if decoder_type == "flow_head":
+        pixel_decoder_cfg = flow_head_cfg
+    else:
+        pixel_decoder_cfg = uvit_flow_cfg
+
     ######## repa projection config
 
     repa_proj_str = (
-        "low_lvl_repa_out_chan=1024 sem_repa_out_chan=1152 low_lvl_cache_layers=[3,6,9,11] "
+        "low_lvl_repa_out_chan=1024 sem_repa_out_chan=1024 low_lvl_cache_layers=[3,6,9,11] "
         "sem_cache_layers=[3,6,9,11] low_lvl_repa_proj_chans=[768,768,768,768] "
-        "sem_repa_proj_chans=[768,768,768,768]"
+        "sem_repa_proj_chans=[1024,1024,1024,1024]"
     )
     repa_proj_cfg = OmegaConf.from_dotlist(repa_proj_str.split(" "))
 
     ######## Tokenizer main config
+    # model and sampling defaults
 
-    main_str = (
-        f"decoder_type={decoder_type} compile=false"
-        "sampling_options_default.num_steps=8 sampling_options_default.stochasticity_ratio=0.0"
-        "sampling_options_default.sample_type='transition' sampling_options_default.cfg_scale=2.0"
+    tim_sample_str = (
+        "num_steps=8 stochasticity_ratio=0.1 sample_type='transition' cfg_scale=2.0"
+        "cfg_low=0.0 cfg_high=0.7"
     )
+    tim_sample_cfg = OmegaConf.from_dotlist(tim_sample_str.split(" "))
+
+    # fm_sample_str = "sample_steps=100 schedule=pow_0.25 cfg_scale=2.0 tbar=true"  # flow head fm mannually sample kwargs
+    fm_sample_str = "num_steps=20 cfg=2.0 progress=true cfg_interval=[0.0,0.7]"
+    fm_sample_cfg = OmegaConf.from_dotlist(fm_sample_str.split(" "))
+
+    main_str = f"decoder_type={decoder_type} compile=false"
     main_cfg = OmegaConf.from_dotlist(main_str.split(" "))
+    main_cfg.sampling_options_default = (
+        tim_sample_cfg if flow_type == "tim" else fm_sample_cfg
+    )
 
     tokenizer_cfg_default = OmegaConf.create(
         {
             # encoder, semantic decoder and pixel decoder configs
             "low_level_encoder": enc_cfg,
             "semantic_decoder": dec_cfg,
-            "pixel_decoder": flow_head_cfg,
+            "pixel_decoder": pixel_decoder_cfg,
             "tokenizer": main_cfg,
             "repa_proj": repa_proj_cfg,
         }
@@ -173,7 +209,7 @@ def _create_default_mingtok_cfg(
 
 
 def is_tuple_list(x):
-    return isinstance(x, (tuple, list))
+    return isinstance(x, (tuple, list, ListConfig))
 
 
 def is_sequence_shape(shape: Any) -> bool:
@@ -260,9 +296,10 @@ class EncoderLowLevel(nn.Module):
             mask_train_ratio=cfg.mask_ratio_train,
             is_causal=False,
             n_reg_tokens=cfg.n_reg_tokens,
-            head="linear",
-            patcher_type="patch_embedder",
             attn_type=cfg.attn_type,
+            head="linear",
+            patcher_type=cfg.patcher_type,
+            patch_prog_dims=getattr(cfg, "patch_prog_dims", None),
         )
         self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
 
@@ -326,11 +363,12 @@ class DecoderFlowHead(nn.Module):
         self.total_resolutions = getattr(cfg, "total_resolutions", cfg.patch_size)
 
         # Transformer tokenizer for processing semantic tokens
+        # TODO: make the transformer time-dependent
         self.decoder = TransformerTokenizer(
             in_chan=cfg.in_chan,
             embed_dim=cfg.embed_dim,
             out_chan=cfg.out_chan,
-            img_size=cfg.img_size,
+            img_size=cfg.decoder_img_size,
             patch_size=cfg.patch_size,
             patcher_type="linear",
             depth=cfg.depth,
@@ -361,7 +399,7 @@ class DecoderFlowHead(nn.Module):
                 use_cfg=cfg.use_cfg,
                 cfg_prob=cfg.cfg_prob,
                 patch_size=cfg.patch_size,
-                img_size=cfg.img_size,
+                img_size=cfg.flow_img_size,
                 head_type=cfg.head_type,
                 head_kwargs=cfg.head_kwargs,
                 # fm config
@@ -377,7 +415,7 @@ class DecoderFlowHead(nn.Module):
                 grad_checkpointing=cfg.grad_checkpointing,
                 use_cfg=cfg.use_cfg,
                 cfg_prob=cfg.cfg_prob,
-                patch_size=cfg.patch_size,
+                patch_size=cfg.flow_patch_size,
                 time_cond_type="t,t-r",
                 img_size=cfg.img_size,
                 head_type=cfg.head_type,
@@ -447,13 +485,7 @@ class DecoderFlowHead(nn.Module):
         mode: Literal["train", "sample"] = "train",
         clamp: bool = False,
         ema_model: Optional[Self] = None,
-        sample_kwargs: dict = dict(
-            num_steps=8,
-            stochasticity_ratio=0.0,
-            cfg=1.0,
-            cfg_interval=None,
-            sample_steps=None,
-        ),
+        sample_kwargs: dict = {},
         ret_trajectory: bool = False,
     ):
         # Process semantic tokens condition
@@ -520,24 +552,77 @@ class DecoderUViT(nn.Module):
             eps=cfg.eps,
             ada_norm=cfg.ada_norm,
             learned_pos_embed=cfg.learned_pos_embed,
-            image_size=cfg.image_size,
+            image_size=cfg.img_size,
             relative_pos_embed=cfg.relative_pos_embed,
             time_cond_type=cfg.time_cond_type,
             init=cfg.init,
             use_act_ckpt=cfg.use_act_ckpt,
         )
 
+        self.cfg_prob = getattr(cfg, "cfg_prob", 0.0)
         # Tim transport and scheduler
         # TODO: add FM support
-        transition_schedule_kwargs = cfg.transition_schedule
-        transport_kwargs = cfg.transport
-        self.transport = OT_FM(**transport_kwargs)
-        self.transition_schedule = TransitionSchedule(
-            self.transport,
-            **transition_schedule_kwargs,
-        )
+        self._flow_type = cfg.flow_type
+        if cfg.flow_type == "tim":
+            transition_schedule_kwargs = cfg.transition_schedule
+            transport_kwargs = cfg.transport
+            self.transport = OT_FM(**transport_kwargs)
+            self.transition_schedule = TransitionSchedule(
+                self.transport,
+                **transition_schedule_kwargs,
+            )
+        elif cfg.flow_type == "fm":
+            # fm_kwargs = cfg.fm_kwargs
+            self.transport = FM_Transport(
+                model_type="velocity",
+                path_type="linear",
+                loss_type="velocity",
+                train_eps=0.000,
+                sample_eps=0.000,
+            )
+            self.sampler = Sampler(transport=self.transport)
+        else:
+            raise ValueError(f"flow_type {cfg.flow_type} not supported")
 
-    def forward(
+    def _create_model_sampled(self, inp_shape):
+        def _inner_tim(x, t, r, y, inp_shape):
+            return self.decoder(x, t, r, y, inp_shape)
+
+        def _inner_fm(x, t, y, inp_shape):
+            return self.decoder(x, t, None, y, inp_shape)
+
+        if self._flow_type == "tim":
+            return partial(_inner_tim, inp_shape=inp_shape)
+        elif self._flow_type == "fm":
+            return partial(_inner_fm, inp_shape=inp_shape)
+        else:
+            raise ValueError(f"flow_type {self._flow_type} not supported")
+
+    def _get_null_h(self, h: Tensor):
+        if hasattr(self.decoder, "null_cond_h"):
+            null_h = self.decoder.null_cond_h  # [1, dim, 1, 1]
+            null_h = null_h.expand(h.shape[0], -1, *h.shape[-2:])
+            return null_h
+        else:
+            return torch.zeros_like(h)
+
+    def _replace_h_as_null(self, h: Tensor, cfg_prob: float = 0.0):
+        n_cfg = int(h.shape[0] * cfg_prob)
+        assert cfg_prob >= 0.0
+        if n_cfg == 0:
+            return h
+        else:
+            cfg_mask = torch.rand(h.shape[0]) < cfg_prob
+            null_h = self._get_null_h(h)
+            h = torch.where(
+                cfg_mask[:, None, None, None],
+                null_h,
+                h,
+            )
+
+        return h
+
+    def _forward_tim(
         self,
         x: torch.Tensor,  # bs, c, h, w
         h: Tensor,  # bs, n, dim or bs, c, h, w
@@ -563,7 +648,7 @@ class DecoderUViT(nn.Module):
 
         # Decoder channels
         chan = get_chan_from_shape(inp_shape)
-        null_cond_h = self.decoder.null_cond_h if hasattr(self.decoder, "null_cond_h") else None  # fmt: skip
+        null_cond_h = self._get_null_h(h)
 
         # Decode using the CNN decoder
         flow_loss, loss_dict = None, {}
@@ -592,15 +677,16 @@ class DecoderUViT(nn.Module):
             recon: Tensor = breakdowns["x0_pred"]
         elif mode == "sample":
             # eval: loop to generate reconstruction image when h is the condition.
-            # no CFG
-            x_init = torch.randn_like(x)
+            # x_init = torch.randn_like(x)
+            x_init = x
             recon: Tensor = self.transition_schedule.sample(
-                self.decoder,
+                # self.decoder,
+                self._create_model_sampled(chan),
                 # start sampling noise
                 z=x_init,
                 # conditions
                 y=h,
-                y_null=null_cond_h,  # since no CFG, y_null is None
+                y_null=null_cond_h,
                 T_max=1.0,
                 **sample_kwargs,
             )
@@ -616,10 +702,84 @@ class DecoderUViT(nn.Module):
         losses = {"flow_loss": flow_loss}
         return recon, losses
 
+    def _forward_fm(
+        self,
+        x: torch.Tensor,  # bs, c, h, w
+        h: Tensor,  # bs, n, dim or bs, c, h, w
+        inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
+        mode: Literal["train", "sample"] = "train",
+        clamp=False,
+        ema_model: Optional[Self] = None,
+        sample_kwargs: dict = dict(
+            num_steps=20,
+            cfg=1.0,
+            progress=True,
+            cfg_interval=None,
+        ),
+        ret_trajectory=False,
+    ):
+        self.transport = cast(FM_Transport, self.transport)
+        if mode == "train":
+            h = self._replace_h_as_null(h, cfg_prob=self.cfg_prob)
+            flow_output = self.transport.training_losses(
+                self.decoder,
+                x,
+                model_kwargs={"inp_shape": inp_shape, "z": h},
+            )
+            flow_loss = flow_output["loss"].mean()
+            recon = flow_output["pred_x_clean"]
+        else:
+            # x_init = torch.randn_like(x)
+            x_init = x
+            cfg_scale: float = sample_kwargs.pop("cfg", 1.0)
+            cfg_interval: tuple[int, int] | None = sample_kwargs.pop(
+                "cfg_interval", None
+            )
+            sample_fn_ = self.sampler.sample_ode(**sample_kwargs)
+
+            # takes [x, model, model_kwargs], model takes [x, t, **model_kwargs]
+            @torch.no_grad()
+            def _model_step_fn(x, t):
+                nonlocal cfg_scale, cfg_interval
+
+                null_cond_h = self._get_null_h(h)
+
+                v = self.decoder(x, t, z=h, inp_shape=inp_shape)
+                if (
+                    cfg_scale > 1.0
+                    and null_cond_h is not None
+                    and cfg_interval is not None
+                    # t is a tensor
+                    and t[0].item() >= cfg_interval[0]
+                    and t[0].item() <= cfg_interval[1]  # fmt: skip
+                ):
+                    # classifier-free guidance
+                    assert cfg_scale > 1.0, "cfg_scale must be > 1.0 for CFG"
+                    assert null_cond_h is not None, "null_cond_h is None for CFG"
+                    v_uncond = self.decoder(x, t, z=null_cond_h, inp_shape=inp_shape)
+                    v = v_uncond + cfg_scale * (v - v_uncond)
+                return v
+
+            recon = sample_fn_(x_init, _model_step_fn)
+
+            if not ret_trajectory:
+                recon = recon[-1]
+            flow_loss = None
+
+        losses = {"flow_loss": flow_loss}
+        return recon, losses
+
+    def forward(self, x, h, inp_shape, mode="train", *args, **kwargs):
+        if self._flow_type == "tim":
+            return self._forward_tim(x, h, inp_shape, mode, *args, **kwargs)
+        else:
+            return self._forward_fm(x, h, inp_shape, mode, *args, **kwargs)
+
 
 class FlowTokenizer(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: DictConfig):
         super().__init__()
+        cfg = to_easydict_recursive(cfg)
 
         # Cfgs
         self.low_cfg = cfg.low_level_encoder
@@ -653,10 +813,15 @@ class FlowTokenizer(nn.Module):
         self.use_repa: bool = cfg.repa_proj is not None
         self.z: Tensor | None = None
         self.sem_z: Tensor | None = None
+        self._hw: tuple | list | None = None
         self.low_lvl_cache_layers = self.proj_cfg.low_lvl_cache_layers
         self.sem_cache_layers = self.proj_cfg.sem_cache_layers
         self.low_lvl_proj_is_multi = is_tuple_list(self.low_lvl_cache_layers)
         self.sem_proj_is_multi = is_tuple_list(self.sem_cache_layers)
+
+        # trainer compatiblity
+        self._use_repa_loss = self.use_repa
+        self._use_vf_loss = False
 
         self._build_repa_projections()
 
@@ -682,6 +847,7 @@ class FlowTokenizer(nn.Module):
                         self.proj_cfg.low_lvl_repa_proj_chans[i],
                         self.proj_cfg.low_lvl_repa_out_chan,
                         self.proj_cfg.low_lvl_repa_out_chan,
+                        is_1d=True,
                     )
                     low_lvl_z_proj.append(proj_)
             else:
@@ -689,6 +855,7 @@ class FlowTokenizer(nn.Module):
                     self.proj_cfg.low_lvl_repa_proj_chans,
                     self.proj_cfg.low_lvl_repa_out_chan,
                     self.proj_cfg.low_lvl_repa_out_chan,
+                    is_1d=True,
                 )
 
             if self.sem_proj_is_multi:
@@ -698,6 +865,7 @@ class FlowTokenizer(nn.Module):
                         self.proj_cfg.sem_repa_proj_chans[i],
                         self.proj_cfg.sem_repa_out_chan,
                         self.proj_cfg.sem_repa_out_chan,
+                        is_1d=True,
                     )
                     sem_z_proj.append(proj_)
             else:
@@ -705,6 +873,7 @@ class FlowTokenizer(nn.Module):
                     self.proj_cfg.sem_repa_proj_chans,
                     self.proj_cfg.sem_repa_out_chan,
                     self.proj_cfg.sem_repa_out_chan,
+                    is_1d=True,
                 )
 
             self._repa_proj = nn.ModuleDict(
@@ -746,26 +915,29 @@ class FlowTokenizer(nn.Module):
     def get_repa_feature(self):
         if not self.training or not self.use_repa:
             return None
-
         assert self.z is not None and self.sem_z is not None, (
             f"z and sem_z must be set before get_repa_feature but {self.z=} and {self.sem_z=}"
         )
 
+        to_2d = partial(self._to_2d, hw=self._hw)
+
+        # Low-level feature distillation
         if self.low_lvl_proj_is_multi:
             low_lvl_features = [
-                self._repa_proj["low_lvl_repa_proj"][i](feat)
+                to_2d(self._repa_proj["low_lvl_repa_proj"][i](feat))
                 for i, feat in enumerate(self.z)
             ]
         else:
-            low_lvl_features = self._repa_proj["low_lvl_repa_proj"](self.z)
+            low_lvl_features = to_2d(self._repa_proj["low_lvl_repa_proj"](self.z))
 
+        # Semantic feature distillation
         if self.sem_proj_is_multi:
             sem_features = [
-                self._repa_proj["sem_repa_proj"][i](feat)
+                to_2d(self._repa_proj["sem_repa_proj"][i](feat))
                 for i, feat in enumerate(self.sem_z)
             ]
         else:
-            sem_features = self._repa_proj["sem_repa_proj"](self.sem_z)
+            sem_features = to_2d(self._repa_proj["sem_repa_proj"](self.sem_z))
 
         return low_lvl_features, sem_features
 
@@ -790,7 +962,7 @@ class FlowTokenizer(nn.Module):
         # To semantic tokens
         sem_out = self._sem_decode(latent)
         sem_tokens = sem_out["sem_tokens"]
-        sem_proj_out = sem_out["sem_proj_out"]
+        # sem_proj_out = sem_out["sem_proj_out"]
 
         # To 2d
         assert hw is not None, "hw must be provided"
@@ -800,9 +972,8 @@ class FlowTokenizer(nn.Module):
         )
 
         # output of 2d shape
-        latent, sem_tokens, sem_proj_out, mask = map(
-            partial(self._to_2d, hw=hw),
-            (latent, sem_tokens, sem_proj_out, mask),
+        latent, sem_tokens, mask = map(
+            partial(self._to_2d, hw=hw), (latent, sem_tokens, mask)
         )
         out = dict(latent=latent, sem_tokens=sem_tokens, mask=mask)
         return out
@@ -821,10 +992,10 @@ class FlowTokenizer(nn.Module):
         ema_model: Optional[Self] = None,
         sample_kwargs: dict = dict(
             ## tim sample kwargs
-            num_steps=8,
-            stochasticity_ratio=0.0,
-            sample_type="transition",
-            cfg_scale=1.0,
+            # num_steps=8,
+            # stochasticity_ratio=0.0,
+            # sample_type="transition",
+            # cfg_scale=1.0,
             ## fm sample kwargs
             # sampling_method="Euler",
             # diffusion_form="SBDM",
@@ -849,6 +1020,7 @@ class FlowTokenizer(nn.Module):
         # HW and EMA
         ema_decoder = ema_model.pixel_decoder if ema_model is not None else None
         hw = (torch.as_tensor(x.shape[-2:]) // self.total_resolutions).tolist()
+        self._hw = hw
 
         # Decode to semantic tokens
         sem_decoder_out = self._decode_to_sem(latent=latent, hw=hw)
@@ -878,12 +1050,7 @@ class FlowTokenizer(nn.Module):
         dec_mode: Literal["train", "sample"] = "train",
         clamp: bool = False,
         ema_model: Optional[Self] = None,
-        sample_kwargs: dict = dict(
-            num_steps=8,
-            stochasticity_ratio=0.0,
-            sample_type="transition",
-            cfg_scale=1.0,
-        ),
+        sample_kwargs: dict = {},
         ret_trajectory: bool = False,
     ):
         enc_out = self.encode(input)
@@ -898,12 +1065,22 @@ class FlowTokenizer(nn.Module):
             ret_trajectory,
         )
         # Form the output
-        out = dict(
-            latent=enc_out["latent"],
-            sem_tokens=dec_out["sem_tokens"],
-            recon=dec_out["recon"],
-            flow_loss=dec_out["losses"]["flow_loss"],
-            mask=enc_out["mask"],
+        # out = dict(
+        #     latent=enc_out["latent"],
+        #     sem_tokens=dec_out["sem_tokens"],
+        #     recon=dec_out["recon"],
+        #     flow_loss=dec_out["losses"]["flow_loss"],
+        #     mask=enc_out["mask"],
+        # )
+
+        # Compatible with trainer
+        out = (
+            dec_out["recon"],
+            dict(
+                flow_loss=dec_out["losses"]["flow_loss"],
+                q_loss=torch.tensor(0.0).to(input),
+            ),
+            None,
         )
         return out
 
@@ -920,18 +1097,24 @@ class FlowTokenizer(nn.Module):
         return missing_keys, unexpected_keys
 
     def set_grad_checkpointing(self, enable: bool = True):
-        for module in self.children():
-            if hasattr(module, "set_grad_checkpointing"):
-                module.set_grad_checkpointing(enable)  # type: ignore
-                logger.info(
-                    f"Set grad_checkpointing={enable} for {module.__class__.__name__}"
-                )
+        for module in [
+            self.low_level_encoder,
+            self.semantic_decoder,
+            self.pixel_decoder,
+        ]:
+            for m in module.modules():
+                if hasattr(m, "set_grad_checkpointing"):
+                    m.set_grad_checkpointing(enable)  # type: ignore
+                    logger.log(
+                        "NOTE",
+                        f"Set grad_checkpointing={enable} for {m.__class__.__name__}",
+                    )
 
     @classmethod
-    def create_model(cls, cfg):
+    def create_model(cls, cfg, flow_type: str, decoder_type: str):
         """Create a FlowTokenizer model from configuration."""
         # Update the defaults
-        tokenizer_cfg_default = _create_default_mingtok_cfg()
+        tokenizer_cfg_default = _create_default_mingtok_cfg(flow_type, decoder_type)
         if cfg is not None:
             cfg = OmegaConf.merge(tokenizer_cfg_default, cfg)
         else:
@@ -947,39 +1130,40 @@ class FlowTokenizer(nn.Module):
 def test_flow_tokenizer():
     from fvcore.nn import FlopCountAnalysis, flop_count_table, parameter_count_table
 
-    tokenizer_cfg_default = _create_default_mingtok_cfg()
-
+    tokenizer_cfg_default = _create_default_mingtok_cfg("fm", "uvit")
     tokenizer = FlowTokenizer(tokenizer_cfg_default).to("cuda", torch.bfloat16)
+    tokenizer.set_grad_checkpointing()
     # print(flop_count_table(FlopCountAnalysis(tokenizer, x)))
     print(parameter_count_table(tokenizer))
 
     x = torch.randn(2, 3, 512, 512).to("cuda", torch.bfloat16)
-    print(f"Input shape: {x.shape}")
-    print("Encoding and decoding (train mode)")
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        with torch.no_grad():
-            out = tokenizer(x)
-        for k, v in out.items():
-            print("{:>20}: {}".format(k, v))
+    # print(f"Input shape: {x.shape}")
+    # print("Encoding and decoding (train mode)")
+    # with torch.autocast("cuda", dtype=torch.bfloat16):
+    #     with torch.no_grad():
+    #         out = tokenizer(x)
+    # # for k, v in out.items():
+    # #     print("{:>20}: {}".format(k, v))
 
-    # Sample
-    print("Sampling")
-    with torch.no_grad():
-        tokenizer.eval()
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            out = tokenizer(
-                x, dec_mode="sample", clamp=True, ema_model=None, ret_trajectory=False
-            )
-        recon = out["recon"]
-        print(
-            f"Sampled recon shape: {recon.shape}, min: {recon.min()}, max: {recon.max()}"
-        )  # type: ignore
+    # # Sample
+    # print("Sampling")
+    # with torch.no_grad():
+    #     tokenizer.eval()
+    #     with torch.autocast("cuda", dtype=torch.bfloat16):
+    #         out = tokenizer(
+    #             x, dec_mode="sample", clamp=True, ema_model=None, ret_trajectory=False
+    #         )
+    #     recon = out[0]
+    #     print(
+    #         f"Sampled recon shape: {recon.shape}, min: {recon.min()}, max: {recon.max()}"
+    #     )  # type: ignore
 
     # Backward
     tokenizer.train()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         out = tokenizer(x)
-    loss = out["flow_loss"]
+    tokenizer.get_repa_feature()  # to set repa features
+    loss = out[1]["flow_loss"]
     print(f"Loss: {loss}")
     loss.backward()
     print("Backward successful.")
@@ -1017,7 +1201,7 @@ def test_decoder_flow_head():
     )
 
     # Input shape
-    inp_shape = (batch_size, 3, img_size, img_size)
+    inp_shape = (batch_size, 202, img_size, img_size)
 
     print(f"Input shapes: x={x.shape}, sem_tokens={sem_tokens.shape}")
 

@@ -207,7 +207,7 @@ class TransitionSchedule:
         unwrapped_model,
         batch_size,
         x,
-        z,
+        z,  # noise
         model_kwargs,
         use_dir_loss=False,
         h_target=None,
@@ -244,11 +244,16 @@ class TransitionSchedule:
             F_t_cond, F_t_uncond, enhance_target = 0, 0, False
 
         # loss target
-        # :: v_t = eps - x; or v_t = (eps - x) + w1 * v_t + w2 * F_t_cond + (1 - w1 - w2) * F_t_uncond
+        # :: v_t = eps - x; or v_t = w1 * v_t + w2 * F_t_cond + (1 - w1 - w2) * F_t_uncond
         # :: tgt = v_t - delta_t * dF_dv_dt
-        F_target = self.transport.target(
+        tgt = self.transport.target(
             x_t, v_t, x, z, t, r, dF_dv_dt, F_t_cond, F_t_uncond, enhance_target
         )
+        if isinstance(tgt, (list, tuple)):
+            v_t, F_target = tgt
+        else:
+            F_target = tgt
+
         denoising_loss = mean_flat((F_pred - F_target) ** 2)
         denoising_loss = torch.nan_to_num(
             denoising_loss, nan=0, posinf=1e5, neginf=-1e5
@@ -331,6 +336,7 @@ class TransitionSchedule:
         stochasticity_ratio=0.0,
         sample_type: str = "transition",  # 'transition', diffusion
         progress_bar=True,
+        **_kwargs,
     ) -> torch.Tensor:
         _dtype = z.dtype
         t_steps = torch.linspace(T_max, T_min, num_steps + 1, dtype=torch.float64).to(z)
@@ -375,45 +381,50 @@ class TransitionSchedule:
         return torch.stack(samples, dim=0).to(torch.float32)
 
 
-# Network utils
+################# Network utils ###################
 
 
-def get_delta_embed(
+def get_delta_time_embed(
     ts: tuple | torch.Tensor,
-    time_proj: nn.Module,
-    delta_t_proj: nn.Module | None = None,
+    time_embedder: nn.Module,
+    delta_t_embedder: nn.Module | None = None,
     time_cond_type: Literal["t-r", "r", "t,r", "t,t-r", "r,t-r", "t,r,t-r"] = "t-r",
-) -> torch.Tensor:
-    use_delta_t_embed = delta_t_proj is not None
+):
+    use_delta_t_embed = delta_t_embedder is not None
 
     if isinstance(ts, (list, tuple)):
         t, r = ts
     else:
         assert not use_delta_t_embed, "timestep should be a tuple of (t, r)"
         t = ts
-        return time_proj(t)
 
+    # Embedding t
+    t_emb = time_embedder(t)  # [B, D]
+
+    ### is t, r embeddings
+
+    delta_embed = None
     if use_delta_t_embed:
-        delta_embedder = delta_t_proj
-    else:
-        delta_embedder = time_proj
-    assert delta_embedder is not None
+        assert delta_t_embedder is not None
+        if time_cond_type == "t-r":
+            delta_embed = delta_t_embedder(t - r)
+        elif time_cond_type == "r":
+            delta_embed = delta_t_embedder(r)
+        elif time_cond_type == "t,r":
+            delta_embed = t_emb + delta_t_embedder(r)
+        elif time_cond_type == "t,t-r":
+            delta_embed = t_emb + delta_t_embedder(t - r)
+        elif time_cond_type == "r,t-r":
+            delta_embed = t_emb + delta_t_embedder(t - r)
+        elif time_cond_type == "t,r,t-r":
+            delta_embed = t_emb + (r) + delta_t_embedder(t - r)
+        else:
+            raise NotImplementedError(
+                f"Time cond type {time_cond_type} not implemented"
+            )
 
-    if time_cond_type == "t-r":
-        delta_embed = delta_embedder(t - r)
-    elif time_cond_type == "r":
-        delta_embed = delta_embedder(r)
-    elif time_cond_type == "t,r":
-        delta_embed = time_proj(t) + delta_embedder(r)
-    elif time_cond_type == "t,t-r":
-        delta_embed = time_proj(t) + delta_embedder(t - r)
-    elif time_cond_type == "r,t-r":
-        delta_embed = time_proj(r) + delta_embedder(t - r)
-    elif time_cond_type == "t,r,t-r":
-        delta_embed = time_proj(t) + time_proj(r) + delta_embedder(t - r)
-    else:
-        raise NotImplementedError(f"Time cond type {time_cond_type} not implemented")
-    return delta_embed
+    main_t_emb = t_emb + delta_embed if delta_embed is not None else t_emb
+    return main_t_emb, delta_embed
 
 
 def test_scheduler():
