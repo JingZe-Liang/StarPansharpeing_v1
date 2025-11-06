@@ -28,6 +28,49 @@ from .patching import (
 )
 
 
+def default(x, y):
+    if x is not None:
+        return x
+    else:
+        return y
+
+
+def build_flow_matching_transport(
+    flow_kwargs: dict | None = None,
+) -> tuple[Transport, Sampler]:
+    default_flow_kwargs = dict(
+        transport=dict(
+            model_type="velocity",
+            path_type="linear",
+            loss_type="velocity",
+            train_eps=0.001,
+            sample_eps=0.001,
+        ),
+        sampler=dict(time_type="linear"),
+    )
+    flow_kwargs = default(flow_kwargs, default_flow_kwargs)
+    transport = Transport(**flow_kwargs.get("transport", {}))
+    sampler = Sampler(transport=transport, **flow_kwargs.get("sampler", {}))
+    return transport, sampler
+
+
+def build_tim_scheduler(tim_kwargs: dict | None = None):
+    default_tim_kwargs = dict(
+        num_steps=8,
+        stochasticity_ratio=0.1,
+        sample_type="transition",
+        cfg_scale=2.0,
+        cfg_low=0.0,
+        cfg_high=0.7,
+    )
+    tim_kwargs = default(tim_kwargs, default_tim_kwargs)
+    transition_schedule = TransitionSchedule(
+        transport=TimTransport(**tim_kwargs.get("transport", {})),
+        **tim_kwargs.get("transition_schedule", {}),
+    )
+    return transition_schedule
+
+
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
@@ -377,6 +420,8 @@ class FlowDecoder(nn.Module):
         img_size=224,
         head_type="once",
         head_kwargs: dict = {},  # progressive dims
+        stand_alone=True,
+        flow_kwargs: dict | None = None,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -412,14 +457,10 @@ class FlowDecoder(nn.Module):
         )
 
         # Scheduler
-        self.transport = Transport(
-            model_type="velocity",
-            path_type="linear",
-            loss_type="velocity",
-            train_eps=0.001,
-            sample_eps=0.001,
-        )
-        self.sampler = Sampler(transport=self.transport)
+        # is stand_alone, the flow decoder is used alone for training and sampling
+        self.stand_alone = stand_alone
+        if stand_alone:
+            self.transport, self.sampler = build_flow_matching_transport()
 
     def _forward_fn(self, xt_bchw, t, z_blc):
         chan = xt_bchw.shape[1]
@@ -460,17 +501,34 @@ class FlowDecoder(nn.Module):
             # x = x.reshape(b * l, c)
         return z, x, (b, l, c_z)
 
-    def forward(
+    def _forward_only_model(
         self,
         z_blc,
         x_bchw=None,
+        t=None,
         inp_shape: tuple | list | torch.Size | None = None,
-        mode: str = "train",
-        sample_kwargs={},
-    ) -> dict | Tensor:
-        # x is 2d image: b, c, h, w
-        # z is 1d latent: b, l, c from transformer, l = h * w / (p ** 2)
+        # mode: str = "train",
+        # sample_kwargs={},
+        **_kwargs,
+    ) -> Tensor:
+        ########### not stand alone, takes x, t, and z ###############
+        # takes states from previous module
 
+        assert not self.stand_alone, (
+            f"FlowDecoder must not be stand_alone to forward as a module"
+        )
+
+        return self._forward_fn(x_bchw, t, z_blc)
+
+    def _forward_stand_alone(
+        self, z_blc, x_bchw=None, t=None, inp_shape=None, mode="train", sample_kwargs={}
+    ) -> dict | Tensor:
+        """
+        x is 2d image: b, c, h, w
+        z is 1d latent: b, l, c from transformer, l = h * w / (p ** 2)
+        """
+
+        ############# is stand alone decoder ###############
         # x, z: [b*n, c]
         if mode == "train":
             assert x_bchw is not None, "Input x must be provided in step mode"
@@ -485,17 +543,43 @@ class FlowDecoder(nn.Module):
             )  # loss, pred_x_clean
             return terms
         else:
-            # self.sampler.sample_ode(
-            #     sampling_method="Euler",
-            #     num_steps=10,
-            #     clip_for_x1_pred=True,
-            #     progress=False,
-            # )
+            # TODO: using sampler to sample
             assert inp_shape is not None, "inp_shape must be provided in sample mode"
-            return self.sample(z_blc, inp_shape, **sample_kwargs)
+            return self._manually_sample_loop(z_blc, inp_shape, **sample_kwargs)
+
+    def forward(
+        self,
+        z_blc,
+        x_bchw=None,
+        t=None,
+        inp_shape=None,
+        mode="train",
+        sample_kwargs={},
+        **kwargs,
+    ):
+        """main forward function
+        The decoder serves as model or flow decoder.
+        """
+        if self.stand_alone:
+            return self._forward_stand_alone(
+                z_blc,
+                x_bchw=x_bchw,
+                t=t,
+                inp_shape=inp_shape,
+                mode=mode,
+                **kwargs,
+            )
+        else:
+            return self._forward_only_model(
+                z_blc,
+                x_bchw=x_bchw,
+                t=t,
+                inp_shape=inp_shape,
+                **kwargs,
+            )
 
     @torch.no_grad()
-    def sample(
+    def _manually_sample_loop(
         self,
         z,
         inp_shape: tuple | list | torch.Size,
@@ -506,6 +590,8 @@ class FlowDecoder(nn.Module):
         tbar=False,
         **_kwargs,
     ):
+        assert self.stand_alone, f"FlowDecoder must be stand_alone for sampling"
+
         b, n, c_z = z.shape
         c_x, h, w = inp_shape[-3:]
         assert h * w // (self.patch_size**2) == n
@@ -551,7 +637,7 @@ class FlowDecoder(nn.Module):
             enumerate((zip(ts, dts))),
             disable=not tbar,
             total=sample_steps,
-            leave=False,
+            leave=False,  # type: ignore
         ):
             timesteps = torch.tensor([t] * b).to(z.device)
 

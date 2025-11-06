@@ -12,6 +12,7 @@ from einops import rearrange
 from loguru import logger
 from timm.layers import create_norm_layer, get_act_layer, get_norm_layer
 from timm.layers.pos_embed_sincos import create_rope_embed
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 
 from ..transformer import SwiGLU
 from .activations import get_linear_activation

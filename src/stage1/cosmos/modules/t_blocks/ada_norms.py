@@ -156,6 +156,8 @@ class AdaGroupNorm2D(nn.Module):
     def forward(self, x: torch.Tensor, ctx_emb: torch.Tensor) -> torch.Tensor:
         assert ctx_emb is not None
         ctx_emb = self.ctx_proj(ctx_emb)
+        if ctx_emb.shape[0] > 32:
+            ctx_emb = ctx_emb.contiguous()
         ctx_emb = torch.nn.functional.interpolate(
             ctx_emb, size=(x.shape[-2], x.shape[-1]), mode="nearest"
         )

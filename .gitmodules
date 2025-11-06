@@ -133,3 +133,7 @@
 [submodule "src/stage2/generative/min_pi_flow"]
 	path = src/stage2/generative/min_pi_flow
 	url = https://github.com/enkeejunior1/min-pi-flow.git
+    
+[submodule "src/utilities/transport/alpha_flow"]
+	path = src/utilities/transport/alpha_flow
+	url = https://github.com/snap-research/alphaflow.git

@@ -159,9 +159,11 @@ class UViTDecoder(nn.Module):
         self.time_cond_type = time_cond_type
         self.use_delta_t_embed = time_cond_type in ["t-r", "r", "t,t-r", "r,t-r", "t,r,t-r"]  # fmt: skip
 
-        self.time_embed = TimestepEmbedder(time_embed_dim)
+        # Akin to diffusion TimestepEmbedder
+        # the fm timestep is 0 .. 1, need to rescaled.
+        self.time_embed = TimestepEmbedder(time_embed_dim, t_factor=1000.0)
         if self.use_delta_t_embed:
-            self.delta_t_embed = TimestepEmbedder(time_embed_dim)
+            self.delta_t_embed = TimestepEmbedder(time_embed_dim, t_factor=1000.0)
 
         ## old version
         # self.time_proj = Timesteps(
@@ -300,7 +302,7 @@ class UViTDecoder(nn.Module):
             )
 
         ### Null condition h ###
-        self.null_cond_h = nn.Buffer(torch.zeros(1, z_dim, 1, 1))
+        # self.null_cond_h = nn.Buffer(torch.zeros(1, z_dim, 1, 1))
 
         ### Weights init ###
         self.init_weights(**(init or {}))
@@ -451,7 +453,7 @@ class UViTDecoder(nn.Module):
 
         # Concat with z and project
         z_expanded = torch.nn.functional.interpolate(
-            z, size=(x.shape[-2], x.shape[-1]), mode="nearest"
+            z.contiguous(), size=(x.shape[-2], x.shape[-1]), mode="nearest"
         )
 
         # conv ins
@@ -604,6 +606,8 @@ class UViTMiddleTransformer(VisionTransformer):
         #### Interpolation cxt_emb
         hidden_states = self.norm(hidden_states)
         if ctx_emb is not None and ctx_emb.shape[-2:] != hidden_states.shape[-2:]:
+            if ctx_emb.shape[0] >= 32:
+                ctx_emb = ctx_emb.contiguous()
             ctx_emb = nn.functional.interpolate(
                 ctx_emb, size=hidden_states.shape[-2:], mode="nearest"
             )

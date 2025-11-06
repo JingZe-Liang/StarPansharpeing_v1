@@ -1,5 +1,5 @@
 _target_: src.stage1.cosmos.cosmos_mingtok.FlowTokenizer.create_model
-flow_type: fm
+flow_type: tim
 decoder_type: uvit
 
 cfg:
@@ -14,8 +14,6 @@ cfg:
     out_patch_size: 1
     patcher_type: progressive_patch_embedder
     patch_prog_dims: [386, 386, 512]
-    additional_pe: true
-    pe_type: rope
 
   semantic_decoder:
     in_chans: 32
@@ -24,22 +22,32 @@ cfg:
     depth: 12
     num_heads: 16
     patch_size: 1
-    additional_pe: false
-    pe_type: rope
+    transport:
+      enhance_target: true
+      w_gt: 1.0
+      w_cond: 0.75
+      w_start: 0.3
+      w_end: 0.8
+    transition_schedule:
+      diffusion_ratio: 0.5
+      consistency_ratio: 0.1
+      weight_time_tangent: true
+      differential_epsilon: 0.005
+      derivative_type: dde
+      weight_time_type: sqrt
 
   pixel_decoder:
-    flow_type: fm
-    time_cond_type: t
-    cfg_prob: 0.0
+    flow_type: tim
+    time_cond_type: t-r
+    cfg_prob: 0.3
 
   tokenizer:
     decoder_type: uvit
     sampling_options_default:
-      sampling_method: euler
-      num_steps: 50
-      cfg: 1.0
-      progress: true
-      cfg_interval: [0.0, 0.7]
+      num_steps: 4
+      stochasticity_ratio: 0.1
+      cfg_scale: 2.0
+      sample_type: transition
 
   repa_proj:
     low_lvl_repa_out_chan: 1024

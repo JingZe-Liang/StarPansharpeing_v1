@@ -1,4 +1,5 @@
 import enum
+from typing import Callable
 
 import numpy as np
 import torch as th
@@ -6,7 +7,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from . import path
-from .integrators import ode, sde
+from .integrators import get_timesteps, ode, sde
 from .utils import mean_flat
 
 
@@ -106,7 +107,13 @@ class Transport:
 
         return t0, t1
 
-    def sample(self, x1):
+    def sample(
+        self,
+        x1,
+        *,
+        t_forced: th.Tensor | None = None,
+        time_sample_type: str = "sigmoid",
+    ):
         """Sampling x0 & t based on shape of x1 (if needed)
         Args:
           x1 - data point; [batch, *dim]
@@ -114,12 +121,29 @@ class Transport:
 
         x0 = th.randn_like(x1)
         t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
-        t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+
+        if t_forced is not None:
+            return t_forced.to(x1), x0, x1
+
+        if time_sample_type == "sigmoid":
+            mean, std = 0.0, 1.0
+            t = th.randn(x1.shape[0]) * std + mean
+            t = th.sigmoid(t) * (t1 - t0) + t0
+        elif time_sample_type == "uniform":
+            t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+        else:
+            raise ValueError(f"Unknown time_sample_type: {time_sample_type}")
         t = t.to(x1)
         return t, x0, x1
 
     def training_losses(
-        self, model, x1, model_kwargs=None, get_pred_x_clean: bool = True
+        self,
+        model,
+        x1,
+        model_kwargs=None,
+        get_pred_x_clean: bool = True,
+        *,
+        t_forced: th.Tensor | None = None,
     ):
         """Loss for training the score model
         Args:
@@ -130,9 +154,10 @@ class Transport:
         if model_kwargs is None:
             model_kwargs = {}
 
-        t, x0, x1 = self.sample(x1)
+        t, x0, x1 = self.sample(x1, t_forced=t_forced)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
+        
         if len(model_output.shape) == len(xt.shape) + 1:
             x0 = x0.unsqueeze(-1).expand(
                 *([-1] * (len(x0.shape))), model_output.shape[-1]
@@ -258,6 +283,7 @@ class Sampler:
     def __init__(
         self,
         transport: Transport,
+        time_type="linear",
     ):
         """Constructor for a general sampler; supporting different sampling methods
         Args:
@@ -272,6 +298,7 @@ class Sampler:
             logger.info(
                 f"[Flow Matching]: model_type is {self.transport.model_type}, drift and score are not needed"
             )
+        self.time_type = time_type
 
     def __get_sde_diffusion_and_drift(
         self,
@@ -433,15 +460,14 @@ class Sampler:
             assert not reverse, "Model type X1 reverse mode is not implemnted yet"
 
             # ignore the self.drift
-            def _sample_fn_loop(
-                x0,
-                model_fn,
-                **model_kwargs
-            ):
+            def _sample_fn_loop(x0, model_fn, **model_kwargs):
                 # simple euler method
                 xt = x0.clone()
                 xt_s = []
-                for t in tqdm(th.linspace(t0, t1, num_steps), desc="sampling ..."):
+                times = get_timesteps(t0, t1, num_steps, self.time_type)
+                logger.debug(f"[FM sampler]: Sampling times: {times}")
+
+                for t in tqdm(times, desc="sampling ..."):
                     t = t.repeat(xt.size(0)).to(xt)
                     x1_pred = model_fn(xt, t, **model_kwargs)
                     delta_t = (t1 - t0) / num_steps
@@ -461,7 +487,7 @@ class Sampler:
             else:
                 drift = self.drift
 
-            def drift_progress_wrapper_fn(drift_fn: callable, tbar):
+            def drift_progress_wrapper_fn(drift_fn: Callable, tbar):
                 def wrapper_fn(x, t, model, **model_kwargs):
                     drift = drift_fn(x, t, model, **model_kwargs)
                     tbar.update(1)
@@ -482,6 +508,7 @@ class Sampler:
                 atol=atol,
                 rtol=rtol,
                 temperature=temperature,
+                time_type=self.time_type,
             )
 
             return _ode.sample

@@ -7,7 +7,6 @@ Features:
 
 import math
 from dataclasses import dataclass
-from inspect import isclass
 from types import SimpleNamespace
 from typing import Callable, List, Optional, Tuple, Type, Union
 
@@ -32,7 +31,7 @@ from timm.layers import (
     get_norm_layer,
 )
 from timm.layers.attention import AttentionRope as Attention_
-from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed import resample_abs_pos_embed, resample_abs_pos_embed_nhwc
 from timm.layers.pos_embed_sincos import (
     RotaryEmbeddingCat,
     RotaryEmbeddingDinoV3,
@@ -139,6 +138,7 @@ class Attention(Attention_):
         is_causal: bool = False,
         jvp=False,
         delta_t_aware: bool = False,
+        rotate_half=False,
     ):
         norm_layer = (
             get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
@@ -156,6 +156,7 @@ class Attention(Attention_):
             qk_norm,
             scale_norm,
             proj_bias,
+            rotate_half,
         )
         self.attn_implem = attn_type
         self.is_causal = is_causal
@@ -219,10 +220,20 @@ class Attention(Attention_):
 
             # Rotate them
             q = torch.cat(
-                [q[:, :, :npt, :], apply_rot_embed_cat(q[:, :, npt:, :], rope_q)], dim=2
+                [
+                    # nope tokens
+                    q[:, :, :npt, :],
+                    # rope tokens
+                    apply_rot_embed_cat(q[:, :, npt:, :], rope_q, self.rotate_half),
+                ],
+                dim=2,
             ).type_as(v)
             k = torch.cat(
-                [k[:, :, :npt, :], apply_rot_embed_cat(k[:, :, npt:, :], rope_k)], dim=2
+                [
+                    k[:, :, :npt, :],
+                    apply_rot_embed_cat(k[:, :, npt:, :], rope_k, self.rotate_half),
+                ],
+                dim=2,
             ).type_as(v)
         elif callable(rope):
             # rope is callable module, not support reg tokens
@@ -607,6 +618,7 @@ class AttentionBlockCondition(AttentionBlock):
         use_gate=False,
         layer_idx=None,
         jvp=False,
+        fuse_t_z=True,
     ):
         super().__init__(
             dim,
@@ -631,13 +643,15 @@ class AttentionBlockCondition(AttentionBlock):
         self.ctx_embed_dim = cxt_embed_dim
 
         ## Add time embedding, context embedding
-        self.t_proj = nn.Sequential(
-            create_act_layer("silu"), nn.Linear(self.time_embed_dim, dim)
-        )
-        self.ctx_proj = nn.Linear(self.ctx_embed_dim, dim)
-        self.cond_proj = nn.Sequential(
-            create_norm_act_layer("rmsnorm", dim, "silu"), nn.Linear(dim, dim * 2)
-        )
+        self.fuse_t_z = fuse_t_z
+        if not fuse_t_z:
+            self.t_proj = nn.Sequential(nn.SiLU(), nn.Linear(self.time_embed_dim, dim))
+            self.ctx_proj = nn.Sequential(nn.SiLU(), nn.Linear(self.ctx_embed_dim, dim))
+        else:
+            self.cond_proj = nn.Sequential(
+                create_norm_act_layer("rmsnorm", dim, "silu"),
+                nn.Linear(dim, dim * 2),
+            )
 
         self._forward_type = "condition_attention_block"
 
@@ -671,15 +685,23 @@ class AttentionBlockCondition(AttentionBlock):
         z_1d = rearrange(z_2d_interp, "b c zh zw -> b (zh zw) c")
         return z_1d
 
-    def _forward_condition_attention_block(self, x, t, z, inp_shape=None, rope=None):
-        # interpolate z into x
-        z_emb = self.ctx_proj(z)
-        z_emb = self._interp_z_to_x(x, z_emb, inp_shape)
+    def _forward_condition_attention_block(
+        self, x, c, t=None, inp_shape=None, rope=None
+    ):
+        if not self.fuse_t_z:
+            # t, c not fused, should be passed both
+            assert t is not None and c is not None
+            # interpolate z into x
+            z_emb = self.ctx_proj(c)
+            z_emb = self._interp_z_to_x(x, z_emb, inp_shape)
+            t_emb = self.t_proj(t)[..., None, None]
+            cond_emb = z_emb + t_emb
+        else:
+            # c is passed only, t and z are fused together
+            cond_emb = self.ctx_proj(c)
 
-        # add time and context embedding
-        t_emb = self.t_proj(t)[..., None, None]
-        cond = self.cond_proj(t_emb + z_emb)
-        c_scale, c_shift = torch.chunk(cond, 2, dim=-1)
+        cond_emb = self.cond_proj(cond_emb)
+        c_scale, c_shift = torch.chunk(cond_emb, 2, dim=-1)
 
         # AdaLN
         x = self.norm1(x)
@@ -848,6 +870,7 @@ class ContextTransformer1D(nn.Module):
             dim=cfg.dim // cfg.heads * 2,  # since this class uses div 4.
             temperature=cfg.rope_theta,
             max_res=cfg.q_seq_len,
+            in_pixels=False,
             feat_shape=[cfg.q_seq_len],
         )
         rope_cat = self.rope.get_embed()
@@ -944,9 +967,10 @@ class TransformerTokenizer(nn.Module):
         n_reg_tokens: int = 0,
         projections={"input": None, "output": None},
         additional_pe=False,
-        pe_type="learn",  # ['learn', 'rope']
-        rope_kwargs={},
+        pe_type="rope",  # ['learn', 'rope']
+        rope_kwargs={"temperature": 10000.0},
         head: str | None = None,
+        other_blk_kwargs: dict = {},
         ## MAE masks
         mask_train_ratio=0.0,  # MAE encoder
         mask_refill: bool = False,  # MAE decoder
@@ -965,6 +989,64 @@ class TransformerTokenizer(nn.Module):
         self.n_reg_tokens: int = n_reg_tokens
         self.grad_checkpointing: bool = False
 
+        # Add cls token and register token PE
+        # if pe_type.startswith("rope"):
+        #     self.pe_cls_reg = nn.Parameter(
+        #         torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
+        #     )
+
+        self._build_patch_embedding(
+            patcher_type,
+            img_size,
+            patch_size,
+            in_chan,
+            embed_dim,
+            patch_prog_dims,
+        )
+        self._build_projections(projections, in_chan, embed_dim)
+        self._build_positional_embedding(
+            pe_type,
+            additional_pe,
+            rope_kwargs,
+            patch_size,
+            img_size,
+            embed_dim,
+            num_heads,
+            depth,
+            with_cls_token,
+        )
+        self._build_transformer_layers(
+            drop_path,
+            depth,
+            embed_dim,
+            attn_blk_type,
+            num_heads,
+            qkv_bias,
+            attention_dropout,
+            dropout,
+            attn_type,
+            is_causal,
+            other_blk_kwargs,
+        )
+        self._build_cls_reg_tokens(n_reg_tokens, with_cls_token, embed_dim)
+        self._build_head(
+            head, out_chan, out_patch_size, norm_layer, embed_dim, unpatch_prog_dims
+        )
+        self._build_mask_tokens(
+            mask_train_ratio, mask_refill, mask_drop_type, embed_dim
+        )
+        self._build_last_norm(last_norm, embed_dim)
+        self.init_weights()
+
+    def _build_patch_embedding(
+        self,
+        patcher_type: str,
+        img_size: int,
+        patch_size: int,
+        in_chan: int,
+        embed_dim: int,
+        patch_prog_dims: list[int] | None = None,
+    ):
         # Patch embedding
         if patcher_type in ("patch_embedder", "progressive_patch_embedder"):
             if patcher_type == "progressive_patch_embedder":
@@ -999,6 +1081,7 @@ class TransformerTokenizer(nn.Module):
         else:
             raise ValueError(f"Unknown patcher type: {patcher_type}")
 
+    def _build_projections(self, projections: dict, in_chan: int, embed_dim: int):
         # Projections
         # Encoder: forward output downsample layer
         # Decoder: forward input upsample layer
@@ -1007,13 +1090,26 @@ class TransformerTokenizer(nn.Module):
         input_proj = output_proj = nn.Identity()
         if output_proj_type == "ds_shortcut":
             output_proj = MingtokDownsampleShortCut(in_chan, embed_dim)
-
         if input_proj_type == "us_average":
             input_proj = MingtokUpsampleAverage(in_chan, embed_dim)
         self.projections = nn.ModuleDict(
             {"input_proj": input_proj, "output_proj": output_proj}
         )
 
+    def _build_transformer_layers(
+        self,
+        drop_path: float,
+        depth: int,
+        embed_dim: int,
+        attn_blk_type: str,
+        num_heads: int,
+        qkv_bias: bool,
+        attention_dropout: float,
+        dropout: float,
+        attn_type: str,
+        is_causal: bool,
+        other_blk_kwargs: dict,
+    ):
         # Layers
         layers = []
         drop_path_ps = torch.linspace(0, drop_path, depth).tolist()
@@ -1032,10 +1128,23 @@ class TransformerTokenizer(nn.Module):
                 drop_path=drop_path_ps[i],
                 is_causal=is_causal,
                 layer_idx=i,
+                **other_blk_kwargs,
             )
             layers.append(block)
         self.layers = nn.ModuleList(layers)
 
+    def _build_positional_embedding(
+        self,
+        pe_type: str,
+        additional_pe: bool,
+        rope_kwargs: dict,
+        patch_size: int,
+        img_size: int,
+        embed_dim: int,
+        num_heads: int,
+        depth: int,
+        with_cls_token: bool,
+    ):
         # Positional embeddings
         self.pe_type: str = pe_type
         self.rope: RotaryEmbeddingCat | RotaryEmbeddingDinoV3 | None
@@ -1067,21 +1176,23 @@ class TransformerTokenizer(nn.Module):
                 dim=embed_dim,
                 num_heads=num_heads,
                 device="cuda",
-                dtype=torch.float64,
+                dtype=torch.float32,
+                # from timm repo usage
+                in_pixels=rope_kwargs.get("in_pixels", False),
+                temperature=rope_kwargs.get("rope_theta", 10000.0),
             )
             if _rope_type_create == "mixed":
                 _rope_kwargs["depth"] = depth
                 self._rope_is_mixed = True
-            self.rope = create_rope_embed(_rope_type_create, **_rope_kwargs)
+            logger.log("NOTE", f"rope kwargs: {_rope_kwargs}")
+            with torch.autocast("cuda", enabled=False):
+                self.rope = create_rope_embed(_rope_type_create, **_rope_kwargs)
         else:
             self.rope, self.pe = None, None
 
-        # Add cls token and register token PE
-        if pe_type.startswith("rope"):
-            self.pe_cls_reg = nn.Parameter(
-                torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
-            )
-
+    def _build_cls_reg_tokens(
+        self, n_reg_tokens: int, with_cls_token: bool, embed_dim: int
+    ):
         # Register tokens
         self.reg_tokens: nn.Parameter | None = None
         if n_reg_tokens > 0:
@@ -1094,6 +1205,15 @@ class TransformerTokenizer(nn.Module):
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.cls_token, std=0.02)
 
+    def _build_head(
+        self,
+        head: str | None,
+        out_chan: int | None,
+        out_patch_size: int,
+        norm_layer: str,
+        embed_dim: int,
+        unpatch_prog_dims: list[int] | None = None,
+    ):
         # Head
         self.head = nn.Identity()
         self.head_required: bool = False
@@ -1142,6 +1262,13 @@ class TransformerTokenizer(nn.Module):
                     "This is not recommended. Please set 'head'."
                 )
 
+    def _build_mask_tokens(
+        self,
+        mask_train_ratio: float,
+        mask_refill: bool,
+        mask_drop_type: str,
+        embed_dim: int,
+    ):
         # Mask token
         self.mask_train_ratio = mask_train_ratio
         self.mask_training = mask_train_ratio > 0.0 or mask_refill
@@ -1162,11 +1289,13 @@ class TransformerTokenizer(nn.Module):
                 f"[Transformer Tokenizer] Mask training enabled with ratio {mask_train_ratio}"
             )
 
+    def _build_last_norm(self, last_norm: str | None, embed_dim: int):
         # Last norm
         self.last_norm = None
         if last_norm is not None:
             self.last_norm = create_norm_layer(last_norm, embed_dim)
 
+    def init_weights(self):
         # Initialize weights
         named_apply(get_init_weights_vit("jax", head_bias=0.0), self)
         logger.debug("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
@@ -1262,9 +1391,10 @@ class TransformerTokenizer(nn.Module):
     def _get_standard_rope_embed(self, grid_size: tuple[int, int], l_cur: int):
         """Per-batch generate the rope embeddings"""
         assert self.rope is not None
-        rope_embeds = self.rope.get_embed(shape=grid_size)
+        with torch.autocast(device_type="cuda", enabled=False):
+            rope_embeds = self.rope.get_embed(shape=grid_size)
         # logger.log("NOTE", f"create the rope embeds shaped as {rope_embeds.shape}")
-        return rope_embeds[None, None]
+        return rope_embeds[None, None]  # [1, 1, seq_len, dim_h]
 
     def _with_pos_embed(self, x, hw: tuple | None = None):
         hp, wp = (
@@ -1280,6 +1410,7 @@ class TransformerTokenizer(nn.Module):
             assert self.pe is not None, f"PE is None"
             pe_1lc = self.pe[None]
             if l_cur != self.n_patches:
+                # TODO: fix it using resample_abs_pos_embed_nhwc
                 pe_1lc = resample_abs_pos_embed(  # type: ignore
                     pe_1lc,  # (1, l, dim)
                     num_prefix_tokens=0,  # TODO: add register tokens support
@@ -1315,7 +1446,7 @@ class TransformerTokenizer(nn.Module):
                 h = w = int(math.sqrt(l))
             else:
                 h, w = hw
-            x = self.patch_embed(x)
+            x = self.patch_embed(x.contiguous())
         else:
             raise ValueError(f"Unsupported input shape: {x.shape}")
 

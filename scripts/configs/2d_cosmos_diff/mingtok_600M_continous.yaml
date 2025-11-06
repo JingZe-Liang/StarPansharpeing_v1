@@ -25,9 +25,9 @@ accelerator:
 vq_loss:
   disc_in_channels: 512 #${dataset.channels} ## interp conv
   # perceptual loss
-  perceptual_weight: 0.0
+  perceptual_weight: 0.2
   # repa loss
-  repa_loss_weight: 0.02 # 0.1
+  repa_loss_weight: 0.1 # 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -41,7 +41,7 @@ vq_loss:
     feature_normalize: false
     get_hier_teacher_feature: true
   # semantic distillatin loss
-  sem_distill_weight: 0.02
+  sem_distill_weight: 0.1
   sem_distill_options:
     c_dim_first: true
     build_proj: false
@@ -118,8 +118,8 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: true
-  resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
-  ema_load_path: #runs/stage1_cosmos_hybrid/2025-10-20_22-55-45_hybrid_cosmos_f16c32/ema
+  resume_path: runs/stage1_mingtok/2025-11-06_05-26-15_mingtok_600M_continous/checkpoints/checkpoint_13
+  ema_load_path: #runs/stage1_mingtok/2025-11-05_03-54-45_mingtok_600M_continous/ema
   compile_model: false
   only_load_tokenizer: true
   seperate_enc_dec: false
@@ -143,9 +143,9 @@ train:
     oned_param_algo: lion
     muon_params_defaults:
       lr: 4.0e-4
-      weight_decay: 0.01
+      weight_decay: 0.1
     oned_params_defaults:
-      lr: 2.0e-4
+      lr: 3.0e-4
       weight_decay: 0.0
 
     # _target_: torch.optim.AdamW
@@ -166,7 +166,7 @@ train:
       lr: 4.0e-4
       weight_decay: 0.01
     oned_params_defaults:
-      lr: 2.0e-4
+      lr: 3.0e-4
       weight_decay: 0.0
 
     # _target_: torch.optim.AdamW
@@ -213,5 +213,5 @@ train:
 model_sampling: {}
 
 val:
-  val_duration: 10000
-  max_val_iters: 5 # val only `max_val_iters` batches
+  val_duration: 1000
+  max_val_iters: 8 # val only `max_val_iters` batches

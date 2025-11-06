@@ -842,7 +842,9 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         with self.accelerator.autocast():
             other_kwargs = {
                 "dec_mode": "train",
-                "ema_model": self.ema_tokenizer.ema_model if ema else None,
+                "ema_model": self.ema_tokenizer.ema_model
+                if hasattr(self, "ema_tokenizer")
+                else None,
             }
             if is_testing:
                 self.tokenizer.eval()
@@ -1179,7 +1181,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
-            self.log_msg(f"[Train Disc]: {_log_disc_losses}")
+            if self.use_disc:
+                self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)

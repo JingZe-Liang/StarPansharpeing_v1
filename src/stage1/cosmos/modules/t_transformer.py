@@ -3,18 +3,33 @@ TODO: Implement it and fix all bugs.
 """
 
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from timm.layers import create_act_layer, create_conv2d, create_norm_layer
+from torch.utils.checkpoint import checkpoint
 
 from src.utilities.transport.tim.transition import get_delta_time_embed
 
 from .t_blocks.embeddings import TimestepEmbedder
 from .transformer import TransformerTokenizer
+
+
+def default(x, y):
+    return x if x is not None else y
+
+
+def exists(x):
+    return x is not None
+
+
+def maybe(v_or_fn, **others):
+    if callable(v_or_fn):
+        return v_or_fn(**others)
+    return v_or_fn
 
 
 class FlowTransformerConditioned(TransformerTokenizer):
@@ -50,6 +65,7 @@ class FlowTransformerConditioned(TransformerTokenizer):
         additional_pe=False,
         pe_type="learn",  # ['learn', 'rope']
         rope_kwargs={},
+        other_blk_kwargs: dict = {},
         head: str | None = None,
         last_norm: str | None = None,
         is_causal: bool = False,
@@ -95,12 +111,14 @@ class FlowTransformerConditioned(TransformerTokenizer):
             with_cls_token=with_cls_token,
             patch_prog_dims=patch_prog_dims,
             unpatch_prog_dims=unpatch_prog_dims,
+            other_blk_kwargs=other_blk_kwargs,
         )
 
         self.time_embed_dim = embed_dim
         self.ctx_embed_dim = ctx_embed_dim
 
-        self.time_cond_type = time_cond_type
+        # Holds for meanflow-type model
+        self.time_cond_type: str = time_cond_type
         self.use_delta_t_embed = time_cond_type in ["t-r", "r", "t,t-r", "r,t-r", "t,r,t-r"]  # fmt: skip
 
         # Setting up the modules
@@ -110,6 +128,8 @@ class FlowTransformerConditioned(TransformerTokenizer):
     def _setup_time_embedder(self, time_cond_type: str):
         # Setup time embedder
         self.time_embed = TimestepEmbedder(self.time_embed_dim)
+
+        self.delta_t_embed = None
         if self.use_delta_t_embed:
             self.delta_t_embed = TimestepEmbedder(self.time_embed_dim)
 
@@ -119,20 +139,23 @@ class FlowTransformerConditioned(TransformerTokenizer):
         # Context embedding projection
         # Assume the context is 1d
         self.ctx_format = ctx_format
+
         if ctx_format == "1d":
-            self.ctx_proj = nn.Sequential(
-                nn.Linear(ctx_embed_dim, embed_dim),
-                create_act_layer("silu"),
-                nn.Linear(embed_dim, embed_dim),
-            )
+            _basic_module = lambda c_in, c_out: nn.Linear(c_in, c_out)
         elif ctx_format == "2d":
-            self.ctx_proj = nn.Sequential(
-                nn.Conv2d(ctx_embed_dim, embed_dim, kernel_size=3, padding=1),
-                create_act_layer("silu"),
-                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+            _basic_module = lambda c_in, c_out: create_conv2d(
+                c_in,
+                c_out,
+                kernel_size=3,
             )
         else:
             raise ValueError(f"Unsupported ctx_format: {ctx_format}")
+
+        self.ctx_proj = nn.Sequential(
+            _basic_module(embed_dim, embed_dim),
+            nn.SiLU(),
+            _basic_module(embed_dim, embed_dim),
+        )
 
     def _get_hw(self, x: torch.Tensor) -> tuple[int, int]:
         """Get height and width from token sequence."""
@@ -167,6 +190,7 @@ class FlowTransformerConditioned(TransformerTokenizer):
         x: torch.Tensor,
         t: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         z: torch.Tensor,
+        inp_shape: Sequence | torch.Size | None = None,
         *,
         ret_2d_tokens=False,
         ret_all=True,
@@ -174,25 +198,6 @@ class FlowTransformerConditioned(TransformerTokenizer):
         out_shape: torch.Size | tuple | None = None,
         **kwargs,
     ):
-        """
-        Forward pass of FlowTransformerConditioned.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tokens with shape (batch_size, seq_len, embed_dim) or (batch_size, channels, height, width)
-        t : torch.Tensor | tuple[torch.Tensor, torch.Tensor]
-            Time embeddings, can be a single tensor or tuple of tensors
-        z : torch.Tensor
-            Context tokens with shape (batch_size, seq_len_z, ctx_embed_dim)
-        **kwargs
-            Additional keyword arguments
-
-        Returns
-        -------
-        torch.Tensor
-            Processed tokens with conditioning applied
-        """
         # Process input tokens through patch embedding if needed
         if x.ndim == 4:  # Input is image format (B, C, H, W)
             x_tokens, rope = self._forward_get_tokens(x)
@@ -203,49 +208,40 @@ class FlowTransformerConditioned(TransformerTokenizer):
             x_tokens, rope = self._with_pos_embed(x, hw=(h, w))
 
         # Process context tokens if provided
-        if z is not None:
-            ctx_emb = self.ctx_proj(z)
-            ctx_emb = self._interp_z_to_x(x_tokens, ctx_emb)
+        ctx_emb = self.ctx_proj(z)
+        ctx_emb = self._interp_z_to_x(x_tokens, ctx_emb)  # [bs, ctxL, dim]
 
-            # Apply time conditioning if enabled
-            if self.time_condition and t is not None:
-                # Handle tuple time embeddings (e.g., for meanflow)
-                if isinstance(t, (list, tuple)):
-                    # Use the first time embedding for conditioning
-                    t_emb = t[0] if len(t) > 0 else t
-                else:
-                    t_emb = t
-
-                # Project time embedding and get scale/shift
-                t_emb = self.time_emb_proj(t_emb)
-                t_emb = t_emb.unsqueeze(-1).unsqueeze(-1)  # Add spatial dimensions
-
-                # Split into scale and shift components
-                t_scale, t_shift = t_emb.chunk(2, dim=1)
-
-                # Apply time modulation to context embeddings
-                ctx_emb = ctx_emb * (1 + t_scale) + t_shift
-
-            # Combine input tokens with conditioned context
-            # This creates a residual connection where context modulates the input
-            x_tokens = x_tokens + ctx_emb
+        # Time-condition
+        t_emb, delta_emb = get_delta_time_embed(
+            ts=t,
+            time_embedder=self.time_embed,
+            delta_t_embedder=self.delta_t_embed,
+            time_cond_type=self.time_cond_type,
+        )
+        t_emb = t_emb.view(t_emb.size(0), 1, t_emb.size(1))  # [bs, 1, dim]
+        layer_cond = t_emb + ctx_emb
 
         # Apply projection if needed (for decoder mode)
         x_tokens = self._forward_proj_in(x_tokens)
 
         # Process through transformer layers with conditioning
         for layer in self.layers:
-            # Assuming attention layers can accept additional conditioning
-            # This would require modification to the attention mechanism
-            if (
-                hasattr(layer, "forward")
-                and "ctx_emb" in layer.forward.__code__.co_varnames
-            ):
-                # If the layer supports context conditioning
-                x_tokens = layer(x_tokens, ctx_emb=ctx_emb, rope=rope)
+            if not self.act_checkpointing:
+                x_tokens = layer(
+                    x_tokens, ctx_emb=layer_cond, rope=rope, inp_shape=inp_shape
+                )
             else:
-                # Standard forward pass
-                x_tokens = layer(x_tokens, rope=rope)
+                x_tokens = checkpoint(
+                    layer,
+                    x_tokens,
+                    layer_cond,
+                    None,
+                    inp_shape,
+                    rope,
+                    use_reentrant=False,
+                )
+
+            # TODO: add saving intermidates if needed
 
         # Apply output projection if needed
         x_tokens = self._forward_proj_out(x_tokens)
