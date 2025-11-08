@@ -35,6 +35,7 @@ from kornia.utils.image import tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp._fully_shard import FSDPModule
@@ -47,6 +48,7 @@ from src.data.hyperspectral_loader import (
     get_hyperspectral_dataloaders,
     get_hyperspectral_img_loaders_with_different_backends,
 )
+from src.stage1.cosmos.cosmos_mingtok import FlowTokenizer as MingtokFlowTokenizer
 from src.stage1.cosmos.cosmos_uvit_flow import CosmosFlowTokenizer
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
@@ -58,6 +60,7 @@ from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file
 from src.utilities.logging.print import print_info_if_raise
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.optim import filter_no_wds_into_optim_groups
 from src.utilities.train_utils.state import StepsCounter
 
@@ -77,7 +80,7 @@ ForwardTokOutput = TypedDict(
         "recon": torch.Tensor,
         "flow_loss": torch.Tensor,
         "q_dict": QuantOutput,
-        "repa_feature": NotRequired[torch.Tensor],
+        "repa_feature": NotRequired[torch.Tensor | tuple[Tensor, Tensor]],
         "vf_feature": NotRequired[torch.Tensor],
         "aug_x": NotRequired[torch.Tensor],
     },
@@ -238,7 +241,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
 
-        # traing state counter
+        # training state counter
         self.train_state = StepsCounter(["train"])
 
         # clear GPU memory
@@ -252,6 +255,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 w.requires_grad_(True)
 
     def setup_tokenizer(self):
+        self.sep_enc_dec = False
         tokenizer_name = self.train_cfg.tokenizer_name
         self.quantizer_type: str | None = self.cfg.vq_loss.quantizer_type
         self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
@@ -259,8 +263,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.norm_z = False  # in the model, not in trainer
 
         # Init tokenizer model
-        self.tokenizer: CosmosFlowTokenizer = hydra.utils.instantiate(
-            self.tokenizer_cfg
+        self.tokenizer: CosmosFlowTokenizer | MingtokFlowTokenizer = (
+            hydra.utils.instantiate(self.tokenizer_cfg)
         )
 
         # quantizer in the tokenizer, not handled by this trainer
@@ -278,6 +282,18 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.log_msg(
             f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}"
         )
+
+        # Checkpointing
+        if (
+            hasattr(self.tokenizer, "set_grad_checkpointing")
+            and self.train_cfg.grad_checkpoint
+        ):
+            self.tokenizer.set_grad_checkpointing(enable=True)
+            logger.info(f"Set grad_checkpointing=True for FlowTokenizer")
+        elif self.train_cfg.grad_checkpoint:
+            logger.warning(
+                f"[Tokenizer]: grad checkpointing not supported for {self.tokenizer.__class__.__name__}"
+            )
 
     def setup_aug_pipe_and_anti_degradation_network(self):
         self.use_training_aug = False
@@ -316,12 +332,6 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         if self.no_ema:
             return
 
-        # self.ema_tokenizer = EMA(
-        #     self.tokenizer,
-        #     beta=self.ema_cfg.beta,
-        #     update_every=self.ema_cfg.update_every,
-        # ).to(self.device)
-
         ema_partial = hydra.utils.instantiate(self.ema_cfg)
         self.ema_tokenizer = ema_partial(self.tokenizer).to(self.device)
 
@@ -358,12 +368,12 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.logger.remove()
         log_format_in_file = (
             "<green>[{time:MM-DD HH:mm:ss}]</green> "
-            "- <level>[{level}]</level> "
+            "- <level>[{level:^6}]</level> "
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
             "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
+            "- {level.icon} <level>[{level:^6}] {file.name}:{line}</level>"
             "- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
@@ -386,12 +396,6 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 enqueue=True,
                 backtrace=True,
                 colorize=False,
-            )
-        else:
-            # monkey patch
-            lt.monkey_patch()
-            logger.warning(
-                "lovely tensor will slow down the training, use this only for debug"
             )
 
         self.logger.add(
@@ -633,7 +637,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter: Callable):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -768,9 +772,11 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             self.accelerator.prepare(self.antideg_net, self.antideg_net_optim)
 
         # dataloaders
-        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
-            self.train_dataloader, self.val_dataloader
-        )
+        if getattr(self.cfg.train, "prepare_dl", True):
+            self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+                self.train_dataloader, self.val_dataloader
+            )
+
         (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
             self.tokenizer_sched, self.disc_sched
         )
@@ -839,17 +845,23 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         with self.accelerator.autocast():
             other_kwargs = {
                 "dec_mode": "train",
-                "ema_model": self.ema_tokenizer.ema_model if ema else None,
+                "ema_model": self.ema_tokenizer.ema_model
+                if hasattr(self, "ema_tokenizer")
+                else None,
             }
             if is_testing:
                 self.tokenizer.eval()
                 # Prepare for the sampling kwargs
+                _model_sample_kwargs = to_cont(self.cfg.model_sampling)
                 other_kwargs.update(
                     {
                         "dec_mode": "sample",
-                        "sampling_kwargs": to_cont(self.cfg.model_sampling),
+                        "sampling_kwargs": _model_sample_kwargs,
                     }
                 )
+                if len(_model_sample_kwargs) == 0:
+                    del other_kwargs["sampling_kwargs"]
+
             latent = None
             self.tokenizer.forward  # debug: fast jump
             recon, loss, q_info = self.tokenizer(x, **other_kwargs)
@@ -866,20 +878,23 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         out_d.update(_q_dict)
 
         # repa or vf feature
-        _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
-        if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
-            _unwrap_tok, "_use_repa_loss", False
-        ):
-            repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
-            assert repa_feature is not None, "repa_feature is None"
-            out_d["repa_feature"] = repa_feature
+        if is_testing:
+            out_d["repa_feature"], out_d["vf_feature"] = None, None
+        else:
+            _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
+            if hasattr(_unwrap_tok, "get_repa_feature") and getattr(
+                _unwrap_tok, "_use_repa_loss", False
+            ):
+                repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
+                assert repa_feature is not None, "repa_feature is None"
+                out_d["repa_feature"] = repa_feature
 
-        elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
-            _unwrap_tok, "_use_vf_loss", False
-        ):
-            vf_feature = _unwrap_tok.get_vf_feature()  # type: ignore
-            assert vf_feature is not None, "vf_feature is None"
-            out_d["vf_feature"] = vf_feature
+            elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(
+                _unwrap_tok, "_use_vf_loss", False
+            ):
+                vf_feature = _unwrap_tok.get_vf_feature()  # type: ignore
+                assert vf_feature is not None, "vf_feature is None"
+                out_d["vf_feature"] = vf_feature
 
         return out_d
 
@@ -891,15 +906,17 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         split: str = "train",
         ema: bool = False,
     ):
-        if ema:
+        if ema and self.use_disc:
             _non_ema_disc = self.vq_loss_fn.discriminator
             self.vq_loss_fn.discriminator = self.ema_vq_disc.ema_model
 
         optim_idx = 0 if train_tokenizer else 1  # tokenizer -> 0, discriminator -> 1
 
-        tok_feat = out_d.get("repa_feature", None)
-        if tok_feat is None:
-            tok_feat = out_d.get("vf_feature", None)
+        # get repa features for distillation
+        tok_feat = out_d.get("repa_feature", out_d.get("vf_feature", None))
+        tok_feat1, tok_feat2 = tok_feat, None
+        if isinstance(tok_feat, (list, tuple)):
+            tok_feat1, tok_feat2 = tok_feat
 
         tok_feat1, tok_feat2 = tok_feat, None
         if isinstance(tok_feat, (list, tuple)):
@@ -926,10 +943,14 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             if train_tokenizer:
                 loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
             else:
+                assert self.use_disc, (
+                    "Discriminator is not used but trying to train it."
+                )
                 loss = disc_train_loss_d["disc_loss"]
 
         # back
-        if ema:
+        if ema and self.use_disc:
+            assert self.vq_loss_fn.discriminator is not None
             self.vq_loss_fn.discriminator = _non_ema_disc
 
         return loss, log_disc
@@ -1074,6 +1095,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             self.gradient_check(self.vq_loss_fn.discriminator)
             self.disc_optim.step()
             self.disc_sched.step()
+            # logger.debug(f'Step the disc.')
 
             # ema update
             self.ema_update(mode="disc")
@@ -1144,8 +1166,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                     out_d["aug_x"] = x_deg
                     tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
-
-            else:  # > normal AE training pipeline
+            ########### normal AE training pipeline
+            else:
                 out_d = self.forward_tokenizer(x)  # no augmentation
                 # train tokenizer and discriminator
                 tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
@@ -1167,7 +1189,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
-            self.log_msg(f"[Train Disc]: {_log_disc_losses}")
+            if self.use_disc:
+                self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)
@@ -1292,6 +1315,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             # randomly choose one
             k = random.choice(keys_not_dunder)
             batch["img"] = batch[k]
+        return batch
 
     def infinity_train_loader(self):
         while True:
@@ -1348,25 +1372,11 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         if self.val_dataloader is None:
             raise ValueError("No validation dataloader found")
 
-        val_loader_iter_ = iter(self.val_dataloader)
-        max_val_iters = self.val_cfg.max_val_iters
-
-        if max_val_iters < 0:
-            # full itering the val dataloader
-            for batch in self.val_dataloader:  # not resampled loader
-                batch = self._randomly_batch_sample_key(batch)
-                yield batch
-        else:
-            # finite itering
-            for _ in range(max_val_iters):
-                try:
-                    batch = next(val_loader_iter_)
-                except StopIteration:
-                    val_loader_iter_ = iter(self.val_dataloader)
-                    batch = next(val_loader_iter_)
-
-                batch = self._randomly_batch_sample_key(batch)
-                yield batch
+        for batch in self.val_dataloader:
+            batch = self._randomly_batch_sample_key(batch)
+            if batch is None or batch.get("img", None) is None:
+                continue
+            yield batch
 
     def val_step(self, batch: dict) -> torch.Tensor:
         img = batch["img"].to(self.device, self.dtype)
@@ -1375,6 +1385,10 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         return recon
 
     def val_loop(self):
+        if not hasattr(self, "_val_loader_iter"):
+            # state in the loader generator
+            self._val_loader_iter = iter(self.finite_val_loader())
+
         if hasattr(self.tokenizer_optim, "eval"):
             self.log_msg("set optimizer to eval mode (support for splus optimizer)")
             self.tokenizer_optim.eval()
@@ -1384,13 +1398,14 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         # track psnr and ssim
         if self.train_cfg.track_metrics:
             psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
-            ssim_fn = StructuralSimilarityIndexMeasure().to(
-                device=self.device, dtype=self.dtype
-            )
+            ssim_fn = StructuralSimilarityIndexMeasure().to(device=self.device, dtype=self.dtype)  # fmt: skip
         loss_metrics = MeanMetric().to(device=self.device)
         self.tokenizer.eval()
 
-        for batch in self.finite_val_loader():
+        for i in range(1, self.val_cfg.max_val_iters + 1):
+            batch = next(self._val_loader_iter)
+            batch = self._randomly_batch_sample_key(batch)
+
             # Do the validation step
             try:
                 recon = self.val_step(batch)
@@ -1416,8 +1431,13 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 ssim_fn.update(batch_img_rgb, recon_for_metrics)
 
             # recon loss
-            loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
+            loss = nn.functional.mse_loss(recon, batch["img"].to(recon))
             loss_metrics.update(loss)
+
+            if i % 10 == 0:
+                self.log_msg(
+                    f"[Val progress]: {i}/{self.val_cfg.max_val_iters} | loss: {loss.item():.4f}"
+                )
 
         if self.train_cfg.track_metrics:
             psnr_val = psnr_fn.compute()
@@ -1444,7 +1464,8 @@ class CosmosFlowHyperspectralTokenizerTrainer:
 
         self.tokenizer.train()
         self.tokenizer_optim.zero_grad()
-        self.disc_optim.zero_grad()
+        if self.use_disc:
+            self.disc_optim.zero_grad()
 
         if hasattr(self.tokenizer_optim, "train"):
             self.log_msg("set optimizer to train mode (support for splus optimizer)")
@@ -1606,12 +1627,24 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 raise RuntimeError("load FSDP or LoRA weights failed")
         else:
             # Load combined model
-            self.log_msg(f"loading bin or safetensors checkpoint into model ...")
-            accelerate.utils.load_checkpoint_in_model(
-                self.accelerator.unwrap_model(self.tokenizer),
-                _assume_path,
-                strict=strict,
-            )
+            self.log_msg("loading bin or safetensors checkpoint into model ...")
+            try:
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.tokenizer),
+                    _assume_path,
+                    strict=strict,
+                )
+            except Exception as e:
+                self.log_msg(
+                    f"loading bin or safetensors checkpoint into tokenizer failed: {e}, "
+                    f"trying to load partial of the weights ..."
+                )
+                load_weights_with_shape_check(
+                    self.accelerator.unwrap_model(self.tokenizer),
+                    accelerate.utils.load_state_dict(
+                        (ema_path / "tokenizer" / "model.safetensors").as_posix()
+                    ),
+                )
 
         # Load discriminator to online model
         if (
@@ -1624,11 +1657,23 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             and not self.train_cfg.only_load_tokenizer
             and self.use_disc
         ):
-            accelerate.utils.load_checkpoint_in_model(
-                self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
-                ema_path / "discriminator",
-                strict=strict,
-            )
+            try:
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    ema_path / "discriminator",
+                    strict=strict,
+                )
+            except Exception as e:
+                self.log_msg(
+                    f"loading discriminator checkpoint into model failed: {e}, "
+                    f"trying to load partial of the weights ..."
+                )
+                load_weights_with_shape_check(
+                    self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
+                    accelerate.utils.load_state_dict(
+                        (ema_path / "discriminator" / "model.safetensors").as_posix()
+                    ),
+                )
 
         # Load quantizer if exists
         if (
@@ -1637,11 +1682,23 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             and isinstance(self.quantizer, nn.Module)
         ):
             if (ema_path / "quantizer").exists():
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.quantizer),
-                    ema_path / "quantizer",
-                    strict=strict,
-                )
+                try:
+                    accelerate.utils.load_checkpoint_in_model(
+                        self.accelerator.unwrap_model(self.quantizer),
+                        ema_path / "quantizer",
+                        strict=strict,
+                    )
+                except Exception as e:
+                    self.log_msg(
+                        f"loading quantizer checkpoint into model failed: {e}, "
+                        f"trying to load partial of the weights ..."
+                    )
+                    load_weights_with_shape_check(
+                        self.accelerator.unwrap_model(self.quantizer),
+                        accelerate.utils.load_state_dict(
+                            (ema_path / "quantizer" / "model.safetensors").as_posix()
+                        ),
+                    )
             else:
                 raise RuntimeError(
                     "Quantizer not found in the checkpoint, please check your checkpoint."
@@ -1682,16 +1739,16 @@ class CosmosFlowHyperspectralTokenizerTrainer:
 
         def to_img(x):
             # img: (..., h, w, c)
-            n_col = 1
+            n_col = 4
             n_row = _only_n // n_col
             if x.ndim == 4:
-                return tensor_to_image(make_grid(x[:_only_n], n_row=n_row, padding=2))
+                return tensor_to_image(make_grid(x[:_only_n], nrow=n_row, padding=2))
             elif x.ndim == 5:
                 # Is the flow sampled sequences: (seq, bs, ...)
                 x = x[:, :_only_n]
                 n_s = x.shape[0]
                 x = x.view(-1, x.shape[-3:])  # (seq*bs, c, h, w)
-                return tensor_to_image(make_grid(x, n_row=n_row, padding=2))
+                return tensor_to_image(make_grid(x, nrow=n_row, padding=2))
             else:
                 raise ValueError(f"Unknown x.shape {x.shape}")
 
@@ -1755,9 +1812,10 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "cosmos_flow_tim_f8c16p1"
+_key = "mingtok_600M"
 _configs_dict = {
     "cosmos_flow_tim_f8c16p1": "cosmos_flow_tim_f8c16p1",
+    "mingtok_600M": "mingtok_600M_continous",
 }
 
 
@@ -1789,7 +1847,7 @@ if __name__ == "__main__":
     # * --- Main function --- #
 
     @hydra.main(
-        config_path="../configs/tokenizer_gan",
+        config_path="../configs/2d_cosmos_diff",
         config_name=chosen_cfg,
         version_base=None,
     )

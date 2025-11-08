@@ -1398,7 +1398,7 @@ class AdaptiveOutputConvLayer(nn.Module):
             return self._forward_conv_with_wb(x, w, self.conv.bias)
 
         # Adaptive cases - use mapping
-        return self.forward_mappings[self.mode](x, out_channels)
+        return self.forward_mappings[self.mode](x.contiguous(), out_channels)
 
     @property
     def weight(self):
@@ -1437,7 +1437,7 @@ class AdaptiveInputLinearLayer(nn.Module):
             w = self.linear.weight[:, :in_features]
         elif self.mode == "interp":
             out_f, in_f = (w := self.linear.weight).shape
-            w_i = w.unsqueeze(0).unsqueeze(0)  # 1, 1, out_f, in_f
+            w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
             w_i = torch.nn.functional.interpolate(
                 w_i, size=(out_f, in_features), mode="bicubic", align_corners=False
             )
@@ -1486,7 +1486,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
         elif self.mode == "interp":
             # Interpolate weights to desired output size
             out_f, in_f = w.shape
-            w_i = w.unsqueeze(0).unsqueeze(0)  # 1, 1, out_f, in_f
+            w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
             w_i = torch.nn.functional.interpolate(
                 w_i, size=(out_features, in_f), mode="bicubic", align_corners=False
             )
@@ -1495,7 +1495,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
             # Interpolate bias if present
             if b is not None:
                 b = torch.nn.functional.interpolate(
-                    b[None, :, None],  # (1, out_f, 1)
+                    b[None, :, None].contiguous(),  # (1, out_f, 1)
                     size=(out_features,),
                     mode="linear",
                     align_corners=False,
@@ -1853,7 +1853,7 @@ class ResnetBlock(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         out_channels = in_channels if out_channels is None else out_channels
-        padding_mode = kwargs.get("padding_mode", "zeros")
+        padding_mode = kwargs.get("padding_mode", "reflect")
         norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
         self.use_dico_cca = kwargs.get("use_dico_cca", False)

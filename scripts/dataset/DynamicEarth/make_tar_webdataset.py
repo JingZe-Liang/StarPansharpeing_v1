@@ -1,9 +1,7 @@
 import io
 import math
-from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from glob import glob
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence, cast
@@ -338,20 +336,16 @@ def per_channel_add_min(
 
 def img_add_min(img, hw_dim: tuple = (-2, -1), quantile=1.0, clip_mode="min"):
     img = torch.as_tensor(img)
+    dtype = img.dtype
     dims = img.ndim
     img = quantile_clip(img, quantile=quantile, clip_mode=clip_mode)
     img_min = img.amin((-3, -2, -1), keepdim=True)
     img = img - img_min
-    return img
+    return img.type(dtype)
 
 
 def quantilize_img(img, hw_dim=(-2, -1), quantile=1.0, clip_mode="both"):
-    img = quantile_clip(
-        img,
-        dim=hw_dim,
-        quantile=quantile,
-        clip_mode=clip_mode,
-    )
+    img = quantile_clip(img, dim=hw_dim, quantile=quantile, clip_mode=clip_mode)
     return img
 
 
@@ -1119,6 +1113,7 @@ def clip_img_to_webdataset(
                 sink.put(data)
             elif dataset_type == "litdata_bin":
                 # webdataset-like writer api
+                sink = cast(BinaryWriter, sink)
                 data = {
                     "__key__": saved_name,
                     "img": img_saver_backend_compact_with_wds(
@@ -1179,6 +1174,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     ] = "tiff",
     max_size: int = 4 * 1024 * 1024 * 1024,
     force_save_dtype: str | np.dtype = "auto",
+    norm=False,
     img_rescale="clamp",
     save_kwargs: dict = {"jpeg_quality": 90},
     add_global_index: bool = False,
@@ -1232,6 +1228,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
             assert_channel_n=channel_n,
             add_global_index=add_global_index,
             dataset_type=dataset_type,
+            norm=norm,
         )
         for msi_file in (tbar := tqdm(msi_files, disable=not tqdm_or_not)):
             msi_file = cast(Path, msi_file)  # ensure msi_file is Path type
@@ -1727,6 +1724,15 @@ if __name__ == "__main__":
         # Dynamic Earth Dataset, 1024px original, clip into 512px
         path = "/home/user/zihancao/Dataset/DynamicEarthNet/planet"
         all_msi_files_s = list(Path(path).rglob("**/PF-SR/*.tif"))
+        logger.info(f"Total images: {len(all_msi_files_s)}")
+        # samples per-2 weeks
+        # sort
+        from natsort import natsorted
+
+        all_msi_files_s = natsorted(all_msi_files_s)
+        all_msi_files_s = [x for i, x in enumerate(all_msi_files_s) if i % (2 * 7) == 0]
+        logger.info(f"Sampled images: {len(all_msi_files_s)}")
+
         # webdataset_pts = (
         #     "data2/DynamicEarth/hyper_images/DynamicEarth-4_bands-px_512-1-%04d.tar"
         # )
@@ -1735,8 +1741,9 @@ if __name__ == "__main__":
             "process_img_type": "clip",
             "img_clip_size": (512, 512),
             "img_stride": (512, 512),
-            "img_rescale": "add_min,0.999,both",
+            "img_rescale": "min_max,0.995,both",
             "save_backend": "tiff",
+            "norm": True,
             "save_kwargs": {
                 "tiff_compression_type": "jpeg2000",
                 "tiff_jpg_irreversible": True,

@@ -1,5 +1,61 @@
+import math
+
 import torch as th
 from torchdiffeq import odeint
+
+
+def _time_shift(
+    img_seq_len: int,
+    basic_timesteps: th.Tensor,
+    base_shift: float = 0.5,
+    max_shift: float = 1.15,
+    x1=256,
+    x2=4096,
+):
+    mean = (max_shift - base_shift) / (x2 - x1)
+    bias = base_shift - mean * x1
+    mu = mean * img_seq_len + bias
+
+    # time shift
+    sigma = 1.0
+    shifted_timesteps = math.exp(mu) / (
+        math.exp(mu) + (1 / basic_timesteps - 1) ** sigma
+    )
+    return shifted_timesteps
+
+
+def get_timesteps(t0=0, t1=1, num_steps=100, time_type: str = "linear"):
+    if time_type == "linear":
+        t = th.linspace(t0, t1, num_steps)
+    else:
+        t_typ = time_type.split("_")
+        if isinstance(t_typ, list):
+            t_typ = t_typ[0]
+            kwargs = t_typ[1:]
+        else:
+            kwargs = None
+
+        if t_typ == "pow":
+            p = float(kwargs[0])
+            assert p > 1.0, "Only power > 1.0 is supported"
+            t = th.linspace(t1, t0, num_steps).pow(p)
+            t = t.flip(-1)
+        elif t_typ == "shift":
+            img_seq_len: int = int(kwargs[0])
+            if len(kwargs) == 3:
+                basic_shift, max_shift = float(kwargs[1]), float(kwargs[2])
+            else:
+                basic_shift, max_shift = 0.5, 1.15
+            basic_ts = th.linspace(t1, t0, num_steps)
+            t = _time_shift(img_seq_len, basic_ts, basic_shift, max_shift)
+            t = t.flip(-1)
+        elif t_typ == "linear_scaled":
+            t = th.linspace(t1**0.5, t0**0.5, steps=num_steps) ** 2
+            t = t.flip(-1)
+        else:
+            raise NotImplementedError(f"Time type {time_type} is not supported.")
+
+    return t
 
 
 class sde:
@@ -12,6 +68,7 @@ class sde:
         *,
         t0,
         t1,
+        time_type="linear",
         num_steps,
         sampler_type,
         temperature=1.0,
@@ -19,7 +76,7 @@ class sde:
         assert t0 < t1, "SDE sampler has to be in forward time"
 
         self.num_timesteps = num_steps
-        self.t = th.linspace(t0, t1, num_steps)
+        self.t = get_timesteps(t0, t1, num_steps, time_type)
         self.dt = self.t[1] - self.t[0]
         self.drift = drift
         self.diffusion = diffusion
@@ -90,12 +147,16 @@ class ode:
         num_steps,
         atol,
         rtol,
+        time_type: str = "pow_2.5",
         temperature=1.0,
     ):
         assert t0 < t1, "ODE sampler has to be in forward time"
 
         self.drift = drift
-        self.t = th.linspace(t0, t1, num_steps)
+
+        # Get sample times
+        self.t = get_timesteps(t0, t1, num_steps, time_type)
+
         self.atol = atol
         self.rtol = rtol
         self.sampler_type = sampler_type

@@ -126,7 +126,7 @@ class NaFlexVitCfg:
     # Variable patch size support
     enable_patch_interpolator: bool = True  # Enable dynamic patch size support
 
-    #  Tokenization related
+    # Tokenization related
     img_size: int = 32
     in_chans: int = 256
     out_chans: int = 16

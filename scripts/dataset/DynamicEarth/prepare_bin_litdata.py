@@ -1070,11 +1070,11 @@ if __name__ == "__main__":
         #     ],
         #     "dataset_type": "condition",
         # },
-        {
-            "tar_path": "data/RSCaptions/conditions",
-            "output_path": "data/RSCaptions/LitData_conditions/",
-            "dataset_type": "condition",
-        },
+        # {
+        #     "tar_path": "data/RSCaptions/conditions",
+        #     "output_path": "data/RSCaptions/LitData_conditions/",
+        #     "dataset_type": "condition",
+        # },
         ## ************ Captions ************* ##
         # {
         #     "tar_path": "data/LoveDA/condition_captions",

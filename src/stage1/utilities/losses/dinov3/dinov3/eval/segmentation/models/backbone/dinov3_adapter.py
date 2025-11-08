@@ -385,9 +385,8 @@ class DINOv3_Adapter(nn.Module):
             # fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
             # fan_out //= m.groups
             # m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
-            from timm.layers.weight_init import lecun_normal_
 
-            lecun_normal_(m.weight)
+            nn.init.xavier_normal_(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
 

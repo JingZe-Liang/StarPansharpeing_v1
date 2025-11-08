@@ -34,7 +34,6 @@ vq_loss:
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
-    repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_student
     loss_type: am_radio_spatial

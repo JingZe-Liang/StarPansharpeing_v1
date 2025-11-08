@@ -59,6 +59,7 @@ train_loader:
             "data/WorldView4/LitData_hyper_images",
             "data/MDAS-Optical/LitData_hyper_images",
             "data/EarthView/LitData_satellogic",
+            "data2/DynamicEarth/LitData_hyper_images",
           ]
         - resize_before_transform: 512
 
@@ -112,6 +113,10 @@ train_loader:
         - ["data/hyspecnet11k/LitData_hyper_images"]
         - resize_before_transform: 256
 
+      202bands_128:
+        - ["data2/HyperspectralEarth/LitData_hyper_images"]
+        - resize_before_transform: 128
+
       224bands_128:
         - ["data/DryadHyper/LitData_hyper_images"]
         - resize_before_transform: 128
@@ -134,21 +139,21 @@ train_loader:
     #     is_cycled: true
 
   macro_sampled_batch_size:
-    128: 26
-    256: 18
+    128: 24
+    256: 14
     512: 9
 
   loader_kwargs:
-    num_workers: 12
+    num_workers: 20
     pin_memory: true
     drop_last: true
     persistent_workers: true
     batch_size: 8
-    prefetch_factor: 3
+    prefetch_factor: 2
     shuffle: false
 
-  #         3    4  8  10  12 13 13 32 50 150 175 202  224 242 368  369
-  weights: [20, 20, 10, 8, 6, 6, 5, 5, 5, 5, 8, 4, 3, 3, 3, 5]
+  #         3    4  8  10  12 13 13 32 50 150 175 202 202  224 242 368  369
+  weights: [20, 20, 10, 8, 6, 6, 5, 5, 5, 5, 8, 4, 3, 7, 3, 3, 5]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader

@@ -155,6 +155,7 @@ tmp/
 *.jpg
 **.pt
 **.pth
+nohup.out
 
 # weight dirs
 src/stage2/generative/tools/conditions/caption/weights/*

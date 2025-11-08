@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "RS_tokenizer"
 version = "0.1.0"
-requires-python = ">=3.12, <=3.13"
+requires-python = ">=3.12, <=3.14"
 dependencies = [
     "numpy>=1.21.0",
-    "torch>=2.6.0",
+    "torch>=2.8.0",
     "transformers>=4.55.4",
     "timm>=1.0.19",
     "accelerate>=1.10.1",
@@ -40,7 +40,9 @@ dependencies = [
 dev = ["pytest>=6.0", "ruff>=0.11", "mypy>=1.0", "ty>=0.0.1", "yamllint>=1.35.0"]
 
 [project.scripts]
-wids-index = "data.wids_index:main"
+# data tool
+wids-index = "data.tools.wids_index:main"
+litdata-index = "data.tools.litdata_index:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -255,8 +257,9 @@ bad-param-name-override = false
 index-out-of-bounds = "error"
 unused-ignore-comment = "ignore"
 redundant-cast = "ignore"
-possibly-unbound-attribute = "error"
-possibly-unbound-import = "error"
+unresolved-attribute = "ignore"
+# possibly-unbound-attribute = "error"
+# possibly-unbound-import = "error"
 
 # [tool.ty.environment]
 # root = ["./src", "./scripts"]

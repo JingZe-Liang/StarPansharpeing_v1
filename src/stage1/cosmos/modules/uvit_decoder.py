@@ -10,11 +10,15 @@ UViT decoder that takes z, noise, and t (optional r) as inputs
 
 import math
 from dataclasses import asdict, dataclass
-from typing import Mapping, Optional, Union
+from typing import Mapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from loguru import logger
+from timm.layers import create_norm_layer, create_rope_embed
 from timm.layers.create_act import create_act_layer
+from timm.layers.weight_init import lecun_normal_
+from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from typing_extensions import Annotated, Any
@@ -30,6 +34,7 @@ from .blocks import (
 from .t_blocks.conv_res import DownBlock2D, ResnetBlock2D, UpBlock2D
 from .t_blocks.embeddings import (
     LearnedPositionalEmbedding,
+    TimestepEmbedder,
     TimestepEmbedding,
     Timesteps,
 )
@@ -46,7 +51,7 @@ class UViTDecoderConfig:
     channels: int = 128
     ch_mult: tuple = (1, 2, 4, 4)
     act_fn: str = "silu"
-    vit_act_fn: str = "geglu"
+    vit_act_fn: str = "silu"
     layers_per_block: int = 2
     num_attention_heads: Optional[int] = None
     dropout: float = 0.0
@@ -60,7 +65,7 @@ class UViTDecoderConfig:
     learned_pos_embed: bool = False
     image_size: tuple | None = None
     relative_pos_embed: bool = True
-    time_cond_type: str = "t-r"
+    time_cond_type: str = "t"
     init: Optional[str] = None
     use_act_ckpt: bool = False
 
@@ -91,7 +96,7 @@ class UViTDecoder(nn.Module):
         channels=128,
         ch_mult=(1, 2, 4, 4),
         act_fn: str = "silu",
-        vit_act_fn: str = "geglu",
+        vit_act_fn: str = "silu",
         layers_per_block=2,
         num_attention_heads: Optional[int] = None,
         total_resolutions: int = 8,
@@ -106,11 +111,14 @@ class UViTDecoder(nn.Module):
         learned_pos_embed=False,
         image_size: int | None = None,
         relative_pos_embed=True,
-        time_cond_type="t-r",
+        time_cond_type="t",
         init: Optional[Mapping] = None,
-        use_act_ckpt: bool = False,
+        use_act_ckpt: bool = True,
+        jvp: bool = False,
         **_kwargs,
     ):
+        super().__init__()
+
         ### Config ###
         self.out_dim = in_channels
         self.ada_norm = ada_norm
@@ -129,8 +137,6 @@ class UViTDecoder(nn.Module):
 
         if isinstance(layers_per_block, int):
             layers_per_block = [layers_per_block] * len(self.ch_level)
-
-        super().__init__()
 
         ### Input ###
         z_conv_in = nn.Conv2d(z_dim, channels, kernel_size=3, padding=1)
@@ -153,16 +159,24 @@ class UViTDecoder(nn.Module):
 
         ### Time ###
         time_embed_dim = channels * 4
-        self.time_proj = Timesteps(
-            channels, flip_sin_to_cos=True, downscale_freq_shift=0
-        )
         self.time_cond_type = time_cond_type
         self.use_delta_t_embed = time_cond_type in ["t-r", "r", "t,t-r", "r,t-r", "t,r,t-r"]  # fmt: skip
+
+        # Akin to diffusion TimestepEmbedder
+        # the fm timestep is 0 .. 1, need to rescaled.
+        self.time_embed = TimestepEmbedder(time_embed_dim, t_factor=1000.0)
         if self.use_delta_t_embed:
-            self.delta_t_proj = Timesteps(
-                channels, flip_sin_to_cos=True, downscale_freq_shift=0
-            )
-        self.time_embedding = TimestepEmbedding(channels, time_embed_dim, act_fn=act_fn)
+            self.delta_t_embed = TimestepEmbedder(time_embed_dim, t_factor=1000.0)
+
+        ## old version
+        # self.time_proj = Timesteps(
+        #     channels, flip_sin_to_cos=True, downscale_freq_shift=0
+        # )
+        # if self.use_delta_t_embed:
+        #     self.delta_t_proj = Timesteps(
+        #         channels, flip_sin_to_cos=True, downscale_freq_shift=0
+        #     )
+        # self.time_embedding = TimestepEmbedding(channels, time_embed_dim, act_fn=act_fn)
 
         ### AdaNorm Embedding ###
         if ada_norm:
@@ -202,6 +216,9 @@ class UViTDecoder(nn.Module):
                         ada_emb_dim=channels,
                     )
                 )
+                logger.debug(
+                    f"[UVit ResDown] {i_level=}, {input_channel=}, {output_channel=}"
+                )
 
         # Mid block ###
         down_scale = total_resolutions  # (2 ** (len(self.ch_level) - 1),)
@@ -217,11 +234,22 @@ class UViTDecoder(nn.Module):
             ada_norm=ada_norm,
             ada_emb_dim=channels,
             learned_pos_embed=learned_pos_embed,
-            sample_size=(image_size // down_scale, image_size // down_scale)
+            sample_size=(
+                (image_size // down_scale, image_size // down_scale)
+                if image_size is not None
+                else None
+            )
             if learned_pos_embed
             else None,
             relative_pos_embed=relative_pos_embed,
+            time_condition=True,
+            temb_channels=time_embed_dim,
             act_fn=vit_act_fn,
+            delta_t_aware=True if self.use_delta_t_embed else False,
+            jvp=jvp,
+        )
+        logger.debug(
+            f"[UVit MidTransformer]: hiddens={output_channel}, n_layers={mid_nlayers}"
         )
 
         ### Up blocks ###
@@ -257,12 +285,17 @@ class UViTDecoder(nn.Module):
                         ada_emb_dim=channels,
                     )
                 )
+                logger.debug(
+                    f"[UVit ResUp]: {i_level=}, {input_channel=}, {output_channel=}"
+                )
 
         ### Output ###
         self.conv_norm_out = nn.GroupNorm(
             num_channels=channels, num_groups=norm_num_groups, eps=eps
         )
         self.conv_out_act = create_act_layer(act_fn)
+        assert self.conv_out_act is not None, f"Unsupported act fn: {act_fn}"
+
         if isinstance(in_channels, (list, tuple)):
             self.conv_out = DiffBandsInputConvOut(
                 in_channels, channels, padding_mode="reflect"
@@ -273,10 +306,15 @@ class UViTDecoder(nn.Module):
             )
 
         ### Null condition h ###
-        self.null_cond_h = nn.Parameter(torch.randn(1, z_dim, 1, 1) * 0.2)
+        # self.null_cond_h = nn.Buffer(torch.zeros(1, z_dim, 1, 1))
 
         ### Weights init ###
-        self.init_weights(**(init or {}))
+        # self.init_weights(**(init or {}))
+        self.init_weights()
+
+    def get_last_layer(self):
+        """Get last layer's weights for GAN training"""
+        return self.conv_out.weight
 
     @classmethod
     def create_model(cls, size: str, **overrides):
@@ -291,13 +329,36 @@ class UViTDecoder(nn.Module):
         return cls(**kwargs)
 
     def init_weights(self, method="xavier_uniform", ckpt_module="decoder", **kwargs):
-        for m in self.modules():
-            if isinstance(m, ResnetBlock2D):
-                init_zero(m.conv2)
-            elif isinstance(m, TransformerBlock):
-                init_zero(m.ff.proj_out)
+        # for m in self.modules():
+        #     if isinstance(m, ResnetBlock2D):
+        #         init_zero(m.conv2)
+        #     # elif isinstance(m, TransformerBlock):
+        #     #     init_zero(m.ff.proj_out)
 
-        init_weights(self, method=method, ckpt_module=ckpt_module, **kwargs)
+        # init_weights(self, method=method, ckpt_module=ckpt_module, **kwargs)
+
+        # Initialize
+        def init_fn(module, name: str):
+            if hasattr(module, "init_weights"):
+                module.init_weights()
+
+            if isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            if isinstance(module, nn.Conv2d):
+                nn.init.xavier_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            if isinstance(module, (nn.LayerNorm, nn.GroupNorm)):
+                if module.weight is not None:
+                    nn.init.ones_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        named_apply(init_fn, self, name="decoder")
 
     def _expand_time(self, timestep, bs: int, device):
         if not torch.is_tensor(timestep):
@@ -316,9 +377,8 @@ class UViTDecoder(nn.Module):
         else:
             timesteps = self._expand_time(timesteps, bs, device)
 
-        t_emb = self._get_delta_embed(timesteps)
-        t_emb = self.time_embedding(t_emb, None)
-        return t_emb
+        t_emb, delta_emb = self._get_delta_embed(timesteps)
+        return t_emb, delta_emb
 
     def _get_delta_embed(self, ts):
         if isinstance(ts, (list, tuple)):
@@ -326,30 +386,34 @@ class UViTDecoder(nn.Module):
         else:
             assert not self.use_delta_t_embed, "timestep should be a tuple of (t, r)"
             t = ts
-            return self.time_proj(t)
 
+        # Embedding t
+        t_emb = self.time_embed(t)  # [B, D]
+
+        ### is t, r embeddings
+
+        delta_embed = None
         if self.use_delta_t_embed:
-            delta_embedder = self.delta_t_proj
-        else:
-            delta_embedder = self.time_proj
+            delta_embedder = self.delta_t_embed
+            if self.time_cond_type == "t-r":
+                delta_embed = delta_embedder(t - r)
+            elif self.time_cond_type == "r":
+                delta_embed = delta_embedder(r)
+            elif self.time_cond_type == "t,r":
+                delta_embed = t_emb + delta_embedder(r)
+            elif self.time_cond_type == "t,t-r":
+                delta_embed = t_emb + delta_embedder(t - r)
+            elif self.time_cond_type == "r,t-r":
+                delta_embed = t_emb + delta_embedder(t - r)
+            elif self.time_cond_type == "t,r,t-r":
+                delta_embed = t_emb + self.time_embed(r) + delta_embedder(t - r)
+            else:
+                raise NotImplementedError(
+                    f"Time cond type {self.time_cond_type} not implemented"
+                )
 
-        if self.time_cond_type == "t-r":
-            delta_embed = delta_embedder(t - r)
-        elif self.time_cond_type == "r":
-            delta_embed = delta_embedder(r)
-        elif self.time_cond_type == "t,r":
-            delta_embed = self.time_proj(t) + delta_embedder(r)
-        elif self.time_cond_type == "t,t-r":
-            delta_embed = self.time_proj(t) + delta_embedder(t - r)
-        elif self.time_cond_type == "r,t-r":
-            delta_embed = self.time_proj(r) + delta_embedder(t - r)
-        elif self.time_cond_type == "t,r,t-r":
-            delta_embed = self.time_proj(t) + self.time_proj(r) + delta_embedder(t - r)
-        else:
-            raise NotImplementedError(
-                f"Time cond type {self.time_cond_type} not implemented"
-            )
-        return delta_embed
+        main_t_emb = (t_emb + delta_embed) if delta_embed is not None else t_emb
+        return main_t_emb, delta_embed
 
     def _forward_downs(self, x, t_emb, ctx_emb, use_act_ckpt=False):
         # 2. Down blocks
@@ -392,16 +456,21 @@ class UViTDecoder(nn.Module):
                 )
         return x  # type: ignore[return-value]
 
-    def _forward_mids(self, x, t_emb, ctx_emb, use_act_ckpt=False):
-        # TODO: middle transformer need to conditioned on t_emb and z.
-        x = self.mid_block(x, ctx_emb=ctx_emb, use_act_ckpt=use_act_ckpt)
+    def _forward_mids(self, x, t_emb, ctx_emb, delta_emb, use_act_ckpt=False):
+        x = self.mid_block(
+            x,
+            t_emb=t_emb,
+            ctx_emb=ctx_emb,
+            delta_emb=delta_emb,
+            use_act_ckpt=use_act_ckpt,
+        )
         return x
 
     def forward(
         self,
         x: Tensor,
         t,
-        r=None,
+        r=None,  # Meanflow or other t-r timesteps diffusion methods
         z: Tensor | None = None,
         inp_shape: Annotated[torch.Size | int, "bs,c,h,w or c"] | None = None,
         return_zs=False,  # always be False
@@ -416,7 +485,7 @@ class UViTDecoder(nn.Module):
 
         # Concat with z and project
         z_expanded = torch.nn.functional.interpolate(
-            z, size=(x.shape[-2], x.shape[-1]), mode="nearest"
+            z.contiguous(), size=(x.shape[-2], x.shape[-1]), mode="nearest"
         )
 
         # conv ins
@@ -434,13 +503,19 @@ class UViTDecoder(nn.Module):
         # 1. Time embedding
         if r is not None:
             t = (t, r)
-        t_emb = self.get_time_embed(sample=x, timesteps=t)
+        t_emb, delta_emb = self.get_time_embed(sample=x, timesteps=t)
 
         # 2. Down blocks
         x, enc_res = self._forward_downs(x, t_emb, ctx_emb, use_act_ckpt=use_act_ckpt)
 
         # 3. Mid block
-        x = self._forward_mids(x, t_emb, ctx_emb, use_act_ckpt=use_act_ckpt)
+        x = self._forward_mids(
+            x,
+            t_emb,
+            ctx_emb,
+            delta_emb=delta_emb,
+            use_act_ckpt=use_act_ckpt,
+        )
 
         # 4. Up blocks
         x = self._forward_ups(x, t_emb, ctx_emb, enc_res, use_act_ckpt=use_act_ckpt)
@@ -460,32 +535,87 @@ class UViTDecoder(nn.Module):
 class UViTMiddleTransformer(VisionTransformer):
     def __init__(
         self,
-        *args,
-        sample_size=None,
-        act_fn: str = "geglu",
-        learned_pos_embed=True,
+        inner_dim: int,
+        patch_size: int = 1,
+        in_channels: Optional[int] = None,
+        out_channels: Optional[int] = None,
+        dropout: float = 0.0,
+        num_layers: int = 12,
+        attn_norm: Optional[str] = None,
+        norm_elementwise_affine=True,
+        num_attention_heads: Optional[int] = None,
+        max_auto_attention_heads: int = 16,
+        act_fn: str = "silu",
+        attention_bias: bool = False,
+        ada_norm: bool = False,
+        ada_emb_dim: Optional[int] = None,  # Context embedding dimension for AdaNorm
+        learned_pos_embed=False,
+        # Only for absolute positional embeddings
+        sample_size: Optional[Tuple[int, ...]] = None,
+        relative_pos_embed=False,
+        # Window size for Swin Transformer or Relative positional bias
+        attn_window: Optional[int] = None,
+        rope_theta: float | None = 10000.0,
+        eps: float = 1e-5,
+        out_norm: bool = True,
+        delta_t_aware: bool = False,
+        time_condition: bool = True,
+        temb_channels: int | None = None,
         norm_num_groups: int = 32,
-        out_norm: bool = False,
-        **kwargs,
+        jvp: bool = False,  # Enable jvp compatibility for meanflow
     ):
         super().__init__(
-            *args,
-            learned_pos_embed=False,
-            sample_size=sample_size,
+            inner_dim=inner_dim,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            dropout=dropout,
+            num_layers=num_layers,
+            attn_norm=attn_norm,
+            norm_elementwise_affine=norm_elementwise_affine,
+            num_attention_heads=num_attention_heads,
+            max_auto_attention_heads=max_auto_attention_heads,
             act_fn=act_fn,
+            attention_bias=attention_bias,
+            ada_norm=ada_norm,
+            ada_emb_dim=ada_emb_dim,
+            learned_pos_embed=learned_pos_embed,
+            sample_size=sample_size,
+            relative_pos_embed=relative_pos_embed,
+            attn_window=attn_window,
+            rope_theta=rope_theta,
+            eps=eps,
             out_norm=out_norm,
-            **kwargs,
+            delta_t_aware=delta_t_aware,
+            temb_channels=temb_channels,
+            jvp=jvp,
         )
+        if jvp:
+            logger.log("NOTE", f"[Mid Transformer]: Use jvp attention.")
+        self.time_condition = time_condition
 
-        self.norm = torch.nn.GroupNorm(
+        if time_condition:
+            assert ada_emb_dim is not None
+            assert temb_channels is not None
+
+            self.time_emb_proj = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(
+                    temb_channels,
+                    ada_emb_dim * 2,
+                ),
+            )
+        self.norm = create_norm_layer(
+            "groupnorm",
+            self.in_channels,
             num_groups=norm_num_groups,
-            num_channels=self.in_channels,
             eps=1e-6,
             affine=True,
         )
 
+        ######### Positional Embedding #########
         self.pre_pos_embeddings = None
-        if learned_pos_embed:
+        if learned_pos_embed and sample_size is not None:
             self.pre_pos_embeddings = LearnedPositionalEmbedding(
                 (self.inner_dim, *sample_size)
             )
@@ -494,27 +624,41 @@ class UViTMiddleTransformer(VisionTransformer):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        t_emb: Optional[torch.Tensor] = None,
         ctx_emb: Optional[torch.Tensor] = None,
+        delta_emb: Optional[torch.Tensor] = None,
         use_act_ckpt: bool = False,
     ) -> torch.Tensor:
         residual = hidden_states
         if self.pre_pos_embeddings is not None:
             hidden_states = self.pre_pos_embeddings(hidden_states)
 
+        #### time embed modulation
+        if self.time_condition and t_emb is not None:
+            t_emb = self.time_emb_proj(t_emb)[:, :, None, None]
+            t_scale, t_shift = t_emb.chunk(2, dim=1)
+            ctx_emb = ctx_emb * (1 + t_scale) + t_shift
+
+        #### Interpolation cxt_emb
         hidden_states = self.norm(hidden_states)
         if ctx_emb is not None and ctx_emb.shape[-2:] != hidden_states.shape[-2:]:
+            if ctx_emb.shape[0] >= 32:
+                ctx_emb = ctx_emb.contiguous()
             ctx_emb = nn.functional.interpolate(
                 ctx_emb, size=hidden_states.shape[-2:], mode="nearest"
             )
 
+        #### Attention and FFN
         hidden_states = super().forward(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             ctx_emb=ctx_emb,
+            delta_emb=delta_emb,
             out_2d_map=True,
             use_act_ckpt=use_act_ckpt,
         )
         output = hidden_states + residual
+
         return output
 
 
@@ -529,8 +673,8 @@ def test_uvit_decoder():
         decoder = UViTDecoder.create_model(
             size=size,
             in_channels=3,
-            z_dim=4,
-            image_size=(64, 64),
+            z_dim=32,
+            image_size=(512, 512),
             time_cond_type="t-r",
             use_act_ckpt=False,
         ).cuda()
@@ -538,13 +682,13 @@ def test_uvit_decoder():
         print(f"Model {size} created successfully")
 
         # Test data
-        bs, c, h, w = 2, 3, 64, 64
-        z_dim = 4
+        bs, c, h, w = 2, 3, 512, 512
+        z_dim = 32
 
         x = torch.randn(bs, c, h, w).cuda()
-        z = torch.randn(bs, z_dim, h // 4, w // 4).cuda()
-        t = torch.randint(0, 1000, (bs,)).cuda()
-        r = torch.randint(0, 1000, (bs,)).cuda()
+        z = torch.randn(bs, z_dim, h // 16, w // 16).cuda()
+        t = torch.randint(0, 1000, (bs,)).cuda().float()
+        r = torch.randint(0, 1000, (bs,)).cuda().float()
 
         print(f"Input shapes: x={x.shape}, z={z.shape}")
 
@@ -573,7 +717,7 @@ def test_uvit_decoder():
         decoder_ckpt = UViTDecoder.create_model(
             size=size,
             in_channels=3,
-            z_dim=4,
+            z_dim=32,
             image_size=(64, 64),
             time_cond_type="t-r",
             use_act_ckpt=True,

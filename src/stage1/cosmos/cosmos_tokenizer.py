@@ -275,8 +275,11 @@ class EncoderDecoderConfig:
     # resamples
     downsample_type: str = "PadConv"
     downsample_shortcut: Any = None  # str
+    downsample_kwargs: Any = field(default_factory=lambda: {"padconv_use_manually_pad": True})  # fmt: skip
+    # downsample_manually_pad: bool = False  # FIXME: True originally  # old version
     upsample_type: str = "RepeatConv"
     upsample_shortcut: Any = None  # str
+    upsample_kwargs: Any = field(default_factory=lambda: {"interp_type": "xy_repeat"})
     # patch size, patcher, and blocks
     patch_size: int = 1
     patch_method: str = "haar"
@@ -294,7 +297,6 @@ class EncoderDecoderConfig:
     padding_mode: str = "reflect"
     norm_type: str = "gn"
     norm_groups: int = 32
-    downsample_manually_pad: bool = True
     resample_norm_keep: bool = False
     # adaptive conv
     adaptive_mode: str = "interp"

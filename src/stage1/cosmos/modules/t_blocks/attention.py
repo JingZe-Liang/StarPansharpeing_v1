@@ -16,8 +16,69 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from loguru import logger
+from timm.layers import apply_rot_embed_cat
 
 from .ada_norms import get_norm_layer
+
+# JVP support
+try:
+    from jvp_flash_attention.jvp_attention import JVPAttn
+    from jvp_flash_attention.jvp_attention import attention as jvp_attention
+
+    JVP_FLASH_ATTN_ENABLED = True
+except ImportError:
+    JVP_FLASH_ATTN_ENABLED = False
+
+
+def _jvp_math_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    """JVP-compatible math attention implementation"""
+    # Use math backend for JVP compatibility
+    with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+        return F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=dropout,
+            is_causal=getattr(module, "is_causal", False),
+        ), None
+
+
+def _jvp_flash_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    dropout: float = 0.0,
+):
+    """JVP-compatible flash attention implementation"""
+    if not JVP_FLASH_ATTN_ENABLED:
+        logger.warning(
+            "JVP Flash Attention not available, falling back to math attention"
+        )
+        return _jvp_math_attention(module, query, key, value, attention_mask, dropout)
+
+    if dropout > 0:
+        logger.warning("Dropout is not supported for JVP Flash Attention, setting to 0")
+
+    try:
+        x = jvp_attention(query, key, value, attn_mask=attention_mask)
+        return x, None
+    except Exception as e:
+        logger.warning(
+            f"JVP Flash Attention failed: {e}, falling back to math attention"
+        )
+        return _jvp_math_attention(module, query, key, value, attention_mask, dropout)
+
 
 #######################
 ### Basic Attention ###
@@ -36,11 +97,11 @@ class Attention(nn.Module):
         cross_attention_dim: Optional[int] = None,
         heads: int = 8,
         dim_head: Optional[int] = None,
-        out_dim: int = None,
+        out_dim: int | None = None,
         dropout: float = 0.0,
         attn_drop: float = 0.0,
         bias: bool = False,
-        qk_norm: Optional[str] = None,
+        qk_norm: Optional[str] = "rmsnorm",
         cross_attention_norm: Optional[str] = None,
         out_bias: bool = True,
         eps: float = 1e-5,
@@ -48,6 +109,10 @@ class Attention(nn.Module):
         is_causal: bool = False,
         rescale_output_factor: float = 1.0,
         residual_connection: bool = False,
+        *,
+        delta_t_aware: bool = False,
+        delta_t_dim: int | None = None,
+        jvp: bool = False,
     ):
         super().__init__()
 
@@ -96,10 +161,33 @@ class Attention(nn.Module):
         self.to_k = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
 
+        self.delta_t_aware = delta_t_aware
+        if delta_t_aware:
+            self.to_q_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+            self.to_k_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+            self.to_v_delta = nn.Linear(delta_t_dim or query_dim, inner_dim, bias=bias)
+
         self.out_proj = nn.Linear(inner_dim, out_dim, bias=out_bias)
         self.out_drop = nn.Dropout(dropout)
 
         self._cache_attn_mask = None
+        self.jvp = jvp
+        self._attention_functions = {
+            "sdpa": self._sdpa_attention,
+            "jvp_math": _jvp_math_attention,
+            "jvp_flash": _jvp_flash_attention,
+        }
+
+        if jvp and not JVP_FLASH_ATTN_ENABLED:
+            logger.warning(
+                "JVP Flash Attention is not enabled. Please install it by running `pip install jvp_flash_attention` "
+                "or the flash attention will not be used and fall back to math attention kernel."
+            )
+            self._attn_impl = "jvp_math"
+        elif jvp and JVP_FLASH_ATTN_ENABLED:
+            self._attn_impl = "jvp_flash"
+        else:
+            self._attn_impl = "sdpa"
 
     def forward(
         self,
@@ -107,6 +195,8 @@ class Attention(nn.Module):
         cross_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states=None,  # For compatibility with transformers
+        delta_emb: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert encoder_hidden_states is None, "encoder_hidden_states should be None"
         residual = hidden_states
@@ -134,22 +224,40 @@ class Attention(nn.Module):
                 batch_size, self.heads, -1, attention_mask.shape[-1]
             )
 
+        ######## Q, K, V #########
         query = self.to_q(hidden_states)
-
         if cross_hidden_states is None:
             cross_hidden_states = hidden_states
         elif self.norm_cross:
             cross_hidden_states = self.norm_cross_hidden_states(cross_hidden_states)
-
         key = self.to_k(cross_hidden_states)
         value = self.to_v(cross_hidden_states)
+
+        # Add delta t awareness
+        if self.delta_t_aware and delta_emb is not None:
+            delta_query = self.to_q_delta(delta_emb)[:, None]
+            delta_key = self.to_k_delta(delta_emb)[:, None]
+            delta_value = self.to_v_delta(delta_emb)[:, None]
+
+            query = query + delta_query
+            key = key + delta_key
+            value = value + delta_value
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // self.heads
 
+        # bs, nheads, seq_len, head_dim
         query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
         key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+
+        # rope
+        if rope is not None:
+            assert tuple(rope.shape[-2:]) == (sequence_length, head_dim * 2), (
+                f"rope shape {tuple(rope.shape[-2:])} does not match needed shape {(sequence_length, head_dim * 2)}"
+            )
+            query = apply_rot_embed_cat(query, rope)
+            key = apply_rot_embed_cat(key, rope)
 
         if self.norm_q is not None:
             query = self.norm_q(query)
@@ -179,7 +287,8 @@ class Attention(nn.Module):
 
         return hidden_states
 
-    def _process_attn(self, query, key, value, attn_mask):
+    def _sdpa_attention(self, query, key, value, attn_mask, *args, **kwargs):
+        """Standard SDPA attention (non-JVP)"""
         return F.scaled_dot_product_attention(  # pylint: disable=not-callable
             query,
             key,
@@ -188,6 +297,24 @@ class Attention(nn.Module):
             dropout_p=self.attn_drop,
             is_causal=self.is_causal,
         )
+
+    def _process_attn(self, query, key, value, attn_mask):
+        """Process attention with JVP support"""
+        if self.jvp:
+            # Use JVP-compatible attention
+            attention_fn = self._attention_functions[self._attn_impl]
+            output, _ = attention_fn(
+                self,
+                query,
+                key,
+                value,
+                attn_mask,
+                self.attn_drop if self.training else 0.0,
+            )
+            return output
+        else:
+            # Use standard SDPA
+            return self._sdpa_attention(query, key, value, attn_mask)
 
     def prepare_attention_mask(
         self,

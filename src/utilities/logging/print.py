@@ -51,6 +51,19 @@ logger.level("INFO", icon="ℹ️ ", color="<light-black>")
 logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
 logger.level("ERROR", icon="❌", color="<red><bold>")
 logger.level("CRITICAL", icon="💥", color="<red><bold>")
+logger.level("NOTE", icon="💡", color="<magenta><bold>", no=40)
+
+
+def is_true(x):
+    return x in (True, 1, "true", "True")
+
+
+def is_false(x):
+    return not is_true(x)
+
+
+def is_none(x):
+    return x in (None, "none", "None")
 
 
 def is_true(x):
@@ -382,22 +395,6 @@ def configure_logger(
             sink=lambda msg: tqdm.write(msg, end=""),
             level=level.upper(),
             filter=tqdm_logger_filter,
-            format=fmt,
-            colorize=colorize,
-            enqueue=False,
-        )
-        # Only log this message if it doesn't have tqdm binding to avoid infinite recursion
-        logger.info("Add tqdm write logger.")
-
-    # Tqdm logger
-    if add_tqdm_filter:
-        from tqdm import tqdm
-
-        # Add a handler for tqdm-specific logs that uses tqdm.write to avoid conflicts
-        logger.add(
-            sink=lambda msg: tqdm.write(msg, end=""),
-            level=level.upper(),
-            filter=lambda record: "tqdm" in record["extra"],
             format=fmt,
             colorize=colorize,
             enqueue=False,

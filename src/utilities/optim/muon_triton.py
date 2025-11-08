@@ -1,6 +1,5 @@
-from typing import Iterable
 from collections import deque
-from typing import Protocol
+from typing import Iterable, Protocol
 
 import torch
 import triton

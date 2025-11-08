@@ -9,7 +9,12 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 from einops import rearrange
+from loguru import logger
+from timm.layers import create_norm_layer, get_act_layer, get_norm_layer
+from timm.layers.pos_embed_sincos import create_rope_embed
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 
+from ..transformer import SwiGLU
 from .activations import get_linear_activation
 from .ada_norms import AdaLayerNorm
 from .attention import Attention
@@ -128,7 +133,7 @@ class TransformerBlock(nn.Module):
         num_attention_heads: int,
         attention_head_dim: int,
         dropout=0.0,
-        activation_fn: str = "geglu",
+        activation_fn: str = "silu",
         attention_bias: bool = False,
         norm_elementwise_affine: bool = True,
         norm_eps: float = 1e-5,
@@ -141,17 +146,25 @@ class TransformerBlock(nn.Module):
         relative_bias=False,
         attn_window: Optional[int] = None,  # Required for relative positional bias
         rope_theta=10000.0,
-        attn_norm=None,
+        norm_layer="layernorm",
+        attn_norm="layernorm",
+        attn_delta_t_aware=False,
+        temb_channels=None,
+        ffn_type="swiglu",
+        jvp=False,
     ):
         super().__init__()
 
         # 1. Self-Attn
         self.ada_norm = ada_norm
         if ada_norm:
+            assert ada_emb_dim is not None, "ada_emb_dim must be provided for AdaNorm."
             self.norm1 = AdaLayerNorm(ada_emb_dim, dim, eps=norm_eps)
         else:
-            self.norm1 = nn.LayerNorm(
-                dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps
+            self.norm1 = create_norm_layer(
+                norm_layer,
+                dim,
+                eps=norm_eps,
             )
 
         self.attn1 = Attention(
@@ -163,19 +176,32 @@ class TransformerBlock(nn.Module):
             cross_attention_dim=None,
             out_bias=attention_out_bias,
             qk_norm=attn_norm,
+            delta_t_aware=attn_delta_t_aware,
+            delta_t_dim=temb_channels,
+            jvp=jvp,
         )
 
         # 2. Feed-forward
-        self.norm2 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
+        self.norm2 = create_norm_layer(norm_layer, dim, eps=norm_eps)
 
-        self.ff = FeedForward(
-            dim,
-            dropout=dropout,
-            activation_fn=activation_fn,
-            final_dropout=final_dropout,
-            inner_dim=ff_inner_dim,
-            bias=ff_bias,
-        )
+        if ffn_type == "swiglu":
+            self.ff = SwiGLU(
+                dim,
+                ff_inner_dim,
+                dim,
+                act_layer=get_act_layer(activation_fn),
+                drop=final_dropout,
+                is_fused=None,
+            )
+        else:
+            self.ff = FeedForward(
+                dim,
+                dropout=dropout,
+                activation_fn=activation_fn,
+                final_dropout=final_dropout,
+                inner_dim=ff_inner_dim,
+                bias=ff_bias,
+            )
 
         # Positional bias
         self.relative_position_bias = None
@@ -189,6 +215,8 @@ class TransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         ctx_emb: Optional[torch.Tensor] = None,
+        delta_emb: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # 1. Self-Attention
         if self.ada_norm:
@@ -205,6 +233,8 @@ class TransformerBlock(nn.Module):
         attn_output = self.attn1(
             norm_hidden_states,
             attention_mask=attention_mask,
+            delta_emb=delta_emb,
+            rope=rope,
         )
         hidden_states = attn_output + hidden_states
 
@@ -239,21 +269,22 @@ class VisionTransformer(nn.Module):
         norm_elementwise_affine=True,
         num_attention_heads: Optional[int] = None,
         max_auto_attention_heads: int = 16,
-        act_fn: str = "gelu",
+        act_fn: str = "silu",
         attention_bias: bool = False,
         ada_norm: bool = False,
         ada_emb_dim: Optional[int] = None,  # Context embedding dimension for AdaNorm
         learned_pos_embed=False,
-        sample_size: Optional[
-            Tuple[int]
-        ] = None,  # Only for absolute positional embeddings
+        # Only for absolute positional embeddings
+        sample_size: Optional[Tuple[int]] = None,
         relative_pos_embed=False,
-        attn_window: Optional[
-            int
-        ] = None,  # Window size for Swin Transformer or Relative positional bias
-        rope_theta: float = 100.0,  # 100 for 2D
+        # Window size for Swin Transformer or Relative positional bias
+        attn_window: Optional[int] = None,
+        rope_theta: float | None = 10000.0,
         eps: float = 1e-5,
         out_norm: bool = True,
+        delta_t_aware: bool = False,
+        temb_channels=None,
+        jvp=False,
     ):
         ### Config ###
         self.inner_dim = inner_dim
@@ -279,6 +310,7 @@ class VisionTransformer(nn.Module):
         # If num_attention_heads is not specified, use inner_dim // 64
         if num_attention_heads is None:
             num_attention_heads = min(max_auto_attention_heads, max(4, inner_dim // 64))
+        self.num_attention_heads: int = num_attention_heads
 
         transformer_blocks = [
             TransformerBlock(
@@ -294,8 +326,11 @@ class VisionTransformer(nn.Module):
                 ada_emb_dim=ada_emb_dim,
                 relative_bias=relative_pos_embed,
                 attn_window=attn_window,
-                rope_theta=rope_theta,
+                rope_theta=None,  # setup the rope outside
                 attn_norm=attn_norm,
+                attn_delta_t_aware=delta_t_aware,
+                temb_channels=temb_channels,
+                jvp=jvp,
             )
             for _ in range(num_layers)
         ]
@@ -306,15 +341,29 @@ class VisionTransformer(nn.Module):
             self.norm_out = nn.LayerNorm(inner_dim, elementwise_affine=False, eps=eps)
         self.proj_out = torch.nn.Linear(inner_dim, out_channels)
 
+        self.use_rope = rope_theta is not None
+        if self.use_rope:
+            self.rope = create_rope_embed(
+                rope_type="cat",
+                dim=self.inner_dim,
+                num_heads=self.num_attention_heads,
+                temperature=rope_theta,
+                in_pixels=False,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            logger.debug("[UVit MidTransformer]: will use RoPE")
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         ctx_emb: Optional[torch.Tensor] = None,
+        delta_emb: Optional[torch.Tensor] = None,
         out_2d_map=False,
         return_dict=False,
         use_act_ckpt=False,
-    ) -> torch.Tensor:
+    ):
         # 1. Input
         if hidden_states.dim() == 4:
             _, _, H, W = hidden_states.shape
@@ -330,12 +379,17 @@ class VisionTransformer(nn.Module):
             assert hidden_states.dim() == 3
             assert self.patch_size == 1, "Patch size only works with 4D input."
             assert not out_2d_map, "out_2d_map is only supported for 4D input."
+            H = W = int(hidden_states.shape[1] ** 0.5)
 
         hidden_states = self.proj_in(hidden_states)
 
         # 2. Pos embedding
         if self.pos_embeddings is not None:
             hidden_states = self.pos_embeddings(hidden_states)
+
+        # 2.1 Rope
+        if self.use_rope:
+            rope = self.rope.get_embed(shape=(H, W))[None, None]
 
         # 3. Blocks
         for block in self.transformer_blocks:
@@ -345,11 +399,17 @@ class VisionTransformer(nn.Module):
                     hidden_states,
                     attention_mask,
                     ctx_emb,
+                    delta_emb,
+                    rope,
                     use_reentrant=False,
                 )
             else:
                 hidden_states = block(
-                    hidden_states, attention_mask=attention_mask, ctx_emb=ctx_emb
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    ctx_emb=ctx_emb,
+                    delta_emb=delta_emb,
+                    rope=rope,
                 )
 
         # 4. Output

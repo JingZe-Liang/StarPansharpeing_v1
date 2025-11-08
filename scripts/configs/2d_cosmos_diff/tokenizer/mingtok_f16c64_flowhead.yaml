@@ -1,0 +1,39 @@
+_target_: src.stage1.cosmos.cosmos_mingtok.FlowTokenizer.create_model
+flow_head_type: fm
+decoder_type: uvit
+
+cfg:
+  low_level_encoder:
+    in_chans: 512
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    patch_size: 16
+    out_patch_size: 1
+    z_dim: 512
+    latent_dim: 32
+    patcher_type: progressive_patch_embedder
+    patch_prog_dims: [386, 386, 512]
+
+  semantic_decoder:
+    in_chans: 512
+    embed_dim: 1024
+    z_dim: 1024
+    depth: 12
+    num_heads: 16
+    patch_size: 1
+
+  pixel_decoder:
+    flow_type: fm
+    time_cond_type: t
+    cfg_prob: 0.0
+
+  tokenizer:
+    decoder_type: uvit
+    sampling_options_default:
+      num_steps: 20
+      cfg: 1.0
+
+  repa_proj:
+    low_lvl_repa_out_chan: 1024
+    sem_repa_out_chan: 1024

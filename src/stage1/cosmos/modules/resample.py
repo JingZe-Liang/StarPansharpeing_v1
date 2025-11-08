@@ -3,11 +3,9 @@ from typing import Any, Literal, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from cv2 import mean
 from einops import rearrange
+from loguru import logger
 from timm.layers import create_norm_act_layer
-
-from src.utilities.logging import log_print
 
 from .blocks import ResidualBlock, get_same_padding
 from .utils import Normalize
@@ -26,9 +24,11 @@ class UpsampleRepeatConv(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str | None = None,
         norm_keep: bool = False,
+        interp_type: str = "nearest_interp",  # NOTE: xy_repeat originally
     ):
         super().__init__()
         self.norm_keep = norm_keep
+        self.interp_type = interp_type
         self.conv = nn.Conv2d(
             in_channels,
             in_channels,
@@ -37,13 +37,28 @@ class UpsampleRepeatConv(nn.Module):
             padding=1,
             padding_mode=padding_mode,
         )
-        # self.norm = Normalize(
-        #     in_channels=in_channels, num_groups=32, norm_type=norm_type
-        # )
+        if interp_type == "transpose_conv":
+            self.trans_conv = nn.ConvTranspose2d(
+                in_channels,
+                in_channels,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                padding_mode=padding_mode,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+        if self.interp_type == "xy_repeat":
+            x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+        elif self.interp_type == "nearest_interp":
+            x = F.interpolate(x, scale_factor=2, mode="nearest")
+        elif self.interp_type == "transpose_conv":
+            x = self.trans_conv(x)
+        else:
+            raise ValueError(f"[Upsample]: Unknown interp_type: {self.interp_type}")
+
         x_resp = self.conv(x)
+
         if self.norm_keep:
             x_resp = resample_norm_keep(x, x_resp)
         return x_resp
@@ -57,6 +72,7 @@ class DownsamplePadConv(nn.Module):
         padding_in_conv: bool = False,
         norm_type: Optional[str] = None,
         norm_keep: bool = False,
+        use_conv: bool = True,
     ):
         # Zihan NOTE: using pad (left and right) align the center of the pixel when downsampling
         # but (may?) cause the boundary artifact when upsampling
@@ -65,35 +81,43 @@ class DownsamplePadConv(nn.Module):
         self.padding_mode = padding_mode
         self.padding_in_conv = padding_in_conv
         self.norm_keep = norm_keep
+        self.use_conv = use_conv
 
-        self.conv = nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=3,
-            stride=2,
-            padding=0 if not padding_in_conv else 1,
-            padding_mode=padding_mode
-            if padding_in_conv
-            else "zeros",  # 'zeros' as default
-        )
+        if self.use_conv:
+            padding = 1
+            # Not pad in conv, then mannually pad the image
+            if not padding_in_conv:
+                padding_mode = "zeros"  # 'zeros' as default in sd vae
+                padding = 0
 
-        # self.norm = Normalize(
-        #     in_channels=in_channels, num_groups=32, norm_type=norm_type
-        # )
+            self.conv = nn.Conv2d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                stride=2,
+                padding=padding,
+                padding_mode=padding_mode,
+            )
+        else:
+            self.conv = nn.AvgPool2d(kernel_size=2, stride=2)
+            logger.debug(f"[Downsample]: using avg pool downsample instead of conv")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # LDM VAE also use the unsymmetric padding
-        if not self.padding_in_conv:  # cosmos manually pad
+        # cosmos manually pad
+        if not self.padding_in_conv and self.use_conv:
             # to align on the center of the downsampled image pixels
-            pad = (0, 1, 0, 1)  # lower and righter pads, why? inductive bias?
+            pad = (0, 1, 0, 1)  # NOTE: lower and righter pads, why? inductive bias?
             if self.padding_mode not in ("constant", "zeros"):
                 x = F.pad(x, pad, mode=self.padding_mode)
             else:
                 x = F.pad(x, pad, mode="constant", value=0)
 
         x_resp = self.conv(x)
+
         if self.norm_keep:
             x_resp = resample_norm_keep(x, x_resp)
+
         return x_resp
 
 
@@ -207,9 +231,6 @@ class InterpolateConvUpSampleLayer(nn.Module):
             padding=get_same_padding(kernel_size),
             padding_mode=padding_mode,
         )
-        # self.norm = Normalize(
-        #     in_channels=in_channels, num_groups=32, norm_type=self.norm_type
-        # )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.nn.functional.interpolate(x, scale_factor=self.factor, mode=self.mode)
@@ -315,8 +336,9 @@ def build_upsample_block(
     padding_mode: str = "zeros",
     norm_type: str | None = None,  # deprecated
     norm_keep: bool = False,
+    **kwargs,
 ) -> nn.Module:
-    log_print(
+    logger.debug(
         f"[build_upsample_block] block_type: {block_type}, "
         f"in_channels: {in_channels}, "
         f"out_channels: {out_channels}, "
@@ -336,7 +358,10 @@ def build_upsample_block(
         )
     elif block_type == "RepeatConv":
         block = UpsampleRepeatConv(
-            in_channels, padding_mode=padding_mode, norm_keep=norm_keep
+            in_channels,
+            padding_mode=padding_mode,
+            norm_keep=norm_keep,
+            interp_type=kwargs.get("interp_type", "nearest_interp"),
         )
     elif block_type == "InterpolateConv":
         block = InterpolateConvUpSampleLayer(
@@ -370,19 +395,20 @@ def build_downsample_block(
     shortcut: None | Literal["averaging"] = None,
     padding_mode: str = "zeros",
     *,
-    padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
     norm_type: str | None = None,
     norm_keep: bool = False,
+    # padconv_use_manually_pad: bool = True,  # for the compatibility with cosmos checkpoints
+    **kwargs,
 ) -> nn.Module:
-    log_print(
-        f"[build_downsample_block] block_type: {block_type}, "
-        f"in_channels: {in_channels}, "
-        f"out_channels: {out_channels}, "
-        f"shortcut: {shortcut}, "
-        f"padding_mode: {padding_mode} "
-        f"padconv_use_manually_pad: {padconv_use_manually_pad}, "
-        f"norm keep: {norm_keep}, ",
-        "debug",
+    padconv_use_manually_pad = kwargs.pop("padconv_use_manually_pad", True)
+    logger.info(
+        f"[build_downsample_block] {block_type=}, "
+        f"{in_channels=}, "
+        f"{out_channels=}, "
+        f"{shortcut=}, "
+        f"{padding_mode=}, "
+        f"{padconv_use_manually_pad=}, "
+        f"{norm_keep=}",
     )
 
     if block_type == "Conv":
@@ -401,6 +427,7 @@ def build_downsample_block(
             padding_in_conv=not padconv_use_manually_pad,
             padding_mode=padding_mode,
             norm_keep=norm_keep,
+            use_conv=True,
         )
     elif block_type == "ConvPixelUnshuffle":
         block = ConvPixelUnshuffleDownSampleLayer(

@@ -209,11 +209,42 @@ def _register_new_norms():
         logger.warning(f"Flash Attention not available, skipping Flash RMSNorm: {e}.")
 
     try:
-        # from fla.modules import LayerNorm, RMSNorm
         import fla.modules
 
-        create_norm._NORM_MAP.update(
-            {"flarmsnorm": fla.modules.RMSNorm, "flalayernorm": fla.modules.LayerNorm}
+        class FlaRMSNorm(fla.modules.RMSNorm):
+            def __init__(
+                self,
+                hidden_size: int,
+                elementwise_affine: bool = True,
+                bias: bool = False,
+                eps: float = 1e-5,
+                **kwargs,
+            ):
+                super().__init__(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    bias=bias,
+                    eps=eps,
+                )
+
+        class FlaLayerNorm(fla.modules.LayerNorm):
+            def __init__(
+                self,
+                hidden_size: int,
+                elementwise_affine: bool = True,
+                bias: bool = False,
+                eps: float = 1e-5,
+                **kwargs,
+            ):
+                super().__init__(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    bias=bias,
+                    eps=eps,
+                )
+
+        create_norm._NORM_MAP.update(  # type: ignore
+            {"flarmsnorm": FlaRMSNorm, "flalayernorm": FlaLayerNorm}
         )
     except ImportError:
         logger.debug("FLA not available, skipping FLA norms registration")

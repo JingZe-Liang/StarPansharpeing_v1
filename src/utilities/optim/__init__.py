@@ -16,7 +16,7 @@ from .came import CAME
 _dino_imported = False
 try:
     from .dion.dion import Dion, DionMixedPrecisionConfig, DionReference, DionSimple
-    from .dion.dion import Muon as MuonAll2All
+    # from .dion.dion import Muon as MuonAll2All
 
     _dino_imported = True
 except ImportError:
@@ -33,6 +33,7 @@ from .mars import MARS
 from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
+from .muon_fused import MuonFSDP
 from .muon_triton import Muon as MuonTriton
 from .sana_came import CAME8BitWrapper, CAMEWrapper, Lion
 
@@ -49,10 +50,12 @@ torch.serialization.add_safe_globals(
         Kron,
         KronMars,
         MARS,
+        # Muon
         Muon,
         MuonTriton,
-        MounFSDP_v2,
+        MuonFSDP,
         MounFSDP_v1,
+        MounFSDP_v2,
         CAME,
         CAME8BitWrapper,
         CAMEWrapper,
@@ -66,13 +69,15 @@ if _dino_imported:
             DionMixedPrecisionConfig,
             DionReference,
             DionSimple,
-            MuonAll2All,
+            # MuonAll2All,
         ]
     )
 
 
 # Muon optimizer parameters getter
 from typing import Any, Iterable
+
+from ..config_utils import function_config_to_basic_types
 
 from ..config_utils import function_config_to_basic_types
 

@@ -20,15 +20,15 @@ from dinov3.eval.segmentation.models.backbone.dinov3_adapter import (  # type: i
 from dinov3.models.vision_transformer import (  # type: ignore
     DinoVisionTransformer,
 )
+from timm.layers.weight_init import lecun_normal_
 
 from .vitamin_conv import MbConvSeqentialCond
-from timm.layers.weight_init import lecun_normal_
 
 
 def initialize(module) -> None:
     if isinstance(module, _ConvNd):
         if module.weight.requires_grad:
-            lecun_normal_(module.weight)
+            nn.init.xavier_normal_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
