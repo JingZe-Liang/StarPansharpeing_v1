@@ -83,14 +83,14 @@ vq_loss:
   disc_num_layers: 3
   use_actnorm: false
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
-  disc_start_for_g: 4_000
-  disc_start_for_d: 4_000
+  disc_start_for_g: 0
+  disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.04
-  disc_weight: 0.0
-  gen_loss_weight: 0.0
+  disc_weight: 0.1
+  ssim_weight: 0.0
+  gen_loss_weight: null
   reconstruction_loss_type: mse
-  force_not_use_recon_loss: true
+  force_not_use_recon_loss: true # compute fm loss in transport, not in vqloss class
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
@@ -118,8 +118,8 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: true
-  resume_path: runs/stage1_mingtok/2025-11-06_05-26-15_mingtok_600M_continous/checkpoints/checkpoint_13
-  ema_load_path: #runs/stage1_mingtok/2025-11-05_03-54-45_mingtok_600M_continous/ema
+  resume_path:
+  ema_load_path: runs/stage1_mingtok/2025-11-07_18-59-28_mingtok_600M_continous/ema
   compile_model: false
   only_load_tokenizer: true
   seperate_enc_dec: false
@@ -142,8 +142,8 @@ train:
     betas: [0.95, 0.99]
     oned_param_algo: lion
     muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.1
+      lr: 6.0e-4
+      weight_decay: 0.01
     oned_params_defaults:
       lr: 3.0e-4
       weight_decay: 0.0

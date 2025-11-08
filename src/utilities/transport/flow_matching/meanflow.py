@@ -1,8 +1,9 @@
+from functools import partial
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from functools import partial
-import numpy as np
 
 
 class Normalizer:
@@ -58,6 +59,13 @@ def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     w = 1.0 / (delta_sq + c).pow(p)
     loss = delta_sq  # ||Δ||^2
     return (stopgrad(w) * loss).mean()
+
+
+def expand_as(t, x):
+    dims_x = x.dim()
+    ep_dims = dims_x - t.dim()
+    t = t.expand(x.shape[0], *[1] * ep_dims)
+    return t
 
 
 class MeanFlow:
@@ -120,6 +128,8 @@ class MeanFlow:
         t_np = np.maximum(samples[:, 0], samples[:, 1])
         r_np = np.minimum(samples[:, 0], samples[:, 1])
 
+        # Select only some samples to apply the Meanflow
+        # else the original flow matching for stability
         num_selected = int(self.flow_ratio * batch_size)
         indices = np.random.permutation(batch_size)[:num_selected]
         r_np[indices] = t_np[indices]
@@ -128,14 +138,16 @@ class MeanFlow:
         r = torch.tensor(r_np, device=device)
         return t, r
 
-    def loss(self, model, x, c=None):
+    def loss(self, model, x, c=None, null_c=None):
         batch_size = x.shape[0]
         device = x.device
 
         t, r = self.sample_t_r(batch_size, device)
 
-        t_ = rearrange(t, "b -> b 1 1 1").detach().clone()
-        r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
+        # t_ = rearrange(t, "b -> b 1 1 1").detach().clone()
+        # r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
+        t_ = expand_as(t, x).detach().clone()
+        r_ = expand_as(r, x).detach().clone()
 
         e = torch.randn_like(x)
         x = self.normer.norm(x)
@@ -143,9 +155,14 @@ class MeanFlow:
         z = (1 - t_) * x + t_ * e
         v = e - x
 
-        if c is not None:
-            assert self.cfg_ratio is not None
-            uncond = torch.ones_like(c) * self.num_classes
+        # Masks for CFG
+        cfg_mask = None
+        if c is not None and self.cfg_ratio > 0.0:
+            if null_c is None:
+                uncond = torch.ones_like(c) * self.num_classes
+            else:
+                uncond = null_c
+
             cfg_mask = torch.rand_like(c.float()) < self.cfg_ratio
             c = torch.where(cfg_mask, uncond, c)
             if self.w is not None:
@@ -180,7 +197,12 @@ class MeanFlow:
         # loss = F.mse_loss(u, stopgrad(u_tgt))
 
         mse_val = (stopgrad(error) ** 2).mean()
-        return loss, mse_val
+
+        # Reconstruction
+        # u = replace some of with cfg uncondition
+        u_hat_pred = u + (t_ - r_) * dudt  # ~= v_hat
+        recon = v + x  # only apporx e
+        return loss, mse_val, recon
 
     @torch.no_grad()
     def sample_each_class(

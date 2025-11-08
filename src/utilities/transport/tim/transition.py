@@ -423,7 +423,7 @@ def get_delta_time_embed(
                 f"Time cond type {time_cond_type} not implemented"
             )
 
-    main_t_emb = t_emb + delta_embed if delta_embed is not None else t_emb
+    main_t_emb = (t_emb + delta_embed) if delta_embed is not None else t_emb
     return main_t_emb, delta_embed
 
 

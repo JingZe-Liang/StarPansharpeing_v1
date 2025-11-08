@@ -139,9 +139,9 @@ train_loader:
     #     is_cycled: true
 
   macro_sampled_batch_size:
-    128: 24
-    256: 18
-    512: 9
+    128: 22
+    256: 16
+    512: 8
 
   loader_kwargs:
     num_workers: 20

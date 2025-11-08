@@ -1297,8 +1297,8 @@ class TransformerTokenizer(nn.Module):
 
     def init_weights(self):
         # Initialize weights
-        named_apply(get_init_weights_vit("jax", head_bias=0.0), self)
-        logger.debug("[Transformer Tokenizer]: Model initialized with JAX Vit weights")
+        named_apply(get_init_weights_vit("moco", head_bias=0.0), self)
+        logger.debug("[Transformer Tokenizer]: Model initialized with MoCo Vit weights")
 
     def _get_masked_x(self, x):
         if self.mask_train_ratio > 0:

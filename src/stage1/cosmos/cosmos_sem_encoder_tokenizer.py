@@ -45,7 +45,8 @@ def init_weights_vit_jax_custom(
                     module.bias, std=1e-6
                 ) if "mlp" in name else nn.init.zeros_(module.bias)
     elif isinstance(module, nn.Conv2d):
-        lecun_normal_(module.weight)
+        # lecun_normal_(module.weight)
+        nn.init.xavier_normal_(module.weight)
         if module.bias is not None:
             nn.init.zeros_(module.bias)
     elif hasattr(module, "init_weights"):

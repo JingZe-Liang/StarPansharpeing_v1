@@ -267,18 +267,16 @@ class FlowTransformerConditioned(TransformerTokenizer):
             return output
         else:
             # Return tuple like parent class
+            # fmt: off
             out = {
                 "head_out": output,
-                "x_norm_patch_tokens": output[:, self.n_reg_tokens :]
-                if self.n_reg_tokens > 0
-                else output,
+                "x_norm_patch_tokens": output[:, self.n_reg_tokens :] if self.n_reg_tokens > 0 else output,
                 "x_prenorm": x_tokens,
-                "x_reg_tokens": x_tokens[:, : self.n_reg_tokens, :]
-                if self.n_reg_tokens > 0
-                else None,
+                "x_reg_tokens": x_tokens[:, : self.n_reg_tokens, :] if self.n_reg_tokens > 0 else None,
                 "grid_size": self._get_hw(x_tokens),
                 "mask": None,
                 "ids_restore": None,
                 "intermidates": None,
             }
+            # fmt: on
             return output, out

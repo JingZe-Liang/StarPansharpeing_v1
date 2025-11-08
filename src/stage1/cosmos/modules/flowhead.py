@@ -383,10 +383,10 @@ class SimpleMLPAdaLN(nn.Module):
         """
         x = self.input_proj(x)
         c = self.cond_embed(c)
-        t = get_delta_embed(
+        t = get_delta_time_embed(
             t,
-            time_proj=self.time_embed,
-            delta_t_proj=self.delta_t_embed,
+            time_embedder=self.time_embed,
+            delta_t_embedder=self.delta_t_embed,
             time_cond_type=self.time_cond_type,
         )
 
@@ -683,9 +683,11 @@ class TimFlowDecoder(nn.Module):
         # tim flow matching kwargs
         fm_kwargs={},
         transition_schedule_kwargs={},
+        stand_alone=True,
     ):
         super().__init__()
-        # decoder
+        self.stand_alone = stand_alone
+        # decoder - always create as standalone=False for internal use
         self.flow_decoder = FlowDecoder(
             target_channels,
             z_channels,
@@ -699,26 +701,48 @@ class TimFlowDecoder(nn.Module):
             img_size=img_size,
             head_type=head_type,
             head_kwargs=head_kwargs,
+            stand_alone=False,  # FlowDecoder is always used as module inside TimFlowDecoder
+            num_sampling_steps="0",  # No sampling steps needed for internal module
         )
-        delattr(self.flow_decoder, "sampler")
-        delattr(self.flow_decoder, "transport")
+        # No need to delete sampler/transport as they won't be created with stand_alone=False
 
         # FM transport and scheduler
-        self.transport = OT_FM(**fm_kwargs)
-        self.transition_schedule = TransitionSchedule(
-            self.transport,
-            **transition_schedule_kwargs,
-        )
-        self.null_cond_h = nn.Parameter(torch.zeros(1, 1, z_channels))
+        if stand_alone:
+            self.transport = OT_FM(**fm_kwargs)
+            self.transition_schedule = TransitionSchedule(
+                self.transport,
+                **transition_schedule_kwargs,
+            )
+            self.null_cond_h = nn.Parameter(torch.zeros(1, 1, z_channels))
+        else:
+            self.transport = None
+            self.transition_schedule = None
+            self.null_cond_h = None
 
-    def forward(
-        self, xt_bchw, t, r, z_blc, inp_shape=None, return_zs=False, derivative=False
-    ):
-        chan = xt_bchw.shape[1]
-        img_size = xt_bchw.shape[-2:]
+    def _forward_only_model(
+        self,
+        z_blc,
+        x_bchw=None,
+        t=None,
+        r=None,
+        inp_shape: tuple | list | torch.Size | None = None,
+        **_kwargs,
+    ) -> Tensor:
+        """Forward as a module without transport (for non-standalone mode)"""
+        assert not self.stand_alone, (
+            f"TimFlowDecoder must not be stand_alone to forward as a module"
+        )
+
+        if x_bchw is None:
+            raise ValueError("x_bchw must be provided for module forward")
+        if t is None or r is None:
+            raise ValueError("t and r must be provided for module forward")
+
+        chan = x_bchw.shape[1]
+        img_size = x_bchw.shape[-2:]
 
         # to bl_c
-        z, x, (b, l, _) = self.flow_decoder._to_bl_c(z_blc, xt_bchw)  # (b * l, c)
+        z, x, (b, l, _) = self.flow_decoder._to_bl_c(z_blc, x_bchw)  # (b * l, c)
 
         # expand t and r
         t = repeat(t, "b -> (b l)", l=l)  # (b * l, )
@@ -726,10 +750,36 @@ class TimFlowDecoder(nn.Module):
 
         x_hidden_blc, zt_cond = self.flow_decoder.net(x, (t, r), z)  # time-dependent
         x_bchw = self.flow_decoder.head(
-            x_hidden_blc.reshape(b, l, -1), zt_cond, out_shape=(chan, *img_size)
+            x_hidden_blc.reshape(b, l, -1),
+            zt_cond if zt_cond is not None else z,
+            out_shape=(chan, *img_size),
         )
 
         return x_bchw
+
+    def forward(
+        self,
+        z_blc,
+        x_bchw=None,
+        t=None,
+        r=None,
+        inp_shape=None,
+        mode="module",
+        **kwargs,
+    ):
+        """Main forward function for TimFlowDecoder
+
+        In standalone mode: supports training_loss and sample methods
+        In non-standalone mode: acts as a simple module via _forward_only_model
+        """
+        assert self.stand_alone, (
+            "TimFlowDecoder in stand_alone mode should use training_loss() "
+            "or sample() methods, not forward()"
+        )
+        # In non-standalone mode, act as a simple module
+        return self._forward_only_model(
+            z_blc, x_bchw=x_bchw, t=t, r=r, inp_shape=inp_shape, **kwargs
+        )
 
     def training_loss(
         self,
@@ -739,6 +789,14 @@ class TimFlowDecoder(nn.Module):
         ema_model: Optional[Self] = None,
         clamp: bool = False,
     ):
+        """Training loss computation (only available in standalone mode)"""
+        assert self.stand_alone, (
+            "training_loss should only be called in stand_alone mode. "
+            "Use forward() method for module inference."
+        )
+        assert self.transition_schedule is not None
+        assert self.null_cond_h is not None
+
         if self.transition_schedule.transport.enhance_target:
             assert ema_model is not None, "EMA model is required for enhance_target"
             assert hasattr(self, "null_cond_h"), (
@@ -781,6 +839,12 @@ class TimFlowDecoder(nn.Module):
         ),
         ret_trajectory=False,
     ):
+        """Sampling (only available in standalone mode)"""
+        assert self.stand_alone, (
+            "sample should only be called in stand_alone mode. "
+            "Use forward() method for module inference."
+        )
+
         x_init = torch.randn(inp_shape).to(z_blc)
         null_cond_h = self.null_cond_h.expand(*z_blc.shape[:2], -1)
         recon: Tensor = self.transition_schedule.sample(
@@ -841,7 +905,8 @@ def test_flow_head():
 
 
 def test_tim_flow_head():
-    flow_head = TimFlowDecoder(
+    # Test standalone mode (default)
+    flow_head_standalone = TimFlowDecoder(
         3,
         16,
         depth=6,
@@ -849,19 +914,20 @@ def test_tim_flow_head():
         patch_size=16,
         head_type="progressive",
         head_kwargs={"progressive_dims": [256, 128, 64]},
+        stand_alone=True,
     )
 
     # 16 * 16 = 256
     # output shape: [2, 3, 256, 256]
     x = torch.randn(2, 3, 256, 256)
     z = torch.randn(2, 256, 16)
-    recon, loss = flow_head.training_loss(z, x, x.shape, None, False)
-    print(recon, loss)
+    recon, loss = flow_head_standalone.training_loss(z, x, x.shape, None, False)
+    print("Standalone mode - recon shape:", recon.shape, "loss:", loss)
 
-    # sample
+    # sample in standalone mode
     z = torch.randn(2, 256, 16)
     with torch.no_grad():
-        sampled = flow_head.sample(
+        sampled = flow_head_standalone.sample(
             z,
             inp_shape=x.shape,
             clamp=False,
@@ -874,7 +940,49 @@ def test_tim_flow_head():
             },
             ret_trajectory=False,
         )
-        print(sampled)
+        print("Standalone mode - sampled shape:", sampled.shape)
+
+    # Test non-standalone mode (module mode)
+    flow_head_module = TimFlowDecoder(
+        3,
+        16,
+        depth=6,
+        width=768,
+        patch_size=16,
+        head_type="progressive",
+        head_kwargs={"progressive_dims": [256, 128, 64]},
+        stand_alone=False,
+    )
+
+    # Test module forward (should work)
+    t = torch.randn(2)
+    r = torch.randn(2)
+    try:
+        output = flow_head_module(z, x, t, r)  # Updated interface
+        print("Module mode - forward output shape:", output.shape)
+    except Exception as e:
+        print("Module mode - forward error:", e)
+
+    # Test that forward raises error in standalone mode
+    try:
+        flow_head_standalone(z, x, t, r)
+        print("ERROR: forward should have raised RuntimeError in standalone mode")
+    except RuntimeError as e:
+        print("Standalone mode - forward correctly raised:", e)
+
+    # Test that training_loss raises error in non-standalone mode
+    try:
+        flow_head_module.training_loss(z, x, x.shape, None, False)
+        print("ERROR: training_loss should have raised RuntimeError in module mode")
+    except RuntimeError as e:
+        print("Module mode - training_loss correctly raised:", e)
+
+    # Test that sample raises error in non-standalone mode
+    try:
+        flow_head_module.sample(z, inp_shape=x.shape)
+        print("ERROR: sample should have raised RuntimeError in module mode")
+    except RuntimeError as e:
+        print("Module mode - sample correctly raised:", e)
 
 
 if __name__ == "__main__":

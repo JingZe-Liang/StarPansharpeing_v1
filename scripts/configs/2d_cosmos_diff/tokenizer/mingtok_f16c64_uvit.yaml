@@ -6,8 +6,8 @@ cfg:
   low_level_encoder:
     in_chan: 512
     embed_dim: 768
-    z_dim: 512
-    latent_dim: 32
+    z_dim: 768
+    latent_dim: 768
     depth: 12
     num_heads: 12
     patch_size: 16
@@ -18,8 +18,8 @@ cfg:
     pe_type: rope
 
   semantic_decoder:
-    in_chans: 32
-    out_chans: 1024
+    in_chan: 768
+    out_chan: 32
     embed_dim: 1024
     depth: 12
     num_heads: 16
@@ -31,12 +31,21 @@ cfg:
     flow_type: fm
     time_cond_type: t
     cfg_prob: 0.0
+    z_dim: 32
+    mid_theta: 10000.0 # rope theta
+    transport: # fm transport
+      model_type: velocity
+      path_type: linear
+      loss_type: velocity
+      train_eps: 0.
+      sample_eps: 0.
+      time_sample_type: sigmoid
 
   tokenizer:
     decoder_type: uvit
     sampling_options_default:
-      sampling_method: euler
-      num_steps: 50
+      sampling_method: dopri5
+      num_steps: 10 # 100 for fm only, 10 for add discriminator
       cfg: 1.0
       progress: true
       cfg_interval: [0.0, 0.7]

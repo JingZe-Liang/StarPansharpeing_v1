@@ -317,6 +317,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         assert self._vf_on_z_or_module == "z"
         assert z is not None and sem_z is not None, "No cached z or sem_z"
 
+        ###### Low-level repa projection
         if self.low_lvl_repa_proj_is_multi:
             assert isinstance(z, list)
             low_lvl_z_proj = [
@@ -327,6 +328,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             assert torch.is_tensor(z)
             low_lvl_z_proj = self._repa_proj["low_lvl_repa_proj"](z)
 
+        ######## Semantic feature repa projection
         if self.sem_repa_proj_is_multi:
             assert isinstance(sem_z, list)
             sem_z_proj = [
@@ -591,11 +593,11 @@ def test_forward_pca():
     )
 
     cfg = OmegaConf.load(
-    "scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml"
+        "scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml"
     )
     logger.info(str(cfg))
 
-    logger.log('NOTE', f'Rope type: {cfg.trans_enc_cfg.rope_type}')
+    logger.log("NOTE", f"Rope type: {cfg.trans_enc_cfg.rope_type}")
 
     model = CosmosHybridTokenizer.create_model(
         cnn_cfg=cfg.cnn_cfg,
@@ -624,15 +626,15 @@ def test_forward_pca():
 
     with torch.no_grad():
         output = model(img)
-        
-    print(output)
-        
-        # z, sem_z = model.z, model.sem_z
-        # logger.info(f"z shape: {z.shape}, sem_z shape: {sem_z.shape}")
-        # z_pca = [feature_pca_sk(z_i.cpu().float(), 3) for z_i in z]
-        # sem_z_pca = [feature_pca_sk(sem_z_i.cpu().float(), 3) for sem_z_i in sem_z]
 
-        # ... plot
+    print(output)
+
+    # z, sem_z = model.z, model.sem_z
+    # logger.info(f"z shape: {z.shape}, sem_z shape: {sem_z.shape}")
+    # z_pca = [feature_pca_sk(z_i.cpu().float(), 3) for z_i in z]
+    # sem_z_pca = [feature_pca_sk(sem_z_i.cpu().float(), 3) for sem_z_i in sem_z]
+
+    # ... plot
 
 
 if __name__ == "__main__":

@@ -495,24 +495,26 @@ class NLayerDiscriminator(nn.Module):
 
         self.weight_init()
 
-    def weight_init(self):
+    def weight_init(self, zero_out_last=False):
         def _basic_init(m):
             if isinstance(m, nn.Conv2d):
-                # nn.init.normal_(m.weight.data, 0.0, 0.02)
-                lecun_normal_(m.weight)
+                nn.init.normal_(m.weight.data, 0.0, 0.02)
+                # nn.init.trunc_normal_(m.weight, std=0.02)
+                # lecun_normal_(m.weight)
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                # nn.init.normal_(m.weight.data, 1.0, 0.02)
-                trunc_normal_(m.weight, std=0.02)
+                nn.init.normal_(m.weight.data, 1.0, 0.02)
+                # trunc_normal_(m.weight, std=0.02)
                 if hasattr(m, "bias") and m.bias is not None:
                     nn.init.constant_(m.bias.data, 0)
 
         self.apply(_basic_init)
 
         # last layer zero out
-        _last_layer = self.main[-1]
-        _last_layer.weight.data.zero_()
-        if _last_layer.bias is not None:
-            _last_layer.bias.data.zero_()
+        if zero_out_last:
+            _last_layer = self.main[-1]
+            _last_layer.weight.data.zero_()
+            if _last_layer.bias is not None:
+                _last_layer.bias.data.zero_()
 
         logger.info(f"[NLayerDisc] init the discriminator.")
 

@@ -151,12 +151,14 @@ class TransformerBlock(nn.Module):
         attn_delta_t_aware=False,
         temb_channels=None,
         ffn_type="swiglu",
+        jvp=False,
     ):
         super().__init__()
 
         # 1. Self-Attn
         self.ada_norm = ada_norm
         if ada_norm:
+            assert ada_emb_dim is not None, "ada_emb_dim must be provided for AdaNorm."
             self.norm1 = AdaLayerNorm(ada_emb_dim, dim, eps=norm_eps)
         else:
             self.norm1 = create_norm_layer(
@@ -176,6 +178,7 @@ class TransformerBlock(nn.Module):
             qk_norm=attn_norm,
             delta_t_aware=attn_delta_t_aware,
             delta_t_dim=temb_channels,
+            jvp=jvp,
         )
 
         # 2. Feed-forward
@@ -276,11 +279,12 @@ class VisionTransformer(nn.Module):
         relative_pos_embed=False,
         # Window size for Swin Transformer or Relative positional bias
         attn_window: Optional[int] = None,
-        rope_theta: float | None = 100.0,  # 100 for 2D
+        rope_theta: float | None = 10000.0,
         eps: float = 1e-5,
         out_norm: bool = True,
         delta_t_aware: bool = False,
         temb_channels=None,
+        jvp=False,
     ):
         ### Config ###
         self.inner_dim = inner_dim
@@ -326,6 +330,7 @@ class VisionTransformer(nn.Module):
                 attn_norm=attn_norm,
                 attn_delta_t_aware=delta_t_aware,
                 temb_channels=temb_channels,
+                jvp=jvp,
             )
             for _ in range(num_layers)
         ]
@@ -342,6 +347,10 @@ class VisionTransformer(nn.Module):
                 rope_type="cat",
                 dim=self.inner_dim,
                 num_heads=self.num_attention_heads,
+                temperature=rope_theta,
+                in_pixels=False,
+                device="cuda",
+                dtype=torch.float32,
             )
             logger.debug("[UVit MidTransformer]: will use RoPE")
 

@@ -17,6 +17,8 @@ import torch.nn as nn
 from loguru import logger
 from timm.layers import create_norm_layer, create_rope_embed
 from timm.layers.create_act import create_act_layer
+from timm.layers.weight_init import lecun_normal_
+from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from typing_extensions import Annotated, Any
@@ -63,7 +65,7 @@ class UViTDecoderConfig:
     learned_pos_embed: bool = False
     image_size: tuple | None = None
     relative_pos_embed: bool = True
-    time_cond_type: str = "t-r"
+    time_cond_type: str = "t"
     init: Optional[str] = None
     use_act_ckpt: bool = False
 
@@ -109,9 +111,10 @@ class UViTDecoder(nn.Module):
         learned_pos_embed=False,
         image_size: int | None = None,
         relative_pos_embed=True,
-        time_cond_type="t-r",
+        time_cond_type="t",
         init: Optional[Mapping] = None,
         use_act_ckpt: bool = True,
+        jvp: bool = False,
         **_kwargs,
     ):
         super().__init__()
@@ -243,6 +246,7 @@ class UViTDecoder(nn.Module):
             temb_channels=time_embed_dim,
             act_fn=vit_act_fn,
             delta_t_aware=True if self.use_delta_t_embed else False,
+            jvp=jvp,
         )
         logger.debug(
             f"[UVit MidTransformer]: hiddens={output_channel}, n_layers={mid_nlayers}"
@@ -305,7 +309,12 @@ class UViTDecoder(nn.Module):
         # self.null_cond_h = nn.Buffer(torch.zeros(1, z_dim, 1, 1))
 
         ### Weights init ###
-        self.init_weights(**(init or {}))
+        # self.init_weights(**(init or {}))
+        self.init_weights()
+
+    def get_last_layer(self):
+        """Get last layer's weights for GAN training"""
+        return self.conv_out.weight
 
     @classmethod
     def create_model(cls, size: str, **overrides):
@@ -320,13 +329,36 @@ class UViTDecoder(nn.Module):
         return cls(**kwargs)
 
     def init_weights(self, method="xavier_uniform", ckpt_module="decoder", **kwargs):
-        for m in self.modules():
-            if isinstance(m, ResnetBlock2D):
-                init_zero(m.conv2)
-            # elif isinstance(m, TransformerBlock):
-            #     init_zero(m.ff.proj_out)
+        # for m in self.modules():
+        #     if isinstance(m, ResnetBlock2D):
+        #         init_zero(m.conv2)
+        #     # elif isinstance(m, TransformerBlock):
+        #     #     init_zero(m.ff.proj_out)
 
-        init_weights(self, method=method, ckpt_module=ckpt_module, **kwargs)
+        # init_weights(self, method=method, ckpt_module=ckpt_module, **kwargs)
+
+        # Initialize
+        def init_fn(module, name: str):
+            if hasattr(module, "init_weights"):
+                module.init_weights()
+
+            if isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            if isinstance(module, nn.Conv2d):
+                nn.init.xavier_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            if isinstance(module, (nn.LayerNorm, nn.GroupNorm)):
+                if module.weight is not None:
+                    nn.init.ones_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        named_apply(init_fn, self, name="decoder")
 
     def _expand_time(self, timestep, bs: int, device):
         if not torch.is_tensor(timestep):
@@ -380,7 +412,7 @@ class UViTDecoder(nn.Module):
                     f"Time cond type {self.time_cond_type} not implemented"
                 )
 
-        main_t_emb = t_emb + delta_embed if delta_embed is not None else t_emb
+        main_t_emb = (t_emb + delta_embed) if delta_embed is not None else t_emb
         return main_t_emb, delta_embed
 
     def _forward_downs(self, x, t_emb, ctx_emb, use_act_ckpt=False):
@@ -523,13 +555,14 @@ class UViTMiddleTransformer(VisionTransformer):
         relative_pos_embed=False,
         # Window size for Swin Transformer or Relative positional bias
         attn_window: Optional[int] = None,
-        rope_theta: float | None = 100.0,  # 100 for 2D
+        rope_theta: float | None = 10000.0,
         eps: float = 1e-5,
         out_norm: bool = True,
         delta_t_aware: bool = False,
         time_condition: bool = True,
         temb_channels: int | None = None,
         norm_num_groups: int = 32,
+        jvp: bool = False,  # Enable jvp compatibility for meanflow
     ):
         super().__init__(
             inner_dim=inner_dim,
@@ -555,7 +588,10 @@ class UViTMiddleTransformer(VisionTransformer):
             out_norm=out_norm,
             delta_t_aware=delta_t_aware,
             temb_channels=temb_channels,
+            jvp=jvp,
         )
+        if jvp:
+            logger.log("NOTE", f"[Mid Transformer]: Use jvp attention.")
         self.time_condition = time_condition
 
         if time_condition:

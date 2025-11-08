@@ -8,27 +8,19 @@ Mingtok-like three-stage tokenizer with low-level and semantic-level feature ali
 """
 
 import math
-import random
 from functools import partial
 from typing import Any, List, Optional, cast, no_type_check
 
 import torch
 import torch.nn as nn
 from einops import rearrange
-from jaxtyping import Float
 from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from timm.layers import (
-    create_norm_act_layer,
-    create_norm_layer,
-    get_act_layer,
-    get_norm_act_layer,
-    get_norm_layer,
-)
 from timm.layers.helpers import to_2tuple
 from torch import Tensor
 from typing_extensions import (
     Annotated,
+    Callable,
     Literal,
     Self,
     Sequence,
@@ -37,17 +29,16 @@ from typing_extensions import (
     Union,
 )
 
-# fmt: off
-from src.utilities.config_utils import to_easydict_recursive, to_object_recursive
+from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
+from src.utilities.transport.flow_matching.meanflow import MeanFlow
 from src.utilities.transport.flow_matching.transport import Sampler
 from src.utilities.transport.flow_matching.transport import Transport as FM_Transport
 from src.utilities.transport.tim.transition import TransitionSchedule
 from src.utilities.transport.tim.transports import OT_FM
 from src.utilities.transport.tim.transports import Transport as Tim_Transport
 
-# fmt: on
-from .modules import Attention, AttentionBlock, TransformerTokenizer
+from .modules import TransformerTokenizer
 from .modules.flowhead import (
     FlowDecoder,
     TimFlowDecoder,
@@ -56,14 +47,13 @@ from .modules.flowhead import (
 )
 from .modules.proj import build_mlp
 from .modules.t_transformer import FlowTransformerConditioned
-from .modules.uvit_decoder import UViTDecoder, UViTDecoderConfig
+from .modules.uvit_decoder import UViTDecoder
 
 LossOutput = TypedDict(
     "LossOutput",
     {"flow_loss": torch.Tensor},
 )
 DecoderOutput: TypeAlias = tuple[Tensor, LossOutput]
-
 
 # *==============================================================
 # * Default Configs
@@ -83,9 +73,20 @@ def _create_flow_transport_cfg():
     )
     tim_transport_cfg = OmegaConf.from_dotlist(tim_transport_str.split(" "))
 
-    ################## Flow head FM config mannually sampling
-    fm_kwargs_str = "num_sampling_steps=100 train_schedule=fat_lognormal"
+    ################## Flow head FM config
+    # fm_kwargs_str = "num_sampling_steps=100 train_schedule=fat_lognormal"
+    fm_kwargs_str = (
+        "model_type=x1 path_type=linear loss_type=x1 train_eps=0 sample_eps=0 "
+        "cfm_factor=0.0 time_sample_type=sigmoid"
+    )
     fm_kwargs_cfg = OmegaConf.from_dotlist(fm_kwargs_str.split(" "))
+
+    ################## MeanFlow config
+    mf_kwargs_str = (
+        "flow_ratio=0.75 time_dist=['lognorm',-0.4,1.0] "
+        "cfg_ratio=0.2 cfg_scale=2.0 cfg_uncond='v' jvp_api='autograd'"
+    )
+    mf_kwargs_cfg = OmegaConf.from_dotlist(mf_kwargs_str.split(" "))
 
     ########### Sampling cfgs
     tim_sample_str = (
@@ -95,12 +96,13 @@ def _create_flow_transport_cfg():
     tim_sample_cfg = OmegaConf.from_dotlist(tim_sample_str.split(" "))
 
     # fm_sample_str = "sample_steps=100 schedule=pow_0.25 cfg_scale=2.0 tbar=true"  # flow head fm mannually sample kwargs
-    fm_sample_str = "sampling_method=euler num_steps=50 cfg=1.0 progress=true cfg_interval=[0.0,0.7] clip_velocity_per_step=false"
+    fm_sample_str = "sampling_method=dopri5 num_steps=50 cfg=1.0 progress=true cfg_interval=[0.0,0.7] clip_velocity_per_step=false"
     fm_sample_cfg = OmegaConf.from_dotlist(fm_sample_str.split(" "))
 
     return {
         "tim": [tim_schedule_cfg, tim_transport_cfg, tim_sample_cfg],
         "fm": [fm_kwargs_cfg, fm_sample_cfg],
+        "mf": [mf_kwargs_cfg],
     }
 
 
@@ -110,32 +112,37 @@ def _create_flow_decoder(
     *,
     tim_cfgs: list | None = None,
     fm_cfgs: list | None = None,
+    mf_cfgs: list | None = None,
 ):
     # Models
 
-    ################# UViT config
+    ################# UViT config ##################
     # TODO: add fm config
     uvit_flow_str: str = (
         "in_chan=512 z_dim=1024 channels=128 ch_mult=[1,1,2,4,8] act_fn='silu' "
         "vit_act_fn='silu' layers_per_block=2 num_attention_heads=8 "
         "dropout=0.0 norm_num_groups=32 time_scale_shift=true "
-        "mid_nlayers=12 mid_theta=100.0 eps=1e-5 ada_norm=true "
+        "mid_nlayers=12 mid_theta=10000.0 eps=1e-5 ada_norm=true "
         "learned_pos_embed=false relative_pos_embed=false "
         f"time_cond_type={'t' if flow_type == 'fm' else 't-r'} "
         "init=null use_act_ckpt=true total_resolutions=16 "
-        f"img_size=512 flow_type={flow_type} cfg_prob=0.3"
+        f"img_size=512 flow_type={flow_type} cfg_prob=0.3 jvp={True if flow_type == 'fm' else False}"
     )
     uvit_flow_cfg = OmegaConf.from_dotlist(uvit_flow_str.split(" "))
-    # NOTE: only supports tim flow yet.
+    # NOTE: supports tim, fm, and mf flows
     if flow_type == "tim":
         tim_schedule_cfg, tim_transport_cfg, _ = tim_cfgs
         uvit_flow_cfg.transition_schedule = tim_schedule_cfg
         uvit_flow_cfg.transport = tim_transport_cfg
     elif flow_type == "fm":
-        # raise NotImplementedError("flow type fm not implemented yet.")
-        pass
+        uvit_flow_cfg.transport = fm_cfgs[0]  # transport
+        uvit_flow_cfg.sampler = fm_cfgs[1]  # not used
+    elif flow_type == "mf":
+        uvit_flow_cfg.transport = mf_cfgs[0]  # meanflow config
+    else:
+        raise ValueError(f"Unknown flow type: {flow_type}")
 
-    ################# flow head config
+    ################# flow head config ###################
     flow_head_str: str = (
         # Transformer decoder kwargs
         "in_chan=768 embed_dim=768 depth=12 num_heads=12 patch_size=1 mlp_ratio=4.0 "
@@ -152,9 +159,12 @@ def _create_flow_decoder(
     if flow_type == "tim":
         flow_head_cfg.fm_kwargs = tim_transport_cfg
         flow_head_cfg.transition_schedule_kwargs = tim_schedule_cfg
-    else:
+    elif flow_type == "fm":
         flow_head_cfg.fm_kwargs = fm_cfgs[0]
+    elif flow_type == "mf":
+        flow_head_cfg.fm_kwargs = mf_cfgs[0]
 
+    ########## Init the config here
     if decoder_type == "flow_head":
         pixel_decoder_cfg = flow_head_cfg
     else:
@@ -194,9 +204,13 @@ def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvi
     #############  two variants of flow decoders
     # UViT and flow head
     flow_dec_cfg_dict = _create_flow_transport_cfg()
-    tim_cfgs, fm_cfgs = flow_dec_cfg_dict["tim"], flow_dec_cfg_dict["fm"]
+    tim_cfgs, fm_cfgs, mf_cfgs = (
+        flow_dec_cfg_dict["tim"],
+        flow_dec_cfg_dict["fm"],
+        flow_dec_cfg_dict["mf"],
+    )
     pixel_decoder_cfg = _create_flow_decoder(
-        flow_type, decoder_type, tim_cfgs=tim_cfgs, fm_cfgs=fm_cfgs
+        flow_type, decoder_type, tim_cfgs=tim_cfgs, fm_cfgs=fm_cfgs, mf_cfgs=mf_cfgs
     )
 
     ######## repa projection config
@@ -294,6 +308,88 @@ def latent_2d_to_1d(feat: Tensor):
 
 
 # *==============================================================
+# * Model Sampling Utilities
+# *==============================================================
+
+
+def create_sampling_step_fn(
+    model: nn.Module,
+    model_cond: Tensor | None = None,
+    cfg_scale: float = 1.0,
+    cfg_interval: list[float] | tuple[float, float] | None = None,
+    clip_v=False,
+    model_type: str = "velocity",
+    inp_shape=None,
+    get_null_cond: Callable[[Tensor], Tensor] | Tensor | None = None,
+    x_init: Tensor | None = None,
+):
+    if clip_v:
+        assert x_init is not None, "x_init must be provided for clip velocity"
+
+    if cfg_scale > 1.0:
+        assert model_cond is not None, "model_cond is None for CFG"
+
+    def _get_null_cond_fn():
+        ######### Get null conditions
+        if get_null_cond is not None:
+            if callable(get_null_cond):
+                null_cond = get_null_cond(model_cond)
+            elif isinstance(get_null_cond, Tensor):
+                null_cond = get_null_cond
+            else:
+                raise ValueError(
+                    "get_null_cond must be a callable or a Tensor, got {}".format(
+                        type(get_null_cond)
+                    )
+                )
+        elif model_cond is None:
+            null_cond = None
+        else:
+            null_cond = torch.zeros_like(model_cond)
+
+        return null_cond
+
+    @torch.no_grad()
+    def _model_step_fn(x, t):
+        ## Model forward
+        v = model(x, t, z=model_cond, inp_shape=inp_shape)
+
+        null_cond = _get_null_cond_fn()
+        if (
+            cfg_scale > 1.0
+            and null_cond is not None
+            and cfg_interval is not None
+            # t is a tensor
+            and t[0].item() >= cfg_interval[0]
+            and t[0].item() <= cfg_interval[1]
+        ):
+            # classifier-free guidance
+            assert cfg_scale > 1.0, "cfg_scale must be > 1.0 for CFG"
+            assert null_cond is not None, "null_cond is None for CFG"
+            v_uncond = model(x, t, z=null_cond, inp_shape=inp_shape)
+            v = v_uncond + cfg_scale * (v - v_uncond)
+
+        # clip fake x1 to (-1, 1)
+        # v = x0 - x1
+        if clip_v:
+            assert x_init is not None, "x_init is None for clip_v"
+            if model_type == "x1":
+                x1_hat = v
+            elif model_type == "velocity":
+                x1_hat = x_init + v
+            else:
+                raise ValueError(f"Model type {model_type} is not supported.")
+
+            x1_hat = x1_hat.clamp(-1, 1)
+            # back to clip velocity
+            v = x1_hat - x_init
+
+        return v
+
+    return _model_step_fn
+
+
+# *==============================================================
 # * Model
 # * Encoder, Decoder, DecoderFlowHead, UViTDecoder
 # *==============================================================
@@ -311,6 +407,7 @@ class EncoderLowLevel(nn.Module):
             in_chan=cfg.in_chan,
             embed_dim=cfg.embed_dim,
             out_chan=cfg.z_dim,
+            num_heads=cfg.num_heads,
             img_size=cfg.img_size,
             patch_size=cfg.patch_size,
             out_patch_size=cfg.out_patch_size,
@@ -352,6 +449,7 @@ class DecoderSemantic(nn.Module):
             patch_size=cfg.patch_size,
             patcher_type="linear",
             depth=cfg.depth,
+            num_heads=cfg.num_heads,
             mlp_ratio=cfg.mlp_ratio,
             norm_layer=cfg.norm_layer,
             drop_path=cfg.drop_path,
@@ -464,10 +562,10 @@ class DecoderFlowHead(nn.Module):
                 use_cfg=cfg.use_cfg,
                 cfg_prob=cfg.cfg_prob,
                 patch_size=cfg.flow_patch_size,
-                time_cond_type="t,t-r",
                 img_size=cfg.img_size,
                 head_type=cfg.head_type,
                 head_kwargs=cfg.head_kwargs,
+                time_cond_type=cfg.time_cond_type,
                 # tim config
                 fm_kwargs=cfg.fm_kwargs,
                 transition_schedule_kwargs=cfg.transition_schedule_kwargs,
@@ -476,6 +574,8 @@ class DecoderFlowHead(nn.Module):
             raise ValueError(f"Unknown flow_type: {cfg.flow_type}")
 
         ####### Build transport and sampler
+        self.transport: Optional[FM_Transport | Tim_Transport] = None
+        self.sampler: Optional[Sampler] = None
         if self.transformer_t_conditioned:
             if cfg.flow_type == "fm":
                 self.transport, self.sampler = build_flow_matching_transport()
@@ -485,7 +585,7 @@ class DecoderFlowHead(nn.Module):
                 raise ValueError(f"{self.flow_type} is not supported.")
 
     ############ Traning functions #############
-    
+
     def flow_train_forward_head_standalone(
         self, x, h, inp_shape, ema_model, clamp=False
     ):
@@ -529,6 +629,7 @@ class DecoderFlowHead(nn.Module):
         assert self.transformer_t_conditioned
 
         if self.flow_type == "fm":
+            self.transport = cast(FM_Transport, self.transport)
             terms = self.transport.training_losses(
                 self._forward_non_standalone_all_model, x, model_kwargs={"z": h}
             )
@@ -537,7 +638,21 @@ class DecoderFlowHead(nn.Module):
             return recon, flow_loss
 
         elif self.flow_type == "tim":
-            raise NotImplementedError
+            transport = cast(Tim_Transport, self.transport)
+            flow_loss, _, loss_dict, breakdowns = transport(  # type: ignore
+                self,
+                ema_model if ema_model is not None else None,
+                self,
+                batch_size=h.shape[0],
+                x=x,
+                z=h,
+                model_kwargs={"inp_shape": inp_shape, "z": h},
+                ema_kwargs={"inp_shape": inp_shape, "z": torch.zeros_like(h)},
+            )
+            return breakdowns["x0_pred"], flow_loss
+
+        else:
+            raise ValueError(f"Unknown flow_type: {self.flow_type}")
 
     ########## Sample functions ###############
 
@@ -575,7 +690,7 @@ class DecoderFlowHead(nn.Module):
                 sample_kwargs.pop("cfg_interval", (0, 1)),
                 sample_kwargs.pop("clip_v", False),
             )
-            x_init = x.copy()
+            x_init = x.clone()
 
             @torch.no_grad()
             def _model_step_fn(x, t):
@@ -617,7 +732,18 @@ class DecoderFlowHead(nn.Module):
 
             return recon
         else:
-            raise NotImplementedError
+            # tim flow sampling, backbone + head fm.
+            self.transport = cast(Tim_Transport, self.transport)
+            null_cond_h = torch.zeros_like(h)
+            recon = self.transport.sample(
+                model=self._forward_non_standalone_all_model,
+                z=x,
+                y=h,
+                y_null=null_cond_h,
+                T_max=1.0,
+                **sample_kwargs,
+            )
+            return recon
 
     def forward(
         self,
@@ -656,7 +782,7 @@ class DecoderFlowHead(nn.Module):
                 inp_shape=inp_shape,
                 sample_kwargs=sample_kwargs,
                 clamp=clamp,
-            )   
+            )
             flow_loss = None
         else:
             raise ValueError(f"Unknown mode: {mode}")
@@ -716,15 +842,19 @@ class DecoderUViT(nn.Module):
                 **transition_schedule_kwargs,
             )
         elif cfg.flow_type == "fm":
-            # fm_kwargs = cfg.fm_kwargs
-            self.transport = FM_Transport(
-                model_type="velocity",
-                path_type="linear",
-                loss_type="velocity",
-                train_eps=0.001,
-                sample_eps=0.001,
-            )
+            self.transport = FM_Transport(**cfg.transport)
             self.sampler = Sampler(transport=self.transport)
+            logger.info(
+                f"[Decoder UViT]: FM transport={cfg.transport}"
+                f"FM sample time type={self.transport.time_sample_type}"
+            )
+        elif cfg.flow_type == "mf":  # meanflow
+            self.transport = MeanFlow(
+                # flow_ratio=0.75, time_dist=['lognorm', -0.4, 1.0],
+                # drop conditions ratio, scale for one-step sample
+                # cfg_ratio=0.2, cfg_scale=2.0
+                **cfg.transport
+            )
         else:
             raise ValueError(f"flow_type {cfg.flow_type} not supported")
 
@@ -875,46 +1005,29 @@ class DecoderUViT(nn.Module):
             recon = flow_output["pred_x_clean"]
         else:
             # x_init = torch.randn_like(x)
-            x_init = x
+            x_init = x.clone()
             cfg_scale: float = sample_kwargs.pop("cfg", 1.0)
-            cfg_interval: tuple[int, int] | None = sample_kwargs.pop(
+            cfg_interval: tuple[float, float] | None = sample_kwargs.pop(
                 "cfg_interval", None
             )
             clip_v = sample_kwargs.pop("clip_velocity_per_step", False)
             sample_fn_ = self.sampler.sample_ode(**sample_kwargs)
+            model_type = self.transport.model_type
 
             # takes [x, model, model_kwargs], model takes [x, t, **model_kwargs]
-            @torch.no_grad()
-            def _model_step_fn(x, t):
-                nonlocal cfg_scale, cfg_interval, clip_v
+            _model_step_fn = create_sampling_step_fn(
+                model=self.decoder,
+                model_cond=h,
+                cfg_scale=cfg_scale,
+                cfg_interval=cfg_interval,
+                clip_v=clip_v,
+                inp_shape=inp_shape,
+                model_type=model_type,
+                get_null_cond=self._get_null_h,
+                x_init=x_init,
+            )
 
-                null_cond_h = self._get_null_h(h)
-
-                v = self.decoder(x, t, z=h, inp_shape=inp_shape)
-                if (
-                    cfg_scale > 1.0
-                    and null_cond_h is not None
-                    and cfg_interval is not None
-                    # t is a tensor
-                    and t[0].item() >= cfg_interval[0]
-                    and t[0].item() <= cfg_interval[1]  # fmt: skip
-                ):
-                    # classifier-free guidance
-                    assert cfg_scale > 1.0, "cfg_scale must be > 1.0 for CFG"
-                    assert null_cond_h is not None, "null_cond_h is None for CFG"
-                    v_uncond = self.decoder(x, t, z=null_cond_h, inp_shape=inp_shape)
-                    v = v_uncond + cfg_scale * (v - v_uncond)
-
-                # clip fake x1 to (-1, 1)
-                # v = x0 - x1
-                if clip_v:
-                    x1_hat = x_init + v
-                    x1_hat = x1_hat.clamp(-1, 1)
-                    # back to clip velocity
-                    v = x1_hat - x_init
-
-                return v
-
+            # Sampling on model_type: x1 or velocity
             recon = sample_fn_(x_init, _model_step_fn)
 
             if not ret_trajectory:
@@ -924,9 +1037,91 @@ class DecoderUViT(nn.Module):
         losses = {"flow_loss": flow_loss}
         return recon, losses
 
+    def _forward_mf(
+        self,
+        x: torch.Tensor,  # bs, c, h, w; x is the noise for mode='sample', is the clean img for mode='train'
+        h: Tensor,  # bs, n, dim or bs, c, h, w
+        inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
+        mode: Literal["train", "sample"] = "train",
+        clamp=False,
+        ema_model: Optional[Self] = None,
+        sample_kwargs: dict = dict(
+            sample_steps=5,
+        ),
+        ret_trajectory=False,
+    ):
+        """MeanFlow forward pass - supports both training and sampling modes."""
+        # Convert h to 2D feature map if needed
+        h = latent1d_to_2d(
+            h,
+            inp_shape=inp_shape,
+            total_resolutions=self.t_res,
+        )
+
+        self.transport = cast(MeanFlow, self.transport)
+        # Get channel dimension
+        chan = get_chan_from_shape(inp_shape)
+
+        # Create model function for MeanFlow - it expects (z, t, r, y=c)
+        def model_fn(
+            x: torch.Tensor, t: torch.Tensor, r: torch.Tensor, y: torch.Tensor = h
+        ) -> torch.Tensor:
+            return self.decoder(x, t, r, y, inp_shape)
+
+        flow_loss = None
+        losses = {}
+
+        if mode == "train":
+            # Training mode: compute MeanFlow loss
+            # MeanFlow expects clean image as input for training
+            flow_loss, mse_val, recon = self.transport.loss(
+                model_fn, x, null_c=self._get_null_h(h)
+            )
+            flow_loss = flow_loss.mean()  # Ensure scalar loss
+        elif mode == "sample":
+            # Sampling mode: generate reconstruction from noise
+            x_init = x  # Use provided noise as starting point
+
+            # Extract sample parameters
+            sample_steps = sample_kwargs.get("sample_steps", 2)
+
+            # Perform sampling step by step
+            trajectory = []
+
+            t_vals = torch.linspace(1.0, 0.0, sample_steps + 1, device=x.device)
+
+            for i in range(sample_steps):
+                t = torch.full((x.size(0),), t_vals[i], device=x.device)
+                r = torch.full((x.size(0),), t_vals[i + 1], device=x.device)
+
+                # Get velocity from model
+                v = model_fn(x, t, r, h)
+
+                # Update x using Euler method
+                t_ = t.view(-1, 1, 1, 1)
+                r_ = r.view(-1, 1, 1, 1)
+                x = x - (t_ - r_) * v
+
+                if ret_trajectory:
+                    trajectory.append(x.clone())
+            recon = x
+            if ret_trajectory:
+                recon = torch.stack(trajectory, dim=0)  # [steps, bs, c, h, w]
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        if clamp:
+            recon = recon.clamp(-1, 1)
+
+        # Return results in consistent format
+        losses = {"flow_loss": flow_loss}
+        return recon, losses
+
     def forward(self, x, h, inp_shape, mode="train", *args, **kwargs):
         if self._flow_type == "tim":
             return self._forward_tim(x, h, inp_shape, mode, *args, **kwargs)
+        elif self._flow_type == "mf":
+            return self._forward_mf(x, h, inp_shape, mode, *args, **kwargs)
         else:
             return self._forward_fm(x, h, inp_shape, mode, *args, **kwargs)
 
@@ -985,7 +1180,8 @@ class FlowTokenizer(nn.Module):
         if self._compile:
             logger.info("Compiling FlowTokenizer model parts...")
             # Only compile the heavy parts - transformer
-            self.low_level_encoder.encoder = torch.compile(self.low_level_encoder.encoder)  # fmt: skip
+            self.low_level_encoder.encoder = torch.compile(
+                self.low_level_encoder.encoder)  # fmt: skip
             self.semantic_decoder.encoder = torch.compile(self.semantic_decoder.encoder)
             self.pixel_decoder.decoder = torch.compile(self.pixel_decoder.decoder)  # type: ignore
             logger.info("Compilation done.")
@@ -1288,15 +1484,16 @@ class FlowTokenizer(nn.Module):
         model = cls(cfg)
         return model
 
+    def get_last_layer(self):
+        """Get last layer's weights for GAN training"""
+        # TODO: add flowhead get_last_layer method.
+        return self.pixel_decoder.decoder.get_last_layer()
+
 
 # * --- Test --- #
 
 
 def test_flow_tokenizer():
-    from fvcore.nn import FlopCountAnalysis, flop_count_table, parameter_count_table
-
-    from src.data.litdata_hyperloader import ImageStreamingDataset
-
     tokenizer_cfg_default = _create_default_mingtok_cfg("tim", "uvit")
     tokenizer = FlowTokenizer(tokenizer_cfg_default).to("cuda", torch.bfloat16)
     tokenizer.set_grad_checkpointing()
@@ -1437,7 +1634,6 @@ if __name__ == "__main__":
     """
     CUDA_VISBILE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
     """
-    import sys
 
     with logger.catch():
         # test_decoder_flow_head()

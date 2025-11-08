@@ -46,11 +46,13 @@ class Transport:
     def __init__(
         self,
         *,
-        model_type,
-        path_type,
-        loss_type,
-        train_eps,
-        sample_eps,
+        model_type: str,
+        path_type: str,
+        loss_type: str,
+        train_eps: float,
+        sample_eps: float,
+        time_sample_type: str = "uniform",
+        cfm_factor=0.0,
     ):
         path_options = {
             PathType.LINEAR: path.ICPlan,
@@ -63,6 +65,9 @@ class Transport:
         self.path_sampler = path_options[path_type]()
         self.train_eps = train_eps
         self.sample_eps = sample_eps
+        self.path_type = path_type
+        self.time_sample_type = time_sample_type
+        self.cfm_factor = cfm_factor
 
     def prior_logp(self, z):
         """
@@ -107,13 +112,7 @@ class Transport:
 
         return t0, t1
 
-    def sample(
-        self,
-        x1,
-        *,
-        t_forced: th.Tensor | None = None,
-        time_sample_type: str = "sigmoid",
-    ):
+    def sample(self, x1, *, t_forced: th.Tensor | None = None):
         """Sampling x0 & t based on shape of x1 (if needed)
         Args:
           x1 - data point; [batch, *dim]
@@ -125,12 +124,24 @@ class Transport:
         if t_forced is not None:
             return t_forced.to(x1), x0, x1
 
+        time_sample_type = self.time_sample_type
         if time_sample_type == "sigmoid":
             mean, std = 0.0, 1.0
             t = th.randn(x1.shape[0]) * std + mean
             t = th.sigmoid(t) * (t1 - t0) + t0
         elif time_sample_type == "uniform":
             t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+        elif time_sample_type == "lognormal":
+            # comes from EDM paper
+            rnd_norm = th.randn((x1.shape[0],))
+            sigma = rnd_norm.exp()
+            if self.path_type == PathType.LINEAR:
+                t = sigma / (1 + sigma)
+            elif self.path_type == PathType.GVP:
+                t = 2 / th.pi * th.atan(sigma)
+            else:
+                raise NotImplementedError()
+            t = t * (t1 - t0) + t0
         else:
             raise ValueError(f"Unknown time_sample_type: {time_sample_type}")
         t = t.to(x1)
@@ -157,7 +168,7 @@ class Transport:
         t, x0, x1 = self.sample(x1, t_forced=t_forced)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
-        
+
         if len(model_output.shape) == len(xt.shape) + 1:
             x0 = x0.unsqueeze(-1).expand(
                 *([-1] * (len(x0.shape))), model_output.shape[-1]
@@ -179,6 +190,13 @@ class Transport:
         terms["pred"] = model_output
         if self.model_type == ModelType.VELOCITY:
             terms["loss"] = mean_flat(((model_output - ut) ** 2))
+            if self.cfm_factor > 0:
+                u_tilde = th.roll(ut, shifts=1, dims=0)
+                terms["cfm_loss"] = self.cfm_factor * mean_flat(
+                    ((model_output - u_tilde) ** 2)
+                )
+                terms["loss"] -= terms["cfm_loss"]
+
         elif self.model_type == ModelType.X1:
             terms["loss"] = th.nn.functional.l1_loss(model_output, x1)
         else:
@@ -464,7 +482,7 @@ class Sampler:
                 # simple euler method
                 xt = x0.clone()
                 xt_s = []
-                times = get_timesteps(t0, t1, num_steps, self.time_type)
+                times = get_timesteps(t0, t1, num_steps, "linear")
                 logger.debug(f"[FM sampler]: Sampling times: {times}")
 
                 for t in tqdm(times, desc="sampling ..."):
