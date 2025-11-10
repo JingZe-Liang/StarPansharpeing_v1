@@ -18,13 +18,17 @@
 from collections.abc import Callable
 from functools import partial
 from inspect import Parameter, isclass, isfunction, signature
-from typing import Any, Literal
+from typing import Any, Literal, no_type_check
 
 import numpy as np
 import timm.layers as tl
 import torch
 import torch.nn as nn
 from einops import pack, rearrange, unpack
+from loguru import logger
+from timm.layers.norm import LayerNorm2d
+
+from src.utilities.config_utils import once
 
 from .rmsnorm_triton import TritonRMSNorm2dFunc
 
@@ -139,35 +143,112 @@ class TritonRMSNorm2d(torch.nn.LayerNorm):
         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 
-class AdaptiveGroupNorm(nn.Module):
-    def __init__(self, cond_chan, in_chan, num_groups=32, eps=1e-6):
+@torch.compile(mode="reduce-overhead")
+def _adaptive_norm_fn(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    eps: float = 1e-5,
+    *,
+    norm: nn.Module,
+    gamma: nn.Module,
+    beta: nn.Module,
+):
+    B, C, _, _ = x.shape
+    fz = z.flatten(2)  # b, c, hw
+
+    # calcuate var for scale
+    scale = fz.var(dim=-1) + eps  # not unbias
+    scale = scale.sqrt()
+    scale = gamma(scale).view(B, C, 1, 1)
+
+    # calculate mean for bias
+    bias = fz.mean(dim=-1)
+    bias = beta(bias).view(B, C, 1, 1)
+
+    x = norm(x)
+    x = scale * x + bias
+
+    return x
+
+
+class AdaptiveNormBase(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.gn = nn.GroupNorm(
-            num_groups=num_groups, num_channels=in_chan, eps=eps, affine=False
+
+    def forward(self, x, z):
+        return _adaptive_norm_fn(
+            x, z, eps=self.eps, norm=self.norm, gamma=self.gamma, beta=self.beta
+        )
+
+
+class AdaptiveGroupNorm(AdaptiveNormBase):
+    def __init__(self, cond_chan, in_chan, num_groups=32, eps=1e-6, norm_eps=1e-6):
+        super().__init__()
+        self.norm = nn.GroupNorm(
+            num_groups=num_groups, num_channels=in_chan, eps=norm_eps, affine=False
         )
         self.gamma = nn.Linear(cond_chan, in_chan)
         self.beta = nn.Linear(cond_chan, in_chan)
         self.eps = eps
 
-    @torch.compile(mode="reduce-overhead")
-    def forward(self, x, z: torch.Tensor):
-        B, C, _, _ = x.shape
-        # fz = rearrange(z, "b c ... -> b c (...)")
-        fz = z.flatten(2)
 
-        # calcuate var for scale
-        scale = fz.var(dim=-1) + self.eps  # not unbias
-        scale = scale.sqrt()
-        scale = self.gamma(scale).view(B, C, 1, 1)
+class AdaptiveLayerNorm2d(AdaptiveNormBase):
+    def __init__(self, cond_chan, in_chan, eps=1e-6):
+        super().__init__()
+        self.gn = LayerNorm2d(in_chan, eps=eps)
+        self.gamma = nn.Linear(cond_chan, in_chan)
+        self.beta = nn.Linear(cond_chan, in_chan)
+        self.eps = eps
 
-        # calculate mean for bias
-        bias = fz.mean(dim=-1)
-        bias = self.beta(bias).view(B, C, 1, 1)
 
-        x = self.gn(x)
-        x = scale * x + bias
+# Alias
+AdaptiveGroupNorm32 = partial(AdaptiveGroupNorm, num_groups=32)
 
-        return x
+# Add to timm
+
+
+@once
+def __register_adaptive_norm():
+    from timm.layers import create_norm
+
+    create_norm._NORM_MAP["adaptivegn"] = AdaptiveGroupNorm  # type: ignore
+    create_norm._NORM_MAP["adaptivegn32"] = AdaptiveGroupNorm32  # type: ignore
+    create_norm._NORM_MAP["adaptiveln2d"] = AdaptiveLayerNorm2d  # type: ignore
+    logger.debug(f"Registering Adaptive GroupNorms and LayerNorm2d to timm.create_norm")
+
+
+__register_adaptive_norm()
+
+
+# class AdaptiveGroupNorm32(nn.Module):
+#     def __init__(self, z_channel, in_filters, eps=1e-6):
+#         super().__init__()
+#         self.gn = nn.GroupNorm(
+#             num_groups=32, num_channels=in_filters, eps=eps, affine=False
+#         )
+#         # self.lin = nn.Linear(z_channels, in_filters * 2)
+#         self.gamma = nn.Linear(z_channel, in_filters)
+#         self.beta = nn.Linear(z_channel, in_filters)
+#         self.eps = eps
+
+#     def forward(self, x, quantizer):
+#         B, C, _, _ = x.shape
+#         # quantizer = F.adaptive_avg_pool2d(quantizer, (1, 1))
+#         # calcuate var for scale
+#         scale = rearrange(quantizer, "b c h w -> b c (h w)")
+#         scale = scale.var(dim=-1) + self.eps  # not unbias
+#         scale = scale.sqrt()
+#         scale = self.gamma(scale).view(B, C, 1, 1)
+
+#         # calculate mean for bias
+#         bias = rearrange(quantizer, "b c h w -> b c (h w)")
+#         bias = bias.mean(dim=-1)
+#         bias = self.beta(bias).view(B, C, 1, 1)
+
+#         x = self.gn(x)
+#         x = scale * x + bias
+
+#         return x
 
 
 def unit_magnitude_normalize(x, dim=None, eps=1e-4):
@@ -176,37 +257,6 @@ def unit_magnitude_normalize(x, dim=None, eps=1e-4):
     norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
     norm = torch.add(eps, norm, alpha=np.sqrt(norm.numel() / x.numel()))
     return x / norm.to(x.dtype)
-
-
-class AdaptiveGroupNorm32(nn.Module):
-    def __init__(self, z_channel, in_filters, eps=1e-6):
-        super().__init__()
-        self.gn = nn.GroupNorm(
-            num_groups=32, num_channels=in_filters, eps=eps, affine=False
-        )
-        # self.lin = nn.Linear(z_channels, in_filters * 2)
-        self.gamma = nn.Linear(z_channel, in_filters)
-        self.beta = nn.Linear(z_channel, in_filters)
-        self.eps = eps
-
-    def forward(self, x, quantizer):
-        B, C, _, _ = x.shape
-        # quantizer = F.adaptive_avg_pool2d(quantizer, (1, 1))
-        # calcuate var for scale
-        scale = rearrange(quantizer, "b c h w -> b c (h w)")
-        scale = scale.var(dim=-1) + self.eps  # not unbias
-        scale = scale.sqrt()
-        scale = self.gamma(scale).view(B, C, 1, 1)
-
-        # calculate mean for bias
-        bias = rearrange(quantizer, "b c h w -> b c (h w)")
-        bias = bias.mean(dim=-1)
-        bias = self.beta(bias).view(B, C, 1, 1)
-
-        x = self.gn(x)
-        x = scale * x + bias
-
-        return x
 
 
 def Normalize(

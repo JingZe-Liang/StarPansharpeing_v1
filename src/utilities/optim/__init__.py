@@ -79,8 +79,6 @@ from typing import Any, Iterable
 
 from ..config_utils import function_config_to_basic_types
 
-from ..config_utils import function_config_to_basic_types
-
 
 @function_config_to_basic_types
 def get_muon_optimizer(named_parameters: Iterable, **other_muon_kwargs):

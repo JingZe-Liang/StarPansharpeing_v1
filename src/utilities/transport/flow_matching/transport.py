@@ -1,3 +1,4 @@
+import ast
 import enum
 from typing import Callable
 
@@ -142,6 +143,23 @@ class Transport:
             else:
                 raise NotImplementedError()
             t = t * (t1 - t0) + t0
+        elif isinstance(time_sample_type, str):
+            # discrete timesteps, e.g., '[0,0.2,0.4,0.6,0.8,0.9999]'
+            try:
+                time_lst = ast.literal_eval(time_sample_type)
+                self._discreate_time_sampled_lst = time_lst
+                time_choices = th.tensor(time_lst)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to parse time_sample_type: {time_sample_type}"
+                ) from e
+            # ignore t0 and t1
+            if th.min(time_choices) < 0 or th.max(time_choices) > 1:
+                raise ValueError(
+                    f"time_sample_type values must be in [0,1], but got {time_choices}"
+                )
+            indices = th.randint(0, len(time_choices), (x1.shape[0],))
+            t = time_choices[indices]
         else:
             raise ValueError(f"Unknown time_sample_type: {time_sample_type}")
         t = t.to(x1)
@@ -446,6 +464,7 @@ class Sampler:
         *,
         sampling_method="dopri5",
         num_steps=50,
+        sampling_time_type="uniform",
         atol=1e-6,
         rtol=1e-3,
         reverse=False,
@@ -482,7 +501,7 @@ class Sampler:
                 # simple euler method
                 xt = x0.clone()
                 xt_s = []
-                times = get_timesteps(t0, t1, num_steps, "linear")
+                times = get_timesteps(t0, t1, num_steps, "uniform")
                 logger.debug(f"[FM sampler]: Sampling times: {times}")
 
                 for t in tqdm(times, desc="sampling ..."):
@@ -526,7 +545,7 @@ class Sampler:
                 atol=atol,
                 rtol=rtol,
                 temperature=temperature,
-                time_type=self.time_type,
+                time_type=sampling_time_type,
             )
 
             return _ode.sample

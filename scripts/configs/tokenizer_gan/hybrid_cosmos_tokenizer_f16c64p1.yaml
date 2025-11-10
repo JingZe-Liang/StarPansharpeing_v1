@@ -32,7 +32,7 @@ vq_loss:
   # perceptual loss
   perceptual_weight: 0.1
   # repa loss
-  repa_loss_weight: 0.02 # 0.1
+  repa_loss_weight: 0.04 # 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
@@ -88,11 +88,11 @@ vq_loss:
   disc_num_layers: 3
   use_actnorm: false
   disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
-  disc_start_for_g: 4_000
-  disc_start_for_d: 4_000
+  disc_start_for_g: 1_000
+  disc_start_for_d: 1_000
   disc_loss: relative
   ssim_weight: 0.04
-  disc_weight: 0.1
+  disc_weight: 0.2
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
@@ -122,9 +122,9 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-03_16-44-51_hybrid_cosmos_f16c64/ema
   compile_model: false
-  only_load_tokenizer: false
+  only_load_tokenizer: true
   seperate_enc_dec: false
 
   # augmentations
@@ -253,7 +253,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c64
+    run_comment: hybrid_cosmos_f16c64_gen_decoder
     log_with_time: True
     visualize_every: 500
     log_every: 10

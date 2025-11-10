@@ -977,6 +977,16 @@ class DiffBandsInputConvIn(nn.Module):
 
         return h
 
+    def init_weights(self):
+        # init: kaiming uniform
+        for name, module in self.in_modules.items():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_uniform_(module.weight, a=np.sqrt(5))
+                if module.bias is not None:
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                    bound = 1 / math.sqrt(fan_in)
+                    nn.init.uniform_(module.bias, -bound, bound)
+
 
 class DiffBandsInputConvOut(nn.Module):
     def __init__(
@@ -1089,6 +1099,16 @@ class DiffBandsInputConvOut(nn.Module):
                 raise ValueError(
                     f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}. Available: conv, resnet, moe, inv_bottleneck"
                 )
+
+    def init_weights(self):
+        # init: kaiming uniform
+        for name, module in self.in_modules.items():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_uniform_(module.weight, a=np.sqrt(5))
+                if module.bias is not None:
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                    bound = 1 / math.sqrt(fan_in)
+                    nn.init.uniform_(module.bias, -bound, bound)
 
 
 # * --- Nested Diffbands conv --- #
@@ -1240,6 +1260,19 @@ class AdaptiveInputConvLayer(nn.Module):
     @property
     def weight(self):
         return self.conv.weight
+
+    def init_weights(self):
+        def _inner(m):
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.apply(_inner)
 
 
 class AdaptiveOutputConvLayer(nn.Module):

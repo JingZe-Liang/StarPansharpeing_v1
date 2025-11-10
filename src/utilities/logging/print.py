@@ -45,25 +45,21 @@ _console = None
 # Configure the logger
 __re_config_logger = True
 
+
 # Set the level
-logger.level("DEBUG", icon="🔍", color="<blue>")
-logger.level("INFO", icon="ℹ️ ", color="<light-black>")
-logger.level("WARNING", icon="⚠️", color="<yellow><bold>")
-logger.level("ERROR", icon="❌", color="<red><bold>")
-logger.level("CRITICAL", icon="💥", color="<red><bold>")
-logger.level("NOTE", icon="💡", color="<magenta><bold>", no=40)
+@once
+def _set_levels(_auto_=True):
+    logger._core.levels.clear()  # clear first, since mp context will duplicate set levels
+    logger.level(name="TRACE", icon="🔬", color="<dim>", no=10)
+    logger.level("DEBUG", icon="🔍", color="<blue>", no=20)
+    logger.level("INFO", icon="ℹ️ ", color="<light-black><bold>", no=30)
+    logger.level("WARNING", icon="⚠️", color="<yellow><bold>", no=40)
+    logger.level("ERROR", icon="❌", color="<red><bold>", no=50)
+    logger.level("CRITICAL", icon="💥", color="<red><bold>", no=60)
+    logger.level("NOTE", icon="💡", color="<magenta><bold>", no=45)
 
 
-def is_true(x):
-    return x in (True, 1, "true", "True")
-
-
-def is_false(x):
-    return not is_true(x)
-
-
-def is_none(x):
-    return x in (None, "none", "None")
+_set_levels()
 
 
 def is_true(x):
@@ -206,6 +202,7 @@ def log_level_range_filters(
         "WARNING": 40,
         "ERROR": 50,
         "CRITICAL": 60,
+        "NOTE": 45,
     }
 
     min_level_value = level_order.get(level_range[0].upper(), 0)
@@ -752,7 +749,7 @@ def _test_print(rank, is_mp=False):
         accelerator = accelerate.Accelerator()
     # Reconfigure logger to avoid conflicts when run as module
     configure_logger(
-        level="debug",
+        level="trace",
         add_tqdm_filter=True,
         removed=True,
         only_rank_one=True,
@@ -775,6 +772,7 @@ def _test_print(rank, is_mp=False):
         accelerator.wait_for_everyone()
 
     # Print other levels
+    logger.trace("Trace some msg.")
     logger.debug(f"Debug message from rank {rank}")
     logger.warning(f"Warning message from rank {rank}", once=True)
     logger.warning(f"Warning message from rank {rank}", once=True)  # not print

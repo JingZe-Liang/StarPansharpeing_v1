@@ -3,6 +3,7 @@ Hyperspectral Transformer Tokenizer with hybrid CNN / Transformer architecture.
 RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
+from collections import OrderedDict
 from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
 import accelerate
@@ -13,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from loguru import logger
+from timm.layers import create_conv2d, create_norm_act_layer
 from torch import Tensor
 from typing_extensions import Annotated
 
@@ -84,8 +86,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             )
             if i_level in cache_index:
                 self.low_lvl_repa_proj_chans.append(out_chan)
+
         # add mid block
-        if -1 == cache_index[-1]:
+        if cache_index[-1] == -1:
             self.low_lvl_repa_proj_chans.append(out_chan)
             logger.info(
                 f"Low-level repa projection channels: {self.low_lvl_repa_proj_chans}"
@@ -99,12 +102,41 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         logger.info(f"Init semantic transformer encoder.")
 
         self.semantic_transformer_dec = None
+        self.st_skip_sem_decoder = False
         if trans_dec_cfg is not None:
             self.semantic_transformer_dec = Transformer(self.trans_dec_cfg)
             self.semantic_transformer_dec.set_grad_checkpointing(
                 self.grad_checkpointing
             )
             logger.info(f"Init semantic transformer decoder.")
+
+            # Straight through skip for low-level features
+            if trans_dec_cfg.latent_straight_through_skip:
+                self.st_skip_sem_decoder = True
+                # Change the postquant conv
+                orig_post_quant_conv = self.decoder.quant_conv
+                cat_dim = cnn_cfg.model.z_channels + cnn_cfg.model.in_channels
+                skip_through_cat_conv = nn.Sequential(
+                    create_norm_act_layer("layernorm2d", cat_dim, "gelu"),
+                    # post conv to z channels and feed into the cnn decoder
+                    # fuse the skipped latent (=z_channels) and the semantic decoder output
+                    create_conv2d(
+                        cat_dim,
+                        cnn_cfg.model.z_channels,
+                        kernel_size=3,
+                    ),
+                )
+                # replace the post quant conv
+                self.decoder.quant_conv = nn.ModuleDict(
+                    {
+                        "post_quant_conv": orig_post_quant_conv,
+                        "st_cat_conv": skip_through_cat_conv,
+                    }
+                )
+                logger.debug(
+                    f"Will skip the latent through the cat conv without semantic decoder, "
+                    "maybe better for reconstruction -- Experimenting"
+                )
 
     def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
         """Init the model from the pretrained only CNN weights."""
@@ -251,7 +283,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         h: Union[torch.Tensor, tuple],
         inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
         clamp=False,
-    ) -> Union[Tensor, Tuple[Tensor, Tensor, Union[dict, Tensor]]]:
+    ):
         """Decode the latent into the corresponding channels image.
         Output the reconstructed image or recon, quantizer loss and loss breakdowns.
         """
@@ -265,11 +297,20 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
         # Apply Post-quant conv - semantic transformer decoder - CNN decoder
-        h = self.decoder.quant_conv(h)
+        if self.st_skip_sem_decoder:
+            h = self.decoder.quant_conv["post_quant_conv"](h)
+            h_skipped = h.clone()
+        else:
+            h = self.decoder.quant_conv(h)
 
         # Apply semantic transformer decoder if it exists
         if self.semantic_transformer_dec is not None:
             h = self.semantic_transformer_dec(h)
+
+        # Cat the skipped latent
+        if self.st_skip_sem_decoder:
+            h = torch.cat([h, h_skipped], dim=1)
+            h = self.decoder.quant_conv["st_cat_conv"](h)
 
         # Decode using the CNN decoder
         dec = self.decoder.decoder(h, chan)  # [b, c, h, w]

@@ -30,7 +30,7 @@ disc_start_for_g: 0
 disc_start_for_d: 0
 disc_reg_r1: 10
 disc_reg_freq: 0 # 0 means disabled
-disc_loss: hinge
+disc_loss: relative
 # quantizer
 quantizer_type: null
 quantizer_options:

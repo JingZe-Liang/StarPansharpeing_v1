@@ -1926,7 +1926,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     load_weights_with_shape_check(
                         self.accelerator.unwrap_model(self.tokenizer),
                         accelerate.utils.load_state_dict(
-                            (ema_path / "model.safetensors").as_posix()
+                            (ema_path / "tokenizer" / "model.safetensors").as_posix()
                         ),
                     )
 
@@ -2121,7 +2121,7 @@ if __name__ == "__main__":
 
     if is_rank_zero := PartialState().is_main_process:
         print_colored_banner("HyperTokenizer")
-    log_print(
+    logger.info(
         "<green>\n"
         + "=" * 60
         + "\n"
@@ -2130,7 +2130,7 @@ if __name__ == "__main__":
         + "Start Running , Good Luck!\n"
         + "=" * 60
         + "</>",
-        only_rank_zero=False,
+        not_rank0_print=True,
     )
 
     # Main function

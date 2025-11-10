@@ -25,11 +25,11 @@ from typing_extensions import Annotated
 
 import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage1.cosmos.modules.layers2d import Decoder, Encoder
+from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, GenerativeDecoder
 from src.stage1.cosmos.modules.proj import build_mlp
 from src.stage1.cosmos.modules.utils import Normalize
 
-# Quantiers
+# Quantizers
 from src.stage1.discretization.collections import FSQ
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
 from src.stage1.discretization.collections.kl_continuous import (
@@ -300,6 +300,8 @@ class EncoderDecoderConfig:
     resample_norm_keep: bool = False
     # adaptive conv
     adaptive_mode: str = "interp"
+    # generative decoder specific
+    per_layer_noise: bool = False
 
 
 @dataclass
@@ -329,6 +331,7 @@ class ContinuousTokenizerConfig:
     # model related
     name: str = "ContinuousImageTokenizer"
     model: EncoderDecoderConfig = field(default_factory=lambda: EncoderDecoderConfig())
+    decoder_type: str = "default"  # default or generative
     z_factor: int = 1
 
 
@@ -495,10 +498,21 @@ class ContinuousImageTokenizer(nn.Module):
             f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}."
         )
 
-    def _build_encoder_decoder(self, cfg, model_cfg: EncoderDecoderConfig):
+    def _build_encoder_decoder(
+        self,
+        cfg: ContinuousTokenizerConfig,
+        model_cfg: EncoderDecoderConfig,
+    ):
         model_kwargs = asdict(model_cfg)
         encoder = Encoder(**model_kwargs)
-        decoder = Decoder(**model_kwargs)
+        if cfg.decoder_type == "default":
+            decoder = Decoder(**model_kwargs)
+        elif cfg.decoder_type == "generative":
+            decoder = GenerativeDecoder(**model_kwargs)
+        else:
+            raise ValueError(f"Unknown decoder type: {cfg.decoder_type}")
+
+        log_print(f"[CNN tokenizer]: Build encoder and {cfg.decoder_type} decoder.")
         return encoder, decoder
 
     def _build_quantizer(self, cfg: ContinuousTokenizerConfig):
@@ -912,8 +926,8 @@ class ContinuousImageTokenizer(nn.Module):
     @no_type_check
     def load_pretrained(
         self,
-        enc_path: str,
-        dec_path: str,
+        enc_path: str | None = None,
+        dec_path: str | None = None,
         tokenizer_cfg: dict | None = None,
         uni_tokenizer_path: str | None = None,
         mean_init_conv_in_out: bool = False,

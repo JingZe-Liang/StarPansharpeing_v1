@@ -16,6 +16,7 @@ import torch.nn as nn
 from einops import rearrange
 from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from timm.layers import create_conv2d, create_norm_act_layer
 from timm.layers.helpers import to_2tuple
 from torch import Tensor
 from typing_extensions import (
@@ -61,6 +62,8 @@ DecoderOutput: TypeAlias = tuple[Tensor, LossOutput]
 
 
 def _create_flow_transport_cfg():
+    ################## Transport Configs ####################
+
     ################# Tim flow config
     tim_schedule_kwargs_str = (
         "diffusion_ratio=0.5 consistency_ratio=0.1 weight_time_tangent=true "
@@ -76,19 +79,21 @@ def _create_flow_transport_cfg():
     ################## Flow head FM config
     # fm_kwargs_str = "num_sampling_steps=100 train_schedule=fat_lognormal"
     fm_kwargs_str = (
-        "model_type=x1 path_type=linear loss_type=x1 train_eps=0 sample_eps=0 "
+        "model_type=velocity path_type=linear loss_type=velocity train_eps=0 sample_eps=0 "
         "cfm_factor=0.0 time_sample_type=sigmoid"
     )
     fm_kwargs_cfg = OmegaConf.from_dotlist(fm_kwargs_str.split(" "))
 
     ################## MeanFlow config
+    # flow_ratio=0.75 is for the training stability
     mf_kwargs_str = (
         "flow_ratio=0.75 time_dist=['lognorm',-0.4,1.0] "
         "cfg_ratio=0.2 cfg_scale=2.0 cfg_uncond='v' jvp_api='autograd'"
     )
     mf_kwargs_cfg = OmegaConf.from_dotlist(mf_kwargs_str.split(" "))
 
-    ########### Sampling cfgs
+    ################## Sampling Configs ##################
+
     tim_sample_str = (
         "num_steps=8 stochasticity_ratio=0.1 sample_type='transition' cfg_scale=2.0 "
         "cfg_low=0.0 cfg_high=0.7"
@@ -96,7 +101,10 @@ def _create_flow_transport_cfg():
     tim_sample_cfg = OmegaConf.from_dotlist(tim_sample_str.split(" "))
 
     # fm_sample_str = "sample_steps=100 schedule=pow_0.25 cfg_scale=2.0 tbar=true"  # flow head fm mannually sample kwargs
-    fm_sample_str = "sampling_method=dopri5 num_steps=50 cfg=1.0 progress=true cfg_interval=[0.0,0.7] clip_velocity_per_step=false"
+    fm_sample_str = (
+        "sampling_method=euler num_steps=8 cfg=1.0 progress=true cfg_interval=[0.0,0.7] "
+        "clip_velocity_per_step=false sampling_time_type=pow_2.5"
+    )
     fm_sample_cfg = OmegaConf.from_dotlist(fm_sample_str.split(" "))
 
     return {
@@ -118,15 +126,16 @@ def _create_flow_decoder(
 
     ################# UViT config ##################
     # TODO: add fm config
+    is_fm = lambda ft: ft == "fm"
     uvit_flow_str: str = (
         "in_chan=512 z_dim=1024 channels=128 ch_mult=[1,1,2,4,8] act_fn='silu' "
         "vit_act_fn='silu' layers_per_block=2 num_attention_heads=8 "
         "dropout=0.0 norm_num_groups=32 time_scale_shift=true "
         "mid_nlayers=12 mid_theta=10000.0 eps=1e-5 ada_norm=true "
         "learned_pos_embed=false relative_pos_embed=false "
-        f"time_cond_type={'t' if flow_type == 'fm' else 't-r'} "
+        f"time_cond_type={'t' if is_fm(flow_type) else 't-r'} "
         "init=null use_act_ckpt=true total_resolutions=16 "
-        f"img_size=512 flow_type={flow_type} cfg_prob=0.3 jvp={True if flow_type == 'fm' else False}"
+        f"img_size=512 flow_type={flow_type} cfg_prob=0.0 jvp={True if not is_fm(flow_type) else False}"
     )
     uvit_flow_cfg = OmegaConf.from_dotlist(uvit_flow_str.split(" "))
     # NOTE: supports tim, fm, and mf flows
@@ -141,6 +150,9 @@ def _create_flow_decoder(
         uvit_flow_cfg.transport = mf_cfgs[0]  # meanflow config
     else:
         raise ValueError(f"Unknown flow type: {flow_type}")
+
+    if uvit_flow_cfg.jvp:
+        logger.log("NOTE", "use JVP attention implem, this is experimental")
 
     ################# flow head config ###################
     flow_head_str: str = (
@@ -173,7 +185,7 @@ def _create_flow_decoder(
     return pixel_decoder_cfg
 
 
-def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvit"):
+def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"):
     """Create a default configuration for Mingtok-like tokenizer model.
     Returns:
         OmegaConf: Default configuration object.
@@ -186,16 +198,16 @@ def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvi
 
     enc_str: str = (
         "in_chan=512 embed_dim=768 depth=12 num_heads=12 patch_size=16 out_patch_size=1 mlp_ratio=4.0 "
-        "norm_layer='rmsnorm' drop_path=0.1 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
-        "last_norm='rmsnorm' z_dim=512 latent_dim=32 img_size=512 patcher_type='progressive_patch_embedder' "
-        "patch_prog_dims=[386,386,512] additional_pe=true "
+        "norm_layer='rmsnorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
+        "last_norm='rmsnorm' z_dim=768 latent_dim=32 img_size=512 patcher_type='patch_embedder' "
+        "additional_pe=true "
         "n_reg_tokens=0 mask_ratio_train=0.0 attn_type='sdpa'"
     )
     enc_cfg = OmegaConf.from_dotlist(enc_str.split(" "))
 
     dec_str: str = (
         "in_chan=32 embed_dim=1024 out_chan=1024 depth=12 num_heads=16 patch_size=1 mlp_ratio=4.0 "
-        "norm_layer='rmsnorm' drop_path=0.1 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
+        "norm_layer='rmsnorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
         "last_norm='rmsnorm' img_size=32 head='linear' "
         "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=false attn_type='sdpa'"
     )
@@ -208,6 +220,7 @@ def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvi
         flow_dec_cfg_dict["tim"],
         flow_dec_cfg_dict["fm"],
         flow_dec_cfg_dict["mf"],
+        # TODO: add scm, mdm, mdm2, rcm
     )
     pixel_decoder_cfg = _create_flow_decoder(
         flow_type, decoder_type, tim_cfgs=tim_cfgs, fm_cfgs=fm_cfgs, mf_cfgs=mf_cfgs
@@ -224,7 +237,7 @@ def _create_default_mingtok_cfg(flow_type: str = "tim", decoder_type: str = "uvi
 
     ######## Tokenizer main config
 
-    main_str = f"decoder_type={decoder_type} compile=false"
+    main_str = f"decoder_type={decoder_type} compile=false straight_through_latent=true"
     main_cfg = OmegaConf.from_dotlist(main_str.split(" "))
     main_cfg.sampling_options_default = flow_dec_cfg_dict[flow_type][-1]
 
@@ -368,6 +381,7 @@ def create_sampling_step_fn(
             assert null_cond is not None, "null_cond is None for CFG"
             v_uncond = model(x, t, z=null_cond, inp_shape=inp_shape)
             v = v_uncond + cfg_scale * (v - v_uncond)
+            logger.debug(f"CFG sampling step: {t[0].item()}")
 
         # clip fake x1 to (-1, 1)
         # v = x0 - x1
@@ -846,7 +860,7 @@ class DecoderUViT(nn.Module):
             self.sampler = Sampler(transport=self.transport)
             logger.info(
                 f"[Decoder UViT]: FM transport={cfg.transport}"
-                f"FM sample time type={self.transport.time_sample_type}"
+                f"FM train time type={self.transport.time_sample_type}"
             )
         elif cfg.flow_type == "mf":  # meanflow
             self.transport = MeanFlow(
@@ -881,12 +895,12 @@ class DecoderUViT(nn.Module):
             return torch.zeros_like(h, memory_format=torch.contiguous_format)
 
     def _replace_h_as_null(self, h: Tensor, cfg_prob: float = 0.0):
-        n_cfg = int(h.shape[0] * cfg_prob)
         assert cfg_prob >= 0.0
-        if n_cfg == 0:
+        if cfg_prob == 0.0:
             # h as original, no cfg
             return h
         else:
+            n_cfg = int(h.shape[0] * cfg_prob)
             cfg_mask = torch.rand(h.shape[0], device=h.device) < cfg_prob
             null_h = (
                 self._get_null_h(h) + 0.0 * h
@@ -1145,14 +1159,17 @@ class FlowTokenizer(nn.Module):
         self.semantic_decoder = DecoderSemantic(self.sem_cfg)
 
         logger.info(f"Init pixel decoder of type {self.tok_cfg.decoder_type}.")
-        decoder_head_cls = {"flow_head": DecoderFlowHead, "uvit": DecoderUViT}[
+        decoder_cls = {"flow_head": DecoderFlowHead, "uvit": DecoderUViT}[
             self.tok_cfg.decoder_type
         ]
-        self.pixel_decoder = decoder_head_cls(self.pix_flow_cfg)
+        self.pixel_decoder = decoder_cls(self.pix_flow_cfg)
 
+        self._build_st_cat_lin()
+
+        # Attrs
         self.total_resolutions: int = self.pix_flow_cfg.total_resolutions
         self.sampling_options_default: dict[str, Any] = getattr(
-            cfg.tokenizer, "sampling_options_default", {}
+            self.tok_cfg, "sampling_options_default", {}
         )
         logger.info(f"Set the sampling options to {self.sampling_options_default}.")
 
@@ -1185,6 +1202,27 @@ class FlowTokenizer(nn.Module):
             self.semantic_decoder.encoder = torch.compile(self.semantic_decoder.encoder)
             self.pixel_decoder.decoder = torch.compile(self.pixel_decoder.decoder)  # type: ignore
             logger.info("Compilation done.")
+
+    def _build_st_cat_lin(self):
+        # Straight through latent functionality
+        self.st_skip_semantic_decoder = False
+        if getattr(self.tok_cfg, "straight_through_latent", False):
+            self.st_skip_semantic_decoder = True
+            # Create skip connection conv for latent
+            latent_channels = self.low_cfg.latent_dim  # channels from low-level encoder
+            semantic_channels = self.sem_cfg.out_chan  # channels from semantic decoder
+            cat_dim = latent_channels + semantic_channels
+            norm_type = self.sem_cfg.norm_layer
+
+            self.st_cat_lin = nn.Sequential(
+                create_norm_act_layer(norm_type, cat_dim, "gelu"),
+                nn.Linear(cat_dim, semantic_channels),
+            )
+            logger.log(
+                "NOTE",
+                f"Will skip the semantic decoder latent through cat conv, "
+                f"latent_channels={latent_channels}, semantic_channels={semantic_channels}",
+            )
 
     def _build_repa_projections(self):
         if self.use_repa:
@@ -1314,6 +1352,13 @@ class FlowTokenizer(nn.Module):
         sem_out = self._sem_decode(latent)
         sem_tokens = sem_out["sem_tokens"]
         # sem_proj_out = sem_out["sem_proj_out"]
+
+        if self.st_skip_semantic_decoder:
+            assert latent.shape[1] == sem_tokens.shape[1], (
+                f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
+            )
+            lat_sem_tokens = torch.cat([latent, sem_tokens], dim=-1)
+            sem_tokens = self.st_cat_lin(lat_sem_tokens)  # input into the cnn decoder
 
         # To 2d
         assert hw is not None, "hw must be provided"
@@ -1475,7 +1520,7 @@ class FlowTokenizer(nn.Module):
     def create_model(cls, cfg, flow_type: str, decoder_type: str):
         """Create a FlowTokenizer model from configuration."""
         # Update the defaults
-        tokenizer_cfg_default = _create_default_mingtok_cfg(flow_type, decoder_type)
+        tokenizer_cfg_default = create_default_mingtok_cfg(flow_type, decoder_type)
         if cfg is not None:
             cfg = OmegaConf.merge(tokenizer_cfg_default, cfg)
         else:
@@ -1494,31 +1539,42 @@ class FlowTokenizer(nn.Module):
 
 
 def test_flow_tokenizer():
-    tokenizer_cfg_default = _create_default_mingtok_cfg("tim", "uvit")
+    from torchmetrics.image import PeakSignalNoiseRatio
+
+    from src.data.litdata_hyperloader import ImageStreamingDataset
+
+    tokenizer_cfg_default = create_default_mingtok_cfg("fm", "uvit")
     tokenizer = FlowTokenizer(tokenizer_cfg_default).to("cuda", torch.bfloat16)
     tokenizer.set_grad_checkpointing()
+
     # print(flop_count_table(FlopCountAnalysis(tokenizer, x)))
     # print(parameter_count_table(tokenizer))
 
-    # path = "runs/stage1_mingtok/2025-11-05_03-54-45_mingtok_600M_continous/ema/tokenizer/model.safetensors"
-    # tokenizer.load_pretrained(path)
-    # logger.info("Load pretrained done.")
+    path = "runs/stage1_mingtok/2025-11-09_21-19-05_mingtok_600M_continous/ema/tokenizer/model.safetensors"
+    tokenizer.load_pretrained(path)
+    logger.info("Load pretrained done.")
 
-    x = torch.randn(9, 32, 512, 512).to("cuda", torch.bfloat16)
-    # dataset = ImageStreamingDataset(
-    #     input_dir="data2/RemoteSAM270k/LitData_hyper_images",
-    #     resize_before_transform=512,
-    # )
-    # x = dataset[201]["img"]
-    # x = x[None].type(torch.bfloat16).to("cuda")
+    # x = torch.randn(9, 32, 512, 512).to("cuda", torch.bfloat16)
+    dataset = ImageStreamingDataset(
+        input_dir="data/MDAS-HySpex/LitData_hyper_images",
+        resize_before_transform=128,
+        # is_hwc=False,
+    )
 
-    # print(f"Input shape: {x.shape}")
-    # print("Encoding and decoding (train mode)")
-    # with torch.autocast("cuda", dtype=torch.bfloat16):
-    #     with torch.no_grad():
-    #         out = tokenizer(x)
-    # # for k, v in out.items():
-    # #     print("{:>20}: {}".format(k, v))
+    for i in range(10):
+        x = dataset[i]["img"]
+        x = x[None].type(torch.bfloat16).to("cuda")
+
+        # print(f"Input shape: {x.shape}")
+        # print("Encoding and decoding (train mode)")
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad():
+                out = tokenizer(x, dec_mode="sample")
+
+            psnr = PeakSignalNoiseRatio(1.0).cuda()
+            x = (x + 1) / 2
+            recon = (out[0] + 1) / 2
+            print(f"PSNR: {psnr(x, recon)}")
 
     # Sample
     # print("Sampling")
@@ -1534,19 +1590,19 @@ def test_flow_tokenizer():
     #     )  # type: ignore
 
     # Backward
-    tokenizer.train()
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        out = tokenizer(x)
-    tokenizer.get_repa_feature()  # to set repa features
-    loss = out[1]["flow_loss"]
-    print(f"Loss: {loss}")
-    loss.backward()
-    print("Backward successful.")
+    # tokenizer.train()
+    # with torch.autocast("cuda", dtype=torch.bfloat16):
+    #     out = tokenizer(x)
+    # tokenizer.get_repa_feature()  # to set repa features
+    # loss = out[1]["flow_loss"]
+    # print(f"Loss: {loss}")
+    # loss.backward()
+    # print("Backward successful.")
 
-    # Check the gradients
-    for n, p in tokenizer.named_parameters():
-        if p.requires_grad and p.grad is None:
-            print(f"Param {n} has no grad!")
+    # # Check the gradients
+    # for n, p in tokenizer.named_parameters():
+    #     if p.requires_grad and p.grad is None:
+    #         print(f"Param {n} has no grad!")
 
 
 def test_decoder_flow_head():
@@ -1554,7 +1610,7 @@ def test_decoder_flow_head():
     from fvcore.nn import parameter_count_table
 
     # Create configuration for DecoderFlowHead
-    cfg = _create_default_mingtok_cfg().pixel_decoder
+    cfg = create_default_mingtok_cfg().pixel_decoder
 
     # Initialize DecoderFlowHead
     decoder = DecoderFlowHead(cfg).to("cuda", torch.bfloat16)
@@ -1632,7 +1688,7 @@ def test_decoder_flow_head():
 
 if __name__ == "__main__":
     """
-    CUDA_VISBILE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
+    MODEL_COMPILED=0 CUDA_VISIBLE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
     """
 
     with logger.catch():
