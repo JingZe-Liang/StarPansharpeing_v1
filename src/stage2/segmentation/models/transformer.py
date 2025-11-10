@@ -10,6 +10,8 @@ from timm.layers import get_act_layer, get_norm_layer
 
 # Attention, MLP
 from timm.layers.patch_embed import PatchEmbed
+from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed_sincos import RotaryEmbeddingCat
 from torch import Tensor
 
 from ...layers import (
@@ -158,7 +160,8 @@ class Transformer(nn.Module):
                     "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
                 )
 
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
+            # rope implem from transformer engine.
             if rope_options is None:
                 self.rope_options = {
                     "dim": dim // self.num_heads,
@@ -170,11 +173,21 @@ class Transformer(nn.Module):
                     "scale": 1.0,
                     "original_latent_shape": (self.base_size, self.base_size),
                 }
-            self.rope = RotaryPositionEmbeddingPytorchV2(
+            self.rope = RotaryPositionEmbeddingPytorchV2(  # type: ignore
                 seq_len=seq_len,
                 latent_shape=(self.base_size, self.base_size),
                 # does not changed
                 **self.rope_options,
+            )
+        elif self.pos_embed_type == "rope":
+            # rope implem from timm.
+            self.rope_options = {
+                "temperature": 10000.0,
+                "in_pixel": False,
+                "feat_shape": [self.base_size, self.base_size],
+            }
+            self.rope = RotaryEmbeddingCat(
+                dim=dim // self.num_heads, **self.rope_options
             )
         else:
             raise ValueError(
@@ -198,20 +211,10 @@ class Transformer(nn.Module):
                 ps = self.patch_size
 
             if pe.shape[1] != h * w:
-                # re-init the pos_embed
-                pe = get_2d_sincos_pos_embed(
-                    pe.shape[-1],
-                    (h // ps, w // ps),
-                    pe_interpolation=self.pe_interpolation,
-                    base_size=base_size,
-                )
-                self.register_buffer(
-                    name,
-                    (pe := torch.from_numpy(pe).float().unsqueeze(0)),
-                    persistent=False,
-                )
+                pe = resample_abs_pos_embed(pe, new_size=[h, w], num_prefix_tokens=0)
+            return pe
 
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
             # TODO: add multi-modal-rope
             # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
 
@@ -223,6 +226,12 @@ class Transformer(nn.Module):
                 self.rope_options["latent_shape"] = (ph, pw)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
+
+        elif self.pos_embed_type == "rope":
+            ph, pw = h // self.patch_size, w // self.patch_size
+            seq_len_x = ph * pw
+            pe = self.rope.get_embed((ph, pw))
+            return pe
 
         else:
             raise ValueError(
@@ -297,15 +306,15 @@ class Transformer(nn.Module):
         # Initialize transformer layers
         def _basic_init(module):
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
+                nn.init.xavier_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
         self.apply(_basic_init)
 
         # patch embedding
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.kaiming_uniform_(self.patch_embed.proj.weight)
+        nn.init.zeros_(self.patch_embed.proj.bias)
 
 
 if __name__ == "__main__":

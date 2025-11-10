@@ -5,10 +5,13 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from jaxtyping import Array, Float
+from loguru import logger
 from timm.layers import get_act_layer, get_norm_layer
 
 # Attention, MLP
 from timm.layers.patch_embed import PatchEmbed
+from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed_sincos import RotaryEmbeddingCat
 from torch import Tensor
 
 from ...layers import (
@@ -162,7 +165,7 @@ class Transformer(nn.Module):
                     "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
                 )
 
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
             if rope_options is None:
                 self.rope_options = {
                     "dim": dim // self.cfg.num_heads,
@@ -174,16 +177,26 @@ class Transformer(nn.Module):
                     "scale": 1.0,
                     "original_latent_shape": (self.base_size, self.base_size),
                 }
-            self.rope = RotaryPositionEmbeddingPytorchV2(
+            self.rope = RotaryPositionEmbeddingPytorchV2(  # ty: ignore error[missing-argument]
                 seq_len=seq_len,
                 latent_shape=(self.base_size, self.base_size),
                 # does not changed
                 **self.rope_options,
             )
+        elif self.pos_embed_type == "rope":
+            # rope implem from timm.
+            self.rope_options = {
+                "temperature": 10000.0,
+                "in_pixel": False,
+                "feat_shape": [self.base_size, self.base_size],
+            }
+            self.rope = RotaryEmbeddingCat(
+                dim=dim // self.num_heads, **self.rope_options
+            )
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                "Supported types are 'sincos', 'rope_te' and 'rope'."
             )
 
     def get_pe(self, hw: tuple | torch.Size, img_type=None):
@@ -202,18 +215,26 @@ class Transformer(nn.Module):
                 ps = self.patch_size
 
             if pe.shape[1] != h * w:
-                # re-init the pos_embed
-                pe = get_2d_sincos_pos_embed(
-                    pe.shape[-1],
-                    (h // ps, w // ps),
-                    pe_interpolation=self.pe_interpolation,
-                    base_size=base_size,
+                # use resample_abs_pos_embed for interpolation like pansharpening model
+                new_h, new_w = hw
+                pos_embed = resample_abs_pos_embed(  # type: ignore
+                    pe, new_size=(new_h, new_w), num_prefix_tokens=0
                 )
-                self.register_buffer(
-                    name, torch.from_numpy(pe).float().unsqueeze(0), persistent=False
-                )
-            return self.pos_embed_latent
+                pe = torch.as_tensor(pos_embed).float()
+                self.register_buffer(name, pe, persistent=False)
+            return pe
 
+        elif self.pos_embed_type == "rope_te":
+            # TODO: add multi-modal-rope
+            # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
+
+            seq_len_x = h * w
+            pre_rope_seq_len = self.rope.cos_cached.shape[1]
+            if seq_len_x > pre_rope_seq_len:
+                # re-init the rope
+                self.rope_options["original_latent_shape"] = (h, w)
+                self.rope.__init__(seq_len_x, **self.rope_options)
+            return self.rope
         elif self.pos_embed_type == "rope":
             # TODO: add multi-modal-rope
             # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
@@ -230,7 +251,7 @@ class Transformer(nn.Module):
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                "Supported types are 'sincos', 'rope_te' and 'rope'."
             )
 
     def unpatchify(self, x: torch.Tensor):
@@ -299,13 +320,28 @@ class Transformer(nn.Module):
     def init_weights(self):
         # Initialize transformer layers
         def _basic_init(module):
+            norms = [get_norm_layer(n) for n in ["layernorm", "simplenorm", "rmsnorm"]]
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
+                torch.nn.init.xavier_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+            elif isinstance(module, tuple(norms)):
+                nn.init.constant_(module.weight, 1.0)
+                if hasattr(module, "bias") and module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
-        self.apply(_basic_init)
+        self.layers.apply(_basic_init)
 
         # patch embedding
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+        # zero-out the head
+        norm, lin = self.head
+        torch.nn.init.zeros_(lin.weight)
+        torch.nn.init.zeros_(lin.bias)
+        torch.nn.init.zeros_(norm.weight)
+        if hasattr(norm, "bias") and norm.bias is not None:
+            torch.nn.init.zeros_(norm.bias)
+
+        logger.info("[Transformer] Initializing model ...")

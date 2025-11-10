@@ -11,6 +11,7 @@ from timm.layers import get_act_layer, get_norm_layer
 # Attention, MLP
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed_sincos import RotaryEmbeddingCat
 from torch import Tensor
 
 from src.utilities.config_utils import dataclass_from_dict
@@ -185,7 +186,7 @@ class Transformer(nn.Module):
                     "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
                 )
 
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
             if rope_options is None:
                 self.rope_options = {
                     "dim": dim // self.cfg.num_heads,
@@ -197,11 +198,22 @@ class Transformer(nn.Module):
                     "scale": 1.0,
                     "original_latent_shape": (self.base_size, self.base_size),
                 }
+
             self.rope = RotaryPositionEmbeddingPytorchV2(  # ty: ignore error[missing-argument]
                 seq_len=seq_len,
                 latent_shape=(self.base_size, self.base_size),
                 # does not changed
                 **self.rope_options,
+            )
+        elif self.pos_embed_type == "rope":
+            # rope implem from timm.
+            self.rope_options = {
+                "temperature": 10000.0,
+                "in_pixel": False,
+                "feat_shape": [self.base_size, self.base_size],
+            }
+            self.rope = RotaryEmbeddingCat(
+                dim=dim // self.num_heads, **self.rope_options
             )
         else:
             raise ValueError(
@@ -242,7 +254,11 @@ class Transformer(nn.Module):
                 self.rope_options["latent_shape"] = (h, w)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
-
+        elif self.pos_embed_type == "rope":
+            ph, pw = h // self.patch_size, w // self.patch_size
+            seq_len_x = ph * pw
+            pe = self.rope.get_embed((ph, pw))
+            return pe
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "

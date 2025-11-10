@@ -1348,7 +1348,9 @@ def test_tokenizer_forward_backward(
             "norm_type": "gn",
             "norm_groups": 32,
             "attn_type": "none",
-            "adaptive_mode": "slice",
+            "adaptive_mode": "interp",
+            # "upsample_kwargs": {},
+            # "downsample_kwargs": {},
         },
         "name": "CI",
         "uni_path": base_model_ckpt,
@@ -1538,12 +1540,15 @@ def test_tokenizer_forward_backward(
 
 
 if __name__ == "__main__":
+    """
+    MODEL_COMPILED=0 python -m src.stage1.cosmos.cosmos_tokenizer
+    """
     import lovely_tensors as lt
 
     lt.monkey_patch()
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos_nested/2025-10-04_02-15-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/checkpoints/checkpoint_637/model.safetensors",
+        base_model_ckpt="runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
         real_data="RS5M",
         save_pca_vis=False,
         pca_type="z",
