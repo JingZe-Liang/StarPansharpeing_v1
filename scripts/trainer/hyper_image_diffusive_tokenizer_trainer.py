@@ -2,6 +2,7 @@ import os
 import random
 import sys
 import time
+from collections import defaultdict, deque
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -138,6 +139,9 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             self.log_msg("[FSDP]: using Fully Sharded Data Parallel plugin")
             self.no_ema = True
 
+        # training state counter
+        self.train_state = StepsCounter(["train"])
+
         # dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
@@ -186,6 +190,10 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                     shuffle_within_workers=self.dataset_cfg.shuffle_within_workers,
                 )
             )
+
+        # for batch in self.infinity_train_loader():
+        #     self.log_msg(f"[Data]: sample batch shape {batch['img'].shape}")
+        # exit(0)
 
         # setup the tokenizer
         self.setup_tokenizer()
@@ -240,9 +248,6 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
-
-        # training state counter
-        self.train_state = StepsCounter(["train"])
 
         # clear GPU memory
         torch.cuda.empty_cache()
@@ -358,10 +363,9 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 input_lst = [log_file] * self.accelerator.num_processes
             else:
                 input_lst = [None] * self.accelerator.num_processes
-            output_lst = [None]
-            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
-            output_lst: list[Path]
-            log_file: Path = output_lst[0]
+            output_lst: list[Path | None] = [None]
+            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)  # type: ignore
+            log_file = output_lst[0]
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
@@ -391,7 +395,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 log_file.parent / "debug.log",
                 format=log_format_in_file,
                 level="DEBUG",
-                filter=lambda record: record["level"].no <= 10,
+                filter=lambda record: 10 <= record["level"].no <= 20,
                 rotation="10 MB",
                 enqueue=True,
                 backtrace=True,
@@ -583,7 +587,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.tokenizer_peft_wrapped = get_peft_model(
             self.tokenizer,
             peft_config=peft_cfg,
-            adapter_name=adapter_name,  # dataset name ?
+            adapter_name=adapter_name,
             low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
         )
         self.log_msg(self.tokenizer_peft_wrapped.print_trainable_parameters())
@@ -1162,12 +1166,16 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                     out_d["aug_x"] = x_deg
                     tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
-            ########### normal AE training pipeline
+            ########### normal AE training pipeline ##########
             else:
                 out_d = self.forward_tokenizer(x)  # no augmentation
                 # train tokenizer and discriminator
                 tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                 disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                logger.trace(
+                    f"Train step: {self.get_global_step()} - {x.shape=} - "
+                    f"total loss: {tokenizer_loss.item()}"
+                )
 
             # track reconstruction quality
             if check_quality is not None:
@@ -1184,7 +1192,9 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 f"[Train State]: lr {self.tokenizer_optim.param_groups[0]['lr']:.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
-            self.log_msg(f"[Train Tok]: {_log_tok_losses}")
+            self.log_msg(
+                f"[Train Tok]: <cyan>Channels</>: {x.shape[1]}, {_log_tok_losses}"
+            )
             if self.use_disc:
                 self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
@@ -1192,6 +1202,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             self.tenb_log_any("metric", log_token_loss, self.global_step)
             self.tenb_log_any("metric", log_disc_loss, self.global_step)
 
+        # Log the reconstruction quality - one step back to x clean.
         if (
             quality_track_n >= 0
             and self.global_step % quality_track_n == 0
@@ -1314,9 +1325,23 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         return batch
 
     def infinity_train_loader(self):
+        _chan_seen = {}
+
         while True:
             for batch in self.train_dataloader:
                 batch = self._randomly_batch_sample_key(batch)
+                if batch is None or batch.get("img", None) is None:
+                    continue
+
+                # Stats
+                bs, img_chan = batch["img"].shape[:2]
+                if img_chan not in _chan_seen:
+                    _chan_seen[img_chan] = bs
+                else:
+                    _chan_seen[img_chan] += bs
+                if self.global_step % 50 == 0:
+                    logger.debug(f"Samples stats: {str(_chan_seen)}")
+
                 yield batch
 
     def train_loop(self):
@@ -1394,9 +1419,10 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         # track psnr and ssim
         if self.train_cfg.track_metrics:
             psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
-            ssim_fn = StructuralSimilarityIndexMeasure().to(device=self.device, dtype=self.dtype)  # fmt: skip
+            ssim_fn = StructuralSimilarityIndexMeasure(data_range=1.0).to(device=self.device, dtype=self.dtype)  # fmt: skip
         loss_metrics = MeanMetric().to(device=self.device)
         self.tokenizer.eval()
+        val_batches_deque = deque(maxlen=10)  # buffer for caching batch_img_rgb
 
         for i in range(1, self.val_cfg.max_val_iters + 1):
             batch = next(self._val_loader_iter)
@@ -1422,18 +1448,27 @@ class CosmosFlowHyperspectralTokenizerTrainer:
             recon_for_metrics = self.to_rgb(recon)
             batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
 
+            # Add to buffer and handle overflow
+            val_batches_deque.append(
+                (recon_for_metrics.detach().cpu(), batch_img_rgb.detach().cpu())
+            )
+
             if self.train_cfg.track_metrics:
                 psnr_fn.update(batch_img_rgb, recon_for_metrics)
                 ssim_fn.update(batch_img_rgb, recon_for_metrics)
+                # print out the infos
+                cur_psnr = psnr_fn.compute()
+                cur_ssim = ssim_fn.compute()
+                self.log_msg(
+                    f"[Val Metrics]: batch {i}/{self.val_cfg.max_val_iters} | "
+                    f"Channels: {batch_img_rgb.shape[1]} | "
+                    f"PSNR: {cur_psnr:.4f}, SSIM: {cur_ssim:.4f} | "
+                )
 
             # recon loss
             loss = nn.functional.mse_loss(recon, batch["img"].to(recon))
             loss_metrics.update(loss)
-
-            if i % 10 == 0:
-                self.log_msg(
-                    f"[Val progress]: {i}/{self.val_cfg.max_val_iters} | loss: {loss.item():.4f}"
-                )
+            logger.debug(f"loss: {loss.item():.4f}")
 
         if self.train_cfg.track_metrics:
             psnr_val = psnr_fn.compute()
@@ -1453,10 +1488,17 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                 step=self.global_step,
             )
 
-            # visualize the last val batch
-            self.visualize_reconstruction(
-                batch["img"], recon, add_step=True, img_name="val_sampled/sampled"
-            )
+            # visualize batches from the deque
+            for i, (img_sampled, img) in enumerate(val_batches_deque):
+                self.visualize_reconstruction(
+                    img,
+                    img_sampled,
+                    add_step=False,
+                    img_name=f"val_sampled/sampled/step_{self.global_step}/val_sampled_{i}",
+                    to_rgb=False,
+                )
+            self.log_msg("visualize val sampled images.")
+        val_batches_deque.clear()
 
         self.tokenizer.train()
         self.tokenizer_optim.zero_grad()
@@ -1723,10 +1765,12 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         img_name: str = "train_original_recon",
         add_step: bool = False,
         only_vis_n: int | None = None,
+        to_rgb=True,
     ):
-        x = self.to_rgb(x)
-        if recon is not None:
-            recon = self.to_rgb(recon)
+        if to_rgb:
+            x = self.to_rgb(x)
+            if recon is not None:
+                recon = self.to_rgb(recon)
 
         _only_n = only_vis_n or 16
         c = x.shape[1]

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import einops
 import torch
@@ -132,11 +132,18 @@ class NaFlexVitCfg:
     out_chans: int = 16
     out_2d_latent: bool = True
     unpatch_size: Optional[int] = None  # if None, use patch_size
-    compile_model: bool = False
+    compile_model: bool = False  # control torch.compile
 
     # for cross-attention
     cross_attn_tokens: int = -1
     cross_attn_ratio: float = 0.5
+
+    # adaptive generation decoder
+    is_first_cat_noise: bool = False
+
+    # is low-level feature skip the semantic encoder
+    # straight through to CNN decoder
+    latent_straight_through_skip: bool = False
 
 
 class Transformer(NaFlexVit):
@@ -146,10 +153,10 @@ class Transformer(NaFlexVit):
         self._build_head(cfg)
 
         if cfg.compile_model:
-            logger.info(f"[Naflex Transformer]: Compiling model ...")
+            logger.log("NOTE", f"[Naflex Transformer]: Compiling model ...")
             for i in range(len(self.blocks)):
                 self.blocks[i] = torch.compile(self.blocks[i])
-            self.head = torch.compile(self.head)
+            # self.head = torch.compile(self.head)
 
     def _build_head(self, cfg: NaFlexVitCfg):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
@@ -204,6 +211,7 @@ class Transformer(NaFlexVit):
 
         # Features
         x = self.forward_features(x)
+        x = cast(torch.Tensor, x)
         x = x[:, self.cfg.reg_tokens :]
 
         # Head
@@ -212,10 +220,10 @@ class Transformer(NaFlexVit):
         return x
 
     @function_config_to_basic_types
-    @staticmethod
-    def create_model(**overrides):
+    @classmethod
+    def create_model(cls, **overrides):
         cfg = dataclass_from_dict(NaFlexVitCfg, overrides)
-        model = Transformer(cfg)
+        model = cls(cfg)
         return model
 
 
@@ -233,7 +241,6 @@ def test_naflex_vit_pansharpening_model():
         img_size=32,
         out_chans=256,
         unpatch_size=2,
-        z_dim=256,
     )
 
     x = torch.randn(1, 256, 32, 32).cuda()

@@ -13,7 +13,7 @@ cnn_cfg:
     in_channels: 512 # nested channels !!
     out_channels: 512 # nested channels !!
     z_channels: 512
-    latent_channels: 64
+    latent_channels: 32
     channels: 128
     channels_mult: [2, 4, 4]
     num_res_blocks: 2
@@ -27,14 +27,15 @@ cnn_cfg:
     adaptive_mode: interp
     downsample_kwargs:
       padconv_use_manually_pad: false
-    # downsample_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
+    per_layer_noise: true
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: true
   dino_feature_dim: 1024
   cache_type: h
+  decoder_type: generative # [default, generative]
 
 trans_enc_cfg:
   embed_dim: 1024
@@ -52,6 +53,7 @@ trans_enc_cfg:
   out_chans: 512
   unpatch_size: 1
   reg_tokens: 0
+  compile_model: false
 
 trans_dec_cfg:
   embed_dim: 1024
@@ -69,6 +71,7 @@ trans_dec_cfg:
   out_chans: 512
   unpatch_size: 2 # sem decoder -> cnn decoder
   reg_tokens: 0
+  compile_model: false
 
 distillation_kwargs:
   dino_feature_dim: 1024

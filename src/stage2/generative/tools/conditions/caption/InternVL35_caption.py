@@ -501,7 +501,7 @@ if __name__ == "__main__":
     # Use the main_process_dataloader_img function to process the dataloader
     main_process_dataloader_img(
         dl,
-        rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
+        rgb_channels=[0, 1, 2],  # Common RGB channels for satellite imagery
         save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions/tmp",
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",

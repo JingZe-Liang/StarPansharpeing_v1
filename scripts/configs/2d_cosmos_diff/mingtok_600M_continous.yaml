@@ -23,6 +23,8 @@ accelerator:
     num_steps: 1
 
 vq_loss:
+  reconstruction_weight: 4.0
+  reconstruction_loss_type: mse
   disc_in_channels: 512 #${dataset.channels} ## interp conv
   # perceptual loss
   perceptual_weight: 0.2
@@ -86,10 +88,9 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  disc_weight: 0.1
+  disc_weight: 0.0
   ssim_weight: 0.0
   gen_loss_weight: null
-  reconstruction_loss_type: mse
   force_not_use_recon_loss: true # compute fm loss in transport, not in vqloss class
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
@@ -119,7 +120,7 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path:
-  ema_load_path: runs/stage1_mingtok/2025-11-07_18-59-28_mingtok_600M_continous/ema
+  ema_load_path: runs/stage1_mingtok/2025-11-09_21-19-05_mingtok_600M_continous/ema
   compile_model: false
   only_load_tokenizer: true
   seperate_enc_dec: false
@@ -137,45 +138,45 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    _partial_: true
-    betas: [0.95, 0.99]
-    oned_param_algo: lion
-    muon_params_defaults:
-      lr: 6.0e-4
-      weight_decay: 0.01
-    oned_params_defaults:
-      lr: 3.0e-4
-      weight_decay: 0.0
-
-    # _target_: torch.optim.AdamW
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-5
-    # eps: 1.0e-8
     # betas: [0.95, 0.99]
-    # # foreach: true
+    # oned_param_algo: adamw
+    # muon_params_defaults:
+    #   lr: 5.0e-4
+    #   weight_decay: 0.1
+    # oned_params_defaults:
+    #   lr: 3.0e-4
+    #   weight_decay: 0.0
+
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 6.0e-4
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+    betas: [0.95, 0.99]
+    # foreach: true
     # fused: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    _partial_: true
-    betas: [0.5, 0.9]
-    oned_param_algo: lion
-    muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.01
-    oned_params_defaults:
-      lr: 3.0e-4
-      weight_decay: 0.0
-
-    # _target_: torch.optim.AdamW
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-5
-    # eps: 1.0e-8
-    # betas: [0.0, 0.9] #[0.9, 0.95]
-    # # foreach: true
+    # betas: [0.5, 0.9]
+    # oned_param_algo: adamw
+    # muon_params_defaults:
+    #   lr: 5.0e-4
+    #   weight_decay: 0.1
+    # oned_params_defaults:
+    #   lr: 3.0e-4
+    #   weight_decay: 0.0
+
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 6.0e-4
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
     # fused: true
 
   tokenizer_sched:
@@ -185,7 +186,7 @@ train:
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
-    min_lr: 1.0e-5
+    min_lr: 1.0e-4
     # _target_: transformers.optimization.get_constant_schedule_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000
@@ -197,7 +198,7 @@ train:
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
-    min_lr: 1.0e-5
+    min_lr: 1.0e-4
     # _target_: transformers.optimization.get_constant_schedule_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000

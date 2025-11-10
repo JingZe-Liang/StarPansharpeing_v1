@@ -12,7 +12,6 @@ from torch.autograd import profiler
 from torch.nn.modules.module import _IncompatibleKeys
 
 from ..config_utils import function_config_to_basic_types
-from ..logging.print import log_print
 
 
 @profiler.record_function("load_weights_with_shape_check")
@@ -61,12 +60,11 @@ def load_weights_with_shape_check(
             if param.shape == weight.shape:
                 param.data.copy_(weight.data)
                 unexpected_keys.remove(weight_name)
-                log_print(f"Weights loaded for {name} (shape: {param.shape})", "debug")
+                logging.debug(f"Weights loaded for {name} (shape: {param.shape})")
             else:
-                log_print(
+                logging.warning(
                     f"Shape mismatch for {name}: "
                     f"expected {param.shape}, got {weight.shape} - skipping",
-                    "warning",
                 )
                 missing_keys.append(name)
                 unexpected_keys.remove(weight_name)
@@ -81,20 +79,19 @@ def load_weights_with_shape_check(
                 )  # This key was expected, and remove from the total key set
                 if param.shape == weights[name].shape:
                     param.data.copy_(weights[name].data)
-                    log_print(
-                        f"Weights loaded for {name} (shape: {param.shape})", "debug"
-                    )
+                    # log_print(
+                    #     f"Weights loaded for {name} (shape: {param.shape})", "debug"
+                    # )
                 else:
-                    log_print(
+                    logging.warning(
                         f"Shape mismatch for {name}: "
                         f"expected {param.shape}, got {weights[name].shape} - skipping",
-                        "warning",
                     )
                     # Consider this a missing key since we didn't load it
                     missing_keys.append(name)
             else:
                 missing_keys.append(name)
-                log_print(f"{name} not found in weights", "warning")
+                logging.warning(f"{name} not found in weights")
 
     return _IncompatibleKeys(missing_keys=missing_keys, unexpected_keys=unexpected_keys)
 
@@ -171,9 +168,9 @@ def load_fsdp_model(
                 else f"{FSDP_MODEL_NAME}_{model_index}.bin"
             )
             input_model_file = os.path.join(input_dir, weights_name)
-            log_print(f"Loading model from {input_model_file}")
+            logging.info(f"Loading model from {input_model_file}")
             state_dict = torch.load(input_model_file)
-            log_print(f"Model loaded from {input_model_file}")
+            logging.info(f"Model loaded from {input_model_file}")
         elif fsdp_plugin.state_dict_type == StateDictType.LOCAL_STATE_DICT:
             weights_name = (
                 f"{FSDP_MODEL_NAME}_rank{accelerator.process_index}.bin"
@@ -181,16 +178,16 @@ def load_fsdp_model(
                 else f"{FSDP_MODEL_NAME}_{model_index}_rank{accelerator.process_index}.bin"
             )
             input_model_file = os.path.join(input_dir, weights_name)
-            log_print(f"Loading model from {input_model_file}")
+            logging.info(f"Loading model from {input_model_file}")
             state_dict = torch.load(input_model_file)
-            log_print(f"Model loaded from {input_model_file}")
+            logging.info(f"Model loaded from {input_model_file}")
         elif fsdp_plugin.state_dict_type == StateDictType.SHARDED_STATE_DICT:
             ckpt_dir = (
                 os.path.join(input_dir, f"{FSDP_MODEL_NAME}_{model_index}")
                 if f"{FSDP_MODEL_NAME}" not in input_dir
                 else input_dir
             )
-            log_print(f"Loading model from {ckpt_dir}")
+            logging.info(f"Loading model from {ckpt_dir}")
             state_dict = {
                 "model": _get_model_state_dict(model, adapter_only=adapter_only)
             }
@@ -200,7 +197,7 @@ def load_fsdp_model(
                 planner=DefaultLoadPlanner(),
             )
             state_dict = state_dict["model"]
-            log_print(f"Model loaded from {ckpt_dir}")
+            logging.info(f"Model loaded from {ckpt_dir}")
 
         if fsdp_plugin.fsdp_version == 1:
             load_result = _set_model_state_dict(
@@ -392,7 +389,7 @@ def load_peft_model_checkpoint(
         base_sd = accelerate.utils.load_state_dict(base_model_pretrained_path)
         # Load the base model
         _incompact_keys = base_model.load_state_dict(base_sd, strict=False)
-        log_print(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
+        logging.info(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
     else:
         warnings.warn(
             "No base model checkpoint provided. Please make sure the base model is initialized correctly."
@@ -469,6 +466,6 @@ def load_diffbands_tokenizer_then_peft_lora(
         **peft_kwargs,
     )
 
-    log_print(f"Tokenizer loaded with PEFT config: {peft_config}")
+    logging.info(f"Tokenizer loaded with PEFT config: {peft_config}")
 
     return peft_config, tokenizer

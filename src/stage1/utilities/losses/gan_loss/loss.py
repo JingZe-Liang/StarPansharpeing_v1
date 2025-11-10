@@ -528,7 +528,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * discriminator
         self.use_disc = disc_weight > 0.0 and disc_weight is not None
         logger.log("NOTE", f"[VQ fn loss]: using discriminator {self.use_disc}")
-        if disc_network_type.lower() in ("none", None):
+        if disc_network_type is None or disc_network_type == "none":
             self.discriminator = None
             assert not self.use_disc, (
                 f"Discriminator is not used (weight={disc_weight}) but "

@@ -6,6 +6,7 @@ Features:
 """
 
 import math
+import os
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, List, Optional, Tuple, Type, Union
@@ -53,6 +54,8 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Annotated
 
+from src.utilities.network_utils import null_decorator_no_any_kwgs
+
 from .blocks import (
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,
@@ -81,6 +84,14 @@ try:
 
 except ImportError:
     JVP_FLASH_ATTN_ENABLED = False
+
+
+compile_forward_fn = bool(int(os.getenv("MODEL_COMPILED", "1")))
+
+if compile_forward_fn:
+    _compile_decorator = torch.compile
+else:
+    _compile_decorator = null_decorator_no_any_kwgs
 
 
 def _jvp_math_attention(
@@ -586,6 +597,7 @@ class AttentionBlock(nn.Module):
 
         self._forward_type = "attention_block"
 
+    @_compile_decorator
     def _forward_attention_block(self, x, rope=None):
         x = x + self.dp1(self.ls1(self.sa(self.norm1(x), rope=rope)))
         x = x + self.dp2(self.ls2(self.ffn(self.norm2(x))))
@@ -685,6 +697,7 @@ class AttentionBlockCondition(AttentionBlock):
         z_1d = rearrange(z_2d_interp, "b c zh zw -> b (zh zw) c")
         return z_1d
 
+    @_compile_decorator
     def _forward_condition_attention_block(
         self, x, c, t=None, inp_shape=None, rope=None
     ):
@@ -1050,6 +1063,8 @@ class TransformerTokenizer(nn.Module):
         # Patch embedding
         if patcher_type in ("patch_embedder", "progressive_patch_embedder"):
             if patcher_type == "progressive_patch_embedder":
+                raise NotImplementedError("Bug here.")
+
                 assert patch_prog_dims is not None, (
                     "patch_prog_dims must be provided for progressive patch embedding"
                 )
@@ -1495,6 +1510,7 @@ class TransformerTokenizer(nn.Module):
         index = get_intermidates or []
         for i, blk in enumerate(self.layers):
             # Rope
+            rope_ = None
             if self._rope_is_mixed:
                 # need to regenerate rope for each layer
                 if isinstance(rope, NaFlexRopeIterator):
@@ -1604,6 +1620,15 @@ class TransformerTokenizer(nn.Module):
 
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
+
+
+class TransformerTokenizerIJEPA(TransformerTokenizer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _ijepa_mask_x(self, x, masks_x):
+        # Apply the IJEPA mask to the input tensor x
+        ...
 
 
 if __name__ == "__main__":

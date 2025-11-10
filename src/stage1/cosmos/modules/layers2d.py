@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """The model definition for Continuous 2D layers
 
 Adapted from: https://github.com/CompVis/stable-diffusion/blob/
@@ -33,6 +32,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from timm.layers import create_conv2d, create_norm_layer
 from timm.layers.layer_scale import LayerScale2d
 from typing_extensions import deprecated
 
@@ -211,7 +211,6 @@ class Encoder(nn.Module):
         padding_mode: str = "zeros",
         norm_type: str = "gn",
         norm_groups: int = 32,
-        # downsample_manually_pad: bool = False,  # FIXME: True orginally
         resample_norm_keep: bool = False,
         adaptive_mode: str = "slice",
         **ignore_kwargs,
@@ -559,7 +558,7 @@ class Decoder(nn.Module):
                 mode=adaptive_mode,
             )
 
-        # fsdp warpper, but not used
+        # Ignore it: fsdp warpper, but not used
         _wrap_fsdp_last_layer = ignore_kwargs.get(
             "wrap_fsdp_last_layer", False
         )  # TODO: remove this
@@ -611,6 +610,8 @@ from src.stage1.cosmos.modules.utils import AdaptiveGroupNorm
 
 
 class GenerativeDecoder(Decoder):
+    """Adapted from WeTok"""
+
     def __init__(
         self,
         out_channels: int | list[int],
@@ -628,6 +629,7 @@ class GenerativeDecoder(Decoder):
             "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
         ] = "RepeatConv",
         upsample_shortcut: Literal["duplicating"] | None = None,
+        upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
@@ -643,6 +645,7 @@ class GenerativeDecoder(Decoder):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
+        adaptive_mode: str = "slice",
         per_layer_noise: bool = False,
         **ignore_kwargs,
     ):
@@ -660,6 +663,7 @@ class GenerativeDecoder(Decoder):
             use_residual_factor=use_residual_factor,
             upsample_type=upsample_type,
             upsample_shortcut=upsample_shortcut,
+            upsample_kwargs=upsample_kwargs,
             conv_out_module=conv_out_module,
             attn_type=attn_type,
             block_name=block_name,
@@ -675,6 +679,7 @@ class GenerativeDecoder(Decoder):
             patch_size=patch_size,
             patch_method=patch_method,
             resample_norm_keep=resample_norm_keep,
+            adaptive_mode=adaptive_mode,
             **ignore_kwargs,
         )
 
@@ -682,13 +687,8 @@ class GenerativeDecoder(Decoder):
 
         # First conv_in should be [z, noise]
         block_in = channels * channels_mult[self.num_resolutions - 1]
-        self.conv_in = torch.nn.Conv2d(
-            z_channels * 2,
-            block_in,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            padding_mode=padding_mode,
+        self.conv_in = create_conv2d(
+            z_channels * 2, block_in, 3, padding_mode=padding_mode
         )
 
         # Code conditioning blocks
@@ -696,17 +696,41 @@ class GenerativeDecoder(Decoder):
         self.noise_ls = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block_out = channels * channels_mult[i_level]
-            adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
+            # adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
+            adap_gn = create_norm_layer(
+                "adaptivegn", z_channels, in_chan=block_in, eps=1e-6
+            )
             self.cond_layers.append(adap_gn)
             if self.per_layer_noise:
-                self.noise_ls.append(LayerScale2d(block_in))
+                layer_noise_proj = nn.ModuleDict(
+                    {
+                        # ls(cat(h, noise)) init relative small
+                        "ls": LayerScale2d(
+                            block_in * 2, init_values=1e-4, inplace=True
+                        ),
+                        "norm": create_norm_layer(
+                            "groupnorm", z_channels, num_groups=32
+                        ),
+                        "proj": nn.Sequential(
+                            nn.SiLU(),
+                            create_conv2d(
+                                2 * block_in,
+                                block_in,
+                                3,
+                                padding_mode=padding_mode,
+                            ),
+                        ),
+                    }
+                )
+                self.noise_ls.append(layer_noise_proj)
 
     @no_type_check
     def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
         cond = z.clone()
 
+        # first cat the noise with z as the condition
         noise = torch.rand_like(z)
-        z = torch.cat([z, noise], dim=1)
+        z = torch.cat([z, noise], dim=1)  # cat z with an additional noise
         h = self.conv_in(z)
 
         # middle
@@ -716,24 +740,34 @@ class GenerativeDecoder(Decoder):
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
-            h = self.cond_layers[i_level](h, cond)
+            # layerscale a noise and inject into the hiddens
             if self.per_layer_noise:
+                layer_noise_proj = self.noise_ls[i_level]
                 layer_noise = torch.randn_like(h)
-                h = h + self.noise_ls[i_level](layer_noise)
+                # norm, cat, ls, proj
+                h_normed = layer_noise_proj["norm"](h)
+                h_noisy = torch.cat([h_normed, layer_noise], dim=1)
+                h_scaled = layer_noise_proj["ls"](h_noisy)
+                h = layer_noise_proj["proj"](h_scaled) + h
+
+            # conditioned on the input z
+            h = self.cond_layers[i_level](h, cond)  # adaGN
+
+            # blocks
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
+
+            # upsample
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
 
+        # out layer
         h = self.norm_out(h)
         h = nonlinearity(h)
-        if not self.use_diffbands_input:
-            conv_out_h = (h,)
-        else:
-            assert out_channels is not None, "out_channels should be provided"
-            conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
+        assert out_channels is not None, "out_channels should be provided"
+        conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
         h = self.conv_out(*conv_out_h)
         h = self.unpatcher(h)
         return h

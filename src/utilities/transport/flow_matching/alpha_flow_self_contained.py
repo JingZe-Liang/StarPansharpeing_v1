@@ -562,3 +562,74 @@ class AlphaFlow(nn.Module):
         }
 
         return loss_dict
+
+
+def get_alpha_flow_default_cfg() -> EasyDict:
+    """
+    Generate default configuration for AlphaFlow using OmegaConf.from_dotlist.
+
+    Returns
+    -------
+    EasyDict
+        Default configuration matching the structure defined in alphaflow.yaml
+    """
+    from omegaconf import OmegaConf
+
+    # Default configuration as dotlist (key=value format)
+    default_cfg_str = [
+        # Adaptive loss weight epsilon
+        "adaptive_loss_weight_eps=0.001",
+        # Time sampling for flow matching (when t_next == t)
+        "time_sampling_fm.timestep_distrib_type=logit_norm",
+        "time_sampling_fm.scale=1.0",
+        "time_sampling_fm.location=-0.4",
+        "time_sampling_fm.eps=0",
+        # Distribution for t and t_next when t_next != t (mean flow)
+        "distrib_t_t_next_mf.type=minmax",
+        # Time sampling for t in mean flow
+        "distrib_t_t_next_mf.time_sampling_mf_t.timestep_distrib_type=logit_norm",
+        "distrib_t_t_next_mf.time_sampling_mf_t.scale=1.0",
+        "distrib_t_t_next_mf.time_sampling_mf_t.location=-0.4",
+        "distrib_t_t_next_mf.time_sampling_mf_t.eps=0",
+        # Time sampling for t_next in mean flow
+        "distrib_t_t_next_mf.time_sampling_mf_t_next.timestep_distrib_type=logit_norm",
+        "distrib_t_t_next_mf.time_sampling_mf_t_next.scale=1.0",
+        "distrib_t_t_next_mf.time_sampling_mf_t_next.location=-0.4",
+        "distrib_t_t_next_mf.time_sampling_mf_t_next.eps=0",
+        # Ratio schedule for flow matching (% of t_next == t)
+        "ratio_fm.scheduler=constant",
+        "ratio_fm.initial_value=0.75",
+        "ratio_fm.end_value=0.75",
+        "ratio_fm.change_init_steps=0",
+        "ratio_fm.change_end_steps=0",
+        "ratio_fm.gamma=1.0",
+        "ratio_fm.clamp_value=0.0",
+        "ratio_fm.up_clamp_value=null",
+        # Alpha schedule
+        "alpha.scheduler=constant",
+        "alpha.initial_value=0.0",
+        "alpha.end_value=0.0",
+        "alpha.change_init_steps=0",
+        "alpha.change_end_steps=0",
+        "alpha.gamma=1.0",
+        "alpha.clamp_value=0.0",
+        "alpha.discrete_training=false",
+        "alpha.up_clamp_value=null",
+        # CFG parameters
+        "cfg_params.omega=1.0",
+        "cfg_params.kappa=0.0",
+        "cfg_params.t_min=0.0",
+        "cfg_params.t_max=1.0",
+        # Maximum training steps
+        "max_steps=100000",
+        # Clamping value for velocity
+        "clamp_utgt=4.0",
+    ]
+
+    # Create OmegaConf from dotlist
+    omega_cfg = OmegaConf.from_dotlist(default_cfg_str)
+
+    # Convert to EasyDict for backward compatibility
+    cfg = EasyDict(OmegaConf.to_container(omega_cfg, resolve=True))
+
+    return cfg

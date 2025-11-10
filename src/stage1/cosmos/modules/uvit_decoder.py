@@ -348,7 +348,11 @@ class UViTDecoder(nn.Module):
                     nn.init.zeros_(module.bias)
 
             if isinstance(module, nn.Conv2d):
-                nn.init.xavier_normal_(module.weight)
+                if "_conv_in" in name or "conv_out" in name:
+                    nn.init.xavier_uniform_(module.weight)
+                    logger.debug(f"uniformly inited {name}")
+                else:
+                    nn.init.xavier_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -370,7 +374,7 @@ class UViTDecoder(nn.Module):
 
     def get_time_embed(
         self, sample: torch.Tensor, timesteps: tuple | torch.Tensor | float
-    ) -> torch.Tensor:
+    ):
         bs, device = sample.shape[0], sample.device
         if isinstance(timesteps, (list, tuple)):
             timesteps = [self._expand_time(t, bs, device) for t in timesteps]
@@ -503,7 +507,9 @@ class UViTDecoder(nn.Module):
         # 1. Time embedding
         if r is not None:
             t = (t, r)
-        t_emb, delta_emb = self.get_time_embed(sample=x, timesteps=t)
+        # force to compute on fp32
+        with torch.amp.autocast("cuda", torch.float32):
+            t_emb, delta_emb = self.get_time_embed(sample=x, timesteps=t)
 
         # 2. Down blocks
         x, enc_res = self._forward_downs(x, t_emb, ctx_emb, use_act_ckpt=use_act_ckpt)

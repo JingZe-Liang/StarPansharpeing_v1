@@ -74,6 +74,7 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
     """A CombinedStreamingDataset that also returns the index of each sample."""
 
     def __init__(self, combined_is_cycled=False, *args, **kwargs) -> None:
+        kwargs.setdefault("seed", 2025)
         super().__init__(*args, **kwargs)
         self.combined_is_cycled = combined_is_cycled
 
@@ -110,7 +111,7 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
         if self.combined_is_cycled:
             logger.error(
                 "The combined dataset is cycled, not supported for indexing. "
-                "Return using __iter__ method sample."
+                "Return using __iter__ method to sample."
             )
             raise IndexError(f"Index {idx} not supported for cycled combined dataset.")
 
@@ -143,6 +144,7 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
         *args,
         **kwargs,
     ):
+        kwargs.setdefault("seed", 2025)
         super().__init__(
             [dataset], length=length, transform=self.transform, *args, **kwargs
         )
@@ -179,6 +181,7 @@ class _BaseStreamingDataset(StreamingDataset):
         if index_file_name is not None:
             litdata_utils._INDEX_FILENAME = f"{index_file_name}.json"
 
+        kwargs.setdefault("seed", 2025)
         super().__init__(input_dir=input_dir, *args, **kwargs)
 
         # change back
@@ -969,7 +972,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
     )
 
     loader_kwargs["collate_fn"] = collate_fn_skip_none(1000)
-    dl = SizeBasedBatchsizeStreamingDataloader(
+    dataloader = SizeBasedBatchsizeStreamingDataloader(
         ds_total,
         size_based_batch_sizes=macro_sampled_batch_size,
         cache_minor=True,
@@ -1002,9 +1005,9 @@ def create_hyper_image_litdata_flatten_paths_loader(
     #         logger.info(
     #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
     #             tqdm=True,
-    #         )
+    # )
 
-    return dataset, dl
+    return dataset, dataloader
 
 
 def __test_create_hyper_image_litdata_loader():
@@ -1179,18 +1182,18 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
     # __test_normal_image_loader()
-    __test_get_item_key()
+    # __test_get_item_key()
 
-    # from omegaconf import OmegaConf
+    from omegaconf import OmegaConf
 
-    # cfg = OmegaConf.load(
-    #     "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
-    #     # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
-    # )
+    cfg = OmegaConf.load(
+        "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
+        # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
+    )
 
-    # logger.info(cfg.train_loader.paths)
-    # create_hyper_image_litdata_flatten_paths_loader(
-    #     paths=cfg.train_loader.paths,
-    #     # weights=cfg.train_loader.weights,
-    #     loader_kwargs=cfg.train_loader.loader_kwargs,
-    # )
+    logger.info(cfg.train_loader.paths)
+    create_hyper_image_litdata_flatten_paths_loader(
+        paths=cfg.train_loader.paths,
+        weights=cfg.train_loader.weights,
+        loader_kwargs=cfg.train_loader.loader_kwargs,
+    )

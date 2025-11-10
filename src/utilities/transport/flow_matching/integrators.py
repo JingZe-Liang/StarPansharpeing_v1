@@ -1,6 +1,7 @@
 import math
 
 import torch as th
+from loguru import logger
 from torchdiffeq import odeint
 
 
@@ -24,14 +25,33 @@ def _time_shift(
     return shifted_timesteps
 
 
-def get_timesteps(t0=0, t1=1, num_steps=100, time_type: str = "linear"):
-    if time_type == "linear":
+def get_timesteps(
+    t0=0,
+    t1=1,
+    num_steps=100,
+    time_type: str = "uniform",
+    discrete_timesteps: th.Tensor | None = None,
+):
+    logger.debug(
+        f"[FM sampler]: use timestep type: {time_type} with {num_steps} steps."
+    )
+
+    if discrete_timesteps is not None:
+        # ensure the discreate timesteps are sorted
+        t = discrete_timesteps.sort().values
+        if t[0].item() != 0.0:
+            t = th.cat([th.tensor([0.0]).to(t.device), t], dim=0)
+        if t[-1].item() != 1.0:
+            t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
+        return t
+
+    if time_type == "uniform":
         t = th.linspace(t0, t1, num_steps)
     else:
         t_typ = time_type.split("_")
         if isinstance(t_typ, list):
-            t_typ = t_typ[0]
             kwargs = t_typ[1:]
+            t_typ = t_typ[0]
         else:
             kwargs = None
 
@@ -41,6 +61,7 @@ def get_timesteps(t0=0, t1=1, num_steps=100, time_type: str = "linear"):
             t = th.linspace(t1, t0, num_steps).pow(p)
             t = t.flip(-1)
         elif t_typ == "shift":
+            # Takes from flux dev.1 code
             img_seq_len: int = int(kwargs[0])
             if len(kwargs) == 3:
                 basic_shift, max_shift = float(kwargs[1]), float(kwargs[2])
@@ -54,6 +75,13 @@ def get_timesteps(t0=0, t1=1, num_steps=100, time_type: str = "linear"):
             t = t.flip(-1)
         else:
             raise NotImplementedError(f"Time type {time_type} is not supported.")
+
+    # Ensure the last timestep is 1.
+    if float(t[-1]) != 1.0:
+        logger.warning(
+            f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0."
+        )
+        t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
 
     return t
 
@@ -147,7 +175,7 @@ class ode:
         num_steps,
         atol,
         rtol,
-        time_type: str = "pow_2.5",
+        time_type: str = "uniform",
         temperature=1.0,
     ):
         assert t0 < t1, "ODE sampler has to be in forward time"

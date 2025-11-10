@@ -153,7 +153,8 @@ train_loader:
     shuffle: false
 
   #         3    4  8  10  12 13 13 32 50 150 175 202 202  224 242 368  369
-  weights: [20, 20, 10, 8, 6, 6, 5, 5, 5, 5, 8, 4, 3, 7, 3, 3, 5]
+  # weights: [20, 20, 10, 8, 6, 6, 5, 5, 5, 5, 8, 4, 3, 7, 3, 3, 5]
+  weights: [18, 18, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
@@ -247,6 +248,10 @@ val_loader:
       202bands_256:
         - ["data/hyspecnet11k/LitData_hyper_images"]
         - resize_before_transform: 256
+
+      202bands_128:
+        - ["data2/HyperspectralEarth/LitData_hyper_images"]
+        - resize_before_transform: 128
 
       224bands_128:
         - ["data/DryadHyper/LitData_hyper_images"]
