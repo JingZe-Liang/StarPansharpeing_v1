@@ -1302,7 +1302,7 @@ def test_tokenizer_forward_backward(
     count_params=False,
     real_data: str | None = None,
     use_optim=False,
-    device="cuda:0",
+    device="cuda",
     base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
     lora_ckpt: list[str] | None = None,
     lora_changes_chans: dict[str, int] | None = None,
@@ -1337,9 +1337,9 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    torch.cuda.set_device(device)
-
-    default_multi_chans = [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
+    default_multi_chans = (
+        512  # [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
+    )
     # default_nested_chans = 500  # max hyperspectral chans in the training datasets
     config = {
         "model": {
@@ -1347,32 +1347,35 @@ def test_tokenizer_forward_backward(
             "channels": 128,
             "channels_mult": [2, 4, 4],
             "dropout": 0.0,
-            "in_channels": default_multi_chans,
+            "in_channels": 512,
             "spatial_compression": 8,
             "num_res_blocks": 2,
-            "out_channels": default_multi_chans,
+            "out_channels": 512,
             "resolution": 1024,
             "patch_size": 1,
             "patch_method": "haar",
-            "z_channels": 16,
+            "z_channels": 256,
+            "latent_channels": 16,
             "act_checkpoint": True,
             "block_name": "res_block",  # res_block, res_moe
             "padding_mode": "reflect",
             "norm_type": "gn",
             "norm_groups": 32,
             "attn_type": "none",
+            "adaptive_mode": "interp",
+            # "upsample_kwargs": {},
+            # "downsample_kwargs": {},
         },
         "name": "CI",
         "uni_path": base_model_ckpt,
         "loading_type": "pretrained" if Path(base_model_ckpt).exists() else None,
-        "quantizer_type": "psd",
+        "quantizer_type": None,
         # repa
         "hook_for_repa": False,
         "use_repa_loss": True,
         "use_vf_loss": False,
         "vf_on_z_or_module": "z",
         "dino_feature_dim": 1024,
-        # "latent_channels": 16,
         "z_factor": 1,
     }
     if other_model_kwargs:
@@ -1551,9 +1554,15 @@ def test_tokenizer_forward_backward(
 
 
 if __name__ == "__main__":
+    """
+    MODEL_COMPILED=0 python -m src.stage1.cosmos.cosmos_tokenizer
+    """
+    import lovely_tensors as lt
+
+    lt.monkey_patch()
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos_psd/2025-10-03_14-20-29_cosmos_f8c16p1_unified_hyperspectral_psd/ema/tokenizer/model.safetensors",
+        base_model_ckpt="runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
         real_data="RS5M",
         save_pca_vis=False,
         pca_type="z",
@@ -1574,7 +1583,7 @@ if __name__ == "__main__":
         },
         active_lora_name="QB",
         save_img_dir="tmp/vis_pansharpening_loras",
-        rgb_chans=[2, 1, 0],  # [49, 39, 29],  # RGB
+        rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
         max_iters=10,

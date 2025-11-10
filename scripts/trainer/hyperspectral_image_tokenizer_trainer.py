@@ -36,7 +36,9 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 from src.data.hyperspectral_loader import (
     get_hyperspectral_img_loaders_with_different_backends,
 )
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
+from src.stage1.cosmos.inference.utils import (
+    load_jit_model_shape_matched,
+)
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.utilities.train.network import (
     get_model_learnable_params,

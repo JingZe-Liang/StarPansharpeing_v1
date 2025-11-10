@@ -1539,7 +1539,7 @@ if __name__ == "__main__":
     test_shuffle_size = -1
 
     loader_kwargs = dict(
-        loader_type="webdataset",
+        loader_type="wids",
         batch_size=test_batch_size,
         num_workers=test_num_workers,
         shuffle_size=test_shuffle_size,
@@ -1619,12 +1619,13 @@ if __name__ == "__main__":
     step_counter = StepsCounter(["train"])
     test_ds, test_loader = get_hyperspectral_img_loaders_with_different_backends_v2(
         test_wds_path,
-        loader_type="webdataset",
+        loader_type="wids",
         basic_kwargs=loader_kwargs,
         changed_kwargs_by_loader=changed_kwargs,
         chain_loader_infinit=False,
         shuffle_loaders=False,
     )
+    breakpoint()
 
     from tqdm import tqdm
 

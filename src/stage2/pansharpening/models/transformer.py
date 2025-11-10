@@ -8,10 +8,11 @@ from jaxtyping import Array, Float
 from timm.layers import get_act_layer, get_norm_layer
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers.pos_embed_sincos import RotaryEmbeddingCat
 from torch import Tensor
 
-from src.utilities.logging import log
 from src.utilities.config_utils import dataclass_from_dict
+from src.utilities.logging import log
 
 from ...layers import (
     AttentionBlock,
@@ -134,7 +135,7 @@ class Transformer(nn.Module):
                 base_size=self.base_size,
             )
             self.pos_embed.data.copy_(torch.as_tensor(pos_embed).float().unsqueeze(0))
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
             if rope_options is None:
                 self.rope_options = {
                     "dim": dim // self.cfg.num_heads,
@@ -151,6 +152,16 @@ class Transformer(nn.Module):
                 latent_shape=(self.base_size, self.base_size),
                 # does not changed
                 **self.rope_options,
+            )
+        elif self.pos_embed_type == "rope":
+            # rope implem from timm.
+            self.rope_options = {
+                "temperature": 10000.0,
+                "in_pixel": False,
+                "feat_shape": [self.base_size, self.base_size],
+            }
+            self.rope = RotaryEmbeddingCat(
+                dim=dim // self.num_heads, **self.rope_options
             )
         else:
             raise ValueError(
@@ -191,7 +202,11 @@ class Transformer(nn.Module):
                 self.rope_options["latent_shape"] = (h, w)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
-
+        elif self.pos_embed_type == "rope":
+            ph, pw = h // self.patch_size, w // self.patch_size
+            seq_len_x = ph * pw
+            pe = self.rope.get_embed((ph, pw))
+            return pe
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "
@@ -270,7 +285,8 @@ class Transformer(nn.Module):
 
         # patch embedding
         w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        torch.nn.init.xavier_normal_(w.view([w.shape[0], -1]))
+        torch.nn.init.zeros_(self.patch_embed.proj.bias)
 
         # zero-out the head
         norm, lin = self.head

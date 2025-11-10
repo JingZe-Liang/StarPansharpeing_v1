@@ -34,9 +34,10 @@ vq_loss:
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
+    repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_student
-    loss_type: am_radio_spatial
+    loss_type: am_ratio_spatial
     feature_normalize: false
   # vf loss
   vf_loss_weight:
@@ -108,7 +109,7 @@ tokenizer:
     patch_size: 1
     attn_type: none
     padding_mode: reflect # for boundary?
-    adaptive_mode: interp_proj
+    adaptive_mode: interp
 
     # latents
     latent_channels: 16
@@ -139,10 +140,11 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   resume_path:
-  ema_load_path: runs/stage1_cosmos_nested/2025-10-04_02-15-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  ema_load_path: runs/stage1_cosmos_nested/2025-10-21_00-35-10_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
+  grad_checkpoint: true
 
   # augmentations
   aug_pipeline_train_obj: #decoder_deg

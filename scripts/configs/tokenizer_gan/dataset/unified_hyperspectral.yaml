@@ -3,7 +3,7 @@ dataset_names_to_img_size:
   unified_hyperspectral: 512
 
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
-img_size: 512 # place holder
+img_size: 512 # placeholder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 size_128_bs: 20
 size_256_bs: 14
@@ -23,10 +23,10 @@ train_paths:
   - - ${glob:"data/MMOT/hyper_images/*.tar"} # MMOT, ? bands
 
   # 8 bands
-  - - data2/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-{0069..0000}.tar
-    - data2/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
-    - data2/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
-    - data2/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0017..0000}.tar
+  - - data/Multispectral-FMow-full/hyper_images_8bands/FMoW-8_bands-px_1024-RGB-jp2k-80-{0069..0000}.tar
+    - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+    - data/WorldView2/hyper_images/WorldView2-8_bands-px_256-MSI-0000.tar
+    - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-{0017..0000}.tar
     - data/Multispectral-Spacenet-series/01_SN1_buildings_8band.tar
     - data/Multispectral-Spacenet-series/00_SN1_buildings_8band.tar
     - data/Multispectral-Spacenet-series/02_SN2_buildings_PS-MS.tar
@@ -34,10 +34,10 @@ train_paths:
     - data/Multispectral-Spacenet-series/05_SN5_roads_PS-MS.tar
 
   # 4 bands
-  - - data2/Multispectral-FMow-full/hyper_images_4bands/FMoW-4_bands-px_1024-RGB-jp2k-80-{0000..0001}.tar
-    - data2/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
-    - data2/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
-    - data2/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
+  - - data/Multispectral-FMow-full/hyper_images_4bands/FMoW-4_bands-px_1024-RGB-jp2k-80-{0000..0001}.tar
+    - data/QuickBird/hyper_images/QuickBird-4_bands-px_256-MSI-0000.tar
+    - data/WorldView4/hyper_images/WorldView4-4_bands-px_256-MSI-0000.tar
+    - data/IKONOS/hyper_images/IKONOS-4_bands-px_256-MSI-0000.tar
     - data/Gaofen1/hyper_images/Gaofen1-4_bands-px_256-MSI-0000.tar
     - data/Multispectral-Spacenet-series/00_SN4_buildings_PS-RGBNIR.tar
     - data/Multispectral-Spacenet-series/01_SN6_buildings_PS-RGBNIR.tar
@@ -48,8 +48,8 @@ train_paths:
   - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
 
   #> rgb dataset
-  - - data2/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar # large Segmentation unified dataset
-    - data2/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0064..0000}.tar
+  - - data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar # large Segmentation unified dataset
+    - data/Fmow_rgb/hyper_images/FMoW-3_bands-RGB-{0064..0000}.tar
     - data/SkyDiffusion/0000.tar
     - ${glob:"data/RS5M/**/*.tar"}
     - data/TEOChatlas/train/GeoChat_Instruct_images{2..1}.tar
@@ -89,9 +89,9 @@ train_paths:
   #> conditions datasets
   - - ${glob:"data/MMOT/conditions/*.tar"} # auto deflatten the list of list
     - ${glob:"data/RSCaptions/conditions/*.tar"}
-    - data2/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
-    - data2/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0017..0000}.tar
-    - data2/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar
+    - data/DCF_2020/conditions/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
+    - data/DCF_2019/conditions/DCF_2019_Track_2-8_bands-px_512-MSI-{0017..0000}.tar
+    - data/BigEarthNet_S2/conditions/BigEarthNet_data_{0000..0006}.tar
     - data/Houston/conditions/Houston-50_bands-px_512-MSI-0000.tar
     - data/LoveDA/conditions/LoveDA-3_bands-px_1024-0000.tar
     - data/MDAS-HySpex/conditions/MDAS-HySpex-368_bands-px_256-MSI-{0003..0000}.tar
@@ -107,14 +107,14 @@ train_paths:
   # - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 val_paths:
-  - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_0006.tar
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0006.tar
   - - data/TUM_128/hyper_images/TUM_128_data_0006.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-0003.tar
-  - - data2/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
-  - - data2/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
+  - - data/DCF_2019/hyper_images/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar
+  - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
   - - data/Houston/hyper_images/Houston-50_bands-px_512-MSI-0000.tar
   - - data/GID-GF2/hyper_images/GID-GF2-test-3_bands-px_512-MSI-0001.tar
-  - - data2/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
+  - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
   - - data/OHS/hyper_images/OHS-32_bands-px_512-MSI-0015.tar
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
   - - data/MDAS-Optical/hyper_images/MDAS-Optical-4_bands-px_512-MSI-0000.tar

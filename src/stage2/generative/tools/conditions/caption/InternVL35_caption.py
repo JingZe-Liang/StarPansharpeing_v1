@@ -34,7 +34,7 @@ from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
 remote_path = "OpenGVLab/InternVL3_5-8B"
-local_path = "src/stage2/generative/tools/conditions/caption/caption_weights/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
+local_path = "src/stage2/generative/tools/conditions/caption/weights/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
 max_tokens = 300
 default_prompt = f"""
 You will act as a remote sensing analyst to describe the content of the image.
@@ -49,7 +49,7 @@ NOT a normal photo. the photo is taken from a top-down view.
 Do not use the markdown format.
 Do not use the bullet points or numbered lists.
 All reponse and answers must be in English, NO other languages.
-Do not include any personal opinions or subjective views. 
+Do not include any personal opinions or subjective views.
 <image>\n
 Now, please provide your description based on the image.
 """
@@ -416,7 +416,6 @@ def main_process_dataloader_img(
             }
         )
         tbar.set_description(f"Id: {res['id'][0]}")
-
         processed_resumed_n = (
             res["processed"]
             + res["skipped"]
@@ -446,6 +445,8 @@ def main_process_dataloader_img(
 
 if __name__ == "__main__":
     # Test dataloader functionality if possible
+    from braceexpand import braceexpand
+
     from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 
     _resumed = True

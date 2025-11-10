@@ -13,6 +13,7 @@ from timm.layers.create_act import create_act_layer
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 from timm.layers.helpers import to_2tuple
+from timm.layers.pos_embed_sincos import apply_rot_embed_cat
 from torch import Tensor
 
 from .conv import ConvLayer, GLUMBConv, MBConv, ResBlock
@@ -106,7 +107,7 @@ class Attention(Attention_):
         else:
             self.q_norm = self.k_norm = nn.Identity()
 
-    def forward(self, x, mask=None, rope: Callable | None = None):
+    def forward(self, x, mask=None, rope: Callable | Tensor | None = None):
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, C)
@@ -122,7 +123,18 @@ class Attention(Attention_):
 
         # RoPE
         if rope is not None:
-            q, k = rope(q, k)
+            if callable(rope):
+                q, k = rope(q, k)
+            elif torch.is_tensor(rope):
+                # is a tensor
+                q = apply_rot_embed_cat(q, rope)
+                k = apply_rot_embed_cat(k, rope)
+            else:
+                raise ValueError(
+                    "rope must be a callable function or a tensor, got {}".format(
+                        type(rope)
+                    )
+                )
 
         use_fp32_attention = getattr(
             self, "fp32_attention", False
