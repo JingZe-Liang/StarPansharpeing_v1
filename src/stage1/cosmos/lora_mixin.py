@@ -89,6 +89,7 @@ class TokenizerLoRAMixin(nn.Module):
         | None = None,
         # Optional, since configs are in directories
         lora_cfg: dict | LoraConfig | None = None,
+        is_diffbands_lora: bool = True,
     ):
         """
         Initialize the TokenizerLoRAMixin with a base tokenizer and LoRA weights.
@@ -110,6 +111,7 @@ class TokenizerLoRAMixin(nn.Module):
         self.model_peft: PeftModel | None = None
         self.current_lora: str | None = None
         self.current_lora_chan: int | None = None
+        self.is_diffbands_lora = is_diffbands_lora
         scale_factor, shift_factor = tokenizer_scale_shift or (1.0, 0.0)
         self.register_buffer("scale_factor", torch.as_tensor(scale_factor))
         self.register_buffer("shift_factor", torch.as_tensor(shift_factor))

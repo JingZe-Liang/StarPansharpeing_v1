@@ -309,10 +309,10 @@ def configure_logger(
     filters: list[Callable] | Callable | None = None,
     removed=True,
     main_log_lvl_range: tuple | None = None,
-    only_rank_one=False,
+    only_rank_one=True,
     print_rank_info=False,
     add_print_once_filter=True,
-    add_tqdm_filter=False,
+    add_tqdm_filter=True,
     *,
     _auto_=True,  # reserved for once decorator
 ):

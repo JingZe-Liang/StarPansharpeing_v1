@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: hyperspectral
-  - tokenizer: uni_cosmos_f8c16p4
+  - tokenizer: uni_cosmos_f8c16p1_nested
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -18,12 +18,13 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: Apex
+  used: Xiongan
   prefetch_factor: 6
   num_workers: 1
   shuffle_size: -1
   loader_type: webdataset
   shuffle_within_workers: false
+  rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
   # For loading the pretrained multi-channels head
   channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
   dataset_names_to_bs:
@@ -57,12 +58,16 @@ tokenizer:
   use_repa_loss: true
   use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
-  vf_on_z_or_module: z
+  vf_on_z_or_module: z # [z, module]
   dino_feature_dim: 1024
 
   # loading
-  uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  uni_path: runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
   loading_type: pretrained
+
+  # augmentations
+  latent_noise_prob: 0.0
+  use_channel_drop: false
 
   # blocks
   model:
@@ -78,10 +83,11 @@ tokenizer:
     patch_size: 1
     attn_type: none
     padding_mode: reflect # for boundary?
+    adaptive_mode: interp
 
     # latents
     latent_channels: 16
-    z_channels: 16
+    z_channels: 256 # [256, 16]
 
     # train
     act_checkpoint: true
@@ -163,7 +169,7 @@ peft:
 
 train:
   tokenizer_name: cosmos_lora
-  proj_dir: runs/stage1_cosmos_lora/
+  proj_dir: runs/stage1_cosmo_nested_lora/
   finetune_strategy: peft
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -174,14 +180,15 @@ train:
   seperate_enc_dec: false
   only_load_tokenizer: false
   grad_check: false
-  track_metrics: false
+  track_metrics: true
   compile_model: false
   # LoRA related
   conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
   add_norms: false
   save_peft_ckpts: true
   resume_path:
-  ema_load_path: #runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  ema_load_path:
+  grad_checkpoint: true
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

@@ -11,6 +11,7 @@ from typing import Any, Literal, Optional, no_type_check
 import accelerate
 import numpy as np
 import torch
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import (
     LoraConfig,
@@ -503,6 +504,8 @@ class ContinuousImageTokenizer(nn.Module):
         cfg: ContinuousTokenizerConfig,
         model_cfg: EncoderDecoderConfig,
     ):
+        self._is_diffbands = isinstance(model_cfg.in_channels, (tuple, list))
+
         model_kwargs = asdict(model_cfg)
         encoder = Encoder(**model_kwargs)
         if cfg.decoder_type == "default":
@@ -1205,17 +1208,18 @@ class ContinuousImageTokenizer(nn.Module):
 
         # conv in and conv out
         # first conv: diff-bands convs or nn.Conv2d
-        if conv_stem_reinit:  # if reinit, the the conv stem is just an nn.Conv2d
+        if conv_stem_reinit or not self._is_diffbands:
+            # if reinit, the the conv stem is just an nn.Conv2d
             # FIXME: this will add all conv_in convs to fully finetuned, but we only need one conv to be tuned, which will result the state dict is larger
 
-            # conv_in
+            # Encoder conv_in
             module_to_save_layers = ["encoder.encoder.conv_in"]
 
-            # conv_out
+            # Decoder conv_out
             if not self.decoder.decoder._wrap_fsdp_last_layer:
                 _conv_out_name = "decoder.decoder.conv_out"
             else:
-                _conv_out_name = "decoder.decoder.conv_out.wrap_mod"
+                _conv_out_name = "decoder.decoder.conv_out.wrap_mod"  # decrepeted
 
             module_to_save_layers.append(_conv_out_name)
             log_print(
@@ -1244,7 +1248,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # If the Conv stem is not reinit, use the pretrained weights,
         # it should be added with the lora weights
-        if not conv_stem_reinit:
+        if not conv_stem_reinit and self._is_diffbands:
             assert conv_stem_chan is not None, (
                 f"conv_stem_chan must be specified when conv_stem_reinit is False"
             )
@@ -1257,6 +1261,10 @@ class ContinuousImageTokenizer(nn.Module):
             else:
                 _conv_out_name = f"wrap_mod.conv_out_{conv_stem_chan}"
             add_tgt_modules.append(_conv_out_name)
+        else:
+            # NOTE: if the conv in and conv out is nn.Conv2d, since the lora weights A and B
+            # can not be slice or interp, we need to fully finetune them.
+            pass
 
         # Backbone convs
         add_tgt_modules += [
@@ -1334,6 +1342,7 @@ def test_tokenizer_forward_backward(
     from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
     from src.stage1.cosmos.modules import blocks
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
+    from src.utilities.logging import print
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
@@ -1416,10 +1425,10 @@ def test_tokenizer_forward_backward(
         tokenizer.eval()
 
         # Log available LoRAs
-        log_print(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
+        logger.info(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
 
     if count_params:
-        log_print(parameter_count_table(tokenizer))
+        logger.info(parameter_count_table(tokenizer))
 
     is_itered = False
     if real_data is not None:
@@ -1497,7 +1506,7 @@ def test_tokenizer_forward_backward(
                     y_grid = (y_grid + 1) / 2
                     y_grid = (y_grid * 255.0).astype(np.uint8)
                     Image.fromarray(y_grid).save(path)
-                    log_print("save reconstruction image")
+                    logger.info("save reconstruction image", tqdm=True)
 
                 plot_img(y, Path(save_img_dir) / f"recon_{real_data}.png")
                 plot_img(x, Path(save_img_dir) / f"gt_{real_data}.png")
@@ -1506,7 +1515,7 @@ def test_tokenizer_forward_backward(
             if real_data:
                 psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
                 psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
-                # log_print(f"PSNR: {psnr_val}")
+                # logger.info(f"PSNR: {psnr_val}")
                 tbar.set_description(f"PSNR: {psnr_val:.4f} - shape: {x.shape}")
                 metric.update(psnr_val)
 
@@ -1524,7 +1533,7 @@ def test_tokenizer_forward_backward(
                 break
 
         if metric.update_count >= 1:
-            log_print(metric.compute())
+            logger.info(metric.compute())
 
     # print mean and std of the latent
     if compute_mean_std:
@@ -1532,8 +1541,8 @@ def test_tokenizer_forward_backward(
         # s = torch.mean(torch.stack(stds), dim=0)
         m = mean_fn.compute()
         s = std_fn.compute()
-        log_print(f"mean of the latent: {m}")
-        log_print(f"std of the latent: {s}")
+        logger.info(f"mean of the latent: {m}")
+        logger.info(f"std of the latent: {s}")
 
     if save_pca_vis:
         if pca_type == "proj":
@@ -1550,7 +1559,7 @@ def test_tokenizer_forward_backward(
         feat_pca = (feat_pca * 255.0).to(torch.uint8).detach().cpu().numpy()[0]
         feat_pca = feat_pca.transpose(1, 2, 0)
         Image.fromarray(feat_pca).save(f"tmp/repa_feature_pca_{pca_type}.png")
-        log_print(f"Save PCA visualization to tmp/repa_feature_pca_{pca_type}.png")
+        logger.info(f"Save PCA visualization to tmp/repa_feature_pca_{pca_type}.png")
 
 
 if __name__ == "__main__":
@@ -1582,12 +1591,12 @@ if __name__ == "__main__":
             "Xiongan": 256,
         },
         active_lora_name="QB",
-        save_img_dir="tmp/vis_pansharpening_loras",
+        save_img_dir=None,  # "tmp/vis_pansharpening_loras",
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=10,
-        compute_mean_std=False,
+        max_iters=2000,
+        compute_mean_std=True,
         use_optim=False,
         check_grad=False,
     )
