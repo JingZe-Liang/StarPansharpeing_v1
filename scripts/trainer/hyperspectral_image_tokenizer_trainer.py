@@ -1422,6 +1422,10 @@ class CosmosHyperspectralTokenizerTrainer:
             if check_quality is not None:
                 check_quality(x, out_d["recon"])
 
+            logger.trace(
+                f"Train step: {self.global_step}, loss: {tokenizer_loss} - Channels: {x.shape[1]}"
+            )
+
         self.step_train_state()
 
         # log losses

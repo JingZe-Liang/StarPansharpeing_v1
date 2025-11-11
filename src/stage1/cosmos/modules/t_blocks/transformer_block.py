@@ -265,7 +265,7 @@ class VisionTransformer(nn.Module):
         out_channels: Optional[int] = None,
         dropout: float = 0.0,
         num_layers: int = 12,
-        attn_norm: Optional[str] = None,
+        attn_norm: Optional[str] = "layernorm",
         norm_elementwise_affine=True,
         num_attention_heads: Optional[int] = None,
         max_auto_attention_heads: int = 16,

@@ -15,7 +15,7 @@ from typing import Mapping, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from loguru import logger
-from timm.layers import create_norm_layer, create_rope_embed
+from timm.layers import create_conv2d, create_norm_layer, create_rope_embed
 from timm.layers.create_act import create_act_layer
 from timm.layers.weight_init import lecun_normal_
 from timm.models._manipulate import named_apply
@@ -94,6 +94,8 @@ class UViTDecoder(nn.Module):
         in_channels=3,
         z_dim=4,
         channels=128,
+        ctx_emb_dim=512,
+        t_emb_mult: int | None = 2,
         ch_mult=(1, 2, 4, 4),
         act_fn: str = "silu",
         vit_act_fn: str = "silu",
@@ -105,7 +107,9 @@ class UViTDecoder(nn.Module):
         time_scale_shift=True,
         mid_nlayers=12,
         mid_theta=100.0,
+        mid_chan=1024,
         attn_window=8,
+        attn_norm="layernorm",
         eps=1e-5,
         ada_norm=True,
         learned_pos_embed=False,
@@ -139,16 +143,14 @@ class UViTDecoder(nn.Module):
             layers_per_block = [layers_per_block] * len(self.ch_level)
 
         ### Input ###
-        z_conv_in = nn.Conv2d(z_dim, channels, kernel_size=3, padding=1)
+        z_conv_in = create_conv2d(z_dim, channels, 3)
         if isinstance(in_channels, (list, tuple)):
             noise_conv_in = DiffBandsInputConvIn(
                 in_channels, channels, padding_mode="reflect"
             )
         else:
             noise_conv_in = AdaptiveInputConvLayer(in_channels, channels, mode="interp")
-        fused_conv = nn.Conv2d(
-            channels * 2, channels, kernel_size=3, padding=1, groups=channels
-        )
+        fused_conv = create_conv2d(channels * 2, channels, 3, groups=channels)
         self.conv_in = nn.ModuleDict(
             {
                 "z_conv_in": z_conv_in,
@@ -158,7 +160,9 @@ class UViTDecoder(nn.Module):
         )
 
         ### Time ###
-        time_embed_dim = channels * 4
+        time_embed_dim = (
+            channels * t_emb_mult if t_emb_mult is not None else channels * 4
+        )
         self.time_cond_type = time_cond_type
         self.use_delta_t_embed = time_cond_type in ["t-r", "r", "t,t-r", "r,t-r", "t,r,t-r"]  # fmt: skip
 
@@ -181,9 +185,9 @@ class UViTDecoder(nn.Module):
         ### AdaNorm Embedding ###
         if ada_norm:
             self.ada_ctx_proj = torch.nn.Sequential(
-                torch.nn.Conv2d(z_dim, channels, kernel_size=3, stride=1, padding=1),
+                create_conv2d(z_dim, ctx_emb_dim, 1),
                 torch.nn.SiLU(),
-                torch.nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
+                create_conv2d(ctx_emb_dim, ctx_emb_dim, 3, groups=ctx_emb_dim),
             )
 
         ### Down blocks ###
@@ -213,26 +217,33 @@ class UViTDecoder(nn.Module):
                         time_scale_shift=time_scale_shift,
                         resnet_eps=eps,
                         ada_norm=ada_norm,
-                        ada_emb_dim=channels,
+                        ada_emb_dim=ctx_emb_dim,
                     )
                 )
                 logger.debug(
                     f"[UVit ResDown] {i_level=}, {input_channel=}, {output_channel=}"
                 )
 
+        self.connectors = [
+            nn.Conv2d(output_channel, mid_chan, 1),
+            nn.Conv2d(mid_chan, output_channel, 1),
+        ]
+        self.connectors = nn.ModuleList(self.connectors)
+
         # Mid block ###
         down_scale = total_resolutions  # (2 ** (len(self.ch_level) - 1),)
         self.mid_block = UViTMiddleTransformer(
-            inner_dim=output_channel,
+            inner_dim=mid_chan,
             dropout=dropout[-1],
             num_layers=mid_nlayers,
+            attn_norm=attn_norm,
             norm_num_groups=norm_num_groups,
             num_attention_heads=num_attention_heads,
             rope_theta=mid_theta,
             attn_window=attn_window,
             eps=eps,
             ada_norm=ada_norm,
-            ada_emb_dim=channels,
+            ada_emb_dim=ctx_emb_dim,
             learned_pos_embed=learned_pos_embed,
             sample_size=(
                 (image_size // down_scale, image_size // down_scale)
@@ -282,7 +293,7 @@ class UViTDecoder(nn.Module):
                         time_scale_shift=time_scale_shift,
                         resnet_eps=eps,
                         ada_norm=ada_norm,
-                        ada_emb_dim=channels,
+                        ada_emb_dim=ctx_emb_dim,
                     )
                 )
                 logger.debug(
@@ -352,7 +363,8 @@ class UViTDecoder(nn.Module):
                     nn.init.xavier_uniform_(module.weight)
                     logger.debug(f"uniformly inited {name}")
                 else:
-                    nn.init.xavier_normal_(module.weight)
+                    # nn.init.xavier_normal_(module.weight)
+                    nn.init.kaiming_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -432,11 +444,13 @@ class UViTDecoder(nn.Module):
                     hidden_states=x, temb=t_emb, ctx_emb=ctx_emb
                 )
             down_block_res.extend(res_samples)
+        x = self.connectors[0](x)
         return x, down_block_res
 
     def _forward_ups(
         self, x, t_emb, ctx_emb, down_block_res, use_act_ckpt=False
     ) -> torch.Tensor:
+        x = self.connectors[1](x)
         for upsample_block in self.up_blocks:
             res_samples = down_block_res[-len(upsample_block.resnets) :]
             down_block_res = down_block_res[: -len(upsample_block.resnets)]
@@ -489,7 +503,7 @@ class UViTDecoder(nn.Module):
 
         # Concat with z and project
         z_expanded = torch.nn.functional.interpolate(
-            z.contiguous(), size=(x.shape[-2], x.shape[-1]), mode="nearest"
+            z, size=(x.shape[-2], x.shape[-1]), mode="nearest"
         )
 
         # conv ins
@@ -547,7 +561,7 @@ class UViTMiddleTransformer(VisionTransformer):
         out_channels: Optional[int] = None,
         dropout: float = 0.0,
         num_layers: int = 12,
-        attn_norm: Optional[str] = None,
+        attn_norm: Optional[str] = "layernorm",
         norm_elementwise_affine=True,
         num_attention_heads: Optional[int] = None,
         max_auto_attention_heads: int = 16,

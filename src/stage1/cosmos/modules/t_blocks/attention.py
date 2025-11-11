@@ -101,7 +101,7 @@ class Attention(nn.Module):
         dropout: float = 0.0,
         attn_drop: float = 0.0,
         bias: bool = False,
-        qk_norm: Optional[str] = "rmsnorm",
+        qk_norm: Optional[str] = "layernorm",
         cross_attention_norm: Optional[str] = None,
         out_bias: bool = True,
         eps: float = 1e-5,

@@ -23,15 +23,15 @@ def get_norm_layer(
 ):
     if norm_type in [None, False]:
         return None
-    elif norm_type == "layer_norm":
+    elif norm_type in ("layernorm", "layer_norm"):
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
     elif norm_type == "ln_l2":
         return nn.LayerNorm(dim, elementwise_affine=False, bias=False)
     elif norm_type == "layer_norm_across_heads":
         return nn.LayerNorm(dim * heads, eps=eps)
-    elif norm_type == "rms_norm":
+    elif norm_type in ("rmsnorm", "rms_norm"):
         return RMSNorm(dim, eps=eps)
-    elif norm_type == "rms_norm_across_heads":
+    elif norm_type == "rmsnorm_across_heads":
         return RMSNorm(dim * heads, eps=eps)
     elif norm_type == "l2":
         return LpNorm(p=2, dim=-1, eps=eps)

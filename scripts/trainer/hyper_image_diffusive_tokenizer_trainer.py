@@ -1326,23 +1326,28 @@ class CosmosFlowHyperspectralTokenizerTrainer:
 
     def infinity_train_loader(self):
         _chan_seen = {}
+        self._batch = None
 
         while True:
-            for batch in self.train_dataloader:
-                batch = self._randomly_batch_sample_key(batch)
-                if batch is None or batch.get("img", None) is None:
-                    continue
+            if self._batch is not None:
+                yield self._batch
+            else:
+                for batch in self.train_dataloader:
+                    batch = self._randomly_batch_sample_key(batch)
+                    if batch is None or batch.get("img", None) is None:
+                        continue
 
-                # Stats
-                bs, img_chan = batch["img"].shape[:2]
-                if img_chan not in _chan_seen:
-                    _chan_seen[img_chan] = bs
-                else:
-                    _chan_seen[img_chan] += bs
-                if self.global_step % 50 == 0:
-                    logger.debug(f"Samples stats: {str(_chan_seen)}")
+                    # Stats
+                    bs, img_chan = batch["img"].shape[:2]
+                    if img_chan not in _chan_seen:
+                        _chan_seen[img_chan] = bs
+                    else:
+                        _chan_seen[img_chan] += bs
+                    if self.global_step % 50 == 0:
+                        logger.debug(f"Samples stats: {str(_chan_seen)}")
 
-                yield batch
+                    self._batch = batch
+                    yield batch
 
     def train_loop(self):
         _stop_train_and_save = False

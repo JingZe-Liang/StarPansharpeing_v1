@@ -14,6 +14,7 @@ from typing import Any, List, Optional, cast, no_type_check
 import torch
 import torch.nn as nn
 from einops import rearrange
+from einops.layers.torch import Rearrange
 from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from timm.layers import create_conv2d, create_norm_act_layer
@@ -46,6 +47,7 @@ from .modules.flowhead import (
     build_flow_matching_transport,
     build_tim_scheduler,
 )
+from .modules.layers2d import Encoder as ResEncoder
 from .modules.proj import build_mlp
 from .modules.t_transformer import FlowTransformerConditioned
 from .modules.uvit_decoder import UViTDecoder
@@ -128,14 +130,16 @@ def _create_flow_decoder(
     # TODO: add fm config
     is_fm = lambda ft: ft == "fm"
     uvit_flow_str: str = (
-        "in_chan=512 z_dim=1024 channels=128 ch_mult=[1,1,2,4,8] act_fn='silu' "
+        "in_chan=3 z_dim=1024 channels=128 ch_mult=[1,1,2,4,8] act_fn='silu' "
         "vit_act_fn='silu' layers_per_block=2 num_attention_heads=8 "
         "dropout=0.0 norm_num_groups=32 time_scale_shift=true "
-        "mid_nlayers=12 mid_theta=10000.0 eps=1e-5 ada_norm=true "
+        "mid_nlayers=12 mid_chan=1024 mid_theta=10000.0 eps=1e-6 "
+        "ada_norm=true ctx_emb_dim=768 t_emb_mult=4 "
         "learned_pos_embed=false relative_pos_embed=false "
-        f"time_cond_type={'t' if is_fm(flow_type) else 't-r'} "
         "init=null use_act_ckpt=true total_resolutions=16 "
-        f"img_size=512 flow_type={flow_type} cfg_prob=0.0 jvp={True if not is_fm(flow_type) else False}"
+        f"time_cond_type={'t' if is_fm(flow_type) else 't-r'} "
+        f"img_size=512 flow_type={flow_type} cfg_prob=0.0 "
+        f"jvp={True if not is_fm(flow_type) else False}"
     )
     uvit_flow_cfg = OmegaConf.from_dotlist(uvit_flow_str.split(" "))
     # NOTE: supports tim, fm, and mf flows
@@ -160,7 +164,7 @@ def _create_flow_decoder(
         "in_chan=768 embed_dim=768 depth=12 num_heads=12 patch_size=1 mlp_ratio=4.0 "
         "norm_layer='rmsnorm' drop_path=0.1 pe_type=rope rope_kwargs.rope_theta=10000.0 "
         "last_norm='rmsnorm' out_chan=512 decoder_img_size=32 head='linear' "
-        "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=false attn_type='sdpa' "
+        "n_reg_tokens=0 mask_train_ratio=0.0 is_causal=false attn_type='sdpa' "
         # Flow decoder kwargs
         "target_channels=512 z_channels=512 flow_depth=6 flow_width=768 "
         "patch_size=16 flow_img_size=512 grad_checkpointing=false use_cfg=false "
@@ -193,23 +197,45 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
     total_resolution: N downsampled times of the original image size.
     """
     ########### Encoder and decoder
-    # CNN encoder and decoder
-    # f16c64
 
-    enc_str: str = (
-        "in_chan=512 embed_dim=768 depth=12 num_heads=12 patch_size=16 out_patch_size=1 mlp_ratio=4.0 "
-        "norm_layer='rmsnorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
-        "last_norm='rmsnorm' z_dim=768 latent_dim=32 img_size=512 patcher_type='patch_embedder' "
-        "additional_pe=true "
-        "n_reg_tokens=0 mask_ratio_train=0.0 attn_type='sdpa'"
+    ################ Encoder
+    # CNN encoder and decoder
+    # res-cnn encoder f8 + transformer f2l12h8
+
+    res_enc_str: str = (
+        "in_channels=3 out_channels=512 channels=128 attn_resolutions=[32] "
+        "channels_mult=[2,4,4] dropout=0.0 spatial_compression=8 "
+        "num_res_blocks=2 resolution=1024 z_channels=512 "
+        "act_checkpoint=true latent_channels=16 norm_type=gn norm_groups=32 "
+        "block_name=res_block moe_token_mixer_type=res_block hidden_factor=4 "
+        "use_residual_factor=false patch_method=haar patch_size=1 attn_type='none' padding_mode=zeros"
     )
-    enc_cfg = OmegaConf.from_dotlist(enc_str.split(" "))
+    res_enc_cfg = OmegaConf.from_dotlist(res_enc_str.split(" "))
+    transf_enc_str: str = (
+        "in_chan=512 embed_dim=768 depth=8 num_heads=8 patch_size=2 out_patch_size=1 mlp_ratio=4.0 "
+        "norm_layer='layernorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
+        "last_norm='layernorm' out_chan=768 img_size=64 patcher_type='patch_embedder' "
+        "additional_pe=false n_reg_tokens=0 attn_type='sdpa'"
+    )
+    transf_enc_cfg = OmegaConf.from_dotlist(transf_enc_str.split(" "))
+    enc_cfg = OmegaConf.create(
+        {
+            "res_encoder": res_enc_cfg,
+            "transformer_encoder": transf_enc_cfg,
+            # TODO: to check if cnn encoder is useful for hyperspectral data
+            "encoder_type": "hybrid",
+            "z_dim": 768,
+            "latent_dim": 64,
+        }
+    )
+
+    ############# Semantic decoder
 
     dec_str: str = (
-        "in_chan=32 embed_dim=1024 out_chan=1024 depth=12 num_heads=16 patch_size=1 mlp_ratio=4.0 "
-        "norm_layer='rmsnorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
-        "last_norm='rmsnorm' img_size=32 head='linear' "
-        "n_reg_tokens=0 mask_ratio_train=0.0 is_causal=false attn_type='sdpa'"
+        "in_chan=64 embed_dim=1024 out_chan=1024 depth=12 num_heads=16 patch_size=1 mlp_ratio=4.0 "
+        "norm_layer='layernorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
+        "last_norm='layernorm' img_size=32 "
+        "n_reg_tokens=0 is_causal=false attn_type='sdpa'"
     )
     dec_cfg = OmegaConf.from_dotlist(dec_str.split(" "))
 
@@ -237,7 +263,9 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
 
     ######## Tokenizer main config
 
-    main_str = f"decoder_type={decoder_type} compile=false straight_through_latent=true"
+    main_str = (
+        f"decoder_type={decoder_type} compile=false straight_through_latent=false"
+    )
     main_cfg = OmegaConf.from_dotlist(main_str.split(" "))
     main_cfg.sampling_options_default = flow_dec_cfg_dict[flow_type][-1]
 
@@ -414,40 +442,85 @@ def create_sampling_step_fn(
 
 
 class EncoderLowLevel(nn.Module):
+    """
+    NOTE
+        # -----------------------------------------------------------------------------------
+        # Three types of this encoder:
+        #   1. CNN encoder only
+        #   2. Transformer encoder only - seems that does not work for hyperspectral data.
+        #   3. CNN + Transformer encoder
+        # -----------------------------------------------------------------------------------
+    """
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.encoder = TransformerTokenizer(
-            in_chan=cfg.in_chan,
-            embed_dim=cfg.embed_dim,
-            out_chan=cfg.z_dim,
-            num_heads=cfg.num_heads,
-            img_size=cfg.img_size,
-            patch_size=cfg.patch_size,
-            out_patch_size=cfg.out_patch_size,
-            depth=cfg.depth,
-            mlp_ratio=cfg.mlp_ratio,
-            norm_layer=cfg.norm_layer,
-            drop_path=cfg.drop_path,
-            projections={"input": None, "output": "us_average"},
-            pe_type=cfg.pe_type,
-            rope_kwargs=cfg.rope_kwargs,
-            last_norm=cfg.last_norm,
-            mask_train_ratio=cfg.mask_ratio_train,
-            is_causal=False,
-            n_reg_tokens=cfg.n_reg_tokens,
-            attn_type=cfg.attn_type,
-            head="linear",
-            patcher_type=cfg.patcher_type,
-            patch_prog_dims=getattr(cfg, "patch_prog_dims", None),
-        )
-        self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
+        encoder_type = cfg.get("encoder_type", "hybrid")
+        assert encoder_type in (
+            "cnn_only",
+            "transformer_only",
+            "hybrid",
+        ), f""
+        self.encoder_type = encoder_type
+        self.latent_dim = cfg.latent_dim
 
-    def forward(self, x, get_intermidates=None):
-        z, out = self.encoder(
-            x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates
+        res_cfg = cfg.get("res_encoder", None)
+        transf_cfg = cfg.get("transformer_encoder", None)
+        transf_kwargs = dict(
+            **transf_cfg,
+            projections={"input": None, "output": "us_average"},
+            is_causal=False,
+            head="linear",
         )
-        h = self.z_to_latent(z)
+
+        if encoder_type == "hybrid":
+            assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
+            self.res_encoder = ResEncoder(**res_cfg)
+            self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
+            self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
+        elif encoder_type == "cnn_only":
+            assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
+            self.res_encoder = ResEncoder(**res_cfg)
+            self.z_to_latent = nn.Sequential(
+                nn.Conv2d(cfg.z_dim, cfg.latent_dim, 3, 1, 1),
+                Rearrange("b c h w -> b (h w) c"),
+            )
+        else:  # transformer only
+            assert transf_cfg is not None, "transformer_encoder config must be provided"
+            self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
+            self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
+
+    def forward(self, x, get_intermidates: list[int] | None = None):
+        """Encode the input image into low-level latent tokens."""
+        if self.encoder_type == "hybrid":
+            # Hybrid encoder, takes the transformer encoder's intermidates
+            res_out = self.res_encoder(x)
+            z, out = self.transformer_encoder(
+                res_out,
+                ret_2d_tokens=False,
+                ret_all=True,
+                get_intermidates=get_intermidates,
+            )
+            h = self.z_to_latent(z)  # to 1d tokens inside
+
+        elif self.encoder_type == "cnn_only":
+            z, intermidates = self.res_encoder(x, ret_interm_feats=get_intermidates)
+            h = self.z_to_latent(z)
+
+            # Intermidates to 1d tokens
+            feats = []
+            for feat in intermidates:
+                assert feat.ndim == 4, f"feat shape {feat.shape} is not 2d"
+                feats.append(rearrange(feat, "b c h w -> b (h w) c"))
+            out = {"intermidates": feats}
+
+        else:  # transformer only
+            z, out = self.transformer_encoder(
+                x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates
+            )
+            h = self.z_to_latent(z)
+
+        assert h.shape[-1] == self.latent_dim
         return dict(latent=h, z=z, **out)
 
 
@@ -456,26 +529,10 @@ class DecoderSemantic(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.encoder = TransformerTokenizer(
-            in_chan=cfg.in_chan,
-            embed_dim=cfg.embed_dim,
-            out_chan=cfg.out_chan,
-            img_size=cfg.img_size,
-            patch_size=cfg.patch_size,
             patcher_type="linear",
-            depth=cfg.depth,
-            num_heads=cfg.num_heads,
-            mlp_ratio=cfg.mlp_ratio,
-            norm_layer=cfg.norm_layer,
-            drop_path=cfg.drop_path,
             projections={"input": "ds_shortcut", "output": None},
-            pe_type=cfg.pe_type,
-            rope_kwargs=cfg.rope_kwargs,
-            last_norm=cfg.last_norm,
-            mask_train_ratio=0.0,
-            is_causal=cfg.is_causal,
-            n_reg_tokens=cfg.n_reg_tokens,
-            attn_type=cfg.attn_type,
             head="linear",
+            **cfg,
         )
 
     def forward(self, x, get_intermidates=None):
@@ -819,10 +876,15 @@ class DecoderUViT(nn.Module):
         grid_size = img_size // self.t_res
 
         self.decoder = UViTDecoder(
+            # basic
             in_channels=cfg.in_chan,
             z_dim=cfg.z_dim,
             channels=cfg.channels,
             ch_mult=cfg.ch_mult,
+            ctx_emb_dim=cfg.ctx_emb_dim,
+            t_emb_mult=cfg.t_emb_mult,
+            time_scale_shift=cfg.time_scale_shift,
+            # transformer
             act_fn=cfg.act_fn,
             vit_act_fn=cfg.vit_act_fn,
             layers_per_block=cfg.layers_per_block,
@@ -830,15 +892,17 @@ class DecoderUViT(nn.Module):
             total_resolutions=cfg.total_resolutions,
             dropout=cfg.dropout,
             norm_num_groups=cfg.norm_num_groups,
-            time_scale_shift=cfg.time_scale_shift,
             mid_nlayers=cfg.mid_nlayers,
             mid_theta=cfg.mid_theta,
+            # ada norm
             eps=cfg.eps,
             ada_norm=cfg.ada_norm,
             learned_pos_embed=cfg.learned_pos_embed,
+            # pe
             image_size=cfg.img_size,
             relative_pos_embed=cfg.relative_pos_embed,
             time_cond_type=cfg.time_cond_type,
+            # train
             init=cfg.init,
             use_act_ckpt=cfg.use_act_ckpt,
         )
@@ -1181,24 +1245,27 @@ class FlowTokenizer(nn.Module):
         self.z: Tensor | None = None
         self.sem_z: Tensor | None = None
         self._hw: tuple | list | None = None
-        self.low_lvl_cache_layers = self.proj_cfg.low_lvl_cache_layers
-        self.sem_cache_layers = self.proj_cfg.sem_cache_layers
-        self.low_lvl_proj_is_multi = is_tuple_list(self.low_lvl_cache_layers)
-        self.sem_proj_is_multi = is_tuple_list(self.sem_cache_layers)
+        self.low_lvl_proj_is_multi = False
+        self.sem_proj_is_multi = False
+        if self.use_repa:
+            self.low_lvl_cache_layers = self.proj_cfg.low_lvl_cache_layers
+            self.sem_cache_layers = self.proj_cfg.sem_cache_layers
+            self.low_lvl_proj_is_multi = is_tuple_list(self.low_lvl_cache_layers)
+            self.sem_proj_is_multi = is_tuple_list(self.sem_cache_layers)
+            self._build_repa_projections()
 
         # trainer compatiblity
         self._use_repa_loss = self.use_repa
         self._use_vf_loss = False
-
-        self._build_repa_projections()
 
         # compile model parts
         self._compile = getattr(self.tok_cfg, "compile", False)
         if self._compile:
             logger.info("Compiling FlowTokenizer model parts...")
             # Only compile the heavy parts - transformer
-            self.low_level_encoder.encoder = torch.compile(
-                self.low_level_encoder.encoder)  # fmt: skip
+            self.low_level_encoder.encoder = torch.compile(  # type: ignore
+                self.low_level_encoder.encoder
+            )
             self.semantic_decoder.encoder = torch.compile(self.semantic_decoder.encoder)
             self.pixel_decoder.decoder = torch.compile(self.pixel_decoder.decoder)  # type: ignore
             logger.info("Compilation done.")
@@ -1281,22 +1348,30 @@ class FlowTokenizer(nn.Module):
 
     def _encode_latent(self, x):
         low_lvl_out = self.low_level_encoder(
-            x, get_intermidates=self.low_lvl_cache_layers if self.training else None
+            x,
+            get_intermidates=self.low_lvl_cache_layers
+            if self.training and self.use_repa
+            else None,
         )
         # Cache low level features
         self.z = (
             low_lvl_out["intermidates"]
             if self.low_lvl_proj_is_multi
-            else low_lvl_out["h"]
+            else low_lvl_out["latent"]
         )
         return low_lvl_out
 
     def _sem_decode(self, latent):
         sem_out = self.semantic_decoder(
-            latent, get_intermidates=self.sem_cache_layers if self.training else None
+            latent,
+            get_intermidates=self.sem_cache_layers
+            if (self.training and self.use_repa)
+            else None,
         )
         # Cache semantic features
-        self.sem_z = sem_out["intermidates"] if self.sem_proj_is_multi else sem_out["z"]
+        self.sem_z = (
+            sem_out["intermidates"] if self.sem_proj_is_multi else sem_out["sem_tokens"]
+        )
         return sem_out
 
     @no_type_check
@@ -1304,6 +1379,7 @@ class FlowTokenizer(nn.Module):
     def get_repa_feature(self):
         if not self.training or not self.use_repa:
             return None
+
         assert self.z is not None and self.sem_z is not None, (
             f"z and sem_z must be set before get_repa_feature but {self.z=} and {self.sem_z=}"
         )
@@ -1541,40 +1617,57 @@ class FlowTokenizer(nn.Module):
 def test_flow_tokenizer():
     from torchmetrics.image import PeakSignalNoiseRatio
 
-    from src.data.litdata_hyperloader import ImageStreamingDataset
+    from src.data.litdata_hyperloader import ImageStreamingDataset, StreamingDataLoader
 
     tokenizer_cfg_default = create_default_mingtok_cfg("fm", "uvit")
     tokenizer = FlowTokenizer(tokenizer_cfg_default).to("cuda", torch.bfloat16)
     tokenizer.set_grad_checkpointing()
 
-    # print(flop_count_table(FlopCountAnalysis(tokenizer, x)))
-    # print(parameter_count_table(tokenizer))
+    from fvcore.nn import FlopCountAnalysis, flop_count_table, parameter_count_table
 
-    path = "runs/stage1_mingtok/2025-11-09_21-19-05_mingtok_600M_continous/ema/tokenizer/model.safetensors"
-    tokenizer.load_pretrained(path)
-    logger.info("Load pretrained done.")
+    # print(flop_count_table(FlopCountAnalysis(tokenizer, x)))
+    print(parameter_count_table(tokenizer))
+
+    # path = "runs/stage1_mingtok/2025-11-09_21-19-05_mingtok_600M_continous/ema/tokenizer/model.safetensors"
+    # tokenizer.load_pretrained(path)
+    # logger.info("Load pretrained done.")
 
     # x = torch.randn(9, 32, 512, 512).to("cuda", torch.bfloat16)
     dataset = ImageStreamingDataset(
-        input_dir="data/MDAS-HySpex/LitData_hyper_images",
-        resize_before_transform=128,
+        # input_dir="data/MDAS-HySpex/LitData_hyper_images",
+        # resize_before_transform=128,
+        # input_dir="data/HyperGlobal/LitData_hyper_images_GF5",
+        # resize_before_transform=256,
+        input_dir="data2/RemoteSAM270k/LitData_hyper_images",
+        resize_before_transform=256,
+        force_to_rgb=True,
+        to_neg_1_1=True,
+        # input_dir="data/Houston/LitData_hyper_images",
+        # resize_before_transform=512,
         # is_hwc=False,
     )
+    dl = StreamingDataLoader(dataset, batch_size=4, num_workers=16, shuffle=True)
 
-    for i in range(10):
-        x = dataset[i]["img"]
-        x = x[None].type(torch.bfloat16).to("cuda")
+    # x = dataset[1923]["img"]
+    # x = x[None].type(torch.bfloat16).to("cuda")
+    # x = x[:, :129]
 
-        # print(f"Input shape: {x.shape}")
-        # print("Encoding and decoding (train mode)")
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            with torch.no_grad():
-                out = tokenizer(x, dec_mode="sample")
+    # x = next(iter(dl))["img"].type(torch.bfloat16).to("cuda")
 
-            psnr = PeakSignalNoiseRatio(1.0).cuda()
-            x = (x + 1) / 2
-            recon = (out[0] + 1) / 2
-            print(f"PSNR: {psnr(x, recon)}")
+    # for i in range(10):
+    #     x = dataset[i]["img"]
+    #     x = x[None].type(torch.bfloat16).to("cuda")
+
+    # print(f"Input shape: {x.shape}")
+    # print("Encoding and decoding (train mode)")
+    # with torch.autocast("cuda", dtype=torch.bfloat16):
+    #     with torch.no_grad():
+    #         out = tokenizer(x, dec_mode="sample")
+
+    #     psnr = PeakSignalNoiseRatio(1.0).cuda()
+    #     x = (x + 1) / 2
+    #     recon = (out[0] + 1) / 2
+    #     print(f"PSNR: {psnr(x, recon)}")
 
     # Sample
     # print("Sampling")
@@ -1590,19 +1683,44 @@ def test_flow_tokenizer():
     #     )  # type: ignore
 
     # Backward
-    # tokenizer.train()
-    # with torch.autocast("cuda", dtype=torch.bfloat16):
-    #     out = tokenizer(x)
-    # tokenizer.get_repa_feature()  # to set repa features
-    # loss = out[1]["flow_loss"]
-    # print(f"Loss: {loss}")
-    # loss.backward()
-    # print("Backward successful.")
+    # optimizer = torch.optim.AdamW(tokenizer.parameters(), lr=4e-3, weight_decay=0.01)
+    from src.utilities.optim import MuonFSDP
+    from src.utilities.optim.muon import Muon
 
-    # # Check the gradients
-    # for n, p in tokenizer.named_parameters():
-    #     if p.requires_grad and p.grad is None:
-    #         print(f"Param {n} has no grad!")
+    # muonp, adamp = Muon.clear_muon_adamw_params(
+    #     tokenizer.named_parameters(),
+    # )
+    # optimizer = Muon(lr=1e-3, muon_params=muonp, adamw_params=adamp)
+
+    optimizer = MuonFSDP.create_muon_optimizer(
+        tokenizer.named_parameters(),
+        muon_params_defaults={"lr": 1e-3},
+        oned_params_defaults={"lr": 3e-4},
+        betas=(0.9, 0.95),
+        nesterov=True,
+        use_triton=False,
+    )
+
+    tokenizer.train()
+    while True:
+        for sample in dl:
+            x = sample["img"].type(torch.bfloat16).to("cuda")
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = tokenizer(x)
+            # tokenizer.get_repa_feature()  # to set repa features
+            loss = out[1]["flow_loss"]
+            print(f"Loss: {loss}")
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(tokenizer.parameters(), 1.0)
+            optimizer.step()
+
+        # print("Backward successful.")
+        # Check the gradients
+        # for n, p in tokenizer.named_parameters():
+        #     if p.requires_grad and p.grad is None:
+        #         print(f"Param {n} has no grad!")
 
 
 def test_decoder_flow_head():

@@ -260,7 +260,7 @@ def format_extra_patcher(record: Record, preserve_keys=PreservedKeys):
     return record
 
 
-def add_logger_filtes_(
+def add_logger_filters_(
     only_rank_one: bool,
     main_log_lvl_range: tuple | None,
     add_tqdm_filter: bool,
@@ -343,7 +343,7 @@ def configure_logger(
 
     # * --- Filters --- #
 
-    main_log_filter = add_logger_filtes_(
+    main_log_filter = add_logger_filters_(
         only_rank_one=only_rank_one,
         main_log_lvl_range=main_log_lvl_range,
         add_tqdm_filter=add_tqdm_filter,
@@ -379,7 +379,7 @@ def configure_logger(
     if add_tqdm_filter:
         from tqdm import tqdm
 
-        tqdm_logger_filter = add_logger_filtes_(
+        tqdm_logger_filter = add_logger_filters_(
             only_rank_one=only_rank_one,
             main_log_lvl_range=main_log_lvl_range,
             add_tqdm_filter=False,  # disable the tqdm fileter
@@ -444,7 +444,7 @@ def set_logger_file(
 
     Path(file).parent.mkdir(parents=True, exist_ok=True)
 
-    file_filter = add_logger_filtes_(
+    file_filter = add_logger_filters_(
         only_rank_one=False,
         main_log_lvl_range=main_log_lvl_range,
         add_tqdm_filter=False,

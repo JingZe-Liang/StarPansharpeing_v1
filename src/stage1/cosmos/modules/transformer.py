@@ -86,7 +86,7 @@ except ImportError:
     JVP_FLASH_ATTN_ENABLED = False
 
 
-compile_forward_fn = bool(int(os.getenv("MODEL_COMPILED", "1")))
+compile_forward_fn = os.getenv("MODEL_COMPILED", "1") in ("1", "true", "True")
 
 if compile_forward_fn:
     _compile_decorator = torch.compile
@@ -221,8 +221,8 @@ class Attention(Attention_):
         if rope is not None:
             npt = self.num_prefix_tokens
             # (bs, nhead, n, head_dim)
-            if rope.shape[-2] != N:
-                logger.warning(f"Rope shape mismatch: {rope.shape}[-2] != {N}")
+            if rope.shape[-2] + npt != N:
+                logger.warning(f"Rope shape mismatch: {rope.shape[-2]} != {N}")
                 rope_q = rope[:, :, :N]  # N is the sequence length
                 rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
             else:
@@ -283,7 +283,7 @@ class GatedAttention(nn.Module):
         hidden_size: int = 1024,
         num_attention_heads: int = 8,
         num_key_value_heads: int = 2,
-        norm_layer: str = "rmsnorm",
+        norm_layer: str = "layernorm",
         use_qk_norm: bool = False,
         qkv_bias: bool = True,
         rms_norm_eps: float = 1e-6,
@@ -528,7 +528,7 @@ class AttentionBlock(nn.Module):
         n_heads,
         n_kv_heads=None,
         qkv_bias=False,
-        norm_layer="rmsnorm",
+        norm_layer="layernorm",
         attn_drop=0.0,
         drop_path=0.0,
         proj_drop=0.0,
@@ -538,6 +538,7 @@ class AttentionBlock(nn.Module):
         is_causal=False,
         mlp_ratio=4,
         ffn_drop=0.0,
+        num_prefix_tokens=0,
         use_gate=False,
         layer_idx=None,
         jvp=False,
@@ -557,7 +558,7 @@ class AttentionBlock(nn.Module):
                 use_qk_norm=qk_norm,
                 elementwise_attn_output_gate=False,
                 is_causal=is_causal,
-                num_prefix_tokens=0,
+                num_prefix_tokens=num_prefix_tokens,
                 attn_type=attn_type,
                 layer_idx=layer_idx,
                 jvp=jvp,
@@ -572,6 +573,7 @@ class AttentionBlock(nn.Module):
                 attn_drop=attn_drop,
                 proj_drop=proj_drop,
                 attn_type=attn_type,
+                num_prefix_tokens=num_prefix_tokens,
                 is_causal=is_causal,
                 jvp=jvp,
             )
@@ -591,8 +593,9 @@ class AttentionBlock(nn.Module):
         self.dp2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         logger.debug(
-            f"Layer {layer_idx} uses Attention {self.sa.__class__.__name__} with is_causal={is_causal}, "
-            f"attn_type={attn_type}; FFN {self.ffn.__class__.__name__} with fused_type={fused_type}"
+            f"Layer {layer_idx} uses Attention {self.sa.__class__.__name__} - is_causal={is_causal} - "
+            f"attn_type={attn_type} norm_layer={norm_layer} mlp_ratio={mlp_ratio} - "
+            f"FFN {self.ffn.__class__.__name__} with fused_type={fused_type}"
         )
 
         self._forward_type = "attention_block"
@@ -617,7 +620,7 @@ class AttentionBlockCondition(AttentionBlock):
         cxt_embed_dim,
         n_kv_heads=None,
         qkv_bias=False,
-        norm_layer="rmsnorm",
+        norm_layer="layernorm",
         attn_drop=0.0,
         drop_path=0.0,
         proj_drop=0.0,
@@ -627,6 +630,7 @@ class AttentionBlockCondition(AttentionBlock):
         is_causal=False,
         mlp_ratio=4,
         ffn_drop=0.0,
+        num_prefix_tokens=0,
         use_gate=False,
         layer_idx=None,
         jvp=False,
@@ -647,6 +651,7 @@ class AttentionBlockCondition(AttentionBlock):
             is_causal,
             mlp_ratio,
             ffn_drop,
+            num_prefix_tokens,
             use_gate,
             layer_idx,
             jvp,
@@ -661,7 +666,7 @@ class AttentionBlockCondition(AttentionBlock):
             self.ctx_proj = nn.Sequential(nn.SiLU(), nn.Linear(self.ctx_embed_dim, dim))
         else:
             self.cond_proj = nn.Sequential(
-                create_norm_act_layer("rmsnorm", dim, "silu"),
+                create_norm_act_layer("layernorm", dim, "silu"),
                 nn.Linear(dim, dim * 2),
             )
 
@@ -734,7 +739,7 @@ class CrossAttentionBlock(nn.Module):
         n_q_heads,
         n_kv_heads=None,
         qkv_bias=False,
-        norm_layer="rmsnorm",
+        norm_layer="layernorm",
         attn_drop=0.0,
         proj_drop=0.0,
         ffn_drop=0.0,
@@ -805,12 +810,12 @@ class CrossTransformer1DConfig:
     qkv_bias: bool = True
     dropout: float = 0.0
     attention_dropout: float = 0.0
-    norm_layer: str = "rmsnorm"
+    norm_layer: str = "layernorm"
     drop_path: float = 0.0
     attn_type: str = "sdpa"
     # Cross attention specific parameters
     n_kv_heads: Optional[int] = None
-    qk_norm: str | None = "rmsnorm"
+    qk_norm: str | None = "layernorm"
     use_gate: bool = True
     norm_eps: float = 1e-6
     # Additional transformer parameters
@@ -973,7 +978,7 @@ class TransformerTokenizer(nn.Module):
         qkv_bias=True,
         dropout=0.0,
         attention_dropout=0.0,
-        norm_layer="rmsnorm",
+        norm_layer="layernorm",
         drop_path=0.0,
         attn_type="sdpa",
         attn_blk_type="AttentionBlock",
@@ -1032,6 +1037,8 @@ class TransformerTokenizer(nn.Module):
             drop_path,
             depth,
             embed_dim,
+            norm_layer,
+            mlp_ratio,
             attn_blk_type,
             num_heads,
             qkv_bias,
@@ -1039,6 +1046,7 @@ class TransformerTokenizer(nn.Module):
             dropout,
             attn_type,
             is_causal,
+            n_reg_tokens,
             other_blk_kwargs,
         )
         self._build_cls_reg_tokens(n_reg_tokens, with_cls_token, embed_dim)
@@ -1116,6 +1124,8 @@ class TransformerTokenizer(nn.Module):
         drop_path: float,
         depth: int,
         embed_dim: int,
+        norm_layer: str,
+        mlp_ratio: float,
         attn_blk_type: str,
         num_heads: int,
         qkv_bias: bool,
@@ -1123,6 +1133,7 @@ class TransformerTokenizer(nn.Module):
         dropout: float,
         attn_type: str,
         is_causal: bool,
+        num_prefix_tokens: int,
         other_blk_kwargs: dict,
     ):
         # Layers
@@ -1137,12 +1148,16 @@ class TransformerTokenizer(nn.Module):
                 dim=embed_dim,
                 n_heads=num_heads,
                 qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
                 attn_drop=attention_dropout,
                 proj_drop=dropout,
                 attn_type=attn_type,
                 drop_path=drop_path_ps[i],
                 is_causal=is_causal,
+                mlp_ratio=mlp_ratio,
+                ffn_drop=dropout,
                 layer_idx=i,
+                num_prefix_tokens=num_prefix_tokens,
                 **other_blk_kwargs,
             )
             layers.append(block)
@@ -1175,8 +1190,8 @@ class TransformerTokenizer(nn.Module):
                 pe_interpolation=1.0,
                 # TODO: if the proxy task need cls token (e.g, constrastive learning)
                 # this will need to be changed
-                cls_token=self.n_reg_tokens > 0 or with_cls_token,
-                extra_tokens=self.n_reg_tokens + int(with_cls_token),
+                cls_token=False,  # self.n_reg_tokens > 0 or with_cls_token,
+                extra_tokens=0,  # self.n_reg_tokens + int(with_cls_token),
             )
             pe_2d = torch.as_tensor(pe_2d)
             self.pe = nn.Parameter(pe_2d, requires_grad=True)
@@ -1428,7 +1443,7 @@ class TransformerTokenizer(nn.Module):
                 # TODO: fix it using resample_abs_pos_embed_nhwc
                 pe_1lc = resample_abs_pos_embed(  # type: ignore
                     pe_1lc,  # (1, l, dim)
-                    num_prefix_tokens=0,  # TODO: add register tokens support
+                    num_prefix_tokens=0,  # self.n_reg_tokens,
                     new_size=(hp, wp),
                     old_size=self.grid_size,
                 )
@@ -1480,6 +1495,8 @@ class TransformerTokenizer(nn.Module):
         hw: tuple[int, int] | None = None,
         get_intermidates: list[int] | None = None,
     ):
+        dtype = x.dtype
+
         # Get grid size
         if hw is None:
             # x grid size
@@ -1522,6 +1539,7 @@ class TransformerTokenizer(nn.Module):
                 rope_ = rope
 
             # Blocks
+            x = x.type(dtype)
             if self.grad_checkpointing and self.training:
                 x = checkpoint(blk, x, rope_, use_reentrant=False)
             else:
@@ -1596,7 +1614,7 @@ class TransformerTokenizer(nn.Module):
         *,
         ret_2d_tokens=False,
         ret_all=True,
-        get_intermidates=None,
+        get_intermidates: list[int] | None = None,
         out_shape: torch.Size | tuple | None = None,
         mask: Optional[torch.Tensor] = None,
         id_store: Optional[torch.Tensor] = None,

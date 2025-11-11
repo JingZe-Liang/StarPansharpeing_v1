@@ -319,6 +319,7 @@ class Sampler:
     def __init__(
         self,
         transport: Transport,
+        time_type="linear",
     ):
         """Constructor for a general sampler; supporting different sampling methods
         Args:
@@ -333,6 +334,7 @@ class Sampler:
             logger.info(
                 f"[Flow Matching]: model_type is {self.transport.model_type}, drift and score are not needed"
             )
+        self.time_type = time_type
 
     def __get_sde_diffusion_and_drift(
         self,

@@ -1109,7 +1109,8 @@ class DiffBandsInputConvOut(nn.Module):
                     fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
                     bound = 1 / math.sqrt(fan_in)
                     nn.init.uniform_(module.bias, -bound, bound)
-                    
+
+
 # * --- Nested Diffbands conv --- #
 
 
@@ -1267,7 +1268,7 @@ class AdaptiveInputConvLayer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.xavier_uniform_(m.weight)  # uniformly init
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -1441,7 +1442,8 @@ class AdaptiveOutputConvLayer(nn.Module):
         if zero_out:
             nn.init.zeros_(self.conv.weight)
         else:
-            nn.init.xavier_normal_(self.conv.weight)
+            nn.init.xavier_uniform_(self.conv.weight)
+
         if self.conv.bias is not None:
             nn.init.zeros_(self.conv.bias)
 
