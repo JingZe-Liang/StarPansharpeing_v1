@@ -1,6 +1,8 @@
+import yaml
+from easydict import EasyDict
+from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from ..logging import log
 from .to_dataclass import dataclass_from_dict
 
 
@@ -30,15 +32,31 @@ def flatten_dict(d, parent_key="", sep="_"):
     return dict(items)
 
 
-def load_config_file[T](config_file, dataclass_cls: type[T]) -> T:
-    config = OmegaConf.to_container(OmegaConf.load(config_file), resolve=True)
-    return dataclass_from_dict(dataclass_cls, config)  # type: ignore
+def load_config_file[T](
+    config_file, dataclass_cls: type[T] | None = None
+) -> T | EasyDict | DictConfig | object:
+    """Load a config file and return a dataclass, Omegaconf DictConfig, or EasyDict."""
+    try:
+        config = OmegaConf.to_container(OmegaConf.load(config_file), resolve=True)
+        if dataclass_cls is None:
+            return config
+        return dataclass_from_dict(dataclass_cls, config)  # type: ignore
+    except Exception as e:
+        logger.warning(
+            f"Error loading config file {config_file}: {e}. Try with PyYaml UnsafeLoader, "
+            "ignore the dataclass"
+        )
+
+        with open(config_file, "r") as f:
+            config = yaml.load(f, Loader=yaml.UnsafeLoader)
+
+        return EasyDict(config)
 
 
 def dump_config(config, path, log_config=True):
     yaml_dump = OmegaConf.to_yaml(OmegaConf.structured(config))
     with open(path, "w") as f:
         if log_config:
-            log("Using the following config for this run:")
-            log(yaml_dump)
+            logger.info("Using the following config for this run:")
+            logger.info(yaml_dump)
         f.write(yaml_dump)

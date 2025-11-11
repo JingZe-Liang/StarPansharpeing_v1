@@ -2,10 +2,12 @@ import inspect
 from collections import deque
 from functools import partial
 from types import MethodType
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 import torch.nn as nn
+from loguru import logger
+from peft import PeftMixedModel, PeftModel, get_peft_model
 from torch import Tensor
 
 from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
@@ -19,6 +21,8 @@ from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log
 
 type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None
+
+# Utilities functions
 
 
 def _not_lora_not_implemented_raise(self, *args, **kwargs):
@@ -38,7 +42,10 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     @function_config_to_basic_types
     def __init__(
         self,
-        tokenizer: ContinuousImageTokenizer | TokenizerLoRAMixin,
+        tokenizer: ContinuousImageTokenizer
+        | TokenizerLoRAMixin
+        | PeftModel
+        | PeftMixedModel,
         downstream_model: nn.Module | AmotizedModelMixin | partial,
         froze_tokenizer: bool = True,
         n_img_encoded: int = 1,
@@ -52,16 +59,21 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self.downstream_model = downstream_model
         self.is_scale_latent = tokenizer_scale_shift is not None
         self.img_is_neg_1_1 = img_is_neg_1_1
+
+        # Latent value scaler
         if self.is_scale_latent:
             scale, shift = tokenizer_scale_shift
             scale, shift = torch.as_tensor(scale), torch.as_tensor(shift)
-            self.scale = nn.Buffer(scale)
-            self.shift = nn.Buffer(shift)
+            self.scale = nn.Buffer(scale, persistent=False)
+            self.shift = nn.Buffer(shift, persistent=False)
+
+        # Image processors
         self.tokenizer_img_processor = tokenizer_img_processor
         if tokenizer_img_processor is not None:
             assert callable(tokenizer_img_processor), (
                 "tokenizer_img_processor must be callable"
             )
+
         self.detokenizer_img_processor = detokenizer_img_processor
         if detokenizer_img_processor is not None:
             assert callable(detokenizer_img_processor), (
@@ -84,6 +96,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self._encode_fn = self.tokenizer.encode
         self._decode_fn = self.tokenizer.decode
         self.is_tokenizer_lora = isinstance(self.tokenizer, TokenizerLoRAMixin)
+        self.is_peft_lora = isinstance(self.tokenizer, (PeftMixedModel, PeftModel))
+        if self.is_peft_lora:
+            self._base_peft_model = self.tokenizer.base_model
 
         # Freeze tokenizer by default
         if froze_tokenizer:
@@ -94,7 +109,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
                     'When using LoRA tokenizer, "learn_decoder" must be false.'
                 )
                 self.tokenizer.decoder.requires_grad_(True)
-            log(f"TokenizerWrapper: froze_tokenizer={froze_tokenizer}")
+            logger.info(f"TokenizerWrapper: froze_tokenizer={froze_tokenizer}")
 
         self._img_chans_cache = deque(maxlen=n_img_encoded)
 
@@ -112,6 +127,52 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self.get_available_loras: Callable
         self.get_current_lora: Callable
         self.get_base_model: Callable
+
+    def change_lora(self, adapter_name: str, merge=True):
+        """Change the active LoRA adapter for the tokenizer."""
+        if self.is_tokenizer_lora:
+            self.tokenizer.change_lora(adapter_name)  # Online loading adapter
+        elif self.is_peft_lora:
+            self.tokenizer = cast(PeftModel, self.tokenizer)
+            if merge:
+                assert getattr(self.tokenizer, "_base_peft_model", None) is not None, (
+                    "_base_peft_model not found in the PeftModel tokenizer."
+                )
+                self._base_peft_model.unmerge_adapter()
+            self.tokenizer.set_adapter(adapter_name)
+            if merge:
+                self._base_peft_model.merge_and_unload()
+        else:
+            raise ValueError(
+                f"Tokenizer type {type(self.tokenizer)} not supported change LoRA weights."
+            )
+
+    def load_lora(self, path_to_adapter: str, adapter_name: str):
+        if self.is_tokenizer_lora:
+            raise ValueError(
+                f"The LoraMixin tokenizer should load LoRA adapters in __init__"
+            )
+            # TODO: add the tokenizer.lora_weights may work? since it's online adapter loading.
+        elif isinstance(self.tokenizer, PeftModel):
+            self.tokenizer.load_adapter(
+                path_to_adapter,
+                adapter_name=adapter_name,
+                is_trainable=False,
+                ignore_mismatched_sizes=True,  # load it anyway
+            )
+            logger.debug(f"Load the Peft adapter: {adapter_name}")
+        elif isinstance(self.tokenizer, PeftMixedModel):
+            self.tokenizer.load_adapter(
+                path_to_adapter,
+                adapter_name=adapter_name,
+                is_trainable=False,
+                ignore_mismatched_sizes=True,  # load it anyway
+            )
+            logger.debug(f"Load the PeftMixed adapter: {adapter_name}")
+        else:
+            raise ValueError(
+                f"Unsupported tokenizer type: {type(self.tokenizer)} for LoRA loading."
+            )
 
     def _check_downstream_model_args(self):
         # Check if downstream model forward has two args, ignore **kwargs

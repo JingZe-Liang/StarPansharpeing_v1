@@ -184,7 +184,7 @@ def get_hyperspectral_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
     num_workers: int,
-    shuffle_size: int = 100,
+    shuffle_size: int = -1,
     to_neg_1_1: bool = True,
     permute: bool = True,
     check_nan: bool = False,

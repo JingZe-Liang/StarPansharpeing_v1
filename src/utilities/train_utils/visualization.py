@@ -262,7 +262,8 @@ def get_rgb_image(
             f"Invalid number of channels: {c}. Expected one of {list(RGB_CHANNELS_BY_BANDS.keys())}"
         )
 
-    rgb_channels = rgb_channels or RGB_CHANNELS_BY_BANDS[c]
+    # If not defined the rgb channels, use mean
+    rgb_channels = rgb_channels or RGB_CHANNELS_BY_BANDS.get(c, "mean")
     if isinstance(rgb_channels, (list, tuple)):
         rgb_img = img[:, rgb_channels, :, :]
     elif rgb_channels == "mean":

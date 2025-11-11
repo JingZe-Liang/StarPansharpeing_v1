@@ -34,18 +34,24 @@ def to_easydict_recursive(config: Iterable):
     """
     Recursively convert a DictConfig or ListConfig to a EasyDict object.
     """
-    py_obj = to_object_recursive(config)
-    return EasyDict(py_obj)
+    # if is iterable, check if is a DictConfig or ListConfig
+    if isinstance(config, (dict, DictConfig)):
+        return EasyDict({k: to_easydict_recursive(v) for k, v in config.items()})
+    elif isinstance(config, (list, ListConfig)):
+        return [to_easydict_recursive(item) for item in config]
 
 
 def kwargs_to_basic_types(
     kwargs: DictConfig | ListConfig | dict | list | None,
+    easydict_type: bool = False,
 ):
     """
     Convert a dictionary or list of dictionaries to basic types.
     """
-
-    return to_object_recursive(kwargs) if kwargs is not None else None
+    if easydict_type:
+        return to_easydict_recursive(kwargs) if kwargs is not None else None
+    else:
+        return to_object_recursive(kwargs) if kwargs is not None else None
 
 
 def function_config_to_basic_types(func):

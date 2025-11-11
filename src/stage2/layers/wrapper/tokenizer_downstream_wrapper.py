@@ -2,6 +2,7 @@
 Tokenizer Wrapper to train a latent processing networks:
 compatible with tasks: pansharpening, denoising, super-resolution
 
+Deprecated: use DownstreamModelTokenizerWrapper
 """
 
 import functools
@@ -10,13 +11,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from typing_extensions import deprecated
 
 from src.stage1.cosmos.tokenizer_inference import (
     TokenizerInferenceWrapper,
     scale_shift_latent,
     un_scale_shift_latent,
 )
-from typing_extensions import deprecated
 from stage2.utilities.amotized.amotized_model_wrapper import AmotizedModelMixin
 
 type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None

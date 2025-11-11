@@ -191,7 +191,7 @@ def repa_loss_(feature_teacher, feature_student, dim=1):
     return -torch.sum(feature_teacher * feature_student, dim=dim).mean()
 
 
-def am_ratio_spatial_loss(feature_teacher, feature_student, dim=1):
+def am_radio_spatial_loss(feature_teacher, feature_student, dim=1):
     # b, c, l
     assert feature_teacher.shape == feature_student.shape
     un_sim = 1 - torch.cosine_similarity(feature_teacher, feature_student, dim=dim)
@@ -727,7 +727,7 @@ class REPALoss(torch.nn.Module):
         # Assertions
         assert loss_type in (
             "repa_original",
-            "am_ratio_spatial",
+            "am_radio",
             "token_relation",
             "hier_distillation",
         )
@@ -1249,7 +1249,7 @@ class REPALoss(torch.nn.Module):
             # Other loss functions use multiple_features_apply
             loss_functions = {
                 "repa_original": repa_loss_,
-                "am_ratio": am_ratio_spatial_loss,
+                "am_radio": am_radio_spatial_loss,
                 "token_relation": token_relation_loss,
             }
 
