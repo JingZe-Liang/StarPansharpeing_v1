@@ -29,13 +29,13 @@ cnn_cfg:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
-    per_layer_noise: true
+    per_layer_noise: false
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: true
   dino_feature_dim: 1024
   cache_type: h
-  decoder_type: generative # [default, generative]
+  decoder_type: default # [default, generative]
 
 trans_enc_cfg:
   embed_dim: 1024
@@ -44,7 +44,7 @@ trans_enc_cfg:
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
-  norm_layer: flarmsnorm
+  norm_layer: layernorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial
@@ -62,7 +62,7 @@ trans_dec_cfg:
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 1
-  norm_layer: flarmsnorm
+  norm_layer: layernorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial

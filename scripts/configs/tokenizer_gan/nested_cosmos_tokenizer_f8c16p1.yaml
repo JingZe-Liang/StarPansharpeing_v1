@@ -37,7 +37,7 @@ vq_loss:
     repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_student
-    loss_type: am_ratio_spatial
+    loss_type: am_radio
     feature_normalize: false
   # vf loss
   vf_loss_weight:

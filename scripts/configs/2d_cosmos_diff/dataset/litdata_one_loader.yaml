@@ -9,96 +9,96 @@ rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 train_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
   paths:
-    rgb_path:
-      3bands_512:
-        - [
-            # remote sensing images
-            "data/AerialVG/LitData_hyper_images",
-            "data/CityBench-CityData/LitData_hyper_images",
-            "data/GID-GF2/LitData_hyper_images",
-            "data/LoveDA/LitData_hyper_images",
-            "data/miniFrance/LitData_hyper_images",
-            "data/Multispectral-Spacenet-series/LitData_hyper_images_3bands",
-            "data/OpenEarthMap/LitData_hyper_images",
-            "data/RefSegRS/LitData_hyper_images",
-            "data/RS5M/LitData_images_train",
-            "data/RS5M/LitData_images_val",
-            "data/RSCaptions/LitData_hyper_images",
-            "data/uavid/LitData_hyper_images",
-            "data2/Disaterm3/LitData_hyper_images",
-            "data/Fmow_rgb/LitData_hyper_images",
-            "data2/InriaAerialLabelingDataset/LitData_hyper_images",
-            "data2/RemoteSAM270k/LitData_hyper_images",
-            "data2/SkyDiffusion/LitData_images",
-            "data2/TEOChatlas/LitData_images_train",
-            "data2/TEOChatlas/LitData_images_eval",
-            "data2/UDD/LitData_hyper_images",
-            "data2/VDD/LitData_hyper_images",
-            # conditions
-            "data/LoveDA/LitData_conditions",
-            "data/GID-GF2/LitData_conditions",
-            "data/Houston/LitData_conditions",
-            "data/IKONOS/LitData_conditions",
-            "data/MDAS-EeteS/LitData_conditions",
-            "data/MDAS-HySpex/LitData_conditions",
-            "data/MDAS-Optical/LitData_conditions",
-            "data/MMSeg_YREB/LitData_conditions",
-            "data/OpenEarthMap/LitData_conditions",
-            "data/RefSegRS/LitData_conditions",
-            "data/RSCaptions/LitData_conditions",
-          ]
-        - resize_before_transform: 512
+    # rgb_path:
+    #   3bands_512:
+    #     - [
+    #         # remote sensing images
+    #         "data/AerialVG/LitData_hyper_images",
+    #         "data/CityBench-CityData/LitData_hyper_images",
+    #         "data/GID-GF2/LitData_hyper_images",
+    #         "data/LoveDA/LitData_hyper_images",
+    #         "data/miniFrance/LitData_hyper_images",
+    #         "data/Multispectral-Spacenet-series/LitData_hyper_images_3bands",
+    #         "data/OpenEarthMap/LitData_hyper_images",
+    #         "data/RefSegRS/LitData_hyper_images",
+    #         "data/RS5M/LitData_images_train",
+    #         "data/RS5M/LitData_images_val",
+    #         "data/RSCaptions/LitData_hyper_images",
+    #         "data/uavid/LitData_hyper_images",
+    #         "data2/Disaterm3/LitData_hyper_images",
+    #         "data/Fmow_rgb/LitData_hyper_images",
+    #         "data2/InriaAerialLabelingDataset/LitData_hyper_images",
+    #         "data2/RemoteSAM270k/LitData_hyper_images",
+    #         "data2/SkyDiffusion/LitData_images",
+    #         "data2/TEOChatlas/LitData_images_train",
+    #         "data2/TEOChatlas/LitData_images_eval",
+    #         "data2/UDD/LitData_hyper_images",
+    #         "data2/VDD/LitData_hyper_images",
+    #         # conditions
+    #         "data/LoveDA/LitData_conditions",
+    #         "data/GID-GF2/LitData_conditions",
+    #         "data/Houston/LitData_conditions",
+    #         "data/IKONOS/LitData_conditions",
+    #         "data/MDAS-EeteS/LitData_conditions",
+    #         "data/MDAS-HySpex/LitData_conditions",
+    #         "data/MDAS-Optical/LitData_conditions",
+    #         "data/MMSeg_YREB/LitData_conditions",
+    #         "data/OpenEarthMap/LitData_conditions",
+    #         "data/RefSegRS/LitData_conditions",
+    #         "data/RSCaptions/LitData_conditions",
+    #       ]
+    #     - resize_before_transform: 512
 
-    multispectral_paths:
-      4bands_512:
-        - [
-            "data2/Multispectral-FMow-full/LitData_hyper_images_4bands",
-            "data/Gaofen1/LitData_hyper_images",
-            "data/QuickBird/LitData_hyper_images",
-            "data/IKONOS/LitData_hyper_images",
-            "data/WorldView4/LitData_hyper_images",
-            "data/MDAS-Optical/LitData_hyper_images",
-            "data/EarthView/LitData_satellogic",
-            "data2/DynamicEarth/LitData_hyper_images",
-          ]
-        - resize_before_transform: 512
+    # multispectral_paths:
+    #   4bands_512:
+    #     - [
+    #         "data2/Multispectral-FMow-full/LitData_hyper_images_4bands",
+    #         "data/Gaofen1/LitData_hyper_images",
+    #         "data/QuickBird/LitData_hyper_images",
+    #         "data/IKONOS/LitData_hyper_images",
+    #         "data/WorldView4/LitData_hyper_images",
+    #         "data/MDAS-Optical/LitData_hyper_images",
+    #         "data/EarthView/LitData_satellogic",
+    #         "data2/DynamicEarth/LitData_hyper_images",
+    #       ]
+    #     - resize_before_transform: 512
 
-      8bands_512:
-        - [
-            "data/Multispectral-Spacenet-series/LitData_hyper_images_8bands",
-            "data2/Multispectral-FMow-full/LitData_hyper_images_8bands",
-            "data/WorldView2/LitData_hyper_images",
-            "data/WorldView3/LitData_hyper_images",
-            "data2/DCF_2019/LitData_hyper_images",
-            "data/MMOT/LitData_hyper_images",
-          ]
-        - resize_before_transform: 512
-          is_cycled: false
+    #   8bands_512:
+    #     - [
+    #         "data/Multispectral-Spacenet-series/LitData_hyper_images_8bands",
+    #         "data2/Multispectral-FMow-full/LitData_hyper_images_8bands",
+    #         "data/WorldView2/LitData_hyper_images",
+    #         "data/WorldView3/LitData_hyper_images",
+    #         "data2/DCF_2019/LitData_hyper_images",
+    #         "data/MMOT/LitData_hyper_images",
+    #       ]
+    #     - resize_before_transform: 512
+    #       is_cycled: false
 
-      10bands_128:
-        - ["data2/TUM_128/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   10bands_128:
+    #     - ["data2/TUM_128/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      12bands_128:
-        - ["data/MMOT/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   12bands_128:
+    #     - ["data/MMOT/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      13bands_128:
-        - ["data2/DCF_2020/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   13bands_128:
+    #     - ["data2/DCF_2020/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      bigearth_13bands_chw_128:
-        - ["data2/BigEarthNet_S2/LitData_hyper_images"]
-        - resize_before_transform: 128
-          is_hwc: false
+    #   bigearth_13bands_chw_128:
+    #     - ["data2/BigEarthNet_S2/LitData_hyper_images"]
+    #     - resize_before_transform: 128
+    #       is_hwc: false
 
-      32bands_512:
-        - ["data/OHS/LitData_hyper_images"]
-        - resize_before_transform: 512
+    #   32bands_512:
+    #     - ["data/OHS/LitData_hyper_images"]
+    #     - resize_before_transform: 512
 
-      50bands_512:
-        - ["data/Houston/LitData_hyper_images"]
-        - resize_before_transform: 512
+    #   50bands_512:
+    #     - ["data/Houston/LitData_hyper_images"]
+    #     - resize_before_transform: 512
 
     hyperspectral_paths:
       150bands_128:
@@ -139,8 +139,8 @@ train_loader:
     #     is_cycled: true
 
   macro_sampled_batch_size:
-    128: 22
-    256: 16
+    128: 4 #36
+    256: 4 #26
     512: 8
 
   loader_kwargs:
@@ -154,86 +154,87 @@ train_loader:
 
   #            3   4   8  10 12 13 13 32 50 150 175 202 202  224 242 368  369
   # weights: [20, 20, 10, 8, 6, 6, 5, 6, 5, 6,   8,  4,   4,   7, 5,  5,   6]
-  weights: [18, 18, 15, 10, 10, 10, 15, 10, 8, 15, 15, 15, 18, 10, 10, 11, 18]
+  # weights: [18, 18, 15, 10, 10, 10, 15, 10, 8, 15, 15, 15, 18, 10, 10, 11, 18]
+  weights: [15, 15, 15, 18, 10, 10, 11, 18]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
   paths:
-    rgb_path:
-      3bands_512:
-        - [
-            "data/AerialVG/LitData_hyper_images",
-            "data/CityBench-CityData/LitData_hyper_images",
-            "data/GID-GF2/LitData_hyper_images",
-            "data/LoveDA/LitData_hyper_images",
-            "data/miniFrance/LitData_hyper_images",
-            "data/Multispectral-Spacenet-series/LitData_hyper_images_3bands",
-            "data/OpenEarthMap/LitData_hyper_images",
-            "data/RefSegRS/LitData_hyper_images",
-            "data/RS5M/LitData_images_train",
-            "data/RS5M/LitData_images_val",
-            "data/RSCaptions/LitData_hyper_images",
-            "data/uavid/LitData_hyper_images",
-            "data2/Disaterm3/LitData_hyper_images",
-            "data/Fmow_rgb/LitData_hyper_images",
-            "data2/InriaAerialLabelingDataset/LitData_hyper_images",
-            "data2/RemoteSAM270k/LitData_hyper_images",
-            "data2/SkyDiffusion/LitData_images",
-            "data2/TEOChatlas/LitData_images_train",
-            "data2/TEOChatlas/LitData_images_eval",
-            "data2/UDD/LitData_hyper_images",
-            "data2/VDD/LitData_hyper_images",
-          ]
-        - resize_before_transform: 512
+    # rgb_path:
+    #   3bands_512:
+    #     - [
+    #         "data/AerialVG/LitData_hyper_images",
+    #         "data/CityBench-CityData/LitData_hyper_images",
+    #         "data/GID-GF2/LitData_hyper_images",
+    #         "data/LoveDA/LitData_hyper_images",
+    #         "data/miniFrance/LitData_hyper_images",
+    #         "data/Multispectral-Spacenet-series/LitData_hyper_images_3bands",
+    #         "data/OpenEarthMap/LitData_hyper_images",
+    #         "data/RefSegRS/LitData_hyper_images",
+    #         "data/RS5M/LitData_images_train",
+    #         "data/RS5M/LitData_images_val",
+    #         "data/RSCaptions/LitData_hyper_images",
+    #         "data/uavid/LitData_hyper_images",
+    #         "data2/Disaterm3/LitData_hyper_images",
+    #         "data/Fmow_rgb/LitData_hyper_images",
+    #         "data2/InriaAerialLabelingDataset/LitData_hyper_images",
+    #         "data2/RemoteSAM270k/LitData_hyper_images",
+    #         "data2/SkyDiffusion/LitData_images",
+    #         "data2/TEOChatlas/LitData_images_train",
+    #         "data2/TEOChatlas/LitData_images_eval",
+    #         "data2/UDD/LitData_hyper_images",
+    #         "data2/VDD/LitData_hyper_images",
+    #       ]
+    #     - resize_before_transform: 512
 
-    multispectral_paths:
-      4bands_512:
-        - [
-            "data2/Multispectral-FMow-full/LitData_hyper_images_4bands",
-            "data/Gaofen1/LitData_hyper_images",
-            "data/QuickBird/LitData_hyper_images",
-            "data/IKONOS/LitData_hyper_images",
-            "data/WorldView4/LitData_hyper_images",
-            "data/MDAS-Optical/LitData_hyper_images",
-            "data/EarthView/LitData_satellogic",
-          ]
-        - resize_before_transform: 512
+    # multispectral_paths:
+    #   4bands_512:
+    #     - [
+    #         "data2/Multispectral-FMow-full/LitData_hyper_images_4bands",
+    #         "data/Gaofen1/LitData_hyper_images",
+    #         "data/QuickBird/LitData_hyper_images",
+    #         "data/IKONOS/LitData_hyper_images",
+    #         "data/WorldView4/LitData_hyper_images",
+    #         "data/MDAS-Optical/LitData_hyper_images",
+    #         "data/EarthView/LitData_satellogic",
+    #       ]
+    #     - resize_before_transform: 512
 
-      8bands_512:
-        - [
-            "data/Multispectral-Spacenet-series/LitData_hyper_images_8bands",
-            "data2/Multispectral-FMow-full/LitData_hyper_images_8bands",
-            "data/WorldView2/LitData_hyper_images",
-            "data/WorldView3/LitData_hyper_images",
-            "data2/DCF_2019/LitData_hyper_images",
-            "data/MMOT/LitData_hyper_images",
-          ]
-        - resize_before_transform: 512
+    #   8bands_512:
+    #     - [
+    #         "data/Multispectral-Spacenet-series/LitData_hyper_images_8bands",
+    #         "data2/Multispectral-FMow-full/LitData_hyper_images_8bands",
+    #         "data/WorldView2/LitData_hyper_images",
+    #         "data/WorldView3/LitData_hyper_images",
+    #         "data2/DCF_2019/LitData_hyper_images",
+    #         "data/MMOT/LitData_hyper_images",
+    #       ]
+    #     - resize_before_transform: 512
 
-      10bands_128:
-        - ["data2/TUM_128/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   10bands_128:
+    #     - ["data2/TUM_128/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      12bands_128:
-        - ["data/MMSeg_YREB/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   12bands_128:
+    #     - ["data/MMSeg_YREB/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      13bands_128:
-        - ["data2/DCF_2020/LitData_hyper_images"]
-        - resize_before_transform: 128
+    #   13bands_128:
+    #     - ["data2/DCF_2020/LitData_hyper_images"]
+    #     - resize_before_transform: 128
 
-      bigearth_13bands_chw_128:
-        - ["data2/BigEarthNet_S2/LitData_hyper_images"]
-        - resize_before_transform: 128
-          is_hwc: false
+    #   bigearth_13bands_chw_128:
+    #     - ["data2/BigEarthNet_S2/LitData_hyper_images"]
+    #     - resize_before_transform: 128
+    #       is_hwc: false
 
-      32bands_512:
-        - ["data/OHS/LitData_hyper_images"]
-        - resize_before_transform: 512
+    #   32bands_512:
+    #     - ["data/OHS/LitData_hyper_images"]
+    #     - resize_before_transform: 512
 
-      50bands_512:
-        - ["data/Houston/LitData_hyper_images"]
-        - resize_before_transform: 512
+    #   50bands_512:
+    #     - ["data/Houston/LitData_hyper_images"]
+    #     - resize_before_transform: 512
 
     hyperspectral_paths:
       150bands_128:

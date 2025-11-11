@@ -318,7 +318,8 @@ def captioning_dataloader_img(
             if resume_from is not None and resumed:
                 logger.info(f"Resuming from {img_id[0]}.")
         elif isinstance(resume_from, set):
-            if img_id[0] in resume_from:
+            img_id_0 = "JPEGImages/" + img_id[0]  # litdata specific
+            if img_id_0 in resume_from:
                 skipped += 1
                 # logger.debug(f"Skipping {img_id[0]}. Skipped {skipped} files.")
                 # continue  # skip already processed files
@@ -402,7 +403,7 @@ def main_process_dataloader_img(
             dl, process_img, rgb_channels=rgb_channels, resume_from=resume_from
         ),
         desc="Captioning ...",
-        total=83818,  # 83814 + 83699 + 83834 + 46849,
+        total=410475,
         disable=False,
     )
 
@@ -448,45 +449,61 @@ if __name__ == "__main__":
 
     from src.data.hyperspectral_loader import get_hyperspectral_dataloaders
 
-    _resumed = False
+    _resumed = True
     resumed_set = None
 
     if _resumed:
-        saved_resume_path = "data/BigEarthNet_S2/condition_captions/0001"
+        saved_resume_path = "data/RemoteSAM270k/RemoteSAM-270K/captions/JPEGImages"
         assert Path(saved_resume_path).exists(), (
             f"Resume path {saved_resume_path} does not exist."
         )
         saved_jsonl_files = list(Path(saved_resume_path).glob("*"))
         # remove extensions
-        # resumed_set = set(  # 'JPEGImages/xxx'
-        #     "/".join(saved_resume_path.with_suffix("").parts[-2:])
-        #     for saved_resume_path in saved_jsonl_files
-        # )
-        resumed_set = set(
-            saved_resume_path.stem for saved_resume_path in saved_jsonl_files
+        resumed_set = set(  # 'JPEGImages/xxx'
+            "/".join(saved_resume_path.with_suffix("").parts[-2:])
+            for saved_resume_path in saved_jsonl_files
         )
         logger.info(f"Already processed files: {len(resumed_set)}")
 
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
-    tar_file = "data/OpenEarthMap/hyper_images/OpenEarthMap-3_bands-px_1024-0000.tar"
-    _, dl = get_hyperspectral_dataloaders(
-        wds_paths=tar_file,
-        batch_size=1,
-        num_workers=1,
-        to_neg_1_1=False,
-        permute=False,
-        resample=False,
-        per_channel_norm=False,
-        shuffle_size=-1,
-        transform_prob=0.0,
-    )
+    tar_file = "data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar"
+    litdata_dir = "data2/RemoteSAM270k/LitData_hyper_images"
+
+    if litdata_dir is not None:
+        from litdata.streaming import StreamingDataLoader
+
+        from src.data.litdata_hyperloader import ImageStreamingDataset
+
+        ds = ImageStreamingDataset(
+            input_dir=litdata_dir,
+            resize_before_transform=None,
+            to_neg_1_1=False,
+            force_to_rgb=True,
+        )
+        dl = StreamingDataLoader(ds, batch_size=1, num_workers=6, shuffle=False)
+
+    # if os.path.exists(tar_file):
+    #     _, dl = get_hyperspectral_dataloaders(
+    #         wds_paths=tar_file,
+    #         batch_size=1,
+    #         num_workers=1,
+    #         to_neg_1_1=False,
+    #         permute=True,
+    #         resample=False,
+    #         per_channel_norm=False,
+    #         shuffle_size=-1,
+    #         transform_prob=0.0,
+    #     )
+    # else:
+    #     raise ValueError(f"Tar file {tar_file} does not exist.")
+
     print("Successfully created dataloader. Testing captioning...")
     # Use the main_process_dataloader_img function to process the dataloader
     main_process_dataloader_img(
         dl,
-        rgb_channels=[3, 2, 1],  # Common RGB channels for satellite imagery
-        save_dir="data/OpenEarthMap/captions",
+        rgb_channels=[0, 1, 2],  # Common RGB channels for satellite imagery
+        save_dir="data/RemoteSAM270k/RemoteSAM-270K/captions/tmp",
         # "tmp/internvl35_captions/",
         device="cuda" if torch.cuda.is_available() else "cpu",
         file_type="jsonl",

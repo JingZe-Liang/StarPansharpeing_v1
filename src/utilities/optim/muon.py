@@ -327,9 +327,9 @@ class Muon(torch.optim.Optimizer):
         for p in params:
             # sanity check
             g = p.grad
-            _orig_g_shape = g.shape
             if g is None:
                 continue
+            _orig_g_shape = g.shape
             if g.ndim > 2:
                 g = g.view(g.size(0), -1)
             assert g is not None

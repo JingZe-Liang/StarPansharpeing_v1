@@ -4,21 +4,46 @@ decoder_type: uvit
 
 cfg:
   low_level_encoder:
-    in_chan: 512
-    embed_dim: 768
+    # res_encoder:
+    #   in_channels: 512
+    #   out_channels: 512
+    #   channels: 128
+    #   attn_resolutions: []
+    #   channels_mult: [2, 4, 4]
+    #   spatial_compression: 8
+    #   z_channels: 768
+    #   latent_channels: 64
+    #   patch_size: 1
+
+    # transformer_encoder:
+    #   in_chan: 768
+    #   embed_dim: 768
+    #   depth: 8
+    #   num_heads: 8
+    #   patch_size: 2
+    #   out_patch_size: 1
+    #   patcher_type: patch_embedder
+    #   additional_pe: true
+    #   pe_type: rope
+
+    transformer_encoder:
+      in_chan: 512
+      embed_dim: 768
+      out_chan: 768
+      depth: 12
+      num_heads: 8
+      patch_size: 16
+      out_patch_size: 1
+      patcher_type: patch_embedder
+      additional_pe: true
+      pe_type: rope
+      img_size: 512
+
     z_dim: 768
-    latent_dim: 32
-    depth: 12
-    num_heads: 12
-    patch_size: 16
-    out_patch_size: 1
-    patcher_type: patch_embedder
-    # patch_prog_dims: [386, 386, 512]
-    additional_pe: true
-    pe_type: rope
+    latent_dim: 64
 
   semantic_decoder:
-    in_chan: 32
+    in_chan: 64
     out_chan: 1024
     embed_dim: 1024
     depth: 12
@@ -30,21 +55,24 @@ cfg:
   pixel_decoder:
     in_chan: 512
     z_dim: 1024
-    num_attention_heads: 8
+    channels: 512
     mid_nlayers: 12
-    act_fn: gelu
+    num_attention_heads: 8
+    act_fn: silu
     vit_act_fn: silu
-    ch_mult: [1, 1, 2, 4, 8]
+    ch_mult: [1, 1, 1, 1, 2]
     mid_theta: 10000.0 # rope theta
     jvp: false
+    mid_chan: 1024
+    layers_per_block: 1
 
     flow_type: fm
     time_cond_type: t
     cfg_prob: 0.0
     transport: # fm transport
-      model_type: velocity
+      model_type: x1
       path_type: linear
-      loss_type: velocity
+      loss_type: x1
       train_eps: 0.
       sample_eps: 0.
       time_sample_type: sigmoid
