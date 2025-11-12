@@ -5,21 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-# 2D image JEPA block utilities
-# used with the dataloader collator function.
-
 import math
+
 from multiprocessing import Value
-from typing import List
+
+from logging import getLogger
 
 import torch
-from loguru import logger
-from torch import Tensor
 
 _GLOBAL_SEED = 0
+logger = getLogger()
 
 
 class MaskCollator(object):
+
     def __init__(
         self,
         input_size=(224, 224),
@@ -30,26 +29,21 @@ class MaskCollator(object):
         nenc=1,
         npred=2,
         min_keep=4,
-        allow_overlap=False,
+        allow_overlap=False
     ):
         super(MaskCollator, self).__init__()
         if not isinstance(input_size, tuple):
-            input_size = (input_size,) * 2
+            input_size = (input_size, ) * 2
         self.patch_size = patch_size
-        self.height, self.width = (
-            input_size[0] // patch_size,
-            input_size[1] // patch_size,
-        )
+        self.height, self.width = input_size[0] // patch_size, input_size[1] // patch_size
         self.enc_mask_scale = enc_mask_scale
         self.pred_mask_scale = pred_mask_scale
         self.aspect_ratio = aspect_ratio
         self.nenc = nenc
         self.npred = npred
         self.min_keep = min_keep  # minimum number of patches to keep
-        self.allow_overlap = (
-            allow_overlap  # whether to allow overlap b/w enc and pred masks
-        )
-        self._itr_counter = Value("i", -1)  # collator is shared across worker processes
+        self.allow_overlap = allow_overlap  # whether to allow overlap b/w enc and pred masks
+        self._itr_counter = Value('i', -1)  # collator is shared across worker processes
 
     def step(self):
         i = self._itr_counter
@@ -81,11 +75,10 @@ class MaskCollator(object):
         h, w = b_size
 
         def constrain_mask(mask, tries=0):
-            """Helper to restrict given mask to a set of acceptable regions"""
-            N = max(int(len(acceptable_regions) - tries), 0)
+            """ Helper to restrict given mask to a set of acceptable regions """
+            N = max(int(len(acceptable_regions)-tries), 0)
             for k in range(N):
                 mask *= acceptable_regions[k]
-
         # --
         # -- Loop to sample masks until we find a valid one
         tries = 0
@@ -96,7 +89,7 @@ class MaskCollator(object):
             top = torch.randint(0, self.height - h, (1,))
             left = torch.randint(0, self.width - w, (1,))
             mask = torch.zeros((self.height, self.width), dtype=torch.int32)
-            mask[top : top + h, left : left + w] = 1
+            mask[top:top+h, left:left+w] = 1
             # -- Constrain mask to a set of acceptable regions
             if acceptable_regions is not None:
                 constrain_mask(mask, tries)
@@ -108,32 +101,26 @@ class MaskCollator(object):
                 if timeout == 0:
                     tries += 1
                     timeout = og_timeout
-                    logger.debug(
-                        f"[Mask Collator Warning]: "
-                        f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]'
-                    )
+                    logger.warning(f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]"')
         mask = mask.squeeze()
         # --
         mask_complement = torch.ones((self.height, self.width), dtype=torch.int32)
-        mask_complement[top : top + h, left : left + w] = 0
+        mask_complement[top:top+h, left:left+w] = 0
         # --
         return mask, mask_complement
 
     def __call__(self, batch):
-        """
+        '''
         Create encoder and predictor masks when collating imgs into a batch
         # 1. sample enc block (size + location) using seed
         # 2. sample pred block (size) using seed
         # 3. sample several enc block locations for each image (w/o seed)
         # 4. sample several pred block locations for each image (w/o seed)
         # 5. return enc mask and pred mask
-        """
+        '''
         B = len(batch)
 
-        if isinstance(batch, (tuple, list)):
-            collated_batch = torch.utils.data.default_collate(batch)
-        else:
-            collated_batch = batch
+        collated_batch = torch.utils.data.default_collate(batch)
 
         seed = self.step()
         g = torch.Generator()
@@ -141,16 +128,17 @@ class MaskCollator(object):
         p_size = self._sample_block_size(
             generator=g,
             scale=self.pred_mask_scale,
-            aspect_ratio_scale=self.aspect_ratio,
-        )
+            aspect_ratio_scale=self.aspect_ratio)
         e_size = self._sample_block_size(
-            generator=g, scale=self.enc_mask_scale, aspect_ratio_scale=(1.0, 1.0)
-        )
+            generator=g,
+            scale=self.enc_mask_scale,
+            aspect_ratio_scale=(1., 1.))
 
         collated_masks_pred, collated_masks_enc = [], []
         min_keep_pred = self.height * self.width
         min_keep_enc = self.height * self.width
         for _ in range(B):
+
             masks_p, masks_C = [], []
             for _ in range(self.npred):
                 mask, mask_C = self._sample_block_mask(p_size)
@@ -162,51 +150,21 @@ class MaskCollator(object):
             acceptable_regions = masks_C
             try:
                 if self.allow_overlap:
-                    acceptable_regions = None
+                    acceptable_regions= None
             except Exception as e:
-                logger.debug(f"Encountered exception in mask-generator {e}")
+                logger.warning(f'Encountered exception in mask-generator {e}')
 
             masks_e = []
             for _ in range(self.nenc):
-                mask, _ = self._sample_block_mask(
-                    e_size, acceptable_regions=acceptable_regions
-                )
+                mask, _ = self._sample_block_mask(e_size, acceptable_regions=acceptable_regions)
                 masks_e.append(mask)
                 min_keep_enc = min(min_keep_enc, len(mask))
             collated_masks_enc.append(masks_e)
 
-        collated_masks_pred = [
-            [cm[:min_keep_pred] for cm in cm_list] for cm_list in collated_masks_pred
-        ]
+        collated_masks_pred = [[cm[:min_keep_pred] for cm in cm_list] for cm_list in collated_masks_pred]
         collated_masks_pred = torch.utils.data.default_collate(collated_masks_pred)
         # --
-        collated_masks_enc = [
-            [cm[:min_keep_enc] for cm in cm_list] for cm_list in collated_masks_enc
-        ]
+        collated_masks_enc = [[cm[:min_keep_enc] for cm in cm_list] for cm_list in collated_masks_enc]
         collated_masks_enc = torch.utils.data.default_collate(collated_masks_enc)
 
         return collated_batch, collated_masks_enc, collated_masks_pred
-
-
-def apply_masks(x: Tensor, masks: List[Tensor]):
-    """
-    :param x: tensor of shape [B (batch-size), N (num-patches), D (feature-dim)]
-    :param masks: list of tensors containing indices of patches in [N] to keep
-    """
-    all_x = []
-    for m in masks:
-        mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
-        all_x += [torch.gather(x, dim=1, index=mask_keep)]
-    return torch.cat(all_x, dim=0)
-
-
-def repeat_interleave_batch(x: Tensor, B: int, repeat: int):
-    N = len(x) // B
-    x = torch.cat(
-        [
-            torch.cat([x[i * B : (i + 1) * B] for _ in range(repeat)], dim=0)
-            for i in range(N)
-        ],
-        dim=0,
-    )
-    return x

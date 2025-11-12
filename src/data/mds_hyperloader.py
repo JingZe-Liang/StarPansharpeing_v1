@@ -86,7 +86,7 @@ class ImageStreamDataset(StreamingDataset):
         self.resize_before_transform = resize_before_transform
         self.use_resize_clip = resize_before_transform is not None
         if self.use_resize_clip:
-            self.`resize_clip_fn` = large_image_resizer_clipper(
+            self.resize_clip_fn = large_image_resizer_clipper(
                 img_key=self._img_key,
                 tgt_size=resize_before_transform,
                 op_for_large="clip",
