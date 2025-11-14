@@ -6,15 +6,42 @@ import natten
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from easydict import EasyDict
 from einops import rearrange
 from jaxtyping import Float
-from timm.layers.attention import Attention as Attention_
+from loguru import logger
+from timm.layers import (
+    DropPath,
+    LayerScale,
+    PatchEmbed,
+    create_act_layer,
+    create_norm_act_layer,
+    create_norm_layer,
+    get_norm_layer,
+)
+from timm.layers.attention import AttentionRope as Attention_
 from timm.layers.create_act import create_act_layer
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 from timm.layers.helpers import to_2tuple
-from timm.layers.pos_embed_sincos import apply_rot_embed_cat
+from timm.layers.pos_embed import resample_abs_pos_embed, resample_abs_pos_embed_nhwc
+from timm.layers.pos_embed_sincos import (
+    RotaryEmbeddingCat,
+    RotaryEmbeddingDinoV3,
+    apply_rot_embed_cat,
+    create_rope_embed,
+    get_mixed_freqs,
+    get_mixed_grid,
+)
 from torch import Tensor
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
+from torch.utils.checkpoint import checkpoint
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from typing_extensions import Annotated
 
 from .conv import ConvLayer, GLUMBConv, MBConv, ResBlock
 
@@ -86,78 +113,124 @@ def _float16_clip_value(x, dtype: torch.dtype | None = None):
 
 
 class Attention(Attention_):
+    config = EasyDict(
+        _attn_implementation="flash_attention_2"
+    )  # for flash_attention_2 config
+
     def __init__(
         self,
-        dim,
-        num_heads=8,
-        qkv_bias=True,
-        qk_norm: type[nn.Module] | None = None,
-        **block_kwargs,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        qkv_fused: bool = True,
+        num_prefix_tokens: int = 0,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        attn_head_dim: Optional[int] = None,
+        norm_layer: type[nn.Module] | str | None = None,
+        qk_norm: bool = True,
+        scale_norm: bool = False,
+        proj_bias: bool = True,
+        attn_type: str = "sdpa",
+        is_causal: bool = False,
+        rotate_half=False,
     ):
+        norm_layer = (
+            get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
+        )
         super().__init__(
             dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            **block_kwargs,
+            num_heads,
+            qkv_bias,
+            qkv_fused,
+            num_prefix_tokens,
+            attn_drop,
+            proj_drop,
+            attn_head_dim,
+            norm_layer,
+            qk_norm,
+            scale_norm,
+            proj_bias,
+            rotate_half,
         )
+        self.attn_implem = attn_type
+        self.is_causal = is_causal
 
-        if qk_norm:
-            self.q_norm = qk_norm(dim)
-            self.k_norm = qk_norm(dim)
-        else:
-            self.q_norm = self.k_norm = nn.Identity()
+        self._all_attention_functions = ALL_ATTENTION_FUNCTIONS
 
-    def forward(self, x, mask=None, rope: Callable | Tensor | None = None):
+    def forward(
+        self,
+        x,
+        rope: Tensor | None = None,
+        mask: BlockMask | Tensor | None = None,
+        delta_t_emb: Tensor | None = None,
+    ):
         B, N, C = x.shape
 
-        qkv = self.qkv(x).reshape(B, N, 3, C)
-        q, k, v = qkv.unbind(2)
-        dtype = q.dtype
+        if self.qkv is not None:
+            qkv = self.qkv(x)
+            qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
+        else:
+            # B, num_heads, N, C
+            q = self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            k = self.k_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # QK-norm
+        q, k = self.q_norm(q), self.k_norm(k)
 
-        q = q.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-        k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-
-        # RoPE
-        if rope is not None:
-            if callable(rope):
-                q, k = rope(q, k)
-            elif torch.is_tensor(rope):
-                # is a tensor
-                q = apply_rot_embed_cat(q, rope)
-                k = apply_rot_embed_cat(k, rope)
+        if rope is not None and torch.is_tensor(rope):
+            npt = self.num_prefix_tokens
+            # (bs, nhead, n, head_dim)
+            if rope.shape[-2] + npt != N:
+                logger.warning(f"Rope shape mismatch: {rope.shape[-2]} != {N}")
+                rope_q = rope[:, :, :N]  # N is the sequence length
+                rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
             else:
-                raise ValueError(
-                    "rope must be a callable function or a tensor, got {}".format(
-                        type(rope)
-                    )
-                )
+                rope_q = rope
+                rope_k = rope
 
-        use_fp32_attention = getattr(
-            self, "fp32_attention", False
-        )  # necessary for NAN loss
-        if use_fp32_attention:
-            q, k, v = q.float(), k.float(), v.float()
+            # Rotate them
+            q = torch.cat(
+                [
+                    # nope tokens
+                    q[:, :, :npt, :],
+                    # rope tokens
+                    apply_rot_embed_cat(q[:, :, npt:, :], rope_q, self.rotate_half),
+                ],
+                dim=2,
+            ).type_as(v)
+            k = torch.cat(
+                [
+                    k[:, :, :npt, :],
+                    apply_rot_embed_cat(k[:, :, npt:, :], rope_k, self.rotate_half),
+                ],
+                dim=2,
+            ).type_as(v)
+        elif callable(rope):
+            # rope is callable module, not support reg tokens
+            prefixed_tokens = self.num_prefix_tokens
+            q_prefixed, q_patches = q[:, :, :prefixed_tokens], q[:, :, prefixed_tokens:]
+            k_prefixed, k_patches = k[:, :, :prefixed_tokens], k[:, :, prefixed_tokens:]
+            q_patches = rope(q_patches, transpose=True)
+            k_patches = rope(k_patches, transpose=True)
+            q = torch.cat([q_prefixed, q_patches], dim=2).type_as(v)
+            k = torch.cat([k_prefixed, k_patches], dim=2).type_as(v)
 
-        # sdpa
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        if mask is not None and mask.ndim == 2:
-            mask = (1 - mask.to(x.dtype)) * -10000.0
-            mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
+        if self.attn_implem != "flex_attention" and isinstance(mask, BlockMask):
+            mask = mask.to_dense()
 
-        x = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
+        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+        assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
+        x, _ = attention_function_(
+            self, q, k, v, attention_mask=mask, dropout=self.attn_drop.p
         )
-        x = x.transpose(1, 2)
 
-        x = x.view(B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.norm(x)
         x = self.proj(x)
         x = self.proj_drop(x)
-
-        x = _float16_clip_value(x)
 
         return x
 
@@ -414,10 +487,19 @@ class Qwen3SdpaAttention(nn.Module):
             key_states = self.k_norm(key_states)
 
         if position_embeddings is not None:
-            cos, sin = position_embeddings
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
+            # q, k: (bs, nh, s, hd)
+            if isinstance(position_embeddings, tuple):
+                cos, sin = position_embeddings
+                query_states, key_states = apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
+            elif torch.is_tensor(position_embeddings):
+                query_states = apply_rot_embed_cat(
+                    query_states, position_embeddings, half=True
+                )
+                key_states = apply_rot_embed_cat(
+                    key_states, position_embeddings, half=True
+                )
 
         # if past_key_value is not None:
         #     cache_kwargs = {
@@ -523,18 +605,22 @@ class NatAttention1d(Attention_):
         k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
         v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
 
-        # RoPE
-        if rope is not None:
-            q, k = rope(q, k)
-
         use_fp32_attention = getattr(
             self, "fp32_attention", False
         )  # necessary for NAN loss
         if use_fp32_attention:
             q, k, v = q.float(), k.float(), v.float()
 
-        # sdpa
+        # sdpa:
+        # (bs, bh, seq_len, hd)
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        # RoPE
+        if rope is not None:
+            q, k = rope(q, k)
+        elif torch.is_tensor(rope):
+            q = apply_rot_embed_cat(q, rope)
+            k = apply_rot_embed_cat(k, rope)
 
         x = natten.na1d(  # (bs, h, w, nh, hd)  # type: ignore
             q,
@@ -601,15 +687,22 @@ class NatAttention2d(nn.Module):
             self.q_norm = self.k_norm = nn.Identity()
 
     def _apply_rope(self, q: Float[Tensor, "b h w nh hd"], k, rope):
-        if rope:
-            h, w = q.shape[1:3]
-            q = rearrange(q, "b h w nh hd -> b (h w) nh hd")
-            k = rearrange(k, "b h w nh hd -> b (h w) nh hd")
+        if rope is None:
+            return q, k
 
+        h, w = q.shape[1:3]
+        q = rearrange(q, "b h w nh hd -> b nh (h w) hd")
+        k = rearrange(k, "b h w nh hd -> b nh (h w) hd")
+
+        if callable(rope):
             q, k = rope(q, k)
+        elif torch.is_tensor(rope):
+            # b, nh, s, hd
+            q = apply_rot_embed_cat(q, rope)
+            k = apply_rot_embed_cat(k, rope)
 
-            q = rearrange(q, "b (h w) nh hd -> b h w nh hd", h=h, w=w)
-            k = rearrange(k, "b (h w) nh hd -> b h w nh hd", h=h, w=w)
+        q = rearrange(q, "b nh (h w) hd -> b h w nh hd", h=h, w=w)
+        k = rearrange(k, "b nh (h w) hd -> b h w nh hd", h=h, w=w)
 
         return q, k
 

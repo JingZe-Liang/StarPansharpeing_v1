@@ -5,9 +5,9 @@ model:
   channels_mult: [2, 4, 4]
   dropout: 0.0
   in_channels: 512 # nested max channels
+  out_channels: 512 # nested max channels
   spatial_compression: 8
   num_res_blocks: 2
-  out_channels: 512 # nested max channels
   resolution: 1024
   z_channels: 256
   latent_channels: 16

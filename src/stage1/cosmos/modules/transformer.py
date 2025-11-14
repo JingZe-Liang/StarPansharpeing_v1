@@ -218,7 +218,7 @@ class Attention(Attention_):
         # QK-norm
         q, k = self.q_norm(q), self.k_norm(k)
 
-        if rope is not None:
+        if rope is not None and torch.is_tensor(rope):
             npt = self.num_prefix_tokens
             # (bs, nhead, n, head_dim)
             if rope.shape[-2] + npt != N:
@@ -247,16 +247,22 @@ class Attention(Attention_):
                 dim=2,
             ).type_as(v)
         elif callable(rope):
-            # rope is callable module, not support reg tokens
-            raise NotImplementedError("Not test the callable rope yet.")
-            # q = rope(q)
-            # k = rope(k)
+            prefixed_tokens = self.num_prefix_tokens
+            q_prefixed, q_patches = q[:, :, :prefixed_tokens], q[:, :, prefixed_tokens:]
+            k_prefixed, k_patches = k[:, :, :prefixed_tokens], k[:, :, prefixed_tokens:]
+            q_patches = rope(q_patches, transpose=True)
+            k_patches = rope(k_patches, transpose=True)
+            q = torch.cat([q_prefixed, q_patches], dim=2)
+            k = torch.cat([k_prefixed, k_patches], dim=2)
+        else:
+            raise ValueError("Invalid rope type")
 
         if self.attn_implem != "flex_attention" and isinstance(
             attention_mask, BlockMask
         ):
             attention_mask = attention_mask.to_dense()
 
+        # flex attention will be compiled inside
         attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
         assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
         x, _ = attention_function_(
@@ -375,7 +381,7 @@ class GatedAttention(nn.Module):
         # output_attentions: bool = False,
         # use_cache: bool = False,
         # cache_position: Optional[torch.LongTensor] = None,
-        rope: Annotated[torch.Tensor, "Rope embedding catted"]
+        rope: Annotated[torch.Tensor, "Rope embedding concat"]
         | None = None,  # necessary, but kept here for BC
     ):
         bsz, q_len, _ = hidden_states.size()

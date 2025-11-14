@@ -18,7 +18,7 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  used: Xiongan
+  used: IKONOS
   prefetch_factor: 6
   num_workers: 1
   shuffle_size: -1
@@ -27,6 +27,7 @@ dataset:
   rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
   # For loading the pretrained multi-channels head
   channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
+  batch_size_val: 4
   dataset_names_to_bs:
     MMSeg_YREB: 16
     DCF_2019: 7
@@ -34,7 +35,7 @@ dataset:
     GID_GF2: 12
     Houston: 7
     DryadHyper: 5
-    MUSLI: 1
+    MUSLI: 2
     OHS: 5
     WV3: 5
     QB: 5
@@ -180,7 +181,7 @@ train:
   seperate_enc_dec: false
   only_load_tokenizer: false
   grad_check: false
-  track_metrics: true
+  track_metrics: false
   compile_model: false
   # LoRA related
   conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
@@ -205,6 +206,7 @@ train:
     momentum: 0.9
     adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     adamw_wd: 0.
+
     # _target_: torch.optim.AdamW
     # _partial_: true
     # lr: 1.5e-4
@@ -213,22 +215,24 @@ train:
     # betas: [0.9, 0.995]
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 2.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.5e-4
-    # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.9, 0.995]
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+    betas: [0.9, 0.995]
+    foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

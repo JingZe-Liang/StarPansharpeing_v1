@@ -25,7 +25,10 @@ def dim_match(tensor: Tensor, target: Tensor) -> Tensor:
 
 
 def scale_shift_latent(
-    latent: Tensor, scale: Tensor | float, shift: Tensor | float
+    latent: Tensor,
+    scale: Tensor | float,
+    shift: Tensor | float,
+    inplace=True,
 ) -> Tensor:
     """Scale and shift the latent tensor."""
     if isinstance(scale, float):
@@ -38,12 +41,15 @@ def scale_shift_latent(
 
     scale = dim_match(scale, latent)
     shift = dim_match(shift, latent)
-    latent.sub_(shift).div_(scale)
+    if inplace:
+        latent.sub_(shift).div_(scale)
+    else:
+        latent = (latent - shift) / scale
 
     return latent
 
 
-def un_scale_shift_latent(latent, scale, shift):
+def un_scale_shift_latent(latent, scale, shift, inplace=True):
     """Un-scale and un-shift the latent tensor."""
     if isinstance(scale, float):
         scale = torch.as_tensor(scale, device=latent.device, dtype=latent.dtype)
@@ -52,7 +58,10 @@ def un_scale_shift_latent(latent, scale, shift):
 
     scale = dim_match(scale, latent)
     shift = dim_match(shift, latent)
-    latent.mul_(scale).add_(shift)
+    if inplace:
+        latent.mul_(scale).add_(shift)
+    else:
+        latent = (latent + shift) / scale
 
     return latent
 

@@ -999,10 +999,10 @@ def wids_filter_img_size(constraint_size: int | tuple):
 
 def large_image_resizer_clipper(
     tgt_size: int | tuple[int, int],
-    img_key: str | list[str] | None = "img",
+    img_key: str | list[str] | None = "im",
     op_for_large: str = "clip",
 ):
-    """
+    """g
     Create a function to process large images by either random cropping or resizing.
 
     Args:

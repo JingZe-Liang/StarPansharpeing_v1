@@ -480,6 +480,7 @@ class ContinuousImageTokenizer(nn.Module):
                             sort_by="self_cpu_time_total", row_limit=10
                         )
                     )
+                logger.log("NOTE", "load pretrained model done!")
 
         # token channel drop
         self.use_channel_drop = cfg.use_channel_drop
@@ -1572,7 +1573,7 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="RS5M",
+        real_data="fmow_MS",
         save_pca_vis=False,
         pca_type="z",
         is_lora=False,
@@ -1595,8 +1596,20 @@ if __name__ == "__main__":
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=2000,
+        max_iters=400,
         compute_mean_std=True,
         use_optim=False,
         check_grad=False,
     )
+
+# RS5M
+# 19:19:44 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: 2.3075454235076904
+# 19:19:44 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.797507286071777
+
+# Fmow_MS
+# 19:24:41 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: -1.2613893747329712
+# 19:24:41 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 4.828085899353027
+
+# BigEarthNetS2
+# 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: -1.926203727722168
+# 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.4402666091918945

@@ -17,15 +17,16 @@ defaults:
 
 dataset:
   cfgs:
-    used: QB
+    used: WV3
     batch_size_train: 16
 
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
+  beta: 0.995
   update_after_step: 1000
   update_every: 2
+  use_foreach: true
   allow_different_devices: true
 
 train:
@@ -37,43 +38,70 @@ train:
   track_metrics_duration: -1
   track_metrics_after: 1000
   visualize_every: 500
-  max_steps: 400_000
+  max_steps: 100_000
   save_every: 1000
 
   to_neg_1_1: false
   pansp_ratio: 4
   online_tokenize: true
-  add_pan_processor: true
+  add_pan_processor: false
 
   resume_path:
-  ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-25_19-16-29_f8c16p1_WV3_nafnet_wrapper/ema
+  ema_load_path: #runs/stage2_pansharpening_wrapper/2025-09-28_00-33-36_WV3_nat_2/ema
 
   pansharpening_loss:
     _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
     pixel_loss_type: l1ssim
     amotized_loss:
-      _target_: torch.nn.MSELoss
+      _target_: torch.nn.L1Loss
     pixel_loss_kwargs:
       weighted_r: [1.0, 0.1] # l1ssim weights
     factors: [0.0, 1.0] # latent and pixel weights
     is_neg_1_1: false
 
   pansharp_optim:
-    # _target_: torch.optim.AdamW
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     # _partial_: true
-    # lr: 1.0e-3
-    # weight_decay: 1.0e-4
-    # eps: 1e-10
-    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
+    # betas: [0.95, 0.99]
+    # oned_param_algo: lion
+    # lr: 6.0e-4
+    # adjust_lr: rms_norm
+    # use_triton: false
+    # muon_params_defaults:
+    #   lr: 6.0e-4
+    #   weight_decay: 0.1
+    # oned_params_defaults:
+    #   lr: 3.0e-4
+    #   weight_decay: 0.0
+
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 6.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
 
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 1.0e-3
+    lr: 2.0e-4
     weight_decay: 1.0e-4
-    eps: 1e-9
-    betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    eps: 1.0e-8
+    betas: ${tuple:[0.99, 0.995]}
     caution: true
-    foreach: true
+    mars: false
+    foreach: false
+
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 1.0e-4
+    # # eps: 1.0e-9
+    # betas: ${tuple:[0.99, 0.995]}
+    # foreach: true
 
     # _target_: heavyball.ForeachSOAP
     # _partial_: true
@@ -87,7 +115,7 @@ train:
     _partial_: true
     num_warmup_steps: 100
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 4
 
   log:
     run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper
@@ -97,8 +125,8 @@ train:
   debug: true
 
 val:
-  val_duration: 1000
+  val_duration: 500
   max_val_reduced_iters: -1 # val only `max_val_iters` batches
-  max_val_full_iters: 20
+  max_val_full_iters: -1 # val_full only `max_val_iters` batches
   val_use_patches: true
   crop_batch_size: 64

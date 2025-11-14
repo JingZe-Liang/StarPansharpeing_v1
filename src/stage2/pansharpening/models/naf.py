@@ -247,6 +247,10 @@ class PansharpeningNAFNet(nn.Module):
             # Upsampling using PixelShuffle (sub-pixel convolution)
             self.ups.append(
                 # nn.ConvTranspose2d(chan, chan // 2, 2, 2)
+                # nn.Sequential(
+                #     nn.Upsample(scale_factor=2, mode="nearest"),
+                #     nn.Conv2d(chan, chan // 2, 3, 1, 1),
+                # )
                 nn.Sequential(
                     nn.Conv2d(chan, chan * 2, 1, bias=False),
                     nn.PixelShuffle(2),  # Upsample by factor of 2
@@ -261,7 +265,7 @@ class PansharpeningNAFNet(nn.Module):
         # Calculate padding size for input processing
         self.padder_size = 2 ** len(self.encoders)
 
-        self._init_weights()
+        self.init_weights()
 
     def _replace_nat_defaults(
         self,
@@ -462,7 +466,7 @@ class PansharpeningNAFNet(nn.Module):
         model = cls(cfg)
         return model
 
-    def _init_weights(self):
+    def init_weights(self):
         """
         Initialize network weights using proper initialization schemes.
 
@@ -473,31 +477,36 @@ class PansharpeningNAFNet(nn.Module):
         - Output head: Zero initialization for stable training start
         """
 
+        @torch.no_grad()
         def _apply(module):
             if isinstance(module, nn.Conv2d):
                 # Convolutional layers: LeCun normal initialization
-                # nn.init.kaiming_normal_(module.weight, mode="fan_in")
+                # nn.init.kaiming_normal_(
+                #     module.weight, mode="fan_out", nonlinearity="relu"
+                # )
                 lecun_normal_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):
                 # Linear layers: Xavier uniform initialization
-                nn.init.xavier_uniform_(module.weight)
+                nn.init.xavier_normal_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.LayerNorm):
                 # Layer normalization: standard initialization
                 nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
+                if hasattr(module, "bias") and module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
         # Apply weight initialization to all modules
         self.apply(_apply)
 
         # Initialize output head with zeros for stable training start
-        if hasattr(self.head["head_out"], "weight"):
-            nn.init.zeros_(self.head["head_out"].weight)
-        if hasattr(self.head["head_out"], "bias"):
-            nn.init.zeros_(self.head["head_out"].bias)
+        # if self.cfg.residual_type is not None:
+        #     if hasattr(self.head["head_out"], "weight"):
+        #         nn.init.zeros_(self.head["head_out"].weight)
+        #     if hasattr(self.head["head_out"], "bias"):
+        #         nn.init.zeros_(self.head["head_out"].bias)
 
         log("[PansharpeningNAFNet] Initialized weights", level="info")
 
@@ -834,7 +843,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
     def _init_weights(self):
         def _apply(module):
             if isinstance(module, nn.Conv2d):
-                # nn.init.kaiming_normal_(module.weight, mode="fan_in")
+                # nn.init.kaiming_normal_(module.weight)
                 lecun_normal_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
@@ -920,12 +929,12 @@ def test_pansharpening_nafnet():
         dec_blk_nums=[1, 1, 1, 1],  # Match default dec_blk_type length
         use_residual=True,
         patch_size=1,
-        dw_expand=1,
+        dw_expand=2,
         ffn_expand=2,
         condition_on_decoder=True,
         residual_type="ms",
-        is_neg_1_1=True,
-        output_rescale=True,
+        is_neg_1_1=False,
+        output_rescale=False,
     )
     model.train()
 
@@ -937,40 +946,72 @@ def test_pansharpening_nafnet():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
 
-    # Create sample inputs
-    ms = torch.randn(1, 8, 256, 256, device=device)
-    pan = torch.randn(1, 1, 256, 256, device=device)
-    cond = torch.randn(1, 256, 32, 32, device=device)  # latents
+    for i in range(1000):
+        # Create sample inputs
+        ms = torch.randn(1, 8, 256, 256, device=device)
+        pan = torch.randn(1, 1, 256, 256, device=device)
+        cond = torch.randn(1, 256, 32, 32, device=device)  # latents
 
-    # Test forward pass with bfloat16 autocast
-    if device == "cuda" and torch.cuda.is_bf16_supported():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+        # Test forward pass with bfloat16 autocast
+        if device == "cuda" and torch.cuda.is_bf16_supported():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                output = model(ms, pan, cond)
+        else:
+            # Fallback to float32 if bfloat16 not supported
             output = model(ms, pan, cond)
-    else:
-        # Fallback to float32 if bfloat16 not supported
-        output = model(ms, pan, cond)
 
-    # Verify output shape
-    assert output.shape == ms.shape, (
-        f"Expected output shape {ms.shape}, got {output.shape}"
-    )
+        # Verify output shape
+        assert output.shape == ms.shape, (
+            f"Expected output shape {ms.shape}, got {output.shape}"
+        )
+
+        optimizer.zero_grad()
+        ng = {}
+
+        gt = torch.randn_like(output)
+        loss = F.l1_loss(output, gt)
+        print(loss)
+
+        loss.backward()
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                ng[name] = param.grad
+
+        # sort the dict grad
+        if i == 0:
+            print("------------------")
+            ng = {
+                k: v
+                for k, v in sorted(
+                    ng.items(), key=lambda item: item[1].norm().item(), reverse=True
+                )
+            }
+            # print the max first 10 grads
+            for i, (k, v) in enumerate(ng.items()):
+                if i < 10:
+                    print(f"grad {i}: name={k}, grad_norm={v.norm().item()}")
+
+        # step
+        optimizer.step()
 
     # Test inference mode
-    model.eval()
-    with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output_eval = model(ms, pan, cond)
+    # model.eval()
+    # with torch.no_grad():
+    #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    #         output_eval = model(ms, pan, cond)
 
     # Verify evaluation output shape
-    assert output_eval.shape == ms.shape, (
-        f"Expected eval output shape {ms.shape}, got {output_eval.shape}"
-    )
+    # assert output_eval.shape == ms.shape, (
+    #     f"Expected eval output shape {ms.shape}, got {output_eval.shape}"
+    # )
 
-    print("✓ PansharpeningNAFNet test passed!")
-    print(f"Input MS shape: {ms.shape}")
-    print(f"Input PAN shape: {pan.shape}")
-    print(f"Input condition shape: {cond.shape}")
-    print(f"Output shape: {output.shape}")
+    # print("✓ PansharpeningNAFNet test passed!")
+    # print(f"Input MS shape: {ms.shape}")
+    # print(f"Input PAN shape: {pan.shape}")
+    # print(f"Input condition shape: {cond.shape}")
+    # print(f"Output shape: {output.shape}")
 
 
 def test_pansharpening_naf_decoder_net():
@@ -1174,5 +1215,5 @@ def test_mixed_blocks():
 
 if __name__ == "__main__":
     print("decoder")
-    test_pansharpening_naf_decoder_net()
-    # test_pansharpening_nafnet()
+    # test_pansharpening_naf_decoder_net()
+    test_pansharpening_nafnet()

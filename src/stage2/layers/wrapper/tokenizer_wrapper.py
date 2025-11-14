@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from loguru import logger
 from peft import PeftMixedModel, PeftModel, get_peft_model
+from peft.tuners.tuners_utils import BaseTuner
 from torch import Tensor
 
 from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
@@ -22,7 +23,8 @@ from src.utilities.logging import log
 
 type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None
 
-# Utilities functions
+
+############### Utilities functions ##############
 
 
 def _not_lora_not_implemented_raise(self, *args, **kwargs):
@@ -36,6 +38,9 @@ def _partial_amotized_model_decode_fn(tokenizer):
         return tokenizer.decode(x, inp_shape)
 
     return decode_fn
+
+
+############# Tokenizer wrapper with downstream model ##############
 
 
 class DownstreamModelTokenizerWrapper(nn.Module):
@@ -59,6 +64,11 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self.downstream_model = downstream_model
         self.is_scale_latent = tokenizer_scale_shift is not None
         self.img_is_neg_1_1 = img_is_neg_1_1
+
+        # Merge the adpter weights
+        if isinstance(self.tokenizer, (PeftMixedModel, PeftModel)):
+            self.tokenizer = self.tokenizer.base_model.merge_and_unload()
+            log("Merge and unload the PEFT adapter weights.")
 
         # Latent value scaler
         if self.is_scale_latent:
@@ -98,7 +108,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         self.is_tokenizer_lora = isinstance(self.tokenizer, TokenizerLoRAMixin)
         self.is_peft_lora = isinstance(self.tokenizer, (PeftMixedModel, PeftModel))
         if self.is_peft_lora:
-            self._base_peft_model = self.tokenizer.base_model
+            self._base_peft_model: BaseTuner = self.tokenizer.base_model
 
         # Freeze tokenizer by default
         if froze_tokenizer:
@@ -134,6 +144,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             self.tokenizer.change_lora(adapter_name)  # Online loading adapter
         elif self.is_peft_lora:
             self.tokenizer = cast(PeftModel, self.tokenizer)
+            # Unmerge the activated adapter, set the new adapter, and merge again
             if merge:
                 assert getattr(self.tokenizer, "_base_peft_model", None) is not None, (
                     "_base_peft_model not found in the PeftModel tokenizer."
@@ -192,24 +203,27 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         )
 
     def _update_lora_methods(self):
-        lora_tokenizer_methods = [
-            "actived_model",
-            "offload_model",
-            "peft_config",
-            "change_lora",
-            "merge_lora_weights",
-            "merge_specific_lora",
-            "disable_lora",
-            "drop_current_lora",
-            "get_available_loras",
-            "get_current_lora",
-            "get_base_model",
-        ]
         if self.is_tokenizer_lora:
+            lora_tokenizer_methods = [
+                "actived_model",
+                "offload_model",
+                "peft_config",
+                "change_lora",
+                "merge_lora_weights",
+                "merge_specific_lora",
+                "disable_lora",
+                "drop_current_lora",
+                "get_available_loras",
+                "get_current_lora",
+                "get_base_model",
+            ]
             self._update_methods_from_model(self.tokenizer, lora_tokenizer_methods)
         else:
-            for method in lora_tokenizer_methods:
-                setattr(self, method, MethodType(_not_lora_not_implemented_raise, self))
+            # for method in lora_tokenizer_methods:
+            #     setattr(self, method, MethodType(_not_lora_not_implemented_raise, self))
+
+            # Do not attach methods
+            pass
 
     def _update_methods_from_model(self, model, model_methods: list[str]):
         if not self.is_tokenizer_lora:
@@ -220,7 +234,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
                 # bind the method to the current model but the function is from the lora model
                 setattr(self, method, getattr(model, method))
             else:
-                log(f"Method {method} not found in the lora model", level="warning")
+                logger.debug(f"Method {method} not found in the lora model")
 
     def _cache_img_chans(self, img: Tensor):
         self._img_chans_cache.appendleft(img.shape[1])
@@ -242,7 +256,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     @property
     def img_fifo_channel(self):
         if len(self._img_chans_cache) == 0:
-            raise ValueError("No image channels cached. Please run forward once.")
+            raise ValueError(
+                "No image channels cached. Please run forward at least once."
+            )
         return self._img_chans_cache.pop()  # left in, right out: FIFO
 
     def _clear_cached_img_channels(self):
@@ -367,19 +383,14 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     def state_dict(self, *args, **kwargs):
         # only save the first tokenizer if it is a lora tokenizer with multiple models
         learn_detok = getattr(self.downstream_model, "learn_decoder", False)
+
         # Filter out
-        if learn_detok and not self.is_tokenizer_lora:
-            filter_out_fn = (
-                lambda k: False if k.startswith("tokenizer.decoder") else True
-            )
-        elif learn_detok and self.is_tokenizer_lora:
-            filter_out_fn = (
-                lambda k: False if k.startswith("active_model.decoder") else True
-            )
-        else:
-            filter_out_fn = (
-                lambda k: True if k.startswith("downstream_model") else False
-            )
+        filter_out_fn = lambda k: k.startswith("downstream_model")
+        if learn_detok:
+            if self.is_peft_lora:
+                filter_out_fn = lambda k: not k.startswith("tokenizer.decoder")
+            elif self.is_tokenizer_lora:
+                filter_out_fn = lambda k: not k.startswith("active_model.decoder")
 
         sd_out = {}
         for k, v in super().state_dict().items():
@@ -387,6 +398,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
                 sd_out[k] = v
 
         return sd_out
+
+    def load_state_dict(self, state_dict, strict=False):
+        super().load_state_dict(state_dict, strict=strict)
 
     def set_grad_checkpointing(self, mode=True):
         for module in self.modules():

@@ -1,7 +1,7 @@
 import math
+from functools import reduce
 from itertools import repeat as repeat_iter
 from math import ceil, floor
-from functools import reduce
 from operator import mul
 from typing import (
     Callable,
@@ -604,13 +604,19 @@ class RotaryPositionEmbeddingPytorchV2(RotaryPositionEmbedding):
         k: torch.Tensor,
         input_pos: Optional[torch.Tensor] = None,
         seq_len: Optional[int] = None,
+        transpose=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         q, k: query, key tensors of shape [b, s, h, d]
         input_pos: optional tensor of positions to apply RoPE to, shape [s]
         seq_len: optional sequence length to apply RoPE to, used for inference
-
         """
+        if transpose:
+            # q, k input is torch spda style: [b, h, s, d]
+            # else is flash-attention style: [b, s, h, d]
+
+            # [b, h, s, d] -> [b, s, h, d]
+            q, k = q.transpose(1, 2), k.transpose(1, 2)
 
         if q.dtype != self.cos_cached.dtype:
             self.cos_cached = self.cos_cached.to(q.dtype)
@@ -626,6 +632,10 @@ class RotaryPositionEmbeddingPytorchV2(RotaryPositionEmbedding):
             sin_emb = sin_emb[:, :seq_len, :, :]
         q = _apply_rotary_pos_emb_te(q, cos_emb, sin_emb)
         k = _apply_rotary_pos_emb_te(k, cos_emb, sin_emb)
+
+        if transpose:
+            q, k = q.transpose(1, 2), k.transpose(1, 2)
+
         return q, k
 
 

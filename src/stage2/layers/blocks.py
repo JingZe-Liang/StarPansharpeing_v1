@@ -72,6 +72,7 @@ class AttentionBlock(nn.Module):
         layer_scale_value=1e-5,
         use_layerscale=False,
         mlp_type: str = "swiglu",
+        is_causal=False,
     ):
         super().__init__()
         self.grad_checkpointing = False
@@ -83,10 +84,12 @@ class AttentionBlock(nn.Module):
                 dim,
                 num_heads=num_heads,
                 qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
+                qk_norm=qk_norm is not None,
                 norm_layer=norm_layer,
                 attn_drop=attn_drop,
                 proj_drop=drop,
+                attn_type="sdpa",
+                is_causal=is_causal,
             )
         elif attn_type == "1d_gated":
             self.attn = Qwen3SdpaAttention(
