@@ -11,7 +11,6 @@ from timm.layers.create_norm import get_norm_layer
 from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
-from timm.layers.pos_embed_sincos import build_fourier_pos_embed
 from timm.models.naflexvit import (
     NaFlexEmbeds,
     NaFlexVit,
