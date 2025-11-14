@@ -181,7 +181,7 @@ train:
   seperate_enc_dec: false
   only_load_tokenizer: false
   grad_check: false
-  track_metrics: false
+  track_metrics: true
   compile_model: false
   # LoRA related
   conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true

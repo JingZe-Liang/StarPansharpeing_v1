@@ -137,3 +137,7 @@
 [submodule "src/utilities/transport/alpha_flow"]
 	path = src/utilities/transport/alpha_flow
 	url = https://github.com/snap-research/alphaflow.git
+
+[submodule "src/stage1/self_supervised/lejepa"]
+	path = src/stage1/self_supervised/lejepa
+	url = https://github.com/rbalestr-lab/lejepa.git

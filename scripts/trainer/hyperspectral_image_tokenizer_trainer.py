@@ -216,6 +216,36 @@ class CosmosHyperspectralTokenizerTrainer:
             for w in last_layer.parameters():
                 w.requires_grad_(True)
 
+    def setup_proxy_task_model_and_optim_scheduler(self):
+        cfg = self.cfg.proxy_task
+        self.proxy_model = None
+        self.proxy_optim, self.proxy_sched = None, None
+
+        if cfg.task == "ijepa":
+            # Projector
+            self.proxy_model = hydra.utils.instantiate(cfg.model)
+            self.log_msg(f"Init proxy model for proxy task: {cfg.task}")
+
+        elif cfg.task == "lejepa":
+            ...
+            raise
+
+        elif cfg.task == "mae":
+            ...
+            raise
+
+        # Optimizer and scheduler
+        if self.proxy_model is not None:
+            _params_need_name = "muon" not in cfg.optimizer._target_
+            if _params_need_name:
+                ps = self.proxy_model.named_parameters()
+            else:
+                ps = self.proxy_model.parameters()
+            self.proxy_optim = hydra.utils.instantiate(cfg.optimizer)(ps)
+            self.proxy_sched = hydra.utils.instantiate(cfg.scheduler)(
+                optimizer=self.proxy_optim
+            )
+
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
         self.sep_enc_dec = self.train_cfg.seperate_enc_dec
@@ -384,6 +414,10 @@ class CosmosHyperspectralTokenizerTrainer:
             beta=self.ema_cfg.beta,
             update_every=self.ema_cfg.update_every,
         ).to(self.device)
+
+        if self.proxy_model is not None:
+            ...
+            # the proxy model do not need EMA?
 
     def configure_logger(self):
         self.logger = logger
@@ -1009,9 +1043,18 @@ class CosmosHyperspectralTokenizerTrainer:
         # self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
         #     self.train_dataloader, self.val_dataloader
         # )
+
+        # Schedulers
         (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(
             self.tokenizer_sched, self.disc_sched
         )
+
+        # Proxy model
+        if self.proxy_model is not None:
+            self.proxy_model, self.proxy_optim = self.accelerator.prepare(
+                self.proxy_model, self.proxy_optim
+            )
+            self.proxy_sched = self.accelerator.prepare(self.proxy_sched)
 
         def _fake_prepare(model, no_split_modules, dtype=torch.float32):
             model._no_split_modules = no_split_modules
@@ -1068,8 +1111,48 @@ class CosmosHyperspectralTokenizerTrainer:
 
         elif mode == "disc":
             self.ema_vq_disc.update()
+
+        elif model == "proxy":
+            if getattr(self.ema_proxy_model, None) is not None:
+                self.ema_proxy_model.update()
+
         else:
             raise ValueError(f"Unknown mode {mode}")
+
+    def forward_proxy_task(self, x):
+        if self.proxy_model is None:
+            return None
+
+        cfg = self.cfg.proxy_task
+        if cfg.task == "ijepa":
+            from src.stage1.self_supervised import (
+                MaskCollator,
+                apply_masks,
+                repeat_interleave_batch,
+            )
+
+            # Masks
+            mask_collator = MaskCollator(**to_cont(cfg.masks))
+            x, masks_enc, masks_pred = mask_collator(x)
+
+            # Target
+            with torch.autocast("cuda", self.dtype):
+                # Target
+                with torch.no_grad():
+                    h = self.ema_tokenizer(x)
+                    h = torch.layer_norm(h, (h.size(-1),))
+                    B = len(h)
+                    h = apply_masks(h, masks_pred)
+                    h_tgt = repeat_interleave_batch(h, B, repeat=len(masks_enc))
+                    print(h_tgt.shape)
+
+                # Context
+                h_ctx = self.tokenizer(x, jepa_masks=masks_enc)
+                h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
+
+                # Loss
+                loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
+            return loss
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
         out_d = {}

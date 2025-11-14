@@ -5,18 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-# 2D image JEPA block utilities
-# used with the dataloader collator function.
-
 import math
+
 from multiprocessing import Value
-from typing import List
+
+from logging import getLogger
 
 import torch
-from loguru import logger
-from torch import Tensor
 
 _GLOBAL_SEED = 0
+logger = getLogger()
 
 
 class MaskCollator(object):
@@ -108,9 +106,8 @@ class MaskCollator(object):
                 if timeout == 0:
                     tries += 1
                     timeout = og_timeout
-                    logger.debug(
-                        f"[Mask Collator Warning]: "
-                        f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]'
+                    logger.warning(
+                        f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]"'
                     )
         mask = mask.squeeze()
         # --
@@ -130,10 +127,7 @@ class MaskCollator(object):
         """
         B = len(batch)
 
-        if isinstance(batch, (tuple, list)):
-            collated_batch = torch.utils.data.default_collate(batch)
-        else:
-            collated_batch = batch
+        collated_batch = torch.utils.data.default_collate(batch)
 
         seed = self.step()
         g = torch.Generator()
@@ -164,7 +158,7 @@ class MaskCollator(object):
                 if self.allow_overlap:
                     acceptable_regions = None
             except Exception as e:
-                logger.debug(f"Encountered exception in mask-generator {e}")
+                logger.warning(f"Encountered exception in mask-generator {e}")
 
             masks_e = []
             for _ in range(self.nenc):
@@ -186,27 +180,3 @@ class MaskCollator(object):
         collated_masks_enc = torch.utils.data.default_collate(collated_masks_enc)
 
         return collated_batch, collated_masks_enc, collated_masks_pred
-
-
-def apply_masks(x: Tensor, masks: List[Tensor]):
-    """
-    :param x: tensor of shape [B (batch-size), N (num-patches), D (feature-dim)]
-    :param masks: list of tensors containing indices of patches in [N] to keep
-    """
-    all_x = []
-    for m in masks:
-        mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
-        all_x += [torch.gather(x, dim=1, index=mask_keep)]
-    return torch.cat(all_x, dim=0)
-
-
-def repeat_interleave_batch(x: Tensor, B: int, repeat: int):
-    N = len(x) // B
-    x = torch.cat(
-        [
-            torch.cat([x[i * B : (i + 1) * B] for _ in range(repeat)], dim=0)
-            for i in range(N)
-        ],
-        dim=0,
-    )
-    return x
