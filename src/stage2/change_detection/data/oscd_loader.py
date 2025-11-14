@@ -228,7 +228,7 @@ def create_oscd_loader(
     shared_norm: bool = True,
     prefetch_factor: int | None = None,
     remapped_gt: dict | None = None,
-):  # -> tuple[Any, Any | WebLoader]:
+):
     """
     Create a dataloader for OSCD (Onera Satellite Change Detection) dataset.
 

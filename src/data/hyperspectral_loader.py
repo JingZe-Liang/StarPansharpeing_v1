@@ -389,6 +389,7 @@ def get_hyperspectral_dataloaders(
 
     # resize
     if resize_before_transform is not None:
+        log_print(f"Resize before transform: {resize_before_transform}")
         dataset = dataset.map(
             large_image_resizer_clipper(
                 img_key=tgt_key,

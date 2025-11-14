@@ -44,7 +44,7 @@ trans_enc_cfg:
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
-  norm_layer: flarmsnorm
+  norm_layer: layernorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial
@@ -62,7 +62,7 @@ trans_dec_cfg:
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 1
-  norm_layer: flarmsnorm
+  norm_layer: layernorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial

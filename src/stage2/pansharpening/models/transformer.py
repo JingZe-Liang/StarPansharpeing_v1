@@ -33,7 +33,7 @@ class TransformerConfig:
     drop: float = 0.0
     drop_path: float = 0.0
     input_size: int = 32
-    patch_size: int = 2
+    patch_size: int = 1
     raw_img_size: int | None = None
     raw_img_chans: int | None = None
     pos_embed_type: str = "sincos"
@@ -41,6 +41,7 @@ class TransformerConfig:
     mlp_norm_layer: str = "rmsnorm"
     act_layer: str = "swiglu"
     feature_layer_ids: list[int] | None = None
+    use_layerscale: bool = True
 
 
 class Transformer(nn.Module):
@@ -49,6 +50,11 @@ class Transformer(nn.Module):
 
         # Store config for reference
         self.cfg = cfg
+
+        # Norm layers
+        norm_layer = get_norm_layer(cfg.norm_layer)
+        mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
+        act_layer = get_act_layer(cfg.act_layer)
 
         # patch embedding
         self.patch_size = cfg.patch_size
@@ -62,6 +68,8 @@ class Transformer(nn.Module):
             embed_dim=cfg.dim // self._n_modalities,
             bias=True,
             strict_img_size=False,
+            # input is latent, norm it first
+            norm_layer=norm_layer,
         )
         self.fuse_stem = nn.Linear(
             cfg.dim // self._n_modalities * self._n_modalities, cfg.dim
@@ -81,24 +89,24 @@ class Transformer(nn.Module):
         drop_path_rates = [
             x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)
         ]  # stochastic depth decay rule
-        norm_layer = get_norm_layer(cfg.norm_layer)
-        mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
-        act_layer = get_act_layer(cfg.act_layer)
+
         for i in range(cfg.depth):
             layers.append(
                 AttentionBlock(
                     dim=cfg.dim,
-                    mlp_ratio=cfg.mlp_ratio,
                     num_heads=cfg.num_heads,
                     qkv_bias=True,
                     qk_norm=norm_layer,
+                    norm_layer=mlp_norm_layer,
+                    mlp_type="swiglu",
+                    mlp_ratio=cfg.mlp_ratio,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
                     drop_path=drop_path_rates[i]
                     if isinstance(drop_path_rates, list)
                     else cfg.drop_path,
-                    norm_layer=mlp_norm_layer,
                     act_layer=act_layer,
+                    use_layerscale=cfg.use_layerscale,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -157,9 +165,11 @@ class Transformer(nn.Module):
             # rope implem from timm.
             self.rope_options = {
                 "temperature": 10000.0,
-                "in_pixel": False,
+                "in_pixels": False,
                 "feat_shape": [self.base_size, self.base_size],
+                "ref_feat_shape": [self.base_size, self.base_size],
             }
+            # create the rope emb at forward
             self.rope = RotaryEmbeddingCat(
                 dim=dim // self.num_heads, **self.rope_options
             )
@@ -178,32 +188,23 @@ class Transformer(nn.Module):
             ps = self.patch_size
 
             if pe.shape[1] != h * w:
-                # re-init the pos_embed
-                # pe = get_2d_sincos_pos_embed(
-                #     pe.shape[-1],
-                #     (h // ps, w // ps),
-                #     pe_interpolation=self.pe_interpolation,
-                #     base_size=base_size,
-                # )
                 new_h, new_w = hw
                 pos_embed = resample_abs_pos_embed(  # type: ignore
                     self.pos_embed, new_size=(new_h, new_w), num_prefix_tokens=0
                 )
                 pe = torch.as_tensor(pos_embed).float()
             return pe
-        elif self.pos_embed_type == "rope":
+        elif self.pos_embed_type == "rope_te":
             # TODO: add multi-modal-rope
             # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
-
             seq_len_x = h * w
             pre_rope_seq_len = self.rope.cos_cached.shape[1]
             if seq_len_x > pre_rope_seq_len:
-                # re-init the rope
                 self.rope_options["latent_shape"] = (h, w)
                 self.rope.__init__(seq_len_x, **self.rope_options)
             return self.rope
         elif self.pos_embed_type == "rope":
-            ph, pw = h // self.patch_size, w // self.patch_size
+            ph, pw = h, w
             seq_len_x = ph * pw
             pe = self.rope.get_embed((ph, pw))
             return pe
@@ -224,7 +225,13 @@ class Transformer(nn.Module):
         assert h * w == x.shape[1]
 
         x = rearrange(
-            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
+            x,
+            "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)",
+            h=h,
+            w=w,
+            p1=p,
+            p2=p,
+            c=c,
         )
         return x
 
@@ -268,12 +275,17 @@ class Transformer(nn.Module):
         else:
             return out, features
 
-    def init_weights(self):
+    def init_weights(self, lin_init="trunc_normal"):
         # Initialize transformer layers
         def _basic_init(module):
             norms = [get_norm_layer(n) for n in ["layernorm", "simplenorm", "rmsnorm"]]
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_normal_(module.weight)
+                if lin_init == "trunc_normal":
+                    nn.init.trunc_normal_(module.weight, std=0.02)
+                elif lin_init == "xavier":
+                    torch.nn.init.xavier_normal_(module.weight)
+                else:
+                    raise ValueError(f"Unsupported lin_init: {lin_init}")
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
             elif isinstance(module, tuple(norms)):
@@ -285,7 +297,7 @@ class Transformer(nn.Module):
 
         # patch embedding
         w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_normal_(w.view([w.shape[0], -1]))
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         torch.nn.init.zeros_(self.patch_embed.proj.bias)
 
         # zero-out the head
@@ -306,6 +318,10 @@ class Transformer(nn.Module):
 
 
 if __name__ == "__main__":
+    """
+    python -m src.stage2.pansharpening.models.transformer
+
+    """
     device = "cpu"
     # torch.cuda.set_device(device)
     # x = torch.randn(1, 768, 128).to(device)
@@ -329,19 +345,34 @@ if __name__ == "__main__":
     # Create config for Transformer
     cfg = TransformerConfig(
         in_dim=16,
+        patch_size=1,
         dim=384,
         depth=8,
         num_heads=8,
         mlp_ratio=4,
         out_channels=16,
-        pos_embed_type="sincos",
+        pos_embed_type="rope",
         norm_layer="rmsnorm",
-        input_size=32,
+        input_size=8,
     )
     model = Transformer(cfg).to(device)
     print(parameter_count_table(model))
 
-    x = torch.randn(1, 16, 64, 64).to(device)
+    x = torch.randn(1, 16, 8, 8).to(device)
     out = model(x, x)
     print(out.shape)  # Expected shape: (1, 16, 32, 32)
     print(out)
+
+    out.mean().backward()
+
+    # sort the grad and print the name/grad norm
+    ng = {}
+    for name, param in model.named_parameters():
+        if param.requires_grad and param.grad is not None:
+            ng[name] = param.grad.norm().item()
+    ng = dict(sorted(ng.items(), key=lambda item: item[1], reverse=True))
+    # print the max 10
+    for i, (name, grad_norm) in enumerate(ng.items()):
+        if i >= 10:
+            break
+        print(f"{name}: {grad_norm}")

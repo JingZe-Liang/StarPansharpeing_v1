@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Callable, Iterable, Optional, Tuple, Union
 
 import torch
@@ -10,6 +11,86 @@ from torch.optim.optimizer import Optimizer, ParamsT
 
 from ..config_utils import function_config_to_basic_types
 from .dion.dion.muon import Muon
+from .dion.dion.newton_schulz_triton import ns_line_1, ns_line_2
+
+abc_s = torch.tensor(
+    [
+        (8.287212018145622, -23.59588651909882, 17.300387312530923),
+        (4.107059111542197, -2.9478499167379084, 0.54484310829266),
+        (3.9486908534822938, -2.908902115962947, 0.5518191394370131),
+        (3.3184196573706055, -2.488488024314878, 0.5100489401237208),
+        (2.3006520199548186, -1.6689039845747518, 0.4188073119525678),
+        (1.8913014077874002, -1.2679958271945908, 0.37680408948524996),
+        (1.875, -1.25, 0.375),
+    ]
+).to(torch.float64)
+denorm = torch.tensor([1.01, 1.01**3, 1.01**5])
+abc_s = abc_s / denorm[None]
+abc_s = abc_s.detach().cpu().numpy().tolist()
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def zeropower_via_newtonschulz6_diff_abc(
+    G,
+    steps: int = 6,
+    norm=False,
+    ns_dtype=torch.bfloat16,
+    use_triton=False,
+    epsilon=1e-8,
+):
+    """
+    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
+    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
+    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
+    zero even beyond the point where the iteration no longer converges all the way to one everywhere
+    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
+    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
+    performance at all relative to UV^T, where USV^T = G is the SVD.
+    """
+    global abc_s
+
+    assert (
+        G.ndim >= 2
+    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+
+    X = G.to(dtype=ns_dtype)
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)  # epsilon: 1e-7
+    iters = abc_s[:steps] + max(steps - len(abc_s), 0) * abc_s[-1:]
+
+    if use_triton:
+        X = X.contiguous()
+        A = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+        B = torch.empty_like(A)
+        C = torch.empty_like(X)
+        ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
+
+    for i, (a, b, c) in enumerate(iters):
+        if use_triton:
+            # triton code
+            ns_line_1(X, out=A)  # A = X @ X.mT
+            ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
+            ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
+            X, C = C, X  # Swap references to avoid unnecessary copies
+
+        else:
+            # naive python code
+            A = X @ X.mT
+            A2 = A @ A
+            if i == 0 and norm:
+                n = ((A2**2).sum(dim=(-2, -1), keepdim=True) + epsilon) ** 0.125
+                X, A, A2 = X / n, A / n**2, A2 / n**4
+            B = (
+                b * A + c * A2
+            )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+            X = a * X + B @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
 
 
 class MuonFSDP(Muon):
@@ -24,15 +105,26 @@ class MuonFSDP(Muon):
         weight_decay: float = 0.01,
         epsilon: float = 1e-8,
         nesterov: bool = False,
-        adjust_lr: Optional[str] = "rms_norm",
+        adjust_lr: Optional[str] = "spectral_norm",
         flatten: bool = True,  # NOTE: set to True by default
         use_triton: bool = False,
-        newton_schulz_func: Optional[Callable] = None,
+        newton_schulz_func: Optional[Callable] = zeropower_via_newtonschulz6_diff_abc,
+        force_my_triton: bool = True,
         *,
         # muon and adamw/lion param group defaults
         muon_params_defaults: dict[str, Any] = {},
         oned_params_defaults: dict[str, Any] = {},
     ):
+        if use_triton:
+            if force_my_triton:
+                newton_schulz_func = partial(
+                    zeropower_via_newtonschulz6_diff_abc, use_triton=True
+                )
+            else:
+                newton_schulz_func = None
+        if newton_schulz_func is not None:
+            logger.info(f"[Muon]: will self-defined Newton-Schulz function")
+
         super().__init__(
             params,
             distributed_mesh,

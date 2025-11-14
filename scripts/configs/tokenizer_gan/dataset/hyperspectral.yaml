@@ -148,7 +148,7 @@ GF1_val:
   - - data/Gaofen1/hyper_images/Gaofen-1-PAN-1_bands-px_512-MSI-0000.tar
 
 MUSLI_train:
-  - - data/hyper_images/MUSLI_safetensors/safetensors
+  - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 WV3_train:
   - - data/WorldView3/hyper_images/WorldView3-8_bands-px_256-MSI-0000.tar
@@ -178,7 +178,7 @@ DFC_2020_val:
   - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-0002.tar
 
 MUSLI_val:
-  - - data/hyper_images/MUSLI_safetensors/safetensors
+  - - data/MUSLI/hyper_images/MUSLI_MSI-438_bands-px_512-MSI-jp2k-80-{0000..0001}.tar
 
 DryadHyper_val:
   - - data/DryadHyper/hyper_images/DryadHyper-224_bands-px_128-MSI-0002.tar
@@ -309,8 +309,10 @@ train_loader:
     quantile_img_clip: 1.0
     per_channel_norm: false
     random_one_key: false
-    resize_before_transform: 256
+    resize_before_transform: ${dataset.img_size}
     # keys_to_remove: ["gt"]
+    # img_key: ["img1"]
+    # tgt_key: ["img1"]
     keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]
 
 val_loader:
@@ -326,6 +328,8 @@ val_loader:
     quantile_img_clip: 1.0
     per_channel_norm: false
     random_one_key: false
-    resize_before_transform: 256
+    resize_before_transform: ${dataset.img_size}
     # keys_to_remove: ["gt"]
+    # img_key: ["img1"]
+    # tgt_key: ["img1"]
     keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]

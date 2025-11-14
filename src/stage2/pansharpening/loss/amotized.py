@@ -2,6 +2,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from loguru import logger
 from torch import Tensor
 
 from src.utilities.config_utils import function_config_to_basic_types
@@ -22,7 +23,9 @@ class AmotizedPixelLoss(nn.Module):
         super().__init__()
         self.amotized_loss = amotized_loss
         self.pixel_loss = get_loss(pixel_loss_type, **pixel_loss_kwargs)
+        # tuple of latent loss factor and pixel loss factor
         self.factors = factors
+        # ensure the pixel loss in computed at range of (0, 1)
         self.is_neg_1_1 = is_neg_1_1
 
     def _map_to_0_1(self, x: Tensor | None):
@@ -65,7 +68,7 @@ class AmotizedPixelLoss(nn.Module):
                 sr_pixel_loss2, _ = sr_pixel_loss2
             sr_pixel_loss2 = sr_pixel_loss2 * self.factors[1]
 
-        # Sum all losses
+        # 4. Sum all losses
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
         _to_out_tensor_detached = (

@@ -2,22 +2,24 @@ _target_: src.stage2.layers.wrapper.tokenizer_wrapper.DownstreamModelTokenizerWr
 
 # Tokenizer configuration (from cosmos_f8c16p1_lora.yaml)
 tokenizer:
-  _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin
-  tokenizer:
+  # _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin  # if is diffbands lora tokenizer
+  # tokenizer:
+  _target_: peft.PeftModel.from_pretrained # basic nested lora tokenizer
+  model:
     _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
     model:
       attn_resolutions: [32]
       channels: 128
       channels_mult: [2, 4, 4]
       dropout: 0.0
-      in_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+      in_channels: 512 # nested max channels
+      out_channels: 512 # nested max channels
       spatial_compression: 8
       num_res_blocks: 2
-      out_channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
       resolution: 1024
-      z_channels: 16
-      act_checkpoint: false
+      z_channels: 256
       latent_channels: 16
+      act_checkpoint: false
       norm_type: gn
       norm_groups: 32
       block_name: res_block
@@ -29,6 +31,8 @@ tokenizer:
       patch_size: 1
       attn_type: none
       padding_mode: reflect # for boundary?
+      adaptive_mode: interp
+      # wrap_fsdp_last_layer: false
     # repa
     use_repa_loss: false
     use_vf_loss: false
@@ -38,17 +42,22 @@ tokenizer:
     # loading
     enc_path: ""
     dec_path: ""
-    uni_path: runs/stage1_cosmos/2025-09-13_17-16-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+    uni_path: "runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors"
     loading_type: pretrained
     # quant
     norm_in_quant_conv: false
-  lora_weights:
-    WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
-    QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
-  lora_hyper_chans:
-    WV3: 8
-    QB: 4
-  active_lora: ${dataset.cfgs.used}
+  # lora_weights:
+  #   WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
+  #   QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
+  # lora_hyper_chans:
+  #   WV3: 8
+  #   QB: 4
+  # active_lora: ${dataset.cfgs.used}
+
+  # Nested LoRA weights
+  model_id: "runs/stage1_cosmo_nested_lora/2025-11-10_21-59-31_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3"
+  adapter_name: "default" # for non-diffbands lora tokenizer
+  ignore_mismatched_sizes: true
 
 # Pansharpening model configuration (from nafnet.yaml)
 downstream_model:
@@ -66,17 +75,17 @@ downstream_model:
     in_dim: 16
     dim: 384
     depth: 8
-    num_heads: 8
+    num_heads: 12
     mlp_ratio: 4.0
     drop: 0.0
-    drop_path: 0.0
+    drop_path: 0.2
     patch_size: 1
     out_channels: 256
     norm_layer: "rmsnorm"
     mlp_norm_layer: "rmsnorm"
     act_layer: "silu"
     pos_embed_type: "sincos"
-    input_size: 32
+    input_size: 8 # 64 / 8 = 8
     with_raw_img: false
     raw_img_size: null
     raw_img_chans: null
@@ -97,26 +106,26 @@ downstream_model:
     patch_size: 1
     dw_expand: 2
     ffn_expand: 2
-    block_drop: 0.0
+    block_drop: 0.1
     condition_on_decoder: true
-    residual_type: mscc
+    residual_type: ms
     is_neg_1_1: false
     output_rescale: false
     # nat 1, 3 < nat 2
     nat_enc_kwargs:
       # - { "k_size": 8, "stride": 2, "dilation": 2 }
       - null
-      - { "k_size": 4, "stride": 2, "dilation": 2 }
-      - { "k_size": 4, "stride": 1, "dilation": 2 }
+      - null #{ "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 8, "stride": 1, "dilation": 2 } # 64 / 4 = 16
     nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
     nat_dec_kwargs:
-      - { "k_size": 4, "stride": 1, "dilation": 2 }
-      - { "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 8, "stride": 1, "dilation": 2 }
+      - null #{ "k_size": 4, "stride": 2, "dilation": 2 }
       # - { "k_size": 8, "stride": 2, "dilation": 2 }
       - null
 
 # Wrapper configuration
 froze_tokenizer: true
 n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
-tokenizer_scale_shift: [6.25221633, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
-img_is_neg_1_1: false
+tokenizer_scale_shift: [6.5, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
+img_is_neg_1_1: false # Pansharpening use 0-1 range images

@@ -4,12 +4,12 @@ from enum import Enum
 from typing import Any, Callable, Literal, TypedDict, no_type_check
 
 import torch
+from loguru import logger
 from torch import Tensor, is_tensor, nn
 from torch.nn import Module
 
 from src.stage2.utilities.patches import ModelForwardPatcher
 from src.utilities.config_utils import dataclass_from_dict
-from src.utilities.logging import log
 
 
 def amotizing_call_model(
@@ -56,6 +56,7 @@ class AmotizedForwardType(str, Enum):
     PIXEL_TO_PIXEL_FUSION = "pixel_to_pixel_fusion"
     LATENT_TO_PIXEL_FUSION = "latent_to_pixel_fusion"
     ONE_MODEL = "one_model"
+    NO_AMOTIZED = "no_amotized"
 
 
 class AmotizedModelMixin(nn.Module):
@@ -87,7 +88,7 @@ class AmotizedModelMixin(nn.Module):
 
     def __init__(
         self,
-        pixel_model: Module,
+        pixel_model: Module | None,
         amotized_model: Module,
         # take latent and size of orignal pixels
         decoder_fn: Module | Callable[[Tensor, torch.Size], Tensor],
@@ -116,11 +117,21 @@ class AmotizedModelMixin(nn.Module):
                 "pixel_to_pixel_fusion",
                 "latent_to_pixel_fusion",
                 "one_model_conditioning",
+                "no_amotized",
             )
             or self.amotize_type[:11] == "simple_merge"
         ):
             raise ValueError(
                 f"amotize_type {self.amotize_type} is not supported for AmotizedModel"
+            )
+        if self.amotize_type == AmotizedForwardType.NO_AMOTIZED:
+            logger.info(
+                "[AmotizedModelMixin] Using NO_AMOTIZED mode, "
+                "the pixel model is only used for decoding if backward_decoder or learn_decoder is True."
+            )
+            # self.amotizing_pixels = False
+            assert self.pixel_model is None, (
+                "pixel_model must be None if amotize_type is NO_AMOTIZED"
             )
 
     def _single_tensor_to_tuple(self, x: Tensor | tuple) -> tuple[Tensor | Any, ...]:
@@ -135,8 +146,11 @@ class AmotizedModelMixin(nn.Module):
         # assume the first element is the main pixel input
         return pixel_in[0].shape
 
-    def _decoded_to_pixel(self, decoded: Tensor | tuple) -> Tensor:
-        return decoded if torch.is_tensor(decoded) else decoded[0]
+    def _decoded_to_pixel(self, decoded: Tensor | tuple[Tensor, ...]) -> Tensor:
+        """decode the output using de-tokenizer"""
+        pixel = decoded if torch.is_tensor(decoded) else decoded[0]
+        # to (0, 1)
+        return (pixel * 0.5 + 0.5).clamp(0.0, 1.0)
 
     def simple_merge_forward(
         self, pixel_in: tuple, latent_in: tuple, amotize_type: str
@@ -162,6 +176,8 @@ class AmotizedModelMixin(nn.Module):
         }
 
     def pixel_to_pixel_fusion_forward(self, pixel_in: tuple, latent_in: tuple):
+        assert self.pixel_model is not None
+
         latent_out = self.amotized_model(*latent_in)  # -> latent loss
         shape = self._get_pixel_shape(pixel_in)
         amotized_pixel_from_latent = self.decoder(latent_out, shape)  # -> pixel loss
@@ -177,6 +193,12 @@ class AmotizedModelMixin(nn.Module):
         }
 
     def latent_to_pixel_fusion_forward(self, pixel_in: tuple, latent_in: tuple):
+        """latent to transformer (amotized model) first, and then decode to pixel space
+        as the condition of the pixel model. Finally, using the pixel model to produce
+        the output (directly in pixel space).
+        """
+        assert self.pixel_model is not None
+
         latent_out = self.amotized_model(*latent_in)  # -> latent loss
         # args: pixel_in, latent_out
         pixel_model_ins = pixel_in + self._single_tensor_to_tuple(latent_out)
@@ -189,9 +211,35 @@ class AmotizedModelMixin(nn.Module):
         }
 
     def pixel_to_latent_forward(self, pixel_in: tuple, latent_in: tuple):
+        """Vice verse of latent to pixel fusion.
+        The pixel model is used as the condition of the amotized model.
+        """
+        assert self.pixel_model is not None
+
         pixel_out_as_cond = self.pixel_model(*pixel_in)
         model_conds = latent_in + self._single_tensor_to_tuple(pixel_out_as_cond)
         latent_out = self.amotized_model(*model_conds)  # -> latent loss
+
+        pixel_out = None
+        if self.backward_decoder or self.learn_decoder:
+            shape = self._get_pixel_shape(pixel_in)
+            pixel_out = self.decoder(latent_out, shape)  # -> pixel loss
+            pixel_out = self._decoded_to_pixel(pixel_out)
+
+        return {
+            "latent_out": latent_out,
+            "pixel_from_latent": pixel_out,
+            "pixel_out": pixel_out,
+        }
+
+    def no_amotized_latent_forward(self, pixel_in: tuple, latent_in: tuple):
+        """no pixel model, just worked in latent space
+        Same to the VAE-diffusion setting.
+        """
+        assert self.pixel_model is None, (
+            "pixel_model must be None if amotize_type is NO_AMOTIZED"
+        )
+        latent_out = self.amotized_model(*latent_in)  # -> latent loss
 
         pixel_out = None
         if self.backward_decoder or self.learn_decoder:
@@ -209,6 +257,8 @@ class AmotizedModelMixin(nn.Module):
     def forward_all_amotized_types(
         self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple
     ) -> ModelOutput:
+        """forward all amotized types"""
+
         pixel_in = self._single_tensor_to_tuple(pixel_in)
         latent_in = self._single_tensor_to_tuple(latent_in)
 
@@ -227,7 +277,11 @@ class AmotizedModelMixin(nn.Module):
             return self.latent_to_pixel_fusion_forward(pixel_in, latent_in)
 
         elif self.amotize_type == AmotizedForwardType.ONE_MODEL:
-            return self.one_model_conditioning_forward(pixel_in, latent_in)
+            raise NotImplementedError("One model conditioning is not implemented yet")
+            # return self.one_model_conditioning_forward(pixel_in, latent_in)
+
+        elif self.amotize_type == AmotizedForwardType.NO_AMOTIZED:
+            return self.no_amotized_latent_forward(pixel_in, latent_in)
 
         else:
             raise ValueError(f"Unknown amotize_type: {self.amotize_type}")
@@ -269,7 +323,9 @@ class AmotizedModelMixin(nn.Module):
         for module in self.modules():
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode
-                log(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")
+                logger.info(
+                    f"Set grad_checkpointing={mode} for {module.__class__.__name__}"
+                )
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         if self.learn_decoder:

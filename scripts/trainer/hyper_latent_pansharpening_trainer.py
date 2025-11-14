@@ -36,11 +36,13 @@ from src.stage2.pansharpening.metrics import AnalysisPanAcc, PansharpeningMetric
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.func.dict_utils import keys_in_dict
 from src.utilities.logging import log_print
-from src.utilities.network_utils import load_peft_model_checkpoint
+from src.utilities.network_utils import (
+    load_peft_model_checkpoint,
+    load_weights_with_shape_check,
+)
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils import metrics_sync, object_all_gather, object_scatter
 from src.utilities.train_utils.state import StepsCounter
-from stage1.WeTok.src.WeTok.modules.util import requires_grad
 
 
 class BatchInput(TypedDict):
@@ -155,6 +157,8 @@ class PansharpeningTrainer:
 
     def setup_pansharpening_model(self):
         self.pansp_model = hydra.utils.instantiate(self.cfg.pansharp_model)
+        # cast to dtype
+        self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
         self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
             self.pansp_model.downstream_model
@@ -229,6 +233,7 @@ class PansharpeningTrainer:
             "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
             "- <level>{message}</level>"
         )
+        logger.disable("ema_pytorch")
         if not self.train_cfg.debug:
             self.logger.add(
                 log_file,
@@ -244,7 +249,7 @@ class PansharpeningTrainer:
                 log_file.parent / "debug.log",
                 format=log_format_in_file,
                 level="DEBUG",
-                filter=lambda record: record["level"].no <= 10,
+                filter=lambda record: record["level"].no <= 20,
                 rotation="10 MB",
                 enqueue=True,
                 backtrace=True,
@@ -386,9 +391,7 @@ class PansharpeningTrainer:
 
         log_it(*msgs, **kwargs)
 
-    def get_optimizer_lr_scheduler(
-        self,
-    ):
+    def get_optimizer_lr_scheduler(self):
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
@@ -397,7 +400,7 @@ class PansharpeningTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -590,7 +593,6 @@ class PansharpeningTrainer:
             # loss
             sr_loss, sr_log_losses = None, {}
             if sr is not None or sr_latent is not None:
-                # breakpoint()
                 sr_loss = self.pansp_loss(
                     pred_latent, sr_latent, pred_sr, sr, pred_sr_from_latent, sr
                 )
@@ -704,6 +706,7 @@ class PansharpeningTrainer:
                 sr_latent=hrms_latent,
             )
             pred_img = train_out.pred_sr
+            logger.trace(f"Step: {self.global_step} - sr_loss: {train_out.sr_loss}")
 
             # track reconstruction quality
             if (
@@ -1093,9 +1096,18 @@ class PansharpeningTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = False):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.pansp_model, ema_path / "pansharp_model", strict=strict
-        )
+        try:
+            accelerate.load_checkpoint_in_model(
+                self.pansp_model, ema_path / "pansharp_model", strict=strict
+            )
+        except Exception as e:
+            logger.warning(f"[Load EMA]: {e}")
+            from safetensors.torch import load_file
+
+            load_weights_with_shape_check(
+                self.pansp_model,
+                load_file(str(ema_path / "pansharp_model" / "model.safetensors")),
+            )
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
