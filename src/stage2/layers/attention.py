@@ -737,6 +737,7 @@ class NatAttention2d(nn.Module):
             is_causal=False,
             torch_compile=self.torch_compile,
         )
+        x = x.type(dtype)
 
         x = rearrange(x, "b h w nh hd -> b (nh hd) h w")
         x = self.norm(x)

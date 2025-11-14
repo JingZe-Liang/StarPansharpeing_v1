@@ -63,13 +63,12 @@ class NAFBlock(nn.Module):
             nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
         )
 
-        self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
-        self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+        self.beta = nn.Parameter(1e-4 * torch.ones((1, c, 1, 1)), requires_grad=True)
+        self.gamma = nn.Parameter(1e-4 * torch.ones((1, c, 1, 1)), requires_grad=True)
 
     def forward(self, inp, *args, **kwargs):
         def forward_closure(inp):
             x = inp
-
             x = self.norm1(x)
 
             x = self.conv1(x)
@@ -77,7 +76,6 @@ class NAFBlock(nn.Module):
             x = self.sg(x)
             x = x * self.sca(x)
             x = self.conv3(x)
-
             x = self.dropout1(x)
 
             y = inp + x * self.beta
@@ -85,7 +83,6 @@ class NAFBlock(nn.Module):
             x = self.conv4(self.norm2(y))
             x = self.sg(x)
             x = self.conv5(x)
-
             x = self.dropout2(x)
 
             return y + x * self.gamma
@@ -94,6 +91,21 @@ class NAFBlock(nn.Module):
             return checkpoint(forward_closure, inp, use_reentrant=False)
         else:
             return forward_closure(inp)
+
+    def init_weights(self):
+        """Initialize weights following the original NAFNet implementation."""
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4, self.conv5]
+        norms = [self.norm1, self.norm2]
+
+        with torch.no_grad():
+            for c in convs:
+                nn.init.kaiming_normal_(c.weight)
+                if c.bias is not None:
+                    nn.init.zeros_(c.bias)
+            for n in norms:
+                nn.init.ones_(n.weight)
+                if getattr(n, "bias", None) is not None:
+                    nn.init.zeros_(n.bias)
 
 
 class NAFBlockConditional(NAFBlock):

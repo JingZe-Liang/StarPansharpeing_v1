@@ -15,6 +15,9 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+accelerator:
+  mixed_precision: "fp16"
+
 dataset:
   cfgs:
     used: WV3
@@ -23,7 +26,7 @@ dataset:
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.995
+  beta: 0.999
   update_after_step: 1000
   update_every: 2
   use_foreach: true
@@ -53,7 +56,7 @@ train:
     _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
     pixel_loss_type: l1ssim
     amotized_loss:
-      _target_: torch.nn.L1Loss
+      _target_: torch.nn.MSELoss
     pixel_loss_kwargs:
       weighted_r: [1.0, 0.1] # l1ssim weights
     factors: [0.0, 1.0] # latent and pixel weights
@@ -62,16 +65,18 @@ train:
   pansharp_optim:
     # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     # _partial_: true
-    # betas: [0.95, 0.99]
-    # oned_param_algo: lion
     # lr: 6.0e-4
+    # mu: 0.95
+    # betas: [0.95, 0.99]
     # adjust_lr: rms_norm
     # use_triton: false
+    # nesterov: true
+    # oned_param_algo: lion
     # muon_params_defaults:
     #   lr: 6.0e-4
     #   weight_decay: 0.1
     # oned_params_defaults:
-    #   lr: 3.0e-4
+    #   lr: 6.0e-4
     #   weight_decay: 0.0
 
     # _target_: src.utilities.optim.get_muon_optimizer
@@ -87,20 +92,20 @@ train:
 
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 2.0e-4
+    lr: 1.0e-3
     weight_decay: 1.0e-4
-    eps: 1.0e-8
-    betas: ${tuple:[0.99, 0.995]}
+    betas: ${tuple:[0.95, 0.99]}
     caution: true
     mars: false
-    foreach: false
+    foreach: true
+    eps: 1.0e-9
 
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
+    # lr: 6.0e-4
     # weight_decay: 1.0e-4
-    # # eps: 1.0e-9
-    # betas: ${tuple:[0.99, 0.995]}
+    # eps: 1.0e-9
+    # betas: ${tuple:[0.95, 0.99]}
     # foreach: true
 
     # _target_: heavyball.ForeachSOAP
@@ -115,7 +120,7 @@ train:
     _partial_: true
     num_warmup_steps: 100
     num_training_steps: ${train.max_steps}
-    num_cycles: 4
+    num_cycles: 3
 
   log:
     run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper

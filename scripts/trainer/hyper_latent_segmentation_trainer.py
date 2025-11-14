@@ -282,11 +282,7 @@ class HyperSegmentationTrainer:
         if self.no_ema:
             return
 
-        self.ema_model = EMA(
-            self.model,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
-        ).to(self.device)
+        self.ema_model = hydra.utils.instantiate(self.ema_cfg)(self.model)
         self.log_msg(f"create EMA model for segmentation")
 
     def configure_logger(self):
@@ -590,7 +586,7 @@ class HyperSegmentationTrainer:
         ):  # seems that FSDP does not support synchronized batchnorm
             # discriminator may have batch norm layer
             self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
-            self.log_msg("[Model] convert discriminator to sync batch norm")
+            self.log_msg("[Model] convert model bn to sync batch norm")
 
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:

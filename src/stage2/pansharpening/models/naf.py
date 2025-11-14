@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer, get_norm_layer
 from timm.layers.weight_init import lecun_normal_
@@ -265,6 +266,7 @@ class PansharpeningNAFNet(nn.Module):
         # Calculate padding size for input processing
         self.padder_size = 2 ** len(self.encoders)
 
+        ## Weight initialization
         self.init_weights()
 
     def _replace_nat_defaults(
@@ -443,6 +445,11 @@ class PansharpeningNAFNet(nn.Module):
         Returns:
             High-resolution pansharpened multispectral output
         """
+        # tmp
+        # cond = cond * 0.0
+        # print('-- max value', ms.abs().max(), pan.abs().max())
+        # print(cond.mean(), cond.std())
+
         # Step 1: Process inputs through patch embedding layers
         x, ms_c, l_c = self._patching_inputs(ms, pan, cond)
 
@@ -476,39 +483,54 @@ class PansharpeningNAFNet(nn.Module):
         - LayerNorm: Ones for weights, zeros for bias
         - Output head: Zero initialization for stable training start
         """
+        norms = [
+            get_norm_layer(n)
+            for n in ["layernorm2d", "rmsnorm2d", "layernorm", "rmsnorm"]
+        ]
 
         @torch.no_grad()
-        def _apply(module):
-            if isinstance(module, nn.Conv2d):
+        def _apply(module, name):
+            logger.debug(f"init module: {name}")
+            if hasattr(module, "init_weights"):
+                module.init_weights()
+            elif isinstance(module, nn.Conv2d):
                 # Convolutional layers: LeCun normal initialization
                 # nn.init.kaiming_normal_(
                 #     module.weight, mode="fan_out", nonlinearity="relu"
                 # )
                 lecun_normal_(module.weight)
+                # nn.init.xavier_normal_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):
                 # Linear layers: Xavier uniform initialization
-                nn.init.xavier_normal_(module.weight)
+                # nn.init.xavier_normal_(module.weight)
+                nn.init.trunc_normal_(module.weight, std=0.02)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
+            elif isinstance(module, tuple(norms)):
                 # Layer normalization: standard initialization
                 nn.init.ones_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
 
         # Apply weight initialization to all modules
-        self.apply(_apply)
+        # self.apply(_apply)
+        named_apply(_apply, self)
 
         # Initialize output head with zeros for stable training start
-        # if self.cfg.residual_type is not None:
-        #     if hasattr(self.head["head_out"], "weight"):
-        #         nn.init.zeros_(self.head["head_out"].weight)
-        #     if hasattr(self.head["head_out"], "bias"):
-        #         nn.init.zeros_(self.head["head_out"].bias)
+        if self.cfg.residual_type is not None:
+            if hasattr(self.head["head_out"], "weight"):
+                nn.init.zeros_(self.head["head_out"].weight)
+            if hasattr(self.head["head_out"], "bias"):
+                nn.init.zeros_(self.head["head_out"].bias)
 
-        log("[PansharpeningNAFNet] Initialized weights", level="info")
+        # Assert all the weights are initialized
+        for name, param in self.named_parameters():
+            data = param.data
+            assert not torch.any(torch.isnan(data)), f"NaN found in parameter {name}"
+
+        logger.log("NOTE", "[PansharpeningNAFNet] Initialized weights")
 
 
 # *==============================================================

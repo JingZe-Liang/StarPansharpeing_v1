@@ -157,8 +157,9 @@ class PansharpeningTrainer:
 
     def setup_pansharpening_model(self):
         self.pansp_model = hydra.utils.instantiate(self.cfg.pansharp_model)
+
         # cast to dtype
-        self.pansp_model = self.pansp_model.to(dtype=self.dtype)
+        # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
         self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
             self.pansp_model.downstream_model
@@ -480,7 +481,10 @@ class PansharpeningTrainer:
         ):  # seems that FSDP does not support synchronized batchnorm
             # discriminator may have batch norm layer
             self.pansp_model = nn.SyncBatchNorm.convert_sync_batchnorm(self.pansp_model)
-            self.log_msg("[Model] convert discriminator to sync batch norm")
+            # self.log_msg("[Model] convert discriminator to sync batch norm")
+
+        # cast the model to dtype?
+        # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
@@ -579,6 +583,11 @@ class PansharpeningTrainer:
                 pred_latent = out["latent_out"]
                 pred_sr = out["pixel_out"]
                 pred_sr_from_latent = out.get("pixel_from_latent", None)
+
+                # print("-- lrms value:", lrms.min().item(), lrms.max().item())
+                # print("-- pan value:", pan.min().item(), pan.max().item())
+                # print("-- max value of pred_sr:", pred_sr.abs().max().item())
+
             else:
                 # Works at latent space only
                 pred_latent = pansp_model(lrms_latent, pan_latent)
@@ -788,25 +797,38 @@ class PansharpeningTrainer:
 
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
-            # train step
-            try:
-                self.train_step(batch)
-            except Exception as e:
-                self.log_msg(
-                    f"Training failed, batch keys are {batch.keys()}. {e}",
-                    level="critical",
-                )
-                for k, v in batch.items():
-                    self.log_msg(
-                        f"{k}: {v.shape if hasattr(v, 'shape') else (v.__class__.__name__, v)}, "
-                    )
-                raise e
+            ### Check the tokenizer is loaded
+            # from torchmetrics.functional import peak_signal_noise_ratio as psnr_fn
+
+            # img = batch["hrms"]
+            # with torch.no_grad():
+            #     latent = self.pansp_model.encode(img)
+            #     recon = self.pansp_model.decode(latent, chans=img.shape[1])
+
+            #     recon = (recon + 1) / 2
+            #     psnr = psnr_fn(recon, img, data_range=1.0)
+            #     print(f"PSNR: {psnr.item():.4f}")
+            # continue
+
+            ### train step
+            # try:
+            self.train_step(batch)
+            # except Exception as e:
+            #     self.log_msg(
+            #         f"Training failed, batch keys are {batch.keys()}. {e}",
+            #         level="critical",
+            #     )
+            #     for k, v in batch.items():
+            #         self.log_msg(
+            #             f"{k}: {v.shape if hasattr(v, 'shape') else (v.__class__.__name__, v)}, "
+            #         )
+            #     raise e
 
             if self.global_step % self.val_cfg.val_duration == 0:
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
                 self.val_loop()
                 # self.val_full_loop()
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
@@ -973,8 +995,9 @@ class PansharpeningTrainer:
                 disable=not self.accelerator.is_main_process,
             )
 
+    @torch.inference_mode()
     def val_loop(self):
-        self.pansp_model.eval()
+        # self.pansp_model.eval()
 
         tbar = self._get_val_tbar_iter(mode="reduced")
         # track psnr and ssim

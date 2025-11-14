@@ -15,7 +15,7 @@ class AmotizedPixelLoss(nn.Module):
     def __init__(
         self,
         pixel_loss_type: str,
-        amotized_loss: Callable[[Tensor, Tensor], Tensor],
+        amotized_loss: Callable[[Tensor, Tensor], Tensor] | None = None,
         pixel_loss_kwargs: dict = {},
         factors: tuple = (0.1, 1.0),
         is_neg_1_1: bool = True,
@@ -36,12 +36,12 @@ class AmotizedPixelLoss(nn.Module):
 
     def forward(
         self,
-        pred_latent,
-        sr_latent,
-        pred_sr=None,
-        sr=None,
-        pred_sr_from_latent=None,
-        sr2=None,
+        pred_latent: Tensor,
+        sr_latent: Tensor,
+        pred_sr: Tensor | None = None,
+        sr: Tensor | None = None,
+        pred_sr_from_latent: Tensor | None = None,
+        sr2: Tensor | None = None,
     ):
         pred_sr, sr, pred_sr_from_latent, sr2 = map(
             self._map_to_0_1, (pred_sr, sr, pred_sr_from_latent, sr2)
@@ -50,6 +50,9 @@ class AmotizedPixelLoss(nn.Module):
         # 1. loss on latent of sr and gt
         latent_loss = 0.0
         if self.factors[0] > 0 and pred_latent is not None and sr_latent is not None:
+            assert self.amotized_loss is not None, (
+                "amotized_loss function must be provided."
+            )
             latent_loss = self.amotized_loss(pred_latent, sr_latent) * self.factors[0]
 
         # 2. pixel loss on sr (e.g., dircectly predicted sr pixels) and gt
@@ -71,6 +74,7 @@ class AmotizedPixelLoss(nn.Module):
         # 4. Sum all losses
         loss = latent_loss + sr_pixel_loss + sr_pixel_loss2
 
+        # Detach the loss for logs
         _to_out_tensor_detached = (
             lambda x: x.detach()
             if torch.is_tensor(x)

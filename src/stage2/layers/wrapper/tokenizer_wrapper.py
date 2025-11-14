@@ -66,7 +66,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     ):
         super().__init__()
         self.tokenizer = tokenizer
-        self.downstream_model = downstream_model
+        self.downstream_model: nn.Module = downstream_model
         self.is_scale_latent = tokenizer_scale_shift is not None
         self.img_is_neg_1_1 = img_is_neg_1_1
 
@@ -103,6 +103,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         if isinstance(self.downstream_model, partial):
             decoder_fn = _partial_amotized_model_decode_fn(self.tokenizer)
             self.downstream_model = self.downstream_model(decoder_fn=decoder_fn)
+        self.downstream_model = cast(nn.Module, self.downstream_model)
 
         self._check_downstream_model_args()
 
@@ -116,10 +117,13 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             self._base_peft_model: BaseTuner = self.tokenizer.base_model
 
         # Freeze tokenizer by default
+        self.tokenizer_decoder_learnt = getattr(
+            self.downstream_model, "learn_decoder", False
+        )
         if froze_tokenizer:
             self.tokenizer.eval()
             self.tokenizer.requires_grad_(False)
-            if self.is_downstream_amotized and downstream_model.learn_decoder:
+            if self.is_downstream_amotized and self.tokenizer_decoder_learnt:
                 assert not self.is_tokenizer_lora, (
                     'When using LoRA tokenizer, "learn_decoder" must be false.'
                 )
@@ -272,6 +276,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     @torch.no_grad()
     def _forward_tokenizer_encode_single_img(self, img: Tensor) -> Tensor:
         img = self._map_to_neg_1_1(img)
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             latent_ret_ = self._encode_fn(img)
 
@@ -283,7 +288,8 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # scale and shift latent
         if self.is_scale_latent:
             latent = scale_shift_latent(latent, self.scale, self.shift)
-        return latent
+
+        return latent.type_as(img)
 
     def _forward_tokenizer_decode_single_latent(
         self, latent: Tensor, input_shape: torch.Size | int
@@ -299,8 +305,10 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         with ctx:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 decoded = self._decode_fn(latent, input_shape)
+
         if isinstance(decoded, tuple):
             return decoded[0]
+
         return decoded
 
     def _forward_tokenizer_encode(
@@ -369,8 +377,8 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             chans = self.img_cached_channels
             assert 0 < len(chans) < len(latents)
         else:
-            if isinstance(chans, int):
-                chans = [chans] * len(latents)
+            # if isinstance(chans, int) and torch.is_tensor(latents):
+            #     chans = [chans] * len(latents)
             if isinstance(chans, list):
                 assert len(chans) == len(latents), (
                     "Channels should be a list of length equal to the number of latents"
@@ -387,11 +395,11 @@ class DownstreamModelTokenizerWrapper(nn.Module):
 
     def state_dict(self, *args, **kwargs):
         # only save the first tokenizer if it is a lora tokenizer with multiple models
-        learn_detok = getattr(self.downstream_model, "learn_decoder", False)
+        # learn_detok = getattr(self.downstream_model, "learn_decoder", False)
 
         # Filter out
         filter_out_fn = lambda k: k.startswith("downstream_model")
-        if learn_detok:
+        if self.tokenizer_decoder_learnt:
             if self.is_peft_lora:
                 filter_out_fn = lambda k: not k.startswith("tokenizer.decoder")
             elif self.is_tokenizer_lora:
@@ -404,11 +412,43 @@ class DownstreamModelTokenizerWrapper(nn.Module):
 
         return sd_out
 
-    def load_state_dict(self, state_dict, strict=False):
-        super().load_state_dict(state_dict, strict=strict)
+    def load_state_dict(self, state_dict, strict=False, **kwargs):
+        try:
+            super().load_state_dict(state_dict, strict=strict)
+        except Exception as e:
+            logger.error(f"[Load state dict]: {e}")
+            from src.utilities.network_utils import load_weights_with_shape_check
+
+            only_load_downstream = True
+            if only_load_downstream:
+                d = {
+                    k[len("downstream_model.") :]: v
+                    for k, v in state_dict.items()
+                    if k.startswith("downstream_model")
+                }
+                load_weights_with_shape_check(self.downstream_model, d)
 
     def set_grad_checkpointing(self, mode=True):
         for module in self.modules():
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode
                 log(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")
+
+    def parameters(self):
+        if self.tokenizer_decoder_learnt:
+            raise NotImplementedError("Not implemented yet")
+        else:
+            # return only downstream model parameters
+            return self.downstream_model.parameters()
+
+    def named_parameters(self):
+        if self.tokenizer_decoder_learnt:
+            raise NotImplementedError("Not implemented yet")
+        else:
+            # return only downstream model parameters
+            named_ps_downstream = self.downstream_model.named_parameters()
+            # add the prefix
+            # named_ps = [(f"downstream_model.{n}", p) for n, p in named_ps_downstream]
+            # return named_ps
+            for n, p in named_ps_downstream:
+                yield f"downstream_model.{n}", p

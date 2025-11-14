@@ -39,7 +39,7 @@ class TransformerConfig:
     pos_embed_type: str = "sincos"
     norm_layer: str = "rmsnorm"
     mlp_norm_layer: str = "rmsnorm"
-    act_layer: str = "swiglu"
+    act_layer: str = "silu"
     feature_layer_ids: list[int] | None = None
     use_layerscale: bool = True
 
@@ -300,11 +300,14 @@ class Transformer(nn.Module):
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         torch.nn.init.zeros_(self.patch_embed.proj.bias)
 
-        # zero-out the head
+        # initialize the head properly
         norm, lin = self.head
-        torch.nn.init.zeros_(lin.weight)
+        # For linear layer: use small random initialization instead of zeros
+        torch.nn.init.trunc_normal_(lin.weight, std=0.02)
         torch.nn.init.zeros_(lin.bias)
-        torch.nn.init.zeros_(norm.weight)
+        # For normalization layer: weight should be 1.0, not 0.0
+        if hasattr(norm, "weight"):
+            torch.nn.init.ones_(norm.weight)
         if hasattr(norm, "bias") and norm.bias is not None:
             torch.nn.init.zeros_(norm.bias)
 
