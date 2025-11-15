@@ -5,6 +5,7 @@ prefetch_factor: 6
 channels: 512
 dataset_channel: 512
 img_size: 64
+rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 
 dataset_names_to_bs:
   HAD100: 16
@@ -24,7 +25,7 @@ train_loader:
   _target_: src.stage2.detections.data.HAD100.HADDataset.create_dataloader
   dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
   sensor: all
-  mask_class: 'no'
+  mask_class: "no"
   channel: 276
   train_ratio: 1.
   norm_type: img
@@ -33,12 +34,13 @@ train_loader:
   batch_size: 8
   shuffle: true
   num_workers: 2
+  ensure_same_bands: true
 
 val_loader:
   _target_: src.stage2.detections.data.HAD100.HADDataset.create_dataloader
   dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
   sensor: all
-  mask_class: 'no'
+  mask_class: "no"
   channel: 276
   train_ratio: 1.
   norm_type: img
@@ -47,3 +49,4 @@ val_loader:
   batch_size: 8
   shuffle: false
   num_workers: 2
+  ensure_same_bands: true

@@ -441,10 +441,10 @@ def quantile_clip_(
             raise ValueError(f"Unknown clip_mode: {clip_mode}")
 
         # expand q_min, q_max to x dims
-        if q_min is not None:
-            q_min = add_n_dim_last_as(q_min, x)
-        if q_max is not None:
-            q_max = add_n_dim_last_as(q_max, x)
+        # if q_min is not None:
+        #     q_min = add_n_dim_last_as(q_min, x)
+        # if q_max is not None:
+        #     q_max = add_n_dim_last_as(q_max, x)
         return q_min, q_max
 
     # downsample the image to avoid quantile calculation error
@@ -460,11 +460,14 @@ def quantile_clip_(
         raise RuntimeError(f"Failed to compute the quantile for {img.shape}") from e
 
     # clamp
+    q_min = add_n_dim_last_as(q_min, img)
+    q_max = add_n_dim_last_as(q_max, img)
     img = img.clamp_(q_min, q_max)
 
     # reshape back
-    r_fp = reverse_einops_pattern(fp)
-    img = rearrange(img, r_fp, c=c, h=h, w=w)
+    # r_fp = reverse_einops_pattern(fp)
+    # img = rearrange(img, r_fp, c=c, h=h, w=w)
+
     return img
 
 
@@ -580,7 +583,7 @@ def img_normalize_to_zero_one_(
     return img, img_min.flatten(), img_max.flatten()
 
 
-def norm_img_(
+def normalize_image_(
     img: Float[Tensor, "... C H W"] | Float[Tensor, "... H W"],
     per_channel: bool = False,
     norm_type: str = "clip_zero_div",
@@ -731,7 +734,7 @@ def norm_img(
                 return None  # None for webdataset means drop this sample
 
         # Normalize image
-        img, img_min, img_max = norm_img_(
+        img, img_min, img_max = normalize_image_(
             img=img,
             per_channel=per_channel,
             norm_type=norm_type,

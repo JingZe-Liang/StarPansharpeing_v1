@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
-  - tokenizer: uni_cosmos_f8c16p4 # base tokenizer
+  - tokenizer: uni_cosmos_f8c16p1_nested # base tokenizer
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50
@@ -64,7 +64,7 @@ vq_loss:
   disc_ndf: 128
   disc_num_layers: 3
   use_actnorm: false
-  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_norm_type: ln2d #bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
@@ -83,9 +83,18 @@ tokenizer:
   hook_module: decoder.decoder.mid.block_2
   vf_on_z_or_module: z # [z, module]
   dino_feature_dim: 1024
+
+  # quantizer
+  quantizer_type: bsq
+
   # loading
-  uni_path: #runs/stage1_cosmos_bsq/2025-08-13_19-29-32_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema/tokenizer/model.safetensors
-  loading_type: #pretrained
+  uni_path:
+  loading_type:
+
+  # augmentations
+  latent_noise_prob: 0.0
+  use_channel_drop: false
+
   # blocks
   model:
     norm_type: gn
@@ -94,70 +103,82 @@ tokenizer:
     moe_token_mixer_type: res_block
     hidden_factor: 4
     use_residual_factor: false
+
+    # others
     patch_method: haar
     patch_size: 1
     attn_type: none
     padding_mode: reflect # for boundary?
+    adaptive_mode: interp
+
     # latents
-    latent_channels: 36
-    z_channels: 36
+    latent_channels: 64
+    z_channels: 256 # [256, 16]
+
     # train
-    act_checkpoint: false
-    # resamples
-    # downsample_type: ConvPixelUnshuffle
-    # downsample_shortcut: averaging
-    # upsample_type: InterpolateConv
-    # upsample_shortcut: duplicating
-  # quantization
-  quantizer_type: bsq
-  # augmentations
-  latent_noise_prob: 0.0
-  use_channel_drop: false
-  # generative specific
-  per_layer_noise: false
+    act_checkpoint: true
+
   channel_drop_config:
     drop_type: ${list:[4, 8, 12]}
     max_channels: ${tokenizer.model.latent_channels}
     drop_prob: 0.5
 
 ema:
-  beta: 0.995
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
   update_after_step: 1000
   update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  update_model_with_ema_every: 5000
 
 train:
-  tokenizer_name: cosmos_uni
+  tokenizer_name: cosmos_bsq
   proj_dir: runs/stage1_cosmos_bsq/
   finetune_strategy: finetune_all
-  max_grad_norm: 0.03
+  max_grad_norm: 1.0
   track_metrics: true
   track_metrics_duration: -1
-  track_metrics_after: 2000
-  visualize_every: 200
+  track_metrics_after: 0
+  visualize_every: 500
   max_steps: 1_000_000
-  save_every: 500
+  save_every: 1_000
+  grad_checkpoint: true
   seperate_enc_dec: false
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
-  resume_path: #runs/stage1_cosmos_bsq/2025-09-28_00-38-19_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_112
-  ema_load_path: runs/2025-09-30_00-30-01_unicosmos_f8c36p1_bsq_repa_unified_hyperspectral/ema
+  resume_path: #runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/checkpoints/checkpoint_143
+  ema_load_path: runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/ema
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-9
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-9
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    betas: ${tuple:[0.95, 0.99]}
+    oned_param_algo: lion
+    use_triton: false
+    muon_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
 
     # _target_: heavyball.ForeachAdamW
     # _partial_: true
@@ -177,12 +198,12 @@ train:
     # adamw_wd: 0.
 
   disc_optimizer:
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # betas: ${tuple:[0.5, 0.999]}
-    # weight_decay: 1.0e-4
-    # foreach: true
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 2.0e-4
+    betas: ${tuple:[0.5, 0.9]}
+    weight_decay: 1.0e-6
+    foreach: true
 
     # _target_: heavyball.ForeachAdamW
     # _partial_: true
@@ -193,16 +214,16 @@ train:
     # caution: true
     # foreach: true
 
-    _target_: src.utilities.optim.get_muon_optimizer
-    _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-9
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-9
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -223,7 +244,7 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: unicosmos_f${tokenizer.model.spatial_compression}c${tokenizer.model.latent_channels}p1_bsq_repa_${dataset.used}
+    run_comment: nested_cosmos_f${tokenizer.model.spatial_compression}c${tokenizer.model.latent_channels}p1_bsq_repa_${dataset.used}
     log_with_time: true
     visualize_every: 500
     log_every: 10

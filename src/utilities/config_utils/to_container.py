@@ -75,6 +75,17 @@ def function_config_to_basic_types(func):
     return wrapper
 
 
+def function_config_to_easy_dict(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        new_args = [kwargs_to_basic_types(arg, easydict_type=True) for arg in args]
+        new_kwargs = kwargs_to_basic_types(kwargs, easydict_type=True)
+
+        return func(*new_args, **new_kwargs)
+
+    return wrapper
+
+
 def function_config_to_basic_types_hint_check(func):
     """
     Decorator that converts Hydra/OmegaConf config objects to basic Python types

@@ -11,6 +11,10 @@ from torchvision import transforms
 from src.data.utils import _DiffbandsDataLoader
 
 
+def _divided_zero(divider: np.ndarray):
+    return np.abs(divider).max() < 1e-5
+
+
 class Mask(object):
     def __init__(self, w=64, h=64, resize=64, sub_w_num=8, sub_h_num=8, dense_rate=0):
         self.w = w
@@ -152,12 +156,21 @@ class HADDataset(Dataset):
         self.ret_dict = ret_dict
 
     def normalize(self, x: np.ndarray):
+        x = x.astype(np.float32)
         if self.norm_type == "img":
-            x = (x - x.min()) / (x.max() - x.min())
+            diviser = x.max() - x.min()
+            if _divided_zero(diviser):
+                return np.zeros_like(x)
+            else:
+                x = (x - x.min()) / diviser
         else:  # per-channel
-            x = (x - x.min(axis=(0, 1), keepdims=True)) / (
-                x.max(axis=(0, 1), keepdims=True) - x.min(axis=(0, 1), keepdims=True)
+            diviser = x.max(axis=(0, 1), keepdims=True) - x.min(
+                axis=(0, 1), keepdims=True
             )
+            if _divided_zero(diviser):
+                return np.zeros_like(x)
+            else:
+                x = (x - x.min(axis=(0, 1), keepdims=True)) / (diviser)
 
         if self.to_neg_1_1:
             x = x * 2 - 1
@@ -373,7 +386,7 @@ class HADDataset(Dataset):
         )
 
         # Create dataloader
-        ensure_same_bands = loader_kwargs.pop("ensure_same_bands", False)
+        ensure_same_bands = default_loader_kwargs.pop("ensure_same_bands", False)
         if not ensure_same_bands:
             dataloader = torch.utils.data.DataLoader(dataset, **default_loader_kwargs)
         else:

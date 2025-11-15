@@ -474,6 +474,7 @@ class CosmosHyperspectralTokenizerTrainer:
             backtrace=True,
             colorize=bool(int(os.getenv("COLOR_LOG", "1"))),
         )
+        logger.disable("ema_pytorch")
 
         # make log dir
         log_dir = log_file.parent
@@ -2098,7 +2099,7 @@ class CosmosHyperspectralTokenizerTrainer:
             # is rgb or gray images
             if c in (1, 3):
                 x_np = to_img(x)
-            elif isinstance(self.dataset_cfg.rgb_channels, Sequence):
+            elif isinstance(self.dataset_cfg.rgb_channels, (list, tuple)):
                 rgb_channels = to_cont(self.dataset_cfg.rgb_channels)
                 x_np = to_img(x[:, rgb_channels])
             elif callable(self.dataset_cfg.rgb_channels):
@@ -2154,7 +2155,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_lora_f8c16p4"
+_key = "unicosmos_bsq_f8c36p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

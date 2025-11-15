@@ -7,7 +7,7 @@ name = "RS_tokenizer"
 version = "0.1.0"
 requires-python = ">=3.12, <=3.14"
 dependencies = [
-    "numpy>=1.21.0",
+    "numpy<=2.0.0",
     "torch>=2.8.0",
     "transformers>=4.55.4",
     "timm>=1.0.19",
@@ -259,6 +259,7 @@ index-out-of-bounds = "error"
 unused-ignore-comment = "ignore"
 redundant-cast = "ignore"
 unresolved-attribute = "ignore"
+possibly-missing-attribute = "ignore"
 # possibly-unbound-attribute = "error"
 # possibly-unbound-import = "error"
 
