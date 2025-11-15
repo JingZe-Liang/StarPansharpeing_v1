@@ -652,7 +652,6 @@ VIT_EMBED_DIMS = {
 if __name__ == "__main__":
     """
     python -m src.stage1.self_supervised.ijepa.src.models.vision_transformer
-    
     """
     from ..masks.multiblock import MaskCollator
 

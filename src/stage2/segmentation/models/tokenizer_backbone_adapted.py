@@ -1,14 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from cupy._manipulation.split import split
 from einops import rearrange
 from jaxtyping import Float
 from loguru import logger
-from omegaconf import MISSING, OmegaConf
+from omegaconf import OmegaConf
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
-from transformers.utils.peft_utils import find_adapter_config_file
 
 from src.stage1.cosmos.cosmos_hybrid import CosmosHybridTokenizer
 from src.utilities.config_utils import (
@@ -38,7 +36,7 @@ def _create_default_cfg():
     )
     _cnn_model_cfg = OmegaConf.from_dotlist(_cnn_model_str.split(" "))
     _cnn_str = (
-        "quantizer_type=null vf_on_z_or_module=z use_repa_loss=true "
+        "quantizer_type=null vf_on_z_or_module=z use_repa_loss=false "
         "dino_feature_dim=1024 cache_type=h"
     )
     _cnn_cfg = OmegaConf.from_dotlist(_cnn_str.split(" "))
@@ -49,7 +47,7 @@ def _create_default_cfg():
         "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
         "patch_size=2 norm_layer=rmsnorm pos_embed=learned "
         "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
-        "out_chans=512 unpatch_size=1 reg_tokens=4"
+        "out_chans=512 unpatch_size=1 reg_tokens=0"
     )
     _trans_enc_cfg = OmegaConf.from_dotlist(_trans_enc_str.split(" "))
     tokenizer_cfg.trans_enc_cfg = _trans_enc_cfg

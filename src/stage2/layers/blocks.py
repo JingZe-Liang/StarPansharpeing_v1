@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from timm.layers import (
     ConvMlp,
     GluMlp,
+    LayerScale,
     LayerScale2d,
     Mlp,
     SwiGLU,
@@ -44,7 +45,7 @@ from .conv import (
 )
 from .cross_attn import CrossAttention, SoftmaxCrossAttention2D
 from .functional import ConditionalBlock, ResidualBlock
-from .layerscale import LayerScale
+
 from .mlp import ClipSwiGLUMlp
 from .mlp import SwiGLU as SwiGLU_Custom
 
@@ -62,7 +63,7 @@ class AttentionBlock(nn.Module):
         kernel_size=8,
         stride=2,
         dilation=2,
-        qk_norm: type[nn.Module] | None = None,
+        qk_norm: type[nn.Module] | None | bool = None,
         drop=0.0,
         attn_drop=0.0,
         drop_path=0.0,
@@ -102,11 +103,17 @@ class AttentionBlock(nn.Module):
                 elementwise_attn_output_gate=False,
             )
         elif attn_type == "nat_1d":
+            # NatAttention expects norm layer object, not boolean
+            nat_qk_norm = (
+                qk_norm
+                if isinstance(qk_norm, (type, nn.Module))
+                else (norm_layer if qk_norm else None)
+            )
             self.attn = NatAttention1d(
                 dim,
                 num_heads=num_heads,
                 qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
+                qk_norm=nat_qk_norm,
                 kernel_size=kernel_size,
                 stride=stride,
                 dilation=dilation,
@@ -115,6 +122,12 @@ class AttentionBlock(nn.Module):
                 proj_drop=drop,
             )
         elif attn_type == "nat_2d":
+            # NatAttention expects norm layer object, not boolean
+            nat_qk_norm = (
+                qk_norm
+                if isinstance(qk_norm, (type, nn.Module))
+                else (norm_layer if qk_norm else None)
+            )
             self.attn = NatAttention2d(
                 dim,
                 kernel_size=kernel_size,
@@ -122,7 +135,7 @@ class AttentionBlock(nn.Module):
                 dilation=dilation,
                 num_heads=num_heads,
                 qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
+                qk_norm=nat_qk_norm,
                 norm_layer=norm_layer,
                 proj_bias=True,
                 attn_drop=attn_drop,
@@ -287,10 +300,10 @@ class Spatial2DNATBlock(nn.Module):
             int(dim * ffn_ratio),
             dim,
             norm_layer=norm_layer,
-            act_layer=get_act_layer("gelu_tanh"),
+            act_layer=get_act_layer("silu"),
         )
-        self.ls1 = LayerScale2d(dim, init_values=1e-5, inplace=True)
-        self.ls2 = LayerScale2d(dim, init_values=1e-5, inplace=True)
+        self.ls1 = LayerScale2d(dim, 0.1)
+        self.ls2 = LayerScale2d(dim, 0.1)
 
         self.drop_path = DropPath(drop_path)
 
@@ -309,6 +322,25 @@ class Spatial2DNATBlock(nn.Module):
         else:
             x = _closure(x)
         return x
+
+    def init_weights(self):
+        norms = [get_norm_layer(n) for n in ["layernorm2d", "rmsnorm2d"]]
+
+        def _module_applied(m):
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, tuple(norms)):
+                nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        self.apply(_module_applied)
 
 
 class Spatial2DNATBlockConditional(Spatial2DNATBlock):
@@ -427,9 +459,10 @@ class CrossAttentionBlock(nn.Module):
                 headwise_attn_output_gate=sa_gate_type == "head_wise",
                 elementwise_attn_output_gate=sa_gate_type == "element_wise",
             )
-        self.self_attention = nn.MultiheadAttention(
-            dim, n_q_heads, dropout=attn_drop, bias=qkv_bias, batch_first=True
-        )
+        else:
+            self.self_attention = nn.MultiheadAttention(
+                dim, n_q_heads, dropout=attn_drop, bias=qkv_bias, batch_first=True
+            )
         self.cross_attention = CrossAttention(
             dim,
             ctx_dim,

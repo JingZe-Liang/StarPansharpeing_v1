@@ -165,7 +165,10 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # GAN, perceptual losses
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss)
-        self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+        # FIXME: do not cast the to any other types? it will raise the unscale grad error.
+        # self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+
+        self.setup_proxy_task_model_and_optim_scheduler()
 
         # Augmentation pipelines and anti-degradation network / losses
         self.setup_aug_pipe_and_anti_degradation_network()
@@ -199,7 +202,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     level="WARNING",
                 )
 
-        self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
 
@@ -207,7 +209,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_state = StepsCounter(["train"])
 
         # clear GPU memory
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     def _ensure_last_layer_requires_grad(self):
         # Call after the optimizer is initialized
@@ -217,9 +219,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 w.requires_grad_(True)
 
     def setup_proxy_task_model_and_optim_scheduler(self):
-        cfg = self.cfg.proxy_task
         self.proxy_model = None
         self.proxy_optim, self.proxy_sched = None, None
+        cfg = getattr(self.cfg, "proxy_task", None)
+        if cfg is None:
+            return
 
         if cfg.task == "ijepa":
             # Projector
@@ -321,7 +325,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     )
                 )
 
-        # < the encoder and decoder is one class or lora mixin
+        # the encoder and decoder is one class or lora mixin
         else:
             self.log_msg(
                 "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
@@ -391,29 +395,20 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.no_ema:
             return
 
-        if self.sep_enc_dec:
-            self.ema_encoder = EMA(
-                self.tokenizer_encoder,
-                beta=self.ema_cfg.beta,
-                update_every=self.ema_cfg.update_every,
-            ).to(self.device)
-            self.ema_decoder = EMA(
-                self.tokenizer_decoder,
-                beta=self.ema_cfg.beta,
-                update_every=self.ema_cfg.update_every,
-            ).to(self.device)
-        else:
-            self.ema_tokenizer = EMA(
-                self.tokenizer,
-                beta=self.ema_cfg.beta,
-                update_every=self.ema_cfg.update_every,
-            ).to(self.device)
+        ema_partial = hydra.utils.instantiate(self.cfg.ema)
 
-        self.ema_vq_disc = EMA(
-            self.vq_loss_fn.discriminator,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
-        ).to(self.device)
+        if self.sep_enc_dec:
+            self.ema_encoder = ema_partial(self.tokenizer_encoder).to(self.device)
+            self.ema_decoder = ema_partial(self.tokenizer_decoder).to(self.device)
+        else:
+            self.ema_tokenizer = ema_partial(self.tokenizer).to(self.device)
+
+        # Disc need ema?
+        self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
+
+        if self.proxy_model is not None:
+            ...
+            # the proxy model do not need EMA?
 
         if self.proxy_model is not None:
             ...
@@ -987,6 +982,7 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.log_msg("[Model] convert discriminator to sync batch norm")
 
+        ################ for FSDP2 accelerator wrapper ############
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
@@ -998,6 +994,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.tokenizer.dtype = torch.float  # self.dtype
             self.vq_loss_fn.discriminator.dtype = self.dtype
 
+        ########### Tokenizer, Quantizer, Discriminator preparation ###########
         # tokenizer
         if self.sep_enc_dec:
             # FIXME: FSDP2 missing mapping for a parameter in the optmizer
@@ -1019,7 +1016,7 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             # self.tokenizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
 
-        # quantizer
+        # quantizer already in the tokenizer  #####  Do no use it
         if self.quantizer is not None:
             self.quantizer = self.accelerator.prepare(self.quantizer)
             # self.quantizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.quantizer)
@@ -1070,6 +1067,9 @@ class CosmosHyperspectralTokenizerTrainer:
             # pop out the repa encoder
             self.accelerator._models.pop(-1)
             self.accelerator._optimizers.pop(-1)
+            logger.debug(
+                f"Fake accelerator model {model.__class__.__name__} for FSDP2."
+            )
             return model_prepared
 
         if self.accelerator.is_fsdp2:
@@ -1136,7 +1136,8 @@ class CosmosHyperspectralTokenizerTrainer:
             x, masks_enc, masks_pred = mask_collator(x)
 
             # Target
-            with torch.autocast("cuda", self.dtype):
+            # with torch.autocast("cuda", self.dtype):
+            with self.accelerator.autocast():
                 # Target
                 with torch.no_grad():
                     h = self.ema_tokenizer(x)
@@ -1294,8 +1295,6 @@ class CosmosHyperspectralTokenizerTrainer:
         return self.get_global_step("train")
 
     def may_freeze(self, model, freeze=True):
-        # for p in model.parameters():
-        #     p.requires_grad = not freeze
         model.requires_grad_(not freeze)
 
     @no_type_check
@@ -1350,8 +1349,11 @@ class CosmosHyperspectralTokenizerTrainer:
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
         if _max_grad_norm is not None and _max_grad_norm > 0:
+            # seems that the FSDP2 and fp16 does not support clip_grad_norm
+            # for bf16 or fp32 cases
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
+            # for FSDP2 case
             elif (
                 self.accelerator.distributed_type
                 == accelerate.utils.DistributedType.FSDP
@@ -2193,7 +2195,6 @@ _configs_dict = {
     # lora finetuning
     "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
 }
-
 
 if __name__ == "__main__":
     from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner

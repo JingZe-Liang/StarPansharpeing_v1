@@ -15,6 +15,9 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+accelerator:
+  mixed_precision: "bf16"
+
 dataset:
   cfgs:
     used: WV3
@@ -28,6 +31,7 @@ ema:
   update_every: 2
   use_foreach: true
   allow_different_devices: true
+  move_ema_to_online_device: true
 
 train:
   grad_check: false
@@ -62,16 +66,18 @@ train:
   pansharp_optim:
     # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     # _partial_: true
-    # betas: [0.95, 0.99]
-    # oned_param_algo: lion
     # lr: 6.0e-4
+    # mu: 0.95
+    # betas: [0.95, 0.99]
     # adjust_lr: rms_norm
     # use_triton: false
+    # nesterov: true
+    # oned_param_algo: lion
     # muon_params_defaults:
     #   lr: 6.0e-4
     #   weight_decay: 0.1
     # oned_params_defaults:
-    #   lr: 3.0e-4
+    #   lr: 6.0e-4
     #   weight_decay: 0.0
 
     # _target_: src.utilities.optim.get_muon_optimizer
@@ -89,18 +95,18 @@ train:
     _partial_: true
     lr: 2.0e-4
     weight_decay: 1.0e-4
-    eps: 1.0e-8
-    betas: ${tuple:[0.99, 0.995]}
+    betas: ${tuple:[0.95, 0.99]}
     caution: true
     mars: false
-    foreach: false
+    foreach: true
+    eps: 1.0e-9
 
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
+    # lr: 6.0e-4
     # weight_decay: 1.0e-4
-    # # eps: 1.0e-9
-    # betas: ${tuple:[0.99, 0.995]}
+    # eps: 1.0e-9
+    # betas: ${tuple:[0.95, 0.99]}
     # foreach: true
 
     # _target_: heavyball.ForeachSOAP

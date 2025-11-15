@@ -307,7 +307,7 @@ class IJEPANaFlexViT(Transformer):
                         "mixed rope is not supported in JEPA training"
                     )
                     """
-                    Equals at 
+                    Equals at
                     # axial rope: [S, headD * 2]
                     # rope: [S, headD * 2] -> [B, 1, S, headD * 2]
                     rope_embeds = rope_embeds[None, None].repeat(x.shape[0], 1, 1, 1)

@@ -174,7 +174,7 @@ class UnmixingTrainer:
     def setup_unmixing_model(self) -> Callable[..., None]:
         self.model: DownstreamModelTokenizerWrapper = hydra.utils.instantiate(
             self.cfg.unmixing_model
-        ).to(self.device, self.dtype)
+        ).to(self.device)
         self.unmixing_amotizing_pixels = self.model.downstream_model.amotizing_pixels
 
         pansp_name = (

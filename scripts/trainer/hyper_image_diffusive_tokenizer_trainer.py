@@ -211,7 +211,7 @@ class CosmosFlowHyperspectralTokenizerTrainer:
         self.use_disc = self.vq_loss_fn.use_disc
         if self.use_disc:
             self.log_msg("[GAN]: using GAN losses")
-            self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+            # self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
 
         # Augmentation pipelines and anti-degradation network / losses
         self.setup_aug_pipe_and_anti_degradation_network()
@@ -245,12 +245,12 @@ class CosmosFlowHyperspectralTokenizerTrainer:
                     level="WARNING",
                 )
 
-        self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
+        # self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)  # DO NOT CAST!!
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
 
         # clear GPU memory
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     def _ensure_last_layer_requires_grad(self):
         # Call after the optimizer is initialized

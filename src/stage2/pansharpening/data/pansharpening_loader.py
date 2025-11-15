@@ -418,7 +418,7 @@ class H5Dataset(Dataset):
         transform=None,
         norm: float = 2047.0,
         mapping_names: Mapping[str, str] = {"lms": "lrms", "gt": "hrms"},
-        to_neg_1_1: bool = True,
+        to_neg_1_1: bool = False,
     ):
         # Handle different input types
         if isinstance(h5file, h5py.File):
@@ -567,7 +567,7 @@ class H5Dataset(Dataset):
         return data
 
     def close(self):
-        """Close all HDF5 file handles."""
+        """Close all HDF5 file handlers."""
         if self._is_multi_file and isinstance(self.h5file, list):
             for h5file in self.h5file:
                 h5file.close()

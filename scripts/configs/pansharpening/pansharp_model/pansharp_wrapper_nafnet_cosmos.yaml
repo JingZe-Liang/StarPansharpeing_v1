@@ -106,7 +106,7 @@ downstream_model:
     patch_size: 1
     dw_expand: 2
     ffn_expand: 2
-    block_drop: 0.1
+    block_drop: 0.2
     condition_on_decoder: true
     residual_type: ms
     is_neg_1_1: false
@@ -115,8 +115,8 @@ downstream_model:
     nat_enc_kwargs:
       # - { "k_size": 8, "stride": 2, "dilation": 2 }
       - null
-      - null #{ "k_size": 4, "stride": 2, "dilation": 2 }
-      - { "k_size": 8, "stride": 1, "dilation": 2 } # 64 / 4 = 16
+      - { "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 4, "stride": 1, "dilation": 2 } # 64 / 4 = 16
     nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
     nat_dec_kwargs:
       - { "k_size": 8, "stride": 1, "dilation": 2 }

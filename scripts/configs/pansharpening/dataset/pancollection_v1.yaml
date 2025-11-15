@@ -122,6 +122,6 @@ val_full:
   loader_kwargs:
     batch_size: ${dataset.cfgs.batch_size_val}
     num_workers: ${dataset.cfgs.num_workers}
-    shuffle: false
-    drop_last: ${dataset.cfgs.train_drop_last}
+    shuffle: true
+    drop_last: ${dataset.cfgs.val_drop_last}
     pin_memory: true

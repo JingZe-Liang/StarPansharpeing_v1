@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: hyperspectral
+  - dataset: HAD100 #hyperspectral
   - tokenizer: uni_cosmos_f8c16p1_nested
   - quantizer: quant
   - accelerator: base
@@ -17,38 +17,38 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-dataset:
-  used: IKONOS
-  prefetch_factor: 6
-  num_workers: 1
-  shuffle_size: -1
-  loader_type: webdataset
-  shuffle_within_workers: false
-  rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-  # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
-  batch_size_val: 4
-  dataset_names_to_bs:
-    MMSeg_YREB: 16
-    DCF_2019: 7
-    DFC_2020: 18
-    GID_GF2: 12
-    Houston: 7
-    DryadHyper: 5
-    MUSLI: 2
-    OHS: 5
-    WV3: 5
-    QB: 5
-    GF1: 5
-    IKONOS: 5
-    WDC: 4
-    Xiongan: 4
-    WHU_Hi: 6
-    CD_224: 4
-    CD_242: 4
-    OSCD: 5
+# dataset:
+#   used: IKONOS
+#   prefetch_factor: 6
+#   num_workers: 1
+#   shuffle_size: -1
+#   loader_type: webdataset
+#   shuffle_within_workers: false
+#   rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+#   # For loading the pretrained multi-channels head
+#   channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
+#   batch_size_val: 4
+#   dataset_names_to_bs:
+#     MMSeg_YREB: 16
+#     DCF_2019: 7
+#     DFC_2020: 18
+#     GID_GF2: 12
+#     Houston: 7
+#     DryadHyper: 5
+#     MUSLI: 2
+#     OHS: 5
+#     WV3: 5
+#     QB: 5
+#     GF1: 5
+#     IKONOS: 5
+#     WDC: 4
+#     Xiongan: 4
+#     WHU_Hi: 6
+#     CD_224: 4
+#     CD_242: 4
+#     OSCD: 5
 
-  transform_prob: 0.0
+#   transform_prob: 0.0
 
 accelerator:
   gradient_accumulation_plugin:
@@ -131,7 +131,7 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.0 # if OOM, set to 0
+  ssim_weight: 0.2 # if OOM, set to 0
   disc_weight: 0.1
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
@@ -140,9 +140,14 @@ vq_loss:
   # disc_reg_freq: 2
 
 ema:
-  beta: 0.995
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
   update_after_step: 1000
   update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  update_model_with_ema_every: 5_000
 
 peft:
   _target_: peft.LoraConfig
