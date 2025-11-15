@@ -133,9 +133,6 @@ class DenoisingTrainer:
         # training state counter
         self.train_state = StepsCounter(["train", "val"])
 
-        # clear GPU memory
-        torch.cuda.empty_cache()
-
     def setup_denoising_model(self):
         self.model = hydra.utils.instantiate(self.cfg.denoising_model)
         self.denoising_amotizing_pixels = self.accelerator.unwrap_model(

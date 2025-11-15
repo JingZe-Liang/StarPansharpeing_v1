@@ -32,6 +32,9 @@ type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]
 ############### Utilities functions ##############
 
 
+############### Utilities functions ##############
+
+
 def _not_lora_not_implemented_raise(self, *args, **kwargs):
     raise AttributeError(
         f"This method is only available for LoRA tokenizer of class {self.__class__.__name__}."

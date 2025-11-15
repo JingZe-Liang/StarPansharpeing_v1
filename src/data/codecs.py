@@ -22,7 +22,7 @@ from timm.layers.helpers import to_2tuple
 
 from src.utilities.logging import log_print
 
-from .utils import norm_img_
+from .utils import normalize_image_
 
 NV_IMAGE_DECODE_ENABLED = False
 try:
@@ -724,7 +724,7 @@ def wids_image_decode(
         # Normalize image
         if not _disable_norm:
             img = img.type(torch.float32)  # ensure float32
-            img, *_ = norm_img_(
+            img, *_ = normalize_image_(
                 img,
                 norm_type=norm_type,
                 per_channel=per_channel,

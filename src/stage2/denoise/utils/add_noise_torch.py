@@ -272,7 +272,10 @@ class TransformationMixedTorch(object):
 
 
 type PredefinedNoiseType = (
-    Literal["complex", "complex_hypersigma", "blind_gaussian_hypersigma"] | str
+    # predefined noise types
+    Literal["complex", "complex_hypersigma", "blind_gaussian_hypersigma"]
+    # single noise types
+    | Literal["stripe", "deadline", "impulse", "inpainting", "noniid", "blind"]
 )
 
 
@@ -280,6 +283,7 @@ def get_default_noise_transformation(
     trans_type: PredefinedNoiseType,
     trans_kwags: dict | None = None,
 ):
+    ###### predefined noise models ######
     if trans_type == "complex":
         mixed_noiser = TransformationMixedTorch(
             [
@@ -302,6 +306,8 @@ def get_default_noise_transformation(
         )
     elif trans_type == "blind_gaussian_hypersigma":
         mixed_noiser = TransformationMixedTorch([AddNoiseBlindTorch(10, 70)], [1.0])
+
+    ###### Per-kind noise models ######
     else:
         if trans_kwags is not None:
             cfg = trans_kwags

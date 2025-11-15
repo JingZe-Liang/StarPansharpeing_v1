@@ -34,7 +34,7 @@ from src.data.utils import (
     remove_extension,
     to_tensor,
 )
-from src.data.utils import norm_img_ as norm_img_fn
+from src.data.utils import normalize_image as norm_img_fn
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.logging import log_print
 

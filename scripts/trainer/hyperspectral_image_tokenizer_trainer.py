@@ -410,10 +410,6 @@ class CosmosHyperspectralTokenizerTrainer:
             ...
             # the proxy model do not need EMA?
 
-        if self.proxy_model is not None:
-            ...
-            # the proxy model do not need EMA?
-
     def configure_logger(self):
         self.logger = logger
 
@@ -478,6 +474,7 @@ class CosmosHyperspectralTokenizerTrainer:
             backtrace=True,
             colorize=bool(int(os.getenv("COLOR_LOG", "1"))),
         )
+        logger.disable("ema_pytorch")
 
         # make log dir
         log_dir = log_file.parent
@@ -2102,7 +2099,7 @@ class CosmosHyperspectralTokenizerTrainer:
             # is rgb or gray images
             if c in (1, 3):
                 x_np = to_img(x)
-            elif isinstance(self.dataset_cfg.rgb_channels, Sequence):
+            elif isinstance(self.dataset_cfg.rgb_channels, (list, tuple)):
                 rgb_channels = to_cont(self.dataset_cfg.rgb_channels)
                 x_np = to_img(x[:, rgb_channels])
             elif callable(self.dataset_cfg.rgb_channels):

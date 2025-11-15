@@ -20,7 +20,9 @@ from src.stage2.denoise.utils.add_noise_torch import (
 
 class UniHSINoiseAdder:
     def __init__(
-        self, noise_type: PredefinedNoiseType = "complex", use_torch: bool = True
+        self,
+        noise_type: PredefinedNoiseType | list[PredefinedNoiseType],
+        use_torch: bool = True,
     ):
         self.use_torch = use_torch
         self.noise_models = []
@@ -28,6 +30,7 @@ class UniHSINoiseAdder:
             noise_type = [noise_type]
 
         for nt in noise_type:
+            ######### Use numpy version #######
             if not use_torch:
                 if nt == "complex":
                     # which is strip, deadline, impulse models in.
@@ -48,6 +51,7 @@ class UniHSINoiseAdder:
                     self.noise_models.append(AddNoiseStripe())
                 else:
                     raise ValueError(f"Unknown noise type: {nt}")
+            ####### Use Torch version #######
             else:
                 self.noise_models.append(get_default_noise_transformation(nt))
 

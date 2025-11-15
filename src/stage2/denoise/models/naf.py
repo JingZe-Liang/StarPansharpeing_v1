@@ -48,14 +48,14 @@ class DenoiseNAFNetConfig:
     enc_blk_type: list = field(default_factory=lambda: ["naf", "naf", "naf", "naf"])
     dec_blk_type: list = field(default_factory=lambda: ["naf", "naf", "naf", "naf"])
     condition_channel: int = 16  # latent channels
-    use_residual: bool = True
     dw_expand: int = 2
     ffn_expand: int = 2
     patch_size: int = 1
     condition_on_decoder: bool = True
     block_drop: float = 0.0
-    output_rescale: bool = True
+    output_rescale: bool = False
     is_neg_1_1: bool = True
+    use_residual: bool = True
     residual_type: Optional[str] = "lr"
     nat_enc_kwargs: list[NATBlockConfig | None] = field(default_factory=lambda: [])
     nat_mid_kwargs: NATBlockConfig | None = None
@@ -321,7 +321,6 @@ class DenoiseNAFNet(nn.Module):
         return x_lr, l_cond
 
     def _forward_head(self, x, lr_c):
-        breakpoint()
         x = self.head["head_conv"](x)
         x = x + self.head["lr_shortcut"](lr_c)
         x = self.head["head_out"](x)
@@ -413,6 +412,7 @@ class DenoiseNAFNet(nn.Module):
         - LayerNorm: Ones for weights, zeros for bias
         - Output head: Zero initialization for stable training start
         """
+        norms = [get_norm_layer(n) for n in ["layernorm", "layernorm2d"]]
 
         def _apply(module):
             if isinstance(module, nn.Conv2d):
@@ -426,19 +426,13 @@ class DenoiseNAFNet(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if hasattr(module, "bias") and module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
+            elif isinstance(module, tuple(norms)):
                 # Layer normalization: standard initialization
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
         # Apply weight initialization to all modules
         self.apply(_apply)
-
-        # Initialize output head with zeros for stable training start
-        if hasattr(self.head["head_out"], "weight"):
-            nn.init.zeros_(self.head["head_out"].weight)
-        if hasattr(self.head["head_out"], "bias"):
-            nn.init.zeros_(self.head["head_out"].bias)
 
         log("[PansharpeningNAFNet] Initialized weights", level="info")
 

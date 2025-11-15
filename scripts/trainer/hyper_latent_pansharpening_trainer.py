@@ -163,6 +163,9 @@ class PansharpeningTrainer:
         # cast to dtype
         # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
+        # cast to dtype
+        # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
+
         self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
             self.pansp_model.downstream_model
         ).amotizing_pixels

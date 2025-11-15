@@ -7,6 +7,7 @@ import torch
 from beartype import beartype
 from beartype.door import is_bearable
 from jaxtyping import Float, Float32, Int, UInt
+from loguru import logger
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from numpy.typing import NDArray
 from PIL import Image
@@ -258,8 +259,9 @@ def get_rgb_image(
 
     c = img.shape[1]
     if c not in RGB_CHANNELS_BY_BANDS and rgb_channels is None:
-        raise ValueError(
-            f"Invalid number of channels: {c}. Expected one of {list(RGB_CHANNELS_BY_BANDS.keys())}"
+        logger.warning(
+            f"Invalid number of channels: {c}. Expected one of {list(RGB_CHANNELS_BY_BANDS.keys())}",
+            once_pattern=r"Invalid number of channels: \d+.*",
         )
 
     # If not defined the rgb channels, use mean

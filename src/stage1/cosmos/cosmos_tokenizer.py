@@ -524,11 +524,11 @@ class ContinuousImageTokenizer(nn.Module):
         if self.quantizer_type == "kl":
             self.quantizer = DiagonalGaussianDistribution  # not quantizer, compatible with trainer  # type: ignore
         elif self.quantizer_type == "bsq":
-            assert model_cfg.z_channels % 2 == 0, (
+            assert model_cfg.latent_channels % 2 == 0, (
                 "quantizer out channels should be even"
             )
             self.quantizer = BSQ(
-                embed_dim=model_cfg.z_channels,  # 18 or 36
+                embed_dim=model_cfg.latent_channels,  # 18 or 36
                 beta=0.0,  # commitment loss
                 gamma0=1.0,
                 gamma=1.0,
@@ -543,7 +543,7 @@ class ContinuousImageTokenizer(nn.Module):
         elif self.quantizer_type == "fsq":
             self.quantizer = FSQ(
                 levels=cfg.fsq_levels,
-                dim=model_cfg.z_channels,
+                dim=model_cfg.latent_channels,
                 num_codebooks=cfg.fsq_num_codebooks,
                 channel_first=True,
             )
@@ -750,8 +750,9 @@ class ContinuousImageTokenizer(nn.Module):
 
     def _has_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
         h_dtype = h.dtype
-        # h_clone = h.clone()
         h = h.float()  # quantizers are in float32
+
+        ####### Quantization get h as the latent #######
 
         if self.quantizer_type == "bsq":
             # here must be l2-normed
@@ -798,6 +799,8 @@ class ContinuousImageTokenizer(nn.Module):
 
         else:
             raise RuntimeError("can not reach here")
+
+        ######## Cache z (or h?) for feature distillation ########
 
         # Cache the latent
         # TODO: fix the discreate quantizer

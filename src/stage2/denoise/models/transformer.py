@@ -14,6 +14,8 @@ from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.layers.pos_embed_sincos import RotaryEmbeddingCat
 from torch import Tensor
 
+from src.utilities.config_utils import function_config_to_easy_dict
+
 from ...layers import (
     AttentionBlock,
     RotaryPositionEmbeddingPytorchV2,
@@ -261,7 +263,13 @@ class Transformer(nn.Module):
         assert h * w == x.shape[1]
 
         x = rearrange(
-            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
+            x,
+            "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)",
+            h=h,
+            w=w,
+            p1=p,
+            p2=p,
+            c=c,
         )
         return x
 
@@ -352,3 +360,10 @@ class Transformer(nn.Module):
             torch.nn.init.zeros_(norm.bias)
 
         logger.info("[Transformer] Initializing model ...")
+
+    @function_config_to_easy_dict
+    @classmethod
+    def create_model(cls, **kwargs):
+        cfg = TransformerConfig(**kwargs)
+        model = cls(cfg)
+        return model
