@@ -37,9 +37,9 @@ class TransformerConfig:
     raw_img_size: int | None = None
     raw_img_chans: int | None = None
     pos_embed_type: str = "sincos"
-    norm_layer: str = "layernorm"
-    mlp_norm_layer: str = "layernorm"
-    act_layer: str = "swiglu"
+    norm_layer: str = "rmsnorm"
+    mlp_norm_layer: str = "rmsnorm"
+    act_layer: str = "silu"
     feature_layer_ids: list[int] | None = None
 
 
@@ -187,9 +187,11 @@ class Transformer(nn.Module):
             # rope implem from timm.
             self.rope_options = {
                 "temperature": 10000.0,
-                "in_pixel": False,
+                "in_pixels": False,
                 "feat_shape": [self.base_size, self.base_size],
+                "ref_feat_shape": [self.base_size, self.base_size],
             }
+            # create the rope emb at forward
             self.rope = RotaryEmbeddingCat(
                 dim=dim // self.num_heads, **self.rope_options
             )
@@ -221,7 +223,6 @@ class Transformer(nn.Module):
                     pe, new_size=(new_h, new_w), num_prefix_tokens=0
                 )
                 pe = torch.as_tensor(pos_embed).float()
-                self.register_buffer(name, pe, persistent=False)
             return pe
 
         elif self.pos_embed_type == "rope_te":
@@ -238,15 +239,10 @@ class Transformer(nn.Module):
         elif self.pos_embed_type == "rope":
             # TODO: add multi-modal-rope
             # (modalities -> ids -> online RoPE class -> positional embedding -> kv rope fn)
-
-            ph, pw = h // self.patch_size, w // self.patch_size
+            ph, pw = h, w
             seq_len_x = ph * pw
-            pre_rope_seq_len = self.rope.cos_cached.shape[1]
-            if seq_len_x > pre_rope_seq_len:
-                # re-init the rope
-                self.rope_options["latent_shape"] = (ph, pw)
-                self.rope.__init__(seq_len_x, **self.rope_options)
-            return self.rope
+            pe = self.rope.get_embed((ph, pw))
+            return pe
 
         else:
             raise ValueError(
@@ -271,8 +267,8 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        noisy_latent: Float[Tensor, "b c_latent h w"],
-        hyper_img: Float[Tensor, "b c_hyper H W"] | None = None,
+        noisy_latent: Float[Tensor, "b c_latent h w"],  # noisy image latent
+        hyper_img: Float[Tensor, "b c_hyper H W"] | None = None,  # raw image
         *,
         feature_layer_ids: list[int] | None = None,
     ) -> Tensor | tuple[Tensor, list[Tensor]]:
@@ -280,7 +276,8 @@ class Transformer(nn.Module):
         y = self.patch_embed(noisy_latent)
 
         # positional embedding
-        pe = self.get_pe(noisy_latent.shape[-2:])
+        hw = torch.tensor(noisy_latent.shape[-2:]) // self.patch_size
+        pe = self.get_pe(tuple(hw))
         if self.pos_embed_type == "sincos":
             assert torch.is_tensor(pe), "Positional embedding must be a tensor."
             y = y + pe.to(y)
@@ -291,7 +288,8 @@ class Transformer(nn.Module):
             y2 = self.raw_img_patcher(hyper_img)
 
             if self.pos_embed_type == "sincos":
-                pe2 = self.get_pe(hyper_img.shape[-2:], img_type="raw")
+                hw_raw = torch.tensor(hyper_img.shape[-2:]) // self.raw_patch_size
+                pe2 = self.get_pe(tuple(hw_raw), img_type="raw")
                 assert torch.is_tensor(pe2), "Positional embedding must be a tensor."
                 y2 = y2 + pe2.to(y2)
 
@@ -317,12 +315,17 @@ class Transformer(nn.Module):
         else:
             return out, features
 
-    def init_weights(self):
+    def init_weights(self, lin_init="trunc_normal"):
         # Initialize transformer layers
         def _basic_init(module):
             norms = [get_norm_layer(n) for n in ["layernorm", "simplenorm", "rmsnorm"]]
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_normal_(module.weight)
+                if lin_init == "trunc_normal":
+                    nn.init.trunc_normal_(module.weight, std=0.02)
+                elif lin_init == "xavier":
+                    torch.nn.init.xavier_normal_(module.weight)
+                else:
+                    raise ValueError(f"Unsupported lin_init: {lin_init}")
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
             elif isinstance(module, tuple(norms)):
@@ -335,12 +338,16 @@ class Transformer(nn.Module):
         # patch embedding
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        torch.nn.init.zeros_(self.patch_embed.proj.bias)
 
-        # zero-out the head
+        # initialize the head properly
         norm, lin = self.head
-        torch.nn.init.zeros_(lin.weight)
+        # For linear layer: use small random initialization instead of zeros
+        torch.nn.init.trunc_normal_(lin.weight, std=0.02)
         torch.nn.init.zeros_(lin.bias)
-        torch.nn.init.zeros_(norm.weight)
+        # For normalization layer: weight should be 1.0, not 0.0
+        if hasattr(norm, "weight"):
+            torch.nn.init.ones_(norm.weight)
         if hasattr(norm, "bias") and norm.bias is not None:
             torch.nn.init.zeros_(norm.bias)
 

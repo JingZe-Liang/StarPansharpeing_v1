@@ -398,24 +398,13 @@ class CosmosHyperspectralTokenizerTrainer:
         ema_partial = hydra.utils.instantiate(self.cfg.ema)
 
         if self.sep_enc_dec:
-            self.ema_encoder = ema_partial(self.tokenizer_encoder)
-            self.ema_decoder = EMA(
-                self.tokenizer_decoder,
-                beta=self.ema_cfg.beta,
-                update_every=self.ema_cfg.update_every,
-            ).to(self.device)
+            self.ema_encoder = ema_partial(self.tokenizer_encoder).to(self.device)
+            self.ema_decoder = ema_partial(self.tokenizer_decoder).to(self.device)
         else:
-            self.ema_tokenizer = EMA(
-                self.tokenizer,
-                beta=self.ema_cfg.beta,
-                update_every=self.ema_cfg.update_every,
-            ).to(self.device)
+            self.ema_tokenizer = ema_partial(self.tokenizer).to(self.device)
 
-        self.ema_vq_disc = EMA(
-            self.vq_loss_fn.discriminator,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
-        ).to(self.device)
+        # Disc need ema?
+        self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
 
         if self.proxy_model is not None:
             ...
@@ -2202,7 +2191,6 @@ _configs_dict = {
     # lora finetuning
     "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
 }
-
 
 if __name__ == "__main__":
     from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner

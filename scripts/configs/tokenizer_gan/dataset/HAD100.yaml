@@ -1,0 +1,49 @@
+used: HAD100
+shuffle_size: -1
+num_workers: 3
+prefetch_factor: 6
+channels: 512
+dataset_channel: 512
+img_size: 64
+
+dataset_names_to_bs:
+  HAD100: 16
+
+dataset_names_to_n_channels:
+  HAD100: 276
+
+dataset_names_to_rgb_channels:
+  HAD100: [39, 29, 19]
+
+dataset_names_to_img_size:
+  HAD100: 64
+
+######### Loaders #########
+
+train_loader:
+  _target_: src.stage2.detections.data.HAD100.HADDataset.create_dataloader
+  dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
+  sensor: all
+  mask_class: 'no'
+  channel: 276
+  train_ratio: 1.
+  norm_type: img
+  to_neg_1_1: true
+  ret_dict: true
+  batch_size: 8
+  shuffle: true
+  num_workers: 2
+
+val_loader:
+  _target_: src.stage2.detections.data.HAD100.HADDataset.create_dataloader
+  dataset_path: data/Downstreams/HAD/HAD100/HAD100Dataset
+  sensor: all
+  mask_class: 'no'
+  channel: 276
+  train_ratio: 1.
+  norm_type: img
+  to_neg_1_1: true
+  ret_dict: true
+  batch_size: 8
+  shuffle: false
+  num_workers: 2

@@ -16,7 +16,7 @@ defaults:
   - override hydra/job_logging: disabled
 
 accelerator:
-  mixed_precision: "fp16"
+  mixed_precision: "bf16"
 
 dataset:
   cfgs:
@@ -31,6 +31,7 @@ ema:
   update_every: 2
   use_foreach: true
   allow_different_devices: true
+  move_ema_to_online_device: true
 
 train:
   grad_check: false

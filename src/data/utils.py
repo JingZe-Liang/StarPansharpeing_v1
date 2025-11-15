@@ -1506,3 +1506,39 @@ def multimodal_wids_collate_fn(batch: list[dict]):
                 if key in __default_wids_keys:
                     # collated_batch
                     ...
+
+
+from collections import defaultdict
+from functools import partial
+
+from torch.utils.data import DataLoader, default_collate
+
+
+def diffbands_collate(batch: list[dict], img_key: str = "img"):
+    chans_set = set([b[img_key].shape[0] for b in batch])
+    # log_print(f"Found {len(chans_set)} channels")
+    if len(chans_set) == 1:
+        return [default_collate(batch)]
+    else:
+        # groups
+        batches: dict[int, list] = defaultdict(list)
+        for b in batch:
+            batches[b[img_key].shape[0]].append(b)
+
+        # return the list of collated batches
+        return [default_collate(batches[k]) for k in batches.keys()]
+
+
+class _DiffbandsDataLoader(DataLoader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ensure the collate function
+        self.collate_fn = partial(diffbands_collate, img_key="img")
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            if isinstance(batch, dict):
+                yield batch
+            else:
+                for b in batch:
+                    yield b

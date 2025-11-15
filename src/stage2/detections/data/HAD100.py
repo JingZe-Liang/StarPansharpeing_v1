@@ -8,6 +8,8 @@ from skimage import transform as sk_transform
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from src.data.utils import _DiffbandsDataLoader
+
 
 class Mask(object):
     def __init__(self, w=64, h=64, resize=64, sub_w_num=8, sub_h_num=8, dense_rate=0):
@@ -128,6 +130,7 @@ class HADDataset(Dataset):
         norm_type: str = "img",
         scale: float = 1.0,  # 0.1,
         to_neg_1_1=False,
+        ret_dict=False,
     ):
         self.dataset_path = dataset_path
         self.mask_class = mask_class
@@ -146,6 +149,7 @@ class HADDataset(Dataset):
         self.norm_type = norm_type
         self.scale = scale
         self.to_neg_1_1 = to_neg_1_1
+        self.ret_dict = ret_dict
 
     def normalize(self, x: np.ndarray):
         if self.norm_type == "img":
@@ -169,19 +173,21 @@ class HADDataset(Dataset):
         # x = (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1  # normalize to [-1, 1]
         # x = x * 0.1  # scale to [-0.1, 0.1]
         x = self.normalize(x)
+
         x = sk_transform.rotate(x, random.choice([0, 90, 180, 270]))
         if random.random() > 0.5:
             x = x[:, ::-1, ...].copy()
         if random.random() > 0.5:
             x = x[::-1, ...].copy()
         x = self.transform(x)
-        x = x.type(torch.FloatTensor)
+        # x = x.type(torch.FloatTensor)
 
         # flip
         # add mask
         mask = self.mask_generator(1)[0]
         mask = np.expand_dims(mask, axis=2)
-        x = self.transform(x)
+        # breakpoint()
+        # x = self.transform(x)
         x = x.type(torch.FloatTensor)
         mask = self.transform(mask)
         mask = mask.type(torch.FloatTensor)
@@ -256,7 +262,13 @@ class HADDataset(Dataset):
         # x_m_o = mask * x + (1 - mask) * mask_out
         x_m = x_m.type(torch.FloatTensor)
         # x_m_o = x_m_o.type(torch.FloatTensor)
-        return x, x_m
+
+        # print(f"Loaded image shape: {x.shape}, masked image shape: {x_m.shape}")
+
+        if self.ret_dict:
+            return {"img": x, "masked_img": x_m}
+        else:
+            return x, x_m
 
     def __len__(self):
         return len(self.train_img)
@@ -312,7 +324,6 @@ class HADDataset(Dataset):
 
         return train_list, paste_list
 
-    
     @classmethod
     def create_dataloader(
         cls,
@@ -326,15 +337,21 @@ class HADDataset(Dataset):
         norm_type: str = "img",
         scale: float = 1.0,  # 0.1,
         to_neg_1_1=False,
+        ret_dict=False,
         **loader_kwargs,
     ):
+        """Create a dataloader for loading data.
+        Two modes:
+            1. HAD mode, loading orignal hyperspectral and masked images.
+            2. Pure image mode, loading only images.
+        """
         # Set default DataLoader parameters if not provided
         default_loader_kwargs = {
-            'batch_size': 16,
-            'shuffle': True,
-            'num_workers': 4,
-            'pin_memory': True,
-            'drop_last': True
+            "batch_size": 16,
+            "shuffle": True,
+            "num_workers": 4,
+            "pin_memory": True,
+            "drop_last": True,
         }
 
         # Update with user-provided kwargs
@@ -351,13 +368,16 @@ class HADDataset(Dataset):
             train_ratio=train_ratio,
             norm_type=norm_type,
             scale=scale,
-            to_neg_1_1=to_neg_1_1
+            to_neg_1_1=to_neg_1_1,
+            ret_dict=ret_dict,
         )
 
         # Create dataloader
-        dataloader = torch.utils.data.DataLoader(
-            dataset, **default_loader_kwargs
-        )
+        ensure_same_bands = loader_kwargs.pop("ensure_same_bands", False)
+        if not ensure_same_bands:
+            dataloader = torch.utils.data.DataLoader(dataset, **default_loader_kwargs)
+        else:
+            dataloader = _DiffbandsDataLoader(dataset, **default_loader_kwargs)
 
         return dataset, dataloader
 
@@ -418,7 +438,9 @@ class HADTestDataset(Dataset):
         return test_img, gt_img
 
     @classmethod
-    def create_loader(cls, dataset_path="./", resize=64, start_channel=0, channel=100, **loader_kwargs):
+    def create_loader(
+        cls, dataset_path="./", resize=64, start_channel=0, channel=100, **loader_kwargs
+    ):
         """
         Create a complete dataset and dataloader for HAD100 anomaly detection testing.
 
@@ -444,11 +466,11 @@ class HADTestDataset(Dataset):
         """
         # Set default DataLoader parameters if not provided (based on train.py defaults)
         default_loader_kwargs = {
-            'batch_size': 1,
-            'shuffle': False,
-            'num_workers': 4,
-            'pin_memory': True,
-            'drop_last': False
+            "batch_size": 1,
+            "shuffle": False,
+            "num_workers": 4,
+            "pin_memory": True,
+            "drop_last": False,
         }
 
         # Update with user-provided kwargs
@@ -459,13 +481,11 @@ class HADTestDataset(Dataset):
             dataset_path=dataset_path,
             resize=resize,
             start_channel=start_channel,
-            channel=channel
+            channel=channel,
         )
 
         # Create dataloader
-        dataloader = torch.utils.data.DataLoader(
-            dataset, **default_loader_kwargs
-        )
+        dataloader = torch.utils.data.DataLoader(dataset, **default_loader_kwargs)
 
         return dataset, dataloader
 
@@ -483,180 +503,199 @@ def test_loader():
     # Test different mask types
     mask_types = ["no", "zero", "other_sensor", "image", "random", "sin", "invimage"]
 
-    try:
-        # Initialize dataset with different mask types
-        print("Testing HAD100 dataset visualization...")
+    # Initialize dataset with different mask types
+    print("Testing HAD100 dataset visualization...")
+
+    for mask_type in mask_types:
+        print(f"Testing mask type: {mask_type}")
+
+        # Create dataset with current mask type
+        dataset = HADDataset(
+            dataset_path="data/Downstreams/HAD/HAD100/HAD100Dataset",
+            sensor="aviris_ng",
+            mask_class=mask_type,
+            resize=64,
+            start_channel=0,
+            channel=50,
+            train_ratio=0.1,  # Use smaller subset for testing
+        )
+
+        # Get a sample
+        print(f"Dataset length: {len(dataset)}")
+        if len(dataset) > 0:
+            original, masked = dataset[0]
+            print(f"Original tensor shape: {original.shape}")
+            print(f"Masked tensor shape: {masked.shape}")
+
+            # Convert tensors to numpy
+            original_np = original.numpy()
+            masked_np = masked.numpy()
+            print(f"Original numpy shape: {original_np.shape}")
+            print(f"Masked numpy shape: {masked_np.shape}")
+
+            # Create visualization
+            fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+            fig.suptitle(f"HAD100 Dataset - Mask Type: {mask_type}", fontsize=16)
+
+            # Show original image (first 3 channels as RGB)
+            if original_np.shape[0] >= 3:
+                rgb_original = np.transpose(original_np[:3], (1, 2, 0))
+                rgb_original = (rgb_original - rgb_original.min()) / (
+                    rgb_original.max() - rgb_original.min()
+                )
+                axes[0, 0].imshow(rgb_original)
+                axes[0, 0].set_title("Original (RGB)")
+            else:
+                axes[0, 0].imshow(original_np[0], cmap="viridis")
+                axes[0, 0].set_title("Original (Channel 1)")
+
+            # Show masked image (first 3 channels as RGB)
+            if masked_np.shape[0] >= 3:
+                rgb_masked = np.transpose(masked_np[:3], (1, 2, 0))
+                rgb_masked = (rgb_masked - rgb_masked.min()) / (
+                    rgb_masked.max() - rgb_masked.min()
+                )
+                axes[0, 1].imshow(rgb_masked)
+                axes[0, 1].set_title("Masked (RGB)")
+            else:
+                axes[0, 1].imshow(masked_np[0], cmap="viridis")
+                axes[0, 1].set_title("Masked (Channel 1)")
+
+            # Show difference
+            diff = np.abs(original_np - masked_np)
+            axes[0, 2].imshow(diff[0], cmap="hot")
+            axes[0, 2].set_title("Difference (Channel 1)")
+
+            # Show mask generator example
+            mask_gen = Mask(resize=64)
+            mask_example = mask_gen(1)[0]
+            axes[0, 3].imshow(mask_example, cmap="gray")
+            axes[0, 3].set_title("Mask Pattern")
+
+            # Show spectral profiles
+            print(f"Original data shape: {original_np.shape}")
+            print(f"Masked data shape: {masked_np.shape}")
+
+            # Use center coordinates dynamically
+            h, w = original_np.shape[1], original_np.shape[2]
+            center_h, center_w = h // 2, w // 2
+            print(f"Image dimensions: {h}x{w}, center: ({center_h}, {center_w})")
+
+            center_pixel = original_np[:, center_h, center_w]
+            center_pixel_masked = masked_np[:, center_h, center_w]
+            axes[1, 0].plot(center_pixel, "b-", label="Original")
+            axes[1, 0].plot(center_pixel_masked, "r-", label="Masked")
+            axes[1, 0].set_title("Spectral Profile (Center)")
+            axes[1, 0].legend()
+            axes[1, 0].set_xlabel("Channel")
+            axes[1, 0].set_ylabel("Value")
+
+            # Show histogram
+            axes[1, 1].hist(original_np.flatten(), bins=50, alpha=0.5, label="Original")
+            axes[1, 1].hist(masked_np.flatten(), bins=50, alpha=0.5, label="Masked")
+            axes[1, 1].set_title("Value Distribution")
+            axes[1, 1].legend()
+
+            # Show multiple mask examples
+            for i in range(2):  # 只显示2个例子以避免越界
+                mask_example = mask_gen(1)[0]
+                axes[1, 2 + i].imshow(mask_example, cmap="gray")
+                axes[1, 2 + i].set_title(f"Mask Example {i + 1}")
+
+            # Remove axis ticks for better visualization
+            for ax in axes.flat:
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            plt.tight_layout()
+
+            # Save the plot
+            output_path = os.path.join(
+                output_dir, f"had100_{mask_type}_visualization.png"
+            )
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close()
+
+            print(f"Saved visualization to: {output_path}")
+
+    # Create mask generator demonstration
+    print("Creating mask generator demonstration...")
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    fig.suptitle("Mask Generator Examples", fontsize=16)
+
+    mask_gen = Mask(resize=64, dense_rate=0.3)
+
+    # Show different mask configurations
+    for i in range(8):
+        row = i // 4
+        col = i % 4
+
+        # Generate mask with different target numbers
+        if i < 4:
+            mask = mask_gen(1, target_num=i + 1)[0]
+            axes[row, col].imshow(mask, cmap="gray")
+            axes[row, col].set_title(f"{i + 1} Target(s)")
+        else:
+            # Show dense masks
+            mask = mask_gen(1)[0]
+            axes[row, col].imshow(mask, cmap="gray")
+            axes[row, col].set_title(f"Dense Mask {i - 3}")
+
+        axes[row, col].set_xticks([])
+        axes[row, col].set_yticks([])
+
+    plt.tight_layout()
+    mask_demo_path = os.path.join(output_dir, "mask_generator_demo.png")
+    plt.savefig(mask_demo_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved mask generator demo to: {mask_demo_path}")
+
+    # Create summary statistics
+    print("Creating summary statistics...")
+    with open(os.path.join(output_dir, "test_summary.txt"), "w") as f:
+        f.write("HAD100 Dataset Test Summary\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Tested mask types: {', '.join(mask_types)}\n")
+        f.write(f"Output directory: {output_dir}\n")
+        f.write(f"Image size: 64x64\n")
+        f.write(f"Channels: 50\n")
+        f.write(f"Sensor: aviris_ng\n\n")
 
         for mask_type in mask_types:
-            print(f"Testing mask type: {mask_type}")
+            f.write(f"Mask type: {mask_type}\n")
+            f.write(f"  - Visualization: had100_{mask_type}_visualization.png\n")
+        f.write(f"\nMask generator demo: mask_generator_demo.png\n")
 
-            # Create dataset with current mask type
-            dataset = HADDataset(
-                dataset_path="data/Downstreams/HAD/HAD100/HAD100Dataset",
-                sensor="aviris_ng",
-                mask_class=mask_type,
-                resize=64,
-                start_channel=0,
-                channel=50,
-                train_ratio=0.1,  # Use smaller subset for testing
-            )
+    print(f"Test summary saved to: {os.path.join(output_dir, 'test_summary.txt')}")
+    print(f"\nAll visualizations saved to: {output_dir}")
+    print("Test completed successfully!")
 
-            # Get a sample
-            print(f"Dataset length: {len(dataset)}")
-            if len(dataset) > 0:
-                original, masked = dataset[0]
-                print(f"Original tensor shape: {original.shape}")
-                print(f"Masked tensor shape: {masked.shape}")
 
-                # Convert tensors to numpy
-                original_np = original.numpy()
-                masked_np = masked.numpy()
-                print(f"Original numpy shape: {original_np.shape}")
-                print(f"Masked numpy shape: {masked_np.shape}")
+def __test_loading_images():
+    # Create dataset with current mask type
+    dataset = HADDataset(
+        dataset_path="data/Downstreams/HAD/HAD100/HAD100Dataset",
+        sensor="all",
+        mask_class="no",
+        resize=64,
+        start_channel=0,
+        channel=276,
+        train_ratio=1,  # Use smaller subset for testing
+        to_neg_1_1=True,
+        ret_dict=True,
+    )
+    print(f"Dataset length: {len(dataset)}")
 
-                # Create visualization
-                fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-                fig.suptitle(f"HAD100 Dataset - Mask Type: {mask_type}", fontsize=16)
+    # img, img_m = dataset[0]
+    # print(f"Image shape: {img.shape}, min: {img.min()}, max: {img.max()}")
+    # print(f"Mask shape: {img_m.shape}")
 
-                # Show original image (first 3 channels as RGB)
-                if original_np.shape[0] >= 3:
-                    rgb_original = np.transpose(original_np[:3], (1, 2, 0))
-                    rgb_original = (rgb_original - rgb_original.min()) / (
-                        rgb_original.max() - rgb_original.min()
-                    )
-                    axes[0, 0].imshow(rgb_original)
-                    axes[0, 0].set_title("Original (RGB)")
-                else:
-                    axes[0, 0].imshow(original_np[0], cmap="viridis")
-                    axes[0, 0].set_title("Original (Channel 1)")
-
-                # Show masked image (first 3 channels as RGB)
-                if masked_np.shape[0] >= 3:
-                    rgb_masked = np.transpose(masked_np[:3], (1, 2, 0))
-                    rgb_masked = (rgb_masked - rgb_masked.min()) / (
-                        rgb_masked.max() - rgb_masked.min()
-                    )
-                    axes[0, 1].imshow(rgb_masked)
-                    axes[0, 1].set_title("Masked (RGB)")
-                else:
-                    axes[0, 1].imshow(masked_np[0], cmap="viridis")
-                    axes[0, 1].set_title("Masked (Channel 1)")
-
-                # Show difference
-                diff = np.abs(original_np - masked_np)
-                axes[0, 2].imshow(diff[0], cmap="hot")
-                axes[0, 2].set_title("Difference (Channel 1)")
-
-                # Show mask generator example
-                mask_gen = Mask(resize=64)
-                mask_example = mask_gen(1)[0]
-                axes[0, 3].imshow(mask_example, cmap="gray")
-                axes[0, 3].set_title("Mask Pattern")
-
-                # Show spectral profiles
-                print(f"Original data shape: {original_np.shape}")
-                print(f"Masked data shape: {masked_np.shape}")
-
-                # Use center coordinates dynamically
-                h, w = original_np.shape[1], original_np.shape[2]
-                center_h, center_w = h // 2, w // 2
-                print(f"Image dimensions: {h}x{w}, center: ({center_h}, {center_w})")
-
-                center_pixel = original_np[:, center_h, center_w]
-                center_pixel_masked = masked_np[:, center_h, center_w]
-                axes[1, 0].plot(center_pixel, "b-", label="Original")
-                axes[1, 0].plot(center_pixel_masked, "r-", label="Masked")
-                axes[1, 0].set_title("Spectral Profile (Center)")
-                axes[1, 0].legend()
-                axes[1, 0].set_xlabel("Channel")
-                axes[1, 0].set_ylabel("Value")
-
-                # Show histogram
-                axes[1, 1].hist(
-                    original_np.flatten(), bins=50, alpha=0.5, label="Original"
-                )
-                axes[1, 1].hist(masked_np.flatten(), bins=50, alpha=0.5, label="Masked")
-                axes[1, 1].set_title("Value Distribution")
-                axes[1, 1].legend()
-
-                # Show multiple mask examples
-                for i in range(2):  # 只显示2个例子以避免越界
-                    mask_example = mask_gen(1)[0]
-                    axes[1, 2 + i].imshow(mask_example, cmap="gray")
-                    axes[1, 2 + i].set_title(f"Mask Example {i + 1}")
-
-                # Remove axis ticks for better visualization
-                for ax in axes.flat:
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-
-                plt.tight_layout()
-
-                # Save the plot
-                output_path = os.path.join(
-                    output_dir, f"had100_{mask_type}_visualization.png"
-                )
-                plt.savefig(output_path, dpi=150, bbox_inches="tight")
-                plt.close()
-
-                print(f"Saved visualization to: {output_path}")
-
-        # Create mask generator demonstration
-        print("Creating mask generator demonstration...")
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-        fig.suptitle("Mask Generator Examples", fontsize=16)
-
-        mask_gen = Mask(resize=64, dense_rate=0.3)
-
-        # Show different mask configurations
-        for i in range(8):
-            row = i // 4
-            col = i % 4
-
-            # Generate mask with different target numbers
-            if i < 4:
-                mask = mask_gen(1, target_num=i + 1)[0]
-                axes[row, col].imshow(mask, cmap="gray")
-                axes[row, col].set_title(f"{i + 1} Target(s)")
-            else:
-                # Show dense masks
-                mask = mask_gen(1)[0]
-                axes[row, col].imshow(mask, cmap="gray")
-                axes[row, col].set_title(f"Dense Mask {i - 3}")
-
-            axes[row, col].set_xticks([])
-            axes[row, col].set_yticks([])
-
-        plt.tight_layout()
-        mask_demo_path = os.path.join(output_dir, "mask_generator_demo.png")
-        plt.savefig(mask_demo_path, dpi=150, bbox_inches="tight")
-        plt.close()
-
-        print(f"Saved mask generator demo to: {mask_demo_path}")
-
-        # Create summary statistics
-        print("Creating summary statistics...")
-        with open(os.path.join(output_dir, "test_summary.txt"), "w") as f:
-            f.write("HAD100 Dataset Test Summary\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(f"Tested mask types: {', '.join(mask_types)}\n")
-            f.write(f"Output directory: {output_dir}\n")
-            f.write(f"Image size: 64x64\n")
-            f.write(f"Channels: 50\n")
-            f.write(f"Sensor: aviris_ng\n\n")
-
-            for mask_type in mask_types:
-                f.write(f"Mask type: {mask_type}\n")
-                f.write(f"  - Visualization: had100_{mask_type}_visualization.png\n")
-            f.write(f"\nMask generator demo: mask_generator_demo.png\n")
-
-        print(f"Test summary saved to: {os.path.join(output_dir, 'test_summary.txt')}")
-        print(f"\nAll visualizations saved to: {output_dir}")
-        print("Test completed successfully!")
-
-    except Exception as e:
-        print(f"Error during testing: {e}")
+    dl = _DiffbandsDataLoader(dataset, batch_size=16, num_workers=1)
+    for sample in dl:
+        print(sample["img"].shape)
 
 
 if __name__ == "__main__":
-    test_loader()
+    # test_loader()
+    __test_loading_images()

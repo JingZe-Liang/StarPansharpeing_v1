@@ -997,7 +997,7 @@ class PansharpeningTrainer:
 
     @torch.inference_mode()
     def val_loop(self):
-        # self.pansp_model.eval()
+        self.pansp_model.eval()
 
         tbar = self._get_val_tbar_iter(mode="reduced")
         # track psnr and ssim
