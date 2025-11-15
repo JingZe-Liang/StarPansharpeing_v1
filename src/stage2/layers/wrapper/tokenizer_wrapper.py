@@ -23,14 +23,6 @@ from src.utilities.logging import log
 
 type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]] | None
 
-# Utilities functions
-
-
-############### Utilities functions ##############
-
-
-############### Utilities functions ##############
-
 
 ############### Utilities functions ##############
 

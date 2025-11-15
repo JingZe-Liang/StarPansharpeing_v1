@@ -103,7 +103,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg("[FSDP]: using Fully Sharded Data Parallel plugin")
             self.no_ema = True
 
-        # dataloader
+        # Dataloader
         used_dataset = self.dataset_cfg.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
 
@@ -152,10 +152,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
             )
 
-        # setup the tokenizer
+        # Setup the tokenizer
         self.setup_tokenizer()
 
-        # pretrained tokenizer or peft tuning
+        # Pretrained tokenizer or peft tuning
         self._is_peft_tuning = False
         self.tokenizer_peft_wrapped = None
         if self.train_cfg.finetune_strategy == "peft":
@@ -168,12 +168,14 @@ class CosmosHyperspectralTokenizerTrainer:
         # FIXME: do not cast the to any other types? it will raise the unscale grad error.
         # self.vq_loss_fn.discriminator = self.vq_loss_fn.discriminator.to(self.dtype)
 
+        # Visual pretraining proxy task models, e.g, contrastive learning teacher model;
+        # JEPA predictor model ...
         self.setup_proxy_task_model_and_optim_scheduler()
 
         # Augmentation pipelines and anti-degradation network / losses
         self.setup_aug_pipe_and_anti_degradation_network()
 
-        # optimizers and lr schedulers
+        # Optimizers and lr schedulers
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = (
             self.get_optimizer_lr_scheduler()
         )
@@ -205,7 +207,7 @@ class CosmosHyperspectralTokenizerTrainer:
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
         # self.set_fsdp_cpu_local_tensor_to_each_rank(self.vq_loss_fn.discriminator)
 
-        # traing state counter
+        # Training state counter
         self.train_state = StepsCounter(["train"])
 
         # clear GPU memory
@@ -390,6 +392,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def setup_invariant_pipeline(self):
         self.invariant_pipe = None
+        # invariant pipeline, see transform-invariant vae paper.
+        raise NotImplementedError(f"Invariant pipeline is not implemented yet")
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -1133,7 +1137,6 @@ class CosmosHyperspectralTokenizerTrainer:
             x, masks_enc, masks_pred = mask_collator(x)
 
             # Target
-            # with torch.autocast("cuda", self.dtype):
             with self.accelerator.autocast():
                 # Target
                 with torch.no_grad():

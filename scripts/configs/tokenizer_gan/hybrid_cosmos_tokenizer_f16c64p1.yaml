@@ -128,9 +128,9 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-03_16-44-51_hybrid_cosmos_f16c64/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-11_23-38-40_hybrid_cosmos_f16c64/ema
   compile_model: false
-  only_load_tokenizer: true
+  only_load_tokenizer: false
   seperate_enc_dec: false
 
   # augmentations
@@ -173,8 +173,9 @@ train:
     _partial_: true
     betas: [0.95, 0.99]
     oned_param_algo: lion
+    use_triton: true
     muon_params_defaults:
-      lr: 4.0e-4
+      lr: 2.0e-4
       weight_decay: 0.01
     oned_params_defaults:
       lr: 2.0e-4
@@ -227,7 +228,7 @@ train:
 
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
+    lr: 2.0e-4
     weight_decay: 1.0e-5
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]

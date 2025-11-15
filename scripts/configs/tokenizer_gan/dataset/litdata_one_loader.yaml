@@ -2,7 +2,7 @@ used: litdata_one_loader
 dataset_names_to_img_size:
   unified_hyperspectral: 512
 
-channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
+channels: 512 #${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 img_size: 512 # place holder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 

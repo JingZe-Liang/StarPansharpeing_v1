@@ -276,6 +276,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             per_channel=False,
         ),
         index_file_name: str | None = None,
+        check_chans: bool = False,
         *args,
         **kwargs,
     ):
@@ -287,6 +288,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         self.to_neg_1_1 = to_neg_1_1
         self.force_to_rgb = force_to_rgb
         self._img_key = "img"
+        self._check_chans= check_chans
 
         # Resize and crop
         self.resize_before_transform = resize_before_transform
@@ -437,7 +439,8 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         # if not 'per_stream' shuffle, make sure each stream has the same keys
         d = self._filter_only_img(d)
 
-        self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
+        if self._check_chans:
+            self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
 
         return d
 

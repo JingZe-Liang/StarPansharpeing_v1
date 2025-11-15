@@ -4,6 +4,12 @@ Print and log functions using loguru.
 env:
     COLOR_LOG: 0/1, whether to colorize the log output to shell (default: 1).
     SHELL_LOG_LEVEL: str, the logger's level. (default: "DEBUG").
+
+logger kept keywords:
+    once: bool, whether to print only once.
+    log_once: bool, whether to print only once.
+    once_pattern: str, the pattern to match.
+    not_rank0_print: bool, whether to print in all ranks even not rank 0.
 """
 
 import inspect
@@ -14,6 +20,7 @@ import time
 from contextlib import ContextDecorator
 from functools import lru_cache, partial, wraps
 from pathlib import Path
+from types import FunctionType, MethodType
 from typing import Any, Callable, Dict, Literal, LiteralString, Optional, Union
 
 import torch.distributed as dist
@@ -302,6 +309,28 @@ def add_logger_filters_(
     return main_log_filter
 
 
+def _loguru_log_func(
+    __self: type[logger],
+    level: str,
+    message: str,
+    # original params
+    __level: str | None = None,
+    __message: str | None = None,
+    *args,
+    **kwargs,
+):
+    if __level is not None and __message is not None:
+        __self._log(__level, False, __self.options, __message, *args, **kwargs)
+    elif message is not None:
+        level = level if level is not None else "info"
+        __self._log(level, False, __self.options, message, *args, **kwargs)
+    else:
+        logger.error(
+            f"Loguru log call error. "
+            f'Either "level" and "message" or "__level" and "__message" must be provided.'
+        )
+
+
 @once
 def configure_logger(
     sink=None,
@@ -313,6 +342,7 @@ def configure_logger(
     print_rank_info=False,
     add_print_once_filter=True,
     add_tqdm_filter=True,
+    patch_log_func=False,
     *,
     _auto_=True,  # reserved for once decorator
 ):
@@ -398,6 +428,10 @@ def configure_logger(
         )
         # Only log this message if it doesn't have tqdm binding to avoid infinite recursion
         logger.info("Add tqdm write logger.")
+
+    # TODO: check this.
+    if patch_log_func:
+        logger.log = _loguru_log_func
 
     return handler
 
