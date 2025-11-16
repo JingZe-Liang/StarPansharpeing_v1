@@ -1,128 +1,134 @@
-_target_: src.stage2.layers.wrapper.tokenizer_wrapper.DownstreamModelTokenizerWrapper
+hydra:
+  output_subdir: null
+  run:
+    dir: .
 
-# Tokenizer configuration (from cosmos_f8c16p1_lora.yaml)
-tokenizer:
-  # _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin  # if is diffbands lora tokenizer
-  # tokenizer:
-  _target_: peft.PeftModel.from_pretrained # basic nested lora tokenizer
-  model:
-    _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
-    model:
-      attn_resolutions: [32]
-      channels: 128
-      channels_mult: [2, 4, 4]
-      dropout: 0.0
-      in_channels: 512 # nested max channels
-      out_channels: 512 # nested max channels
-      spatial_compression: 8
-      num_res_blocks: 2
-      resolution: 1024
-      z_channels: 256
-      latent_channels: 16
-      act_checkpoint: false
-      norm_type: gn
-      norm_groups: 32
-      block_name: res_block
-      moe_token_mixer_type: res_block
-      hidden_factor: 4
-      use_residual_factor: false
-      # others
-      patch_method: haar
-      patch_size: 1
-      attn_type: none
-      padding_mode: reflect # for boundary?
-      adaptive_mode: interp
-      # wrap_fsdp_last_layer: false
-    # repa
-    use_repa_loss: false
-    use_vf_loss: false
-    hook_module: decoder.decoder.mid.block_2
-    vf_on_z_or_module: z # [z, module]
-    dino_feature_dim: 1024
-    # loading
-    enc_path: ""
-    dec_path: ""
-    uni_path: "runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors"
-    loading_type: pretrained
-    # quant
-    norm_in_quant_conv: false
-  # lora_weights:
-  #   WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
-  #   QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
-  # lora_hyper_chans:
-  #   WV3: 8
-  #   QB: 4
-  # active_lora: ${dataset.cfgs.used}
+defaults:
+  # wrapper ==========
+  - dataset: wdc
+  - accelerator: base
+  - denoise_model: tokenizer_wrapped_naf
+  # self ===============
+  - _self_
 
-  # Nested LoRA weights
-  model_id: "runs/stage1_cosmo_nested_lora/2025-11-10_21-59-31_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3"
-  adapter_name: "default" # for non-diffbands lora tokenizer
-  ignore_mismatched_sizes: true
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
 
-# Pansharpening model configuration (from nafnet.yaml)
-downstream_model:
-  _target_: src.stage2.utilities.amotized.amotized_model_wrapper.AmotizedModelMixin
-  _partial_: true # for decode_fn
+accelerator:
+  mixed_precision: "bf16"
 
-  # Model configuration
-  amotize_type: "latent_to_pixel_fusion"
-  backward_decoder: false
-  learn_decoder: false
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
+  update_after_step: 1000
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  move_ema_to_online_device: true
 
-  # Amotized model (Transformer branch)
-  amotized_model:
-    _target_: src.stage2.denoise.models.transformer.Transformer.create_model
-    in_dim: 16
-    dim: 384
-    depth: 8
-    num_heads: 12
-    mlp_ratio: 4.0
-    drop: 0.0
-    drop_path: 0.2
-    patch_size: 1
-    out_channels: 256
-    norm_layer: "rmsnorm"
-    mlp_norm_layer: "rmsnorm"
-    act_layer: "silu"
-    pos_embed_type: "sincos"
-    input_size: 8 # 64 / 8 = 8
-    with_raw_img: false
+train:
+  grad_check: false
+  proj_dir: runs/stage2_denoise/
+  finetune_strategy: finetune_all
+  max_grad_norm: 1.0
 
-  # Pixel model (NAFNet branch)
-  pixel_model:
-    _target_: src.stage2.denoise.models.naf.DenoiseNAFNet.create_model
-    pan_channel: 1
-    ms_channel: ${dataset.consts.bands}
-    width: 128
-    middle_blk_num: 2
-    enc_blk_nums: [1, 2, 2]
-    dec_blk_nums: [1, 2, 2]
-    enc_blk_type: ["naf", "naf", "nat"]
-    dec_blk_type: ["nat", "naf", "naf"]
-    condition_channel: 256 # comes from the de-tokenizer
-    patch_size: 1
-    dw_expand: 2
-    ffn_expand: 2
-    block_drop: 0.2
-    condition_on_decoder: true
-    residual_type: lr
+  track_metrics_duration: -1
+  track_metrics_after: 1000
+  visualize_every: 500
+  max_steps: 100_000
+  save_every: 1000
+  visualize_rgb_channels: [39, 29, 19] # WDC
+
+  is_neg_1_1: false
+  pansp_ratio: 4
+  online_tokenize: true
+  add_pan_processor: false
+
+  resume_path:
+  ema_load_path:
+
+  denoising_loss:
+    _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
+    pixel_loss_type: l1ssim
+    amotized_loss:
+      _target_: torch.nn.MSELoss
+    pixel_loss_kwargs:
+      weighted_r: [1.0, 0.1] # l1ssim weights
+    factors: [0.0, 1.0] # latent and pixel weights
     is_neg_1_1: false
-    output_rescale: false
-    # nat 1, 3 < nat 2
-    nat_enc_kwargs:
-      # - { "k_size": 8, "stride": 2, "dilation": 2 }
-      - null
-      - { "k_size": 4, "stride": 2, "dilation": 2 }
-      - { "k_size": 4, "stride": 1, "dilation": 2 } # 64 / 4 = 16
-    nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
-    nat_dec_kwargs:
-      - { "k_size": 4, "stride": 1, "dilation": 2 }
-      - { "k_size": 4, "stride": 2, "dilation": 2 }
-      # - { "k_size": 8, "stride": 2, "dilation": 2 }
-      - null
 
-# Wrapper configuration
-froze_tokenizer: true
-n_img_encoded: 1 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
-tokenizer_scale_shift: [6.5, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
-img_is_neg_1_1: false # Pansharpening use 0-1 range images
+  denoise_optim:
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _partial_: true
+    # lr: 6.0e-4
+    # mu: 0.95
+    # betas: [0.95, 0.99]
+    # adjust_lr: rms_norm
+    # use_triton: false
+    # nesterov: true
+    # oned_param_algo: lion
+    # muon_params_defaults:
+    #   lr: 6.0e-4
+    #   weight_decay: 0.1
+    # oned_params_defaults:
+    #   lr: 6.0e-4
+    #   weight_decay: 0.0
+
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 6.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    _target_: heavyball.ForeachAdamW
+    _partial_: true
+    lr: 4.0e-4
+    weight_decay: 1.0e-4
+    betas: ${tuple:[0.95, 0.99]}
+    caution: true
+    foreach: true
+    eps: 1.0e-9
+
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 6.0e-4
+    # weight_decay: 1.0e-4
+    # eps: 1.0e-9
+    # betas: ${tuple:[0.95, 0.99]}
+    # foreach: true
+
+    # _target_: heavyball.ForeachSOAP
+    # _partial_: true
+    # lr: 1.0e-3
+    # eps: 1e-10
+    # betas: ${tuple:[0.9, 0.99]}
+    # weight_decay: 0.
+
+  denoise_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 100
+    num_training_steps: ${train.max_steps}
+    num_cycles: 3
+
+  log:
+    run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper
+    log_with_time: true
+    log_every: 10
+
+  debug: true
+
+val:
+  val_duration: 500
+  max_val_iters: -1
+  # max_val_reduced_iters: -1 # val only `max_val_iters` batches
+  # max_val_full_iters: -1 # val_full only `max_val_iters` batches
+  # crop_batch_size: 64
+  # val_use_patches: true

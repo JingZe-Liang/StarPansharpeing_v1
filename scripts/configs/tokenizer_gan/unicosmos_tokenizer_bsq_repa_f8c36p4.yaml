@@ -149,8 +149,8 @@ train:
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
-  resume_path: #runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/checkpoints/checkpoint_143
-  ema_load_path: runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/ema
+  resume_path: runs/stage1_cosmos_bsq/2025-11-16_16-35-32_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_8
+  ema_load_path: #runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/ema
 
   finetune_cfg:
     refine_decoder_head_n_layers: all

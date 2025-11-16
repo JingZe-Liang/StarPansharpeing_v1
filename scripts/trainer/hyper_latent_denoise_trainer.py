@@ -30,9 +30,7 @@ from tqdm import trange
 from src.stage2.denoise.metrics import DenoisingMetrics
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
-from src.utilities.config_utils import (
-    to_object as to_cont,  # register new resolvers at the same time
-)
+from src.utilities.config_utils import function_config_to_easy_dict
 from src.utilities.logging import dict_round_to_list_str
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
@@ -50,6 +48,7 @@ class TrainDenoisingStepOutput(NamedTuple):
 
 
 class DenoisingTrainer:
+    @function_config_to_easy_dict
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.train_cfg = cfg.train
@@ -98,10 +97,10 @@ class DenoisingTrainer:
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
+            self.dataset_cfg.train_loader
         )
         self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
+            self.dataset_cfg.val_loader
         )
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
@@ -134,10 +133,8 @@ class DenoisingTrainer:
         self.train_state = StepsCounter(["train", "val"])
 
     def setup_denoising_model(self):
-        self.model = hydra.utils.instantiate(self.cfg.denoising_model)
-        self.denoising_amotizing_pixels = self.accelerator.unwrap_model(
-            self.model
-        ).amotizing_pixels
+        self.model = hydra.utils.instantiate(self.cfg.denoise_model)
+        self.denoising_amotizing_pixels = self.model.downstream_model.amotizing_pixels
         if self.denoising_amotizing_pixels:
             # Wrapper will handle tokenization for amotizing pixels
             self.backward_detokenizer = True
@@ -155,12 +152,8 @@ class DenoisingTrainer:
     def prepare_ema_models(self):
         if self.no_ema:
             return
-
-        self.ema_model = EMA(
-            self.model,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
-        ).to(self.device)
+        self.ema_model: EMA = hydra.utils.instantiate(self.ema_cfg)(self.model)
+        self.ema_model.to(self.device)
         self.log_msg(f"create EMA model for denoising")
 
     def configure_logger(self):
@@ -317,6 +310,7 @@ class DenoisingTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
+        kwargs.setdefault("stack_level", 3)
         log_fn = getattr(self.logger, level.lower())
 
         if only_rank_zero:
@@ -420,9 +414,9 @@ class DenoisingTrainer:
             # set models with property dtype
             self.model.dtype = torch.float
 
-        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
-            self.train_dataloader, self.val_dataloader
-        )
+        # self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+        #     self.train_dataloader, self.val_dataloader
+        # )
 
     def step_train_state(self, mode="train"):
         self.train_state.update(mode)
@@ -493,8 +487,7 @@ class DenoisingTrainer:
         return self.get_global_step("train")
 
     def may_freeze(self, model, freeze=True):
-        for p in model.parameters():
-            p.requires_grad = not freeze
+        model.requires_grad_(not freeze)
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
@@ -605,6 +598,9 @@ class DenoisingTrainer:
             gt_latent = gt_tok_out["latent"].detach()
 
         out = self.forward_denoising_model(noisy, gt, noisy_latent, gt_latent)
+        logger.trace(
+            f"Step: {self.global_step} - Denoise loss: {out.denoise_loss.item():.4f}"
+        )
 
         if self.accelerator.sync_gradients:
             # backward
@@ -627,27 +623,26 @@ class DenoisingTrainer:
         return self._denoising_metrics
 
     def update_metrics(self, noisy, gt, clear=False, only_update=True):
-        metrics_fn = self._get_metric_fn(clear)
-        metrics_fn(noisy, gt)
+        metrics_fn: DenoisingMetrics = self._get_metric_fn(clear)
+        metrics_fn.update(noisy, gt)
 
     def get_metrics(self):
         assert hasattr(self, "_denoising_metrics")
         return self._denoising_metrics.compute()
 
+    def to_device_dtype(self, x: dict | Tensor):
+        """Data to proper dtype"""
+        if torch.is_tensor(x):
+            return x.to(device=self.device, dtype=self.dtype)
+        elif isinstance(x, dict):
+            return {
+                k: self.to_device_dtype(v) if torch.is_tensor(v) else v
+                for k, v in x.items()
+            }
+        else:
+            raise ValueError(f"Unsupported type: {type(x)}")
+
     def train_step(self, batch: dict):
-        """
-        Execute one training step for denoising model.
-
-        Parameters
-        ----------
-        batch : dict
-            Batch input containing noisy and clean images, and optionally latents
-
-        Note
-        ----
-        The wrapper handles tokenization internally. If latents are not provided in the batch,
-        the wrapper will encode the images to latents automatically.
-        """
         noisy_latent = gt_latent = None
 
         # Get latents from batch - wrapper handles tokenization
@@ -686,12 +681,15 @@ class DenoisingTrainer:
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
             log_loss = dict_tensor_sync(log_loss)
-        strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
+        strings = dict_round_to_list_str(
+            log_loss, select=list(log_loss.keys()), n_round=4
+        )
         return " - ".join(strings)
 
     def infinity_train_loader(self):
         while True:
             for batch in self.train_dataloader:
+                batch = self.to_device_dtype(batch)
                 yield batch
 
     def train_loop(self):
@@ -701,6 +699,7 @@ class DenoisingTrainer:
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
             # train step
+            batch = cast(dict[str, torch.Tensor], batch)
             self.train_step(batch)
 
             if self.global_step % self.val_cfg.val_duration == 0:
@@ -727,6 +726,7 @@ class DenoisingTrainer:
             raise ValueError("No validation dataloader found")
 
         for batch in self.val_dataloader:
+            batch = self.to_device_dtype(batch)
             yield batch
 
     def get_val_loader_iter(self):
@@ -756,24 +756,6 @@ class DenoisingTrainer:
 
     @torch.no_grad()
     def val_step(self, batch: dict):
-        """
-        Execute one validation step for denoising model.
-
-        Parameters
-        ----------
-        batch : dict
-            Batch input containing noisy and clean images, and optionally latents
-
-        Returns
-        -------
-        dict
-            Dictionary containing predictions
-
-        Note
-        ----
-        The wrapper handles tokenization internally. If latents are not provided in the batch,
-        the wrapper will encode the images to latents automatically.
-        """
         noisy_latent = gt_latent = None
 
         # Get latents from batch - wrapper handles tokenization
@@ -790,13 +772,13 @@ class DenoisingTrainer:
 
     def val_loop(self):
         self.model.eval()
-        # torch.cuda.empty_cache()
 
         loss_metrics = MeanMetric().to(device=self.device)
         val_iter = self.get_val_loader_iter()
         for batch_or_idx in val_iter:  # type: ignore
             if self.val_cfg.max_val_iters > 0:
                 batch = next(self._val_loader_iter)
+                batch = self.to_device_dtype(batch)
             else:
                 batch = batch_or_idx
 
@@ -807,23 +789,23 @@ class DenoisingTrainer:
             pred_img_rgb = self.to_rgb(val_out["pred_img"])
             batch_img_rgb = self.to_rgb(gt)
 
-            # l1 loss
-            loss_of_latent = nn.functional.mse_loss(pred_img_rgb, gt.to(pred_img_rgb))
-            loss_metrics.update(loss_of_latent)
+            # mse loss
+            loss = nn.functional.mse_loss(pred_img_rgb, gt.to(pred_img_rgb))
+            loss_metrics.update(loss)
 
             # metrics
             self.update_metrics(batch_img_rgb, pred_img_rgb)
             self.step_train_state("val")
 
-        metrics = self.get_metrics()
+        metrics_val = self.get_metrics()
         loss_val = loss_metrics.compute()
 
         if self.accelerator.is_main_process:
             _metric_str = ""
-            for k, v in metrics.items():
+            for k, v in metrics_val.items():
                 _metric_str += f"{k}: {v:.4f} - "
-            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.3e}")
-            self.tenb_log_any("metric", metrics, step=self.global_step)
+            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.4e}")
+            self.tenb_log_any("metric", metrics_val, step=self.global_step)
 
             # visualize the last val batch
             self.visualize_reconstruction(
@@ -894,7 +876,7 @@ class DenoisingTrainer:
 
         def hyperspectral_to_rgb_fn(x):
             x_np = visualize_hyperspectral_image(
-                x[_only_n],
+                x[:_only_n].detach().cpu(),
                 rgb_channels=self.train_cfg.visualize_rgb_channels,
                 to_uint8=True,
                 to_grid=True,
@@ -941,25 +923,28 @@ class DenoisingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_fusionnet"  # vq, bsq, fsq, kl
+_key = "denoise_naf"
 _configs_dict = {
     # cosmos tokenizer, simple denoising
-    "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",
+    "denoise_naf": "denoise_naf",
 }[_key]
 
 
-@hydra.main(
-    config_path="configs/denoising",
-    config_name=_configs_dict,
-    version_base=None,
-)
-def main(cfg):
-    catcher = logger.catch if PartialState().is_main_process else nullcontext
-
-    with catcher():
-        trainer = DenoisingTrainer(cfg)
-        trainer.run()
-
-
 if __name__ == "__main__":
+    from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
+
+    print_colored_banner("HyperDenoise")
+
+    @hydra.main(
+        config_path="../configs/denoise",
+        config_name=_configs_dict,
+        version_base=None,
+    )
+    def main(cfg):
+        catcher = logger.catch if PartialState().is_main_process else nullcontext
+
+        with catcher():
+            trainer = DenoisingTrainer(cfg)
+            trainer.run()
+
     main()

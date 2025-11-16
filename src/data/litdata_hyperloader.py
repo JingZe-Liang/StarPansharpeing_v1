@@ -189,7 +189,9 @@ class _BaseStreamingDataset(StreamingDataset):
             litdata_utils._INDEX_FILENAME = "index.json"
 
     def _check_datasets(self, datasets: list[StreamingDataset]) -> None:
-        # override the class
+        """override the original method
+        do nothing check.
+        """
 
         # if any(not isinstance(d, StreamingDataset) for d in datasets):
         #     raise RuntimeError("The provided datasets should be instances of the StreamingDataset.")

@@ -42,6 +42,7 @@ class TransformerConfig:
     norm_layer: str = "rmsnorm"
     mlp_norm_layer: str = "rmsnorm"
     act_layer: str = "silu"
+    use_layerscale: bool = True
     feature_layer_ids: list[int] | None = None
 
 
@@ -61,6 +62,12 @@ class Transformer(nn.Module):
         self.raw_img_size = cfg.raw_img_size
         self.raw_img_chans = cfg.raw_img_chans
         self.raw_patch_size = 16
+
+        # Norm layers
+        norm_layer = get_norm_layer(cfg.norm_layer)
+        mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
+        act_layer = get_act_layer(cfg.act_layer)
+
         self.patch_embed = PatchEmbed(
             img_size=cfg.input_size,
             patch_size=cfg.patch_size,
@@ -68,6 +75,7 @@ class Transformer(nn.Module):
             embed_dim=cfg.dim,
             bias=True,
             strict_img_size=False,
+            norm_layer=norm_layer,
         )
         if self.with_raw_img:
             assert cfg.raw_img_size is not None
@@ -97,24 +105,25 @@ class Transformer(nn.Module):
         drop_path_rates = [
             x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)
         ]  # stochastic depth decay rule
-        norm_layer = get_norm_layer(cfg.norm_layer)
-        mlp_norm_layer = get_norm_layer(cfg.mlp_norm_layer)
-        act_layer = get_act_layer(cfg.act_layer)
         for i in range(cfg.depth):
             layers.append(
                 AttentionBlock(
                     dim=cfg.dim,
-                    mlp_ratio=cfg.mlp_ratio,
                     num_heads=cfg.num_heads,
                     qkv_bias=True,
                     qk_norm=norm_layer,
+                    norm_layer=mlp_norm_layer,
+                    mlp_type="swiglu",
+                    mlp_ratio=cfg.mlp_ratio,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
-                    drop_path=drop_path_rates[i]
-                    if isinstance(drop_path_rates, list)
-                    else cfg.drop_path,
-                    norm_layer=mlp_norm_layer,
+                    drop_path=(
+                        drop_path_rates[i]
+                        if isinstance(drop_path_rates, list)
+                        else cfg.drop_path
+                    ),
                     act_layer=act_layer,
+                    use_layerscale=cfg.use_layerscale,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -361,8 +370,8 @@ class Transformer(nn.Module):
 
         logger.info("[Transformer] Initializing model ...")
 
-    @function_config_to_easy_dict
     @classmethod
+    @function_config_to_easy_dict
     def create_model(cls, **kwargs):
         cfg = TransformerConfig(**kwargs)
         model = cls(cfg)

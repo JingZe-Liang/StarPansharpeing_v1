@@ -8,7 +8,7 @@ rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
 size_128_bs: 14
 size_256_bs: 12
 size_512_bs: 5
-val_bs: 8
+val_bs: 6
 max_workers: 2
 min_workers: 1
 shuffle_size: -1

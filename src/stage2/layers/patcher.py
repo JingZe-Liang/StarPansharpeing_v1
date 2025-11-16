@@ -11,6 +11,7 @@ def create_patcher(
     patch_size: int = 1,
     img_size: int | tuple = 512,
     out_fmt: str = "NCHW",
+    **kwargs,
 ):
     patcher = PatchEmbed(
         to_2tuple(img_size),
@@ -20,6 +21,7 @@ def create_patcher(
         norm_layer=None,
         output_fmt=out_fmt,
         strict_img_size=False,
+        **kwargs,
     )
     return patcher
 
