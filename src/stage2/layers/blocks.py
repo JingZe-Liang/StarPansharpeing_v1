@@ -45,7 +45,6 @@ from .conv import (
 )
 from .cross_attn import CrossAttention, SoftmaxCrossAttention2D
 from .functional import ConditionalBlock, ResidualBlock
-
 from .mlp import ClipSwiGLUMlp
 from .mlp import SwiGLU as SwiGLU_Custom
 
@@ -280,6 +279,7 @@ class Spatial2DNATBlock(nn.Module):
         qk_norm="layernorm2d",
         norm_layer="layernorm2d",
         drop_path: float = 0.0,
+        **_kwargs,
     ) -> None:
         super().__init__()
         self.grad_checkpointing = False
@@ -358,6 +358,8 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
         qk_norm="layernorm2d",
         norm_layer="layernorm2d",
         drop_path: float = 0.0,
+        latent_cond_type: str = "adaln3",
+        **_kwargs,
     ) -> None:
         super().__init__(
             dim,
@@ -376,6 +378,10 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
             self.ms_conv_before_add = create_conv2d(ms_cond_chans, dim, 3)
 
         mod_factor = 2
+        self.latent_cond_type = latent_cond_type
+        assert latent_cond_type in ("adaln3", "adaln6"), (
+            "latent_cond_type must be adaln3 or adaln6"
+        )
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, dim // mod_factor, 1, bias=True),
             create_norm_act_layer(
@@ -383,7 +389,7 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
             ),
             create_conv2d(
                 dim // mod_factor,
-                dim * 6,
+                dim * 3 if latent_cond_type == "adaln3" else dim * 6,
                 3,
                 stride=1,
                 bias=False,
@@ -404,11 +410,20 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
                 x = x + self.ms_conv_before_add(ms_cond)
 
             latent_cond = self._interp_as(latent, x.shape[2:])
-            sh_a, sc_a, g_a, sh_f, sc_f, g_f = self.modulation(latent_cond).chunk(
-                6, dim=1
+            if self.latent_cond_type == "adaln3":
+                sh_a, sc_a, g_a = self.modulation(latent_cond).chunk(3, dim=1)
+                sh_f, sc_f, g_f = 0.0, 0.0, 1.0
+            else:
+                sh_a, sc_a, g_a, sh_f, sc_f, g_f = self.modulation(latent_cond).chunk(
+                    6, dim=1
+                )
+
+            # NAT attention
+            y_attn = (
+                self.ls1(self.attn(self._modulate(self.norm1(x), sc_a, sh_a))) * g_a
             )
-            y_attn = self.ls1(self.attn(self._modulate(self.norm1(x), sc_a, sh_a))) * g_a  # fmt: skip
             x = x + self.drop_path(y_attn)
+            # ConvFFN
             y_ffn = self.ls2(self.cffn(self._modulate(self.norm2(x), sc_f, sh_f))) * g_f
             x = x + self.drop_path(y_ffn)
             return x

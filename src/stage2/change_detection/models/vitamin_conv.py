@@ -41,7 +41,7 @@ class MbConvLNBlock(nn.Module):
         super(MbConvLNBlock, self).__init__()
         self.stride, self.in_chs, self.out_chs = stride, in_chs, out_chs
         mid_chs = make_divisible(out_chs * expand_ratio)
-        # breakpoint()
+
         prenorm_act_layer = partial(
             get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
         )
@@ -74,6 +74,7 @@ class MbConvLNBlock(nn.Module):
             if cond_chs
             else nn.Identity()
         )
+        self._has_condition = cond_chs is not None
 
     def init_weights(self, scheme=""):
         named_apply(partial(_init_conv, scheme=scheme), self)
@@ -90,7 +91,7 @@ class MbConvLNBlock(nn.Module):
 
         # (strided) depthwise 3x3 conv & act
         x = self.conv2_kxk(x)
-        if cond is not None:
+        if self._has_condition and cond is not None:
             cond = self.cond_conv_kxk(cond)
             x = x + cond
         x = self.act2(x)
@@ -132,7 +133,7 @@ class Stem(nn.Module):
         return x
 
 
-class MbConvSeqentialCond(nn.Module):
+class MbConvSequentialCond(nn.Module):
     def __init__(
         self,
         in_chans: int,
@@ -185,14 +186,24 @@ class MbConvSeqentialCond(nn.Module):
             )
 
         # stages
-        for stage in self.stages.values():
-            for block in stage:
-                if self.grad_checkpointing and self.training:
-                    x = checkpoint(block, x, cond, use_reentrant=False)
-                else:
-                    x = block(x, cond)
+        def _closure(x, cond):
+            for stage in self.stages.values():
+                for block in stage:
+                    if self.grad_checkpointing and self.training:
+                        x = checkpoint(block, x, cond, use_reentrant=False)
+                    else:
+                        x = block(x, cond)
+
+        # Checkpointing
+        if self.grad_checkpointing and self.training:
+            x = checkpoint(_closure, x, cond, use_reentrant=False)
+        else:
+            x = _closure(x, cond)
 
         return self.out_conv(x)
+
+    def set_grad_checkpointing(self, enable: bool = True):
+        self.grad_checkpointing = enable
 
 
 class MbConvStagesCond(nn.Module):

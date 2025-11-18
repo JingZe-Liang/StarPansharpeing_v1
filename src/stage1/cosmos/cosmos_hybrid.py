@@ -209,7 +209,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             interp_feats.append(f)
         return interp_feats
 
-    def encode(self, x, use_quantizer=None):
+    def encode(self, x, use_quantizer=None, get_intermediate_features=False):
         """Encode the image into latent.
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
@@ -217,7 +217,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Low-level encoder
         cache_low_lvl = None
         last_hidden_cached = self.cache_layers["low_level"] == -1
-        if self.training:
+        if self.training or get_intermediate_features:
             low_lvl_out = self.encoder.encoder(
                 x, ret_interm_feats=not last_hidden_cached
             )
@@ -231,13 +231,13 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Forward semantic transformer encoder
         cache_semantic = None
-        if not self.training:  # is eval
+        if not self.training and not get_intermediate_features:  # is eval
             z_semantic = self.semantic_enc_transformer(z_low_lvl)
-        elif self.cache_layers["semantic"] == -1:
+        elif self.cache_layers["semantic"] == -1 and get_intermediate_features:
             z_semantic = self.semantic_enc_transformer(z_low_lvl)
             cache_semantic = z_semantic
         else:
-            # forward the intermidiates
+            # forward the intermediate features
             z_semantic, cache_semantic = (
                 self.semantic_enc_transformer.forward_intermediates(
                     z_low_lvl,

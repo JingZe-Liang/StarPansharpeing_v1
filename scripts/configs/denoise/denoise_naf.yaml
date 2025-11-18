@@ -47,7 +47,7 @@ train:
   add_pan_processor: false
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_denoise/2025-11-17_00-33-21_f8c16p1_wdc_nafnet_wrapper/ema
 
   denoising_loss:
     _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
@@ -60,21 +60,21 @@ train:
     is_neg_1_1: false
 
   denoise_optim:
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    # _partial_: true
-    # lr: 6.0e-4
-    # mu: 0.95
-    # betas: [0.95, 0.99]
-    # adjust_lr: rms_norm
-    # use_triton: false
-    # nesterov: true
-    # oned_param_algo: lion
-    # muon_params_defaults:
-    #   lr: 6.0e-4
-    #   weight_decay: 0.1
-    # oned_params_defaults:
-    #   lr: 6.0e-4
-    #   weight_decay: 0.0
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    lr: 6.0e-4
+    mu: 0.95
+    betas: [0.95, 0.999]
+    adjust_lr: rms_norm
+    use_triton: false
+    nesterov: true
+    oned_param_algo: lion
+    muon_params_defaults:
+      lr: 6.0e-4
+      weight_decay: 0.1
+    oned_params_defaults:
+      lr: 6.0e-4
+      weight_decay: 0.0
 
     # _target_: src.utilities.optim.get_muon_optimizer
     # _partial_: true
@@ -87,14 +87,23 @@ train:
     # adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
     # adamw_wd: 0.
 
-    _target_: heavyball.ForeachAdamW
-    _partial_: true
-    lr: 4.0e-4
-    weight_decay: 1.0e-4
-    betas: ${tuple:[0.95, 0.99]}
-    caution: true
-    foreach: true
-    eps: 1.0e-9
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 1.0e-4
+    # betas: ${tuple:[0.95, 0.99]}
+    # caution: true
+    # foreach: true
+    # eps: 1.0e-9
+
+    # _target_: heavyball.CachedPSGDKron
+    # _partial_: true
+    # betas: ${tuple:[0.9, 0.999]}
+    # ortho_method: qr
+    # caution: true
+    # mars: true
+    # precond_init_scale: 0.1
+    # store_triu_as_line: true
 
     # _target_: torch.optim.AdamW
     # _partial_: true

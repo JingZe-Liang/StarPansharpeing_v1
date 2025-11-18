@@ -16,8 +16,9 @@ from src.utilities.config_utils import (
     function_config_to_basic_types,
 )
 
-from ...layers import DINOv3_Adapter
+from ...layers import DINOv3_Adapter, MbConvLNBlock
 from .adapter import DINOv3EncoderAdapter, UNetDecoder
+from .dinov3_adapted import LatentSpectralStage, MultiscaleMBConvSkipsStage
 
 TOKENIZER_INTERACTION_INDEXES = {
     "hybrid_tokenizer_b16": [3, 6, 8, 11],
@@ -92,6 +93,12 @@ def _create_default_cfg():
 
     # * ----------------------------------------------
 
+    _cd_stage_str = (
+        "channels=[256,256,256,256] stride=1 kernel_size=3 norm_layer=layernorm2d "
+        "act_layer=gelu expand_ratio=2.0 block_type=mbconv depth=1"
+    )
+    cd_stage_cfg = OmegaConf.from_dotlist(_cd_stage_str.split(" "))
+
     _unet_str = (
         "input_channels=3 num_classes=7 deep_supervision=false n_stages=4 "
         "use_latent=true ensure_rgb_type=null _debug=false"
@@ -102,6 +109,7 @@ def _create_default_cfg():
     cfg = OmegaConf.create()
     cfg.tokenizer = tokenizer_cfg
     cfg.tokenizer_feature = tokenizer_feature_cfg
+    cfg.cd_stage = cd_stage_cfg
     cfg.adapter = adapter_cfg
     cfg.tokenizer_pretrained_path = None  # need to override
     cfg.merge_with(unet_cfg)
@@ -164,14 +172,16 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         return self.embed_dim
 
     def _forward_backbone_intermediate_features(self, x):
+        """Get the intermediate features from the backbone."""
+
         # NOTE: cls feature is None
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
-                final_latent = self.backbone.encode(x)
+                final_latent = self.backbone.encode(x, get_intermediate_features=True)
         all_layers = self.backbone.sem_z  # get from semantic encoder
 
-        # reorg all_layers
+        # reorganize all_layers
         assert all_layers is not None, "all_layers is None"
         assert len(all_layers) == len(self.interaction_indexes), (
             f"{len(all_layers)=} != {len(self.interaction_indexes)=}"
@@ -234,6 +244,15 @@ class TokenizerHybridUNet(nn.Module):
 
         # Create tokenzier encoder
         self.encoder = self._create_tok_encoder()
+        logger.info(f"Created tokenizer encoder adapter")
+
+        # Change detection stages
+        self.cd_stage = MultiscaleMBConvSkipsStage(self.cfg.cd_stage)
+        latent_chans = self.cfg.tokenizer.cnn_cfg.model.latent_channels
+        self.latent_fuse = MbConvLNBlock(
+            in_chs=latent_chans * 2, out_chs=latent_chans, cond_chs=None
+        )
+        logger.info(f"Created change detection stage")
 
         # Create decoder
         self.decoder = UNetDecoder(
@@ -248,7 +267,7 @@ class TokenizerHybridUNet(nn.Module):
         logger.info(f"Created Unet decoder with 4 stages")
 
         # Init weights
-        self.initialize()
+        self.init_weights()
 
     def _create_tok_encoder(self):
         """Create DINOv3 encoder"""
@@ -311,58 +330,35 @@ class TokenizerHybridUNet(nn.Module):
 
         return encoder_adapter
 
-    def _ensure_rgb_input(
-        self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "mean"
-    ):
-        if not self.force_rgb_input:
-            return x
-
-        C = x.size(1)
-        if C == 1:
-            x = x.repeat(1, 3, 1, 1)
-        elif C != 3:
-            if C < 3:
-                x = x.repeat(1, 3 // C + (1 if 3 % C != 0 else 0), 1, 1)[:, :3, :, :]
-            elif larger_then_3_op == "first_3":
-                x = x[:, :3, :, :]
-            elif larger_then_3_op == "mean":
-                channels_per_group = C // 3
-                remainder = C % 3
-                groups = []
-                start = 0
-                for i in range(3):
-                    group_size = channels_per_group + (1 if i < remainder else 0)
-                    end = start + group_size
-                    groups.append(x[:, start:end].mean(dim=1, keepdim=True))
-                    start = end
-                x = torch.cat(groups, dim=1)
-            elif isinstance(larger_then_3_op, (list, tuple)):
-                x = x[:, larger_then_3_op]
-            else:
-                raise ValueError(
-                    f"Unknown operation for C > 3 ({C=}): {larger_then_3_op}"
-                )
-        elif C == 3:
-            pass
-        else:
-            raise ValueError(f"Unexpected number of channels: {C}")
-
-        return x
-
     def forward(
         self,
-        x: Float[Tensor, "b c h w"],
+        x1: Float[Tensor, "b c h w"],
+        x2: Float[Tensor, "b c h w"],
         # cond: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
     ):
-        x = self._ensure_rgb_input(x)
-        skips, final_h = self.encoder(x)
-        output = self.decoder(skips, final_h)
+        """Two time-series images for change detection"""
+
+        # Encode two images
+        skips1, final_h1 = self.encoder(x1)
+        skips2, final_h2 = self.encoder(x2)
+
+        # Fuse the skips in CD stages
+        fused_skips = self.cd_stage(skips1, skips2)
+        latent = self.latent_fuse(
+            torch.cat((final_h1, final_h2), dim=1),
+        )
+
+        # Decode
+        output = self.decoder(fused_skips, latent)
+
         return output
 
-    def initialize(self) -> None:
+    def init_weights(self) -> None:
         def _apply(module, name: str):
             if "backbone" not in name:  # skip the pretrained weights
-                if isinstance(module, _ConvNd):
+                if hasattr(module, "init_weights"):
+                    module.init_weights()
+                elif isinstance(module, _ConvNd):
                     nn.init.kaiming_normal_(
                         module.weight, mode="fan_out", nonlinearity="relu"
                     )
@@ -421,11 +417,14 @@ class TokenizerHybridUNet(nn.Module):
 
 
 def __test_model():
+    from fvcore.nn import parameter_count_table
+
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
     dl = get_fast_test_hyperspectral_data("fmow_RGB")
     sample = next(iter(dl))
-    x = sample["img"].cuda()
+    x1 = sample["img"].cuda()
+    x2 = x1
 
     cfg = _create_default_cfg()
     cfg._debug = True
@@ -433,24 +432,26 @@ def __test_model():
         "runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors"
     )
     unet = TokenizerHybridUNet(cfg).cuda()
+    print(parameter_count_table(unet))
+
     unet.eval()
     with torch.autocast("cuda", torch.bfloat16):
         with torch.no_grad():
-            # y = unet(x)
-            y_recon = unet.encoder.dinov3_adapter.backbone(x)
-    from torchmetrics import PeakSignalNoiseRatio
+            y = unet(x1, x2)
+            # y_recon = unet.encoder.dinov3_adapter.backbone(x)
+    # from torchmetrics import PeakSignalNoiseRatio
 
-    logger.info(f"Input shape: {x.shape}")
-    logger.info(f"Output shape: {y_recon.shape}")
+    # logger.info(f"Input shape: {x.shape}")
+    # logger.info(f"Output shape: {y_recon.shape}")
 
-    psnr_fn = PeakSignalNoiseRatio(data_range=1.0).cuda()
-    psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
-    logger.info(f"Reconstruction PSNR: {psnr}")
+    # psnr_fn = PeakSignalNoiseRatio(data_range=1.0).cuda()
+    # psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
+    # logger.info(f"Reconstruction PSNR: {psnr}")
 
 
 if __name__ == "__main__":
     """
-    python -m src.stage2.segmentation.models.tokenizer_backbone_adapted
+    LOVELY_TENSORS=1 python -m src.stage2.change_detection.models.tokenizer_backbone_adapted
     """
     with logger.catch():
         __test_model()

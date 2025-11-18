@@ -336,6 +336,10 @@ class DenoiseNAFNet(nn.Module):
         elif res_type == "lr":
             assert lr.shape[-2:] == x.shape[-2:]
             x = x + lr
+        elif res_type is None:
+            pass
+        else:
+            raise ValueError(f"Invalid residual type: {res_type}")
 
         # Apply output rescaling using RescaleOutput layer
         x = self.output_rescale(x)

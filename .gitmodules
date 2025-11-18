@@ -141,3 +141,8 @@
 [submodule "src/stage1/self_supervised/lejepa"]
 	path = src/stage1/self_supervised/lejepa
 	url = https://github.com/rbalestr-lab/lejepa.git
+
+# forked repo
+[submodule "src/stage1/featups/loftup"]
+	path = src/stage1/featups/loftup
+	url = git@github.com:294coder/loftup-mod.git

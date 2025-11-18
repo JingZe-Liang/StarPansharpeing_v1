@@ -1,4 +1,10 @@
 # ruff: noqa
+import os
+
+# Env
+os.environ["MODEL_COMPILED"] = "0"  # no compiled model
+os.environ["SHELL_LOG_LEVEL"] = "DEBUG"  # set shell log level to DEBUG to reduce logs
+
 # Change Detection
 from scripts.trainer.hyper_latent_change_detection_trainer import (
     HyperCDTrainer,

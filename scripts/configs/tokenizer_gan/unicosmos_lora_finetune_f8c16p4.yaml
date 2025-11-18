@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: HAD100 #hyperspectral
+  - dataset: hyperspectral # [hyperspectral, HAD100]
   - tokenizer: uni_cosmos_f8c16p1_nested
   - quantizer: quant
   - accelerator: base
@@ -17,36 +17,36 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-# dataset:
-#   used: IKONOS
-#   prefetch_factor: 6
-#   num_workers: 1
-#   shuffle_size: -1
-#   loader_type: webdataset
-#   shuffle_within_workers: false
-#   rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-#   # For loading the pretrained multi-channels head
-#   channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
-#   batch_size_val: 4
-#   dataset_names_to_bs:
-#     MMSeg_YREB: 16
-#     DCF_2019: 7
-#     DFC_2020: 18
-#     GID_GF2: 12
-#     Houston: 7
-#     DryadHyper: 5
-#     MUSLI: 2
-#     OHS: 5
-#     WV3: 5
-#     QB: 5
-#     GF1: 5
-#     IKONOS: 5
-#     WDC: 4
-#     Xiongan: 4
-#     WHU_Hi: 6
-#     CD_224: 4
-#     CD_242: 4
-#     OSCD: 5
+dataset:
+  used: ARIS_Universe_Melas
+  prefetch_factor: 2
+  num_workers: 1
+  shuffle_size: -1
+  loader_type: webdataset
+  shuffle_within_workers: false
+  rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+  # For loading the pretrained multi-channels head
+  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
+  batch_size_val: 4
+  # dataset_names_to_bs:
+  #   MMSeg_YREB: 16
+  #   DCF_2019: 7
+  #   DFC_2020: 18
+  #   GID_GF2: 12
+  #   Houston: 7
+  #   DryadHyper: 5
+  #   MUSLI: 2
+  #   OHS: 5
+  #   WV3: 5
+  #   QB: 5
+  #   GF1: 5
+  #   IKONOS: 5
+  #   WDC: 4
+  #   Xiongan: 4
+  #   WHU_Hi: 6
+  #   CD_224: 4
+  #   CD_242: 4
+  #   OSCD: 5
 
 #   transform_prob: 0.0
 

@@ -9,12 +9,16 @@ train_loader:
   loader_kwargs:
     wds_paths: data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
     batch_size: 4
-    num_workers: 1
+    num_workers: 4
     shuffle_size: -1
     to_neg_1_1: false
     resample: false
     pin_memory: true
     tgt_key: "img"
+    ########### same as the case generator ############
+    quantile_img_clip: 0.995
+    per_channel_norm: true
+
   noise_adder_kwargs:
     p: 1.0
     same_on_batch: true
@@ -23,11 +27,13 @@ train_loader:
     clip_value: true
   get_loader_type: "wds"
   cache: true
+  shuffle: true
 
 val_loader:
   _target_: src.stage2.denoise.data.general_noisy_loader.NoisyCasesDataset.create_dataloader
   input_dir: data/Downstreams/WDCDenoise/_cases_litdata
-  # stream_ds_kwargs:
+  dataset_kwargs:
+    shuffle: true
   loader_kwargs:
     batch_size: 1
     num_workers: 4

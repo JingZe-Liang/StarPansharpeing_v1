@@ -630,15 +630,15 @@ class DINOv3_Adapter(nn.Module):
         dw_ratios=[2, 1, 0.5],
         with_cp=True,
         use_bn=True,
+        inp_mean_std=(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ):
-        block_fn = InteractionBlockWithCls
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
         self.spm = SpatialPriorModule(
             inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False
         )
         self.interactions = nn.Sequential(
             *[
-                block_fn(
+                InteractionBlockWithCls(
                     dim=embed_dim,
                     num_heads=deform_num_heads,
                     n_points=n_points,
@@ -680,15 +680,20 @@ class DINOv3_Adapter(nn.Module):
             else create_norm_layer("layernorm2d", embed_dim)
         )
 
+        self._input_norm = Normalize(*inp_mean_std)
+
+        self.init_weights()
+
+    def init_weights(self):
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
         self.apply(self._init_deform_weights)
         torch.nn.init.normal_(self.level_embed)
 
-        self._input_norm = Normalize(
-            mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
-        )
+    def _init_deform_weights(self, m):
+        if isinstance(m, MSDeformAttn):
+            m._reset_parameters()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -721,10 +726,6 @@ class DINOv3_Adapter(nn.Module):
             .permute(0, 2, 1)
         )
         return pos_embed
-
-    def _init_deform_weights(self, m):
-        if isinstance(m, MSDeformAttn):
-            m._reset_parameters()
 
     def _add_level_embed(self, c2, c3, c4):
         c2 = c2 + self.level_embed[0]

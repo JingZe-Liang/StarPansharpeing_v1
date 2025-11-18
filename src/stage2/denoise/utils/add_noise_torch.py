@@ -2,7 +2,7 @@
 Noise Adder for hyperspectral image denoising task.
 Based on Hypersigma implementation and modified for Kornia and PyTorch.
 
-Author: Zihan Cao.
+Author: Zihan Cao
 Date: 2025.11.16
 Email: iamzihan666@gmail.com
 
@@ -329,7 +329,7 @@ def get_default_noise_transformation(
             cfg = trans_kwargs
         else:
             cfg = noisers_default_kwargs.get(trans_type, None)
-        assert cfg is not None, f"Noiser kwargs for {trans_type} should be provided"
+        assert cfg is not None, f"{trans_type} is not supported"
         num_bands = cfg.pop("num_bands", 1 / 3)
 
         mixed_noiser = TransformationMixedTorch.from_config(

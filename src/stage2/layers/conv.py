@@ -56,7 +56,7 @@ class MbConvLNBlock(nn.Module):
         self,
         in_chs: int,
         out_chs: int,
-        cond_chs: int,
+        cond_chs: int | None = None,
         stride: int = 1,
         drop_path: float = 0.0,
         kernel_size: int = 3,
@@ -64,6 +64,7 @@ class MbConvLNBlock(nn.Module):
         norm_eps: float = 1e-6,
         act_layer: str = "gelu",
         expand_ratio: float = 4.0,
+        cond_type: str = "add",
     ):
         super(MbConvLNBlock, self).__init__()
         self.grad_checkpointing = False
@@ -97,13 +98,17 @@ class MbConvLNBlock(nn.Module):
         self.act2 = create_act_layer(act_layer, inplace=True)
         self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=True)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.cond_conv_kxk = nn.Sequential(
-            create_conv2d(cond_chs, out_chs, 1, bias=True),
-            create_norm_act_layer("layernorm2d", mid_chs // 2, "gelu"),
-            create_conv2d(out_chs, out_chs * 2, 3, bias=False, groups=out_chs),
-        )
 
-    def forward_(self, x, cond):
+        self.cond_type = cond_type
+        if cond_chs is not None:
+            cond_out_chs = out_chs * 2 if cond_type == "adaln3" else out_chs
+            self.cond_conv_kxk = nn.Sequential(
+                create_conv2d(cond_chs, out_chs, 1, bias=True),
+                create_norm_act_layer("layernorm2d", mid_chs // 2, "gelu"),
+                create_conv2d(out_chs, cond_out_chs, 3, bias=False, groups=out_chs),
+            )
+
+    def forward_(self, x, cond=None):
         shortcut = self.shortcut(x)
 
         x = self.pre_norm(x)
@@ -118,10 +123,16 @@ class MbConvLNBlock(nn.Module):
         x = self.act2(x)
 
         # 1x1 linear projection to output width
-        scale, shift = self.cond_conv_kxk(cond).chunk(2, dim=1)
         x = self.conv3_1x1(x)
-        # modulate
-        x = x * (1 + scale) + shift
+
+        # conditioning
+        if cond is not None and hasattr(self, "cond_conv_kxk"):
+            # modulate
+            if self.cond_type == "adaln3":
+                scale, shift = self.cond_conv_kxk(cond).chunk(2, dim=1)
+                x = x * (1 + scale) + shift
+            else:
+                x = x + self.cond_conv_kxk(cond)
 
         # output
         x = self.drop_path(x) + shortcut
@@ -129,7 +140,7 @@ class MbConvLNBlock(nn.Module):
         return x
 
     @torch.compile
-    def forward(self, x, cond):
+    def forward(self, x, cond=None):
         if self.grad_checkpointing:
             return torch.utils.checkpoint.checkpoint(
                 self.forward_, x, cond, use_reentrant=False

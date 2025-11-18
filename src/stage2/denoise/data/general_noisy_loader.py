@@ -7,6 +7,12 @@ import litdata
 import numpy as np
 import torch
 import webdataset as wds
+from kornia.augmentation import (
+    AugmentationSequential,
+    RandomHorizontalFlip,
+    RandomRotation,
+    RandomVerticalFlip,
+)
 from torch import Tensor
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
@@ -38,8 +44,9 @@ CASES_NOISE_TYPES = [
 ]
 
 
-class __CachedDataset(torch.utils.data.Dataset):
-    def __init__(self, data: list[Mapping]):
+class _CachedDataset(torch.utils.data.Dataset):
+    def __init__(self, data: list):
+        assert len(data) > 0, "Data for caching cannot be empty."
         self.data = data
 
     def __len__(self):
@@ -59,14 +66,14 @@ class GeneralNoisyLoader:
         noise_adder_kwargs: dict = {},
         get_loader_type: str = "wds",
         cache: bool = True,  # when the dataset is small
+        aug_prob: float = 0.5,
     ):
         if get_loader_type == "wds":
             if cache:
                 # When caching, we handle resampling ourselves
                 self.cache_resample = loader_kwargs.get("resample", True)
-                loader_kwargs["resample"] = (
-                    False  # disable underlying dataloader resample
-                )
+                loader_kwargs["resample"] = False
+                loader_kwargs["num_workers"] = 1
             self.dataset, self.dataloader = get_hyperspectral_dataloaders(
                 **loader_kwargs
             )
@@ -80,44 +87,61 @@ class GeneralNoisyLoader:
 
         # Initialize multiple noise adders if multiple noise types are provided
         self.noisers = []
+        if isinstance(noise_types[0], str):
+            noise_types = [noise_types]  # type: ignore
         self.noise_types = noise_types
+
         for nt in noise_types:
             noise_kwargs_ = noise_adder_kwargs.copy()
             noise_kwargs_.update(noise_type=nt, is_neg_1_1=self.is_neg_1_1)
             noiser = UniHSINoiseAdderKornia(**noise_kwargs_)
             self.noisers.append(noiser)
-            log(f"Initialized noise adder with types: {nt}")
+            log(
+                f"Initialized noise adder with types: {nt} with kwargs: {noise_kwargs_}"
+            )
+        log(f"Initialized {len(self.noisers)} noise adders")
+
+        # Transformations
+        self.transforms = AugmentationSequential(
+            # RandomRotation(degrees=90, p=0.5),
+            RandomHorizontalFlip(p=aug_prob),
+            RandomVerticalFlip(p=aug_prob),
+            random_apply=1,
+            data_keys=["input"],
+        )
 
         # Cache all of the dataset
         if self.cache:
             log("Caching all dataset batches...")
-            self.data = []
+            self.data: list[dict] = []
             for batch in tqdm(self.dataloader, desc="Caching dataset ..."):
                 # Cache clean images only
-                cached_batch = {}
-                cached_batch["gt"] = batch["img"]
-                n_chan = batch["img"].shape[1]
-                cached_batch["n_chan"] = n_chan
-                self.data.append(cached_batch)
+                bs = batch["img"].shape[0]
+                gt = batch["img"].split(1, dim=0)
+
+                # add to data
+                for i in range(bs):
+                    self.data.append({"gt": gt[i].squeeze(0)})
 
             log(f"Cached {len(self.data)} batches")
 
-    def _add_noise_to_batch(self, clean_img: Tensor) -> Tensor:
-        """
-        Add noise to clean image batch.
+            self._cache_dataset = _CachedDataset(self.data)
+            self._cache_loader = DataLoader(
+                self._cache_dataset,
+                batch_size=loader_kwargs["batch_size"],
+                num_workers=loader_kwargs["num_workers"],
+                pin_memory=loader_kwargs.get("pin_memory", False),
+                persistent_workers=loader_kwargs.get("persistent_workers", False),
+                shuffle=True,
+                drop_last=loader_kwargs.get("drop_last", False),
+            )
 
-        Parameters
-        ----------
-        clean_img : Tensor
-            Clean image tensor
-
-        Returns
-        -------
-        Tensor
-            Noisy image tensor
-        """
+    def _add_noise_to_batch(self, clean_img: Tensor):
         # Randomly select a noise adder for each batch
         noiser = random.choice(self.noisers)
+
+        # Transform the image
+        clean_img = self.transforms(clean_img)
 
         # Noise the image
         noisy = noiser(clean_img)
@@ -128,30 +152,31 @@ class GeneralNoisyLoader:
         else:
             noisy = torch.clamp(noisy, 0, 1)
 
-        return noisy
+        return clean_img, noisy
 
     def __iter__(self):
         if self.cache:
             if self.cache_resample:
                 # Resample mode: infinite loop
                 while True:
-                    for cached_batch in self.data:
-                        batch = cached_batch.copy()
-                        batch["noisy"] = self._add_noise_to_batch(batch["gt"])
+                    for batch in self._cache_loader:
+                        batch["gt"], batch["noisy"] = self._add_noise_to_batch(
+                            batch["gt"]
+                        )
                         yield batch
             else:
                 # Single pass mode: iterate once
-                for cached_batch in self.data:
-                    batch = cached_batch.copy()
-                    batch["noisy"] = self._add_noise_to_batch(batch["gt"])
+                for batch in self._cache_loader:
+                    batch["gt"], batch["noisy"] = self._add_noise_to_batch(batch["gt"])
                     yield batch
         else:
             # Process batches on-the-fly (dataloader already handles resampling)
             for batch in self.dataloader:
-                batch["gt"] = batch["img"]
+                gt = batch["img"]
                 del batch["img"]
-                n_chan = batch["gt"].shape[1]
-                batch["noisy"] = self._add_noise_to_batch(batch["gt"])
+                n_chan = gt.shape[1]
+
+                batch["gt"], batch["noisy"] = self._add_noise_to_batch(gt)
                 batch["n_chan"] = n_chan
                 yield batch
 
@@ -160,9 +185,11 @@ class GeneralNoisyLoader:
         cls,
         loader_kwargs: dict,
         noise_types=CASES_NOISE_TYPES,
-        noise_adder_kwargs: dict[str, dict] | None = None,
+        noise_adder_kwargs: dict | None = None,
         get_loader_type: str = "wds",
         cache: bool = True,
+        *,
+        shuffle=True,
     ):
         loader = cls(
             loader_kwargs=loader_kwargs,
@@ -171,18 +198,6 @@ class GeneralNoisyLoader:
             get_loader_type=get_loader_type,
             cache=cache,
         )
-
-        # is_cached = loader.cache
-        # if is_cached:
-        #     loader = DataLoader(
-        #         loader,
-        #         batch_size=loader_kwargs["batch_size"],
-        #         num_workers=loader_kwargs["num_workers"],
-        #         pin_memory=loader_kwargs.get("pin_memory", False),
-        #         persistent_workers=loader_kwargs.get("persistent_workers", False),
-        #         shuffle=loader_kwargs.get("shuffle_size", 0) > 0,
-        #         drop_last=loader_kwargs.get("drop_last", False),
-        #     )
 
         return loader.dataset, loader
 
@@ -216,6 +231,9 @@ class NoisyCasesDataset(_BaseStreamingDataset):
         # gt and noisy should be clipped values
         d["gt"] = torch.clamp(d["gt"], 0, 1)
         d["noisy"] = torch.clamp(d["noisy"], 0, 1)
+
+        # Case number
+        d["case_type"] = get_case_n(d["__key__"])
 
         if self.to_neg_1_1:
             d["gt"] = (d["gt"] - 0.5) * 2
@@ -262,6 +280,12 @@ def not_pure_tensor_collate_fn(batch: list[dict]):
     return {**tensor_collated, **not_tensor_lst}
 
 
+def get_case_n(name: str) -> int:
+    """Get case number from __key__"""
+    # name: 'case0_1'
+    return int(name[4])
+
+
 # * --- Test --- #
 
 
@@ -269,8 +293,8 @@ def test_loader():
     path = "data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar"
     loader_kwargs = {
         "wds_paths": path,
-        "batch_size": 2,
-        "num_workers": 1,
+        "batch_size": 4,
+        "num_workers": 4,
         "shuffle_size": 0,
         "to_neg_1_1": False,
         "resample": False,
@@ -286,34 +310,55 @@ def test_loader():
         "clip_value": True,
     }
 
-    loader = GeneralNoisyLoader(
+    ds, loader = GeneralNoisyLoader.create_dataloader(
         loader_kwargs=loader_kwargs,
-        # noise_types=["complex", "noniid", "deadline", "impulse"],
         noise_adder_kwargs=noise_adder_kwargs,
+        cache=True,
+        # noise_types=["complex", "noniid", "deadline", "impulse"],
     )
 
     print("=== Testing General Noisy DataLoader ===")
     import time
 
     t1 = time.time()
-    for batch in loader:
-        print(batch["gt"].shape)
-        t2 = time.time()
-        print(f"Time taken for one batch: {t2 - t1:.4f} seconds")
-        t1 = t2
+    while True:
+        for batch in loader:
+            print(batch["gt"].shape)
+            t2 = time.time()
+            print(f"Time taken for one batch: {t2 - t1:.4f} seconds")
+            t1 = t2
 
 
 def test_noisy_cases():
+    import matplotlib.pyplot as plt
+    import PIL.Image as Image
+
     ds, dl = NoisyCasesDataset.create_dataloader(
         "data/Downstreams/WDCDenoise/_cases_litdata",
+        dataset_kwargs={"shuffle": True},
         loader_kwargs=dict(
             batch_size=2,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True,
         ),
     )
-    for sample in dl:
+    for i, sample in enumerate(dl):
         print(sample.keys())
+
+        # get the name
+        name = sample["__key__"]
+        print(name)
+        case_type = sample["case_type"]
+        print(f"Case type: {case_type}")
+
+        # vis the cases
+        # noisy = sample["noisy"][0].permute(1, 2, 0).cpu().numpy()
+        # noisy_rgb = noisy[:, :, [39, 29, 19]]
+        # noisy_rgb = np.clip(noisy_rgb, 0, 1)
+
+        # Image.fromarray((noisy_rgb * 255).astype(np.uint8)).save(
+        #     f"tmp/noisy_case_{i}.png"
+        # )
 
 
 if __name__ == "__main__":
