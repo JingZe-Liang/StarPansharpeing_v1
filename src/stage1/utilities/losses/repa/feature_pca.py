@@ -1,8 +1,15 @@
 import einops
 import torch
+import torch.nn.functional as F
 from sklearn.decomposition import PCA as PCA_sk
+import numpy as np
+from typing import List, Optional, Union, Tuple, Any
 
 from src.utilities.logging import log
+
+"""
+src.stage1.utilities.losses.repa.feature_pca
+"""
 
 
 def shape_to_1d(img_feat: torch.Tensor, pca_k: int):
@@ -318,3 +325,199 @@ if __name__ == "__main__":
             log("\ncuML not installed. Skipping cuML comparison.")
         except Exception as e:
             log(f"\nError during cuML comparison: {e}. Skipping.")
+
+
+def pca_list(
+    image_feats_list: List[torch.Tensor],
+    dim: int = 3,
+    fit_pca: Optional[Union["TorchPCA", PCA_sk]] = None,
+    use_torch_pca: bool = True,
+    max_samples: Optional[int] = None,
+) -> Tuple[List[torch.Tensor], Union["TorchPCA", PCA_sk]]:
+    """
+    Apply PCA dimensionality reduction to a list of image feature tensors.
+
+    This function processes multiple image feature tensors by flattening them,
+    fitting a PCA model (either using PyTorch implementation or scikit-learn),
+    and then transforming each tensor to the reduced dimension. The function
+    handles both 2D features and 4D feature maps.
+
+    Parameters
+    ----------
+    image_feats_list : List[torch.Tensor]
+        List of image feature tensors. Each tensor can be either:
+        - 2D tensor: [num_features, feature_dim]
+        - 4D tensor: [batch_size, channels, height, width]
+    dim : int, optional
+        Target dimension after PCA reduction. Default is 3.
+    fit_pca : Optional[Union['TorchPCA', PCA_sk]], optional
+        Pre-fitted PCA model to use for transformation. If None, a new
+        PCA model will be fitted on the concatenated features. Default is None.
+    use_torch_pca : bool, optional
+        Whether to use PyTorch-based PCA implementation or scikit-learn.
+        Default is True (use PyTorch implementation).
+    max_samples : Optional[int], optional
+        Maximum number of samples to use for PCA fitting. If provided and
+        the number of samples exceeds this value, random subsampling will be
+        applied. Default is None (use all samples).
+
+    Returns
+    -------
+    Tuple[List[torch.Tensor], Union['TorchPCA', PCA_sk]]
+        A tuple containing:
+        - List of reduced feature tensors with the same structure as input
+        - The fitted PCA model (either TorchPCA or sklearn.PCA instance)
+
+    Notes
+    -----
+    - For 4D input tensors, spatial dimensions are preserved and only the
+      channel dimension is reduced.
+    - The output features are normalized to [0, 1] range per dimension.
+    - When multiple tensors are provided with different spatial sizes,
+      they will be interpolated to match the first tensor's spatial size.
+    """
+    device = image_feats_list[0].device
+
+    def flatten(
+        tensor: torch.Tensor, target_size: Optional[int] = None
+    ) -> torch.Tensor:
+        """
+        Flatten feature tensor for PCA processing.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            Input feature tensor (2D or 4D)
+        target_size : Optional[int], optional
+            Target spatial size for interpolation. Default is None.
+
+        Returns
+        -------
+        torch.Tensor
+            Flattened tensor with shape [num_samples, feature_dim]
+        """
+        if len(tensor.shape) == 2:
+            return tensor.detach().cpu()
+        if target_size is not None and fit_pca is None:
+            tensor = F.interpolate(tensor, (target_size, target_size), mode="bilinear")
+        B, C, H, W = tensor.shape
+        return (
+            tensor.permute(1, 0, 2, 3)
+            .reshape(C, B * H * W)
+            .permute(1, 0)
+            .detach()
+            .cpu()
+        )
+
+    if len(image_feats_list) > 1 and fit_pca is None:
+        if len(image_feats_list[0].shape) == 2:
+            target_size = None
+        else:
+            target_size = image_feats_list[0].shape[2]
+    else:
+        target_size = None
+
+    flattened_feats = []
+    for feats in image_feats_list:
+        flattened_feats.append(flatten(feats, target_size))
+    x = torch.cat(flattened_feats, dim=0)
+
+    # Subsample the data if max_samples is set and the number of samples exceeds max_samples
+    if max_samples is not None and x.shape[0] > max_samples:
+        indices = torch.randperm(x.shape[0])[:max_samples]
+        x = x[indices]
+
+    if fit_pca is None:
+        if use_torch_pca:
+            fit_pca = TorchPCA(n_components=dim).fit(x)
+        else:
+            fit_pca = PCA_sk(n_components=dim).fit(x)
+
+    reduced_feats = []
+    for feats in image_feats_list:
+        x_red = fit_pca.transform(flatten(feats))
+        if isinstance(x_red, np.ndarray):
+            x_red = torch.from_numpy(x_red)
+        x_red -= x_red.min(dim=0, keepdim=True).values
+        x_red /= x_red.max(dim=0, keepdim=True).values
+        if len(feats.shape) == 2:
+            reduced_feats.append(x_red)  # 1D
+        else:
+            B, C, H, W = feats.shape
+            reduced_feats.append(
+                x_red.reshape(B, H, W, dim).permute(0, 3, 1, 2).to(device)
+            )  # 3D
+
+    return reduced_feats, fit_pca
+
+
+class TorchPCA:
+    """
+    PyTorch-based PCA implementation using torch.pca_lowrank.
+
+    This class provides a scikit-learn compatible interface for PCA
+    dimensionality reduction using PyTorch operations.
+    """
+
+    def __init__(self, n_components: int) -> None:
+        """
+        Initialize TorchPCA with specified number of components.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of principal components to keep.
+        """
+        self.n_components: int = n_components
+        self.mean_: Optional[torch.Tensor] = None
+        self.components_: Optional[torch.Tensor] = None
+        self.singular_values_: Optional[torch.Tensor] = None
+
+    def fit(self, X: torch.Tensor) -> "TorchPCA":
+        """
+        Fit PCA model to the data.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input data with shape [n_samples, n_features].
+
+        Returns
+        -------
+        TorchPCA
+            Fitted PCA model instance.
+        """
+        self.mean_ = X.mean(dim=0)
+        unbiased = X - self.mean_.unsqueeze(0)
+        U, S, V = torch.pca_lowrank(
+            unbiased, q=self.n_components, center=False, niter=4
+        )
+        self.components_ = V.T
+        self.singular_values_ = S
+        return self
+
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        Transform data using fitted PCA model.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input data with shape [n_samples, n_features].
+
+        Returns
+        -------
+        torch.Tensor
+            Transformed data with shape [n_samples, n_components].
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
+        if self.mean_ is None or self.components_ is None:
+            raise RuntimeError("PCA model has not been fitted yet. Call fit() first.")
+
+        t0 = X - self.mean_.unsqueeze(0)
+        projected = t0 @ self.components_.T
+        return projected

@@ -1,0 +1,84 @@
+######### Hybrid tokenizer backbone
+
+# _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
+cnn_cfg:
+  model:
+    resolution: 512
+    in_channels: 384
+    out_channels: 384
+    z_channels: 512
+    latent_channels: 64
+    channels: 128
+    channels_mult:
+      - 2
+      - 4
+      - 4
+    num_res_blocks: 2
+    attn_resolutions: []
+    dropout: 0.0
+    spatial_compression: 8
+    patch_size: 1
+    block_name: res_block
+    norm_type: gn
+    norm_groups: 32
+    adaptive_mode: interp
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
+    per_layer_noise: false
+  quantizer_type: null
+  vf_on_z_or_module: z
+  use_repa_loss: true
+  dino_feature_dim: 1024
+  cache_type: h
+  decoder_type: default
+  use_channel_drop: false
+  channel_drop_config:
+    drop_type:
+      - 16
+      - 32
+      - 48
+    max_channels: 64
+    drop_prob: 0.5
+trans_enc_cfg:
+  embed_dim: 1024
+  depth: 12
+  num_heads: 16
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 2
+  norm_layer: layernorm
+  pos_embed: learned
+  pos_embed_grid_size:
+    - 32
+    - 32
+  rope_type: axial
+  img_size: 32
+  in_chans: 512
+  out_chans: 512
+  unpatch_size: 1
+  reg_tokens: 0
+  compile_model: false
+trans_dec_cfg:
+  embed_dim: 1024
+  depth: 12
+  num_heads: 16
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 1
+  norm_layer: layernorm
+  pos_embed: learned
+  pos_embed_grid_size:
+    - 32
+    - 32
+  rope_type: axial
+  img_size: 32
+  in_chans: 512
+  out_chans: 512
+  unpatch_size: 2
+  reg_tokens: 0
+  compile_model: false
+distillation_kwargs:
+  dino_feature_dim: 1024
+  semantic_feature_dim: 1024

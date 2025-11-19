@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -16,48 +16,109 @@ def list_sum(x: list) -> Any:
 class ResidualBlock(nn.Module):
     def __init__(
         self,
-        main: Optional[nn.Module],
+        main: nn.Module,
         shortcut: Optional[nn.Module],
-        post_act=None,
+        ##### keep the norm/act and pre/post block distinct
+        post_act: Optional[Union[nn.Module, str]] = None,
+        post_block: Optional[nn.Module] = None,
+        pre_block: Optional[nn.Module] = None,
         pre_norm: Optional[nn.Module] = None,
-        in_main_idx: int = 0,
-        out_main_idx: int = 0,
+        #### Main input/output index
+        in_main_idx: int | None = None,
+        out_main_idx: int | None = None,
+        main_out_tuple: bool = False,
     ):
         super(ResidualBlock, self).__init__()
 
         self.pre_norm = pre_norm
+        self.pre_block = pre_block
         self.main = main
         self.shortcut = shortcut
-        self.post_act = create_act_layer(post_act)
-        self.in_main_idx = in_main_idx
-        self.out_main_idx = out_main_idx
+        self.post_act = (
+            create_act_layer(post_act) if isinstance(post_act, str) else post_act
+        )
+        self.post_block = post_block
+        self.in_main_idx = in_main_idx if in_main_idx is not None else 0
+        self.out_main_idx = out_main_idx if out_main_idx is not None else 0
+        self.main_out_tuple = main_out_tuple
 
-    def forward_main(self, *args) -> torch.Tensor:
-        if self.pre_norm is None:
-            return self.main(*args)
-        else:
-            x = args[self.in_main_idx]
-            args = list(args)
-            args[self.in_main_idx] = self.pre_norm(x)
-            return self.main(*args)
+    def _forward_pre_layers(self, x: Tensor) -> Tensor:
+        """Take the input x and pass through pre-norm and pre-block layers."""
+        if self.pre_norm is not None:
+            x = self.pre_norm(x)
+        if self.pre_block is not None:
+            x = self.pre_block(x)
+        return x
 
-    def forward(self, *args) -> torch.Tensor:
-        # take out the x
+    def _forward_post_layers(self, x: Tensor) -> Tensor:
+        """Take the input x and pass through post-norm and post-block layers."""
+        if self.post_act is not None:
+            x = self.post_act(x)
+        if self.post_block is not None:
+            x = self.post_block(x)
+        return x
+
+    def forward_main(self, *args):
+        """Forward pass through the pre-norm/block, main block, post-act/block"""
+        args = list(args)
+
+        # Pre-norm/block
         x = args[self.in_main_idx]
+        x = self._forward_pre_layers(x)
+        args[self.in_main_idx] = x
 
-        if self.main is None:
-            res = x
-        elif self.shortcut is None:
-            res = self.forward_main(*args)
+        # Main block
+        out = self.main(*args)
+        return out
+
+    def _take_out_main_x(self, out: Tensor | tuple[Tensor, ...]):
+        if self.main_out_tuple:
+            assert isinstance(out, (tuple, list)), (
+                f"Expected tuple/list output from main block, but got {type(out)}"
+            )
+            return out[self.out_main_idx]
         else:
-            res = self.forward_main(*args) + self.shortcut(x)
-            if self.post_act:
-                if isinstance(res, (list, tuple)):
-                    x = res[self.out_main_idx]
-                else:
-                    x = res
-                res = self.post_act(x)
-        return res
+            return out
+
+    def _replace_main_x(self, out: Tensor | tuple[Tensor, ...], x: Tensor):
+        if self.main_out_tuple:
+            assert isinstance(out, (tuple, list)), (
+                f"Expected tuple/list output from main block, but got {type(out)}"
+            )
+            out = list(out)
+            out[self.out_main_idx] = x
+            return tuple(out)
+        else:
+            return x
+
+    def forward(self, *args) -> Tensor | tuple[Tensor, ...]:
+        # Main + Shortcut
+        if self.main is None:
+            assert self.shortcut is None, "Identity block do not support shortcut"
+            assert not self.main_out_tuple, (
+                "Identity block do not support multiple outputs, set it to False"
+            )
+            out = args[self.in_main_idx]
+            return out
+        elif self.shortcut is None:
+            assert self.main is not None, (
+                "Main block cannot be None if no shortcut is provided."
+            )
+            out = self.forward_main(*args)
+            x = self._take_out_main_x(out)
+        else:
+            x_inp = args[self.in_main_idx]
+            out = self.forward_main(*args)
+            x = self._take_out_main_x(out)
+            # Shortcut connection
+            shortcut = self.shortcut(x_inp)
+            x = x + shortcut
+
+        # Post-act/block
+        x = self._forward_post_layers(x)
+        out = self._replace_main_x(out, x)
+
+        return out
 
 
 class ConditionalBlock(nn.Module):
@@ -83,8 +144,11 @@ class ConditionalBlock(nn.Module):
             "add",
             "modulate_3",
             "modulate_2",
+            # alias
+            "adaln3",
+            "adaln2",
         ], (
-            f"condition_types must be one of [add, modulate_3, modulate_2] but got {condition_types}"
+            f"condition_types must be one of [add, modulate_3, modulate_2, adaln3, adaln2] but got {condition_types}"
         )
         self.dim = dim
 
@@ -119,6 +183,7 @@ class ConditionalBlock(nn.Module):
     def _add(self, x, cond):
         if self.premain_module is not None:
             x = self.premain_module(x)
+
         x = self.main(x) + cond
         return x
 
@@ -143,20 +208,19 @@ class ConditionalBlock(nn.Module):
             return cond
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor):
+        breakpoint()
         cond = self._forward_condition(x, condition)
 
         if self.condition_types == "add":
             return self._add(x, cond)
-        elif self.condition_types == "modulate_3":
+        elif self.condition_types in ("modulate_3", "adaln3"):
             return self._modulate_3(x, cond)
-        elif self.condition_types == "modulate_2":
+        elif self.condition_types in ("modulate_2", "adaln2"):
             return self._modulate_2(x, cond)
         elif self.condition_types == "in_module":
             return self._in_module_cond(x, cond)
         else:
-            raise NotImplementedError(
-                'condition_types should be "add", "modulate_2" or "modulate_3"'
-            )
+            raise ValueError(f"Unknown condition_types: {self.condition_types}")
 
 
 class DAGBlock(nn.Module):

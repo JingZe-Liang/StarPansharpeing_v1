@@ -30,10 +30,10 @@ vq_loss:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
-    img_resize: 384 # null for no resize
-    repa_img_size: 384
+    img_resize: 512 # null for no resize
+    repa_img_size: 512
     repa_model_name: "dinov3_vitl16"
-    feature_resample_type: match_student
+    feature_resample_type: match_teacher
     loss_type: am_radio
     feature_normalize: true
   # vf loss
@@ -64,11 +64,11 @@ vq_loss:
   disc_ndf: 128
   disc_num_layers: 3
   use_actnorm: false
-  disc_norm_type: ln2d #bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_norm_type: bn2d #bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.04
+  ssim_weight: 0.06
   disc_weight: 0.1
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
@@ -149,8 +149,8 @@ train:
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
-  resume_path: #runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/checkpoints/checkpoint_143
-  ema_load_path: runs/stage1_cosmos_nested/2025-11-01_17-12-29_cosmos_bsq_f8c64p1_unified_hyperspectral/ema
+  resume_path: #runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_48
+  ema_load_path: runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/ema
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
@@ -174,10 +174,10 @@ train:
     oned_param_algo: lion
     use_triton: false
     muon_params_defaults:
-      lr: 2.0e-4
+      lr: 4.0e-4
       weight_decay: 0.01
     oned_params_defaults:
-      lr: 2.0e-4
+      lr: 4.0e-4
       weight_decay: 0.0
 
     # _target_: heavyball.ForeachAdamW
@@ -203,6 +203,7 @@ train:
     lr: 2.0e-4
     betas: ${tuple:[0.5, 0.9]}
     weight_decay: 1.0e-6
+    eps: 1.0e-8
     foreach: true
 
     # _target_: heavyball.ForeachAdamW

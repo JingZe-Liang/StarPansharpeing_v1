@@ -1,3 +1,8 @@
+"""
+Pure Unet-like NAFNet model for denoising,
+no conditions from the tokenizer, but diectly denoising in latent space.
+"""
+
 import math
 from dataclasses import asdict, dataclass, field, fields, replace
 from functools import partial
@@ -47,11 +52,9 @@ class DenoiseNAFNetConfig:
     dec_blk_nums: list = field(default_factory=lambda: [1, 1, 1, 1])
     enc_blk_type: list = field(default_factory=lambda: ["naf", "naf", "naf", "naf"])
     dec_blk_type: list = field(default_factory=lambda: ["naf", "naf", "naf", "naf"])
-    condition_channel: int = 16  # latent channels
     dw_expand: int = 2
     ffn_expand: int = 2
     patch_size: int = 1
-    condition_on_decoder: bool = True
     block_drop: float = 0.0
     output_rescale: bool = False
     is_neg_1_1: bool = True
@@ -62,13 +65,18 @@ class DenoiseNAFNetConfig:
     nat_dec_kwargs: list[NATBlockConfig | None] = field(default_factory=lambda: [])
 
 
-class DenoiseNAFNet(nn.Module):
+class DenoiseLatentNAFNet(nn.Module):
     """
-    Denoise Network using NAFNet architecture with conditional blocks.
+    Denoise Network using NAFNet architecture for direct latent space denoising.
+
+    This model processes low-resolution latent representations directly without
+    requiring conditional inputs from the tokenizer, performing denoising in the
+    latent space.
     """
 
     def __init__(self, cfg: DenoiseNAFNetConfig):
         super().__init__()
+        self.cfg = cfg
 
         # Validate configuration
         assert len(cfg.enc_blk_nums) == len(cfg.enc_blk_type), (
@@ -88,18 +96,11 @@ class DenoiseNAFNet(nn.Module):
         # Input Processing Layers
         # =====================================================================
 
-        # Patch embedding layers for different input modalities
-        patchers = nn.ModuleDict()
-        patchers["lr_conv"] = create_patcher(
+        # Patch embedding layer for LR input
+        self.lr_patcher = create_patcher(
             cfg.lr_channels, cfg.width, cfg.patch_size
         )  # LR image patch embedding
-        patchers["latent_conv"] = nn.Sequential(
-            create_norm_layer("layernorm2d", cfg.condition_channel),
-            create_conv2d(cfg.condition_channel, cfg.width, 3, bias=True),
-        )  # Latent condition processing
 
-        self.cfg = cfg
-        self.patchers = patchers
         self.unpatcher = create_unpatcher(
             cfg.width, cfg.width, cfg.patch_size
         )  # Output unpatching
@@ -111,12 +112,13 @@ class DenoiseNAFNet(nn.Module):
 
         # Add output rescaling layer for value range normalization
         if cfg.output_rescale:
-            out_val_range = (
-                ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
-            )
-            self.output_rescale = RescaleOutput(
-                rescale=True, out_val_range=out_val_range
-            )
+            raise ValueError("Output rescaling should not be set for latent network")
+            # out_val_range = (
+            #     ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
+            # )
+            # self.output_rescale = RescaleOutput(
+            #     rescale=True, out_val_range=out_val_range
+            # )
         else:
             self.output_rescale = nn.Identity()  # do nothing
 
@@ -140,49 +142,37 @@ class DenoiseNAFNet(nn.Module):
 
         # Partial functions for different block types with shared parameters
         naf_enc_block_partial = partial(
-            NAFBlockConditional,
-            cond_chs=cfg.width,
+            NAFBlock,
             DW_Expand=cfg.dw_expand,
             FFN_Expand=cfg.ffn_expand,
             drop_out_rate=cfg.block_drop,
-            ms_cond_chans=cfg.width,
-        )  # NAF encoder block with conditional processing
+        )  # NAF encoder block
         nat_enc_block_partial = partial(
-            Spatial2DNATBlockConditional,
-            cond_chs=cfg.width,
-            ms_cond_chans=cfg.width,
+            Spatial2DNATBlock,
+            dim=cfg.width,
             ffn_ratio=cfg.ffn_expand,
             drop_path=cfg.block_drop,
-            # defaults
             k_size=4,
             stride=2,
             dilation=2,
             n_heads=8,
-        )  # Neighborhood Attention encoder block with conditional processing
-        naf_dec_block_partial = (
-            partial(
-                NAFBlock,
-                DW_Expand=cfg.dw_expand,
-                FFN_Expand=cfg.ffn_expand,
-                drop_out_rate=cfg.block_drop,
-            )
-            if not cfg.condition_on_decoder
-            else naf_enc_block_partial
-        )  # NAF decoder block (conditional or unconditional)
-        nat_dec_block_partial = (
-            partial(
-                Spatial2DNATBlock,
-                dim=cfg.width,
-                ffn_ratio=cfg.ffn_expand,
-                drop_path=cfg.block_drop,
-                k_size=4,
-                stride=2,
-                dilation=2,
-                n_heads=8,
-            )
-            if not cfg.condition_on_decoder
-            else nat_enc_block_partial
-        )  # Neighborhood Attention decoder block (conditional or unconditional)
+        )  # Neighborhood Attention encoder block
+        naf_dec_block_partial = partial(
+            NAFBlock,
+            DW_Expand=cfg.dw_expand,
+            FFN_Expand=cfg.ffn_expand,
+            drop_out_rate=cfg.block_drop,
+        )  # NAF decoder block
+        nat_dec_block_partial = partial(
+            Spatial2DNATBlock,
+            dim=cfg.width,
+            ffn_ratio=cfg.ffn_expand,
+            drop_path=cfg.block_drop,
+            k_size=4,
+            stride=2,
+            dilation=2,
+            n_heads=8,
+        )  # Neighborhood Attention decoder block
 
         # Block type mappings for dynamic architecture selection
         enc_mapping = {
@@ -311,14 +301,10 @@ class DenoiseNAFNet(nn.Module):
         head["lr_shortcut"] = lr_shortcut
         return head
 
-    def _patching_inputs(self, lr, cond):
-        # Embed individual modalities
-        x_lr = self.patchers["lr_conv"](lr)  # MS patch embedding
-
-        # Process latent conditions
-        l_cond = self.patchers["latent_conv"](cond)  # Latent condition processing
-
-        return x_lr, l_cond
+    def _patching_inputs(self, lr):
+        # Embed LR input
+        x_lr = self.lr_patcher(lr)  # LR patch embedding
+        return x_lr
 
     def _forward_head(self, x, lr_c):
         x = self.head["head_conv"](x)
@@ -326,26 +312,18 @@ class DenoiseNAFNet(nn.Module):
         x = self.head["head_out"](x)
         return x
 
-    def _to_out(self, x, lr, latent):
+    def _to_out(self, x, lr):
         res_type = self.cfg.residual_type
-        if res_type == "condition":
-            assert latent.shape[1] == x.shape[1], (
-                f"Condition channel {latent.shape[1]} must match output channel {x.shape[1]}"
-            )
-            x = x + latent
-        elif res_type == "lr":
+        if res_type == "lr":
             assert lr.shape[-2:] == x.shape[-2:]
             x = x + lr
-        elif res_type is None:
-            pass
-        else:
-            raise ValueError(f"Invalid residual type: {res_type}")
 
         # Apply output rescaling using RescaleOutput layer
         x = self.output_rescale(x)
         return x
 
-    def _forward_backbone(self, x, lr_c, latent_c):
+    def _forward_backbone(self, x):
+        # x: lr latent
         encs = []  # Store encoder outputs for skip connections
 
         # =====================================================================
@@ -354,7 +332,7 @@ class DenoiseNAFNet(nn.Module):
         for i, (encoder, down) in enumerate(zip(self.encoders, self.downs)):
             # Process through encoder blocks at current resolution
             for block in encoder:
-                x = block(x, latent_c, lr_c)  # Conditional block processing
+                x = block(x)  # Block processing
             encs.append(x)  # Store for skip connection
             x = down(x)  # Downsample to next resolution level
 
@@ -362,7 +340,7 @@ class DenoiseNAFNet(nn.Module):
         # Middle Bottleneck Processing
         # =====================================================================
         for block in self.middle_blks:
-            x = block(x, latent_c, lr_c)  # Process at lowest resolution
+            x = block(x)  # Process at lowest resolution
 
         # =====================================================================
         # Decoder Path (Upsampling with skip connections)
@@ -373,21 +351,17 @@ class DenoiseNAFNet(nn.Module):
             x = up(x)  # Upsample to higher resolution
             x = x + enc_skip  # Add skip connection from encoder
             for block in decoder:
-                x = block(x, latent_c, lr_c)  # Conditional block processing
+                x = block(x)  # Block processing
 
         return x
 
-    def forward(
-        self,
-        lr,
-        cond: Annotated[Tensor, "latents or decoded images"],
-    ):
+    def forward(self, lr):
         # Step 1: Process inputs through patch embedding layers
-        x, latent_c = self._patching_inputs(lr, cond)
+        x = self._patching_inputs(lr)
         lr_c = x.clone()
 
         # Step 2: Process through encoder-decoder backbone
-        x = self._forward_backbone(x, lr_c, latent_c)
+        x = self._forward_backbone(x)
 
         # Step 3: Convert back to spatial resolution
         x = self.unpatcher(x)
@@ -396,7 +370,7 @@ class DenoiseNAFNet(nn.Module):
         x = self._forward_head(x, lr_c)
 
         # Step 5: Apply residual connections and output scaling
-        x = self._to_out(x, lr, cond)
+        x = self._to_out(x, lr)
 
         return x
 
@@ -441,64 +415,14 @@ class DenoiseNAFNet(nn.Module):
         log("[PansharpeningNAFNet] Initialized weights", level="info")
 
 
-# *==============================================================
-# * Timm register model
-# *==============================================================
-
-
-def _create_nafnet(variant: str, pretrained=False, **kwargs):
-    log(f"Creating model {variant}, pretrained={pretrained}")
-    if kwargs.get("pretrained_cfg", "") == "none":
-        kwargs.setdefault("pretrained_strict", False)
-
-    cfg_keys = [f.name for f in fields(PansharpeningNAFNetConfig)]
-    cfg_args = {}
-    for k in list(kwargs.keys()):
-        if k in cfg_keys:
-            cfg_args[k] = kwargs.pop(k)
-    model_cfg = replace(PansharpeningNAFNetConfig(), **cfg_args)
-
-    model = build_model_with_cfg(
-        PansharpeningNAFNet,
-        variant,
-        pretrained,
-        cfg=model_cfg,
-        **kwargs,
-    )
-    return model
-
-
-@register_model
-def pansharpening_nafnet_small(pretrained=False, **kwargs):
-    model_args = {
-        "width": 64,
-        "middle_blk_num": 1,
-        "enc_blk_nums": [1, 1, 1],
-        "dec_blk_nums": [1, 1, 1],
-        "condition_channel": 256,  # comes from the de-tokenizer
-        "patch_size": 1,
-        "dw_expand": 1,
-        "ffn_expand": 2,
-        "is_neg_1_1": True,
-        "output_rescale": True,
-    }
-    model = _create_nafnet(
-        "pansharpening_nafnet_small",
-        pretrained,
-        **dict(model_args, **kwargs),
-    )
-    return model
-
-
 if __name__ == "__main__":
-    model = DenoiseNAFNet.create_model(
+    model = DenoiseLatentNAFNet.create_model(
         is_neg_1_1=False,
         width=64,
         enc_blk_nums=[1, 1, 1],
         dec_blk_nums=[1, 1, 1],
         enc_blk_type=["naf", "nat", "nat"],
         dec_blk_type=["nat", "nat", "naf"],
-        condition_channel=16,
         patch_size=2,
         block_drop=0.1,
     )
@@ -507,10 +431,9 @@ if __name__ == "__main__":
 
     model.to(device=device, dtype=dtype)
     lr = torch.randn(1, 8, 256, 256).to(device=device, dtype=dtype)
-    latent = torch.randn(1, 16, 32, 32).to(device=device, dtype=dtype)
 
     with torch.autocast(device_type="cuda", dtype=dtype):
-        out = model(lr, latent)
+        out = model(lr)
     print(out.shape)
 
     # fvcore
@@ -519,7 +442,7 @@ if __name__ == "__main__":
     """
     model, 0.372G, 0.803T
     """
-    print(flop_count_table(FlopCountAnalysis(model, (lr, latent))))
+    print(flop_count_table(FlopCountAnalysis(model, (lr,))))
 
     out.mean().backward()
     for n, p in model.named_parameters():

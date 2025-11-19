@@ -320,7 +320,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.dropout_op = dropout_op
         self.dropout_op_kwargs = dropout_op_kwargs
 
-        in_ch = self.dinov3_adapter.embed_dim
+        in_ch = int(self.dinov3_adapter.embed_dim)
 
         self.fapm = FAPM(
             in_ch,

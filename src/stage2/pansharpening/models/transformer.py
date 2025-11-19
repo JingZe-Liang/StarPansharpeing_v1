@@ -102,9 +102,11 @@ class Transformer(nn.Module):
                     mlp_ratio=cfg.mlp_ratio,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
-                    drop_path=drop_path_rates[i]
-                    if isinstance(drop_path_rates, list)
-                    else cfg.drop_path,
+                    drop_path=(
+                        drop_path_rates[i]
+                        if isinstance(drop_path_rates, list)
+                        else cfg.drop_path
+                    ),
                     act_layer=act_layer,
                     use_layerscale=cfg.use_layerscale,
                 )

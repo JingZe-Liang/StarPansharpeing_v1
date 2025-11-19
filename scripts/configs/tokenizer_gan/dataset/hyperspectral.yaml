@@ -27,6 +27,7 @@ dataset_names_to_bs:
   Urban: 2
   Samson: 2
   Oil_leak: 2
+  ARIS_Universe_Melas: 4
 
 dataset_names_to_n_channels:
   MMSeg_YREB: 12
@@ -55,6 +56,7 @@ dataset_names_to_n_channels:
   Urban: 188
   Samson: 156
   Oil_leak: 224
+  ARIS_Universe_Melas: 372
 
 dataset_names_to_rgb_channels:
   MMSeg_YREB: ${list:[4, 3, 2]}
@@ -77,6 +79,7 @@ dataset_names_to_rgb_channels:
   CD_242: ${list:[49,39,29]}
   OSCD: ${list:[3,2,1]}
   DC: mean
+  ARIS_Universe_Melas: mean
 
 dataset_names_to_img_size:
   MMSeg_YREB: 256
@@ -106,6 +109,13 @@ dataset_names_to_img_size:
   Urban: 256
   Samson: 256
   Oil_leak: 256
+  ARIS_Universe_Melas: 80
+
+ARIS_Universe_Melas_train:
+  - - data/AIRS-Universe-Melas-Chasma/hyper_images/AIS_contest_data_372_bands-px_80-MSI-0000.tar
+
+ARIS_Universe_Melas_val:
+  - - data/AIRS-Universe-Melas-Chasma/hyper_images/AIS_contest_data_372_bands-px_80-MSI-0000.tar
 
 WDC_train:
   - - data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar

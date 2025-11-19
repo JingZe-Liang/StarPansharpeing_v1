@@ -40,6 +40,8 @@ def to_easydict_recursive(config: Iterable):
     elif isinstance(config, (list, ListConfig)):
         return [to_easydict_recursive(item) for item in config]
 
+    return config
+
 
 def kwargs_to_basic_types(
     kwargs: DictConfig | ListConfig | dict | list | None,
@@ -156,7 +158,9 @@ def function_config_to_basic_types_hint_check(func):
 
 if __name__ == "__main__":
     # Example usage
-    config = DictConfig({"key": "value", "list": [1, 2, 3]})
+    config = DictConfig(
+        {"key": "value", "list": [1, 2, 3], "anydict": {"a": 1, "b": 2}}
+    )
     # print(type(to_object(config)["list"]))  # <class 'list'>
     # print(to_object_recursive(config))  # {'key': 'value', 'list': [1, 2, 3]}
 
@@ -164,18 +168,20 @@ if __name__ == "__main__":
     print(type(config.list))
 
     # @function_config_to_basic_types
-    # def func(**kwargs):
-    #     for k, v in kwargs.items():
-    #         print(k, type(v))
+    @function_config_to_easy_dict
+    def func(**kwargs):
+        for k, v in kwargs.items():
+            print(k, type(v))
 
-    # func(key=config.key, lst=config.list)
+    func(key=config.key, lst=config.list)
+    func(anydict=config.anydict)
 
-    @function_config_to_basic_types_hint_check
-    def func(key: str, lst: tuple | list):
-        print(key, type(key))
-        print(lst, type(lst))
+    # @function_config_to_basic_types_hint_check
+    # def func(key: str, lst: tuple | list):
+    #     print(key, type(key))
+    #     print(lst, type(lst))
 
-    func(config.key, lst=config.list)
+    # func(config.key, lst=config.list)
 
     # config = ListConfig([1, 2, 3])
     # print(to_object(config))  # [1, 2, 3]

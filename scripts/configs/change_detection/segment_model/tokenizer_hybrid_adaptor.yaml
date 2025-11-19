@@ -1,0 +1,60 @@
+# Default configuration for TokenizerHybridUNet model
+# This configuration is extracted from the _create_default_cfg() function in tokenizer_backbone_adapted.py
+
+defaults:
+  - tokenizer: hybrid
+
+# CNN Model Configuration (cm244c384)
+# in defaults
+
+# Tokenizer Feature Configuration
+tokenizer_feature:
+  pretrained_path: null
+  features_per_stage: [512, 512, 512, 512]
+  model_name: hybrid_tokenizer_b16
+  # encoder settings
+  pretrained_size: 512
+  conv_inplane: 64
+  drop_path_rate: 0.3
+  with_cffn: true
+  cffn_ratio: 0.25
+  deform_num_heads: 16
+  deform_ratio: 0.5
+  add_vit_feature: true
+  use_extra_extractor: true
+  with_cp: true
+
+# Adapter Configuration
+adapter:
+  adapter_type: default
+  latent_width: 64
+  n_conv_per_stage: 1
+  depth_per_stage: 1
+  norm: layernorm2d
+  act: gelu
+  drop: 0.0
+  act_first: false
+  conv_bias: false
+
+# Change Detection Stage Configuration
+cd_stage:
+  channels: [512, 512, 512, 512]
+  stride: 1
+  kernel_size: 3
+  norm_layer: layernorm2d
+  act_layer: gelu
+  expand_ratio: 2.0
+  block_type: mbconv
+  depth: 1
+
+# UNet Configuration
+input_channels: 3
+num_classes: 7
+deep_supervision: false
+n_stages: 4
+use_latent: true
+ensure_rgb_type: null
+_debug: false
+
+# Tokenizer pretrained path (needs to be overridden)
+tokenizer_pretrained_path: runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors

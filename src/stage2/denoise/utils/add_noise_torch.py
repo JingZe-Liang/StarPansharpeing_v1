@@ -1,3 +1,15 @@
+"""
+Noise Adder for hyperspectral image denoising task.
+Based on Hypersigma implementation and modified for Kornia and PyTorch.
+
+Author: Zihan Cao
+Date: 2025.11.16
+Email: iamzihan666@gmail.com
+
+Copyright (c) 2025 Zihan Cao. All Rights Reserved.
+Licensed under the MIT License.
+"""
+
 from typing import Literal, TypeVar
 
 import numpy as np
@@ -222,7 +234,7 @@ class TransformationMixedTorch(object):
         cls,
         noise_bank: list[str | type[NoisersType]],
         noise_bank_cfg: list[dict],
-        num_channels: list[int],
+        num_channels: list[float],
     ):
         """Create an instance from a configuration dictionary."""
 
@@ -276,13 +288,17 @@ type PredefinedNoiseType = (
     Literal["complex", "complex_hypersigma", "blind_gaussian_hypersigma"]
     # single noise types
     | Literal["stripe", "deadline", "impulse", "inpainting", "noniid", "blind"]
+    | str  # for linting
 )
 
 
 def get_default_noise_transformation(
     trans_type: PredefinedNoiseType,
-    trans_kwags: dict | None = None,
+    trans_kwargs: dict | None = None,
 ):
+    """
+    Support predefined noise models and single noise models.
+    """
     ###### predefined noise models ######
     if trans_type == "complex":
         mixed_noiser = TransformationMixedTorch(
@@ -309,11 +325,11 @@ def get_default_noise_transformation(
 
     ###### Per-kind noise models ######
     else:
-        if trans_kwags is not None:
-            cfg = trans_kwags
+        if trans_kwargs is not None:
+            cfg = trans_kwargs
         else:
             cfg = noisers_default_kwargs.get(trans_type, None)
-        assert cfg is not None, f"Noiser kwargs for {trans_type} should be provided"
+        assert cfg is not None, f"{trans_type} is not supported"
         num_bands = cfg.pop("num_bands", 1 / 3)
 
         mixed_noiser = TransformationMixedTorch.from_config(

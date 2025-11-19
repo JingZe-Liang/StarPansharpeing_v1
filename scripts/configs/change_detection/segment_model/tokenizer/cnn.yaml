@@ -1,0 +1,51 @@
+### CNN AE tokenizer backbone
+
+# _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
+model:
+  attn_resolutions:
+    - 32
+  channels: 128
+  channels_mult:
+    - 2
+    - 4
+    - 4
+  dropout: 0.0
+  in_channels: 512
+  spatial_compression: 8
+  num_res_blocks: 2
+  out_channels: 512
+  resolution: 1024
+  z_channels: 256
+  latent_channels: 16
+  act_checkpoint: true
+  norm_type: gn
+  norm_groups: 32
+  block_name: res_block
+  moe_token_mixer_type: res_block
+  hidden_factor: 4
+  use_residual_factor: false
+  patch_method: haar
+  patch_size: 1
+  attn_type: none
+  padding_mode: reflect
+
+adaptive_mode: interp
+use_repa_loss: true
+use_vf_loss: false
+hook_module: decoder.decoder.mid.block_2
+vf_on_z_or_module: z
+dino_feature_dim: 1024
+enc_path: ""
+dec_path: ""
+uni_path: null
+loading_type: null
+norm_in_quant_conv: false
+latent_noise_prob: 0.0
+use_channel_drop: false
+channel_drop_config:
+  drop_type:
+    - 4
+    - 8
+    - 12
+  max_channels: 16
+  drop_prob: 0.5

@@ -1,21 +1,40 @@
+cfgs:
+  used: wdc
+
 consts:
   bands: 191
 
 train_loader:
-  _target_: src.data.hyperspectral_loader.get_hyperspectral_img_loaders_with_different_backends
-  paths: data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
-  loader_type: "wds"
-  basic_kwargs:
-    batch_size: 6
-    num_workers: 1
-    prefetch_factor: 2
-    shuffle_within_workers: false
-    resample: true
-    check_channels_n: ${dataset.dataset_channel}
-    quantile_img_clip: 1.0
-    per_channel_norm: false
-    random_one_key: false
-    resize_before_transform: 192
-    # keys_to_remove: ["endmembers", "abunds", "init_vca_indices"]
+  _target_: src.stage2.denoise.data.general_noisy_loader.GeneralNoisyLoader.create_dataloader
+  loader_kwargs:
+    wds_paths: data/Downstreams/WDCDenoise/hyper_images/Washington_DC_mall-191_bands-px_192-0000.tar
+    batch_size: 4
+    num_workers: 4
+    shuffle_size: -1
+    to_neg_1_1: false
+    resample: false
+    pin_memory: true
+    tgt_key: "img"
+    ########### same as the case generator ############
+    quantile_img_clip: 0.995
+    per_channel_norm: true
+
+  noise_adder_kwargs:
+    p: 1.0
+    same_on_batch: true
+    keepdim: true
+    use_torch: true
+    clip_value: true
+  get_loader_type: "wds"
+  cache: true
+  shuffle: true
 
 val_loader:
+  _target_: src.stage2.denoise.data.general_noisy_loader.NoisyCasesDataset.create_dataloader
+  input_dir: data/Downstreams/WDCDenoise/_cases_litdata
+  dataset_kwargs:
+    shuffle: true
+  loader_kwargs:
+    batch_size: 1
+    num_workers: 4
+    pin_memory: true

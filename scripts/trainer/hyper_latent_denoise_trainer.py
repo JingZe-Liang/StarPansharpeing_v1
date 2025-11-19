@@ -1,11 +1,13 @@
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, NamedTuple, Sequence, cast
+from typing import Any, Callable, Literal, Optional, Sequence, cast, no_type_check
 
 import accelerate
+import heavyball
 import hydra
 import lazy_loader
 import numpy as np
@@ -25,31 +27,45 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from tqdm import trange
+from tqdm import tqdm, trange
+from transformers.modeling_outputs import ModelOutput
 
 from src.stage2.denoise.metrics import DenoisingMetrics
 from src.stage2.pansharpening.loss import AmotizedPixelLoss
 from src.stage2.pansharpening.metrics import AnalysisPanAcc
-from src.utilities.config_utils import (
-    to_object as to_cont,  # register new resolvers at the same time
-)
+from src.utilities.config_utils import function_config_to_easy_dict
 from src.utilities.logging import dict_round_to_list_str
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import visualize_hyperspectral_image
 
-heavyball = lazy_loader.load("heavyball")
 
+@dataclass
+class TrainDenoisingStepOutput(ModelOutput):
+    """
+    Output of the denoising model training step.
 
-class TrainDenoisingStepOutput(NamedTuple):
-    pred_latent: Tensor
-    pred_pixel: Tensor
-    denoise_loss: Tensor
-    log_losses: dict[str, Tensor]
+    Parameters
+    ----------
+    pred_latent : Optional[torch.FloatTensor]
+        Predicted latent representation
+    pred_pixel : Optional[torch.FloatTensor]
+        Predicted pixel values (reconstructed image)
+    denoise_loss : Optional[torch.FloatTensor]
+        Denoising loss value
+    log_losses : Optional[dict[str, torch.FloatTensor]]
+        Dictionary of losses for logging
+    """
+
+    pred_latent: Tensor = None
+    pred_pixel: Tensor = None
+    denoise_loss: Tensor = None
+    log_losses: dict[str, Tensor] = None
 
 
 class DenoisingTrainer:
+    @function_config_to_easy_dict
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.train_cfg = cfg.train
@@ -98,10 +114,10 @@ class DenoisingTrainer:
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
+            self.dataset_cfg.train_loader
         )
         self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
+            self.dataset_cfg.val_loader
         )
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
@@ -112,7 +128,7 @@ class DenoisingTrainer:
         self.setup_denoising_model()  # setup the denoising model
 
         # optimizers and lr schedulers
-        self.optim, self.sched = self.get_optimizer_lr_scheduler()
+        self.get_optimizer_lr_scheduler()
 
         # EMA models and accelerator prepare
         self.prepare_for_training()
@@ -134,10 +150,8 @@ class DenoisingTrainer:
         self.train_state = StepsCounter(["train", "val"])
 
     def setup_denoising_model(self):
-        self.model = hydra.utils.instantiate(self.cfg.denoising_model)
-        self.denoising_amotizing_pixels = self.accelerator.unwrap_model(
-            self.model
-        ).amotizing_pixels
+        self.model = hydra.utils.instantiate(self.cfg.denoise_model)
+        self.denoising_amotizing_pixels = self.model.downstream_model.amotizing_pixels
         if self.denoising_amotizing_pixels:
             # Wrapper will handle tokenization for amotizing pixels
             self.backward_detokenizer = True
@@ -155,12 +169,8 @@ class DenoisingTrainer:
     def prepare_ema_models(self):
         if self.no_ema:
             return
-
-        self.ema_model = EMA(
-            self.model,
-            beta=self.ema_cfg.beta,
-            update_every=self.ema_cfg.update_every,
-        ).to(self.device)
+        self.ema_model: EMA = hydra.utils.instantiate(self.ema_cfg)(self.model)
+        self.ema_model.to(self.device)
         self.log_msg(f"create EMA model for denoising")
 
     def configure_logger(self):
@@ -317,6 +327,7 @@ class DenoisingTrainer:
         def str_msg(*msg):
             return sep.join([str(m) for m in msg])
 
+        kwargs.setdefault("stack_level", 3)
         log_fn = getattr(self.logger, level.lower())
 
         if only_rank_zero:
@@ -329,9 +340,7 @@ class DenoisingTrainer:
                 msg_string = f"rank-{self.accelerator.process_index} | {msg_string}"
                 log_fn(msg_string, **kwargs)
 
-    def get_optimizer_lr_scheduler(
-        self,
-    ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    def get_optimizer_lr_scheduler(self):
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
@@ -340,7 +349,7 @@ class DenoisingTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -386,7 +395,7 @@ class DenoisingTrainer:
                 "for efficience testing the scripts, disable the compilation."
             )
 
-        return model_opt, model_sched
+        self.optim, self.sched = model_opt, model_sched
 
     def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module):
         if not self._is_fsdp:
@@ -420,9 +429,12 @@ class DenoisingTrainer:
             # set models with property dtype
             self.model.dtype = torch.float
 
-        self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
-            self.train_dataloader, self.val_dataloader
-        )
+        self.model, self.optim = self.accelerator.prepare(self.model, self.optim)
+        self.sched = self.accelerator.prepare(self.sched)
+
+        # self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
+        #     self.train_dataloader, self.val_dataloader
+        # )
 
     def step_train_state(self, mode="train"):
         self.train_state.update(mode)
@@ -493,8 +505,7 @@ class DenoisingTrainer:
         return self.get_global_step("train")
 
     def may_freeze(self, model, freeze=True):
-        for p in model.parameters():
-            p.requires_grad = not freeze
+        model.requires_grad_(not freeze)
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
@@ -537,39 +548,28 @@ class DenoisingTrainer:
         gt: torch.Tensor,
         noisy_latent: torch.Tensor | None,
         gt_latent: torch.Tensor | None,
+        use_ema=False,
     ) -> TrainDenoisingStepOutput:
-        """
-        Forward pass through the denoising model.
+        # model = self.model if (not use_ema or self.no_ema) else self.ema_model.ema_model
+        if hasattr(self, "ema_model") and use_ema:
+            model = self.ema_model.ema_model
+        else:
+            model = self.model
+        assert model is not None, "model is None, which is not expected."
 
-        Parameters
-        ----------
-        noisy : torch.Tensor
-            Input noisy image
-        gt : torch.Tensor
-            Ground truth clean image
-        noisy_latent : torch.Tensor | None
-            Latent representation of noisy image
-        gt_latent : torch.Tensor | None
-            Latent representation of ground truth image
-
-        Returns
-        -------
-        TrainDenoisingStepOutput
-            Model output containing predictions and losses
-        """
         with self.accelerator.autocast():
             if self.denoising_amotizing_pixels:
-                out = self.model(noisy, noisy_latent)
+                out = model(noisy, noisy_latent)
                 pred_latent = out["latent_out"]
                 pred = out["pixel_out"]
                 pred_from_latent = out.get("pixel_from_latent", None)
             else:
-                pred_latent = self.model(noisy_latent)
+                pred_latent = model(noisy_latent)
                 # Use wrapper decode method
                 bands = self.get_training_sample_channels()
-                pred = self.model.decode(pred_latent, bands)
+                pred = model.decode(pred_latent, bands)  # type: ignore
                 if isinstance(pred, tuple):
-                    pred = pred[0]  # construction is the first output
+                    pred = pred[0]  # reconstruction is the first output
                 pred_from_latent = None
 
             # loss
@@ -585,7 +585,12 @@ class DenoisingTrainer:
                 else:
                     raise NotImplementedError(f"Unknown type {type(loss)}")
 
-        out = TrainDenoisingStepOutput(pred_latent, pred, loss, log_losses)
+        out = TrainDenoisingStepOutput(
+            pred_latent=pred_latent,
+            pred_pixel=pred,
+            denoise_loss=loss,
+            log_losses=log_losses,
+        )
         return out
 
     def train_denoise_step(
@@ -605,6 +610,9 @@ class DenoisingTrainer:
             gt_latent = gt_tok_out["latent"].detach()
 
         out = self.forward_denoising_model(noisy, gt, noisy_latent, gt_latent)
+        logger.trace(
+            f"Step: {self.global_step} - Denoise loss: {out.denoise_loss.item():.4f}"
+        )
 
         if self.accelerator.sync_gradients:
             # backward
@@ -619,35 +627,19 @@ class DenoisingTrainer:
 
         return out
 
-    def _get_metric_fn(self, clear=False):
-        if not hasattr(self, "_denoising_metrics"):
-            self._denoising_metrics = DenoisingMetrics().to(self.device)
-            if clear:
-                self._denoising_metrics.reset()
-        return self._denoising_metrics
-
-    def update_metrics(self, noisy, gt, clear=False, only_update=True):
-        metrics_fn = self._get_metric_fn(clear)
-        metrics_fn(noisy, gt)
-
-    def get_metrics(self):
-        assert hasattr(self, "_denoising_metrics")
-        return self._denoising_metrics.compute()
+    def to_device_dtype(self, x: dict | Tensor):
+        """Data to proper dtype"""
+        if torch.is_tensor(x):
+            return x.to(device=self.device, dtype=self.dtype)
+        elif isinstance(x, dict):
+            return {
+                k: self.to_device_dtype(v) if torch.is_tensor(v) else v
+                for k, v in x.items()
+            }
+        else:
+            raise ValueError(f"Unsupported type: {type(x)}")
 
     def train_step(self, batch: dict):
-        """
-        Execute one training step for denoising model.
-
-        Parameters
-        ----------
-        batch : dict
-            Batch input containing noisy and clean images, and optionally latents
-
-        Note
-        ----
-        The wrapper handles tokenization internally. If latents are not provided in the batch,
-        the wrapper will encode the images to latents automatically.
-        """
         noisy_latent = gt_latent = None
 
         # Get latents from batch - wrapper handles tokenization
@@ -683,15 +675,29 @@ class DenoisingTrainer:
             # tensorboard log
             self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
+        if self.global_step % self.train_cfg.visualize_every == 0:
+            self.visualize_reconstruction(
+                self.to_rgb(batch["noisy"]),
+                self.to_rgb(train_out.pred_pixel),
+                self.to_rgb(batch["gt"]),
+                add_step=True,
+                img_name="recon/train_recon",
+                no_to_rgb=True,
+            )
+            logger.info(f"[Train]: visualize reconstruction at step {self.global_step}")
+
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
             log_loss = dict_tensor_sync(log_loss)
-        strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()))
+        strings = dict_round_to_list_str(
+            log_loss, select=list(log_loss.keys()), n_round=4
+        )
         return " - ".join(strings)
 
     def infinity_train_loader(self):
         while True:
             for batch in self.train_dataloader:
+                batch = self.to_device_dtype(batch)
                 yield batch
 
     def train_loop(self):
@@ -700,9 +706,11 @@ class DenoisingTrainer:
 
         self.log_msg("[Train]: start training", only_rank_zero=False)
         for batch in self.infinity_train_loader():
-            # train step
+            # Train step
+            batch = cast(dict[str, torch.Tensor], batch)
             self.train_step(batch)
 
+            # Validation step
             if self.global_step % self.val_cfg.val_duration == 0:
                 self.val_loop()
 
@@ -727,53 +735,62 @@ class DenoisingTrainer:
             raise ValueError("No validation dataloader found")
 
         for batch in self.val_dataloader:
+            batch = self.to_device_dtype(batch)
             yield batch
 
     def get_val_loader_iter(self):
-        if self.val_cfg.max_val_iters > 0:
-            # create a new iterator for the validation loader
-            # state in the loader generator
-            if not hasattr(self, "_val_loader_iter"):
-                self._val_loader_iter = iter(self._finite_val_loader())
+        """
+        Get validation loader iterator with consistent interface.
 
-            iterable_ = trange(
-                self.val_cfg.max_val_iters,
-                desc="validating ...",
-                leave=False,
-                disable=not self.accelerator.is_main_process,
-            )
+        Returns
+        -------
+        Iterable
+            Iterator over validation batches
+        """
+        if self.val_cfg.max_val_iters > 0:
+            # Create a new iterator for the validation loader
+            if not hasattr(self, "_val_loader_iter"):
+                self._val_loader_iter = iter(self.val_dataloader)
+
             self.log_msg(
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
+
+            for _ in trange(
+                self.val_cfg.max_val_iters,
+                desc="validating ...",
+                leave=False,
+                disable=not self.accelerator.is_main_process,
+            ):
+                try:
+                    batch = next(self._val_loader_iter)
+                except StopIteration:
+                    # Reset iterator if exhausted
+                    self._val_loader_iter = iter(self.val_dataloader)
+                    batch = next(self._val_loader_iter)
+                yield self.to_device_dtype(batch)
         else:
-            iterable_ = self._finite_val_loader()
+            max_iters = (
+                len(self.val_dataloader)
+                if hasattr(self.val_dataloader, "__len__")
+                else -1
+            )
             self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
+                f"[Val]: start validating with the whole val set ({max_iters} batches)",
+                only_rank_zero=False,
             )
 
-        return iterable_
+            # Data needs to be moved to device here since val_step doesn't do it
+            for batch in tqdm(
+                self.val_dataloader,
+                desc="validating ...",
+                disable=not self.accelerator.is_main_process,
+            ):
+                yield self.to_device_dtype(batch)
 
     @torch.no_grad()
-    def val_step(self, batch: dict):
-        """
-        Execute one validation step for denoising model.
-
-        Parameters
-        ----------
-        batch : dict
-            Batch input containing noisy and clean images, and optionally latents
-
-        Returns
-        -------
-        dict
-            Dictionary containing predictions
-
-        Note
-        ----
-        The wrapper handles tokenization internally. If latents are not provided in the batch,
-        the wrapper will encode the images to latents automatically.
-        """
+    def val_step(self, batch: dict) -> TrainDenoisingStepOutput:
         noisy_latent = gt_latent = None
 
         # Get latents from batch - wrapper handles tokenization
@@ -782,53 +799,76 @@ class DenoisingTrainer:
             gt_latent = batch["gt_latent"].to(self.device, self.dtype)
 
         # forward the fusion network
-        pred_latent, pred_img, *_ = self.forward_denoising_model(
-            batch["noisy"], batch["gt"], noisy_latent, gt_latent
+        val_out = self.forward_denoising_model(
+            batch["noisy"],
+            batch["gt"],
+            noisy_latent,
+            gt_latent,
+            use_ema=True,
         )
 
-        return {"pred_img": pred_img, "pred_latent": pred_latent}
+        return val_out
 
     def val_loop(self):
         self.model.eval()
-        # torch.cuda.empty_cache()
 
         loss_metrics = MeanMetric().to(device=self.device)
-        val_iter = self.get_val_loader_iter()
-        for batch_or_idx in val_iter:  # type: ignore
-            if self.val_cfg.max_val_iters > 0:
-                batch = next(self._val_loader_iter)
-            else:
-                batch = batch_or_idx
+        val_metrics = {
+            i: DenoisingMetrics().to(device=self.device)
+            for i in range(1, 6)  # Says we have 5 cases for denoising validation
+        }
 
+        val_iter = self.get_val_loader_iter()
+        for batch in val_iter:  # type: ignore
             batch = cast(dict[str, torch.Tensor], batch)
             gt = batch["gt"].to(self.device)
             val_out = self.val_step(batch)
 
-            pred_img_rgb = self.to_rgb(val_out["pred_img"])
-            batch_img_rgb = self.to_rgb(gt)
-
-            # l1 loss
-            loss_of_latent = nn.functional.mse_loss(pred_img_rgb, gt.to(pred_img_rgb))
-            loss_metrics.update(loss_of_latent)
+            # mse loss
+            loss = nn.functional.mse_loss(gt, val_out.pred_pixel)
+            loss_metrics.update(loss)
 
             # metrics
-            self.update_metrics(batch_img_rgb, pred_img_rgb)
+            pred_img_rgb = self.to_rgb(val_out.pred_pixel)
+            gt_img_rgb = self.to_rgb(gt)
+            # val_metric_cur = val_metric_fn(pred_img_rgb, gt_img_rgb)
+            case_type = batch["case_type"].cpu().tolist()
+
+            # per-sample val
+            for pred_img_rgb_i, gt_img_rgb_i, case_type_i in zip(
+                pred_img_rgb, gt_img_rgb, case_type
+            ):
+                metric_fn = val_metrics[int(case_type_i)]
+                metric_fn.update(pred_img_rgb_i[None], gt_img_rgb_i[None])
+
             self.step_train_state("val")
 
-        metrics = self.get_metrics()
+        # Total loss
         loss_val = loss_metrics.compute()
 
         if self.accelerator.is_main_process:
-            _metric_str = ""
-            for k, v in metrics.items():
-                _metric_str += f"{k}: {v:.4f} - "
-            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.3e}")
-            self.tenb_log_any("metric", metrics, step=self.global_step)
+            for case_type, metric_fn in val_metrics.items():
+                case_metrics = metric_fn.compute()
+
+                # log the metrics
+                metric_str = dict_round_to_list_str(case_metrics, 4)
+                metric_str = ", ".join(metric_str)
+                self.log_msg(f"[Val]: Case {case_type} metrics: {metric_str}")
+
+                # add prefix
+                case_metrics = {
+                    f"val_case_{case_type}/{k}": v for k, v in case_metrics.items()
+                }
+                self.tenb_log_any("metric", case_metrics, step=self.global_step)
+                logger.info("-" * 80)
+
+            self.log_msg(f"loss: {loss_val:.4e}")
 
             # visualize the last val batch
             self.visualize_reconstruction(
-                batch_img_rgb,  # gt
+                self.to_rgb(batch["noisy"]),
                 pred_img_rgb,  # prediction
+                gt_img_rgb,  # gt
                 add_step=True,
                 img_name="val/denoising",
                 no_to_rgb=True,
@@ -860,7 +900,7 @@ class DenoisingTrainer:
         ema_path = Path(ema_path)
 
         accelerate.load_checkpoint_in_model(
-            self.model, ema_path / "model", strict=strict
+            self.model, ema_path / "denoise_ema_model", strict=strict
         )
 
         # Prepare models
@@ -883,8 +923,9 @@ class DenoisingTrainer:
 
     def visualize_reconstruction(
         self,
-        x: torch.Tensor,
+        noisy: torch.Tensor,
         recon: torch.Tensor | None = None,
+        gt: torch.Tensor | None = None,
         img_name: str = "train_original_recon",
         add_step: bool = False,
         only_vis_n: int | None = None,
@@ -894,7 +935,7 @@ class DenoisingTrainer:
 
         def hyperspectral_to_rgb_fn(x):
             x_np = visualize_hyperspectral_image(
-                x[_only_n],
+                x[:_only_n].detach().cpu(),
                 rgb_channels=self.train_cfg.visualize_rgb_channels,
                 to_uint8=True,
                 to_grid=True,
@@ -904,17 +945,20 @@ class DenoisingTrainer:
             return x_np
 
         if not no_to_rgb:
-            x = self.to_rgb(x)
-        if recon is not None and not no_to_rgb:
-            recon = self.to_rgb(recon)
+            noisy = self.to_rgb(noisy)
+            if recon is not None:
+                recon = self.to_rgb(recon)
+            if gt is not None:
+                gt = self.to_rgb(gt)
 
-        x_np = hyperspectral_to_rgb_fn(x)
         # cat original and reconstructed images
+        img = hyperspectral_to_rgb_fn(noisy)
         if recon is not None:
             recon_np = hyperspectral_to_rgb_fn(recon)
-            img = np.concatenate([x_np, recon_np], axis=1)
-        else:
-            img = x_np
+            img = np.concatenate([img, recon_np], axis=1)
+        if gt is not None:
+            gt_np = hyperspectral_to_rgb_fn(gt)
+            img = np.concatenate([img, gt_np], axis=1)
 
         # save
         img_to_save = Image.fromarray(img)
@@ -941,25 +985,28 @@ class DenoisingTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_fusionnet"  # vq, bsq, fsq, kl
+_key = "denoise_naf"
 _configs_dict = {
     # cosmos tokenizer, simple denoising
-    "cosmos_f8c16p4_fusionnet": "cosmos_f8c16p4_fusionnet",
+    "denoise_naf": "denoise_naf",
 }[_key]
 
 
-@hydra.main(
-    config_path="configs/denoising",
-    config_name=_configs_dict,
-    version_base=None,
-)
-def main(cfg):
-    catcher = logger.catch if PartialState().is_main_process else nullcontext
-
-    with catcher():
-        trainer = DenoisingTrainer(cfg)
-        trainer.run()
-
-
 if __name__ == "__main__":
+    from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
+
+    print_colored_banner("HyperDenoise")
+
+    @hydra.main(
+        config_path="../configs/denoise",
+        config_name=_configs_dict,
+        version_base=None,
+    )
+    def main(cfg):
+        catcher = logger.catch if PartialState().is_main_process else nullcontext
+
+        with catcher():
+            trainer = DenoisingTrainer(cfg)
+            trainer.run()
+
     main()

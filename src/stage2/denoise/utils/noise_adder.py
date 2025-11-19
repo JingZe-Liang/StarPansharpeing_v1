@@ -26,6 +26,8 @@ class UniHSINoiseAdder:
     ):
         self.use_torch = use_torch
         self.noise_models = []
+        self._noise_type = noise_type
+
         if isinstance(noise_type, str):
             noise_type = [noise_type]
 
@@ -112,6 +114,12 @@ class UniHSINoiseAdder:
         else:
             return imgs
 
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(noise_types={self._noise_type}, "
+            f"use_torch={self.use_torch})"
+        )
+
 
 # * --- Kornia compatible --- #
 
@@ -133,6 +141,8 @@ class UniHSINoiseAdderKornia(IntensityAugmentationBase2D):
         self.is_neg_1_1 = is_neg_1_1
         self.clip_value = clip_value
         self.noise_adder = UniHSINoiseAdder(noise_type=noise_type, use_torch=use_torch)
+        self._noise_type = noise_type
+        self._use_torch = use_torch
 
     def apply_transform(self, input: torch.Tensor, params, flags, transform=None):
         """
@@ -165,6 +175,12 @@ class UniHSINoiseAdderKornia(IntensityAugmentationBase2D):
             noisy_img_th.mul_(2).sub_(1)
 
         return noisy_img_th
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(noise_type={self._noise_type}, clip_value={self.clip_value},"
+            f"use_torch={self._use_torch}, is_neg_1_1={self.is_neg_1_1}, p={self.p})"
+        )
 
 
 # Alias

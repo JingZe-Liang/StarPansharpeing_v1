@@ -436,12 +436,14 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             # return only downstream model parameters
             return self.downstream_model.parameters()
 
-    def named_parameters(self):
+    def named_parameters(self, *args, **kwargs):
         if self.tokenizer_decoder_learnt:
             raise NotImplementedError("Not implemented yet")
         else:
             # return only downstream model parameters
-            named_ps_downstream = self.downstream_model.named_parameters()
+            named_ps_downstream = self.downstream_model.named_parameters(
+                *args, **kwargs
+            )
             # add the prefix
             # named_ps = [(f"downstream_model.{n}", p) for n, p in named_ps_downstream]
             # return named_ps

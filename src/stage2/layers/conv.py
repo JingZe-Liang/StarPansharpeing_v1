@@ -1,3 +1,4 @@
+import os
 from functools import partial
 from typing import Any, Optional, Union
 
@@ -17,7 +18,18 @@ from timm.models.vitamin import (
 )
 from torch.utils.checkpoint import checkpoint
 
+from src.utilities.network_utils import null_decorator_no_any_kwgs
+
 from .functional import ConditionalBlock
+
+compile_forward_fn = bool(int(os.getenv("MODEL_COMPILED", "1")))
+
+if compile_forward_fn:
+    _compile_decorator = torch.compile(mode="default")
+    torch._functorch.config.donated_buffer = False  # for adaptive weighting
+    torch._dynamo.config.cache_size_limit = 1_000  # larger cache size
+else:
+    _compile_decorator = null_decorator_no_any_kwgs
 
 
 class MBStem(nn.Module):
@@ -56,7 +68,7 @@ class MbConvLNBlock(nn.Module):
         self,
         in_chs: int,
         out_chs: int,
-        cond_chs: int,
+        cond_chs: int | None = None,
         stride: int = 1,
         drop_path: float = 0.0,
         kernel_size: int = 3,
@@ -64,6 +76,7 @@ class MbConvLNBlock(nn.Module):
         norm_eps: float = 1e-6,
         act_layer: str = "gelu",
         expand_ratio: float = 4.0,
+        cond_type: str = "add",
     ):
         super(MbConvLNBlock, self).__init__()
         self.grad_checkpointing = False
@@ -97,13 +110,18 @@ class MbConvLNBlock(nn.Module):
         self.act2 = create_act_layer(act_layer, inplace=True)
         self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=True)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.cond_conv_kxk = nn.Sequential(
-            create_conv2d(cond_chs, out_chs, 1, bias=True),
-            create_norm_act_layer("layernorm2d", mid_chs // 2, "gelu"),
-            create_conv2d(out_chs, out_chs * 2, 3, bias=False, groups=out_chs),
-        )
 
-    def forward_(self, x, cond):
+        self.cond_type = cond_type
+        if cond_chs is not None:
+            cond_out_chs = out_chs * 2 if cond_type == "adaln2" else out_chs
+            self.cond_conv_kxk = nn.Sequential(
+                create_conv2d(cond_chs, out_chs, 1, bias=True),
+                create_norm_act_layer("layernorm2d", out_chs, "silu"),
+                create_conv2d(out_chs, cond_out_chs, 3, bias=False, groups=out_chs),
+            )
+
+    @_compile_decorator
+    def forward_(self, x, cond=None):
         shortcut = self.shortcut(x)
 
         x = self.pre_norm(x)
@@ -118,18 +136,23 @@ class MbConvLNBlock(nn.Module):
         x = self.act2(x)
 
         # 1x1 linear projection to output width
-        scale, shift = self.cond_conv_kxk(cond).chunk(2, dim=1)
         x = self.conv3_1x1(x)
-        # modulate
-        x = x * (1 + scale) + shift
+
+        # conditioning
+        if cond is not None and hasattr(self, "cond_conv_kxk"):
+            # modulate
+            if self.cond_type == "adaln2":
+                scale, shift = self.cond_conv_kxk(cond).chunk(2, dim=1)
+                x = x * (1 + scale) + shift
+            else:
+                x = x + self.cond_conv_kxk(cond)
 
         # output
         x = self.drop_path(x) + shortcut
 
         return x
 
-    @torch.compile
-    def forward(self, x, cond):
+    def forward(self, x, cond=None):
         if self.grad_checkpointing:
             return torch.utils.checkpoint.checkpoint(
                 self.forward_, x, cond, use_reentrant=False
@@ -343,6 +366,7 @@ class MBConv(nn.Module):
             use_bias=use_bias[2],
         )
 
+    @_compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.inverted_conv(x)
         x = self.depth_conv(x)
@@ -392,6 +416,7 @@ class FusedMBConv(nn.Module):
             act_func=act_func[1],
         )
 
+    @_compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.spatial_conv(x)
         x = self.point_conv(x)
@@ -448,6 +473,7 @@ class GLUMBConv(nn.Module):
             act_func=act_func[2],
         )
 
+    @_compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.inverted_conv(x)
         x = self.depth_conv(x)
@@ -461,6 +487,7 @@ class GLUMBConv(nn.Module):
 
 
 class GLUMBConv1D(GLUMBConv):
+    @_compile_decorator
     def forward(
         self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None
     ) -> torch.Tensor:
@@ -490,6 +517,7 @@ class SEModule_(nn.Module):
         self.fc2 = nn.Conv2d(channels // reduction, channels, kernel_size=1)
         self.sigmoid = nn.Sigmoid()
 
+    @_compile_decorator
     def forward(self, x):
         module_input = x
         x = x.mean((2, 3), keepdim=True)
@@ -516,6 +544,7 @@ class CoordAttnModule_(nn.Module):
         self.conv3 = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
         self.act = nn.SiLU(inplace=True)
 
+    @_compile_decorator
     def forward(self, x):
         identity = x
         n, c, h, w = x.size()
@@ -583,6 +612,7 @@ class ResBlock(nn.Module):
             act_func=act_func[1],
         )
 
+    @_compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         x = self.conv2(x)
@@ -618,18 +648,18 @@ class ResBlockCondition(ResBlock):
             round(in_channels * expand_ratio) if mid_channels is None else mid_channels
         )
         cond_layer = nn.Sequential(
-            create_conv2d(cond_channels, out_channels, kernel_size=1),
+            create_conv2d(cond_channels, mid_channels, kernel_size=1),
             create_norm_act_layer(
-                "layernorm2d", out_channels, act_layer="silu", eps=1e-6
+                "layernorm2d", mid_channels, act_layer="silu", eps=1e-6
             ),
             create_conv2d(
-                out_channels, out_channels * 3, kernel_size=3, groups=out_channels
+                mid_channels, mid_channels * 2, kernel_size=3, groups=mid_channels
             ),
         )
         self.conv2 = ConditionalBlock(
             self.conv2,
             cond_layer,
-            condition_types="modulate_3",
+            condition_types="adaln2",
             process_cond_before="interpolate_as_x",
         )
 
@@ -690,6 +720,7 @@ class GLUResBlock(nn.Module):
             act_func=act_func[1],
         )
 
+    @_compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x) * self.conv_gate(x)
         x = self.conv2(x)
