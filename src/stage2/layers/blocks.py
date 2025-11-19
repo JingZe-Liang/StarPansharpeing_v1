@@ -20,7 +20,6 @@ from timm.layers import (
     get_norm_layer,
 )
 from timm.layers.drop import DropPath
-from timm.models.convnext import ConvNeXtBlock
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
@@ -614,6 +613,7 @@ class EfficientViTBlock(nn.Module):
     def __init__(
         self,
         in_channels: int,
+        out_channels: int | None = None,
         heads_ratio: float = 1.0,
         dim=32,
         expand_ratio: float = 4,
@@ -626,6 +626,9 @@ class EfficientViTBlock(nn.Module):
         **kwargs,
     ):
         super(EfficientViTBlock, self).__init__()
+
+        # Context Module
+        # keep the output channels same as input channels
         if context_module == "LiteMLA":
             self.context_module = ResidualBlock(
                 LiteMLA(
@@ -647,17 +650,16 @@ class EfficientViTBlock(nn.Module):
                     heads_ratio=heads_ratio,
                     dim=dim,
                     norm=(None, norm),
-                    norm_qk=norm_qk,
                 ),
                 IdentityLayer(),
             )
         elif context_module == "Spatial2DNAT":
+            # Spatial2DNAT has residual already
             self.context_module = Spatial2DNATBlock(
                 dim=in_channels,
                 qk_norm=None if not norm_qk else "layernorm2d",
                 **kwargs,
             )
-            # local module should be identity usually
         else:
             raise ValueError(f"context_module {context_module} is not supported")
 
@@ -688,15 +690,25 @@ class EfficientViTBlock(nn.Module):
         else:
             raise NotImplementedError(f"local_module {local_module} is not supported")
 
+        out_channels = out_channels or in_channels
+        self.proj = nn.Conv2d(in_channels, out_channels, 1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.context_module(x)
         x = self.local_module(x)
-        return x
+        return self.proj(x)
 
 
 # *==============================================================
 # * Interface
 # *==============================================================
+
+
+def _create_conv_out_blk(in_channels: int, out_channels: int):
+    if in_channels == out_channels:
+        return nn.Identity()
+    else:
+        return nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
 
 def build_block(
@@ -706,6 +718,7 @@ def build_block(
     norm: Optional[str],
     act: Optional[str],
     cond_channels: Optional[int] = None,
+    **block_kwargs,
 ) -> nn.Module:
     """
     Composition of ResidualBlock with different main and shortcut blocks.
@@ -713,8 +726,9 @@ def build_block(
     cfg = block_type.split("@")
     block_name = cfg[0]
     if block_name == "ResBlock":
-        assert in_channels == out_channels
+        expand_ratio = int(cfg[1]) if len(cfg) > 1 else 1
         if cond_channels is not None:
+            # ResBlock@2
             main_block = ResBlockCondition(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -724,6 +738,7 @@ def build_block(
                 use_bias=(True, False),
                 norm=(None, norm),
                 act_func=(act, None),
+                expand_ratio=expand_ratio,
             )
         else:
             main_block = ResBlock(
@@ -734,10 +749,13 @@ def build_block(
                 use_bias=(True, False),
                 norm=(None, norm),
                 act_func=(act, None),
+                expand_ratio=expand_ratio,
             )
-        block = ResidualBlock(main_block, IdentityLayer())
+        block = ResidualBlock(
+            main_block,
+            _create_conv_out_blk(in_channels, out_channels),
+        )
     elif block_name == "GLUResBlock":
-        assert in_channels == out_channels
         # GLUResBlock@3
         main_block = GLUResBlock(
             in_channels=in_channels,
@@ -749,9 +767,11 @@ def build_block(
             norm=(None, norm),
             act_func=(act, None),
         )
-        block = ResidualBlock(main_block, IdentityLayer())
+        block = ResidualBlock(
+            main_block,
+            _create_conv_out_blk(in_channels, out_channels),
+        )
     elif block_name == "ChannelAttentionResBlock":
-        assert in_channels == out_channels
         # ChannelAttentionResBlock@SEModule@2
         main_block = ChannelAttentionResBlock(
             in_channels=in_channels,
@@ -764,9 +784,11 @@ def build_block(
             channel_attention_operation=cfg[1],
             channel_attention_position=int(cfg[2]) if len(cfg) > 2 else 2,
         )
-        block = ResidualBlock(main_block, IdentityLayer())
+        block = ResidualBlock(
+            main_block,
+            _create_conv_out_blk(in_channels, out_channels),
+        )
     elif block_name == "GLUMBConv":
-        assert in_channels == out_channels
         # GLUMBConv@4
         main_block = GLUMBConv(
             in_channels=in_channels,
@@ -776,16 +798,25 @@ def build_block(
             norm=(None, None, norm),
             act_func=(act, act, None),
         )
-        block = ResidualBlock(main_block, IdentityLayer())
-    elif block_name == "EViTGLU":
-        assert in_channels == out_channels
-        block = EfficientViTBlock(
-            in_channels, norm=norm, act_func=act, local_module="GLUMBConv", scales=()
+        block = ResidualBlock(
+            main_block,
+            _create_conv_out_blk(in_channels, out_channels),
         )
-    elif block_name == "EViTNormQKGLU":
-        assert in_channels == out_channels
+    elif block_name == "EViTGLU":
+        # assert in_channels == out_channels
         block = EfficientViTBlock(
             in_channels,
+            out_channels,
+            norm=norm,
+            act_func=act,
+            local_module="GLUMBConv",
+            scales=(),
+        )
+    elif block_name == "EViTNormQKGLU":
+        # assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels,
+            out_channels,
             norm=norm,
             act_func=act,
             local_module="GLUMBConv",
@@ -793,27 +824,34 @@ def build_block(
             norm_qk=True,
         )
     elif block_name == "EViTS5GLU":
-        assert in_channels == out_channels
-        block = EfficientViTBlock(
-            in_channels, norm=norm, act_func=act, local_module="GLUMBConv", scales=(5,)
-        )
-    elif block_name == "ViTGLU":
-        assert in_channels == out_channels
+        # assert in_channels == out_channels
         block = EfficientViTBlock(
             in_channels,
+            out_channels,
+            norm=norm,
+            act_func=act,
+            local_module="GLUMBConv",
+            scales=(5,),
+        )
+    elif block_name == "ViTGLU":
+        # assert in_channels == out_channels
+        block = EfficientViTBlock(
+            in_channels,
+            out_channels,
             norm=norm,
             act_func=act,
             context_module="SoftmaxAttention",
             local_module="GLUMBConv",
         )
     elif block_name == "ViTNAT":
-        assert in_channels == out_channels
+        # assert in_channels == out_channels
         # ViTNAT@8@1@1@8@4
         if len(cfg) == 1:
             # k_size, stride, dilation, n_heads, ffn_ratio
             cfg = ["ViTNAT", "8", "1", "1", "8", "4"]  # defaults
         block = EfficientViTBlock(
             in_channels,
+            out_channels,
             norm=norm,
             act_func=act,
             context_module="Spatial2DNAT",
@@ -825,10 +863,12 @@ def build_block(
             ffn_ratio=int(cfg[5]),
         )
     elif block_name == "ConvNext":
+        from timm.models.convnext import ConvNeXtBlock
+
         # ConvNext@7@4@1
         block = ConvNeXtBlock(
             in_channels,
-            in_channels,
+            out_channels,
             kernel_size=int(cfg[1]),
             stride=1,
             mlp_ratio=float(cfg[2]),

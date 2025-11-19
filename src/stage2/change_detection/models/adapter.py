@@ -18,16 +18,16 @@ from timm.layers.weight_init import lecun_normal_
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
 
-from ...layers.natblocks import Spatial2DNatStage
-from ...layers.vitamin_conv import MbConvSequentialCond
+from ...layers.dinov3_adapter import DINOv3_Adapter
+from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage
 
-sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
-from dinov3.eval.segmentation.models.backbone.dinov3_adapter import (  # type: ignore
-    DINOv3_Adapter,
-)
-from dinov3.models.vision_transformer import (  # type: ignore
-    DinoVisionTransformer,
-)
+# sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
+# from dinov3.eval.segmentation.models.backbone.dinov3_adapter import (  # type: ignore
+#     DINOv3_Adapter,
+# )
+# from dinov3.models.vision_transformer import (  # type: ignore
+#     DinoVisionTransformer,
+# )
 
 
 def initialize(module) -> None:
@@ -433,7 +433,7 @@ class UNetDecoder(nn.Module):
         conv_bias: Union[bool, None] = None,
         deep_supervision: bool = False,
         has_latent_condition: bool = False,
-        block_type: str = "mbconv",
+        block_types: list[str] = ["mbconv", "mbconv", "mbconv", "mbconv"],
         block_kwargs: dict = {},
     ):
         """
@@ -491,6 +491,7 @@ class UNetDecoder(nn.Module):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
+            block_type = block_types[s - 1]
             transpconvs.append(
                 nn.ConvTranspose2d(
                     input_features_below,

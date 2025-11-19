@@ -21,14 +21,13 @@ from src.utilities.config_utils import (
 from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
-from ...layers.blocks import Spatial2DNATBlock
+from ...layers.blocks import MbConvLNBlock, Spatial2DNATBlock
 from .adapter import (
     DINOv3_Adapter,  # type: ignore
     DINOv3EncoderAdapter,
     UNetDecoder,
     initialize,
 )
-from .vitamin_conv import MbConvLNBlock
 
 DINOv3_INTERACTION_INDEXES = {
     "dinov3_vits16": [2, 5, 8, 11],

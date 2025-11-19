@@ -55,7 +55,11 @@ from .resample import create_downsample_layer, create_upsample_layer
 from .dinov3_adapter import DINOv3_Adapter, DINOv3_Adapter_MS_Down
 
 # Stages
-from .vitamin_conv import MbConvSequentialCond, MbConvStagesCond
-from .natblocks import Spatial2DNatStage
+from .stages import (
+    MbConvSequentialCond,
+    MbConvStagesCond,
+    Spatial2DNatStage,
+    ResBlockStage,
+)
 
 from .utils import pack_one, unpack_one

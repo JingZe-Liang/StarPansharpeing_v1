@@ -199,8 +199,7 @@ class Spatial2DNatStage(_BasicStages):
             )
             blocks = [
                 block_cls(
-                    in_channels=stage_in_chs if i == 0 else dim,
-                    out_channels=dim,
+                    dim=stage_in_chs if i == 0 else dim,
                     cond_chs=cond_width,
                     **block_kwargs,
                 )
@@ -276,7 +275,7 @@ class ResBlockStage(_BasicStages):
         act_layer: str = "relu6",
     ) -> nn.Module:
         blk = build_block(
-            "ResBlock",
+            "ResBlock@2",  # expand_ratio=2
             in_chs,
             out_chs,
             norm=norm_layer,
@@ -285,3 +284,63 @@ class ResBlockStage(_BasicStages):
         )
 
         return blk
+
+
+def __test_resblock_stage():
+    print("------ Test ResBlockStage ------")
+    stage = ResBlockStage(
+        3,
+        [180, 180, 180],
+        [1, 1, 1],
+        4,
+        32,
+    )
+    x = th.randn(1, 3, 16, 16)
+    cond = th.randn(1, 4, 16, 16)
+    y = stage(x, cond)
+    print(y.shape)
+
+
+def __test_stages():
+    """
+    Simple test function for basic validation of stage implementations.
+
+    For comprehensive testing, run the pytest tests in test_stages.py:
+
+    ```bash
+    pytest src/stage2/layers/test_stages.py -v
+    ```
+    """
+    import torch
+
+    print("Running basic stage validation...")
+
+    # Test basic functionality
+    x = torch.randn(1, 32, 16, 16)
+    stage = MbConvSequentialCond(
+        in_chans=32,
+        embed_dim=[64, 128],
+        depths=[1, 1],
+        cond_width=None,
+        out_chans=64,
+    )
+
+    stage.eval()
+    with torch.no_grad():
+        output = stage(x)
+
+    assert output.shape[0] == 1
+    assert output.shape[1] == 64
+    print("✓ Basic stage validation passed")
+
+    print("Run `pytest src/stage2/layers/test_stages.py -v` for comprehensive tests")
+
+
+if __name__ == "__main__":
+    """
+    LOVELY_TENSORS=1  python -m src.stage2.layers.stages
+    """
+    from loguru import logger
+
+    with logger.catch():
+        __test_resblock_stage()

@@ -5,7 +5,7 @@ from einops import rearrange
 from jaxtyping import Float
 from loguru import logger
 from omegaconf import OmegaConf
-from timm.layers import get_act_layer, get_norm_layer
+from timm.layers import create_conv2d, get_act_layer, get_norm_layer
 from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
@@ -249,9 +249,10 @@ class TokenizerHybridUNet(nn.Module):
         # Change detection stages
         self.cd_stage = MultiscaleMBConvSkipsStage(self.cfg.cd_stage)
         latent_chans = self.cfg.tokenizer.cnn_cfg.model.latent_channels
-        self.latent_fuse = MbConvLNBlock(
-            in_chs=latent_chans * 2, out_chs=latent_chans, cond_chs=None
-        )
+        # self.latent_fuse = MbConvLNBlock(
+        #     in_chs=latent_chans * 2, out_chs=latent_chans, cond_chs=None
+        # )
+        self.latent_fuse = create_conv2d(latent_chans * 2, latent_chans, 1)
         logger.info(f"Created change detection stage")
 
         # Create decoder
@@ -263,6 +264,7 @@ class TokenizerHybridUNet(nn.Module):
             self.adapter_cfg.depth_per_stage,
             nonlin_first=self.adapter_cfg.act_first,
             deep_supervision=cfg.deep_supervision,
+            block_types=["nat", "nat", "mbconv", "mbconv"],
         )
         logger.info(f"Created Unet decoder with 4 stages")
 
@@ -424,6 +426,7 @@ def __test_model():
     dl = get_fast_test_hyperspectral_data("fmow_RGB")
     sample = next(iter(dl))
     x1 = sample["img"].cuda()
+    x1 = F.interpolate(x1, (512, 512), mode="bilinear", align_corners=False)
     x2 = x1
 
     cfg = _create_default_cfg()
@@ -439,6 +442,8 @@ def __test_model():
         with torch.no_grad():
             y = unet(x1, x2)
             # y_recon = unet.encoder.dinov3_adapter.backbone(x)
+    print(y.shape)
+
     # from torchmetrics import PeakSignalNoiseRatio
 
     # logger.info(f"Input shape: {x.shape}")
