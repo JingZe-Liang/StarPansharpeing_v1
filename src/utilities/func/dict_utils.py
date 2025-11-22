@@ -1,6 +1,8 @@
 from collections import defaultdict
 from typing import Any, Literal
 
+from easydict import EasyDict as edict
+
 
 def keys_in_dict(
     keys: str | list[str],
@@ -69,3 +71,12 @@ def parse_dict_keys(d: dict, sep=".") -> dict[str, dict[str, Any]]:
             out = defaultdict(dict)
         out[prefix][orig_k] = v
     return out
+
+
+def set_defaults(cfg: dict | None, defaults: dict[str, Any], use_edict=True):
+    """set defaults for dict/edict config"""
+    if cfg is None:
+        cfg = edict() if use_edict else {}
+    for k, v in defaults.items():
+        cfg.setdefault(k, v)
+    return edict(cfg) if use_edict else dict(cfg)

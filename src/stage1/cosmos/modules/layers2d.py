@@ -32,11 +32,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.layers import create_conv2d, create_norm_layer
-from timm.layers.layer_scale import LayerScale2d
+from loguru import logger
+from timm.layers import LayerScale2d, create_conv2d, create_norm_layer
 from typing_extensions import deprecated
-
-from src.utilities.logging import log_print
 
 from .blocks import (
     AdaptiveInputConvLayer,
@@ -56,6 +54,7 @@ from .blocks import (
 )
 from .patching import Patcher, UnPatcher
 from .resample import build_downsample_block, build_upsample_block
+from .utils import AdaptiveGroupNorm
 
 
 def is_list_tuple(x: Any) -> bool:
@@ -225,16 +224,16 @@ class Encoder(nn.Module):
         self.moe_type = moe_type
         self.block_name = block_name
 
-        log_print(
+        logger.info(
             f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, "
             f"use activation checkpoint: {act_checkpoint}"
         )
-        log_print(f"[Encoder]: z_channels: {z_channels}, patch size: {patch_size}")
-        log_print(f"[Encoder]: Using block name: {block_name}")
+        logger.info(f"[Encoder]: z_channels: {z_channels}, patch size: {patch_size}")
+        logger.info(f"[Encoder]: Using block name: {block_name}")
 
         # Patcher.
         self.patcher = Patcher(patch_size, patch_method)
-        log_print(
+        logger.info(
             f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, "
             f"patch_method: {patch_method}"
         )
@@ -309,7 +308,7 @@ class Encoder(nn.Module):
                 block.append(res_block)
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    log_print(f"[Encoder]: use attn at {curr_res}")
+                    logger.info(f"[Encoder]: use attn at {curr_res}")
                     attn.append(
                         make_attn(
                             block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
@@ -431,8 +430,8 @@ class Decoder(nn.Module):
         **ignore_kwargs,
     ):
         super().__init__()
-        self.num_resolutions = len(channels_mult)
         self.num_res_blocks = num_res_blocks
+        self.num_resolutions = len(channels_mult)
         self.moe_n_experts = moe_n_experts
         self.moe_n_selected = moe_n_selected
         self.moe_n_shared_experts = moe_n_shared_experts
@@ -440,12 +439,12 @@ class Decoder(nn.Module):
         self.moe_type = moe_type
         self.block_name = block_name
 
-        log_print(
+        logger.info(
             f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, "
             f"use activation checkpoint: {act_checkpoint}"
         )
-        log_print(f"[Decoder]: z_channels: {z_channels}")
-        log_print(f"[Decoder]: Using block type: {block_name} ")
+        logger.info(f"[Decoder]: z_channels: {z_channels}")
+        logger.info(f"[Decoder]: Using block type: {block_name} ")
 
         # UnPatcher.
         self.patch_size = patch_size
@@ -462,7 +461,7 @@ class Decoder(nn.Module):
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        log_print(
+        logger.info(
             "Working with z of shape {} = {} dimensions.".format(
                 self.z_shape, np.prod(self.z_shape)
             )
@@ -514,7 +513,7 @@ class Decoder(nn.Module):
                 block.append(block_fn(block_in, block_out, dropout, curr_res))
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    log_print(f"[Decoder]: use attn at {curr_res}")
+                    logger.info(f"[Decoder]: use attn at {curr_res}")
                     attn.append(
                         make_attn(
                             block_in,
@@ -542,7 +541,7 @@ class Decoder(nn.Module):
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
 
         if isinstance(out_channels, list):
-            log_print("[Decoder]: use diffbands input")
+            logger.info("[Decoder]: use diffbands input")
             out_ch = [c * patch_size * patch_size for c in out_channels]
             conv_out = DiffBandsInputConvOut(
                 band_lst=out_ch, hidden_dim=block_in, basic_module=conv_out_module
@@ -565,20 +564,30 @@ class Decoder(nn.Module):
         self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
         if _wrap_fsdp_last_layer:
             self.conv_out = FSDPNoWarpModule(conv_out)
-            log_print("[Decoder] use FSDPNoWarpModule")
+            logger.info("[Decoder] use FSDPNoWarpModule")
         else:
             self.conv_out = conv_out
 
     @no_type_check
-    def forward(self, z: torch.Tensor, out_channels: int | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        z: torch.Tensor,
+        out_channels: int | None = None,
+        ret_all_res_features: bool = False,
+    ) -> torch.Tensor:
+        all_res_feats = [] if ret_all_res_features else None
+
+        # Conv in
         h = self.conv_in(z)
 
         # middle
         h = self.mid.block_1(h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
+        if ret_all_res_features:
+            all_res_feats.append(h)
 
-        # upsampling
+        # Main blocks
         # decoder.up.0.block.2.conv1.weight
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
@@ -587,13 +596,21 @@ class Decoder(nn.Module):
                     h = self.up[i_level].attn[i_block](h)
             if i_level >= (self.num_resolutions - self.num_upsamples):
                 h = self.up[i_level].upsample(h)
+                if ret_all_res_features:
+                    all_res_feats.append(h)
 
+        # Norm output
         h = self.norm_out(h)
         h = nonlinearity(h)
+
+        # Conv out
         assert out_channels is not None, "out_channels should be provided"
         conv_out_h = (h, out_channels * self.patch_size * self.patch_size)
         h = self.conv_out(*conv_out_h)
         h = self.unpatcher(h)
+
+        if ret_all_res_features:
+            return h, all_res_feats + [h]  # per-resolution features
         return h
 
     def get_last_layer(self):
@@ -606,7 +623,6 @@ class Decoder(nn.Module):
 # *==============================================================
 # * Generative Decoder
 # *==============================================================
-from src.stage1.cosmos.modules.utils import AdaptiveGroupNorm
 
 
 class GenerativeDecoder(Decoder):
@@ -812,7 +828,7 @@ class DecoderDiff(nn.Module):
         self.z_cfg_drop = z_cfg_drop
         self.out_channels = out_channels
 
-        log_print(
+        logger.info(
             f"[Decoder]: use activation checkpoint: {act_checkpoint}\n"
             f"diffusion conditioning inject strategy: {diff_cond_inject_strategy}\n"
             f"use_residual_factor: {use_residual_factor}",
@@ -831,7 +847,7 @@ class DecoderDiff(nn.Module):
         z_res = resolution // spatial_compression
         self.z_shape = (1, z_channels, z_res, z_res)
         curr_res = resolution // decoder_patch_size
-        log_print(
+        logger.info(
             "Working with z of shape {} = {} dimensions.".format(
                 self.z_shape, np.prod(self.z_shape)
             )
@@ -846,7 +862,7 @@ class DecoderDiff(nn.Module):
             # out_channels * decoder_patch_size * decoder_patch_size
             self.num_upsamples = 0
         elif self.unpatch_type == "upsample":
-            log_print(
+            logger.info(
                 f"[Decoder Unpatcher]: unpatcher is set to use upsample, may cause GPU OOM",
                 "warning",
             )
@@ -909,7 +925,7 @@ class DecoderDiff(nn.Module):
             mid_blk_2_cls = ResnetBlock
         elif diff_cond_inject_strategy == "inject_full":
             mid_blk_2_cls = block_class
-            log_print(
+            logger.warning(
                 f"[Decoder Block]: diffusion condition injection strategy is {diff_cond_inject_strategy}, "
                 "it will inject condition in every residual block, may cause GPU usage high",
                 "warning",
@@ -960,7 +976,7 @@ class DecoderDiff(nn.Module):
             ):  # [2,1] upsample, 1
                 # last layers upsample
                 up.upsample = UpsampleRepeatConv(block_in)
-                log_print(f"upsample {i_level}")
+                logger.info(f"upsample {i_level}")
                 curr_res = curr_res * 2
 
             # [128*4*4*2, 128*4, 128*2]
@@ -1360,7 +1376,7 @@ if __name__ == "__main__":
             if optimize:
                 optimizer.zero_grad()
                 loss = F.mse_loss(recon, img)
-                log_print(f"<red>loss: {loss.item():.4f}</>")
+                logger.info(f"<red>loss: {loss.item():.4f}</>")
                 accelerator.backward(loss)
                 optimizer.step()
 

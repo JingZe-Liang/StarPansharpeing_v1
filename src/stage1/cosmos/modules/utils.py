@@ -260,9 +260,7 @@ def unit_magnitude_normalize(x, dim=None, eps=1e-4):
 
 
 def Normalize(
-    in_channels,
-    norm_type: str | None = "gn",
-    **norm_kwargs,
+    in_channels, norm_type: str | None = "gn", **norm_kwargs
 ) -> nn.Module | Callable:
     if norm_type == "gn":
         return torch.nn.GroupNorm(

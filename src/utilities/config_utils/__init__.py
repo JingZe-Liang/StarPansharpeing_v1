@@ -9,6 +9,7 @@ from .dict_config import (
     dump_config,
     flatten_dict,
     load_config_file,
+    set_defaults,
     set_struct_recursively,
 )
 from .to_container import (
