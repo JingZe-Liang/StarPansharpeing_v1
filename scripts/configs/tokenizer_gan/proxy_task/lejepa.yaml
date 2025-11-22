@@ -1,0 +1,9 @@
+task: ijepa
+
+aug:
+  n_local: 6
+  n_global: 2
+
+sigreg:
+  knots: 17
+  rnd_proj_dim: 128

@@ -35,7 +35,7 @@ from .cosmos_tokenizer import (
 from .modules import blocks as cosmos_blocks
 from .modules.blocks import AdaptiveOutputConvLayer
 from .modules.layers2d import Decoder, Encoder
-from .modules.naflex import NaFlexVitCfg, Transformer
+from .modules.naflex import IJEPANaFlexViT, NaFlexVitCfg, Transformer
 from .modules.proj import build_mlp
 
 
@@ -124,14 +124,24 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     def _build_transformers(self, cnn_cfg, trans_enc_cfg, trans_dec_cfg=None):
         # cnn_cfg is already set as self.cnn_cfg in __init__
         # Transformer Encoder and Decoder
-        self.semantic_enc_transformer = Transformer(self.trans_enc_cfg)
+        enc_model_cls = Transformer
+        dec_model_cls = Transformer
+        if trans_enc_cfg.pretrained_type in ("ijepa", "lejepa"):
+            enc_model_cls = IJEPANaFlexViT
+        if trans_dec_cfg is not None and trans_dec_cfg.pretrained_type in (
+            "ijepa",
+            "lejepa",
+        ):
+            dec_model_cls = IJEPANaFlexViT
+
+        self.semantic_enc_transformer = enc_model_cls(self.trans_enc_cfg)
         self.semantic_enc_transformer.set_grad_checkpointing(self.grad_checkpointing)
         logger.info(f"Init semantic transformer encoder.")
 
         self.semantic_transformer_dec = None
         self.st_skip_sem_decoder = False
         if trans_dec_cfg is not None:
-            self.semantic_transformer_dec = Transformer(self.trans_dec_cfg)
+            self.semantic_transformer_dec = dec_model_cls(self.trans_dec_cfg)
             self.semantic_transformer_dec.set_grad_checkpointing(
                 self.grad_checkpointing
             )
@@ -274,12 +284,53 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             interp_feats.append(f)
         return interp_feats
 
-    def encode(self, x, use_quantizer=None, get_intermediate_features=False):
+    def encode_ijepa(self, x, use_quantizer=None, jepa_masks=None, **_ignored_kwargs):
+        """
+        x -> CNN (with full image) -> transformer (with unmasked patches) -> 1d tokens.
+        no quantization, no quant_conv, no other projections.
+        """
+        # Low-level encoder
+        z_low_lvl = self.encoder.encoder(x)
+
+        # Semantic encoder
+        z_semantic = self.semantic_enc_transformer(
+            z_low_lvl, jepa_masks=jepa_masks, output_type="1d"
+        )
+
+        # no quant_conv here
+        return z_semantic
+
+    def encode_lejepa(self, x, use_quantizer=None, **_ignored_kwargs):
+        """
+        LeJEPA encoding with augmentated global and local views.
+        """
+
+        # Low-level encoder
+        z_low_lvl = self.encoder.encoder(x)
+
+        # Semantic encoder
+        # z_low_lvl -> transformer backbone -> projector -> z_proj
+        z_proj = self.semantic_enc_transformer(
+            z_low_lvl, jepa_masks=None, output_type="1d"
+        )
+
+        return z_proj
+
+    def encode(
+        self,
+        x,
+        use_quantizer=None,
+        get_intermediate_features=False,
+    ):
         """Encode the image into latent.
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
+
+        x: (B, C, H, W) - Image
+        use_quantizer:  Whether to use the quantizer. If None, use the default setting.
+        get_intermediate_features: Whether to return the intermediate features for distillation.
         """
-        # Low-level encoder
+        ############ Low-level encoder
         cache_low_lvl = None
         last_hidden_cached = self.cache_layers["low_level"] == -1
         if self.training or get_intermediate_features:
@@ -294,7 +345,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         else:
             z_low_lvl = self.encoder.encoder(x)
 
-        # Forward semantic transformer encoder
+        ########### Forward semantic transformer encoder
         cache_semantic = None
         if not self.training and not get_intermediate_features:  # is eval
             z_semantic = self.semantic_enc_transformer(z_low_lvl)
@@ -303,16 +354,19 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             cache_semantic = z_semantic
         else:
             # forward the intermediate features
-            z_semantic, cache_semantic = (
-                self.semantic_enc_transformer.forward_intermediates(
-                    z_low_lvl,
-                    indices=self.cache_layers["semantic"],
-                    return_prefix_tokens=False,
-                    norm=True,
-                    output_fmt="NCHW",
-                    output_dict=False,
-                )
+            _model_kwargs = dict(
+                x=z_low_lvl,
+                indices=self.cache_layers["semantic"],
+                return_prefix_tokens=False,
+                norm=True,
+                output_fmt="NCHW",
+                output_dict=False,
             )
+            # forward intermediates does not support jepa masks
+            z_semantic, cache_semantic = (
+                self.semantic_enc_transformer.forward_intermediates(**_model_kwargs)
+            )
+
             # Add head forward
             z_semantic = z_semantic[:, self.trans_enc_cfg.reg_tokens :]
             z_semantic = self.semantic_enc_transformer._forward_after_backbone(
@@ -322,7 +376,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             # Stack the intermidates features: [n_cache_layers, b, c, h, w]
             # cache_semantic = torch.stack(cache_semantic, dim=0)
 
-        # Apply CNN encoder - semantic transformer encoder - quant conv
+        ######## Apply CNN encoder - semantic transformer encoder - quant conv
+        # Semantic token -> quant conv -> latent
         h = self.encoder.quant_conv(z_semantic)
 
         # Quantization
@@ -339,9 +394,10 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             # NOTE: if quantizer is used, the aug z is not applied
             return h, q_loss, loss_breakdown
 
-        # z augmentions
+        ##### z augmentions (noise adding or channel dropping).
         h = self.latent_aug(maybe_q_ret)
-        return h
+
+        return h, z_semantic
 
     def decode(
         self,
@@ -349,7 +405,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
         clamp=False,
     ):
-        """Decode the latent into the corresponding channels image.
+        """
+        Decode the latent into the corresponding channels image.
         Output the reconstructed image or recon, quantizer loss and loss breakdowns.
         """
         q_loss = loss_breakdown = None
@@ -539,6 +596,18 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                     "sem_repa_proj": sem_z_proj,
                 }
             )
+
+    def _set_grad_zero_for_ddp(self, starts_with: list[str] | None = None):
+        """Set the gradients to zero for DDP training.
+        starts_with: e.g., ['decoder', 'semantic_transformer_dec']
+        """
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if starts_with is None or any(
+                    name.startswith(sw) for sw in starts_with
+                ):
+                    if param.requires_grad and param.grad is None:
+                        param.grad = torch.zeros_like(param)
 
 
 def test_model_forward_backward():

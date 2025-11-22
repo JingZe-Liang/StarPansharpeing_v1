@@ -175,6 +175,58 @@ class NestChannelDrop(nn.Module):
         return z, mask
 
 
+def _sample_t_distributional(
+    bs: int,
+    device: str | torch.device = "cuda",
+    noise_type_cfg: str = "beta_1_3",
+    timestep_range: tuple[int, int] = (0, 1),
+):
+    """Sample a latent noising time-step in specific distribution"""
+    # NOTE: helper sub-functions are defined below; this function only parses the string and dispatches.
+    # Output shape: (bs, 1, 1, 1); value range depends on distribution.
+
+    # Backward compatibility: map patterns like "exp_0.2" to "exp_max_0.2_lambda_5"
+    if noise_type_cfg.startswith("exp_") and not noise_type_cfg.startswith("exp_max_"):
+        _val = float(noise_type_cfg.split("_")[1])
+        noise_type_cfg = f"exp_max_{_val}_lambda_5"
+
+    # Uniform in [0, max_val]
+    elif noise_type_cfg.startswith("uniform_max_"):
+        max_val = float(noise_type_cfg.split("_")[-1])
+        t = torch.rand((bs,), device=device) * max_val
+
+    # Truncated exponential on [0, T]
+    elif noise_type_cfg.startswith("exp_max_"):
+        parts = noise_type_cfg.split("_")
+        # exp_max_{T} or exp_max_{T}_lambda_{lam}
+        T = float(parts[2])
+        lam = 5.0
+        if len(parts) >= 5 and parts[3] == "lambda":
+            lam = float(parts[4])
+
+        u = torch.rand((bs,), device=device)
+        exp_term = torch.exp(torch.tensor(-lam * T, device=device))
+        t = -torch.log1p(-u * (1.0 - exp_term)) / lam
+
+    # Beta(a, b) scaled to [0,1]
+    elif noise_type_cfg.startswith("beta_"):
+        parts = noise_type_cfg.split("_")
+        a = float(parts[1])
+        b = float(parts[2])
+        dist = torch.distributions.Beta(
+            torch.tensor(a, device=device),
+            torch.tensor(b, device=device),
+        )
+        t = dist.sample((bs))
+        return t
+
+    # Default: standard normal, absolute value then clamp to [0,1] for stability
+    else:
+        t = torch.abs(torch.rand((bs,), device=device))
+
+    return t
+
+
 # * --- Network utilities --- #
 
 
@@ -313,7 +365,6 @@ class ContinuousTokenizerConfig:
     hook_module: str = "decoder.decoder.mid.block_2"
     vf_on_z_or_module: str = "module"
     dino_feature_dim: int = 1024
-    latent_noise_prob: float = 0.0
     cache_type: str = "h"  # z or h
     # quantizer related
     quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", None
@@ -329,6 +380,8 @@ class ContinuousTokenizerConfig:
     # latent augmented related
     use_channel_drop: bool = False
     channel_drop_config: ChannelDropConfig = field(default_factory=ChannelDropConfig)
+    latent_noise_prob: float = 0.0
+    latent_noise_type: str = "beta_1_5"  # Beta time-step sample distribution
     # model related
     name: str = "ContinuousImageTokenizer"
     model: EncoderDecoderConfig = field(default_factory=lambda: EncoderDecoderConfig())
@@ -365,7 +418,9 @@ class ContinuousImageTokenizer(nn.Module):
         self._hook_module = cfg.hook_module
         self._vf_on_z_or_module = cfg.vf_on_z_or_module
         self._dino_feature_dim = cfg.dino_feature_dim
+        # latent noise probability (fix field name typo: latent_noise_prob)
         self.latent_noise_prob = cfg.latent_noise_prob
+        self.latent_noise_type = cfg.latent_noise_type
         self.use_latent_denoise = self.latent_noise_prob > 0.0
 
         self.cfg = cfg
@@ -388,7 +443,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         self.loading_type = cfg.loading_type
         self.name = cfg.name
-        self.latent_channels = model_cfg.z_channels
+        self.latent_channels = model_cfg.latent_channels
         self.norm_in_quant_conv = cfg.norm_in_quant_conv
 
         self.in_channels_after_patcher = (
@@ -719,10 +774,17 @@ class ContinuousImageTokenizer(nn.Module):
         if random.random() > self.latent_noise_prob:
             return h
 
-        # interpolated noising
         bs = h.size(0)
-        t = torch.randn((bs,)).to(h).view(-1, 1, 1, 1)
+        noise_type_cfg = getattr(self.cfg, "latent_noise_type", "uniform_max_0.3")
+        # sample interpolation factor t
+        t = _sample_t_distributional(
+            bs=bs, device=h.device, noise_type_cfg=noise_type_cfg
+        )
+        t = t.to(h.dtype).view(-1, 1, 1, 1)
+
+        # sample noise
         noise = torch.randn_like(h)
+
         # mask out the dropped channels
         if mask is not None:
             assert mask.shape[1] == h.shape[1], (
@@ -921,12 +983,11 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             return dec
 
-    def forward(self, input: torch.Tensor):
+    def forward(self, input: torch.Tensor, enc_kwargs={}, dec_kwargs={}):
         if cosmos_block.compile_forward_fn and cosmos_block.compile_forward_fn:
             torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
-        latent = self.encode(input)
-        dec = self.decode(latent, input.shape)
-
+        latent = self.encode(input, **enc_kwargs)
+        dec = self.decode(latent, input.shape, **dec_kwargs)
         return dec
 
     # * --- checkpoint loding --- #

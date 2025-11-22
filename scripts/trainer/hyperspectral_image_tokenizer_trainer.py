@@ -16,10 +16,12 @@ import PIL.Image as Image
 import torch
 import torch._functorch.config
 import torch.nn as nn
+import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
+from easydict import EasyDict
 from ema_pytorch import EMA
 from fvcore.nn import parameter_count_table
 from kornia.utils.image import make_grid, tensor_to_image
@@ -38,6 +40,14 @@ from src.data.hyperspectral_loader import (
 )
 from src.stage1.cosmos.inference.utils import (
     load_jit_model_shape_matched,
+)
+from src.stage1.self_supervised import (
+    LeJEPAAugmentation,
+    MaskCollator,
+    SIGReg,
+    apply_masks,
+    lejepa_loss,
+    repeat_interleave_batch,
 )
 from src.stage1.utilities.losses.gan_loss import VQLPIPSWithDiscriminator
 from src.stage1.utilities.train.network import (
@@ -224,17 +234,27 @@ class CosmosHyperspectralTokenizerTrainer:
         self.proxy_model = None
         self.proxy_optim, self.proxy_sched = None, None
         cfg = getattr(self.cfg, "proxy_task", None)
+        self._has_proxy_task = False
         if cfg is None:
             return
 
+        self._has_proxy_task = True
         if cfg.task == "ijepa":
             # Projector
             self.proxy_model = hydra.utils.instantiate(cfg.model)
             self.log_msg(f"Init proxy model for proxy task: {cfg.task}")
+            logger.info(f"Model params: \n{parameter_count_table(self.proxy_model)}")
 
         elif cfg.task == "lejepa":
-            ...
-            raise
+            # Augmentation pipeline
+            self.proxy_aug_pipeline = LeJEPAAugmentation(
+                n_locals=cfg.aug.n_local,
+                n_globals=cfg.aug.n_global,
+                stack=False,
+            )
+            self.proxy_lejepa_sigreg = SIGReg(
+                knots=cfg.sigreg.knots, rnd_proj_dim=cfg.sigreg.rnd_proj_dim
+            )
 
         elif cfg.task == "mae":
             ...
@@ -405,7 +425,7 @@ class CosmosHyperspectralTokenizerTrainer:
             self.ema_encoder = ema_partial(self.tokenizer_encoder).to(self.device)
             self.ema_decoder = ema_partial(self.tokenizer_decoder).to(self.device)
         else:
-            self.ema_tokenizer = ema_partial(self.tokenizer).to(self.device)
+            self.ema_tokenizer: EMA = ema_partial(self.tokenizer).to(self.device)
 
         # Disc need ema?
         self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
@@ -1113,8 +1133,8 @@ class CosmosHyperspectralTokenizerTrainer:
         elif mode == "disc":
             self.ema_vq_disc.update()
 
-        elif model == "proxy":
-            if getattr(self.ema_proxy_model, None) is not None:
+        elif mode == "proxy":
+            if getattr(self, "ema_proxy_model", None) is not None:
                 self.ema_proxy_model.update()
 
         else:
@@ -1124,36 +1144,79 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.proxy_model is None:
             return None
 
+        def _maybe_to_1d(x):
+            if x.ndim == 4:
+                x = x.flatten(2).permute(0, -1, 1)  # BCHW -> BLC
+            return x
+
         cfg = self.cfg.proxy_task
         if cfg.task == "ijepa":
-            from src.stage1.self_supervised import (
-                MaskCollator,
-                apply_masks,
-                repeat_interleave_batch,
-            )
+            # Resize to
+            img_size = tuple(cfg.masks.input_size)
+            x = F.interpolate(x, size=img_size, mode="bilinear")
 
             # Masks
             mask_collator = MaskCollator(**to_cont(cfg.masks))
             x, masks_enc, masks_pred = mask_collator(x)
+            masks_enc = [m.to(x.device, torch.int32) for m in masks_enc]
+            masks_pred = [m.to(x.device, torch.int32) for m in masks_pred]
 
             # Target
             with self.accelerator.autocast():
                 # Target
                 with torch.no_grad():
-                    h = self.ema_tokenizer(x)
-                    h = torch.layer_norm(h, (h.size(-1),))
-                    B = len(h)
-                    h = apply_masks(h, masks_pred)
-                    h_tgt = repeat_interleave_batch(h, B, repeat=len(masks_enc))
-                    print(h_tgt.shape)
+                    # z is the tokenizer's pre-quant-conv hidden state
+                    z = self.ema_tokenizer.ema_model.encode_ijepa(x)  # type: ignore
+                    z = _maybe_to_1d(z)
+                    z = torch.layer_norm(z, (z.size(-1),))
+                    B = len(z)
+                    z = apply_masks(z, masks_pred)
+                    h_tgt = repeat_interleave_batch(z, B, repeat=len(masks_enc))
 
                 # Context
-                h_ctx = self.tokenizer(x, jepa_masks=masks_enc)
+                h_ctx = self.tokenizer.encode_ijepa(x, jepa_masks=masks_enc)  # type: ignore
+                h_ctx = _maybe_to_1d(h_ctx)
                 h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
 
                 # Loss
                 loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
-            return loss
+            return EasyDict(
+                {"proxy_loss": loss, "proxy_loss_breakdowns": {"ijepa_loss": loss}}
+            )
+
+        elif cfg.task == "lejepa":
+            # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
+
+            # Resize to
+            img_size = 224  # FIXME: flexible at cfg
+            x = F.interpolate(x, size=img_size, mode="bilinear")
+
+            # Augmentation pipeline
+            # Global and local views has different size
+            global_views: list[torch.Tensor]
+            global_views, local_views = self.proxy_aug_pipeline(x)
+            global_x = torch.cat(global_views, dim=0)
+
+            # Encoding views
+            assert hasattr(self.tokenizer, "encode_lejepa")
+            with self.accelerator.autocast():
+                global_emb = self.tokenizer.encode_lejepa(global_x)  # type: ignore
+                local_emb = None
+                if local_views is not None:
+                    local_x = torch.cat(local_views, dim=0)
+                    local_emb = self.tokenizer.encode_lejepa(local_x)  # type: ignore
+
+                # Loss
+                loss, breakdowns = lejepa_loss(
+                    global_emb,
+                    local_emb,
+                    sigreg=self.proxy_lejepa_sigreg,
+                    lam=cfg.sigreg.lam,
+                )
+            return EasyDict({"proxy_loss": loss, "proxy_loss_breakdowns": breakdowns})
+
+        else:
+            raise NotImplementedError("Unknown proxy task {cfg.task}")
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
         out_d = {}
@@ -1400,6 +1463,7 @@ class CosmosHyperspectralTokenizerTrainer:
             # add into main loss to backward
             gen_loss = gen_loss + ds_loss
 
+        # additional recovery loss
         if self.use_training_aug and self.aug_pipeline_train_obj == "anti_deg_network":
             assert "aug_x" in tok_dict, "aug_x not in tokenizer output dict"
             assert self.antideg_net is not None, "antideg_net not defined"
@@ -1414,6 +1478,7 @@ class CosmosHyperspectralTokenizerTrainer:
             gen_loss = gen_loss + recovery_loss
             log_losses["recovery_loss"] = recovery_loss.item()
 
+        # step the optimizer and lr scheduler
         if self.accelerator.sync_gradients:
             # backward
             self.tokenizer_optim.zero_grad()
@@ -1455,6 +1520,38 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return disc_loss, log_disc
 
+    def train_proxy_model_step(self, x: torch.Tensor):
+        if not self._has_proxy_task:
+            return None
+
+        out = self.forward_proxy_task(x)
+        # Update the tokenizer and proxy model
+        self.proxy_optim.zero_grad()
+        self.tokenizer_optim.zero_grad()
+
+        self.accelerator.backward(out.proxy_loss)
+        self.gradient_check(self.proxy_model)
+
+        _unwrap_model = self.accelerator.unwrap_model(self.tokenizer)
+        if hasattr(_unwrap_model, "_set_grad_zero_for_ddp"):
+            # else set 'find_unused_parameters' to True
+            _unwrap_model._set_grad_zero_for_ddp()
+
+        self.proxy_optim.step()
+        self.tokenizer_optim.step()
+        self.proxy_sched.step()
+        # no tokenizer lr scheduler step ...
+
+        # EMA update
+        self.ema_update(mode="proxy")
+
+        logger.trace(
+            f"Train step: {self.global_step} | "
+            f"proxy losses: {', '.join(f'{k}: {v.item():.4f}' for k, v in out.proxy_loss_breakdowns.items())}"
+        )
+
+        return out
+
     def train_step(self, batch: dict):
         # torch.autograd.set_detect_anomaly(True)
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
@@ -1482,6 +1579,8 @@ class CosmosHyperspectralTokenizerTrainer:
             else [self.tokenizer]
         )
         _accum_models.append(self.vq_loss_fn.discriminator)
+        if hasattr(self, "proxy_model"):
+            _accum_models.append(self.proxy_model)
 
         with self.accelerator.accumulate(*_accum_models):
             # with torch.autograd.set_detect_anomaly(True):
@@ -1529,13 +1628,15 @@ class CosmosHyperspectralTokenizerTrainer:
                 # train tokenizer and discriminator
                 tokenizer_loss, log_token_loss = self.train_tokenizer_step(x, out_d)
                 disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                # Proxy model train step (pretraining task)
+                proxy_out = self.train_proxy_model_step(x)
 
             # track reconstruction quality
             if check_quality is not None:
                 check_quality(x, out_d["recon"])
 
             logger.trace(
-                f"Train step: {self.global_step}, loss: {tokenizer_loss} - Channels: {x.shape[1]}"
+                f"Train step: {self.global_step}, recon loss: {tokenizer_loss} - Channels: {x.shape[1]}"
             )
 
         self.step_train_state()
@@ -1551,6 +1652,10 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
             self.log_msg(f"[Train Disc]: {_log_disc_losses}")
+            if self._has_proxy_task and proxy_out is not None:
+                self.log_msg(
+                    f"[Train proxy]: <cyan>proxy_loss</>: {proxy_out.proxy_loss.item():.4f}"
+                )
 
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)
@@ -1896,6 +2001,12 @@ class CosmosHyperspectralTokenizerTrainer:
             ema_path / "discriminator",
         )
 
+        if hasattr(self, "ema_proxy_model"):
+            self.accelerator.save_model(
+                self.ema_proxy_model,
+                ema_path / "proxy_model",
+            )
+
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -2075,6 +2186,15 @@ class CosmosHyperspectralTokenizerTrainer:
                     ),
                 )
 
+        # Load proxy model if exists
+        if self._has_proxy_task and hasattr(self, "proxy_model"):
+            if (ema_path / "proxy_model").exists():
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.proxy_model),
+                    ema_path / "proxy_model",
+                    strict=strict,
+                )
+
         # Load quantizer if exists
         if (
             self.use_quantizer
@@ -2185,7 +2305,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "hybrid_cosmos_f16c64p1"
+_key = "ijepa_cosmos_f16c64"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2221,6 +2341,8 @@ _configs_dict = {
     "ldm_vae_f8c16p1": "ldm_vae_f8c16p1",
     # lora finetuning
     "unicosmos_lora_f8c16p4": "unicosmos_lora_finetune_f8c16p4",
+    # ijepa pretraining tokenizer
+    "ijepa_cosmos_f16c64": "ijepa_hybrid_tokenizer_f16c64",
 }
 
 if __name__ == "__main__":

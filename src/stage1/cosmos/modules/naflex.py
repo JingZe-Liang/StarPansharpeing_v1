@@ -16,6 +16,7 @@ from timm.models.naflexvit import (
     NaFlexVit,
     checkpoint,
     create_attention_mask,
+    feature_take_indices,
 )
 from torch import Tensor
 
@@ -23,6 +24,7 @@ from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
 )
+from easydict import EasyDict as edict
 
 from .norm import *  # register custom norms
 
@@ -151,6 +153,11 @@ class NaFlexVitCfg:
     # is low-level feature skip the semantic encoder
     # straight through to CNN decoder
     latent_straight_through_skip: bool = False
+    # enable_jepa: bool = False  # enable jepa training
+    # enable_lejepa: bool = False  # enable lejepa training
+    pretrained_type: Optional[str] = (
+        None  # 'ijepa', 'lejepa', None for no pretrained task
+    )
 
 
 class Transformer(NaFlexVit):
@@ -198,10 +205,15 @@ class Transformer(NaFlexVit):
         )
         return x
 
-    def _forward_after_backbone(self, x, hw):
+    def _forward_after_backbone(self, x, hw: list | None):
         x = self.head(x)
-        if self.cfg.out_2d_latent:
+        if self.cfg.out_2d_latent and hw is not None:
             x = self.unpatchify(x, hw)
+        else:
+            assert hw is None and self.unpatch_size == 1, (
+                f"HW is not None or the unpatch_size is not 1, when force no patchify"
+            )
+            # Let the output be 1D tensor
         return x
 
     def _get_output_shape(self, x):
@@ -212,9 +224,12 @@ class Transformer(NaFlexVit):
             out_hw = hw
         return out_hw
 
-    def forward(self, x):
+    def forward(self, x, output_type: str | None = None, **_ignored_kwargs):
         # Output HW
-        out_hw = self._get_output_shape(x)
+        if output_type in (None, "2d"):
+            out_hw = self._get_output_shape(x)
+        else:
+            out_hw = None  # keep the output to be 1D tensor
 
         # Features
         x = self.forward_features(x)
@@ -235,6 +250,21 @@ class Transformer(NaFlexVit):
 
 
 class IJEPANaFlexViT(Transformer):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        # Build the LeJEPA head
+        if cfg.pretrained_type == "lejepa":
+            self._build_jepa_head(cfg)
+
+    def _build_jepa_head(self, cfg):
+        from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
+
+        self.lejepa_projector = create_lejepa_projector(
+            cfg.embed_dim, cfg.embed_dim, mean_out_hw=False
+        )
+        logger.info("[IJEPA Naflex Transformer]: Build LeJEPA head")
+
     def _prepare_masks(self, masks=None):
         """Ensure the masks are list of tensors"""
         if masks is not None and not isinstance(masks, list):
@@ -242,13 +272,20 @@ class IJEPANaFlexViT(Transformer):
 
         return masks
 
+    def _jepa_apply_masks(self, x, masks):
+        all_x = []
+        for m in masks:
+            mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
+            all_x += [torch.gather(x, dim=1, index=mask_keep)]
+        return torch.cat(all_x, dim=0)
+
     def _forward_embeds(
         self,
         x,
         patch_coord,
         patch_valid,
         attn_mask,
-        masks: List[Tensor] | None,
+        masks: List[Tensor] | None = None,
     ):
         """Forward pass through patch / abs pos / rope pos embeds and patch dropout"""
         naflex_mode = patch_coord is not None
@@ -295,9 +332,9 @@ class IJEPANaFlexViT(Transformer):
                 patch_valid, num_prefix_tokens=self.num_prefix_tokens, dtype=x.dtype
             )
 
-        # JEPA masks
+        ########## Apply JEPA masks
         if masks is not None:
-            x = apply_masks(x, masks=masks)
+            x = self._jepa_apply_masks(x, masks=masks)
             # Rope related, rope is applied in attention module
             if rope_embeds is not None:
                 rope_masked = []
@@ -412,6 +449,7 @@ class IJEPANaFlexViT(Transformer):
         patch_coord: Optional[torch.Tensor] = None,
         patch_valid: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        output_type: str | None = None,
         jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
     ):
         """Forward with JEPA masks support"""
@@ -422,6 +460,7 @@ class IJEPANaFlexViT(Transformer):
         naflex_mode = input_is_dict or patch_coord is not None
         if naflex_mode:
             assert jepa_masks is None, "JEPA does not support naflex mode."
+
             if input_is_dict:
                 # Handle dictionary input from NaFlex collator, dict inputs take priority over args
                 patches = x["patches"]
@@ -438,14 +477,109 @@ class IJEPANaFlexViT(Transformer):
                 patch_valid=patch_valid,
                 patch_coord=patch_coord,
                 attn_mask=attn_mask,
+                ##### ! is naflex mode, do not input the jepa masks
             )
 
             # Pass patches & patch_valid to forward_head for masked pooling
             x = self.forward_head(**features)
         else:
+            # * This is the Tensor input x forward pass, not naflex mode ##################
+
+            if output_type in (None, "2d"):
+                out_hw = self._get_output_shape(x)
+            else:
+                out_hw = None  # keep the output to be 1D tensor
+
+            # Features
             x = self.forward_features(x, jepa_masks=jepa_masks)
-            x = self.forward_head(x)
+            x = cast(torch.Tensor, x)
+            x = x[:, self.cfg.reg_tokens :]
+
+            # Head
+            x = self._forward_after_backbone(x, out_hw)
+
         return x
+
+    def _forward_after_backbone(
+        self, x, hw: list | None
+    ) -> tuple[Tensor, Optional[Dict[str, Tensor]]] | Tensor:
+        # Other output if has pretraining task
+        others = None
+
+        x = self.head(x)
+        if self.cfg.out_2d_latent and hw is not None:
+            x = self.unpatchify(x, hw)
+        else:
+            assert hw is None and self.unpatch_size == 1, (
+                f"HW is not None or the unpatch_size is not 1, when force no patchify"
+            )
+            # Let the output be 1D tensor
+
+            ######### Lejepa projector #########
+            if (
+                hasattr(self, "lejepa_projector")
+                and self.cfg.pretrained_type == "lejepa"
+            ):
+                lejepa_proj = self.lejepa_projector(x)
+                others = edit({"lejepa_proj": lejepa_proj})
+
+        return x, others if others is not None else x
+
+    def forward_intermediates(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        indices: Optional[Union[int, List[int]]] = None,
+        return_prefix_tokens: bool = False,
+        norm: bool = False,
+        stop_early: bool = False,
+        output_fmt: str = "NCHW",
+        intermediates_only: bool = False,
+        output_dict: bool = False,
+        patch_coord: Optional[torch.Tensor] = None,
+        patch_valid: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+    ):
+        """Forward features that returns intermediates.
+
+        Args:
+            x: Input image tensor
+            indices: Take last n blocks if int, all if None, select matching indices if sequence
+            return_prefix_tokens: Return both prefix and spatial intermediate tokens
+            norm: Apply norm layer to all intermediates
+            stop_early: Stop iterating over blocks when last desired intermediate hit
+            output_fmt: Shape of intermediate feature outputs
+            intermediates_only: Only return intermediate features
+            output_dict: Return outputs as a dictionary with 'image_features' and 'image_intermediates' keys
+            patch_coord: Optional patch coordinates [B, N, 2] for NaFlex mode
+            patch_valid: Optional patch type indicators (1=patch, 0=padding) for NaFlex
+            attn_mask: Optional attention mask for masked attention
+        Returns:
+            A tuple with (final_features, intermediates), a list of intermediate features, or a dictionary containing
+            'image_features' and 'image_intermediates' (and optionally 'image_intermediates_prefix')
+        """
+
+        # Prepare JEPA masks
+        if jepa_masks is not None:
+            # jepa_masks = self._prepare_masks(masks=jepa_masks)
+            raise ValueError(
+                f"Input masks are not supported for getting the intermidate features"
+            )
+            jepa_masks = None
+
+        return super().forward_intermediates(
+            x,
+            indices,
+            return_prefix_tokens,
+            norm,
+            stop_early,
+            output_fmt,
+            intermediates_only,
+            output_dict,
+            patch_coord,
+            patch_valid,
+            attn_mask,
+        )
 
 
 class MAENaFlexViT(Transformer):

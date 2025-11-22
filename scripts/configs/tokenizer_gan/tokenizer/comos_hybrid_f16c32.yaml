@@ -9,7 +9,7 @@ _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 
 cnn_cfg:
   model:
-    resolution: 512
+    resolution: 1024
     in_channels: 384 # nested channels !!
     out_channels: 384 # nested channels !!
     z_channels: 512

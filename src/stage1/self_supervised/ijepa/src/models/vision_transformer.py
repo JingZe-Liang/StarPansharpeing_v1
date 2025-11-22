@@ -275,7 +275,7 @@ class VisionTransformerPredictor(nn.Module):
 
     def __init__(
         self,
-        patched_size: tuple = (14, 14),
+        num_patches,
         embed_dim=768,
         predictor_embed_dim=384,
         depth=6,
@@ -297,9 +297,6 @@ class VisionTransformerPredictor(nn.Module):
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
         ]  # stochastic depth decay rule
         # --
-        assert len(patched_size) == 2, "patched_size should be a tuple of (H, W)"
-        self.patched_size = patched_size
-        num_patches = patched_size[0] * patched_size[1]
         self.predictor_pos_embed = nn.Parameter(
             torch.zeros(1, num_patches, predictor_embed_dim), requires_grad=False
         )
@@ -373,24 +370,13 @@ class VisionTransformerPredictor(nn.Module):
         x = self.predictor_embed(x)
 
         # -- add positional embedding to x tokens
-        # x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
-        _, N_ctxt, D = x.shape
-
-        x_pos_embed = self.predictor_pos_embed
-        if x_pos_embed.shape[-2] != N_ctxt:
-            nh = nw = int(math.sqrt(N_ctxt))
-            x_pos_embed = resample_abs_pos_embed(
-                x_pos_embed,
-                new_size=(nh, nw),
-                old_size=self.patched_size,
-                num_prefix_tokens=0,
-            )
-        x_pos_embed = x_pos_embed.reshape(B, 1, 1)
+        x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
         x += apply_masks(x_pos_embed, masks_x)
 
+        _, N_ctxt, D = x.shape
+
         # -- concat mask tokens to x
-        # pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
-        pos_embs = x_pos_embed
+        pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
         pos_embs = apply_masks(pos_embs, masks)
         pos_embs = repeat_interleave_batch(pos_embs, B, repeat=len(masks_x))
         # --

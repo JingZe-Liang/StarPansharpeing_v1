@@ -1,0 +1,44 @@
+######### ijepa as the pretraining task
+
+task: ijepa
+model: # predictor
+  _target_: src.stage1.self_supervised.ijepa.src.models.vision_transformer.VisionTransformerPredictor
+  # patched_size: [16, 16]  # 224/16=14
+  num_patches: 196 # 14*14
+  embed_dim: 512
+  predictor_embed_dim: 384
+  depth: 6
+  num_heads: 12
+  mlp_ratio: 4.0
+  qkv_bias: true
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  init_std: 0.02
+masks:
+  input_size: [224, 224]
+  patch_size: 16
+  enc_mask_scale: [0.8, 1.0]
+  pred_mask_scale: [0.15, 0.2]
+  aspect_ratio: [0.75, 1.5]
+  nenc: 1
+  npred: 4
+  min_keep: 10
+  allow_overlap: false
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 4.0e-4
+  weight_decay: 1.0e-5
+  eps: 1.0e-8
+  betas: [0.5, 0.9] #[0.9, 0.95]
+  foreach: true
+scheduler:
+  _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+  _partial_: true
+  num_warmup_steps: 1000
+  num_training_steps: 1_000_000
+  num_cycles: 1
+  reduced_factor: 2
+  min_lr: 1.0e-5

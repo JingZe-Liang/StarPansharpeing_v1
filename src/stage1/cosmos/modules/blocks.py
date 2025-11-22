@@ -86,29 +86,6 @@ def get_same_padding(kernel_size: int | tuple[int, ...]):
         raise ValueError(f"kernel_size should be int or tuple, got {type(kernel_size)}")
 
 
-# * --- Activation Functions --- #
-
-
-# register activation function here
-# REGISTERED_ACT_DICT: dict[str, type | partial] = {
-#     "relu": nn.ReLU,
-#     "relu6": nn.ReLU6,
-#     "hswish": nn.Hardswish,
-#     "silu": nn.SiLU,
-#     "gelu": partial(nn.GELU, approximate="tanh"),
-# }
-
-
-# def build_act(name: str | None, **kwargs) -> Optional[nn.Module]:
-#     if name in REGISTERED_ACT_DICT:
-#         assert name is not None
-#         act_cls = REGISTERED_ACT_DICT[name]
-#         kwargs = extract_needed_kwargs(kwargs, act_cls)
-#         return act_cls(**kwargs)
-#     else:
-#         return None
-
-
 # * --- Convolutional Layers --- #
 
 

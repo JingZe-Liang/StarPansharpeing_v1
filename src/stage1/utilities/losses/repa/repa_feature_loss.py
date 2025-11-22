@@ -14,7 +14,6 @@ from typing import (
     overload,
 )
 
-import lovely_tensors as lt
 import numpy as np
 import timm
 import torch
@@ -23,11 +22,12 @@ import torch.nn.functional as F
 from accelerate.state import AcceleratorState
 from einops import rearrange
 from jaxtyping import Float
+from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers.create_norm_act import get_norm_act_layer
 from torch import Tensor, is_tensor
 from torch.distributed.tensor import DTensor, Shard
-from torch.utils.file_baton import FileBaton
+from torch.utils.checkpoint import checkpoint
 from torchvision.transforms import Normalize
 from transformers import (
     AutoModel,
@@ -46,9 +46,9 @@ from src.stage1.utilities.losses.repa.feature_pca import (
     feature_pca_torch,
 )
 from src.utilities.config_utils import function_config_to_basic_types
-from src.utilities.logging.print import log, log_print
 
 # fmt: off
+# Dino collections
 DINOV3_TO_NUM_LAYERS = {
     "dinov3_vits16": 12,
     "dinov3_vits16plus": 12,
@@ -77,6 +77,14 @@ SIGLIP2_INTERACTION_INDEXES = {
     "google/siglip2-so400m-patch16-naflex": [7, 16, 22, 26],  # naflex backbone
 }
 SIGLIP2_FEATURE_INDEX: list[int] | None = None
+
+# PE collections
+PE_INTERACTION_INDEXES = {
+    'PE-Spatial-L14-448': [5, 11, 17, 23],
+    'PE-Spatial-G14-448': [9, 21, 33, 48],
+    'PE-Core-B16-224': [3, 5, 8, 11],
+    'PE-Core-G14-448': [9, 21, 33, 48],
+}
 # fmt: on
 
 # types
@@ -109,7 +117,9 @@ def interpolate_features_2d(x: Tensor, tgt_size: InterpType) -> Tensor:
     if H == H_tgt and W == W_tgt:
         return x
     else:
-        return F.interpolate(x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False)
+        return F.interpolate(
+            x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False
+        )
 
 
 def interpolate_features_1d(x, target_len: int):
@@ -354,17 +364,99 @@ def hier_distillation_loss(
 # *==============================================================
 
 
+def _pe_model_multi_features_patcher(
+    self,
+    x: torch.Tensor,
+    norm: bool = False,
+    layer_idx: int | list[int] = -1,
+    strip_cls_token: bool = True,
+) -> Tensor | list[Tensor]:
+    batch, _, h, w = x.shape
+    grid_h, grid_w = h // self.patch_size, w // self.patch_size
+    _is_multi_feats_out = isinstance(layer_idx, list)
+
+    x = self.conv1(x)
+    x = x.permute(0, 2, 3, 1).reshape(batch, -1, self.width)
+
+    if self.use_cls_token:
+        x = torch.cat(
+            [self.class_embedding.view(1, 1, -1).expand(batch, -1, -1), x],
+            dim=1,
+        )
+
+    if self.use_abs_posemb:
+        x = x + self._sample_abs_posemb(grid_h, grid_w)
+
+    if self.use_rope2d:
+        self.rope.update_grid(x.device, grid_h, grid_w)
+
+    x = self.ln_pre(x)
+
+    ###### Forward transformer layers
+    # x = self.transformer(x, layer_idx=layer_idx)
+    backbone = self.transformer
+    output_feats: list[Tensor] = []
+
+    if isinstance(layer_idx, int):
+        stop_idx = (backbone.layers + layer_idx) % backbone.layers
+    else:
+        # For list of layer indices, we need to go through all specified layers
+        stop_idx = max(layer_idx) if layer_idx else backbone.layers - 1
+
+    attn_mask = None
+    for i, r in enumerate(backbone.resblocks):
+        if backbone.grad_checkpointing and not torch.jit.is_scripting():
+            # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
+            x = checkpoint(r, x, None, None, attn_mask)
+        else:
+            x = r(x, attn_mask=attn_mask)
+
+        # Collect features at specified layers
+        if _is_multi_feats_out:
+            assert isinstance(layer_idx, list)
+            if i in layer_idx:
+                output_feats.append(x)
+
+        if i == stop_idx:
+            break
+
+    if not _is_multi_feats_out:
+        return_feats: Tensor | list[Tensor] = x
+    else:
+        return_feats = output_feats
+
+    ######### Post ln norm
+    if norm:
+        if _is_multi_feats_out:
+            for i, feats in enumerate(return_feats):
+                return_feats[i] = self.ln_post(feats)
+        else:
+            return_feats = self.ln_post(return_feats)
+
+    if strip_cls_token and self.use_cls_token:
+        if _is_multi_feats_out:
+            for i, feats in enumerate(return_feats):
+                return_feats[i] = feats[:, 1:, :]
+        else:
+            return_feats = return_feats[:, 1:, :]
+
+    return return_feats
+
+
 def load_perception_model(
     weight_path: str | Path,
     model_name: str = "PE-Core-L14-336",
-    pretrained_on: Literal["core", "llm", "spatial"] = "core",
+    pretrained_on: Literal["core", "lang", "spatial"] = "core",
     compile=True,
 ):
     """
     Perception Encoder: https://github.com/facebookresearch/perception_models
     """
+    sys.path.insert(0, "src/stage1/perception_models")
+    import core.vision_encoder.pe as pe
 
-    import src.stage1.perception_models.core.vision_encoder.pe as pe
+    if model_name is None:
+        model_name = Path(weight_path).stem
 
     visual_available_cfgs = pe.VisionTransformer.available_configs()
     assert model_name in visual_available_cfgs, (
@@ -375,15 +467,18 @@ def load_perception_model(
     )
 
     # Load the model
-    cfg = pe.PE_VISION_CONFIG[model_name]
+    # cfg = pe.PE_VISION_CONFIG[model_name]
     model = pe.VisionTransformer.from_config(
-        cfg, pretrained=True, checkpoint_path=str(weight_path)
+        model_name, pretrained=True, checkpoint_path=str(weight_path)
     )
-    log_print(f"[PE Model]: Load model {model_name} with config {cfg}")
+    logger.info(f"[PE Model]: Load model {model_name} with model_name {model_name}")
+
+    # Patch forward method to support multiple-layer feature output
+    model.forward_features = MethodType(_pe_model_multi_features_patcher, model)
 
     if compile:
         model = torch.compile(model, mode="reduce-overhead")
-        log_print("[PE model]: Model compiled with reduce-overhead")
+        logger.info("[PE model]: Model compiled with reduce-overhead")
 
     return model
 
@@ -464,7 +559,7 @@ def load_repa_dino_v3_model(
         raise ValueError("Either model_name or weight_path must be specified.")
 
     assert weight_path is not None, f"{weight_path=} does not exists"
-    log_print(
+    logger.info(
         f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}."
     )
     assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
@@ -476,7 +571,7 @@ def load_repa_dino_v3_model(
     if compile:
         dino_model = torch.compile(dino_model, mode="reduce-overhead")
         dino_model = cast(torch._dynamo.OptimizedModule, dino_model)
-        log_print("[Dino v3 model]: compiled model done")
+        logger.info("[Dino v3 model]: compiled model done")
     return dino_model
 
 
@@ -503,7 +598,7 @@ def load_repa_dino_v2_model(
         )
     if compile:
         model = torch.compile(model)
-        log_print("[Dino v2 model]: compiled model done")
+        logger.info("[Dino v2 model]: compiled model done")
     return model  # type: ignore[return-value]
 
 
@@ -598,18 +693,18 @@ def load_siglip2_model(
 
     global SIGLIP2_FEATURE_INDEX
     SIGLIP2_FEATURE_INDEX = SIGLIP2_INTERACTION_INDEXES[name]
-    log_print(f"[Siglip2]: using feature index {SIGLIP2_FEATURE_INDEX=}")
+    logger.info(f"[Siglip2]: using feature index {SIGLIP2_FEATURE_INDEX=}")
 
     # Override the forward_features method
     vision_model.encoder.forward = MethodType(
         _siglip_vit_encoder_forward_features_patcher, vision_model.encoder
     )
-    log_print("[Siglip2]: override forward_features method for Siglipv2 ViT encoder")
+    logger.info("[Siglip2]: override forward_features method for Siglipv2 ViT encoder")
     if "naflex" not in name:
         vision_model.forward = MethodType(
             _siglip_vit_forward_features_patcher, vision_model
         )
-        log_print("[Siglip2]: override forward method for Siglipv2 ViT")
+        logger.info("[Siglip2]: override forward method for Siglipv2 ViT")
 
     return vision_model, processor  # type: ignore[return-value]
 
@@ -667,11 +762,8 @@ def load_repa_encoder(
         assert weight_path is not None, (
             "weight_path should not be None when loading PE model"
         )
-        return load_perception_model(
-            weight_path,
-            model_name,
-            compile=compile,
-        )
+        pe_model = load_perception_model(weight_path, model_name, compile=compile)
+        return pe_model
     elif repa_name == "siglip2":
         # assert weight_path is not None, (
         #     "weight_path should not be None when loading Siglip2 model"
@@ -782,15 +874,7 @@ class REPALoss(torch.nn.Module):
             )
             self.repa_model_name = repa_model_name
 
-            # Baton load
-            # if baton.try_acquire():
-            #     try:
-            #         repa_encoder = load_repa_encoder(**load_kwargs)
-            #     finally:
-            #         baton.release()
-            # else:
-            #     baton.wait()
-            #     repa_encoder = load_repa_encoder(**load_kwargs)
+            # Load the repa encoder
             repa_encoder = load_repa_encoder(**load_kwargs)
 
             # Image processor for Siglip2
@@ -813,23 +897,20 @@ class REPALoss(torch.nn.Module):
             self.repa_encoder.requires_grad_(False)
             self.repa_encoder.eval()
 
-        log_print("[REPA Loss]: load pretrained dino visual foundation model done")
+        logger.info("[REPA Loss]: load pretrained dino visual foundation model done")
         self.c_dim_first = c_dim_first
-        # if c_dim_first:
-        #     self.interp_feat = interpolate_features_2d
-        # else:
-        #     self.interp_feat = interpolate_features_1d
 
         # mlp projection to aligh the dim
         self.build_proj = build_proj
         if build_proj:
+            encoder = self._get_encoder()
             self.projector = build_mlp(
-                self.repa_encoder.embed_dim,
+                encoder.embed_dim,
                 2048,
-                self.repa_encoder.embed_dim,
+                encoder.embed_dim,
                 is_1d=not c_dim_first,
             )
-            log_print(
+            logger.warning(
                 "build repa loss in loss class, remember to optimize the projector, "
                 "or match to repa dim in model forward",
                 "warning",
@@ -838,7 +919,18 @@ class REPALoss(torch.nn.Module):
             self.projector = nn.Identity()
 
         self.img_is_neg1_1 = img_is_neg1_1
-        self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+        if self.repa_model_type == "pe":
+            self.normalize = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        else:
+            self.normalize = Normalize(
+                mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+            )
+
+    def _get_encoder(self):
+        """Unwrap compiled model to access original attributes."""
+        if isinstance(self.repa_encoder, torch._dynamo.OptimizedModule):
+            return self.repa_encoder._orig_mod
+        return self.repa_encoder
 
     def __repr__(self):
         return (
@@ -870,11 +962,15 @@ class REPALoss(torch.nn.Module):
     ):
         if self.repa_model_type == "siglip2":
             return self._forward_siglip_features(x, get_interm_feats, detach=detach)
-        else:
+        elif self.repa_model_type in ("dinov2", "dinov3"):
             assert is_tensor(x), "inputs must be a tensor for DINOv2/v3 model"
             return self._forward_dino_features(
                 x, get_interm_feats, detach=detach, **kwargs
             )
+        elif self.repa_model_type == "pe":
+            return self._forward_pe_features(x, get_interm_feats, detach=detach)
+        else:
+            raise ValueError(f"Unknown model type: {self.repa_model_type}")
 
     @torch.autocast("cuda", torch.bfloat16)
     def _forward_siglip_features(self, inputs, get_interm_feats=False, detach=True):
@@ -1014,16 +1110,53 @@ class REPALoss(torch.nn.Module):
 
         return img_feats
 
+    def _forward_pe_features(self, img, get_interm_feats=False, detach=True):
+        assert self.repa_model_type == "pe", (
+            f'repa model type should be "pe" when using Perception Encoder model'
+        )
+        img = self._to_dtensor(img)
+        layers_to_take = (
+            PE_INTERACTION_INDEXES.get(self.repa_model_name, -1)
+            if get_interm_feats
+            else -1
+        )
+        out_feats = self.repa_encoder.forward_features(
+            img, layer_idx=layers_to_take, strip_cls_token=True, norm=True
+        )  # type: ignore
+
+        # All to 2d features
+        encoder = self._get_encoder()
+        ps = encoder.patch_size
+        h, w = img.shape[2] // ps, img.shape[3] // ps
+        if is_list_tuple(out_feats):
+            out_feats = [
+                rearrange(f, "b (h w) c -> b c h w", h=h, w=w) for f in out_feats
+            ]
+        else:
+            out_feats = rearrange(out_feats, "b (h w) c -> b c h w", h=h, w=w)
+
+        # Detach all tensors
+        if detach:
+            if is_tensor(out_feats):
+                out_feats = out_feats.detach()
+            elif is_list_tuple(out_feats):
+                out_feats = [f.detach() for f in out_feats]
+
+        return out_feats
+
     def _resize_img(self, img, size) -> Tensor:
         assert img.shape[1] == 3, (
             f"img must be rgb images but got image shaped as {img.shape}"
         )
 
+        # Unwrap compiled model to access attributes
+        encoder = self._get_encoder()
+
         # resize images
         _interp_kwargs = {"input": img, "mode": "bicubic", "align_corners": False}
-        if tuple([self.repa_encoder.image_size] * 2) != size:
+        if tuple([encoder.image_size] * 2) != size:
             if self.img_resize == "dino":  # to 224 x 224 pretrained size
-                _interp_kwargs["size"] = self.repa_encoder.image_size
+                _interp_kwargs["size"] = encoder.image_size
             elif isinstance(self.img_resize, (tuple, list)):
                 assert len(self.img_resize) == 2, "img_resize must be 2d tuple"
                 _interp_kwargs["size"] = self.img_resize
@@ -1032,10 +1165,8 @@ class REPALoss(torch.nn.Module):
                     next_divisble_of_y(img.shape[-2], 14),
                     next_divisble_of_y(img.shape[-1], 14),
                 )
-                log_print(
-                    "[Repa Resize]: image not resize into dino pretrained size",
-                    "warning",
-                    warn_once=True,
+                logger.warning(
+                    "[Repa Resize]: image not resize into dino pretrained size"
                 )
             img = F.interpolate(**_interp_kwargs)
 
@@ -1371,7 +1502,7 @@ class VFLoss(REPALoss):
         self.cos_weight = cos_weight
         self.vf_weight = vf_weight
 
-        log_print(repr(self), "debug")
+        logger.debug(repr(self))
 
     def __repr__(self):
         return "VFLoss: " + (
@@ -1595,7 +1726,7 @@ def test_dinov3_pca():
         model_name=model_name,
         pretrained_on="satellite",
     )
-    log_print("load model done.")
+    logger.info("load model done.")
     model.eval()
     model = model.cuda().to(torch.bfloat16)
     model.requires_grad_(False)
@@ -1612,14 +1743,14 @@ def test_dinov3_pca():
 
     norm = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
     x = norm(x)
-    log_print(x.shape)
+    logger.info(x.shape)
 
     x = x.cuda().to(torch.bfloat16)
     with torch.inference_mode() and torch.autocast("cuda", torch.bfloat16):
         y = model.get_intermediate_layers(  # type: ignore
             x, n=1, reshape=True, norm=True
         )[0]  # the last layer feature
-        log_print(y.shape)
+        logger.info(y.shape)
 
     # pca
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
@@ -1708,6 +1839,7 @@ def test_gram_loss():
 def test_siglip2_model():
     import math
 
+    import lovely_tensors as lt
     from einops import rearrange
     from PIL import Image
 
@@ -1773,6 +1905,39 @@ def test_siglip2_model():
     print("test_siglip2_model done.")
 
 
+def test_pe_model():
+    from src.data.litdata_hyperloader import ImageStreamingDataset
+    from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk, pca_list
+
+    ds = ImageStreamingDataset(
+        input_dir="data2/RemoteSAM270k/LitData_hyper_images", to_neg_1_1=False
+    )
+    x = ds[10]["img"][None]  # [1, 3, H, W]
+    x = x.to("cuda", torch.bfloat16)
+    x = F.interpolate(x, size=(448, 448))
+
+    pe_model = load_perception_model(
+        "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt",
+        model_name="PE-Spatial-L14-448",
+        compile=False,
+    )
+    layer_take = PE_INTERACTION_INDEXES["PE-Spatial-L14-448"]
+    print(f"Loaded model: {pe_model.__class__.__name__}")
+    pe_model = pe_model.cuda()
+
+    with torch.no_grad():
+        with torch.autocast("cuda", torch.bfloat16):
+            feats = pe_model.forward_features(x, layer_idx=layer_take, norm=True)
+            # to 2d
+            h, w = x.shape[2] // 14, x.shape[3] // 14
+            feats = [rearrange(f, "b (h w) c -> b c h w", h=h, w=w) for f in feats]
+    feats_pca, _ = pca_list(feats, 3)
+    feats_pca_b = torch.cat(feats_pca, dim=0)
+
+    for i, f in enumerate(feats):
+        print(f"Feature {i}: {f.shape}")
+
+
 if __name__ == "__main__":
     import lovely_tensors as lt
     from rich.traceback import install
@@ -1782,6 +1947,7 @@ if __name__ == "__main__":
 
     # test_gram_loss()
     # test_siglip2_model()
-    test_repa_loss_hier()
+    # test_repa_loss_hier()
+    test_pe_model()
 
     # load_siglip2_model("google/siglip2-large-patch16-512")
