@@ -400,14 +400,17 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     def _forward_deep_supervised_heads(self, interms: list[Tensor]):
         """Forward the deep supervised heads given the intermediate features."""
         deep_sup_outputs = []
-        for i, to_out in enumerate(self.deep_supervised_heads):
+
+        for i, head in enumerate(self.deep_supervised_heads):
             interm_feat = interms[i]
+
             if self.deep_supervision_type == "sum_previous_out" and i > 0:
                 prev_interm_feat = interms[i - 1]
-                proj_inp = interm_feat + prev_interm_feat
-                interm_feat = to_out.prev_out_proj(proj_inp)
-            out = to_out.main(interm_feat)
+                interm_feat = interm_feat + head.prev_out_proj(prev_interm_feat)
+
+            out = head.main(interm_feat)
             deep_sup_outputs.append(out)
+
         return deep_sup_outputs
 
     @classmethod

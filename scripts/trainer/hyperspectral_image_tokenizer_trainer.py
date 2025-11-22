@@ -1393,7 +1393,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     x, size=cur_res, mode="bilinear", align_corners=False
                 )
                 ds_loss = ds_loss + torch.nn.functional.mse_loss(ds_out, gt_cur_res)
-            log_losses[f"ds_loss"] = ds_loss.item()
+            log_losses["ds_loss"] = ds_loss.item()
             # add into main loss to backward
             gen_loss = gen_loss + ds_loss
 
