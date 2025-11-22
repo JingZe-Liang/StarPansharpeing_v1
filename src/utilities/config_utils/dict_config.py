@@ -1,5 +1,7 @@
+from typing import Any
+
 import yaml
-from easydict import EasyDict
+from easydict import EasyDict as edict
 from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
@@ -34,7 +36,7 @@ def flatten_dict(d, parent_key="", sep="_"):
 
 def load_config_file[T](
     config_file, dataclass_cls: type[T] | None = None
-) -> T | EasyDict | DictConfig | object:
+) -> T | edict | DictConfig | object:
     """Load a config file and return a dataclass, Omegaconf DictConfig, or EasyDict."""
     try:
         config = OmegaConf.to_container(OmegaConf.load(config_file), resolve=True)
@@ -50,7 +52,7 @@ def load_config_file[T](
         with open(config_file, "r") as f:
             config = yaml.load(f, Loader=yaml.UnsafeLoader)
 
-        return EasyDict(config)
+        return edict(config)
 
 
 def dump_config(config, path, log_config=True):
@@ -60,3 +62,14 @@ def dump_config(config, path, log_config=True):
             logger.info("Using the following config for this run:")
             logger.info(yaml_dump)
         f.write(yaml_dump)
+
+
+def set_defaults(
+    cfg: dict | None, defaults: dict[str, Any], use_edict=True
+) -> dict | edict:
+    """set defaults for dict/edict config"""
+    if cfg is None:
+        cfg = edict() if use_edict else {}
+    for k, v in defaults.items():
+        cfg.setdefault(k, v)
+    return edict(cfg) if use_edict else dict(cfg)

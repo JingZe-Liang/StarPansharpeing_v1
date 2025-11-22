@@ -1154,8 +1154,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
         out_d = {}
+
         with self.accelerator.autocast():
+            # `is_testing` is deprecated, use `ema` instead
             if self.sep_enc_dec:
+                ## This logic is total deprecated, right now the encoder and decoder are unified
+                # into a single model.
                 if not ema:
                     if is_testing:
                         self.tokenizer_encoder.eval()
@@ -1171,7 +1175,6 @@ class CosmosHyperspectralTokenizerTrainer:
 
                 latent = to_enc(x)
 
-                # TODO: move the total seperated encoder and decoder into a unified class
                 if self.norm_z:  # only norm for seperated encoder and decoder
                     latent = torch.nn.functional.normalize(latent, dim=1)
 
@@ -1181,15 +1184,29 @@ class CosmosHyperspectralTokenizerTrainer:
                     latent_q = latent
                 recon = to_dec(latent_q)
             else:
-                if is_testing:
-                    self.tokenizer.eval()
-                latent = None
-                # TODO: add ema tokenizer
+                tokenizer = (
+                    self.ema_tokenizer.ema_model
+                    if (not self.no_ema and ema)
+                    else self.tokenizer
+                )
+                tokenizer.eval()
+                _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
 
+                latent = None
                 if self.use_quantizer:
-                    recon, q_loss, q_info = self.tokenizer(x)
+                    dec_out, q_loss, q_info = tokenizer(x)
                 else:
-                    recon = self.tokenizer(x)
+                    dec_out = tokenizer(x)
+
+                # Is deep supervision
+                if _unwrap_tok.getattr("_is_deep_supervision", False):
+                    assert isinstance(dec_out, dict), (
+                        "dec_out must be a dict for deep supervision"
+                    )
+                    recon = dec_out["recon"]
+                    out_d["deep_supervision_outputs"] = dec_out[
+                        "deep_supervision_outputs"
+                    ]
 
         # basic out
         out_d.update({"latent": latent, "recon": recon})
@@ -1202,7 +1219,6 @@ class CosmosHyperspectralTokenizerTrainer:
         out_d.update(_q_dict)
 
         # repa or vf feature
-        _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
         if (
             hasattr(_unwrap_tok, "get_repa_feature")
             and getattr(_unwrap_tok, "_use_repa_loss", False)
@@ -1364,11 +1380,22 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # quantizer loss sent to discriminator
         gen_loss, log_losses = self.forward_discriminator(
-            x,
-            tok_dict,
-            train_tokenizer=True,
-            split="train",
+            x, tok_dict, train_tokenizer=True, split="train"
         )
+
+        # deep supervision loss
+        if "deep_supervision_outputs" in tok_dict:
+            ds_loss = 0.0
+            # downsample the gt into the deep supervision outputs size
+            for ds_out in tok_dict["deep_supervision_outputs"]:
+                cur_res = ds_out.shape[2:]
+                gt_cur_res = torch.nn.functional.interpolate(
+                    x, size=cur_res, mode="bilinear", align_corners=False
+                )
+                ds_loss = ds_loss + torch.nn.functional.mse_loss(ds_out, gt_cur_res)
+            log_losses[f"ds_loss"] = ds_loss.item()
+            # add into main loss to backward
+            gen_loss = gen_loss + ds_loss
 
         if self.use_training_aug and self.aug_pipeline_train_obj == "anti_deg_network":
             assert "aug_x" in tok_dict, "aug_x not in tokenizer output dict"
@@ -1702,7 +1729,7 @@ class CosmosHyperspectralTokenizerTrainer:
     def val_step(self, batch: dict) -> torch.Tensor:
         img = batch["img"].to(self.device, self.dtype)
         with torch.no_grad():
-            recon = self.forward_tokenizer(img, ema=True, is_testing=True)["recon"]
+            recon = self.forward_tokenizer(img, ema=True)["recon"]
 
         return recon
 

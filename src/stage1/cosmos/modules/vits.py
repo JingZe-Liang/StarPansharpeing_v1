@@ -83,7 +83,7 @@ class AttentionCustom(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        freqs_cis: torch.Tensor = None,
+        freqs_cis: torch.Tensor | None = None,
         attn_mask: Optional[torch.Tensor] = None,
         is_causal: bool = False,
     ):

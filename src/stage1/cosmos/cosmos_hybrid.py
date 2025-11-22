@@ -4,6 +4,7 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
 import accelerate
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from easydict import EasyDict as edict
 from einops.layers.torch import Rearrange
 from loguru import logger
 from timm.layers import create_conv2d, create_norm_act_layer
@@ -21,6 +23,8 @@ from typing_extensions import Annotated
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
+    function_config_to_easy_dict,
+    set_defaults,
 )
 
 from .cosmos_tokenizer import (
@@ -29,6 +33,7 @@ from .cosmos_tokenizer import (
     EncoderDecoderConfig,
 )
 from .modules import blocks as cosmos_blocks
+from .modules.blocks import AdaptiveOutputConvLayer
 from .modules.layers2d import Decoder, Encoder
 from .modules.naflex import NaFlexVitCfg, Transformer
 from .modules.proj import build_mlp
@@ -55,17 +60,39 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         trans_dec_cfg: Optional[NaFlexVitCfg] = None,
         *,
         distillation_kwargs: dict[str, Any] = {},
+        hybrid_tokenizer_kwargs: dict[str, Any] = {},
     ):
         self.cnn_cfg = cnn_cfg
         self.trans_enc_cfg = trans_enc_cfg
         self.trans_dec_cfg = trans_dec_cfg
         self.distillation_kwargs = distillation_kwargs
-        self._dino_feature_dim = distillation_kwargs.get("dino_feature_dim", 1024)
-        self._semantic_feature_dim = distillation_kwargs.get("semantic_feature_dim", 1152)  # fmt: skip
+        self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
+
+        ###### Distillation configs
+        distillation_kwargs = set_defaults(
+            distillation_kwargs,
+            {
+                "dino_feature_dim": 1024,
+                "semantic_feature_dim": 1152,
+            },
+        )
+        self._dino_feature_dim = distillation_kwargs.dino_feature_dim
+        self._semantic_feature_dim = distillation_kwargs.semantic_feature_dim
         self.cache_layers = distillation_kwargs.get("cache_layers", self.cache_layers)
 
+        ###### Deep supervision configs
+        hybrid_tokenizer_kwargs = set_defaults(
+            hybrid_tokenizer_kwargs,
+            {"deep_supervision_type": None},
+        )
+        # deep_supervision_type: [direct_out, sum_previous_out]
+        self.deep_supervision_type = hybrid_tokenizer_kwargs.deep_supervision_type
+        self._is_deep_supervision = self.deep_supervision_type is not None
+        self._build_deep_supervised_heads(cnn_cfg)
+
         super().__init__(self.cnn_cfg)
-        self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
+
+        ##### Transformer models
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
 
     def _set_low_level_proj_chans(self):
@@ -137,6 +164,44 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                     f"Will skip the latent through the cat conv without semantic decoder, "
                     "maybe better for reconstruction -- Experimenting"
                 )
+
+    def _build_deep_supervised_heads(self, cnn_cfg):
+        if not self._is_deep_supervision:
+            return
+
+        deep_sup_type = self.deep_supervision_type
+
+        # Per-resolution output channels
+        chan_mults = cnn_cfg.model.channels_mult
+        n_res = len(chan_mults)
+        basic_chan = cnn_cfg.model.channels
+        head_out_chan = cnn_cfg.model.out_channels
+
+        # Make the output heads
+        self.deep_supervised_heads = nn.ModuleList()
+        for i in reversed(range(n_res)):
+            to_out = nn.Module()
+            out_chan = basic_chan * chan_mults[i]
+            # Create head according to supervision type
+            to_out_main = nn.Sequential(
+                create_norm_act_layer("layernorm2d", out_chan, "silu"),
+                AdaptiveOutputConvLayer(out_chan, head_out_chan, mode="interp"),
+            )
+            to_out.add_module("main", to_out_main)
+            if deep_sup_type == "sum_previous_out":
+                # Add previous summed feature
+                if i not in (0, n_res - 1):
+                    prev_out_chan = basic_chan * chan_mults[i - 1]
+                    # Upsample previous feature and add to current
+                    prev_out_proj = nn.Sequential(
+                        create_norm_act_layer("layernorm2d", prev_out_chan, "silu"),
+                        create_conv2d(prev_out_chan, out_chan, kernel_size=3),
+                        nn.Upsample(scale_factor=2, mode="nearest"),
+                    )
+                    to_out.add_module("prev_out_proj", prev_out_proj)
+
+            self.deep_supervised_heads.append(to_out)
+        logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
 
     def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
         """Init the model from the pretrained only CNN weights."""
@@ -313,23 +378,47 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             h = self.decoder.quant_conv["st_cat_conv"](h)
 
         # Decode using the CNN decoder
-        dec = self.decoder.decoder(h, chan)  # [b, c, h, w]
+        dec = self.decoder.decoder(
+            h, chan, ret_all_res_features=self._is_deep_supervision
+        )
 
-        if clamp:
+        # Deep supervision output to 'dec'
+        if self._is_deep_supervision:
+            dec, interms = dec
+            deep_sup_outputs = self._forward_deep_supervised_heads(interms)
+            dec = edict({"recon": dec, "deep_supervision_outputs": deep_sup_outputs})
+            if clamp:
+                dec.recon = dec.recon.clamp(-1, 1)
+        elif clamp:
             dec = dec.clamp(-1, 1)
+
         if self.quantizer_type is not None:
             return dec, q_loss, loss_breakdown
         else:
             return dec
 
+    def _forward_deep_supervised_heads(self, interms: list[Tensor]):
+        """Forward the deep supervised heads given the intermediate features."""
+        deep_sup_outputs = []
+        for i, to_out in enumerate(self.deep_supervised_heads):
+            interm_feat = interms[i]
+            if self.deep_supervision_type == "sum_previous_out" and i > 0:
+                prev_interm_feat = interms[i - 1]
+                proj_inp = interm_feat + prev_interm_feat
+                interm_feat = to_out.prev_out_proj(proj_inp)
+            out = to_out.main(interm_feat)
+            deep_sup_outputs.append(out)
+        return deep_sup_outputs
+
     @classmethod
-    @function_config_to_basic_types
+    @function_config_to_easy_dict
     def create_model(
         cls,
         cnn_cfg,
         trans_enc_cfg,
         trans_dec_cfg=None,
         distillation_kwargs: dict | None = None,
+        hybrid_tokenizer_kwargs: dict | None = None,
     ):
         cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
         trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
@@ -340,7 +429,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             cnn_cfg,
             trans_enc_cfg,
             trans_dec_cfg,
-            distillation_kwargs=distillation_kwargs or {},
+            distillation_kwargs=distillation_kwargs or edict(),
+            hybrid_tokenizer_kwargs=hybrid_tokenizer_kwargs or edict(),
         )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
