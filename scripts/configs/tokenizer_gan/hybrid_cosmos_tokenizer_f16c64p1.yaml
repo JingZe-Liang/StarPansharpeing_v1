@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: comos_hybrid_f16c32
+  - tokenizer: cosmos_hybrid_f16c32
   - quantizer: quant
   - accelerator: base
   - vq_loss: remote_clip_RN50

@@ -411,7 +411,7 @@ class ContinuousImageTokenizer(nn.Module):
     z: torch.Tensor | None = None  # the latent z
     supported_cached_hiddens: list[str] = ["z"]
 
-    def __init__(self, cfg: ContinuousTokenizerConfig):
+    def __init__(self, cfg: ContinuousTokenizerConfig, build_enc_dec_kwargs: dict = {}):
         super().__init__()
         self._use_repa_loss = cfg.use_repa_loss
         self._use_vf_loss = cfg.use_vf_loss
@@ -495,7 +495,9 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             # encoder and decoder
             # not combine the encoder, for FSDP wrap
-            encoder, decoder = self._build_encoder_decoder(cfg, model_cfg)
+            encoder, decoder = self._build_encoder_decoder(
+                cfg, model_cfg, **build_enc_dec_kwargs
+            )
             quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
 
             self.encoder = self.encoder_jit(encoder, quant_conv)
@@ -559,6 +561,7 @@ class ContinuousImageTokenizer(nn.Module):
         self,
         cfg: ContinuousTokenizerConfig,
         model_cfg: EncoderDecoderConfig,
+        **build_enc_dec_kwargs,
     ):
         self._is_diffbands = isinstance(model_cfg.in_channels, (tuple, list))
 

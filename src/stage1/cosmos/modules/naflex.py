@@ -1,9 +1,11 @@
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import einops
 import torch
 import torch.nn as nn
+from easydict import EasyDict as edict
 from einx import get_at
 from loguru import logger
 from timm.layers import apply_keep_indices_nlc, to_2tuple
@@ -24,7 +26,6 @@ from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
 )
-from easydict import EasyDict as edict
 
 from .norm import *  # register custom norms
 
@@ -155,9 +156,8 @@ class NaFlexVitCfg:
     latent_straight_through_skip: bool = False
     # enable_jepa: bool = False  # enable jepa training
     # enable_lejepa: bool = False  # enable lejepa training
-    pretrained_type: Optional[str] = (
-        None  # 'ijepa', 'lejepa', None for no pretrained task
-    )
+    # 'ijepa', 'lejepa', None for no pretrained task
+    pretrained_type: Optional[Union[str, list[str]]] = None
 
 
 class Transformer(NaFlexVit):
@@ -248,20 +248,36 @@ class Transformer(NaFlexVit):
         model = cls(cfg)
         return model
 
+    def init_weights(self):
+        super().init_weights(mode="jax")
+
+        def rescale(p, layer_id):
+            p.div_(math.sqrt(2.0 * layer_id))
+
+        # Rescale the depth
+        rescale_layer = True
+        if rescale_layer:
+            for layer_id, blk in enumerate(self.blocks, 1):
+                rescale(blk.attn.proj.weight.data, layer_id)
+                rescale(blk.mlp.fc2.weight.data, layer_id)
+
 
 class IJEPANaFlexViT(Transformer):
     def __init__(self, cfg):
         super().__init__(cfg)
 
         # Build the LeJEPA head
-        if cfg.pretrained_type == "lejepa":
+        if "lejepa" in cfg.pretrained_type:
             self._build_jepa_head(cfg)
 
     def _build_jepa_head(self, cfg):
         from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
 
         self.lejepa_projector = create_lejepa_projector(
-            cfg.embed_dim, cfg.embed_dim, mean_out_hw=False
+            cfg.embed_dim,
+            cfg.embed_dim,
+            mean_out_hw=False,
+            # mean_out_hw=not cfg.class_token,  # if use class, not mean out the spatial tokens
         )
         logger.info("[IJEPA Naflex Transformer]: Build LeJEPA head")
 
@@ -503,27 +519,50 @@ class IJEPANaFlexViT(Transformer):
     def _forward_after_backbone(
         self, x, hw: list | None
     ) -> tuple[Tensor, Optional[Dict[str, Tensor]]] | Tensor:
-        # Other output if has pretraining task
-        others = None
-
-        x = self.head(x)
+        head_out = self.head(x)
         if self.cfg.out_2d_latent and hw is not None:
-            x = self.unpatchify(x, hw)
+            out = self.unpatchify(head_out, hw)
         else:
             assert hw is None and self.unpatch_size == 1, (
                 f"HW is not None or the unpatch_size is not 1, when force no patchify"
             )
             # Let the output be 1D tensor
+            out = head_out
 
-            ######### Lejepa projector #########
-            if (
-                hasattr(self, "lejepa_projector")
-                and self.cfg.pretrained_type == "lejepa"
-            ):
-                lejepa_proj = self.lejepa_projector(x)
-                others = edit({"lejepa_proj": lejepa_proj})
+        return out
 
-        return x, others if others is not None else x
+    def _forward_pretrained_backbone(
+        self,
+        x: torch.Tensor,
+        output_type: str = "1d",  # fixed it.
+        jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+    ):
+        others = None
+
+        if output_type in (None, "2d"):
+            out_hw = self._get_output_shape(x)
+        else:
+            out_hw = None  # keep the output to be 1D tensor
+
+        # Features
+        x = self.forward_features(x, jepa_masks=jepa_masks)
+        x = cast(torch.Tensor, x)
+        x = x[:, self.cfg.reg_tokens :]
+
+        ######### IJepa features ########
+        if self.cfg.pretrained_type == "ijepa":
+            # x is the backbone's out
+            others = edict({"ijepa_feat": x})
+
+        ######### Lejepa projector #########
+        if hasattr(self, "lejepa_projector") and self.cfg.pretrained_type == "lejepa":
+            x = self._pool(x)
+            lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
+            others = edict({"lejepa_proj": lejepa_proj})
+
+        # Return the 1d features as the backbone output
+        # not forward by the head
+        return x, others
 
     def forward_intermediates(
         self,

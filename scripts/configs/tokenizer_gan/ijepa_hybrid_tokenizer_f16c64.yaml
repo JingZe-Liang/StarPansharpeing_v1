@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: comos_hybrid_f16c32
+  - tokenizer: cosmos_hybrid_f16c32
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
@@ -35,8 +35,8 @@ tokenizer:
       max_channels: 64
       drop_prob: 0.5
   trans_enc_cfg:
-  #   in_chans: 1024
-  #   out_chans: 1024
+    #   in_chans: 1024
+    #   out_chans: 1024
     enable_jepa: true
   # trans_dec_cfg:
   #   in_chans: 1024

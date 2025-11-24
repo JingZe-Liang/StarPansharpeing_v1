@@ -4,8 +4,8 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple, Union
+from dataclasses import asdict, dataclass
+from typing import Any, List, NamedTuple, Optional, Self, Tuple, Union
 
 import accelerate
 import einops
@@ -34,7 +34,7 @@ from .cosmos_tokenizer import (
 )
 from .modules import blocks as cosmos_blocks
 from .modules.blocks import AdaptiveOutputConvLayer
-from .modules.layers2d import Decoder, Encoder
+from .modules.layers2d import Decoder, Encoder, GenerativeDecoder
 from .modules.naflex import IJEPANaFlexViT, NaFlexVitCfg, Transformer
 from .modules.proj import build_mlp
 
@@ -47,7 +47,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     sem_z: Tensor | None = None
     supported_cached_hiddens: List[str] = ["z", "sem_z"]
     cache_layers: dict[str, list[int]] = {
-        "low_level": [0, 1, 2, -1],  # -1 means middle layercao20011002
+        "low_level": [0, 1, 2, -1],  # -1 means middle layer
         "semantic": [2, 5, 8, 11],  # 12 layers of encoder
     }
     low_lvl_repa_proj_chans: list[int] = []
@@ -59,6 +59,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         trans_enc_cfg: NaFlexVitCfg,
         trans_dec_cfg: Optional[NaFlexVitCfg] = None,
         *,
+        cnn_enc_cfg: EncoderDecoderConfig | None = None,
+        cnn_dec_cfg: EncoderDecoderConfig | None = None,
         distillation_kwargs: dict[str, Any] = {},
         hybrid_tokenizer_kwargs: dict[str, Any] = {},
     ):
@@ -74,11 +76,12 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             {
                 "dino_feature_dim": 1024,
                 "semantic_feature_dim": 1152,
+                "cache_layers": self.cache_layers,
             },
         )
         self._dino_feature_dim = distillation_kwargs.dino_feature_dim
         self._semantic_feature_dim = distillation_kwargs.semantic_feature_dim
-        self.cache_layers = distillation_kwargs.get("cache_layers", self.cache_layers)
+        self.cache_layers = distillation_kwargs.cache_layers
 
         ###### Deep supervision configs
         hybrid_tokenizer_kwargs = set_defaults(
@@ -90,10 +93,48 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self._is_deep_supervision = self.deep_supervision_type is not None
         self._build_deep_supervised_heads(cnn_cfg)
 
-        super().__init__(self.cnn_cfg)
+        build_enc_dec_kwargs = {}
+        if cnn_enc_cfg is not None or cnn_dec_cfg is not None:
+            # If the encoder or decoder config is provided, use it
+            build_enc_dec_kwargs = edict(
+                {
+                    "enc_cnn_model_cfg": cnn_enc_cfg,
+                    "dec_cnn_model_cfg": cnn_dec_cfg,
+                }
+            )
+        super().__init__(self.cnn_cfg, build_enc_dec_kwargs=build_enc_dec_kwargs)
 
         ##### Transformer models
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+
+    def _build_encoder_decoder(
+        self,
+        cfg: ContinuousTokenizerConfig,
+        model_cfg: EncoderDecoderConfig,
+        *,
+        enc_cnn_model_cfg: EncoderDecoderConfig | None = None,
+        dec_cnn_model_cfg: EncoderDecoderConfig | None = None,
+    ):
+        self._is_diffbands = isinstance(model_cfg.in_channels, (tuple, list))
+
+        enc_kwargs = dec_kwargs = asdict(model_cfg)
+        if enc_cnn_model_cfg is not None:
+            enc_kwargs = asdict(enc_cnn_model_cfg)
+            logger.info("[Build CNN Encoder]: override cnn encoder config.")
+        if dec_cnn_model_cfg is not None:
+            dec_kwargs = asdict(dec_cnn_model_cfg)
+            logger.info("[Build CNN Decoder]: override cnn decoder config.")
+
+        encoder = Encoder(**enc_kwargs)
+        if cfg.decoder_type == "default":
+            decoder = Decoder(**dec_kwargs)
+        elif cfg.decoder_type == "generative":
+            decoder = GenerativeDecoder(**dec_kwargs)
+        else:
+            raise ValueError(f"Unknown decoder type: {cfg.decoder_type}")
+
+        logger.info(f"[CNN tokenizer]: Build encoder and {cfg.decoder_type} decoder.")
+        return encoder, decoder
 
     def _set_low_level_proj_chans(self):
         cache_index = self.cache_layers["low_level"]
@@ -293,14 +334,14 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         z_low_lvl = self.encoder.encoder(x)
 
         # Semantic encoder
-        z_semantic = self.semantic_enc_transformer(
-            z_low_lvl, jepa_masks=jepa_masks, output_type="1d"
+        z_semantic, _ = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+            z_low_lvl, jepa_masks=jepa_masks
         )
 
         # no quant_conv here
         return z_semantic
 
-    def encode_lejepa(self, x, use_quantizer=None, **_ignored_kwargs):
+    def encode_lejepa(self, x, **_ignored_kwargs):
         """
         LeJEPA encoding with augmentated global and local views.
         """
@@ -310,11 +351,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Semantic encoder
         # z_low_lvl -> transformer backbone -> projector -> z_proj
-        z_proj = self.semantic_enc_transformer(
-            z_low_lvl, jepa_masks=None, output_type="1d"
+        _, others = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+            z_low_lvl, jepa_masks=None
         )
 
-        return z_proj
+        return others.lejepa_proj
 
     def encode(
         self,
@@ -397,7 +438,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         ##### z augmentions (noise adding or channel dropping).
         h = self.latent_aug(maybe_q_ret)
 
-        return h, z_semantic
+        return h
 
     def decode(
         self,
@@ -440,6 +481,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         )
 
         # Deep supervision output to 'dec'
+        dec: Tensor | dict[str, Tensor | list[Tensor]]
         if self._is_deep_supervision:
             dec, interms = dec
             deep_sup_outputs = self._forward_deep_supervised_heads(interms)
@@ -471,7 +513,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         return deep_sup_outputs
 
     @classmethod
-    @function_config_to_easy_dict
+    @function_config_to_basic_types
     def create_model(
         cls,
         cnn_cfg,
@@ -479,18 +521,28 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         trans_dec_cfg=None,
         distillation_kwargs: dict | None = None,
         hybrid_tokenizer_kwargs: dict | None = None,
+        # overrides for the main cnn_cfg, if None, use the default values
+        # in cnn_cfg
+        cnn_enc_cfg: dict | None = None,
+        cnn_dec_cfg: dict | None = None,
     ):
         cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
         trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
         if trans_dec_cfg is not None:
             trans_dec_cfg = dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg)
+        if cnn_enc_cfg is not None:
+            cnn_enc_cfg = dataclass_from_dict(EncoderDecoderConfig, cnn_enc_cfg)
+        if cnn_dec_cfg is not None:
+            cnn_dec_cfg = dataclass_from_dict(EncoderDecoderConfig, cnn_dec_cfg)
 
         return cls(
             cnn_cfg,
             trans_enc_cfg,
             trans_dec_cfg,
-            distillation_kwargs=distillation_kwargs or edict(),
-            hybrid_tokenizer_kwargs=hybrid_tokenizer_kwargs or edict(),
+            cnn_enc_cfg=cnn_enc_cfg,
+            cnn_dec_cfg=cnn_dec_cfg,
+            distillation_kwargs=edict(distillation_kwargs) or edict(),
+            hybrid_tokenizer_kwargs=edict(hybrid_tokenizer_kwargs) or edict(),
         )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)

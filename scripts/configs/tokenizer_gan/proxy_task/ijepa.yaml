@@ -5,7 +5,7 @@ model: # predictor
   _target_: src.stage1.self_supervised.ijepa.src.models.vision_transformer.VisionTransformerPredictor
   # patched_size: [16, 16]  # 224/16=14
   num_patches: 196 # 14*14
-  embed_dim: 512
+  embed_dim: 1152
   predictor_embed_dim: 384
   depth: 6
   num_heads: 12
@@ -27,13 +27,23 @@ masks:
   min_keep: 10
   allow_overlap: false
 optimizer:
+  # _target_: heavyball.ForeachAdamW
+  # _partial_: true
+  # lr: 4.0e-4
+  # weight_decay: 1.0e-4
+  # betas: ${tuple:[0.99, 0.995]}
+  # caution: true
+  # mars: false
+  # foreach: true
+  # eps: 1.0e-9
   _target_: torch.optim.AdamW
   _partial_: true
   lr: 4.0e-4
   weight_decay: 1.0e-5
   eps: 1.0e-8
-  betas: [0.5, 0.9] #[0.9, 0.95]
+  betas: [0.99, 0.995]
   foreach: true
+
 scheduler:
   _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
   _partial_: true

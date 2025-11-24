@@ -1,4 +1,4 @@
-task: ijepa
+task: lejepa
 
 aug:
   n_local: 6
@@ -7,3 +7,4 @@ aug:
 sigreg:
   knots: 17
   rnd_proj_dim: 128
+  lam: 0.02

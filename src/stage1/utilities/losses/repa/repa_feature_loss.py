@@ -858,10 +858,6 @@ class REPALoss(torch.nn.Module):
         if repa_encoder is not None:
             self.repa_encoder = repa_encoder
         else:
-            # baton = FileBaton(
-            #     "/tmp/repa_model_loading.lock"
-            # )  # Use a file baton to ensure single process access
-            # load repa encoder in multiprocessing context
             if dino_version == 3:
                 self.dino_type = "torch"
             load_kwargs = dict(
