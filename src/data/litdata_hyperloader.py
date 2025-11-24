@@ -278,6 +278,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             per_channel=False,
         ),
         index_file_name: str | None = None,
+        check_chans: bool = False,
         *args,
         **kwargs,
     ):
@@ -289,6 +290,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         self.to_neg_1_1 = to_neg_1_1
         self.force_to_rgb = force_to_rgb
         self._img_key = "img"
+        self._check_chans = check_chans
 
         # Resize and crop
         self.resize_before_transform = resize_before_transform
@@ -390,23 +392,11 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
     def __check_chans_for_hyper_images(self, d, orig_img_shape: torch.Size, idx: int):
         """Check the number of channels for hyper images"""
-        assert d["img"].shape[0] in [
-            3,
-            4,
-            8,
-            10,
-            12,
-            13,
-            32,
-            50,
-            150,
-            175,
-            202,
-            224,
-            242,
-            368,
-            369,
-        ], f"{d['img'].shape=}, {orig_img_shape=}, {d['__key__']=}, {idx=}"
+        # fmt: off
+        assert d["img"].shape[0] in [ 3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369], (
+            f"{d['img'].shape=}, {orig_img_shape=}, {d['__key__']=}, {idx=}"
+        )
+        # fmt: on
 
     def _skip_undecode(self, d):
         # skip the none or undecoded value
@@ -422,9 +412,19 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
         return d
 
+    def _ensure_dict_sample(self, sample):
+        if not isinstance(sample, dict):
+            # Assume the sample is the img tensor/array
+            assert isinstance(sample, (torch.Tensor, np.ndarray)), (
+                f"sample must be dict or tensor/array, got {type(sample)}"
+            )
+            sample = {"img": sample}
+        return sample
+
     def __getitem__(self, idx):
         d = super().__getitem__(idx)
 
+        d = self._ensure_dict_sample(d)
         d = self._conditions_select_random_one(d)
         d = self._skip_undecode(d)
 
@@ -439,7 +439,8 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         # if not 'per_stream' shuffle, make sure each stream has the same keys
         d = self._filter_only_img(d)
 
-        self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
+        if self._check_chans:
+            self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
 
         return d
 

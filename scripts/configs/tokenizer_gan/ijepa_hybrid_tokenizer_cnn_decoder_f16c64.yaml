@@ -6,8 +6,9 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: cosmos_hybrid_f16c32
+  - tokenizer: cosmos_hybrid_pure_cnn_decoder_f16c64
   - quantizer: quant
+  - proxy_task: ijepa
   - accelerator: base
   - vq_loss: remote_clip_RN50
   # self ============
@@ -23,29 +24,31 @@ accelerator:
     num_steps: 1
 
 tokenizer:
-  model:
-    latent_channels: 32
+  cnn_cfg:
+    quantizer_type: null
+  trans_enc_cfg:
+    pretrained_type: ijepa
 
 vq_loss:
-  # disc_in_channels: ${dataset.channels}
   # perceptual loss
-  perceptual_weight: 0.05
+  perceptual_weight: 0.1
   # repa loss
-  repa_loss_weight: 0.02 # 0.1
+  repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
-    repa_model_type: dinov3
-    repa_model_name: "dinov3_vitl16"
+    repa_model_type: pe
+    repa_model_name: "PE-Spatial-L14-448"
+    repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
     feature_normalize: false
     get_hier_teacher_feature: true
   # semantic distillatin loss
-  sem_distill_weight: 0.02
+  sem_distill_weight: 0.1
   sem_distill_options:
     c_dim_first: true
     build_proj: false
@@ -83,6 +86,7 @@ vq_loss:
   quantizer_options:
   # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_in_channels: 512 #${dataset.channels} ## interp conv
   disc_ndf: 128
   disc_num_layers: 3
   use_actnorm: false
@@ -90,8 +94,8 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.0
-  disc_weight: 0.1
+  ssim_weight: 0.04
+  disc_weight: 0.4
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
@@ -99,15 +103,20 @@ vq_loss:
   # disc_reg_freq: 2
 
 ema:
-  beta: 0.999
-  update_after_step: 1000
-  update_every: 2
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 0
+  update_every: 1
+  use_foreach: true
+  allow_different_devices: true
+  # update_model_with_ema_every: 5_000
 
 train:
-  tokenizer_name: hybrid_cosmos_f16c32
+  tokenizer_name: hybrid_cosmos_f16c64
   proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 3.0
+  max_grad_norm: 1.0
   track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
@@ -115,8 +124,8 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: true
-  resume_path: runs/stage1_cosmos_hybrid/2025-10-19_21-55-32_hybrid_cosmos_f16c32/checkpoints/checkpoint_27
-  ema_load_path:
+  resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
+  ema_load_path: #runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -133,42 +142,79 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    # _target_: src.utilities.optim.get_muon_triton_optimizer
+    # _partial_: true
+    # general_defaults:
+    #   lr: 4.0e-4
+    # muon_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.1
+    #   momentum: 0.95
+    # adamw_defaults:
+    #   lr: 2.0e-4
+    #   weight_decay: 0.0
+    #   betas: [0.9, 0.95]
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 4.0e-4 # Reduced learning rate for hybrid model stability
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    betas: [0.95, 0.99]
+    oned_param_algo: lion
+    use_triton: true
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.0
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 1.0e-4
+    # betas: ${tuple:[0.99, 0.995]}
+    # caution: true
+    # mars: false
+    # foreach: true
+    # eps: 1.0e-9
+
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
-    # betas: [0.5, 0.95]
-    # foreach: true
+    # betas: [0.95, 0.99]
+    # # foreach: true
+    # fused: true
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 4.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
-    # _target_: torch.optim.AdamW
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
+
+    # _target_: heavyball.ForeachAdamW
     # _partial_: true
-    # lr: 1.0e-4
+    # lr: 4.0e-4
     # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.0, 0.9] #[0.9, 0.95]
+    # betas: ${tuple:[0.5, 0.9]}
+    # caution: true
+    # mars: false
     # foreach: true
+    # eps: 1.0e-9
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -195,12 +241,14 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c32
-    log_with_time: True
+    run_comment: hybrid_cosmos_f16c64_jepa_pretrained_pure_cnn_decoder
+    log_with_time: true
     visualize_every: 500
     log_every: 10
 
   debug: true
+
+model_sampling: {}
 
 val:
   val_duration: 1000

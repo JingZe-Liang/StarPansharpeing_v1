@@ -13,6 +13,8 @@ from ..config_utils import function_config_to_basic_types
 from .dion.dion.muon import Muon
 from .dion.dion.newton_schulz_triton import ns_line_1, ns_line_2
 
+######### Newton-Schulz ABCs ##########
+
 abc_s = torch.tensor(
     [
         (8.287212018145622, -23.59588651909882, 17.300387312530923),
@@ -75,7 +77,6 @@ def zeropower_via_newtonschulz6_diff_abc(
             ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
             ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
             X, C = C, X  # Swap references to avoid unnecessary copies
-
         else:
             # naive python code
             A = X @ X.mT

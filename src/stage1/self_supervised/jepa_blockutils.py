@@ -33,7 +33,7 @@ class MaskCollator(object):
         allow_overlap=False,
     ):
         super(MaskCollator, self).__init__()
-        if not isinstance(input_size, tuple):
+        if not isinstance(input_size, (tuple, list)):
             input_size = (input_size,) * 2
         self.patch_size = patch_size
         self.height, self.width = (

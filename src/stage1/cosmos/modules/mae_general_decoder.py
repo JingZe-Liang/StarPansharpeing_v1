@@ -912,7 +912,7 @@ class GeneralDecoder(nn.Module):
 
 def test_general_decoder():
     """Test GeneralDecoder with ViT-XL configuration"""
-
+    
     # ViT-XL configuration (fixed patch_size)
     config_dict = {
         "_name_or_path": "facebook/vit-mae-base",
@@ -927,7 +927,7 @@ def test_general_decoder():
         "hidden_size": 768,
         "image_size": 224,
         "initializer_range": 0.02,
-        "intermediate_size": 3072,  # 3072 / 768 = 4
+        "intermediate_size": 3072, # 3072 / 768 = 4
         "layer_norm_eps": 1e-12,
         "mask_ratio": 0.75,
         "model_type": "vit_mae",
@@ -938,90 +938,79 @@ def test_general_decoder():
         "patch_size": 16,  # Fixed: was "SHOULD BE RELOADED"
         "qkv_bias": True,
         "torch_dtype": "float32",
-        "transformers_version": "4.42.3",
+        "transformers_version": "4.42.3"
     }
-
+    
     # Create config
     config = ViTMAEConfig(**config_dict)
-
+    
     # Calculate number of patches
     num_patches = (config.image_size // config.patch_size) ** 2
     print(f"Image size: {config.image_size}, Patch size: {config.patch_size}")
     print(f"Number of patches: {num_patches}")
-
+    
     # Create decoder
     decoder = GeneralDecoder(config, num_patches)
     print(f"\nDecoder created successfully!")
     print(f"Decoder hidden size: {config.decoder_hidden_size}")
     print(f"Decoder layers: {config.decoder_num_hidden_layers}")
     print(f"Decoder attention heads: {config.decoder_num_attention_heads}")
-
+    
     # Test input: simulate encoder output (masked patches)
     batch_size = 2
     # After masking, we keep 25% of patches + CLS token
     seq_length = int(num_patches * (1 - config.mask_ratio)) + 1
     hidden_size = config.hidden_size
-
+    
     # Create dummy hidden states (encoder output)
     hidden_states = torch.randn(batch_size, seq_length, hidden_size)
     print(f"\nInput shape: {hidden_states.shape}")
-    print(
-        f"Expected: (batch_size={batch_size}, seq_length={seq_length}, hidden_size={hidden_size})"
-    )
-
+    print(f"Expected: (batch_size={batch_size}, seq_length={seq_length}, hidden_size={hidden_size})")
+    
     # Test 1: Basic forward pass
     print("\n=== Test 1: Basic Forward Pass ===")
     with torch.no_grad():
         output = decoder(hidden_states)
         print(f"Output type: {type(output)}")
         print(f"Logits shape: {output.logits.shape}")
-        print(
-            f"Expected logits shape: (batch_size={batch_size}, num_patches={num_patches}, patch_size^2*channels={config.patch_size**2 * config.num_channels})"
-        )
-
+        print(f"Expected logits shape: (batch_size={batch_size}, num_patches={num_patches}, patch_size^2*channels={config.patch_size**2 * config.num_channels})")
+        
         # Verify output dimensions
-        expected_patch_dim = config.patch_size**2 * config.num_channels
-        assert output.logits.shape == (batch_size, num_patches, expected_patch_dim), (
+        expected_patch_dim = config.patch_size ** 2 * config.num_channels
+        assert output.logits.shape == (batch_size, num_patches, expected_patch_dim), \
             f"Unexpected logits shape: {output.logits.shape}"
-        )
         print("✓ Output shape correct!")
-
+    
     # Test 2: With hidden states output
     print("\n=== Test 2: With Hidden States ===")
     with torch.no_grad():
         output = decoder(hidden_states, output_hidden_states=True)
-        print(
-            f"Hidden states length: {len(output.hidden_states) if output.hidden_states else 0}"
-        )
+        print(f"Hidden states length: {len(output.hidden_states) if output.hidden_states else 0}")
         if output.hidden_states:
             print(f"First hidden state shape: {output.hidden_states[0].shape}")
             print(f"Last hidden state shape: {output.hidden_states[-1].shape}")
-
+    
     # Test 3: With attentions output
     print("\n=== Test 3: With Attentions ===")
     with torch.no_grad():
         output = decoder(hidden_states, output_attentions=True)
-        print(
-            f"Attentions length: {len(output.attentions) if output.attentions else 0}"
-        )
+        print(f"Attentions length: {len(output.attentions) if output.attentions else 0}")
         if output.attentions:
             print(f"First attention shape: {output.attentions[0].shape}")
-            print(
-                f"Expected attention shape: (batch_size={batch_size}, num_heads={config.decoder_num_attention_heads}, seq_len, seq_len)"
-            )
-
+            print(f"Expected attention shape: (batch_size={batch_size}, num_heads={config.decoder_num_attention_heads}, seq_len, seq_len)")
+    
     # Test 4: With interpolation (different input sequence length)
     print("\n=== Test 4: With Interpolation ===")
     # Simulate different input resolution
     different_seq_length = 50  # Different from expected
     hidden_states_diff = torch.randn(batch_size, different_seq_length, hidden_size)
     print(f"Different input shape: {hidden_states_diff.shape}")
-
+    
     with torch.no_grad():
         output = decoder(hidden_states_diff, drop_cls_token=True)
         print(f"Interpolated output shape: {output.logits.shape}")
         print("✓ Interpolation works!")
-
+    
     # Test 5: Unpatchify functionality
     print("\n=== Test 5: Unpatchify Test ===")
     with torch.no_grad():
@@ -1029,21 +1018,13 @@ def test_general_decoder():
         # Convert logits back to image format
         reconstructed_image = decoder.unpatchify(output.logits)
         print(f"Reconstructed image shape: {reconstructed_image.shape}")
-        print(
-            f"Expected: (batch_size={batch_size}, channels={config.num_channels}, height={config.image_size}, width={config.image_size})"
-        )
-
-        expected_shape = (
-            batch_size,
-            config.num_channels,
-            config.image_size,
-            config.image_size,
-        )
-        assert reconstructed_image.shape == expected_shape, (
+        print(f"Expected: (batch_size={batch_size}, channels={config.num_channels}, height={config.image_size}, width={config.image_size})")
+        
+        expected_shape = (batch_size, config.num_channels, config.image_size, config.image_size)
+        assert reconstructed_image.shape == expected_shape, \
             f"Unexpected image shape: {reconstructed_image.shape}"
-        )
         print("✓ Unpatchify works correctly!")
-
+    
     # Test 6: Return tuple format
     print("\n=== Test 6: Tuple Format ===")
     with torch.no_grad():
@@ -1051,10 +1032,10 @@ def test_general_decoder():
         print(f"Tuple output length: {len(tuple_output)}")
         print(f"Logits shape (tuple[0]): {tuple_output[0].shape}")
         print("✓ Tuple format works!")
-
+    
     print("\n=== All Tests Passed! ===")
     print(f"Model parameters: {sum(p.numel() for p in decoder.parameters()):,}")
-
+    
     return decoder, output
 
 

@@ -79,7 +79,7 @@ class Qwen3NextRMSNorm(nn.Module):
 
 
 # Register custom norm
-create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
+create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore 
 
 
 class CrossAttention(nn.Module):

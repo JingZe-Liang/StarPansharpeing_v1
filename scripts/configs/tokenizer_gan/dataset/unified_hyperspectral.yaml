@@ -5,19 +5,19 @@ dataset_names_to_img_size:
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 img_size: 512 # placeholder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-size_128_bs: 14
-size_256_bs: 12
-size_512_bs: 5
-val_bs: 6
-max_workers: 2
-min_workers: 1
-shuffle_size: -1
-prefetch_factor: 2
+size_128_bs: 20
+size_256_bs: 14
+size_512_bs: 7
+val_bs: 12
+max_workers: 5
+min_workers: 4
+shuffle_size: 100
+prefetch_factor: 6
 
 train_paths:
   #> multispectral datasets
-  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0006..0000}.tar
-  - - data/TUM_128/hyper_images/TUM_128_data_{0005..0000}.tar
+  - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0006..0000}.tar
+  - - data/TUM_128/hyper_images/TUM_128_data_{0006..0000}.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0003..0000}.tar
   - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
   - - ${glob:"data/MMOT/hyper_images/*.tar"} # MMOT, ? bands

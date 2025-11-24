@@ -107,8 +107,8 @@ def hyper_transform(
     op_seq = AugmentationSequential(
         *ops,
         data_keys=["input"],
-        random_apply=(  # type: ignore
-            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply
+        random_apply=( # type: ignore
+            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply 
         ),
         same_on_batch=False,
         keepdim=True,

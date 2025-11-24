@@ -26,7 +26,7 @@ dataset:
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
+  beta: 0.995
   update_after_step: 1000
   update_every: 2
   use_foreach: true
@@ -57,7 +57,7 @@ train:
     _target_: src.stage2.pansharpening.loss.amotized.AmotizedPixelLoss
     pixel_loss_type: l1ssim
     amotized_loss:
-      _target_: torch.nn.MSELoss
+      _target_: torch.nn.L1Loss
     pixel_loss_kwargs:
       weighted_r: [1.0, 0.1] # l1ssim weights
     factors: [0.0, 1.0] # latent and pixel weights
@@ -93,7 +93,7 @@ train:
 
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 1.0e-3
+    lr: 2.0e-4
     weight_decay: 1.0e-4
     betas: ${tuple:[0.95, 0.99]}
     caution: true
@@ -121,7 +121,7 @@ train:
     _partial_: true
     num_warmup_steps: 100
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 4
 
   log:
     run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper

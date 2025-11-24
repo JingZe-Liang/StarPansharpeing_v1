@@ -119,8 +119,8 @@ downstream_model:
       - { "k_size": 4, "stride": 1, "dilation": 2 } # 64 / 4 = 16
     nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
     nat_dec_kwargs:
-      - { "k_size": 4, "stride": 1, "dilation": 2 }
-      - { "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 8, "stride": 1, "dilation": 2 }
+      - null #{ "k_size": 4, "stride": 2, "dilation": 2 }
       # - { "k_size": 8, "stride": 2, "dilation": 2 }
       - null
 

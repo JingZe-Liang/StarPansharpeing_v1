@@ -1,9 +1,10 @@
+from typing import Any, List, Optional, Tuple, Union
+
 import einops
+import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.decomposition import PCA as PCA_sk
-import numpy as np
-from typing import List, Optional, Union, Tuple, Any
 
 from src.utilities.logging import log
 
@@ -33,7 +34,14 @@ def shape_to_1d(img_feat: torch.Tensor, pca_k: int):
     return data, _back_kwargs
 
 
-def feature_pca_sk(img_feat: torch.Tensor, pca_k: int = 3):
+def norm_pca_feats_per_channel(feat_pca):
+    f_min = feat_pca.min(dim=1)[0]
+    f_max = feat_pca.max(dim=1)[0]
+    feat_pca = (feat_pca - f_min) / (f_max - f_min)
+    return feat_pca
+
+
+def feature_pca_sk(img_feat: torch.Tensor, pca_k: int = 3, norm_pca=True):
     """
     Perform PCA dimension reduction on image features using scikit-learn
     """
@@ -45,11 +53,14 @@ def feature_pca_sk(img_feat: torch.Tensor, pca_k: int = 3):
     pca = PCA_sk(n_components=pca_k, whiten=True)
     pca_data = pca.fit_transform(data)
     pca_data = einops.rearrange(pca_data, **_back_kwargs)
+    pca_data = torch.as_tensor(pca_data).to(img_feat.device)
 
-    return torch.as_tensor(pca_data).to(img_feat.device)
+    if norm_pca:
+        pca_data = norm_pca_feats_per_channel(pca_data)
+    return pca_data
 
 
-def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
+def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3, norm_pca=True):
     from cuml.decomposition import PCA as cuML_PCA
 
     assert img_feat.is_cuda, "img_feat must be on GPU"
@@ -63,6 +74,8 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
     )
 
     img_feats_reduced = einops.rearrange(img_feats_reduced_flat, **_back_kwargs)
+    if norm_pca:
+        img_feats_reduced = norm_pca_feats_per_channel(img_feats_reduced)
 
     log(f"Original shape: {img_feat.shape}")
     log(f"Reshaped for cuML PCA: {data.shape}")
@@ -73,7 +86,7 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3):
 
 
 @torch.no_grad()
-def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
+def feature_pca_torch(img_feat: torch.Tensor, pca_k: int, norm_pca=True):
     """
     Perform PCA dimension reduction on image features using PyTorch's SVD on CUDA.
 
@@ -202,129 +215,10 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int):
     # logger.debug(f"Projected data shape (flat): {projected_data.shape}")
     # logger.debug(f"Reduced features shape (reshaped): {img_feats_reduced.shape}")
 
+    if norm_pca:
+        img_feats_reduced = norm_pca_feats_per_channel(img_feats_reduced)
+
     return img_feats_reduced
-
-
-# * --- Test --- #
-
-
-def test_speed_torch_version():
-    import time
-
-    from tqdm import trange
-
-    a = torch.randn(2, 128, 256, 256).cuda()
-    t1 = time.time()
-    for _ in trange(100):
-        _ = feature_pca_torch(a, pca_k=3)
-    t2 = time.time()
-    print(f"Time taken: {(t2 - t1) / 100:.2f} s")
-
-
-# --- Example Usage (Requires CUDA enabled PyTorch and einops) ---
-
-if __name__ == "__main__":
-    test_speed_torch_version()
-    exit(0)
-
-    # Make sure CUDA is available
-    if not torch.cuda.is_available():
-        log("CUDA is not available. Cannot run CUDA PCA example.")
-    else:
-        device = torch.device("cuda")
-        log(f"Using device: {device}")
-
-        # Example 1: Simulate 3D ViT features [bs, l, c]
-        bs_vit, l_vit, c_vit = 4, 256, 768
-        pca_k_vit = 64
-        log("\n--- Testing 3D ViT-like Features ---")
-        vit_features = torch.randn(
-            bs_vit, l_vit, c_vit, device=device, dtype=torch.float32
-        )
-
-        log("Running PCA with PyTorch manual SVD...")
-        reduced_vit_features_torch = feature_pca_torch(vit_features, pca_k=pca_k_vit)
-        log(f"Final reduced shape (torch): {reduced_vit_features_torch.shape}")
-        assert reduced_vit_features_torch.shape == (bs_vit, l_vit, pca_k_vit)
-        assert reduced_vit_features_torch.device == device
-
-        # Example 2: Simulate 4D CNN features [bs, c, h, w]
-        bs_cnn, c_cnn, h_cnn, w_cnn = 2, 512, 14, 14
-        pca_k_cnn = 32
-        log("\n--- Testing 4D CNN-like Features ---")
-        cnn_features = torch.randn(
-            bs_cnn, c_cnn, h_cnn, w_cnn, device=device, dtype=torch.float32
-        )
-
-        log("Running PCA with PyTorch manual SVD...")
-        reduced_cnn_features_torch = feature_pca_torch(cnn_features, pca_k=pca_k_cnn)
-        log(f"Final reduced shape (torch): {reduced_cnn_features_torch.shape}")
-        assert reduced_cnn_features_torch.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
-        assert reduced_cnn_features_torch.device == device
-
-        # Optional: Compare with cuML if installed
-        try:
-            from cuml.decomposition import PCA as cuML_PCA
-
-            log("\n--- Testing with cuML PCA (for comparison) ---")
-
-            def feature_pca_cuml2(img_feat: torch.Tensor, pca_k: int):
-                assert img_feat.ndim in (3, 4), "must be 1d vit or 2d cnn features"
-                assert img_feat.is_cuda, "img_feat must be on GPU"
-
-                _shape = img_feat.shape
-                if len(_shape) == 3:
-                    c = _shape[-1]  # [bs, l, c]
-                    data = einops.rearrange(img_feat, "bs l c -> (bs l) c")
-                    _back_kwargs = dict(
-                        pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1]
-                    )
-                else:
-                    c = _shape[1]
-                    data = einops.rearrange(img_feat, "bs c h w -> (bs h w) c")
-                    _back_kwargs = dict(
-                        pattern="(bs h w) k -> bs k h w",
-                        k=pca_k,
-                        bs=_shape[0],
-                        h=_shape[2],
-                        w=_shape[3],
-                    )
-                assert pca_k <= c, (
-                    f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
-                )
-
-                pca = cuML_PCA(n_components=pca_k)
-                projected_data = pca.fit_transform(data)
-
-                img_feats_reduced_flat = torch.as_tensor(
-                    projected_data, device=data.device, dtype=img_feat.dtype
-                )
-                img_feats_reduced = einops.rearrange(
-                    img_feats_reduced_flat, **_back_kwargs
-                )
-                return img_feats_reduced
-
-            log("Running PCA with cuML...")
-            reduced_vit_features_cuml = feature_pca_cuml2(vit_features, pca_k=pca_k_vit)
-            log(f"Final reduced shape (cuML): {reduced_vit_features_cuml.shape}")
-            assert reduced_vit_features_cuml.shape == (bs_vit, l_vit, pca_k_vit)
-            assert reduced_vit_features_cuml.device == device
-
-            reduced_cnn_features_cuml = feature_pca_cuml2(cnn_features, pca_k=pca_k_cnn)
-            log(f"Final reduced shape (cuML): {reduced_cnn_features_cuml.shape}")
-            assert reduced_cnn_features_cuml.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
-            assert reduced_cnn_features_cuml.device == device
-
-            # Note: The exact numerical results might differ slightly between PyTorch SVD
-            # and cuML PCA due to implementation details and floating-point precision,
-            # but the shapes and general transformed structure should be comparable.
-            # To check numerical similarity, you could compare the projected data
-            # after aligning their signs (as PCA components are directionally ambiguous).
-
-        except ImportError:
-            log("\ncuML not installed. Skipping cuML comparison.")
-        except Exception as e:
-            log(f"\nError during cuML comparison: {e}. Skipping.")
 
 
 def pca_list(
@@ -521,3 +415,125 @@ class TorchPCA:
         t0 = X - self.mean_.unsqueeze(0)
         projected = t0 @ self.components_.T
         return projected
+
+
+# * --- Test --- #
+
+
+def test_speed_torch_version():
+    import time
+
+    from tqdm import trange
+
+    a = torch.randn(2, 128, 256, 256).cuda()
+    t1 = time.time()
+    for _ in trange(100):
+        _ = feature_pca_torch(a, pca_k=3)
+    t2 = time.time()
+    print(f"Time taken: {(t2 - t1) / 100:.2f} s")
+
+
+# --- Example Usage (Requires CUDA enabled PyTorch and einops) ---
+
+if __name__ == "__main__":
+    test_speed_torch_version()
+    exit(0)
+
+    # Make sure CUDA is available
+    if not torch.cuda.is_available():
+        log("CUDA is not available. Cannot run CUDA PCA example.")
+    else:
+        device = torch.device("cuda")
+        log(f"Using device: {device}")
+
+        # Example 1: Simulate 3D ViT features [bs, l, c]
+        bs_vit, l_vit, c_vit = 4, 256, 768
+        pca_k_vit = 64
+        log("\n--- Testing 3D ViT-like Features ---")
+        vit_features = torch.randn(
+            bs_vit, l_vit, c_vit, device=device, dtype=torch.float32
+        )
+
+        log("Running PCA with PyTorch manual SVD...")
+        reduced_vit_features_torch = feature_pca_torch(vit_features, pca_k=pca_k_vit)
+        log(f"Final reduced shape (torch): {reduced_vit_features_torch.shape}")
+        assert reduced_vit_features_torch.shape == (bs_vit, l_vit, pca_k_vit)
+        assert reduced_vit_features_torch.device == device
+
+        # Example 2: Simulate 4D CNN features [bs, c, h, w]
+        bs_cnn, c_cnn, h_cnn, w_cnn = 2, 512, 14, 14
+        pca_k_cnn = 32
+        log("\n--- Testing 4D CNN-like Features ---")
+        cnn_features = torch.randn(
+            bs_cnn, c_cnn, h_cnn, w_cnn, device=device, dtype=torch.float32
+        )
+
+        log("Running PCA with PyTorch manual SVD...")
+        reduced_cnn_features_torch = feature_pca_torch(cnn_features, pca_k=pca_k_cnn)
+        log(f"Final reduced shape (torch): {reduced_cnn_features_torch.shape}")
+        assert reduced_cnn_features_torch.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
+        assert reduced_cnn_features_torch.device == device
+
+        # Optional: Compare with cuML if installed
+        try:
+            from cuml.decomposition import PCA as cuML_PCA
+
+            log("\n--- Testing with cuML PCA (for comparison) ---")
+
+            def feature_pca_cuml2(img_feat: torch.Tensor, pca_k: int):
+                assert img_feat.ndim in (3, 4), "must be 1d vit or 2d cnn features"
+                assert img_feat.is_cuda, "img_feat must be on GPU"
+
+                _shape = img_feat.shape
+                if len(_shape) == 3:
+                    c = _shape[-1]  # [bs, l, c]
+                    data = einops.rearrange(img_feat, "bs l c -> (bs l) c")
+                    _back_kwargs = dict(
+                        pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1]
+                    )
+                else:
+                    c = _shape[1]
+                    data = einops.rearrange(img_feat, "bs c h w -> (bs h w) c")
+                    _back_kwargs = dict(
+                        pattern="(bs h w) k -> bs k h w",
+                        k=pca_k,
+                        bs=_shape[0],
+                        h=_shape[2],
+                        w=_shape[3],
+                    )
+                assert pca_k <= c, (
+                    f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
+                )
+
+                pca = cuML_PCA(n_components=pca_k)
+                projected_data = pca.fit_transform(data)
+
+                img_feats_reduced_flat = torch.as_tensor(
+                    projected_data, device=data.device, dtype=img_feat.dtype
+                )
+                img_feats_reduced = einops.rearrange(
+                    img_feats_reduced_flat, **_back_kwargs
+                )
+                return img_feats_reduced
+
+            log("Running PCA with cuML...")
+            reduced_vit_features_cuml = feature_pca_cuml2(vit_features, pca_k=pca_k_vit)
+            log(f"Final reduced shape (cuML): {reduced_vit_features_cuml.shape}")
+            assert reduced_vit_features_cuml.shape == (bs_vit, l_vit, pca_k_vit)
+            assert reduced_vit_features_cuml.device == device
+
+            reduced_cnn_features_cuml = feature_pca_cuml2(cnn_features, pca_k=pca_k_cnn)
+            log(f"Final reduced shape (cuML): {reduced_cnn_features_cuml.shape}")
+            assert reduced_cnn_features_cuml.shape == (bs_cnn, pca_k_cnn, h_cnn, w_cnn)
+            assert reduced_cnn_features_cuml.device == device
+
+            # Note: The exact numerical results might differ slightly between PyTorch SVD
+            # and cuML PCA due to implementation details and floating-point precision,
+            # but the shapes and general transformed structure should be comparable.
+            # To check numerical similarity, you could compare the projected data
+            # after aligning their signs (as PCA components are directionally ambiguous).
+
+        except ImportError:
+            log("\ncuML not installed. Skipping cuML comparison.")
+        except Exception as e:
+            log(f"\nError during cuML comparison: {e}. Skipping.")
