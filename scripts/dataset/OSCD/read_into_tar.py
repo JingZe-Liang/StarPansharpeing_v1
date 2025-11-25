@@ -32,9 +32,7 @@ gt_name = "data/Downstreams/ChangeDetection/OSCD/Onera Satellite Change Detectio
 
 
 def read_bands(img_dir, bands=bands):
-    return np.stack(
-        [read_image(os.path.join(img_dir, band)) for band in bands], axis=-1
-    )  # (h, w, c)  # type: ignore
+    return np.stack([read_image(os.path.join(img_dir, band)) for band in bands], axis=-1)  # (h, w, c)  # type: ignore
 
 
 # @print_info_if_raise()
@@ -63,9 +61,7 @@ def read_dir_img(img_dir, use_rgb=False):
 
 @catch_any()
 def main(use_rgb=False):
-    writter = wds.TarWriter(
-        "data/Downstreams/ChangeDetection/OSCD/OSCD_3bands_train.tar"
-    )
+    writter = wds.TarWriter("data/Downstreams/ChangeDetection/OSCD/OSCD_3bands_train.tar")
 
     tbar = tqdm(os.listdir(base_dir))
     for sub_dir in tbar:
@@ -73,9 +69,7 @@ def main(use_rgb=False):
             # print(sub_dir)
             # print(img1.shape, img2.shape, gt.shape)
             try:
-                img1, img2, gt = read_dir_img(
-                    os.path.join(base_dir, sub_dir), use_rgb=use_rgb
-                )
+                img1, img2, gt = read_dir_img(os.path.join(base_dir, sub_dir), use_rgb=use_rgb)
             except Exception as e:
                 print(f"Error in {sub_dir}: {e}")
                 continue

@@ -19,13 +19,9 @@ def kaiming_init(
     assert distribution in ["uniform", "normal"]
     if hasattr(module, "weight") and module.weight is not None:
         if distribution == "uniform":
-            nn.init.kaiming_uniform_(
-                module.weight, a=a, mode=mode, nonlinearity=nonlinearity
-            )
+            nn.init.kaiming_uniform_(module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
         else:
-            nn.init.kaiming_normal_(
-                module.weight, a=a, mode=mode, nonlinearity=nonlinearity
-            )
+            nn.init.kaiming_normal_(module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
     if hasattr(module, "bias") and module.bias is not None:
         nn.init.constant_(module.bias, bias)
 
@@ -288,13 +284,9 @@ class UpConvHead(nn.Module):
         self.head = nn.Sequential(
             nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1),
             Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
-            nn.Conv2d(
-                features // 2, n_hidden_channels, kernel_size=3, stride=1, padding=1
-            ),
+            nn.Conv2d(features // 2, n_hidden_channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(
-                n_hidden_channels, n_output_channels, kernel_size=1, stride=1, padding=0
-            ),
+            nn.Conv2d(n_hidden_channels, n_output_channels, kernel_size=1, stride=1, padding=0),
         )
 
     def forward(self, x):
@@ -367,17 +359,10 @@ class ReassembleBlocks(nn.Module):
         if self.readout_type == "project":
             self.readout_projects = nn.ModuleList()
             for i in range(len(self.projects)):
-                self.readout_projects.append(
-                    nn.Sequential(
-                        nn.Linear(2 * in_channels[i], in_channels[i]), nn.GELU()
-                    )
-                )
+                self.readout_projects.append(nn.Sequential(nn.Linear(2 * in_channels[i], in_channels[i]), nn.GELU()))
 
         self.batchnorm_layers = nn.ModuleList(
-            [
-                nn.SyncBatchNorm(channel) if use_batchnorm else nn.Identity(channel)
-                for channel in in_channels
-            ]
+            [nn.SyncBatchNorm(channel) if use_batchnorm else nn.Identity(channel) for channel in in_channels]
         )
 
     @staticmethod
@@ -433,9 +418,7 @@ class ReassembleBlocksWithoutCls(RessembleBlocks):
         out_channels=[128, 256, 512, 1024],
         use_batchnorm=False,
     ):
-        super(ReassembleBlocksWithoutCls, self).__init__(
-            in_channels, out_channels, "project", use_batchnorm
-        )
+        super(ReassembleBlocksWithoutCls, self).__init__(in_channels, out_channels, "project", use_batchnorm)
         if hasattr(self, "readout_projects"):
             delattr(self, "readout_projects")
 
@@ -462,9 +445,7 @@ class PreActResidualConvUnit(nn.Module):
         init_cfg (dict, optional): Initialization config dict. Default: None.
     """
 
-    def __init__(
-        self, in_channels, act_cfg, norm_cfg, stride=1, dilation=1, init_cfg=None
-    ):
+    def __init__(self, in_channels, act_cfg, norm_cfg, stride=1, dilation=1, init_cfg=None):
         super(PreActResidualConvUnit, self).__init__()  # init_cfg)
         self.conv1 = ConvModule(
             in_channels,
@@ -525,15 +506,9 @@ class FeatureFusionBlock(nn.Module):
         self.out_channels = in_channels
         if self.expand:
             self.out_channels = in_channels // 2
-        self.project = ConvModule(
-            self.in_channels, self.out_channels, kernel_size=1, act_cfg=None, bias=True
-        )
-        self.res_conv_unit1 = PreActResidualConvUnit(
-            in_channels=self.in_channels, act_cfg=act_cfg, norm_cfg=norm_cfg
-        )
-        self.res_conv_unit2 = PreActResidualConvUnit(
-            in_channels=self.in_channels, act_cfg=act_cfg, norm_cfg=norm_cfg
-        )
+        self.project = ConvModule(self.in_channels, self.out_channels, kernel_size=1, act_cfg=None, bias=True)
+        self.res_conv_unit1 = PreActResidualConvUnit(in_channels=self.in_channels, act_cfg=act_cfg, norm_cfg=norm_cfg)
+        self.res_conv_unit2 = PreActResidualConvUnit(in_channels=self.in_channels, act_cfg=act_cfg, norm_cfg=norm_cfg)
 
     def forward(self, *inputs):
         x = inputs[0]
@@ -551,9 +526,7 @@ class FeatureFusionBlock(nn.Module):
             x = x + self.res_conv_unit1(res)
         x = self.res_conv_unit2(x)  # ok
 
-        x = torch.nn.functional.interpolate(
-            x, scale_factor=2, mode="bilinear", align_corners=self.align_corners
-        )
+        x = torch.nn.functional.interpolate(x, scale_factor=2, mode="bilinear", align_corners=self.align_corners)
         #  ok
 
         x = self.project(x)  # ok
@@ -607,8 +580,7 @@ class DPTHead(nn.Module):
         )
 
         self.post_process_channels = [
-            channel * (2**i) if expand_channels else channel
-            for i, channel in enumerate(post_process_channels)
+            channel * (2**i) if expand_channels else channel for i, channel in enumerate(post_process_channels)
         ]
         self.convs = nn.ModuleList()
         for channel in self.post_process_channels:
@@ -625,9 +597,7 @@ class DPTHead(nn.Module):
         self.fusion_blocks = nn.ModuleList()
         self.act_cfg = {"type": "ReLU"}
         for _ in range(len(self.convs)):
-            self.fusion_blocks.append(
-                FeatureFusionBlock(self.channels, self.act_cfg, self.norm_cfg)
-            )
+            self.fusion_blocks.append(FeatureFusionBlock(self.channels, self.act_cfg, self.norm_cfg))
         self.fusion_blocks[0].res_conv_unit1 = None
         self.project = ConvModule(
             self.channels,
@@ -707,9 +677,7 @@ def test_dpt_head():
 
         # Update expected shape based on actual output (we'll adjust after first run)
         print(f"✓ Basic forward pass successful. Output shape: {output.shape}")
-        print(
-            f"Expected shape calculation needs adjustment based on actual DPT Head behavior"
-        )
+        print(f"Expected shape calculation needs adjustment based on actual DPT Head behavior")
 
     except Exception as e:
         print(f"✗ Basic functionality test failed: {e}")
@@ -735,9 +703,7 @@ def test_dpt_head():
             vit_outputs_custom.append([feature_map, cls_token])
 
         output_custom = dpt_head_custom(vit_outputs_custom)
-        print(
-            f"✓ Custom configuration test successful. Output shape: {output_custom.shape}"
-        )
+        print(f"✓ Custom configuration test successful. Output shape: {output_custom.shape}")
 
     except Exception as e:
         print(f"✗ Custom configuration test failed: {e}")
@@ -754,9 +720,7 @@ def test_dpt_head():
                 vit_outputs_batch.append([feature_map, cls_token])
 
             output_batch = dpt_head(vit_outputs_batch)
-            print(
-                f"✓ Batch size {batch_size_test} test successful. Output shape: {output_batch.shape}"
-            )
+            print(f"✓ Batch size {batch_size_test} test successful. Output shape: {output_batch.shape}")
 
         print("✓ Batch size variation test successful")
 
@@ -798,9 +762,7 @@ def test_dpt_head():
     try:
         vit_outputs_grad = []
         for i in range(4):
-            feature_map = torch.randn(
-                batch_size, feature_dim, height, width, requires_grad=True
-            )
+            feature_map = torch.randn(batch_size, feature_dim, height, width, requires_grad=True)
             cls_token = torch.randn(batch_size, feature_dim, requires_grad=True)
             vit_outputs_grad.append([feature_map, cls_token])
 
@@ -825,9 +787,7 @@ def test_dpt_head():
         for readout_type in ["ignore", "add", "project"]:
             dpt_head_readout = DPTHead(readout_type=readout_type)
             output_readout = dpt_head_readout(vit_outputs)
-            print(
-                f"✓ Readout type {readout_type} test successful. Output shape: {output_readout.shape}"
-            )
+            print(f"✓ Readout type {readout_type} test successful. Output shape: {output_readout.shape}")
 
         print("✓ Different readout types test successful")
 
@@ -849,9 +809,7 @@ def test_conv_module():
 
     try:
         # Test basic ConvModule
-        conv_module = ConvModule(
-            in_channels=64, out_channels=128, kernel_size=3, padding=1
-        )
+        conv_module = ConvModule(in_channels=64, out_channels=128, kernel_size=3, padding=1)
 
         # Test input
         x = torch.randn(2, 64, 32, 32)
@@ -895,9 +853,7 @@ def test_feature_fusion_block():
 
     try:
         # Test single input
-        fusion_block = FeatureFusionBlock(
-            in_channels=256, act_cfg={"type": "ReLU"}, norm_cfg=None
-        )
+        fusion_block = FeatureFusionBlock(in_channels=256, act_cfg={"type": "ReLU"}, norm_cfg=None)
 
         x1 = torch.randn(2, 256, 32, 32)
         output_single = fusion_block(x1)

@@ -72,12 +72,8 @@ class ResidualFSQ(Module):
         dim = default(dim, codebook_dim)
 
         requires_projection = codebook_dim != dim
-        self.project_in = (
-            nn.Linear(dim, codebook_dim) if requires_projection else nn.Identity()
-        )
-        self.project_out = (
-            nn.Linear(codebook_dim, dim) if requires_projection else nn.Identity()
-        )
+        self.project_in = nn.Linear(dim, codebook_dim) if requires_projection else nn.Identity()
+        self.project_out = nn.Linear(codebook_dim, dim) if requires_projection else nn.Identity()
         self.has_projections = requires_projection
 
         self.is_channel_first = is_channel_first
@@ -114,7 +110,9 @@ class ResidualFSQ(Module):
         assert quantize_dropout_cutoff_index >= 0
 
         self.quantize_dropout_cutoff_index = quantize_dropout_cutoff_index
-        self.quantize_dropout_multiple_of = quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        self.quantize_dropout_multiple_of = (
+            quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        )
 
     @property
     def codebooks(self):
@@ -141,9 +139,7 @@ class ResidualFSQ(Module):
         # take care of quantizer dropout
 
         mask = indices == -1
-        indices = indices.masked_fill(
-            mask, 0
-        )  # have it fetch a dummy code to be masked out later
+        indices = indices.masked_fill(mask, 0)  # have it fetch a dummy code to be masked out later
 
         all_codes = get_at("q [c] d, b n q -> q b n d", self.codebooks, indices)
 
@@ -210,32 +206,20 @@ class ResidualFSQ(Module):
 
             rand = random.Random(rand_quantize_dropout_fixed_seed)
 
-            rand_quantize_dropout_index = rand.randrange(
-                self.quantize_dropout_cutoff_index, num_quant
-            )
+            rand_quantize_dropout_index = rand.randrange(self.quantize_dropout_cutoff_index, num_quant)
 
             if quant_dropout_multiple_of != 1:
                 rand_quantize_dropout_index = (
-                    round_up_multiple(
-                        rand_quantize_dropout_index + 1, quant_dropout_multiple_of
-                    )
-                    - 1
+                    round_up_multiple(rand_quantize_dropout_index + 1, quant_dropout_multiple_of) - 1
                 )
 
-            null_indices = torch.full(
-                x.shape[:2], -1.0, device=device, dtype=torch.long
-            )
+            null_indices = torch.full(x.shape[:2], -1.0, device=device, dtype=torch.long)
 
         # go through the layers
 
         with autocast("cuda", enabled=False):
-            for quantizer_index, (layer, scale) in enumerate(
-                zip(self.layers, self.scales)
-            ):
-                if (
-                    should_quantize_dropout
-                    and quantizer_index > rand_quantize_dropout_index
-                ):
+            for quantizer_index, (layer, scale) in enumerate(zip(self.layers, self.scales)):
+                if should_quantize_dropout and quantizer_index > rand_quantize_dropout_index:
                     all_indices.append(null_indices)
                     continue
 
@@ -316,17 +300,11 @@ class GroupedResidualFSQ(Module):
         return 1 if self.accept_image_fmap else -1
 
     def get_codes_from_indices(self, indices):
-        codes = tuple(
-            rvq.get_codes_from_indices(chunk_indices)
-            for rvq, chunk_indices in zip(self.rvqs, indices)
-        )
+        codes = tuple(rvq.get_codes_from_indices(chunk_indices) for rvq, chunk_indices in zip(self.rvqs, indices))
         return torch.stack(codes)
 
     def get_output_from_indices(self, indices):
-        outputs = tuple(
-            rvq.get_output_from_indices(chunk_indices)
-            for rvq, chunk_indices in zip(self.rvqs, indices)
-        )
+        outputs = tuple(rvq.get_output_from_indices(chunk_indices) for rvq, chunk_indices in zip(self.rvqs, indices))
         return torch.cat(outputs, dim=self.split_dim)
 
     def forward(self, x, return_all_codes=False):
@@ -339,9 +317,7 @@ class GroupedResidualFSQ(Module):
 
         forward_kwargs = dict(
             return_all_codes=return_all_codes,
-            rand_quantize_dropout_fixed_seed=get_maybe_sync_seed(device)
-            if self.training
-            else None,
+            rand_quantize_dropout_fixed_seed=get_maybe_sync_seed(device) if self.training else None,
         )
 
         # invoke residual vq on each group

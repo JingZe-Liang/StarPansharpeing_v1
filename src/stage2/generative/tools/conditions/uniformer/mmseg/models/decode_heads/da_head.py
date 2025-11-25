@@ -167,15 +167,7 @@ class DAHead(BaseDecodeHead):
         """Compute ``pam_cam``, ``pam``, ``cam`` loss."""
         pam_cam_seg_logit, pam_seg_logit, cam_seg_logit = seg_logit
         loss = dict()
-        loss.update(
-            add_prefix(
-                super(DAHead, self).losses(pam_cam_seg_logit, seg_label), "pam_cam"
-            )
-        )
-        loss.update(
-            add_prefix(super(DAHead, self).losses(pam_seg_logit, seg_label), "pam")
-        )
-        loss.update(
-            add_prefix(super(DAHead, self).losses(cam_seg_logit, seg_label), "cam")
-        )
+        loss.update(add_prefix(super(DAHead, self).losses(pam_cam_seg_logit, seg_label), "pam_cam"))
+        loss.update(add_prefix(super(DAHead, self).losses(pam_seg_logit, seg_label), "pam"))
+        loss.update(add_prefix(super(DAHead, self).losses(cam_seg_logit, seg_label), "cam"))
         return loss

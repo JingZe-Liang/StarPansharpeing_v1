@@ -11,9 +11,7 @@ from ....mmcv.utils import deprecated_api_warning
 from ..cnn import CONV_LAYERS
 from ..utils import ext_loader, print_log
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["modulated_deform_conv_forward", "modulated_deform_conv_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["modulated_deform_conv_forward", "modulated_deform_conv_backward"])
 
 
 class ModulatedDeformConv2dFunction(Function):
@@ -81,9 +79,7 @@ class ModulatedDeformConv2dFunction(Function):
         input = input.type_as(offset)
         weight = weight.type_as(input)
         ctx.save_for_backward(input, offset, mask, weight, bias)
-        output = input.new_empty(
-            ModulatedDeformConv2dFunction._output_size(ctx, input, weight)
-        )
+        output = input.new_empty(ModulatedDeformConv2dFunction._output_size(ctx, input, weight))
         ctx._bufs = [input.new_empty(0), input.new_empty(0)]
         ext_module.modulated_deform_conv_forward(
             input,
@@ -171,11 +167,7 @@ class ModulatedDeformConv2dFunction(Function):
             stride_ = ctx.stride[d]
             output_size += ((in_size + (2 * pad) - kernel) // stride_ + 1,)
         if not all(map(lambda s: s > 0, output_size)):
-            raise ValueError(
-                "convolution input is too small (output would be "
-                + "x".join(map(str, output_size))
-                + ")"
-            )
+            raise ValueError("convolution input is too small (output would be " + "x".join(map(str, output_size)) + ")")
         return output_size
 
 
@@ -183,9 +175,7 @@ modulated_deform_conv2d = ModulatedDeformConv2dFunction.apply
 
 
 class ModulatedDeformConv2d(nn.Module):
-    @deprecated_api_warning(
-        {"deformable_groups": "deform_groups"}, cls_name="ModulatedDeformConv2d"
-    )
+    @deprecated_api_warning({"deformable_groups": "deform_groups"}, cls_name="ModulatedDeformConv2d")
     def __init__(
         self,
         in_channels,
@@ -211,9 +201,7 @@ class ModulatedDeformConv2d(nn.Module):
         self.transposed = False
         self.output_padding = _single(0)
 
-        self.weight = nn.Parameter(
-            torch.Tensor(out_channels, in_channels // groups, *self.kernel_size)
-        )
+        self.weight = nn.Parameter(torch.Tensor(out_channels, in_channels // groups, *self.kernel_size))
         if bias:
             self.bias = nn.Parameter(torch.Tensor(out_channels))
         else:
@@ -317,25 +305,14 @@ class ModulatedDeformConv2dPack(ModulatedDeformConv2d):
             # the key is different in early versions
             # In version < 2, ModulatedDeformConvPack
             # loads previous benchmark models.
-            if (
-                prefix + "conv_offset.weight" not in state_dict
-                and prefix[:-1] + "_offset.weight" in state_dict
-            ):
-                state_dict[prefix + "conv_offset.weight"] = state_dict.pop(
-                    prefix[:-1] + "_offset.weight"
-                )
-            if (
-                prefix + "conv_offset.bias" not in state_dict
-                and prefix[:-1] + "_offset.bias" in state_dict
-            ):
-                state_dict[prefix + "conv_offset.bias"] = state_dict.pop(
-                    prefix[:-1] + "_offset.bias"
-                )
+            if prefix + "conv_offset.weight" not in state_dict and prefix[:-1] + "_offset.weight" in state_dict:
+                state_dict[prefix + "conv_offset.weight"] = state_dict.pop(prefix[:-1] + "_offset.weight")
+            if prefix + "conv_offset.bias" not in state_dict and prefix[:-1] + "_offset.bias" in state_dict:
+                state_dict[prefix + "conv_offset.bias"] = state_dict.pop(prefix[:-1] + "_offset.bias")
 
         if version is not None and version > 1:
             print_log(
-                f"ModulatedDeformConvPack {prefix.rstrip('.')} is upgraded to "
-                "version 2.",
+                f"ModulatedDeformConvPack {prefix.rstrip('.')} is upgraded to version 2.",
                 logger="root",
             )
 

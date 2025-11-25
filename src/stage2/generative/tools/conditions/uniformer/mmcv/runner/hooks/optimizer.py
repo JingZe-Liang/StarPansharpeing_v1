@@ -35,9 +35,7 @@ class OptimizerHook(Hook):
             grad_norm = self.clip_grads(runner.model.parameters())
             if grad_norm is not None:
                 # Add grad norm to the logger
-                runner.log_buffer.update(
-                    {"grad_norm": float(grad_norm)}, runner.outputs["num_samples"]
-                )
+                runner.log_buffer.update({"grad_norm": float(grad_norm)}, runner.outputs["num_samples"])
         runner.optimizer.step()
 
 
@@ -74,8 +72,7 @@ class GradientCumulativeOptimizerHook(OptimizerHook):
         super(GradientCumulativeOptimizerHook, self).__init__(**kwargs)
 
         assert isinstance(cumulative_iters, int) and cumulative_iters > 0, (
-            f"cumulative_iters only accepts positive int, but got "
-            f"{type(cumulative_iters)} instead."
+            f"cumulative_iters only accepts positive int, but got {type(cumulative_iters)} instead."
         )
 
         self.cumulative_iters = cumulative_iters
@@ -101,15 +98,12 @@ class GradientCumulativeOptimizerHook(OptimizerHook):
 
         if self.has_batch_norm(runner.model) and self.cumulative_iters > 1:
             runner.logger.warning(
-                "GradientCumulativeOptimizerHook may slightly decrease "
-                "performance if the model has BatchNorm layers."
+                "GradientCumulativeOptimizerHook may slightly decrease performance if the model has BatchNorm layers."
             )
 
         residual_iters = runner.max_iters - runner.iter
 
-        self.divisible_iters = (
-            residual_iters // self.cumulative_iters * self.cumulative_iters
-        )
+        self.divisible_iters = residual_iters // self.cumulative_iters * self.cumulative_iters
         self.remainder_iters = residual_iters - self.divisible_iters
 
         self.initialized = True
@@ -126,23 +120,17 @@ class GradientCumulativeOptimizerHook(OptimizerHook):
         loss = loss / loss_factor
         loss.backward()
 
-        if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(
-            runner
-        ):
+        if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(runner):
             if self.grad_clip is not None:
                 grad_norm = self.clip_grads(runner.model.parameters())
                 if grad_norm is not None:
                     # Add grad norm to the logger
-                    runner.log_buffer.update(
-                        {"grad_norm": float(grad_norm)}, runner.outputs["num_samples"]
-                    )
+                    runner.log_buffer.update({"grad_norm": float(grad_norm)}, runner.outputs["num_samples"])
             runner.optimizer.step()
             runner.optimizer.zero_grad()
 
 
-if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version(
-    "1.6.0"
-):
+if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version("1.6.0"):
 
     @HOOKS.register_module()
     class Fp16OptimizerHook(OptimizerHook):
@@ -196,10 +184,7 @@ if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version(
             elif isinstance(loss_scale, dict):
                 self.loss_scaler = GradScaler(**loss_scale)
             else:
-                raise ValueError(
-                    "loss_scale must be of type float, dict, or "
-                    f'"dynamic", got {loss_scale}'
-                )
+                raise ValueError(f'loss_scale must be of type float, dict, or "dynamic", got {loss_scale}')
 
         def before_run(self, runner):
             """Preparing steps before Mixed Precision Training."""
@@ -245,22 +230,16 @@ if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version(
                 grad_norm = self.clip_grads(runner.model.parameters())
                 if grad_norm is not None:
                     # Add grad norm to the logger
-                    runner.log_buffer.update(
-                        {"grad_norm": float(grad_norm)}, runner.outputs["num_samples"]
-                    )
+                    runner.log_buffer.update({"grad_norm": float(grad_norm)}, runner.outputs["num_samples"])
             # backward and update scaler
             self.loss_scaler.step(runner.optimizer)
             self.loss_scaler.update(self._scale_update_param)
 
             # save state_dict of loss_scaler
-            runner.meta.setdefault("fp16", {})["loss_scaler"] = (
-                self.loss_scaler.state_dict()
-            )
+            runner.meta.setdefault("fp16", {})["loss_scaler"] = self.loss_scaler.state_dict()
 
     @HOOKS.register_module()
-    class GradientCumulativeFp16OptimizerHook(
-        GradientCumulativeOptimizerHook, Fp16OptimizerHook
-    ):
+    class GradientCumulativeFp16OptimizerHook(GradientCumulativeOptimizerHook, Fp16OptimizerHook):
         """Fp16 optimizer Hook (using PyTorch's implementation) implements
         multi-iters gradient cumulating.
 
@@ -284,9 +263,7 @@ if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version(
 
             self.loss_scaler.scale(loss).backward()
 
-            if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(
-                runner
-            ):
+            if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(runner):
                 # copy fp16 grads in the model to fp32 params in the optimizer
                 self.loss_scaler.unscale_(runner.optimizer)
 
@@ -304,9 +281,7 @@ if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) >= digit_version(
                 self.loss_scaler.update(self._scale_update_param)
 
                 # save state_dict of loss_scaler
-                runner.meta.setdefault("fp16", {})["loss_scaler"] = (
-                    self.loss_scaler.state_dict()
-                )
+                runner.meta.setdefault("fp16", {})["loss_scaler"] = self.loss_scaler.state_dict()
 
                 # clear grads
                 runner.model.zero_grad()
@@ -355,10 +330,7 @@ else:
             elif isinstance(loss_scale, dict):
                 self.loss_scaler = LossScaler(**loss_scale)
             else:
-                raise ValueError(
-                    "loss_scale must be of type float, dict, or "
-                    f'"dynamic", got {loss_scale}'
-                )
+                raise ValueError(f'loss_scale must be of type float, dict, or "dynamic", got {loss_scale}')
 
         def before_run(self, runner):
             """Preparing steps before Mixed Precision Training.
@@ -448,20 +420,13 @@ else:
                 self.copy_params_to_fp16(runner.model, fp32_weights)
             self.loss_scaler.update_scale(has_overflow)
             if has_overflow:
-                runner.logger.warning(
-                    "Check overflow, downscale loss scale "
-                    f"to {self.loss_scaler.cur_scale}"
-                )
+                runner.logger.warning(f"Check overflow, downscale loss scale to {self.loss_scaler.cur_scale}")
 
             # save state_dict of loss_scaler
-            runner.meta.setdefault("fp16", {})["loss_scaler"] = (
-                self.loss_scaler.state_dict()
-            )
+            runner.meta.setdefault("fp16", {})["loss_scaler"] = self.loss_scaler.state_dict()
 
     @HOOKS.register_module()
-    class GradientCumulativeFp16OptimizerHook(
-        GradientCumulativeOptimizerHook, Fp16OptimizerHook
-    ):
+    class GradientCumulativeFp16OptimizerHook(GradientCumulativeOptimizerHook, Fp16OptimizerHook):
         """Fp16 optimizer Hook (using mmcv implementation) implements multi-
         iters gradient cumulating."""
 
@@ -484,9 +449,7 @@ else:
             scaled_loss = loss * self.loss_scaler.loss_scale
             scaled_loss.backward()
 
-            if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(
-                runner
-            ):
+            if self.every_n_iters(runner, self.cumulative_iters) or self.is_last_iter(runner):
                 # copy fp16 grads in the model to fp32 params in the optimizer
                 fp32_weights = []
                 for param_group in runner.optimizer.param_groups:
@@ -516,17 +479,12 @@ else:
                     # copy fp32 params to the fp16 model
                     self.copy_params_to_fp16(runner.model, fp32_weights)
                 else:
-                    runner.logger.warning(
-                        "Check overflow, downscale loss scale "
-                        f"to {self.loss_scaler.cur_scale}"
-                    )
+                    runner.logger.warning(f"Check overflow, downscale loss scale to {self.loss_scaler.cur_scale}")
 
                 self.loss_scaler.update_scale(has_overflow)
 
                 # save state_dict of loss_scaler
-                runner.meta.setdefault("fp16", {})["loss_scaler"] = (
-                    self.loss_scaler.state_dict()
-                )
+                runner.meta.setdefault("fp16", {})["loss_scaler"] = self.loss_scaler.state_dict()
 
                 # clear grads
                 runner.model.zero_grad()

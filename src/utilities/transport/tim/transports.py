@@ -86,9 +86,7 @@ class OT_FM(Transport):
         """
         self.P_mean = P_mean
         self.P_std = P_std
-        super().__init__(
-            sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end
-        )
+        super().__init__(sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end)
 
     def interpolant(self, t: torch.Tensor):
         alpha_t = 1 - t
@@ -121,9 +119,7 @@ class OT_FM(Transport):
     ):
         if enhance_target:
             w_gt = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_gt, 1.0)
-            w_cond = torch.where(
-                (t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0
-            )
+            w_cond = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0)
             v_t = w_gt * v_t + w_cond * F_t_cond + (1 - w_gt - w_cond) * F_t_uncond
         F_target = v_t - (t - r) * dF_dv_dt
         return v_t, F_target
@@ -165,9 +161,7 @@ class TrigFlow(Transport):
         """
         self.P_mean = P_mean
         self.P_std = P_std
-        super().__init__(
-            sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end
-        )
+        super().__init__(sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end)
 
     def interpolant(self, t: torch.Tensor):
         alpha_t = torch.cos(t)
@@ -200,9 +194,7 @@ class TrigFlow(Transport):
     ):
         if enhance_target:
             w_gt = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_gt, 1.0)
-            w_cond = torch.where(
-                (t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0
-            )
+            w_cond = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0)
             v_t = w_gt * v_t + w_cond * F_t_cond + (1 - w_gt - w_cond) * F_t_uncond
         F_target = v_t - torch.tan(t - r) * (x_t + dF_dv_dt)
         return F_target
@@ -239,9 +231,7 @@ class EDM(Transport):
         """
         self.P_mean = P_mean
         self.P_std = P_std
-        super().__init__(
-            sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end
-        )
+        super().__init__(sigma_d, T_max, T_min, enhance_target, w_gt, w_cond, w_start, w_end)
 
     def interpolant(self, t: torch.Tensor):
         """
@@ -305,17 +295,9 @@ class EDM(Transport):
         )
         if enhance_target:
             w_gt = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_gt, 1.0)
-            w_cond = torch.where(
-                (t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0
-            )
-            diffusion_target = (
-                w_gt * diffusion_target
-                + w_cond * F_t_cond
-                + (1 - w_gt - w_cond) * F_t_uncond
-            )
-        F_target = diffusion_target + Bt_dv_dBt * (
-            d_alpha_hat_t * x + d_sigma_hat_t * z - dF_dv_dt
-        )
+            w_cond = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0)
+            diffusion_target = w_gt * diffusion_target + w_cond * F_t_cond + (1 - w_gt - w_cond) * F_t_uncond
+        F_target = diffusion_target + Bt_dv_dBt * (d_alpha_hat_t * x + d_sigma_hat_t * z - dF_dv_dt)
         return F_target
 
     def from_x_t_to_x_r(
@@ -327,11 +309,7 @@ class EDM(Transport):
         s_ratio=0.0,
     ):
         sigma_d = self.sigma_d
-        ratio = (
-            (t**2 + sigma_d**2).sqrt()
-            / (r**2 + sigma_d**2).sqrt()
-            / (sigma_d**3 + t**2)
-        )
+        ratio = (t**2 + sigma_d**2).sqrt() / (r**2 + sigma_d**2).sqrt() / (sigma_d**3 + t**2)
         A_t = (sigma_d**3 + t * r) * ratio
         B_t = (sigma_d**2) * (t - r) * ratio
         x_r = A_t * x_t + B_t * F
@@ -360,9 +338,7 @@ class VP_SDE(Transport):
         self.beta_d = beta_d
         self.epsilon_t = epsilon_t
         self.T = T
-        super().__init__(
-            sigma_d, 1.0, epsilon_t, enhance_target, w_gt, w_cond, w_start, w_end
-        )
+        super().__init__(sigma_d, 1.0, epsilon_t, enhance_target, w_gt, w_cond, w_start, w_end)
 
     def interpolant(self, t: torch.Tensor):
         """
@@ -385,9 +361,7 @@ class VP_SDE(Transport):
         alpha_t = 1 / torch.sqrt(beta_t**2 + 1)
         sigma_t = beta_t / torch.sqrt(beta_t**2 + 1)
         d_alpha_t = -0.5 * (self.beta_d * t + self.beta_min) / (beta_t**2 + 1).sqrt()
-        d_sigma_t = (
-            0.5 * (self.beta_d * t + self.beta_min) / (beta_t * (beta_t**2 + 1).sqrt())
-        )
+        d_sigma_t = 0.5 * (self.beta_d * t + self.beta_min) / (beta_t * (beta_t**2 + 1).sqrt())
         return alpha_t, sigma_t, d_alpha_t, d_sigma_t
 
     def beta(self, t: torch.Tensor):
@@ -416,9 +390,7 @@ class VP_SDE(Transport):
     ):
         if enhance_target:
             w_gt = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_gt, 1.0)
-            w_cond = torch.where(
-                (t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0
-            )
+            w_cond = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0)
             z = w_gt * z + w_cond * F_t_cond + (1 - w_gt - w_cond) * F_t_uncond
         beta_t = self.beta(t)
         beta_r = self.beta(r)
@@ -460,9 +432,7 @@ class VE_SDE(Transport):
         """
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
-        super().__init__(
-            sigma_d, sigma_max, sigma_min, enhance_target, w_gt, w_cond, w_start, w_end
-        )
+        super().__init__(sigma_d, sigma_max, sigma_min, enhance_target, w_gt, w_cond, w_start, w_end)
 
     def interpolant(self, t: torch.Tensor):
         alpha_t = 1
@@ -473,9 +443,7 @@ class VE_SDE(Transport):
 
     def sample_t(self, batch_size, dtype, device):
         rnd_uniform = torch.rand((batch_size,), dtype=dtype, device=device)
-        t = self.sigma_min * (
-            (self.sigma_max / self.sigma_min) ** rnd_uniform
-        )  # [sigma_min, sigma_max]
+        t = self.sigma_min * ((self.sigma_max / self.sigma_min) ** rnd_uniform)  # [sigma_min, sigma_max]
         return t
 
     def c_noise(self, t: torch.Tensor):
@@ -496,9 +464,7 @@ class VE_SDE(Transport):
     ):
         if enhance_target:
             w_gt = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_gt, 1.0)
-            w_cond = torch.where(
-                (t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0
-            )
+            w_cond = torch.where((t >= self.w_start) & (t <= self.w_end), self.w_cond, 0.0)
             z = w_gt * z + w_cond * (-F_t_cond) + (1 - w_gt - w_cond) * (-F_t_uncond)
         F_target = (r - t) * dF_dv_dt - z
         return F_target

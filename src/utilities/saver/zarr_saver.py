@@ -11,9 +11,7 @@ def zarr_saver(
     save_path: str,
     compression: bool = False,
 ):
-    compressors = zarr.codecs.BloscCodec(
-        cname="zstd", clevel=3, shuffle=zarr.codecs.BloscShuffle.bitshuffle
-    )
+    compressors = zarr.codecs.BloscCodec(cname="zstd", clevel=3, shuffle=zarr.codecs.BloscShuffle.bitshuffle)
     store = zarr.storage.LocalStore(save_path)
     root = zarr.group(store=store).create_group("hyperspectral_images")
     for name, arr in arr_generator:

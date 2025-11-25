@@ -11,9 +11,7 @@ def choose_lightest_bands(img: th.Tensor | Any):
     _, indices = th.topk(mean_cs, k=3, largest=True)
     indices = indices.tolist()
     indices = sorted(indices, reverse=True)
-    assert indices[-1] < img.shape[1], (
-        f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
-    )
+    assert indices[-1] < img.shape[1], f"Invalid channel index {indices[-1]} for image with {img.shape[1]} channels."
     return indices
 
 
@@ -71,24 +69,16 @@ def get_rgb_channels_for_model(
             _lft_idx = int(_lft_idx)
             _rgt_idx = int(_rgt_idx)
 
-            assert _lft_idx < _rgt_idx, (
-                "rgb_channels must be in the range of [lft, rgt)"
-            )
-            assert _rgt_idx < img.shape[1], (
-                "rgb_channels must be in the range of [lft, rgt)"
-            )
+            assert _lft_idx < _rgt_idx, "rgb_channels must be in the range of [lft, rgt)"
+            assert _rgt_idx < img.shape[1], "rgb_channels must be in the range of [lft, rgt)"
             _rgb_chan_select = th.randperm(_rgt_idx - _lft_idx)[:3] + _lft_idx
-            rgb_channels = th.tensor(
-                [_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]]
-            )
+            rgb_channels = th.tensor([_rgb_chan_select[0], _rgb_chan_select[1], _rgb_chan_select[2]])
             img = img[:, rgb_channels]
         elif rgb_channels == "mean":
             # mean three splitted bands
             c = img.shape[1]
             c_3 = c // 3
-            bands = [
-                img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)
-            ]
+            bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
             img = th.stack(bands, dim=1)
         elif rgb_channels == "largest":
             bands = choose_lightest_bands(img)
@@ -109,9 +99,7 @@ def get_rgb_channels_for_model(
     return img
 
 
-def linstretch_torch(
-    images: torch.Tensor, tol: list[float] | None = None, bins: int = 256
-) -> torch.Tensor:
+def linstretch_torch(images: torch.Tensor, tol: list[float] | None = None, bins: int = 256) -> torch.Tensor:
     """Linear stretching for image contrast enhancement using PyTorch.
 
     This function provides a PyTorch-native implementation of linear stretching,
@@ -148,9 +136,7 @@ def linstretch_torch(
         # (c, h, w) -> (1, c, h, w)
         images = images.unsqueeze(0)
     elif images.ndim != 4:
-        raise ValueError(
-            f"Input tensor must have 2, 3, or 4 dimensions, got {images.ndim}"
-        )
+        raise ValueError(f"Input tensor must have 2, 3, or 4 dimensions, got {images.ndim}")
 
     batch_size, channels, height, width = images.shape
     total_pixels = height * width
@@ -179,14 +165,10 @@ def linstretch_torch(
             channel_max = max_vals[b, c].item()
 
             # Create histogram bins for this channel
-            hist_edges = torch.linspace(
-                channel_min, channel_max, bins + 1, device=images.device
-            )  # (bins+1,)
+            hist_edges = torch.linspace(channel_min, channel_max, bins + 1, device=images.device)  # (bins+1,)
 
             # Calculate histogram using torch.histc
-            hist[b, c] = torch.histc(
-                channel_data, bins=bins, min=channel_min, max=channel_max
-            )
+            hist[b, c] = torch.histc(channel_data, bins=bins, min=channel_min, max=channel_max)
 
     # Calculate cumulative histogram
     cumsum_hist = torch.cumsum(hist, dim=-1)  # (b, c, bins)
@@ -197,28 +179,18 @@ def linstretch_torch(
         for c in range(channels):
             channel_min = min_vals[b, c].item()
             channel_max = max_vals[b, c].item()
-            hist_edges = torch.linspace(
-                channel_min, channel_max, bins + 1, device=images.device
-            )  # (bins+1,)
+            hist_edges = torch.linspace(channel_min, channel_max, bins + 1, device=images.device)  # (bins+1,)
             bin_centers[b, c] = (hist_edges[:-1] + hist_edges[1:]) / 2  # (bins,)
 
     # Find percentile thresholds
-    lower_threshold_idx = torch.argmax(
-        (cumsum_hist > total_pixels * tol[0]).float(), dim=-1
-    )  # (b, c)
+    lower_threshold_idx = torch.argmax((cumsum_hist > total_pixels * tol[0]).float(), dim=-1)  # (b, c)
     upper_threshold_idx = (
-        bins
-        - 1
-        - torch.argmax((cumsum_hist.flip(-1) < total_pixels * tol[1]).float(), dim=-1)
+        bins - 1 - torch.argmax((cumsum_hist.flip(-1) < total_pixels * tol[1]).float(), dim=-1)
     )  # (b, c)
 
     # Get threshold values
-    lower_thresholds = torch.gather(
-        bin_centers, -1, lower_threshold_idx.unsqueeze(-1)
-    ).squeeze(-1)  # (b, c)
-    upper_thresholds = torch.gather(
-        bin_centers, -1, upper_threshold_idx.unsqueeze(-1)
-    ).squeeze(-1)  # (b, c)
+    lower_thresholds = torch.gather(bin_centers, -1, lower_threshold_idx.unsqueeze(-1)).squeeze(-1)  # (b, c)
+    upper_thresholds = torch.gather(bin_centers, -1, upper_threshold_idx.unsqueeze(-1)).squeeze(-1)  # (b, c)
 
     # Reshape thresholds for broadcasting
     lower_thresholds = lower_thresholds.unsqueeze(-1)  # (b, c, 1)
@@ -226,9 +198,7 @@ def linstretch_torch(
 
     # Apply linear stretching
     stretched = torch.clamp(flattened, lower_thresholds, upper_thresholds)
-    stretched = (stretched - lower_thresholds) / (
-        upper_thresholds - lower_thresholds + 1e-8
-    )
+    stretched = (stretched - lower_thresholds) / (upper_thresholds - lower_thresholds + 1e-8)
 
     # Reshape back to original dimensions
     result = stretched.view(original_shape)

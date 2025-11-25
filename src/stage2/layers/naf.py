@@ -28,16 +28,12 @@ class SimpleGate(nn.Module):
 
 
 class NAFBlock(nn.Module):
-    def __init__(
-        self, c, DW_Expand=2, FFN_Expand=2, drop_out_rate=0.0, **__discarded_kwargs
-    ):
+    def __init__(self, c, DW_Expand=2, FFN_Expand=2, drop_out_rate=0.0, **__discarded_kwargs):
         super().__init__()
         self.grad_checkpointing = False
         dw_channel = c * DW_Expand
         self.conv1 = create_conv2d(c, dw_channel, 1)
-        self.conv2 = create_conv2d(
-            dw_channel, dw_channel, 3, stride=1, padding=1, depthwise=True
-        )
+        self.conv2 = create_conv2d(dw_channel, dw_channel, 3, stride=1, padding=1, depthwise=True)
         self.conv3 = create_conv2d(dw_channel // 2, c, 1)
 
         # Simplified Channel Attention
@@ -56,12 +52,8 @@ class NAFBlock(nn.Module):
         self.norm1 = create_norm_layer("layernorm2d", c)
         self.norm2 = create_norm_layer("layernorm2d", c)
 
-        self.dropout1 = (
-            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
-        )
-        self.dropout2 = (
-            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
-        )
+        self.dropout1 = nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
+        self.dropout2 = nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
 
         self.beta = nn.Parameter(1e-4 * torch.ones((1, c, 1, 1)), requires_grad=True)
         self.gamma = nn.Parameter(1e-4 * torch.ones((1, c, 1, 1)), requires_grad=True)
@@ -127,9 +119,7 @@ class NAFBlockConditional(NAFBlock):
         # lora-like modulation
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
-            create_norm_act_layer(
-                "layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6
-            ),
+            create_norm_act_layer("layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6),
             create_conv2d(
                 ffn_channel // 2,
                 ffn_channel * 2,
@@ -148,9 +138,7 @@ class NAFBlockConditional(NAFBlock):
 
             # Add multispectral condition
             if hasattr(self, "ms_conv_before_add") and ms_cond is not None:
-                ms_cond = F.interpolate(
-                    ms_cond, size=x.shape[2:], mode="bilinear", align_corners=False
-                )
+                ms_cond = F.interpolate(ms_cond, size=x.shape[2:], mode="bilinear", align_corners=False)
                 ms_cond = self.ms_conv_before_add(ms_cond)
                 x = x + ms_cond
 
@@ -165,9 +153,7 @@ class NAFBlockConditional(NAFBlock):
             y = inp + x * self.beta
 
             # Latent modulation
-            l_cond = F.interpolate(
-                latent, size=y.shape[-2:], mode="bilinear", align_corners=False
-            )
+            l_cond = F.interpolate(latent, size=y.shape[-2:], mode="bilinear", align_corners=False)
             scale, shift = self.modulation(l_cond).chunk(2, dim=1)
 
             # Conv stage 2
@@ -180,9 +166,7 @@ class NAFBlockConditional(NAFBlock):
             return y + x * self.gamma
 
         if self.grad_checkpointing and self.training:
-            return checkpoint(
-                forward_closure, inp, mod_cond, ms_cond, use_reentrant=False
-            )
+            return checkpoint(forward_closure, inp, mod_cond, ms_cond, use_reentrant=False)
         else:
             return forward_closure(inp, mod_cond, ms_cond)
 
@@ -210,9 +194,7 @@ class NAFCrossAttentionConditional(NAFBlock):
         # lora-like modulation
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, ffn_channel // 2, 1, bias=True),
-            create_norm_act_layer(
-                "layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6
-            ),
+            create_norm_act_layer("layernorm2d", ffn_channel // 2, act_layer="silu", eps=1e-6),
             create_conv2d(
                 ffn_channel // 2,
                 ffn_channel * 2,
@@ -227,9 +209,7 @@ class NAFCrossAttentionConditional(NAFBlock):
             ps = cross_attn_kwargs.pop("cross_attn_patch_size", 2)
             self.ca_patch_size = ps
             self.cond_to_x_dim = create_conv2d(cond_chs, c, 1, bias=True)
-            self.cross_attn = CrossAttention(
-                dim=c, **cross_attn_kwargs if cross_attn_kwargs else {}
-            )
+            self.cross_attn = CrossAttention(dim=c, **cross_attn_kwargs if cross_attn_kwargs else {})
             self.ca_q_patcher = PatchEmbed(
                 patch_size=ps,
                 norm_layer=get_norm_layer("layernorm"),
@@ -271,9 +251,7 @@ class NAFCrossAttentionConditional(NAFBlock):
                 y = self._forward_cross_attn(y, cond_cross_attn)
 
             # ms modulation
-            cond_modulate = F.interpolate(
-                cond_modulate, size=y.shape[-2:], mode="bilinear", align_corners=False
-            )
+            cond_modulate = F.interpolate(cond_modulate, size=y.shape[-2:], mode="bilinear", align_corners=False)
             scale, shift = self.modulation(cond_modulate).chunk(2, dim=1)
 
             # Conv stage 2
@@ -332,9 +310,7 @@ class NAFNet(nn.Module):
             self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))
             chan = chan * 2
 
-        self.middle_blks = nn.Sequential(
-            *[NAFBlock(chan) for _ in range(cfg.middle_blk_num)]
-        )
+        self.middle_blks = nn.Sequential(*[NAFBlock(chan) for _ in range(cfg.middle_blk_num)])
 
         for num in cfg.dec_blk_nums:
             self.ups.append(

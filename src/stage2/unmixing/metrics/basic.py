@@ -37,9 +37,7 @@ class UnmixingMetrics(torch.nn.Module):
         _plot_abunds: Visualize abundance maps with proper ground truth correspondence
     """
 
-    def __init__(
-        self, num_endmembers: Optional[int] = None, device: str = "cuda"
-    ) -> None:
+    def __init__(self, num_endmembers: Optional[int] = None, device: str = "cuda") -> None:
         """
         Initialize the UnmixingMetrics class
 
@@ -108,9 +106,7 @@ class UnmixingMetrics(torch.nn.Module):
         return sad
 
     @staticmethod
-    def _compute_sad_matrix(
-        endmembers: torch.Tensor, endmembers_gt: torch.Tensor
-    ) -> torch.Tensor:
+    def _compute_sad_matrix(endmembers: torch.Tensor, endmembers_gt: torch.Tensor) -> torch.Tensor:
         """
         Compute SAD matrix between all pairs of endmembers using PyTorch
 
@@ -124,23 +120,17 @@ class UnmixingMetrics(torch.nn.Module):
         num_endmembers = endmembers.shape[0]
 
         # Create SAD matrix
-        sad_matrix = torch.ones(
-            (num_endmembers, num_endmembers), device=endmembers.device
-        )
+        sad_matrix = torch.ones((num_endmembers, num_endmembers), device=endmembers.device)
 
         # Normalize endmembers
         for i in range(num_endmembers):
             endmembers[i, :] = UnmixingMetrics._normalize_spectra(endmembers[i, :])
-            endmembers_gt[i, :] = UnmixingMetrics._normalize_spectra(
-                endmembers_gt[i, :]
-            )
+            endmembers_gt[i, :] = UnmixingMetrics._normalize_spectra(endmembers_gt[i, :])
 
         # Compute SAD matrix
         for i in range(num_endmembers):
             for j in range(num_endmembers):
-                sad_matrix[i, j] = UnmixingMetrics._compute_sad(
-                    endmembers[i, :], endmembers_gt[j, :]
-                )
+                sad_matrix[i, j] = UnmixingMetrics._compute_sad(endmembers[i, :], endmembers_gt[j, :])
 
         return sad_matrix
 
@@ -235,9 +225,7 @@ class UnmixingMetrics(torch.nn.Module):
             are assigned to remaining predicted components in order.
         """
         # Get matching using the existing order_endmembers function
-        match_dict, sad_values, avg_sad = UnmixingMetrics._order_endmembers(
-            endmembers, endmembers_gt
-        )
+        match_dict, sad_values, avg_sad = UnmixingMetrics._order_endmembers(endmembers, endmembers_gt)
 
         num_endmembers = endmembers.shape[0]
 
@@ -298,9 +286,7 @@ class UnmixingMetrics(torch.nn.Module):
 
         # Use the new ordering function
         ordered_endmembers, ordered_abundances, ordered_sad, match_dict = (
-            UnmixingMetrics._order_endmembers_and_abundances(
-                endmembers, endmembers_gt, abundances
-            )
+            UnmixingMetrics._order_endmembers_and_abundances(endmembers, endmembers_gt, abundances)
         )
 
         # Compute average SAD
@@ -324,9 +310,7 @@ class UnmixingMetrics(torch.nn.Module):
 
             # Plot ground truth and predicted endmembers
             ax.plot(endmembers_gt_np[i, :], "r-", linewidth=1.5, label="Ground Truth")
-            ax.plot(
-                ordered_endmembers_np[i, :], "k--", linewidth=1.5, label="Predicted"
-            )
+            ax.plot(ordered_endmembers_np[i, :], "k--", linewidth=1.5, label="Predicted")
 
             # Set title with SAD value
             ax.set_title(f"Endmember {i + 1}, SAD: {ordered_sad[i].item():.4f} rad")
@@ -337,9 +321,7 @@ class UnmixingMetrics(torch.nn.Module):
                 ax.legend()
 
         # Set main title
-        fig.suptitle(
-            f"Endmember Comparison (Average SAD: {avg_sad:.4f} rad)", fontsize=14
-        )
+        fig.suptitle(f"Endmember Comparison (Average SAD: {avg_sad:.4f} rad)", fontsize=14)
         plt.tight_layout()
         plt.subplots_adjust(top=0.9)
 
@@ -435,9 +417,7 @@ class UnmixingMetrics(torch.nn.Module):
             ax = axes[2, i]
             if i in match_dict:
                 # Compare with corresponding GT abundance
-                abundance_diff = (
-                    torch.abs(ordered_abundances[i] - abundances_gt[i]).cpu().numpy()
-                )
+                abundance_diff = torch.abs(ordered_abundances[i] - abundances_gt[i]).cpu().numpy()
                 ax.set_title(f"Difference (SAD: {ordered_sad[i].item():.4f})")
             else:
                 # Show predicted abundance as difference (no GT match)
@@ -513,9 +493,7 @@ class UnmixingMetrics(torch.nn.Module):
         # Store number of endmembers
         self.num_endmembers = num_endmembers
 
-    def _update_metrics(
-        self, sad_values: torch.Tensor, mse_values: torch.Tensor
-    ) -> None:
+    def _update_metrics(self, sad_values: torch.Tensor, mse_values: torch.Tensor) -> None:
         """
         Update MeanMetric objects with new values
 
@@ -524,9 +502,7 @@ class UnmixingMetrics(torch.nn.Module):
             mse_values (torch.Tensor): MSE values for each endmember and average
         """
         # Update SAD metrics
-        assert self.num_endmembers is not None, (
-            "Number of endmembers is not initialized."
-        )
+        assert self.num_endmembers is not None, "Number of endmembers is not initialized."
 
         for i in range(self.num_endmembers):
             self.sad_metrics[f"sad_{i}"].update(sad_values[i])
@@ -573,10 +549,7 @@ class UnmixingMetrics(torch.nn.Module):
         abundances: torch.Tensor | np.ndarray,
         abundances_gt: torch.Tensor | np.ndarray | None = None,
         plot: bool = False,
-    ) -> (
-        Dict[str, Dict[str, float]]
-        | Tuple[Dict[str, Dict[str, float]], Any, np.ndarray]
-    ):
+    ) -> Dict[str, Dict[str, float]] | Tuple[Dict[str, Dict[str, float]], Any, np.ndarray]:
         """
         Compute unmixing metrics for the given predictions
 
@@ -610,13 +583,11 @@ class UnmixingMetrics(torch.nn.Module):
         # Compute SAD metrics and order endmembers
         fig, axes = None, None
         if plot:
-            sad_values, ordered_endmembers, ordered_abundances, fig, axes = (
-                self._plot_endmembers(endmembers, endmembers_gt, abundances)
+            sad_values, ordered_endmembers, ordered_abundances, fig, axes = self._plot_endmembers(
+                endmembers, endmembers_gt, abundances
             )
         else:
-            match_dict, sad_values_list, avg_sad = self._order_endmembers(
-                endmembers, endmembers_gt
-            )
+            match_dict, sad_values_list, avg_sad = self._order_endmembers(endmembers, endmembers_gt)
 
             # Order endmembers and abundances
             ordered_endmembers_list: List[torch.Tensor] = []
@@ -664,9 +635,7 @@ class UnmixingMetrics(torch.nn.Module):
         metrics = self._compute_metrics()
 
         if plot:
-            assert fig is not None and axes is not None, (
-                "Figure and axes should not be None when plot=True"
-            )
+            assert fig is not None and axes is not None, "Figure and axes should not be None when plot=True"
             return metrics, fig, axes
         else:
             return metrics
@@ -736,10 +705,7 @@ class UnmixingMetrics(torch.nn.Module):
         if self.sad_avg is None or self.mse_avg is None:
             return "UnmixingMetrics (no data yet)"
 
-        return (
-            f"UnmixingMetrics (calls={self.call_count}): "
-            f"SAD_avg={self.sad_avg:.4f}, MSE_avg={self.mse_avg:.6f}"
-        )
+        return f"UnmixingMetrics (calls={self.call_count}): SAD_avg={self.sad_avg:.4f}, MSE_avg={self.mse_avg:.6f}"
 
 
 # Alias

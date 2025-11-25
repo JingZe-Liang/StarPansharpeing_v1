@@ -127,9 +127,7 @@ def _jvp_flash_attention(
 
 
 class Attention(Attention_):
-    config = SimpleNamespace(
-        _attn_implementation="flash_attention_2"
-    )  # for flash_attention_2 config
+    config = SimpleNamespace(_attn_implementation="flash_attention_2")  # for flash_attention_2 config
 
     def __init__(
         self,
@@ -151,9 +149,7 @@ class Attention(Attention_):
         delta_t_aware: bool = False,
         rotate_half=False,
     ):
-        norm_layer = (
-            get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
-        )
+        norm_layer = get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
         super().__init__(
             dim,
             num_heads,
@@ -210,9 +206,7 @@ class Attention(Attention_):
         # Meanflow delta-time (t-r) awareness
         if self.delta_t_aware and delta_t_emb is not None:
             qkv_delta = self.qkv_delta_t(delta_t_emb)
-            qd, kd, vd = qkv_delta.reshape(B, -1, 3, self.num_heads, -1).permute(
-                2, 0, 3, 1, 4
-            )
+            qd, kd, vd = qkv_delta.reshape(B, -1, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k, v = q + qd, k + kd, v + vd
 
         # QK-norm
@@ -257,17 +251,13 @@ class Attention(Attention_):
         else:
             raise ValueError("Invalid rope type")
 
-        if self.attn_implem != "flex_attention" and isinstance(
-            attention_mask, BlockMask
-        ):
+        if self.attn_implem != "flex_attention" and isinstance(attention_mask, BlockMask):
             attention_mask = attention_mask.to_dense()
 
         # flex attention will be compiled inside
         attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
         assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
-        x, _ = attention_function_(
-            self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p
-        )
+        x, _ = attention_function_(self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p)
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.norm(x)
@@ -335,9 +325,7 @@ class GatedAttention(nn.Module):
                 bias=qkv_bias,
             )
         else:
-            self.q_proj = nn.Linear(
-                self.hidden_size, self.num_heads * self.head_dim, bias=qkv_bias
-            )
+            self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=qkv_bias)
 
         self.k_proj = nn.Linear(
             self.hidden_size,
@@ -349,9 +337,7 @@ class GatedAttention(nn.Module):
             self.num_key_value_heads * self.head_dim,
             bias=qkv_bias,
         )
-        self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias
-        )
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias)
         if self.use_qk_norm:
             self.q_norm = create_norm_layer(norm_layer, self.head_dim, eps=rms_norm_eps)
             self.k_norm = create_norm_layer(norm_layer, self.head_dim, eps=rms_norm_eps)
@@ -381,8 +367,7 @@ class GatedAttention(nn.Module):
         # output_attentions: bool = False,
         # use_cache: bool = False,
         # cache_position: Optional[torch.LongTensor] = None,
-        rope: Annotated[torch.Tensor, "Rope embedding concat"]
-        | None = None,  # necessary, but kept here for BC
+        rope: Annotated[torch.Tensor, "Rope embedding concat"] | None = None,  # necessary, but kept here for BC
     ):
         bsz, q_len, _ = hidden_states.size()
 
@@ -409,9 +394,7 @@ class GatedAttention(nn.Module):
             # g: bs, l, n_kvh * n_kvg, 1 = bs, l, nh, 1
             gate_score = gate_score.reshape(bsz, q_len, -1, 1)
             # q: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
-            query_states = query_states.reshape(
-                bsz, q_len, -1, self.head_dim
-            ).transpose(1, 2)
+            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         elif self.elementwise_attn_output_gate:
             # q: bs, l, n_kvh, n_kvg * hd * 2
             query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
@@ -428,13 +411,9 @@ class GatedAttention(nn.Module):
             # g: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
             gate_score = gate_score.reshape(bsz, q_len, -1, self.head_dim)
             # q: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
-            query_states = query_states.reshape(
-                bsz, q_len, -1, self.head_dim
-            ).transpose(1, 2)
+            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         else:
-            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(
-                1, 2
-            )
+            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         kv_len = key_states.shape[2]
@@ -709,9 +688,7 @@ class AttentionBlockCondition(AttentionBlock):
         return z_1d
 
     @_compile_decorator
-    def _forward_condition_attention_block(
-        self, x, c, t=None, inp_shape=None, rope=None
-    ):
+    def _forward_condition_attention_block(self, x, c, t=None, inp_shape=None, rope=None):
         if not self.fuse_t_z:
             # t, c not fused, should be passed both
             assert t is not None and c is not None
@@ -863,9 +840,7 @@ class ContextTransformer1D(nn.Module):
 
         self.projections = nn.ModuleDict(
             {
-                "query_proj": nn.Linear(cfg.ctx_dim, cfg.dim)
-                if cfg.query_strategy != "learnable"
-                else nn.Identity(),
+                "query_proj": nn.Linear(cfg.ctx_dim, cfg.dim) if cfg.query_strategy != "learnable" else nn.Identity(),
                 "ctx_proj": nn.Linear(cfg.ctx_dim, cfg.dim),
             }
         )
@@ -881,12 +856,8 @@ class ContextTransformer1D(nn.Module):
         ctx_latent_pe = get_2d_sincos_pos_embed(  # (l, dim)
             cfg.dim, cfg.ctx_latent_size, pe_interpolation=1.0
         )
-        self.register_buffer(
-            "query_latent_pe", torch.as_tensor(query_latent_pe), persistent=False
-        )
-        self.register_buffer(
-            "ctx_latent_pe", torch.as_tensor(ctx_latent_pe), persistent=False
-        )
+        self.register_buffer("query_latent_pe", torch.as_tensor(query_latent_pe), persistent=False)
+        self.register_buffer("ctx_latent_pe", torch.as_tensor(ctx_latent_pe), persistent=False)
         self.query_latent_pe: nn.Buffer
         self.ctx_latent_pe: nn.Buffer
 
@@ -932,9 +903,7 @@ class ContextTransformer1D(nn.Module):
         if x.shape[1] != self.ctx_latent_pe.shape[1]:
             if x_hw is None:
                 hw = math.sqrt(x.shape[1])
-                assert hw.is_integer(), (
-                    f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
-                )
+                assert hw.is_integer(), f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
                 x_hw = (int(hw), int(hw))
             x_pe = resample_abs_pos_embed(  # type: ignore
                 x_pe,  # (1, l, dim)
@@ -951,9 +920,7 @@ class ContextTransformer1D(nn.Module):
         q = self._get_queries(x)
 
         # proj ctx
-        x = self.projections["ctx_proj"](
-            x.flatten(2).permute(0, 2, 1)
-        )  # (bs, ctxN, dim)
+        x = self.projections["ctx_proj"](x.flatten(2).permute(0, 2, 1))  # (bs, ctxN, dim)
 
         # Add PEs
         q, x = self._with_pos_embed(q, x, x_hw=hw)
@@ -1056,12 +1023,8 @@ class TransformerTokenizer(nn.Module):
             other_blk_kwargs,
         )
         self._build_cls_reg_tokens(n_reg_tokens, with_cls_token, embed_dim)
-        self._build_head(
-            head, out_chan, out_patch_size, norm_layer, embed_dim, unpatch_prog_dims
-        )
-        self._build_mask_tokens(
-            mask_train_ratio, mask_refill, mask_drop_type, embed_dim
-        )
+        self._build_head(head, out_chan, out_patch_size, norm_layer, embed_dim, unpatch_prog_dims)
+        self._build_mask_tokens(mask_train_ratio, mask_refill, mask_drop_type, embed_dim)
         self._build_last_norm(last_norm, embed_dim)
         self.init_weights()
 
@@ -1079,9 +1042,7 @@ class TransformerTokenizer(nn.Module):
             if patcher_type == "progressive_patch_embedder":
                 raise NotImplementedError("Bug here.")
 
-                assert patch_prog_dims is not None, (
-                    "patch_prog_dims must be provided for progressive patch embedding"
-                )
+                assert patch_prog_dims is not None, "patch_prog_dims must be provided for progressive patch embedding"
                 self.patch_embed = AdaptiveProgressivePatchEmbedding(
                     img_size=(img_size, img_size),  # placeholder, not used
                     patch_size=patch_size,
@@ -1121,9 +1082,7 @@ class TransformerTokenizer(nn.Module):
             output_proj = MingtokDownsampleShortCut(in_chan, embed_dim)
         if input_proj_type == "us_average":
             input_proj = MingtokUpsampleAverage(in_chan, embed_dim)
-        self.projections = nn.ModuleDict(
-            {"input_proj": input_proj, "output_proj": output_proj}
-        )
+        self.projections = nn.ModuleDict({"input_proj": input_proj, "output_proj": output_proj})
 
     def _build_transformer_layers(
         self,
@@ -1226,9 +1185,7 @@ class TransformerTokenizer(nn.Module):
         else:
             self.rope, self.pe = None, None
 
-    def _build_cls_reg_tokens(
-        self, n_reg_tokens: int, with_cls_token: bool, embed_dim: int
-    ):
+    def _build_cls_reg_tokens(self, n_reg_tokens: int, with_cls_token: bool, embed_dim: int):
         # Register tokens
         self.reg_tokens: nn.Parameter | None = None
         if n_reg_tokens > 0:
@@ -1259,9 +1216,7 @@ class TransformerTokenizer(nn.Module):
 
         if head is not None:
             assert out_chan is not None, "out_chan must be specified if head is used"
-            assert out_patch_size is not None, (
-                "out_patch_size must be specified if head is used"
-            )
+            assert out_patch_size is not None, "out_patch_size must be specified if head is used"
             self.head_required = True
             if head == "linear":
                 self.head = nn.Linear(embed_dim, out_chan * (out_patch_size**2))
@@ -1271,16 +1226,10 @@ class TransformerTokenizer(nn.Module):
                     nn.Linear(embed_dim, out_chan * (out_patch_size**2)),
                 )
             elif head == "adaptive_linear":
-                self.head = AdaptiveOutputLinearLayer(
-                    embed_dim, out_chan * (out_patch_size**2), mode="interp"
-                )
+                self.head = AdaptiveOutputLinearLayer(embed_dim, out_chan * (out_patch_size**2), mode="interp")
             elif head == "adaptive_unpatcher":
-                assert unpatch_prog_dims is not None, (
-                    "unpatch_prog_dims must be provided for adaptive unpatcher head"
-                )
-                assert out_patch_size > 1, (
-                    f"out_patch_size must be >1 for unpatcher head"
-                )
+                assert unpatch_prog_dims is not None, "unpatch_prog_dims must be provided for adaptive unpatcher head"
+                assert out_patch_size > 1, f"out_patch_size must be >1 for unpatcher head"
                 self.head = AdaptiveProgressivePatchUnembedding(
                     embed_dim,
                     out_chan,
@@ -1316,14 +1265,10 @@ class TransformerTokenizer(nn.Module):
             # do not drop the masked tokens.
 
             # TODO: RoPE, theoretically support, but I haven't implemented it yet.
-            assert not self.pe_type.startswith("rope"), (
-                "Rope PE not supported for mask training"
-            )
+            assert not self.pe_type.startswith("rope"), "Rope PE not supported for mask training"
             self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             nn.init.trunc_normal_(self.mask_token, std=0.02)
-            logger.info(
-                f"[Transformer Tokenizer] Mask training enabled with ratio {mask_train_ratio}"
-            )
+            logger.info(f"[Transformer Tokenizer] Mask training enabled with ratio {mask_train_ratio}")
 
     def _build_last_norm(self, last_norm: str | None, embed_dim: int):
         # Last norm
@@ -1342,9 +1287,7 @@ class TransformerTokenizer(nn.Module):
             if self.mask_drop_type == "mae":
                 x, mask, ids_restore = random_masking_mae(x, self.mask_train_ratio)
             else:
-                x, mask, ids_restore = random_masking_no_drop(
-                    x, self.mask_train_ratio, self.mask_token
-                )
+                x, mask, ids_restore = random_masking_no_drop(x, self.mask_train_ratio, self.mask_token)
         else:
             x, mask, ids_restore = x, None, None
 
@@ -1353,13 +1296,9 @@ class TransformerTokenizer(nn.Module):
     def _refill_masked_x(self, x, mask, ids_restore):
         """the original x are masked and dropped"""
         mask_learned = getattr(self, "mask_token", None)
-        assert mask_learned is not None, (
-            "mask_token must be init when using this class as MAE decoder"
-        )
+        assert mask_learned is not None, "mask_token must be init when using this class as MAE decoder"
         ids_restore = ids_restore[..., None].repeat(1, 1, x.shape[2])
-        mask_learned_expand = mask_learned.repeat(
-            x.shape[0], ids_restore.shape[1] + self.n_reg_tokens - x.shape[1], 1
-        )
+        mask_learned_expand = mask_learned.repeat(x.shape[0], ids_restore.shape[1] + self.n_reg_tokens - x.shape[1], 1)
         x_ = torch.cat([x[:, self.n_reg_tokens :], mask_learned_expand], dim=1)
         x_ = torch.gather(x_, dim=1, index=ids_restore)  # unshuffle
         x = torch.cat([x[:, : self.n_reg_tokens], x_], dim=1)
@@ -1399,15 +1338,11 @@ class TransformerTokenizer(nn.Module):
             )
 
         # create the rope embeddings with different grid sizes
-        rope_embeds = torch.zeros(
-            B, l_cur, self.rope.dim * 2, dtype=dtype, device=device
-        )
+        rope_embeds = torch.zeros(B, l_cur, self.rope.dim * 2, dtype=dtype, device=device)
         if hasattr(self.rope, "get_batch_embeds"):
             # Rope cat
             unique_embeds = self.rope.get_batch_embeds(unique_sizes)
-            for grid_size, embed, batch_indices in zip(
-                unique_sizes, unique_embeds, size_to_indices.values()
-            ):
+            for grid_size, embed, batch_indices in zip(unique_sizes, unique_embeds, size_to_indices.values()):
                 h, w = grid_size
                 actual_len = h * w
                 for bi in batch_indices:
@@ -1433,9 +1368,7 @@ class TransformerTokenizer(nn.Module):
         return rope_embeds[None, None]  # [1, 1, seq_len, dim_h]
 
     def _with_pos_embed(self, x, hw: tuple | None = None):
-        hp, wp = (
-            hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
-        )
+        hp, wp = hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
         assert hp.is_integer() and wp.is_integer(), (
             f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
         )
@@ -1486,9 +1419,7 @@ class TransformerTokenizer(nn.Module):
         else:
             raise ValueError(f"Unsupported input shape: {x.shape}")
 
-        x, rope = self._with_pos_embed(
-            x, hw=(h // self.patch_size, w // self.patch_size)
-        )
+        x, rope = self._with_pos_embed(x, hw=(h // self.patch_size, w // self.patch_size))
         # Register tokens get no PE
         if self.n_reg_tokens > 0 and self.reg_tokens is not None:
             reg_tokens = self.reg_tokens.repeat(bs, 1, 1)  # (bs, n_reg, dim)
@@ -1625,9 +1556,7 @@ class TransformerTokenizer(nn.Module):
         mask: Optional[torch.Tensor] = None,
         id_store: Optional[torch.Tensor] = None,
     ):
-        out = self.forward_features(
-            x, get_intermidates=get_intermidates
-        )  # (bs, n, dim)
+        out = self.forward_features(x, get_intermidates=get_intermidates)  # (bs, n, dim)
         x = out["x_norm_patch_tokens"]
         x = self._to_output(
             x,

@@ -110,35 +110,18 @@ def _qindex(img1, img2, block_size=8):
     # filter, valid
     pad_topleft = int(np.floor(block_size / 2))
     pad_bottomright = block_size - 1 - pad_topleft
-    mu1 = cv2.filter2D(img1_, -1, window)[
-        pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright
-    ]
-    mu2 = cv2.filter2D(img2_, -1, window)[
-        pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright
-    ]
+    mu1 = cv2.filter2D(img1_, -1, window)[pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright]
+    mu2 = cv2.filter2D(img2_, -1, window)[pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright]
     mu1_sq = mu1**2
     mu2_sq = mu2**2
     mu1_mu2 = mu1 * mu2
 
-    sigma1_sq = (
-        cv2.filter2D(img1_**2, -1, window)[
-            pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright
-        ]
-        - mu1_sq
-    )
-    sigma2_sq = (
-        cv2.filter2D(img2_**2, -1, window)[
-            pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright
-        ]
-        - mu2_sq
-    )
+    sigma1_sq = cv2.filter2D(img1_**2, -1, window)[pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright] - mu1_sq
+    sigma2_sq = cv2.filter2D(img2_**2, -1, window)[pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright] - mu2_sq
     # print(mu1_mu2.shape)
     # print(sigma2_sq.shape)
     sigma12 = (
-        cv2.filter2D(img1_ * img2_, -1, window)[
-            pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright
-        ]
-        - mu1_mu2
+        cv2.filter2D(img1_ * img2_, -1, window)[pad_topleft:-pad_bottomright, pad_topleft:-pad_bottomright] - mu1_mu2
     )
 
     # all = 1, include the case of simga == mu == 0
@@ -164,10 +147,7 @@ def qindex(img1, img2, block_size=8):
     if img1.ndim == 2:
         return _qindex(img1, img2, block_size)
     elif img1.ndim == 3:
-        qindexs = [
-            _qindex(img1[..., i], img2[..., i], block_size)
-            for i in range(img1.shape[2])
-        ]
+        qindexs = [_qindex(img1[..., i], img2[..., i], block_size) for i in range(img1.shape[2])]
         return np.array(qindexs).mean()
     else:
         raise ValueError("Wrong input image dimensions.")
@@ -209,17 +189,13 @@ def D_s(img_fake, img_lm, pan, satellite="QuickBird", scale=4, block_size=32, q=
     assert img_fake.ndim == img_lm.ndim == 3, "MS images must be 3D!"
     H_f, W_f, C_f = img_fake.shape
     H_r, W_r, C_r = img_lm.shape
-    assert H_f // H_r == W_f // W_r == scale, (
-        "Spatial resolution should be compatible with scale"
-    )
+    assert H_f // H_r == W_f // W_r == scale, "Spatial resolution should be compatible with scale"
     assert C_f == C_r, "Fake and lm should have the same number of bands!"
     # fake and pan
     assert pan.ndim == 3, "Panchromatic image must be 3D!"
     H_p, W_p, C_p = pan.shape
     assert C_p == 1, "size of 3rd dim of Panchromatic image must be 1"
-    assert H_f == H_p and W_f == W_p, (
-        "Pan's and fake's spatial resolution should be the same"
-    )
+    assert H_f == H_p and W_f == W_p, "Pan's and fake's spatial resolution should be the same"
     # get LRPan, 2D
     pan_lr = fmtf_resize(pan, satellite=satellite, scale=scale)
     # print(pan_lr.shape)
@@ -267,19 +243,13 @@ def my_qnr(ps_ms, ms, msexp, pan, ratio, S, p=1, q=1, alpha=1, beta=1):
     return QNR_idx, D_lambda_idx, D_s_idx
 
 
-def indexes_evaluation_FS(
-    I_F, I_MS_LR, I_PAN, L, th_values, I_MS, sensor, ratio, Qblocks_size, flagQNR
-):
+def indexes_evaluation_FS(I_F, I_MS_LR, I_PAN, L, th_values, I_MS, sensor, ratio, Qblocks_size, flagQNR):
     if th_values == 1:
         I_F[I_F > 2**L] = 2**L
         I_F[I_F < 0] = 0
     if flagQNR:
-        QNR_index, D_lambda, D_S = my_qnr(
-            I_F, I_MS_LR, I_MS, I_PAN, ratio, Qblocks_size
-        )
+        QNR_index, D_lambda, D_S = my_qnr(I_F, I_MS_LR, I_MS, I_PAN, ratio, Qblocks_size)
     else:
-        QNR_index, D_lambda, D_S, _ = HQNR(
-            I_F, I_MS_LR, I_MS, I_PAN, Qblocks_size, sensor, ratio
-        )
+        QNR_index, D_lambda, D_S, _ = HQNR(I_F, I_MS_LR, I_MS, I_PAN, Qblocks_size, sensor, ratio)
 
     return QNR_index, D_lambda, D_S

@@ -116,35 +116,15 @@ def init_opt(
     ipe_scale=1.25,
 ):
     param_groups = [
+        {"params": (p for n, p in encoder.named_parameters() if ("bias" not in n) and (len(p.shape) != 1))},
+        {"params": (p for n, p in predictor.named_parameters() if ("bias" not in n) and (len(p.shape) != 1))},
         {
-            "params": (
-                p
-                for n, p in encoder.named_parameters()
-                if ("bias" not in n) and (len(p.shape) != 1)
-            )
-        },
-        {
-            "params": (
-                p
-                for n, p in predictor.named_parameters()
-                if ("bias" not in n) and (len(p.shape) != 1)
-            )
-        },
-        {
-            "params": (
-                p
-                for n, p in encoder.named_parameters()
-                if ("bias" in n) or (len(p.shape) == 1)
-            ),
+            "params": (p for n, p in encoder.named_parameters() if ("bias" in n) or (len(p.shape) == 1)),
             "WD_exclude": True,
             "weight_decay": 0,
         },
         {
-            "params": (
-                p
-                for n, p in predictor.named_parameters()
-                if ("bias" in n) or (len(p.shape) == 1)
-            ),
+            "params": (p for n, p in predictor.named_parameters() if ("bias" in n) or (len(p.shape) == 1)),
             "WD_exclude": True,
             "weight_decay": 0,
         },

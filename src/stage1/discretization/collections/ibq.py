@@ -33,9 +33,7 @@ def compute_entropy_loss(
     sample_entropy = -torch.sum(probs * log_probs, -1)
     sample_entropy = torch.mean(sample_entropy)
 
-    loss = (sample_minimization_weight * sample_entropy) - (
-        batch_maximization_weight * avg_entropy
-    )
+    loss = (sample_minimization_weight * sample_entropy) - (batch_maximization_weight * avg_entropy)
 
     return sample_entropy, avg_entropy, loss
 
@@ -91,9 +89,7 @@ class IndexPropagationQuantize(nn.Module):
         new = match.argmax(-1)
         unknown = match.sum(2) < 1
         if self.unknown_index == "random":
-            new[unknown] = torch.randint(0, self.re_embed, size=new[unknown].shape).to(
-                device=new.device
-            )
+            new[unknown] = torch.randint(0, self.re_embed, size=new[unknown].shape).to(device=new.device)
         else:
             new[unknown] = self.unknown_index
         return new.reshape(ishape)
@@ -126,9 +122,7 @@ class IndexPropagationQuantize(nn.Module):
 
         dim = 1
         ind = soft_one_hot.max(dim, keepdim=True)[1]
-        hard_one_hot = torch.zeros_like(
-            logits, memory_format=torch.legacy_contiguous_format
-        ).scatter_(dim, ind, 1.0)
+        hard_one_hot = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format).scatter_(dim, ind, 1.0)
         one_hot = hard_one_hot - soft_one_hot.detach() + soft_one_hot
 
         z_q = einsum("b n h w, n d -> b d h w", one_hot, self.embedding.weight)

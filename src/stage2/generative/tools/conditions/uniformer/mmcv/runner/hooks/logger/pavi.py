@@ -27,9 +27,7 @@ class PaviLoggerHook(LoggerHook):
         by_epoch=True,
         img_key="img_info",
     ):
-        super(PaviLoggerHook, self).__init__(
-            interval, ignore_last, reset_flag, by_epoch
-        )
+        super(PaviLoggerHook, self).__init__(interval, ignore_last, reset_flag, by_epoch)
         self.init_kwargs = init_kwargs
         self.add_graph = add_graph
         self.add_last_ckpt = add_last_ckpt
@@ -53,8 +51,7 @@ class PaviLoggerHook(LoggerHook):
             if "config_dict" in runner.meta:
                 config_dict = runner.meta["config_dict"]
                 assert isinstance(config_dict, dict), (
-                    'meta["config_dict"] has to be of a dict, '
-                    f"but got {type(config_dict)}"
+                    f'meta["config_dict"] has to be of a dict, but got {type(config_dict)}'
                 )
             elif "config_file" in runner.meta:
                 config_file = runner.meta["config_file"]

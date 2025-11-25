@@ -223,9 +223,7 @@ def parquet_to_webdataset(
         executor = ThreadPoolExecutor(max_workers=4)
 
         def move_async(file: Path, tmp_dir: Path):
-            return executor.submit(
-                move_file_to_tmp, Path(file), Path(tmp_dir), clear_dir_lock
-            )
+            return executor.submit(move_file_to_tmp, Path(file), Path(tmp_dir), clear_dir_lock)
 
         future_to_file = {}
     else:
@@ -337,9 +335,7 @@ def parquet_to_webdataset_async(
                 out_dir.mkdir(parents=True, exist_ok=True)
                 pattern = str(out_dir / f"{dataset_name}-%04d.tar")
 
-                with wds.writer.ShardWriter(
-                    pattern, maxsize=8 * 1024**3, start_shard=0
-                ) as sink:
+                with wds.writer.ShardWriter(pattern, maxsize=8 * 1024**3, start_shard=0) as sink:
                     for f in file_list:
                         for sample in reading_fn(str(f)):
                             sink.write(sample)
@@ -375,9 +371,7 @@ def parquet_to_webdataset_async(
                 # last buffer
                 flush_buffer(buffer)
 
-            logger.info(
-                f"Thread {thread_idx} finished, processed {len(file_list)} files"
-            )
+            logger.info(f"Thread {thread_idx} finished, processed {len(file_list)} files")
         except Exception as e:
             logger.error(f"Thread {thread_idx} failed: {e}")
 
@@ -446,10 +440,7 @@ def parquet_to_webdataset_async_mp_tp(
 
     # 3. 启动进程池
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = [
-            pool.submit(_worker, i, fl, output_root, dataset_name)
-            for i, fl in enumerate(files_per_worker)
-        ]
+        futures = [pool.submit(_worker, i, fl, output_root, dataset_name) for i, fl in enumerate(files_per_worker)]
         for fut in as_completed(futures):
             fut.result()  # 如有异常会在这里抛出
 
@@ -491,9 +482,7 @@ def shards_tar_merged(
     tar_files = natsort.natsorted(tar_files, key=lambda f: f.stem)
     logger.info(f"Merged list are {tar_files}")
 
-    assert tar_files is not None and len(tar_files) > 0, (
-        "No .tar files provided or found"
-    )
+    assert tar_files is not None and len(tar_files) > 0, "No .tar files provided or found"
 
     tar_files = [Path(f) for f in tar_files if Path(f).stem != "merged"]
 
@@ -510,9 +499,7 @@ def shards_tar_merged(
                         extract = tar.extractfile(member)
                         out_tar.addfile(member, extract)
                     except Exception as e:
-                        logger.error(
-                            f"Error extracting {member.name} from {tar_path}: {e}"
-                        )
+                        logger.error(f"Error extracting {member.name} from {tar_path}: {e}")
 
 
 def shards_file_to_tar(shards_dir: str | Path, tar_path: str | Path):

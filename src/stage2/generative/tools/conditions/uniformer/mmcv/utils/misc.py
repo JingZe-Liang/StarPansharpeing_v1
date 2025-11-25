@@ -183,9 +183,7 @@ def slice_list(in_list, lens):
     if not isinstance(lens, list):
         raise TypeError('"indices" must be an integer or a list of integers')
     elif sum(lens) != len(in_list):
-        raise ValueError(
-            f"sum of lens and list length does not match: {sum(lens)} != {len(in_list)}"
-        )
+        raise ValueError(f"sum of lens and list length does not match: {sum(lens)} != {len(in_list)}")
     out_list = []
     idx = 0
     for i in range(len(lens)):
@@ -226,9 +224,7 @@ def check_prerequisites(
     def wrap(func):
         @functools.wraps(func)
         def wrapped_func(*args, **kwargs):
-            requirements = (
-                [prerequisites] if isinstance(prerequisites, str) else prerequisites
-            )
+            requirements = [prerequisites] if isinstance(prerequisites, str) else prerequisites
             missing = []
             for item in requirements:
                 if not checker(item):
@@ -315,9 +311,7 @@ def deprecated_api_warning(name_dict, cls_name=None):
                 for src_arg_name, dst_arg_name in name_dict.items():
                     if src_arg_name in arg_names:
                         warnings.warn(
-                            f'"{src_arg_name}" is deprecated in '
-                            f'`{func_name}`, please use "{dst_arg_name}" '
-                            "instead"
+                            f'"{src_arg_name}" is deprecated in `{func_name}`, please use "{dst_arg_name}" instead'
                         )
                         arg_names[arg_names.index(src_arg_name)] = dst_arg_name
             if kwargs:
@@ -334,9 +328,7 @@ def deprecated_api_warning(name_dict, cls_name=None):
                         )
 
                         warnings.warn(
-                            f'"{src_arg_name}" is deprecated in '
-                            f'`{func_name}`, please use "{dst_arg_name}" '
-                            "instead"
+                            f'"{src_arg_name}" is deprecated in `{func_name}`, please use "{dst_arg_name}" instead'
                         )
                         kwargs[dst_arg_name] = kwargs.pop(src_arg_name)
 
@@ -357,9 +349,7 @@ def is_method_overridden(method, base_class, derived_class):
         base_class (type): the class of the base class.
         derived_class (type | Any): the class or instance of the derived class.
     """
-    assert isinstance(base_class, type), (
-        "base_class doesn't accept instance, Please pass class instead."
-    )
+    assert isinstance(base_class, type), "base_class doesn't accept instance, Please pass class instead."
 
     if not isinstance(derived_class, type):
         derived_class = derived_class.__class__

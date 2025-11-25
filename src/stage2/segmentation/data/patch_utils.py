@@ -100,9 +100,7 @@ def create_patches(
     return patches, labels
 
 
-def create_patches_inference(
-    X: np.ndarray, window_size: int = 5
-) -> Tuple[np.ndarray, int, int]:
+def create_patches_inference(X: np.ndarray, window_size: int = 5) -> Tuple[np.ndarray, int, int]:
     """Create patches for whole-image inference.
 
     Returns patches in row-major order and original height/width so caller can
@@ -133,9 +131,7 @@ def create_patches_inference(
     return patches, H, W
 
 
-def reconstruct_from_flat_predictions(
-    preds_flat: np.ndarray, height: int, width: int
-) -> np.ndarray:
+def reconstruct_from_flat_predictions(preds_flat: np.ndarray, height: int, width: int) -> np.ndarray:
     """Reconstruct a 2D label map from flat predictions in row-major order.
 
     Args:
@@ -185,9 +181,7 @@ def test_patching_recon(cfg: HyperClassificationConfig):
 
     # fallback to small synthetic example if loading failed or shapes invalid
     if X is None or y is None:
-        print(
-            "Could not find valid image/gt in provided .mat files; using synthetic example."
-        )
+        print("Could not find valid image/gt in provided .mat files; using synthetic example.")
         H, W, C = 3, 4, 2
         X = np.arange(H * W * C, dtype=np.int32).reshape(H, W, C)
         y = np.array(
@@ -200,12 +194,7 @@ def test_patching_recon(cfg: HyperClassificationConfig):
         )
     else:
         # ensure image is HxWxC and gt is HxW
-        if (
-            X.ndim == 3
-            and y.ndim == 2
-            and X.shape[0] == y.shape[0]
-            and X.shape[1] == y.shape[1]
-        ):
+        if X.ndim == 3 and y.ndim == 2 and X.shape[0] == y.shape[0] and X.shape[1] == y.shape[1]:
             print(f"Loaded image shape: {X.shape}, gt shape: {y.shape}")
         else:
             print("Loaded mats but shapes are incompatible; using synthetic example.")
@@ -224,16 +213,12 @@ def test_patching_recon(cfg: HyperClassificationConfig):
     print("Input X shape:", X.shape)
     print("Input y shape:", y.shape)
 
-    patches_all, labels_all = create_patches(
-        X, y, window_size, remove_zero_labels=False
-    )
+    patches_all, labels_all = create_patches(X, y, window_size, remove_zero_labels=False)
     print("patches_all.shape:", patches_all.shape)
     print("labels_all.shape:", labels_all.shape)
     # print("labels_all (row-major):", labels_all.tolist())
 
-    patches_nonzero, labels_nonzero = create_patches(
-        X, y, window_size, remove_zero_labels=True
-    )
+    patches_nonzero, labels_nonzero = create_patches(X, y, window_size, remove_zero_labels=True)
     print("patches_nonzero.shape:", patches_nonzero.shape)
     print("labels_nonzero.shape:", labels_nonzero.shape)
     # print("labels_nonzero (filtered):", labels_nonzero.tolist())
@@ -274,9 +259,7 @@ def test_patching_model_inference():
     img_model_out = outs_merged["img"]
 
     assert img_model_out.shape == x.shape, "Output shape must match input shape"
-    assert (img_model_out == (x > 0.5).type(torch.float32)).all(), (
-        "Output values must match model output"
-    )
+    assert (img_model_out == (x > 0.5).type(torch.float32)).all(), "Output values must match model output"
 
 
 if __name__ == "__main__":

@@ -126,9 +126,7 @@ class Unpatcher(nn.Module):
         self.img_size = img_size
 
         if head_type == "progressive":
-            assert "progressive_dims" in prog_kwargs, (
-                f"progressive_dims must be provided for progressive unpatching"
-            )
+            assert "progressive_dims" in prog_kwargs, f"progressive_dims must be provided for progressive unpatching"
             self.unpatcher = AdaptiveProgressivePatchUnembedding(  # type: ignore
                 in_chans=in_chans,
                 out_chans=out_chans,
@@ -139,18 +137,14 @@ class Unpatcher(nn.Module):
         elif head_type == "once":
             self.unpatcher = nn.Linear(in_chans, out_chans * patch_size * patch_size)
         elif head_type == "once_adaptive":
-            self.unpatcher = AdaptiveOutputLinearLayer(
-                in_chans, out_chans, bias=True, mode="interp"
-            )
+            self.unpatcher = AdaptiveOutputLinearLayer(in_chans, out_chans, bias=True, mode="interp")
         else:
             raise NotImplementedError(f"head_type {head_type} not implemented")
 
         # Time modulation
         self.module_by_time = module_by_time
         if module_by_time:
-            self.adaLN_modulation = nn.Sequential(
-                nn.SiLU(), nn.Linear(in_chans, 2 * in_chans, bias=True)
-            )
+            self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(in_chans, 2 * in_chans, bias=True))
 
     def init_weights(self):
         # zero out?
@@ -172,9 +166,7 @@ class Unpatcher(nn.Module):
             # does not support dynamic out channels
             # if is a rgb image decoding, select this in most cases
             if self.head_type == "once_adaptive":
-                assert out_shape is not None, (
-                    "out_shape must be provided for once_adaptive unpatching"
-                )
+                assert out_shape is not None, "out_shape must be provided for once_adaptive unpatching"
             x_blc = self.unpatcher(x_blc)
             img_size = out_shape[-2:] if out_shape is not None else self.img_size
             return l2p_transform_tensor(
@@ -183,9 +175,7 @@ class Unpatcher(nn.Module):
                 img_size=img_size,
             )
         else:  # is progressive
-            assert out_shape is not None, (
-                "out_shape must be provided for progressive unpatching"
-            )
+            assert out_shape is not None, "out_shape must be provided for progressive unpatching"
             return self.unpatcher(x_blc, out_shape=out_shape)
 
 
@@ -215,25 +205,19 @@ class TimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
-            / half
-        ).to(device=t.device)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, t):
         # rescale t
         t = t * 1000
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(
-            self.mlp[0].weight.dtype
-        )
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(self.mlp[0].weight.dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -255,9 +239,7 @@ class ResBlock(nn.Module):
             nn.Linear(channels, channels, bias=True),
         )
 
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(channels, 3 * channels, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(channels, 3 * channels, bias=True))
 
     def forward(self, x, y):
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(y).chunk(3, dim=-1)
@@ -273,13 +255,9 @@ class FinalLayer(nn.Module):
 
     def __init__(self, model_channels, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(
-            model_channels, elementwise_affine=False, eps=1e-6
-        )
+        self.norm_final = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(model_channels, out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(model_channels, 2 * model_channels, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(model_channels, 2 * model_channels, bias=True))
 
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
@@ -336,9 +314,7 @@ class SimpleMLPAdaLN(nn.Module):
         if first_lin_type == "linear":
             self.input_proj = nn.Linear(in_channels, model_channels)
         else:
-            self.input_proj = AdaptiveInputLinearLayer(
-                in_channels, model_channels, mode=first_lin_type
-            )
+            self.input_proj = AdaptiveInputLinearLayer(in_channels, model_channels, mode=first_lin_type)
 
         res_blocks = []
         for i in range(num_res_blocks):
@@ -474,9 +450,7 @@ class FlowDecoder(nn.Module):
 
         # model
         x_hidden_blc, y = self.net(x, t, z)  # time-dependent
-        x_bchw = self.head(
-            x_hidden_blc.reshape(b, l, -1), y, out_shape=(chan, *img_size)
-        )
+        x_bchw = self.head(x_hidden_blc.reshape(b, l, -1), y, out_shape=(chan, *img_size))
 
         return x_bchw
 
@@ -494,9 +468,7 @@ class FlowDecoder(nn.Module):
                 nh=self.patch_size,
                 nw=self.patch_size,
             )
-            assert x.shape[0] == b * l, (
-                f"Input x shape {x.shape} does not match z shape {z.shape}"
-            )
+            assert x.shape[0] == b * l, f"Input x shape {x.shape} does not match z shape {z.shape}"
             assert x.ndim == 2, "Input x must be a 2D tensor [b*n, c]"
             # x = x.reshape(b * l, c)
         return z, x, (b, l, c_z)
@@ -514,9 +486,7 @@ class FlowDecoder(nn.Module):
         ########### not stand alone, takes x, t, and z ###############
         # takes states from previous module
 
-        assert not self.stand_alone, (
-            f"FlowDecoder must not be stand_alone to forward as a module"
-        )
+        assert not self.stand_alone, f"FlowDecoder must not be stand_alone to forward as a module"
 
         return self._forward_fn(x_bchw, t, z_blc)
 
@@ -600,9 +570,7 @@ class FlowDecoder(nn.Module):
 
         # get all timesteps ts and intervals Δts
         if schedule == "linear":
-            ts = (
-                torch.arange(1, sample_steps + 1).flip(0) / sample_steps
-            )  # (0 .. 1) -> (1 .. 0)
+            ts = torch.arange(1, sample_steps + 1).flip(0) / sample_steps  # (0 .. 1) -> (1 .. 0)
             dts = torch.ones_like(ts) * (1.0 / sample_steps)
         elif schedule.startswith("pow"):  # "pow_0.25"
             p = float(schedule.split("_")[1])
@@ -618,9 +586,7 @@ class FlowDecoder(nn.Module):
         if cfg_interval is None:  # cfg_interval = "(.17,1.02)"
             interval = None
         else:
-            raise NotImplementedError(
-                f"cfg_interval {cfg_interval} parsing not implemented"
-            )
+            raise NotImplementedError(f"cfg_interval {cfg_interval} parsing not implemented")
             cfg_lo, cfg_hi = ast.literal_eval(cfg_interval)
             interval = (
                 self._edm_to_flow_convention(cfg_lo),
@@ -646,10 +612,7 @@ class FlowDecoder(nn.Module):
             vc = self._forward_fn(xc, timesteps, z)  # conditional v
 
             # classifier free guidance
-            if null_z is not None and (
-                interval is None
-                or ((t.item() >= interval[0]) and (t.item() <= interval[1]))
-            ):
+            if null_z is not None and (interval is None or ((t.item() >= interval[0]) and (t.item() <= interval[1]))):
                 xu = x
                 vu = self._forward_fn(xu, timesteps, null_z)  # unconditional v
                 vc = vu + cfg * (vc - vu)
@@ -729,9 +692,7 @@ class TimFlowDecoder(nn.Module):
         **_kwargs,
     ) -> Tensor:
         """Forward as a module without transport (for non-standalone mode)"""
-        assert not self.stand_alone, (
-            f"TimFlowDecoder must not be stand_alone to forward as a module"
-        )
+        assert not self.stand_alone, f"TimFlowDecoder must not be stand_alone to forward as a module"
 
         if x_bchw is None:
             raise ValueError("x_bchw must be provided for module forward")
@@ -773,13 +734,10 @@ class TimFlowDecoder(nn.Module):
         In non-standalone mode: acts as a simple module via _forward_only_model
         """
         assert self.stand_alone, (
-            "TimFlowDecoder in stand_alone mode should use training_loss() "
-            "or sample() methods, not forward()"
+            "TimFlowDecoder in stand_alone mode should use training_loss() or sample() methods, not forward()"
         )
         # In non-standalone mode, act as a simple module
-        return self._forward_only_model(
-            z_blc, x_bchw=x_bchw, t=t, r=r, inp_shape=inp_shape, **kwargs
-        )
+        return self._forward_only_model(z_blc, x_bchw=x_bchw, t=t, r=r, inp_shape=inp_shape, **kwargs)
 
     def training_loss(
         self,
@@ -791,17 +749,14 @@ class TimFlowDecoder(nn.Module):
     ):
         """Training loss computation (only available in standalone mode)"""
         assert self.stand_alone, (
-            "training_loss should only be called in stand_alone mode. "
-            "Use forward() method for module inference."
+            "training_loss should only be called in stand_alone mode. Use forward() method for module inference."
         )
         assert self.transition_schedule is not None
         assert self.null_cond_h is not None
 
         if self.transition_schedule.transport.enhance_target:
             assert ema_model is not None, "EMA model is required for enhance_target"
-            assert hasattr(self, "null_cond_h"), (
-                "The decoder must have null_cond_h for CFG"
-            )
+            assert hasattr(self, "null_cond_h"), "The decoder must have null_cond_h for CFG"
         assert x_bchw is not None, "Input x must be provided in step mode"
 
         noise = torch.randn_like(x_bchw)
@@ -841,8 +796,7 @@ class TimFlowDecoder(nn.Module):
     ):
         """Sampling (only available in standalone mode)"""
         assert self.stand_alone, (
-            "sample should only be called in stand_alone mode. "
-            "Use forward() method for module inference."
+            "sample should only be called in stand_alone mode. Use forward() method for module inference."
         )
 
         x_init = torch.randn(inp_shape).to(z_blc)

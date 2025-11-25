@@ -93,9 +93,7 @@ class MobileNetV3(nn.Module):
 
         if frozen_stages not in range(-1, len(self.arch_settings[arch]) + 2):
             raise ValueError(
-                "frozen_stages must be in range(-1, "
-                f"{len(self.arch_settings[arch]) + 2}). "
-                f"But received {frozen_stages}"
+                f"frozen_stages must be in range(-1, {len(self.arch_settings[arch]) + 2}). But received {frozen_stages}"
             )
         self.arch = arch
         self.conv_cfg = conv_cfg

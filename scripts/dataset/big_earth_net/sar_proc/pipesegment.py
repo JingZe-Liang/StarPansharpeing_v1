@@ -66,11 +66,7 @@ class PipeSegment:
     def attach_check(self, ps):
         if not self.attach(ps):
             raise Exception(
-                "(!) "
-                + type(self).__name__
-                + " has no free input at which to attach "
-                + type(ps).__name__
-                + "."
+                "(!) " + type(self).__name__ + " has no free input at which to attach " + type(ps).__name__ + "."
             )
 
     def attach(self, ps):
@@ -99,9 +95,7 @@ class PipeSegment:
         return LoadSegment(other) * self
 
     @classmethod
-    def parallel(
-        cls, input_args=None, input_kwargs=None, processes=None, saveall=0, verbose=0
-    ):
+    def parallel(cls, input_args=None, input_kwargs=None, processes=None, saveall=0, verbose=0):
         if input_args is not None and input_kwargs is None:
             input_kwargs = [{}] * len(input_args)
         elif input_kwargs is not None and input_args is None:
@@ -182,11 +176,7 @@ class MergeSegment(PipeSegment):
             self.feeder2.reset(recursive=True)
 
     def __str__(self, offset=0):
-        return (
-            self.selfstring(offset)
-            + self.feeder1.__str__(offset + 1)
-            + self.feeder2.__str__(offset + 1)
-        )
+        return self.selfstring(offset) + self.feeder1.__str__(offset + 1) + self.feeder2.__str__(offset + 1)
 
     def attach(self, ps):
         if self.feeder1 is None:
@@ -277,9 +267,7 @@ class Conditional(PipeSegment):
             self.feeder = LoadSegment(())
 
     def transform(self, pin):
-        condition_obj = self.condition_class(
-            *self.condition_args, **self.condition_kwargs
-        )
+        condition_obj = self.condition_class(*self.condition_args, **self.condition_kwargs)
         if not isinstance(condition_obj, LoadSegment):
             condition_obj = LoadSegment(pin) * condition_obj
         if condition_obj(self._saveall, self._verbose):
@@ -308,9 +296,7 @@ class Map(PipeSegment):
     def transform(self, pin):
         pout = ()
         for entry in pin:
-            outp = (LoadSegment(entry) * self.inner_class(*self.args, **self.kwargs))(
-                self._saveall, self._verbose
-            )
+            outp = (LoadSegment(entry) * self.inner_class(*self.args, **self.kwargs))(self._saveall, self._verbose)
             if not isinstance(outp, tuple):
                 outp = (outp,)
             pout = pout + outp
@@ -343,15 +329,11 @@ class While(PipeSegment):
         self.inner_kwargs = inner_kwargs
 
     def transform(self, pin):
-        condition_obj = self.condition_class(
-            *self.condition_args, **self.condition_kwargs
-        )
+        condition_obj = self.condition_class(*self.condition_args, **self.condition_kwargs)
         while (LoadSegment(pin) * condition_obj)(self._saveall, self._verbose):
             inner_obj = self.inner_class(*self.inner_args, **self.inner_kwargs)
             pin = (LoadSegment(pin) * inner_obj)(self._saveall, self._verbose)
-            condition_obj = self.condition_class(
-                *self.condition_args, **self.condition_kwargs
-            )
+            condition_obj = self.condition_class(*self.condition_args, **self.condition_kwargs)
         return pin
 
 

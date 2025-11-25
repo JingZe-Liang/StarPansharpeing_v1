@@ -188,9 +188,7 @@ def get_flatten_einops_pattern(
         output_axes.insert(f_dim_at, f"({flatten_pattern})")
 
         # create dictionary mapping axis names to dimension indices
-        flatten_dim_dict = {
-            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
-        }
+        flatten_dim_dict = {axis: i for i, axis in enumerate(axes) if axis in flatten_axes}
 
         return f"{' '.join(axes)} -> {' '.join(output_axes)}", flatten_dim_dict
     elif remaining_axes:
@@ -198,9 +196,7 @@ def get_flatten_einops_pattern(
         return f"{' '.join(axes)} -> {' '.join(remaining_axes)}", {}
     elif flatten_axes:
         # if only flatten axes (flatten to 1D)
-        flatten_dim_dict = {
-            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
-        }
+        flatten_dim_dict = {axis: i for i, axis in enumerate(axes) if axis in flatten_axes}
         return f"{' '.join(axes)} -> ({' '.join(flatten_axes)})", flatten_dim_dict
     else:
         # edge case: no axes specified
@@ -244,14 +240,10 @@ def quantile_clip(
 
     q_dim = -1
     if clip_mode == "both":
-        q_min = img.quantile(
-            1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-        )
+        q_min = img.quantile(1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
         q_max = img.quantile(quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
     elif clip_mode == "min":
-        q_min = img.quantile(
-            1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-        )
+        q_min = img.quantile(1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
         q_max = None
     elif clip_mode == "max":
         q_min = None
@@ -279,9 +271,7 @@ def quantile_clip(
     return img
 
 
-def per_channel_normalize(
-    img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1), quantile=1.0
-):
+def per_channel_normalize(img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1), quantile=1.0):
     if isinstance(img, (torch.Tensor, np.ndarray)):
         is_tensor = torch.is_tensor(img)
         dims = img.ndim
@@ -295,9 +285,7 @@ def per_channel_normalize(
         min_c = einops.reduce(img, pattern=pattern, reduction="min")
         max_c = einops.reduce(img, pattern=pattern, reduction="max")
 
-        img = (img - min_c) / (
-            max_c - min_c + 1e-8
-        )  # Add small epsilon to avoid division by zero
+        img = (img - min_c) / (max_c - min_c + 1e-8)  # Add small epsilon to avoid division by zero
 
         # Use torch.clamp for PyTorch tensors and np.clip for NumPy arrays to ensure compatibility
         if torch.is_tensor(img):
@@ -308,9 +296,7 @@ def per_channel_normalize(
     return img
 
 
-def per_channel_add_min(
-    img: torch.Tensor | np.ndarray, hw_dim: tuple = (-2, -1), quantile=1.0
-):
+def per_channel_add_min(img: torch.Tensor | np.ndarray, hw_dim: tuple = (-2, -1), quantile=1.0):
     if isinstance(img, (torch.Tensor, np.ndarray)):
         img = torch.as_tensor(img)
         dims = img.ndim
@@ -367,24 +353,20 @@ def sliding_window(
         # 如果pad大小大于h,w的1/4，那么不要多出来的部分；小于1/4就正常pad
         if pad_h > h / 4:
             pad_h = 0
-            logger.warning(
-                f"Pad height {pad_h} is greater than half of image height {h}, skipping padding"
-            )
+            logger.warning(f"Pad height {pad_h} is greater than half of image height {h}, skipping padding")
 
         if pad_w > w / 4:
             pad_w = 0
-            logger.warning(
-                f"Pad width {pad_w} is greater than half of image width {w}, skipping padding"
-            )
+            logger.warning(f"Pad width {pad_w} is greater than half of image width {w}, skipping padding")
 
         # 对图像进行 padding
         if pad_h > 0 or pad_w > 0:
             image = torch.as_tensor(image) if isinstance(image, np.ndarray) else image
             image, shape_inverse = to_batched(image, is_hwc)
             orig_dtype = image.dtype
-            image = torch.nn.functional.pad(
-                image.float(), (0, pad_w, 0, pad_h), mode="constant", value=0.0
-            ).to(orig_dtype)
+            image = torch.nn.functional.pad(image.float(), (0, pad_w, 0, pad_h), mode="constant", value=0.0).to(
+                orig_dtype
+            )
             image = shape_inverse(image)
     elif pad_type == "resize":
         if pad_h < h / 2:
@@ -435,9 +417,7 @@ def sliding_window(
 
             if isinstance(img_slide, np.memmap):
                 # img_slide = np.array(img_slide)
-                logger.debug(
-                    f"Copying memmap to numpy array at patch ({i_start}:{i_end}, {j_start}:{j_end})"
-                )
+                logger.debug(f"Copying memmap to numpy array at patch ({i_start}:{i_end}, {j_start}:{j_end})")
                 img_slide = img_slide.copy()  # Ensure we have a copy, not a view
 
             img_slide = torch.as_tensor(img_slide)
@@ -446,9 +426,7 @@ def sliding_window(
                 # background_is_all_zero(img_slide.cuda(), norm=True, is_hwc=is_hwc)
                 False and check_background
             ):  # on device check
-                logger.warning(
-                    f"Background is all zero at patch ({i_start}:{i_end}, {j_start}:{j_end})"
-                )
+                logger.warning(f"Background is all zero at patch ({i_start}:{i_end}, {j_start}:{j_end})")
                 if is_yield:
                     yield None, None
                 else:
@@ -518,9 +496,7 @@ def resize_or_clip_img(
 
     if h > h_max or w > w_max:
         # clip
-        yield from sliding_window(
-            img, patch_size, stride, pad_type=pad_type, is_hwc=is_hwc
-        )
+        yield from sliding_window(img, patch_size, stride, pad_type=pad_type, is_hwc=is_hwc)
     else:
         # yield (torch.as_tensor(img), None)
 
@@ -562,9 +538,7 @@ def merge_patches(patches, coords, original_shape, patch_size, stride):
         count_map[..., i : i + patch_size[0], j : j + patch_size[1]] += 1
 
     # 避免除以零的情况
-    merged_image = torch.where(
-        count_map > 0, merged_image / count_map, torch.tensor(0.0)
-    )
+    merged_image = torch.where(count_map > 0, merged_image / count_map, torch.tensor(0.0))
 
     # 移除 padding
     if pad_h > 0 or pad_w > 0:
@@ -586,9 +560,7 @@ def dict_extract(
     extract_type: ExtractMode = ExtractMode.LAST,
     force_load: bool = True,
 ) -> dict | Any:
-    etype = (
-        extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
-    )
+    etype = extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
     force_load_fn = lambda x: x[:] if force_load else x
 
     if keys is None:
@@ -602,9 +574,7 @@ def dict_extract(
         else:
             raise Exception(f"Invalid extract_type: {etype} when keys is None")
     else:
-        assert etype == "specific", (
-            f"extract_type must be 'specific' when keys is provided, got {etype}"
-        )
+        assert etype == "specific", f"extract_type must be 'specific' when keys is provided, got {etype}"
         ret = {}
         d_keys = list(d.keys())
         for k in keys:
@@ -638,9 +608,7 @@ def read_image(
     if isinstance(key_if_dict, str):
         key_if_dict = [key_if_dict]
     if key_if_dict is not None:
-        assert not mat_ret_all, (
-            "mat_ret_all is not supported when key_if_dict is not None"
-        )
+        assert not mat_ret_all, "mat_ret_all is not supported when key_if_dict is not None"
         dict_extract_type = ExtractMode.SPECIFIC
 
     if verbose:
@@ -652,8 +620,7 @@ def read_image(
             return dict_extract(d, key_if_dict, dict_extract_type)
         except Exception as e:
             log(
-                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
-                "read using h5py.",
+                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to read using h5py.",
                 level="warning",
             )
 
@@ -663,9 +630,7 @@ def read_image(
     elif img_path.suffix.lower() == ".img":
         with rasterio.open(img_path) as dataset:
             bands = dataset.count
-            img = np.zeros(
-                (dataset.height, dataset.width, bands), dtype=dataset.dtypes[0]
-            )
+            img = np.zeros((dataset.height, dataset.width, bands), dtype=dataset.dtypes[0])
             for i in range(bands):
                 img[..., i] = dataset.read(i + 1)
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
@@ -681,14 +646,10 @@ def read_image(
         img = np.load(img_path)
     elif img_path.suffix.lower() in [".tif", ".tiff"] and tiff_bands_seperated:
         # assume img_path endswith *B01.tif
-        basic_name = (
-            img_path.name
-        )  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
+        basic_name = img_path.name  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
         uni_tif_paths = []
 
-        assert bands_name is not None, (
-            "bands_name should be provided when tiff_bands_seperated is True"
-        )
+        assert bands_name is not None, "bands_name should be provided when tiff_bands_seperated is True"
         for band_name in bands_name:
             parts = basic_name.split(".")  # replace B01 with band_name
             name = ".".join(parts[:-2]) + "." + band_name + ".tif"
@@ -724,11 +685,7 @@ def read_image(
         # memmap
         tif = tifffile.TiffFile(img_path)
         try:
-            img = (
-                tif.asarray(out="memmap")
-                if tiff_read_mode == "memmap"
-                else tif.asarray()
-            )
+            img = tif.asarray(out="memmap") if tiff_read_mode == "memmap" else tif.asarray()
         except Exception as e:
             log(
                 f"failed to load image from: {img_path.as_posix()}. {e}",
@@ -742,9 +699,7 @@ def read_image(
         for frame in reader:
             pts = frame["pts"]
             if pts % 0.5 <= 0.001:
-                data = (
-                    frame["data"].numpy().transpose(1, 2, 0)
-                )  # [c, h, w] -> [h, w, c]
+                data = frame["data"].numpy().transpose(1, 2, 0)  # [c, h, w] -> [h, w, c]
                 frames.append(data)
 
             if pts > 60:
@@ -795,9 +750,7 @@ def postprocess_img(
             img = img.clamp(min=0)
             img = img / img_max
         elif rescale == "min_max":
-            img = per_channel_normalize(
-                img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999
-            )
+            img = per_channel_normalize(img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999)
         elif rescale == "none" or rescale is None:
             pass
         else:
@@ -816,9 +769,7 @@ def postprocess_img(
             #     hw_dim=(-2, -1) if img.ndim == 4 else (0, 1),
             #     quantile=0.999,
             # )
-            img = img_add_min(
-                img, hw_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999
-            )
+            img = img_add_min(img, hw_dim=(-2, -1) if img.ndim == 4 else (0, 1), quantile=0.999)
         elif rescale == "none" or rescale is None:
             pass
         else:
@@ -938,9 +889,7 @@ def img_saver_backend_compact_with_wds(
                 f"Failed to save image with shape {img.shape} and dtype {img.dtype} as {extension}"
             ) from e
     elif extension == "safetensors":
-        byte = safetensors.torch.save(
-            {"img": torch.as_tensor(img, dtype=getattr(torch, img.dtype.name))}
-        )
+        byte = safetensors.torch.save({"img": torch.as_tensor(img, dtype=getattr(torch, img.dtype.name))})
         return byte
     elif extension == "webdataset":
         # left for webdataset to encode
@@ -1010,11 +959,7 @@ def clip_img_to_webdataset(
             raise ValueError(f"Unsupported process_img_type: {process_img_type}")
 
         if force_save_dtype is not None and force_save_dtype != "auto":
-            save_dtype = (
-                np.dtype(force_save_dtype)
-                if isinstance(force_save_dtype, str)
-                else force_save_dtype
-            )
+            save_dtype = np.dtype(force_save_dtype) if isinstance(force_save_dtype, str) else force_save_dtype
         else:
             save_dtype = None
 
@@ -1037,18 +982,14 @@ def clip_img_to_webdataset(
                 rescale=rescale,
             )
 
-            patch, save_dtype = to_suitable_dtype_img(
-                patch, *min_max, dtype=save_dtype, is_normed=norm
-            )
+            patch, save_dtype = to_suitable_dtype_img(patch, *min_max, dtype=save_dtype, is_normed=norm)
 
             # write to webdataset
             # img_name = img_name.replace(
             #     ".jp2", "-jp2"
             # )  # ensure the webdataset extrace 'img' as the key
 
-            img_name = img_name.replace(
-                ".", "-"
-            )  # ensure the webdataset extrace 'img' as the key
+            img_name = img_name.replace(".", "-")  # ensure the webdataset extrace 'img' as the key
             saved_name = (
                 f"{total_img_saved_count}_{img_name}_patch-{patch_idx}"
                 if add_global_index
@@ -1084,9 +1025,7 @@ def clip_img_to_webdataset(
         img = img[..., None]  # H, W -> H, W, 1
     if assert_channel_n is not None:
         if img.shape[-1] != assert_channel_n:
-            logger.warning(
-                f"Image {img_path} has {img.shape[-1]} channels, expected {assert_channel_n} channels."
-            )
+            logger.warning(f"Image {img_path} has {img.shape[-1]} channels, expected {assert_channel_n} channels.")
             return None, None, None
 
     if Path(img_path).suffix.lower() in [".mp4"] and isinstance(img, list):
@@ -1109,9 +1048,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
     img_stride: tuple[int, int] = (512, 512),
     img_resize: int | None = None,
     process_img_type: Literal["clip", "resize", "clip_resize", None] = "clip",
-    save_backend: Literal[
-        "tiff", "jpeg", "png", "npy", "safetensors", "webdataset"
-    ] = "tiff",
+    save_backend: Literal["tiff", "jpeg", "png", "npy", "safetensors", "webdataset"] = "tiff",
     max_size: int = 4 * 1024 * 1024 * 1024,
     force_save_dtype: str | np.dtype = "auto",
     img_rescale="clamp",
@@ -1178,9 +1115,7 @@ def loop_dataset_tif_MSI_images_to_webdataset(
                 Path(msi_file).unlink(missing_ok=True)
 
             if tqdm_or_not:
-                tbar.set_description(
-                    f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}, {delete_file=}"
-                )
+                tbar.set_description(f"writing {msi_file.name}, {n_patches=}, {shape=}, {patch_shape=}, {delete_file=}")
 
     logger.info(f"webdataset written to {webdataset_pattern}")
 
@@ -1634,32 +1569,20 @@ if __name__ == "__main__":
         def split_list(lst, n):
             """将列表 lst 分成 n 份"""
             k, m = divmod(len(lst), n)
-            return (
-                lst[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n)
-            )
+            return (lst[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
 
         # 获取所有 msi_files
-        all_msi_files = list(
-            Path("data/Disaterm3/train_images/train_images").glob("**/*.png")
-        )
-        all_msi_files += list(
-            Path("data/Disaterm3/train_images/train_images").glob("**/*.jpg")
-        )
-        all_msi_files += list(
-            Path("data/Disaterm3/test/test/rgb_images").glob("**/*.png")
-        )
-        all_msi_files += list(
-            Path("data/Disaterm3/test/test/rgb_images").glob("**/*.jpg")
-        )
+        all_msi_files = list(Path("data/Disaterm3/train_images/train_images").glob("**/*.png"))
+        all_msi_files += list(Path("data/Disaterm3/train_images/train_images").glob("**/*.jpg"))
+        all_msi_files += list(Path("data/Disaterm3/test/test/rgb_images").glob("**/*.png"))
+        all_msi_files += list(Path("data/Disaterm3/test/test/rgb_images").glob("**/*.jpg"))
 
         # 按进程数分割 msi_files
         num_processes = 8  # mp.cpu_count()
         msi_files_split = list(split_list(all_msi_files, num_processes))
 
         # 为每个进程指定输出文件夹
-        output_folders = [
-            f"data/Disaterm3/hyper_images/part_{i}" for i in range(num_processes)
-        ]
+        output_folders = [f"data/Disaterm3/hyper_images/part_{i}" for i in range(num_processes)]
         for folder in output_folders:
             Path(folder).mkdir(parents=True, exist_ok=True)
 
@@ -1682,12 +1605,7 @@ if __name__ == "__main__":
             results = pool.starmap(
                 process_files,
                 # `i == 0` 表示第一个进程才显示tqdm
-                [
-                    (files, folder, i == 0)
-                    for i, (files, folder) in enumerate(
-                        zip(msi_files_split, output_folders)
-                    )
-                ],
+                [(files, folder, i == 0) for i, (files, folder) in enumerate(zip(msi_files_split, output_folders))],
             )
 
         logger.info("All processes completed successfully.")

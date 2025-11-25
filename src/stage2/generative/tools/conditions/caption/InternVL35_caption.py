@@ -87,9 +87,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
     return best_ratio
 
 
-def dynamic_preprocess(
-    image, min_num=1, max_num=12, image_size=448, use_thumbnail=False
-):
+def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=False):
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
 
@@ -104,9 +102,7 @@ def dynamic_preprocess(
     target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
 
     # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
-    )
+    target_aspect_ratio = find_closest_aspect_ratio(aspect_ratio, target_ratios, orig_width, orig_height, image_size)
 
     # calculate the target width and height
     target_width = image_size * target_aspect_ratio[0]
@@ -137,15 +133,11 @@ def load_image(image_file: np.ndarray | str, input_size=448, max_num=12):
     if isinstance(image_file, str) and os.path.exists(image_file):
         image = Image.open(image_file).convert("RGB")
     else:
-        assert isinstance(image_file, np.ndarray), "Invalid image file, got {}".format(
-            type(image_file)
-        )
+        assert isinstance(image_file, np.ndarray), "Invalid image file, got {}".format(type(image_file))
         image = array_img_to_pil(image_file, denorm=True)
     # image = Image.open(image_file).convert("RGB")
     transform = build_transform(input_size=input_size)
-    images = dynamic_preprocess(
-        image, image_size=input_size, use_thumbnail=True, max_num=max_num
-    )
+    images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
     pixel_values = [transform(image) for image in images]
     pixel_values = torch.stack(pixel_values)
     return pixel_values
@@ -170,9 +162,7 @@ def get_intervl35_model(
         .eval()
         .cuda()
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        ckpt, trust_remote_code=True, use_fast=False
-    )
+    tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True, use_fast=False)
     logger.info("Loaded model done.")
 
     def process_img(img):
@@ -182,9 +172,7 @@ def get_intervl35_model(
         question = prompt
 
         if stream:
-            streamer = TextIteratorStreamer(
-                tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=10
-            )
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=10)
             generation_config = dict(
                 max_new_tokens=1024,
                 do_sample=False,
@@ -226,9 +214,7 @@ def get_intervl35_model(
                 if new_text == model.conv_template.sep:
                     break
                 gen_txt += new_text
-                print(
-                    new_text, end="", flush=True
-                )  # Print each new chunk of generated text on the same line
+                print(new_text, end="", flush=True)  # Print each new chunk of generated text on the same line
 
         yield {
             "caption": response,
@@ -250,9 +236,7 @@ def img_to_base64(img: np.ndarray | str | Image.Image) -> str:
         img.save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
     img_bytes = io.BytesIO()
     Image.fromarray(img).save(img_bytes, format="PNG")
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
@@ -268,16 +252,12 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
     if denorm:
         img = (img * 255).astype(np.uint8)
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
 
     return Image.fromarray(img).convert("RGB")
 
 
-def captioning_dataloader_img(
-    dl, process_img, rgb_channels: list[int] | str = "mean", resume_from=None
-):
+def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "mean", resume_from=None):
     """
     Process images from a dataloader and generate captions.
 
@@ -295,9 +275,7 @@ def captioning_dataloader_img(
     for sample in dl:
         img = sample["img"]
         assert img.ndim == 4, f"Image batch must be 4D numpy array, got {img.ndim}D."
-        assert img.shape[0] == 1, (
-            f"Only support batch size 1 for captioning, got {img.shape[0]}."
-        )
+        assert img.shape[0] == 1, f"Only support batch size 1 for captioning, got {img.shape[0]}."
         img_id = sample["__key__"]
 
         if isinstance(resume_from, str):
@@ -305,9 +283,7 @@ def captioning_dataloader_img(
                 resumed = True
             else:
                 skipped += 1
-                logger.debug(
-                    f"Skipping {img_id[0]} until {resume_from}. Skipped {skipped} files."
-                )
+                logger.debug(f"Skipping {img_id[0]} until {resume_from}. Skipped {skipped} files.")
                 yield {
                     "id": img_id,
                     "processed": processed,
@@ -335,9 +311,7 @@ def captioning_dataloader_img(
         if img.ndim == 4 and img.shape[1] == 3:
             img_rgb = img
         else:
-            img_rgb = get_rgb_image(
-                img, rgb_channels=rgb_channels, use_linstretch=True
-            )  # (bs, c, h, w)
+            img_rgb = get_rgb_image(img, rgb_channels=rgb_channels, use_linstretch=True)  # (bs, c, h, w)
         img = img_rgb[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3) numpy array
 
         results_g = process_img(img)
@@ -379,9 +353,7 @@ def main_process_dataloader_img(
     try:
         import jsonlines as jsl
     except ImportError:
-        raise ImportError(
-            "jsonlines package is required for saving captions in jsonl format"
-        )
+        raise ImportError("jsonlines package is required for saving captions in jsonl format")
 
     from loguru import logger
     from tqdm import tqdm
@@ -399,9 +371,7 @@ def main_process_dataloader_img(
     os.makedirs(save_dir, exist_ok=True)
 
     tbar: tqdm = tqdm(  # type: ignore
-        captioning_dataloader_img(
-            dl, process_img, rgb_channels=rgb_channels, resume_from=resume_from
-        ),
+        captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels, resume_from=resume_from),
         desc="Captioning ...",
         total=410475,
         disable=False,
@@ -417,9 +387,7 @@ def main_process_dataloader_img(
         )
         tbar.set_description(f"Id: {res['id'][0]}")
         processed_resumed_n = (
-            res["processed"]
-            + res["skipped"]
-            + (len(resume_from) if isinstance(resume_from, (set, list)) else 0)
+            res["processed"] + res["skipped"] + (len(resume_from) if isinstance(resume_from, (set, list)) else 0)
         )
         tbar.n = processed_resumed_n
         tbar.refresh()
@@ -454,14 +422,11 @@ if __name__ == "__main__":
 
     if _resumed:
         saved_resume_path = "data/RemoteSAM270k/RemoteSAM-270K/captions/JPEGImages"
-        assert Path(saved_resume_path).exists(), (
-            f"Resume path {saved_resume_path} does not exist."
-        )
+        assert Path(saved_resume_path).exists(), f"Resume path {saved_resume_path} does not exist."
         saved_jsonl_files = list(Path(saved_resume_path).glob("*"))
         # remove extensions
         resumed_set = set(  # 'JPEGImages/xxx'
-            "/".join(saved_resume_path.with_suffix("").parts[-2:])
-            for saved_resume_path in saved_jsonl_files
+            "/".join(saved_resume_path.with_suffix("").parts[-2:]) for saved_resume_path in saved_jsonl_files
         )
         logger.info(f"Already processed files: {len(resumed_set)}")
 

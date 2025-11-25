@@ -172,9 +172,7 @@ class AnomalyDetectionVisualizer:
             os.makedirs(save_dir, exist_ok=True)
 
         # Save figure
-        plt.savefig(
-            save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi
-        )
+        plt.savefig(save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi)
         plt.close()
 
         print(f"ROC curves saved to: {save_path}")
@@ -243,9 +241,7 @@ class AnomalyDetectionVisualizer:
             os.makedirs(save_dir, exist_ok=True)
 
         # Save figure
-        plt.savefig(
-            save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi
-        )
+        plt.savefig(save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi)
         plt.close()
 
         print(f"Heatmap saved to: {save_path}")
@@ -372,9 +368,7 @@ class AnomalyDetectionVisualizer:
             os.makedirs(save_dir, exist_ok=True)
 
         # Save figure
-        plt.savefig(
-            save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi
-        )
+        plt.savefig(save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi)
         plt.close()
 
         print(f"Box plot saved to: {save_path}")
@@ -527,9 +521,7 @@ class AnomalyDetectionVisualizer:
             os.makedirs(save_dir, exist_ok=True)
 
         # Save figure
-        plt.savefig(
-            save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi
-        )
+        plt.savefig(save_path, format="pdf", bbox_inches="tight", pad_inches=0.0, dpi=self.dpi)
         plt.close()
 
         print(f"Multiple box plots saved to: {save_path}")
@@ -564,9 +556,7 @@ def test_visualizer():
             "thresholds": np.linspace(1, 0, 100),
         }
 
-    visualizer.plot_roc_curves(
-        results_dict, save_path="test_roc_curves.pdf", title="ROC Curves Comparison"
-    )
+    visualizer.plot_roc_curves(results_dict, save_path="test_roc_curves.pdf", title="ROC Curves Comparison")
 
     # Test heatmap
     print("\n2. Testing heatmap...")
@@ -594,9 +584,7 @@ def test_visualizer():
     scores[gt == 1] = 0.7 + 0.3 * np.random.rand(np.sum(gt == 1))
     scores[gt == 0] = 0.1 + 0.3 * np.random.rand(np.sum(gt == 0))
 
-    visualizer.plot_boxplot(
-        scores, gt, save_path="test_boxplot.pdf", method_name="Test Method"
-    )
+    visualizer.plot_boxplot(scores, gt, save_path="test_boxplot.pdf", method_name="Test Method")
 
     # Test multiple boxplots
     print("\n4. Testing multiple boxplots...")
@@ -607,9 +595,7 @@ def test_visualizer():
         method_scores[gt == 0] = 0.1 + 0.3 * np.random.rand(np.sum(gt == 0))
         multi_results[method] = {"scores": method_scores}
 
-    visualizer.plot_multiple_boxplots(
-        multi_results, gt, save_path="test_multiple_boxplots.pdf"
-    )
+    visualizer.plot_multiple_boxplots(multi_results, gt, save_path="test_multiple_boxplots.pdf")
 
     print("\nAll visualization tests completed!")
     print("Generated files:")

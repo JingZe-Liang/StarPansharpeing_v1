@@ -26,12 +26,8 @@ class ModelForwardPatcher(nn.Module):
         self.out_stride = out_stride or stride[list(stride.keys())[0]]
         self._patching_input_names = list(patch_size.keys())
         self.model_out_processer = model_out_processer
-        assert self._patching_input_names == list(stride.keys()), (
-            "patch_size and stride should have the same keys"
-        )
-        log(
-            f"[ModelForwardPatcher] Patching model with patch_size={patch_size} and stride={stride}"
-        )
+        assert self._patching_input_names == list(stride.keys()), "patch_size and stride should have the same keys"
+        log(f"[ModelForwardPatcher] Patching model with patch_size={patch_size} and stride={stride}")
 
     def forward(
         self,
@@ -49,9 +45,7 @@ class ModelForwardPatcher(nn.Module):
                 )
 
         # 2. forward the model with patched inputs
-        _n_patches = patched_inputs[self._patching_input_names[0]].shape[
-            1
-        ]  # [B, N, C, H, W]
+        _n_patches = patched_inputs[self._patching_input_names[0]].shape[1]  # [B, N, C, H, W]
         model_outs = []
         for i in tqdm(range(_n_patches), desc="Patching model forward ..."):
             model_in = {}
@@ -59,16 +53,12 @@ class ModelForwardPatcher(nn.Module):
                 model_in[k] = v[:, i]  # [B, C, H, W]
             patched_out = self.model(**model_in)  # dict of [B, C, H, W]
             patched_out = self.model_out_processer(patched_out)
-            assert isinstance(patched_out, torch.Tensor), (
-                "model output should be a tensor"
-            )
+            assert isinstance(patched_out, torch.Tensor), "model output should be a tensor"
             model_outs.append(patched_out)
 
         # 3. combine patches for outputs that need patching
         if original_size is None:
-            original_size = tuple(
-                model_inputs[self._patching_input_names[0]].shape[-2:]
-            )
+            original_size = tuple(model_inputs[self._patching_input_names[0]].shape[-2:])
 
         # 4. combine patches
         model_outs = torch.stack(model_outs, dim=1)  # [B, N, C, H, W]

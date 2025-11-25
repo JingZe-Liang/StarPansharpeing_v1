@@ -89,7 +89,6 @@ def make_head(
     head_type: str = "linear",
     **kwargs,
 ) -> torch.nn.Module:
-
     if isinstance(embed_dims, int):
         embed_dims = [embed_dims]
 

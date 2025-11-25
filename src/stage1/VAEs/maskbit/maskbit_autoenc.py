@@ -31,29 +31,19 @@ class Conv2dSame(torch.nn.Conv2d):
         """
         ih, iw = x.size()[-2:]
 
-        pad_h = self.calc_same_pad(
-            i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0]
-        )
-        pad_w = self.calc_same_pad(
-            i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1]
-        )
+        pad_h = self.calc_same_pad(i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0])
+        pad_w = self.calc_same_pad(i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1])
 
         if pad_h > 0 or pad_w > 0:
-            x = F.pad(
-                x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
-            )
+            x = F.pad(x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2])
         return super().forward(x)
 
 
 def GroupNorm(in_channels):
     """GroupNorm with 32 groups."""
     if in_channels % 32 != 0:
-        raise ValueError(
-            f"GroupNorm requires in_channels to be divisible by 32, got {in_channels}."
-        )
-    return torch.nn.GroupNorm(
-        num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
-    )
+        raise ValueError(f"GroupNorm requires in_channels to be divisible by 32, got {in_channels}.")
+    return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
 
 class ResidualBlock(torch.nn.Module):
@@ -73,19 +63,13 @@ class ResidualBlock(torch.nn.Module):
         self.out_channels = self.in_channels if out_channels is None else out_channels
 
         self.norm1 = norm_func(self.in_channels)
-        self.conv1 = Conv2dSame(
-            self.in_channels, self.out_channels, kernel_size=3, bias=False
-        )
+        self.conv1 = Conv2dSame(self.in_channels, self.out_channels, kernel_size=3, bias=False)
 
         self.norm2 = norm_func(self.out_channels)
-        self.conv2 = Conv2dSame(
-            self.out_channels, self.out_channels, kernel_size=3, bias=False
-        )
+        self.conv2 = Conv2dSame(self.out_channels, self.out_channels, kernel_size=3, bias=False)
 
         if self.in_channels != self.out_channels:
-            self.nin_shortcut = Conv2dSame(
-                self.out_channels, self.out_channels, kernel_size=1, bias=False
-            )
+            self.nin_shortcut = Conv2dSame(self.out_channels, self.out_channels, kernel_size=1, bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass of the residual block.
@@ -133,9 +117,7 @@ class ResidualStage(torch.nn.Module):
 
         self.res_blocks = torch.nn.ModuleList()
         for _ in range(num_res_blocks):
-            self.res_blocks.append(
-                ResidualBlock(in_channels, out_channels, norm_func=norm_func)
-            )
+            self.res_blocks.append(ResidualBlock(in_channels, out_channels, norm_func=norm_func))
             in_channels = out_channels
 
     def forward(self, hidden_states: torch.Tensor, *unused_args) -> torch.Tensor:
@@ -180,9 +162,7 @@ class DownsamplingStage(torch.nn.Module):
 
         self.sample_with_conv = sample_with_conv
         if self.sample_with_conv:
-            self.down_conv = Conv2dSame(
-                in_channels, in_channels, kernel_size=3, stride=2
-            )
+            self.down_conv = Conv2dSame(in_channels, in_channels, kernel_size=3, stride=2)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass of the downsampling stage.
@@ -283,9 +263,7 @@ class ConvEncoder(torch.nn.Module):
                     )
                 )
             else:
-                encoder_blocks.append(
-                    ResidualStage(in_channels, out_channels, num_res_blocks)
-                )
+                encoder_blocks.append(ResidualStage(in_channels, out_channels, num_res_blocks))
         self.down = torch.nn.ModuleList(encoder_blocks)
 
         # middle
@@ -336,15 +314,10 @@ class ConvDecoderLegacy(torch.nn.Module):
         self.config = config
 
         # compute in_channel_mult, block_in and curr_res at lowest res
-        block_in = (
-            self.config.hidden_channels
-            * self.config.channel_mult[self.config.num_resolutions - 1]
-        )
+        block_in = self.config.hidden_channels * self.config.channel_mult[self.config.num_resolutions - 1]
         num_res_blocks = self.config.num_res_blocks
         hidden_channels = self.config.hidden_channels
-        in_channel_mult = tuple(self.config.channel_mult) + (
-            self.config.channel_mult[-1],
-        )
+        in_channel_mult = tuple(self.config.channel_mult) + (self.config.channel_mult[-1],)
 
         # z to block_in
         self.conv_in = Conv2dSame(self.config.token_size, block_in, kernel_size=3)
@@ -358,21 +331,15 @@ class ConvDecoderLegacy(torch.nn.Module):
             in_channels = hidden_channels * in_channel_mult[i_level + 1]
             out_channels = hidden_channels * in_channel_mult[i_level]
             if i_level > 0:
-                decoder_blocks.append(
-                    UpsamplingStage(in_channels, out_channels, num_res_blocks)
-                )
+                decoder_blocks.append(UpsamplingStage(in_channels, out_channels, num_res_blocks))
             else:
-                decoder_blocks.append(
-                    ResidualStage(in_channels, out_channels, num_res_blocks)
-                )
+                decoder_blocks.append(ResidualStage(in_channels, out_channels, num_res_blocks))
 
         self.up = torch.nn.ModuleList(list(reversed(decoder_blocks)))
 
         # end
         self.norm_out = GroupNorm(out_channels)
-        self.conv_out = Conv2dSame(
-            out_channels, self.config.num_channels, kernel_size=3
-        )
+        self.conv_out = Conv2dSame(out_channels, self.config.num_channels, kernel_size=3)
 
     def forward(self, z_quantized: torch.Tensor) -> torch.Tensor:
         """Forward pass of the convolutional decoder.
@@ -413,23 +380,14 @@ class ConvDecoder(torch.nn.Module):
         self.config = config
 
         # compute in_channel_mult, block_in and curr_res at lowest res
-        block_in = (
-            self.config.hidden_channels
-            * self.config.channel_mult[self.config.num_resolutions - 1]
-        )
-        num_res_blocks = self.config.get(
-            "num_res_blocks_decoder", self.config.num_res_blocks
-        )
+        block_in = self.config.hidden_channels * self.config.channel_mult[self.config.num_resolutions - 1]
+        num_res_blocks = self.config.get("num_res_blocks_decoder", self.config.num_res_blocks)
         hidden_channels = self.config.hidden_channels
-        in_channel_mult = tuple(self.config.channel_mult) + (
-            self.config.channel_mult[-1],
-        )
+        in_channel_mult = tuple(self.config.channel_mult) + (self.config.channel_mult[-1],)
 
         # z to block_in
         if config.quantizer_type == "vae":
-            self.conv_in = Conv2dSame(
-                self.config.token_size // 2, block_in, kernel_size=3
-            )
+            self.conv_in = Conv2dSame(self.config.token_size // 2, block_in, kernel_size=3)
         else:
             self.conv_in = Conv2dSame(self.config.token_size, block_in, kernel_size=3)
 
@@ -442,20 +400,14 @@ class ConvDecoder(torch.nn.Module):
             in_channels = hidden_channels * in_channel_mult[i_level + 1]
             out_channels = hidden_channels * in_channel_mult[i_level]
             if i_level > 0:
-                decoder_blocks.append(
-                    UpsamplingStage(in_channels, out_channels, num_res_blocks)
-                )
+                decoder_blocks.append(UpsamplingStage(in_channels, out_channels, num_res_blocks))
             else:
-                decoder_blocks.append(
-                    ResidualStage(in_channels, out_channels, num_res_blocks)
-                )
+                decoder_blocks.append(ResidualStage(in_channels, out_channels, num_res_blocks))
         self.up = torch.nn.ModuleList(decoder_blocks)
 
         # end
         self.norm_out = GroupNorm(out_channels)
-        self.conv_out = Conv2dSame(
-            out_channels, self.config.num_channels, kernel_size=3
-        )
+        self.conv_out = Conv2dSame(out_channels, self.config.num_channels, kernel_size=3)
 
     def forward(self, z_quantized: torch.Tensor) -> torch.Tensor:
         """Forward pass of the convolutional decoder.

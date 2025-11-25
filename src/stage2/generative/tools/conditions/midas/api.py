@@ -20,7 +20,9 @@ ISL_PATHS = {
     "midas_v21_small": "",
 }
 
-remote_model_path = "https://huggingface.co/lllyasviel/ControlNet/resolve/main/annotator/ckpts/dpt_hybrid-midas-501f0c75.pt"
+remote_model_path = (
+    "https://huggingface.co/lllyasviel/ControlNet/resolve/main/annotator/ckpts/dpt_hybrid-midas-501f0c75.pt"
+)
 
 
 def disabled_train(self, mode=True):
@@ -45,21 +47,15 @@ def load_midas_transform(model_type):
     elif model_type == "midas_v21":
         net_w, net_h = 384, 384
         resize_mode = "upper_bound"
-        normalization = NormalizeImage(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        normalization = NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     elif model_type == "midas_v21_small":
         net_w, net_h = 256, 256
         resize_mode = "upper_bound"
-        normalization = NormalizeImage(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        normalization = NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     else:
-        assert False, (
-            f"model_type '{model_type}' not implemented, use: --model_type large"
-        )
+        assert False, f"model_type '{model_type}' not implemented, use: --model_type large"
 
     transform = Compose(
         [
@@ -113,9 +109,7 @@ def load_model(model_type):
         model = MidasNet(model_path, non_negative=True)
         net_w, net_h = 384, 384
         resize_mode = "upper_bound"
-        normalization = NormalizeImage(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        normalization = NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     elif model_type == "midas_v21_small":
         model = MidasNet_small(
@@ -128,9 +122,7 @@ def load_model(model_type):
         )
         net_w, net_h = 256, 256
         resize_mode = "upper_bound"
-        normalization = NormalizeImage(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        normalization = NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     else:
         print(f"model_type '{model_type}' not implemented, use: --model_type large")

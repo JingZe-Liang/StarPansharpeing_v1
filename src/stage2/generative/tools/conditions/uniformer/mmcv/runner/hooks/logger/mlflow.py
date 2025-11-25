@@ -42,9 +42,7 @@ class MlflowLoggerHook(LoggerHook):
         .. _MLflow:
             https://www.mlflow.org/docs/latest/index.html
         """
-        super(MlflowLoggerHook, self).__init__(
-            interval, ignore_last, reset_flag, by_epoch
-        )
+        super(MlflowLoggerHook, self).__init__(interval, ignore_last, reset_flag, by_epoch)
         self.import_mlflow()
         self.exp_name = exp_name
         self.tags = tags

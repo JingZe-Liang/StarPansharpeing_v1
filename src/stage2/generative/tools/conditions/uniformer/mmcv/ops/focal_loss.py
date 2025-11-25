@@ -31,9 +31,7 @@ class SigmoidFocalLossFunction(Function):
         )
 
     @staticmethod
-    def forward(
-        ctx, input, target, gamma=2.0, alpha=0.25, weight=None, reduction="mean"
-    ):
+    def forward(ctx, input, target, gamma=2.0, alpha=0.25, weight=None, reduction="mean"):
         assert isinstance(target, (torch.LongTensor, torch.cuda.LongTensor))
         assert input.dim() == 2
         assert target.dim() == 1
@@ -52,9 +50,7 @@ class SigmoidFocalLossFunction(Function):
 
         output = input.new_zeros(input.size())
 
-        ext_module.sigmoid_focal_loss_forward(
-            input, target, weight, output, gamma=ctx.gamma, alpha=ctx.alpha
-        )
+        ext_module.sigmoid_focal_loss_forward(input, target, weight, output, gamma=ctx.gamma, alpha=ctx.alpha)
         if ctx.reduction == ctx.reduction_dict["mean"]:
             output = output.sum() / input.size(0)
         elif ctx.reduction == ctx.reduction_dict["sum"]:
@@ -69,9 +65,7 @@ class SigmoidFocalLossFunction(Function):
 
         grad_input = input.new_zeros(input.size())
 
-        ext_module.sigmoid_focal_loss_backward(
-            input, target, weight, grad_input, gamma=ctx.gamma, alpha=ctx.alpha
-        )
+        ext_module.sigmoid_focal_loss_backward(input, target, weight, grad_input, gamma=ctx.gamma, alpha=ctx.alpha)
 
         grad_input *= grad_output
         if ctx.reduction == ctx.reduction_dict["mean"]:
@@ -91,9 +85,7 @@ class SigmoidFocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, input, target):
-        return sigmoid_focal_loss(
-            input, target, self.gamma, self.alpha, self.weight, self.reduction
-        )
+        return sigmoid_focal_loss(input, target, self.gamma, self.alpha, self.weight, self.reduction)
 
     def __repr__(self):
         s = self.__class__.__name__
@@ -117,9 +109,7 @@ class SoftmaxFocalLossFunction(Function):
         )
 
     @staticmethod
-    def forward(
-        ctx, input, target, gamma=2.0, alpha=0.25, weight=None, reduction="mean"
-    ):
+    def forward(ctx, input, target, gamma=2.0, alpha=0.25, weight=None, reduction="mean"):
         assert isinstance(target, (torch.LongTensor, torch.cuda.LongTensor))
         assert input.dim() == 2
         assert target.dim() == 1
@@ -144,9 +134,7 @@ class SoftmaxFocalLossFunction(Function):
         input_softmax /= channel_stats.unsqueeze(1).expand_as(input)
 
         output = input.new_zeros(input.size(0))
-        ext_module.softmax_focal_loss_forward(
-            input_softmax, target, weight, output, gamma=ctx.gamma, alpha=ctx.alpha
-        )
+        ext_module.softmax_focal_loss_forward(input_softmax, target, weight, output, gamma=ctx.gamma, alpha=ctx.alpha)
 
         if ctx.reduction == ctx.reduction_dict["mean"]:
             output = output.sum() / input.size(0)
@@ -189,9 +177,7 @@ class SoftmaxFocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, input, target):
-        return softmax_focal_loss(
-            input, target, self.gamma, self.alpha, self.weight, self.reduction
-        )
+        return softmax_focal_loss(input, target, self.gamma, self.alpha, self.weight, self.reduction)
 
     def __repr__(self):
         s = self.__class__.__name__

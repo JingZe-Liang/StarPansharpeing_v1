@@ -31,9 +31,7 @@ def func_mem_wrapper(device):
             memory_usage = allocated_memory - initial_memory
 
             print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
-            print(
-                f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
-            )
+            print(f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB")
             print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
             print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
 

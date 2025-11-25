@@ -15,9 +15,7 @@ class HyperspectralJPEG2000Compressor:
     高光谱图像JPEG2000压缩器
     """
 
-    def __init__(
-        self, quality: float = 50.0, compression_ratio: Optional[float] = None
-    ):
+    def __init__(self, quality: float = 50.0, compression_ratio: Optional[float] = None):
         """
         初始化压缩器
 
@@ -58,9 +56,7 @@ class HyperspectralJPEG2000Compressor:
         if normalize:
             processed = np.zeros((height, width, num_bands), dtype=np.uint8)
             for i in range(num_bands):
-                processed[:, :, i] = self._preprocess_band(
-                    hyperspectral_data[:, :, i], True
-                )
+                processed[:, :, i] = self._preprocess_band(hyperspectral_data[:, :, i], True)
         else:
             processed = (
                 hyperspectral_data
@@ -102,14 +98,10 @@ class HyperspectralJPEG2000Compressor:
         compression_stats = {
             "original_size": original_size,
             "compressed_size": compressed_size,
-            "compression_ratio": original_size / compressed_size
-            if compressed_size > 0
-            else 0,
+            "compression_ratio": original_size / compressed_size if compressed_size > 0 else 0,
             "num_bands": num_bands,
         }
-        logger.info(
-            f"Saved multi-band TIFF: {output_file.name} (orig {original_size}, comp {compressed_size})"
-        )
+        logger.info(f"Saved multi-band TIFF: {output_file.name} (orig {original_size}, comp {compressed_size})")
         return [str(output_file)], compression_stats
 
     def _preprocess_band(self, band_data: np.ndarray, normalize: bool) -> np.ndarray:
@@ -128,9 +120,7 @@ class HyperspectralJPEG2000Compressor:
             min_val = np.min(band_data)
             max_val = np.max(band_data)
             if max_val > min_val:
-                normalized = ((band_data - min_val) / (max_val - min_val) * 255).astype(
-                    np.uint8
-                )
+                normalized = ((band_data - min_val) / (max_val - min_val) * 255).astype(np.uint8)
             else:
                 normalized = np.zeros_like(band_data, dtype=np.uint8)
             return normalized
@@ -161,9 +151,7 @@ class HyperspectralJPEG2000Compressor:
         # 读取多波段 TIFF 文件
         data = tifffile.imread(compressed_files[0])
         if output_shape is not None and data.shape != output_shape:
-            raise AssertionError(
-                f"Shape mismatch: expected {output_shape}, got {data.shape}"
-            )
+            raise AssertionError(f"Shape mismatch: expected {output_shape}, got {data.shape}")
         logger.info(f"Decompressed multi-band data: {data.shape}")
         return data
 
@@ -224,9 +212,7 @@ if __name__ == "__main__":
     # sample_data = np.random.rand(100, 100, 200) * 1000
     # sample_data = sample_data.astype(np.uint16)
 
-    sample_data = tifffile.imread(
-        "/HardDisk/ZiHanCao/datasets/Multispectral-DFC2020/s1_0/ROIs0000_test_s1_0_p140.tif"
-    )
+    sample_data = tifffile.imread("/HardDisk/ZiHanCao/datasets/Multispectral-DFC2020/s1_0/ROIs0000_test_s1_0_p140.tif")
 
     # 压缩
     quality = 50.0

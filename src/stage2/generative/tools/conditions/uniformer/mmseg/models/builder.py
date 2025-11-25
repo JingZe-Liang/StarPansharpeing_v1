@@ -39,12 +39,6 @@ def build_segmentor(cfg, train_cfg=None, test_cfg=None):
             "train_cfg and test_cfg is deprecated, please specify them in model",
             UserWarning,
         )
-    assert cfg.get("train_cfg") is None or train_cfg is None, (
-        "train_cfg specified in both outer field and model field "
-    )
-    assert cfg.get("test_cfg") is None or test_cfg is None, (
-        "test_cfg specified in both outer field and model field "
-    )
-    return SEGMENTORS.build(
-        cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg)
-    )
+    assert cfg.get("train_cfg") is None or train_cfg is None, "train_cfg specified in both outer field and model field "
+    assert cfg.get("test_cfg") is None or test_cfg is None, "test_cfg specified in both outer field and model field "
+    return SEGMENTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))

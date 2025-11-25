@@ -42,9 +42,7 @@ class MbConvLNBlock(nn.Module):
         self.stride, self.in_chs, self.out_chs = stride, in_chs, out_chs
         mid_chs = make_divisible(out_chs * expand_ratio)
         # breakpoint()
-        prenorm_act_layer = partial(
-            get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
-        )
+        prenorm_act_layer = partial(get_norm_act_layer(norm_layer, act_layer), eps=norm_eps)
 
         if stride == 2:
             self.shortcut = Downsample2d(in_chs, out_chs, pool_type="avg", bias=True)
@@ -70,9 +68,7 @@ class MbConvLNBlock(nn.Module):
         self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=True)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.cond_conv_kxk = (
-            create_conv2d(cond_chs, mid_chs, 3, stride=1, padding=1, bias=True)
-            if cond_chs
-            else nn.Identity()
+            create_conv2d(cond_chs, mid_chs, 3, stride=1, padding=1, bias=True) if cond_chs else nn.Identity()
         )
 
     def init_weights(self, scheme=""):
@@ -114,9 +110,7 @@ class Stem(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        norm_act_layer = partial(
-            get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
-        )
+        norm_act_layer = partial(get_norm_act_layer(norm_layer, act_layer), eps=norm_eps)
         self.out_chs = out_chs
 
         self.conv1 = create_conv2d(in_chs, out_chs, 3, stride=stride, bias=bias)
@@ -180,9 +174,7 @@ class MbConvSeqentialCond(nn.Module):
     def forward(self, x, cond=None):
         # interpolate the condition
         if cond is not None:
-            cond = th.nn.functional.interpolate(
-                cond, size=x.shape[2:], mode="bilinear", align_corners=False
-            )
+            cond = th.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
         # stages
         for stage in self.stages.values():
@@ -243,9 +235,7 @@ class MbConvStagesCond(nn.Module):
         x = self.stem(x)
 
         # interpolate the condition
-        cond = th.nn.functional.interpolate(
-            cond, size=x.shape[2:], mode="bilinear", align_corners=False
-        )
+        cond = th.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
         # stages
         for stage in self.stages.values():
@@ -261,9 +251,7 @@ class MbConvStagesCond(nn.Module):
 @dataclass
 class ConvCfg:
     expand_ratio: float = 4.0
-    expand_output: bool = (
-        True  # calculate expansion channels from output (vs input chs)
-    )
+    expand_output: bool = True  # calculate expansion channels from output (vs input chs)
     kernel_size: int = 3
     group_size: int = 1  # 1 == depthwise
     pre_norm_act: bool = False  # activation after pre-norm
@@ -298,9 +286,7 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         self.patchers = nn.ModuleDict()
-        self.patchers["noisy_conv"] = create_conv3x3_same(
-            cfg.input_channel, cfg.stem_width
-        )
+        self.patchers["noisy_conv"] = create_conv3x3_same(cfg.input_channel, cfg.stem_width)
         self.patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
@@ -334,9 +320,7 @@ if __name__ == "__main__":
     import torch
 
     # Example usage of ConvCfg dataclass
-    conv_cfg = ConvCfg(
-        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-    )
+    conv_cfg = ConvCfg(expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d")
     print("ConvCfg example:", conv_cfg)
 
     # Example usage of VitaminCfg dataclass

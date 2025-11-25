@@ -85,9 +85,7 @@ def tar_pure_image_read_fn(tar_file: str, has_caption=False, decode=False):
                             else:
                                 # pairs of caption and image
                                 if _prev_name != name:
-                                    logger.warning(
-                                        f"Caption and image name mismatch: {_prev_name} vs {name}"
-                                    )
+                                    logger.warning(f"Caption and image name mismatch: {_prev_name} vs {name}")
                                     # clear the data since is not paired
                                     data.clear()
                                     _prev_name = None
@@ -122,9 +120,7 @@ def tar_pure_image_read_fn(tar_file: str, has_caption=False, decode=False):
                             continue
             except tarfile.ReadError:
                 member_name = member.name if member else "unknown"
-                logger.warning(
-                    f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar"
-                )
+                logger.warning(f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar")
             except tarfile.TarError as e:
                 logger.info(f"Tar read done: {e}")
             except Exception as e:
@@ -172,9 +168,7 @@ def tar_conditions_read_fn(
                             round_i = 0
                             for c in condition_types:
                                 if c not in data:
-                                    logger.warning(
-                                        f"Missing condition {c} for {name}, {data.keys()=}, skipping"
-                                    )
+                                    logger.warning(f"Missing condition {c} for {name}, {data.keys()=}, skipping")
                                     data = {}
                                     round_i = 0
                                     _failed = True
@@ -185,9 +179,7 @@ def tar_conditions_read_fn(
                             data.clear()
             except tarfile.ReadError:
                 member_name = member.name if member else "unknown"
-                logger.warning(
-                    f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar"
-                )
+                logger.warning(f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar")
             except tarfile.TarError as e:
                 logger.info(f"Tar read done: {e}")
             except Exception as e:
@@ -217,9 +209,7 @@ def mds_file_writter(
     if convert_type == "condition":
         read_fn = tar_conditions_read_fn(tar_file)
     elif convert_type == "image":
-        read_fn = tar_pure_image_read_fn(
-            tar_file, has_caption=has_caption, decode=decode
-        )
+        read_fn = tar_pure_image_read_fn(tar_file, has_caption=has_caption, decode=decode)
     else:
         raise ValueError(f"Unknown convert_type {convert_type}")
 
@@ -279,14 +269,10 @@ def parallel_mds_file_writter(
     def init_worker():
         logger.info("Worker initialized, pid: {}".format(os.getpid()))
 
-    with ProcessPoolExecutor(
-        initializer=init_worker, max_workers=max_workers
-    ) as executor:
+    with ProcessPoolExecutor(initializer=init_worker, max_workers=max_workers) as executor:
         futures = []
         for i, tar_file in enumerate(orig_tar_files):
-            out_dir = (
-                Path(tar_file).parents[1] / save_dir_name / f"{sub_mds_name}_{i:02d}"
-            )
+            out_dir = Path(tar_file).parents[1] / save_dir_name / f"{sub_mds_name}_{i:02d}"
             future = executor.submit(
                 mds_file_writter,
                 tar_file,
@@ -367,12 +353,8 @@ class GenerativeDataset(torch.utils.data.Dataset):
         self.img_ds = img_ds
         self.condition_ds = condition_ds
 
-        assert img_ds.size == condition_ds.size, (
-            "Image and condition dataset size mismatch"
-        )
-        assert img_ds.batch_size == condition_ds.batch_size, (
-            "Image and condition dataset batch size mismatch"
-        )
+        assert img_ds.size == condition_ds.size, "Image and condition dataset size mismatch"
+        assert img_ds.batch_size == condition_ds.batch_size, "Image and condition dataset batch size mismatch"
 
         self.batch_size = img_ds.batch_size
         self.epoch_size = img_ds.epoch_size
@@ -399,9 +381,7 @@ def test_img_stream_dataset():
     path = "data2/RemoteSAM270k/MDS_hyper_images/image_00"
     img_ds = ImageStreamDataset(True, True, local=path, batch_size=16, shuffle=False)
     print(len(img_ds))
-    dl = StreamingDataLoader(
-        img_ds, batch_size=16, num_workers=4, persistent_workers=True
-    )
+    dl = StreamingDataLoader(img_ds, batch_size=16, num_workers=4, persistent_workers=True)
     for i, sample in enumerate(dl):
         print(f"Batch {i}: keys={sample.keys()}, img_shape={sample['img'].shape}")
 
@@ -414,9 +394,7 @@ def test_stream_dataset():
     cond_ds = ConditionsDataset(streams=[cond_stream], batch_size=16, shuffle=False)
     generative_ds = GenerativeDataset(img_ds, cond_ds)
 
-    dl = StreamingDataLoader(
-        generative_ds, batch_size=16, num_workers=12, persistent_workers=True
-    )
+    dl = StreamingDataLoader(generative_ds, batch_size=16, num_workers=12, persistent_workers=True)
     logger.info(f"Streaming dataset prepared. Length {len(generative_ds)}")
 
     # for sample in ds:

@@ -5,9 +5,7 @@ from io import StringIO
 from .file_client import FileClient
 
 
-def list_from_file(
-    filename, prefix="", offset=0, max_num=0, encoding="utf-8", file_client_args=None
-):
+def list_from_file(filename, prefix="", offset=0, max_num=0, encoding="utf-8", file_client_args=None):
     """Load a text file and parse the content as a list of strings.
 
     Note:

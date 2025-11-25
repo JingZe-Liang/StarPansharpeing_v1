@@ -17,11 +17,7 @@ class BiasedActivationReference(nn.Module):
         self.Bias.data.zero_()
 
     def forward(self, x):
-        y = (
-            x + self.Bias.to(x.dtype).view(1, -1, 1, 1)
-            if len(x.shape) > 2
-            else x + self.Bias.to(x.dtype).view(1, -1)
-        )
+        y = x + self.Bias.to(x.dtype).view(1, -1, 1, 1) if len(x.shape) > 2 else x + self.Bias.to(x.dtype).view(1, -1)
         return BiasedActivationReference.Function(y)
 
 
@@ -36,9 +32,7 @@ class BiasedActivationCUDA(nn.Module):
         self.Bias.data.zero_()
 
     def forward(self, x):
-        return bias_act.bias_act(
-            x, self.Bias.to(x.dtype), act=BiasedActivationCUDA.Function, gain=1
-        )
+        return bias_act.bias_act(x, self.Bias.to(x.dtype), act=BiasedActivationCUDA.Function, gain=1)
 
 
 BiasedActivation = BiasedActivationCUDA

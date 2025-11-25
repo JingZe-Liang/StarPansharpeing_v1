@@ -49,9 +49,7 @@ type ModalityPrefixedName = Literal[
 type ModalityName = str | ModalityPrefixedName
 type IndexFilePath = str | Path
 
-loader_seed = int(
-    hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16
-) % (2**31)
+loader_seed = int(hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16) % (2**31)
 loader_generator = torch.Generator().manual_seed(loader_seed)
 
 
@@ -100,9 +98,7 @@ class MultimodalityDataloader:
         self.getitem_remove_meta = getitem_remove_meta
 
         # default codecs
-        self.supported_codecs_mapping = self._get_supported_decodes(
-            to_neg_1_1=to_neg_1_1, permute=permute
-        )
+        self.supported_codecs_mapping = self._get_supported_decodes(to_neg_1_1=to_neg_1_1, permute=permute)
         if codecs is not None:
             self.supported_codecs_mapping.update(codecs)
 
@@ -121,9 +117,7 @@ class MultimodalityDataloader:
 
         self.total_len = -1
         if extracted_keys is not None:
-            assert len(extracted_keys) == len(wds_paths), (
-                "extracted_keys must have the same length as wds_paths"
-            )
+            assert len(extracted_keys) == len(wds_paths), "extracted_keys must have the same length as wds_paths"
 
         for name, p in self.wds_paths.items():
             # decode functions
@@ -182,9 +176,7 @@ class MultimodalityDataloader:
             "image_latent": wids_latent_decode,
             "condition_latent": wids_latent_decode,
             "pansharpening_latent": partial(wids_latent_decode, return_dict=True),
-            "denoising_latent": partial(
-                wids_latent_decode, return_dict=True
-            ),  # if gt is in, return_dict=True
+            "denoising_latent": partial(wids_latent_decode, return_dict=True),  # if gt is in, return_dict=True
             # language captions and its embeddings
             "captions": wids_caption_embed_decode,
         }
@@ -192,9 +184,7 @@ class MultimodalityDataloader:
 
     def __len__(self):
         len_f = self.total_len / getattr(self, "batch_size", 1)
-        return (
-            math.ceil(len_f) if getattr(self, "drop_last", False) else math.floor(len_f)
-        )
+        return math.ceil(len_f) if getattr(self, "drop_last", False) else math.floor(len_f)
 
     def __getitem__(self, index):
         modality_sample: dict[ModalityName | str, Any] = {}
@@ -215,13 +205,8 @@ class MultimodalityDataloader:
             # convert the sample into a flat dict
             if isinstance(sample, dict):
                 if self.getitem_type == GetitemType.FLAT:
-                    modality_sample.update(
-                        self._extract_key_for_non_nested_dict(sample, name)
-                    )
-                elif (
-                    self.getitem_type == GetitemType.EXTRACTED
-                    and self.extracted_keys is not None
-                ):
+                    modality_sample.update(self._extract_key_for_non_nested_dict(sample, name))
+                elif self.getitem_type == GetitemType.EXTRACTED and self.extracted_keys is not None:
                     ext_key = self.extracted_keys[i]
                     modality_sample.update(self._extract_keys(sample, ext_key, None))
                 elif self.getitem_type == GetitemType.EXTRACTED:
@@ -264,9 +249,7 @@ class MultimodalityDataloader:
         else:  # modality_name: {"img": Tensor, 'img2': Tensor, ...}
             modal_sample_new = {}
             for name in content_not_dunder:
-                new_name = (
-                    Path(name).stem.rsplit(".", 1)[-1] if without_extension else name
-                )
+                new_name = Path(name).stem.rsplit(".", 1)[-1] if without_extension else name
                 modal_sample_new[new_name] = modal_sample[name]
 
         # Add meta infos
@@ -329,10 +312,7 @@ class MultimodalityDataloader:
     @staticmethod
     def get_loader_sampler(dataset, shuffle_size: int = -1):
         img_index = None
-        if (
-            torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
-        ):
+        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             log_print("[wids mm dataset]: use distributed sampler")
             if img_index is None:
                 sampler = wids.DistributedChunkedSampler(
@@ -525,17 +505,13 @@ def get_mm_chained_loaders(
     )
     if changed_kwargs_by_loader is None:
         changed_kwargs_by_loader = [{} for _ in paths]
-    assert len(paths) == len(changed_kwargs_by_loader), (
-        "changed_kwargs_by_loader must have the same length as paths"
-    )
+    assert len(paths) == len(changed_kwargs_by_loader), "changed_kwargs_by_loader must have the same length as paths"
 
     # < 1. loop index file and create loaders
     datasets = []
     loaders = []
     curriculum_fn = None
-    for i, (path_dict, per_loader_options) in enumerate(
-        zip(paths, changed_kwargs_by_loader)
-    ):
+    for i, (path_dict, per_loader_options) in enumerate(zip(paths, changed_kwargs_by_loader)):
         if basic_kwargs is None:
             loader_kwargs = per_loader_options
         else:
@@ -556,9 +532,7 @@ def get_mm_chained_loaders(
 
         # < 1.1 curriculums fn
         if curriculum_type is not None:
-            assert curriculum_kwargs is not None, (
-                f"curriculum_kwargs must be provided if {curriculum_type=}."
-            )
+            assert curriculum_kwargs is not None, f"curriculum_kwargs must be provided if {curriculum_type=}."
             curriculum_fn = get_curriculum_fn(  # type: ignore
                 c_type=curriculum_type,
                 **curriculum_kwargs,
@@ -569,12 +543,8 @@ def get_mm_chained_loaders(
             )
 
     # < 2. chain dataloaders
-    assert len(datasets) > 0 and len(loaders) > 0, (
-        "At least one dataset and one loader must be provided."
-    )
-    dataloader = chained_dataloaders(
-        loaders, shuffle_loaders=shuffle_loaders, curriculum_fn=curriculum_fn
-    )
+    assert len(datasets) > 0 and len(loaders) > 0, "At least one dataset and one loader must be provided."
+    dataloader = chained_dataloaders(loaders, shuffle_loaders=shuffle_loaders, curriculum_fn=curriculum_fn)
 
     return datasets, dataloader
 

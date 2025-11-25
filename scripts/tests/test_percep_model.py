@@ -42,14 +42,10 @@ with torch.no_grad():
     # plot images
     out_img_rgb = feature_pca_cuml(out_img.cuda(), pca_k=3)
     out_img_rgb = out_img_rgb.permute(0, 2, 3, 1).cpu().numpy()[0]
-    out_img_rgb = (out_img_rgb - out_img_rgb.min()) / (
-        out_img_rgb.max() - out_img_rgb.min()
-    )  # normalize to [0,1]
+    out_img_rgb = (out_img_rgb - out_img_rgb.min()) / (out_img_rgb.max() - out_img_rgb.min())  # normalize to [0,1]
     out_img_rgb = (out_img_rgb * 255).astype("uint8")
     out_img_rgb = Image.fromarray(out_img_rgb)
-    out_img_rgb.resize((512, 512), resample=Image.Resampling.LANCZOS).save(
-        "cat_memes_pca.jpg"
-    )
+    out_img_rgb.resize((512, 512), resample=Image.Resampling.LANCZOS).save("cat_memes_pca.jpg")
 
     # image features (1)
     out = model(image)

@@ -51,9 +51,7 @@ def signal_handler(signum: int, frame) -> None:
         _current_producer.terminate()
         _current_producer.join(timeout=5)  # Wait up to 5 seconds for graceful shutdown
         if _current_producer.is_alive():
-            logger.warning(
-                "Producer process did not terminate gracefully, forcing kill"
-            )
+            logger.warning("Producer process did not terminate gracefully, forcing kill")
             _current_producer.kill()
             _current_producer.join()
     logger.info("Producer process terminated. Exiting...")
@@ -82,18 +80,12 @@ def tar_next_with_timeout(tar_obj: tarfile.TarFile, timeout_seconds: int = 30):
             logger.warning(f"tar.next() failed with error: {result}")
             return None
     except queue.Empty:
-        logger.warning(
-            f"tar.next() timed out after {timeout_seconds} seconds, assuming end of file"
-        )
+        logger.warning(f"tar.next() timed out after {timeout_seconds} seconds, assuming end of file")
         return None
 
 
 def read_files():
-    paths = list(
-        Path(
-            "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/BigEarthNet_S2/tmp"
-        ).glob("*")
-    )
+    paths = list(Path("/home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/BigEarthNet_S2/tmp").glob("*"))
     output_dir = "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/BigEarthNet_S2/litdata_hyper_images_2"
     print(f"Found {len(paths)} TiFF files")
     return paths, output_dir
@@ -191,9 +183,7 @@ def tar_pure_image_read_fn(
                     rgb_type = _is_rgb(member.name)
                     tiff_type = _is_tiff(member.name)
                     is_img = rgb_type or tiff_type
-                    is_caption = member.name.lower().endswith(
-                        (".jsonl", ".txt", ".caption")
-                    )
+                    is_caption = member.name.lower().endswith((".jsonl", ".txt", ".caption"))
 
                     # not caption or img, skip
                     if not (is_caption or is_img):
@@ -269,14 +259,10 @@ def tar_pure_image_read_fn(
 
                                         # keep still in list
                                         not_paired_data.append(data)
-                                        logger.warning(
-                                            f"Now has not paired data len: {len(not_paired_data)}"
-                                        )
+                                        logger.warning(f"Now has not paired data len: {len(not_paired_data)}")
 
                                     if len(not_paired_data) > 5:
-                                        logger.warning(
-                                            f"Too many unpaired data, only keep the last 5 items."
-                                        )
+                                        logger.warning(f"Too many unpaired data, only keep the last 5 items.")
                                         not_paired_data = not_paired_data[-5:]
                         elif has_caption and discard_caption:
                             if is_caption:
@@ -349,9 +335,7 @@ def tar_conditions_read_fn(tar_file: str):
                         if _prev_name is None:
                             _prev_name = name
                         elif _prev_name != name:
-                            logger.warning(
-                                f"Name mismatch: {_prev_name} != {name}, {data.keys()=}, skipping"
-                            )
+                            logger.warning(f"Name mismatch: {_prev_name} != {name}, {data.keys()=}, skipping")
                             data = {}
                             round_i = 0
                             _prev_name = name
@@ -365,9 +349,7 @@ def tar_conditions_read_fn(tar_file: str):
                             round_i = 0
                             for c in condition_types:
                                 if c not in data:
-                                    logger.warning(
-                                        f"Missing condition {c} for {name}, {data.keys()=}, skipping"
-                                    )
+                                    logger.warning(f"Missing condition {c} for {name}, {data.keys()=}, skipping")
                                     data = {}
                                     round_i = 0
                                     _prev_name = None
@@ -380,9 +362,7 @@ def tar_conditions_read_fn(tar_file: str):
                             _prev_name = None
             except tarfile.ReadError:
                 member_name = member.name if member else "unknown"
-                logger.warning(
-                    f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar"
-                )
+                logger.warning(f"Failed to read {member_name} with tarfile, trying with extract_member_from_tar")
                 break
             except tarfile.TarError as e:
                 logger.info(f"Tar read done: {e}")
@@ -439,9 +419,7 @@ def tar_captions_embeddings_read_fn(tar_file: str, has_embed=True, not_keep_embe
                             else:
                                 data["features"] = d
                         else:
-                            logger.warning(
-                                f"Found unknown cond_type: {cond_type}, tar member name {member.name}, skip"
-                            )
+                            logger.warning(f"Found unknown cond_type: {cond_type}, tar member name {member.name}, skip")
 
                         if "caption" in data:
                             data = _keep_seq(data)
@@ -523,9 +501,7 @@ def demo_identity(x):
 
 
 # --- Process/Queue shutdown utilities ---
-def _shutdown_producer(
-    producer: Process, q: "Queue | None" = None, timeout: float = 10.0
-) -> None:
+def _shutdown_producer(producer: Process, q: "Queue | None" = None, timeout: float = 10.0) -> None:
     """Finalize a producer Process and optionally release its Queue.
 
     Always attempt to join to avoid zombie processes. If the process doesn't
@@ -542,9 +518,7 @@ def _shutdown_producer(
 
     # Escalate if still alive
     if producer.is_alive():
-        logger.warning(
-            f"Producer {producer.pid} did not finish gracefully, terminating..."
-        )
+        logger.warning(f"Producer {producer.pid} did not finish gracefully, terminating...")
         producer.terminate()
         producer.join(timeout=max(0.0, timeout / 2))
 
@@ -581,9 +555,7 @@ class ImageDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         if idx >= len(self.files):
-            raise IndexError(
-                f"Index {idx} out of range for dataset of size {len(self.files)}"
-            )
+            raise IndexError(f"Index {idx} out of range for dataset of size {len(self.files)}")
 
         path = self.files[idx]
 
@@ -1170,9 +1142,7 @@ if __name__ == "__main__":
     for kwargs in paths_dict:
         try:
             logger.info(f"input preparing function args: {kwargs}")
-            tar_path: str | list[str] = cast(
-                str | list[str], kwargs["tar_path"]
-            )  # required
+            tar_path: str | list[str] = cast(str | list[str], kwargs["tar_path"])  # required
             output_path: str = cast(str, kwargs["output_path"])  # required
             dataset_type: str = cast(str, kwargs.get("dataset_type", "image"))
             has_caption: bool = cast(bool, kwargs.get("has_caption", False))

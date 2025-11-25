@@ -61,16 +61,12 @@ class MultiLevelNeck(nn.Module):
     def forward(self, inputs):
         assert len(inputs) == len(self.in_channels)
         print(inputs[0].shape)
-        inputs = [
-            lateral_conv(inputs[i]) for i, lateral_conv in enumerate(self.lateral_convs)
-        ]
+        inputs = [lateral_conv(inputs[i]) for i, lateral_conv in enumerate(self.lateral_convs)]
         # for len(inputs) not equal to self.num_outs
         if len(inputs) == 1:
             inputs = [inputs[0] for _ in range(self.num_outs)]
         outs = []
         for i in range(self.num_outs):
-            x_resize = F.interpolate(
-                inputs[i], scale_factor=self.scales[i], mode="bilinear"
-            )
+            x_resize = F.interpolate(inputs[i], scale_factor=self.scales[i], mode="bilinear")
             outs.append(self.convs[i](x_resize))
         return tuple(outs)

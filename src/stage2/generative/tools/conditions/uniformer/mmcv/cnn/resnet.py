@@ -90,9 +90,7 @@ class Bottleneck(nn.Module):
         else:
             conv1_stride = stride
             conv2_stride = 1
-        self.conv1 = nn.Conv2d(
-            inplanes, planes, kernel_size=1, stride=conv1_stride, bias=False
-        )
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, stride=conv1_stride, bias=False)
         self.conv2 = nn.Conv2d(
             planes,
             planes,
@@ -105,9 +103,7 @@ class Bottleneck(nn.Module):
 
         self.bn1 = nn.BatchNorm2d(planes)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(
-            planes, planes * self.expansion, kernel_size=1, bias=False
-        )
+        self.conv3 = nn.Conv2d(planes, planes * self.expansion, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
@@ -171,16 +167,10 @@ def make_res_layer(
         )
 
     layers = []
-    layers.append(
-        block(
-            inplanes, planes, stride, dilation, downsample, style=style, with_cp=with_cp
-        )
-    )
+    layers.append(block(inplanes, planes, stride, dilation, downsample, style=style, with_cp=with_cp))
     inplanes = planes * block.expansion
     for _ in range(1, blocks):
-        layers.append(
-            block(inplanes, planes, 1, dilation, style=style, with_cp=with_cp)
-        )
+        layers.append(block(inplanes, planes, 1, dilation, style=style, with_cp=with_cp))
 
     return nn.Sequential(*layers)
 

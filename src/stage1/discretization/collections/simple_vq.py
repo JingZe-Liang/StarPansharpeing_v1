@@ -54,9 +54,9 @@ class VectorQuantizer(nn.Module):
         # fix the issue with loss scaling
         # loss weight should not associate with the dimensionality of words
         # loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean((z_q - z.detach()) ** 2)
-        loss = self.beta * torch.mean(
-            ((z_q.detach() - z) ** 2).sum(dim=-1)
-        ) + torch.mean(((z_q - z.detach()) ** 2).sum(dim=-1))
+        loss = self.beta * torch.mean(((z_q.detach() - z) ** 2).sum(dim=-1)) + torch.mean(
+            ((z_q - z.detach()) ** 2).sum(dim=-1)
+        )
 
         z_q = z + (z_q - z).detach()
         if self.input_format == "bchw":
@@ -156,9 +156,7 @@ class EMAVectorQuantizer(nn.Module):
             encodings_sum = encodings.sum(0)
             if dist.is_initialized():
                 dist.all_reduce(encodings_sum)
-            self.ema_cluster_size.data.mul_(self.decay).add_(
-                encodings_sum, alpha=1 - self.decay
-            )
+            self.ema_cluster_size.data.mul_(self.decay).add_(encodings_sum, alpha=1 - self.decay)
 
             # EMA update of the embedding vectors
             dw = encodings.t() @ z_flatten
@@ -168,9 +166,7 @@ class EMAVectorQuantizer(nn.Module):
 
             # Laplace smoothing of the cluster size
             n = torch.sum(self.ema_cluster_size)
-            weights = (
-                (self.ema_cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
-            )
+            weights = (self.ema_cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
             self.embedding.weight.data = self.embedding_avg.data / weights.unsqueeze(1)
 
             if self.random_restart:
@@ -178,9 +174,7 @@ class EMAVectorQuantizer(nn.Module):
                 _k_rand = zz[torch.randperm(zz.size(0))][: self.n_embed]
                 if dist.is_initialized():
                     dist.broadcast(_k_rand, 0)
-                usage = (
-                    self.ema_cluster_size.view(-1, 1) > self.restart_threshold
-                ).float()
+                usage = (self.ema_cluster_size.view(-1, 1) > self.restart_threshold).float()
                 self.embedding.weight.data.mul_(usage).add_(_k_rand * (1 - usage))
 
         loss = self.beta * torch.mean((z_q.detach() - z) ** 2)

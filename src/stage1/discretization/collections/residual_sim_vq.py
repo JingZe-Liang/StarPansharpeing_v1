@@ -97,7 +97,9 @@ class ResidualSimVQ(Module):
         assert quantize_dropout_cutoff_index >= 0
 
         self.quantize_dropout_cutoff_index = quantize_dropout_cutoff_index
-        self.quantize_dropout_multiple_of = quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        self.quantize_dropout_multiple_of = (
+            quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        )
 
     @property
     def codebook_size(self):
@@ -132,9 +134,7 @@ class ResidualSimVQ(Module):
         # take care of quantizer dropout
 
         mask = indices == -1.0
-        indices = indices.masked_fill(
-            mask, 0
-        )  # have it fetch a dummy code to be masked out later
+        indices = indices.masked_fill(mask, 0)  # have it fetch a dummy code to be masked out later
 
         all_codes = get_at("q [c] d, b n q -> q b n d", self.codebooks, indices)
 
@@ -182,24 +182,15 @@ class ResidualSimVQ(Module):
 
             rand = random.Random(rand_quantize_dropout_fixed_seed)
 
-            rand_quantize_dropout_index = rand.randrange(
-                self.quantize_dropout_cutoff_index, num_quant
-            )
+            rand_quantize_dropout_index = rand.randrange(self.quantize_dropout_cutoff_index, num_quant)
 
             if quant_dropout_multiple_of != 1:
                 rand_quantize_dropout_index = (
-                    round_up_multiple(
-                        rand_quantize_dropout_index + 1, quant_dropout_multiple_of
-                    )
-                    - 1
+                    round_up_multiple(rand_quantize_dropout_index + 1, quant_dropout_multiple_of) - 1
                 )
 
-            null_indices_shape = (
-                (x.shape[0], *x.shape[2:]) if self.channel_first else tuple(x.shape[:2])
-            )
-            null_indices = torch.full(
-                null_indices_shape, -1.0, device=device, dtype=torch.long
-            )
+            null_indices_shape = (x.shape[0], *x.shape[2:]) if self.channel_first else tuple(x.shape[:2])
+            null_indices = torch.full(null_indices_shape, -1.0, device=device, dtype=torch.long)
             null_loss = torch.full((), 0.0, device=device, dtype=x.dtype)
 
         # save all inputs across layers, for use during expiration at end under shared codebook setting
@@ -209,10 +200,7 @@ class ResidualSimVQ(Module):
         # go through the layers
 
         for quantizer_index, sim_vq in enumerate(self.layers):
-            if (
-                should_quantize_dropout
-                and quantizer_index > rand_quantize_dropout_index
-            ):
+            if should_quantize_dropout and quantizer_index > rand_quantize_dropout_index:
                 all_indices.append(null_indices)
                 all_losses.append(null_loss)
                 continue
@@ -235,9 +223,7 @@ class ResidualSimVQ(Module):
 
         # stack all losses and indices
 
-        all_losses, all_indices = map(
-            partial(torch.stack, dim=-1), (all_losses, all_indices)
-        )
+        all_losses, all_indices = map(partial(torch.stack, dim=-1), (all_losses, all_indices))
 
         ret = (quantized_out, all_indices, all_losses)
 

@@ -12,9 +12,7 @@ def exists(val):
 class RandomProjectionQuantizer(nn.Module):
     """https://arxiv.org/abs/2202.01855"""
 
-    def __init__(
-        self, *, dim, codebook_size, codebook_dim, num_codebooks=1, norm=True, **kwargs
-    ):
+    def __init__(self, *, dim, codebook_size, codebook_dim, num_codebooks=1, norm=True, **kwargs):
         super().__init__()
         self.num_codebooks = num_codebooks
 
@@ -26,9 +24,7 @@ class RandomProjectionQuantizer(nn.Module):
         # in section 3 of https://arxiv.org/abs/2202.01855
         # "The input data is normalized to have 0 mean and standard deviation of 1 ... to prevent collapse"
 
-        self.norm = (
-            nn.LayerNorm(dim, elementwise_affine=False) if norm else nn.Identity()
-        )
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False) if norm else nn.Identity()
 
         self.vq = VectorQuantize(
             dim=codebook_dim * num_codebooks,

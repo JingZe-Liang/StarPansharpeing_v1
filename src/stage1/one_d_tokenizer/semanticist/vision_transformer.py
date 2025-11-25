@@ -39,9 +39,7 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
-    )  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
     if keep_prob > 0.0:
         random_tensor.div_(keep_prob)
@@ -121,12 +119,8 @@ class Block(nn.Module):
         )
 
         if init_values > 0:
-            self.gamma_1 = nn.Parameter(
-                init_values * torch.ones((dim)), requires_grad=True
-            )
-            self.gamma_2 = nn.Parameter(
-                init_values * torch.ones((dim)), requires_grad=True
-            )
+            self.gamma_1 = nn.Parameter(init_values * torch.ones((dim)), requires_grad=True)
+            self.gamma_2 = nn.Parameter(init_values * torch.ones((dim)), requires_grad=True)
         else:
             self.gamma_1, self.gamma_2 = None, None
 
@@ -157,9 +151,7 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.num_patches = num_patches
 
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -201,16 +193,12 @@ class VisionTransformer(nn.Module):
         self.num_slots = num_slots
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches + 1 + self.num_slots, embed_dim)
-        )
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1 + self.num_slots, embed_dim))
         self.slot_embed = nn.Parameter(torch.zeros(1, num_slots, embed_dim))
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -259,23 +247,16 @@ class VisionTransformer(nn.Module):
         # see discussion at https://github.com/facebookresearch/dino/issues/8
         w0, h0 = w0 + 0.1, h0 + 0.1
         patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(
-                1, int(math.sqrt(N)), int(math.sqrt(N)), dim
-            ).permute(0, 3, 1, 2),
+            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
             scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
             mode="bicubic",
         )
-        assert (
-            int(w0) == patch_pos_embed.shape[-2]
-            and int(h0) == patch_pos_embed.shape[-1]
-        )
+        assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
 
         slots_pos_embed = self.pos_embed[:, 1 + npatch :]
         slots_pos_embed = slots_pos_embed.view(1, -1, dim)  # (1, num_slots, dim)
-        return torch.cat(
-            (class_pos_embed.unsqueeze(0), patch_pos_embed, slots_pos_embed), dim=1
-        )
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed, slots_pos_embed), dim=1)
 
     def prepare_tokens(self, x):
         B, nc, w, h = x.shape
@@ -291,13 +272,9 @@ class VisionTransformer(nn.Module):
     def forward(self, x, is_causal=True):
         x = self.prepare_tokens(x)
         if is_causal:
-            attn_mask = torch.ones(
-                x.shape[1], x.shape[1], device=x.device, dtype=torch.bool
-            )
+            attn_mask = torch.ones(x.shape[1], x.shape[1], device=x.device, dtype=torch.bool)
             # slots are causal to each other
-            causal_mask = torch.ones(
-                self.num_slots, self.num_slots, device=x.device, dtype=torch.bool
-            ).tril(diagonal=0)
+            causal_mask = torch.ones(self.num_slots, self.num_slots, device=x.device, dtype=torch.bool).tril(diagonal=0)
             attn_mask[-self.num_slots :, -self.num_slots :] = causal_mask
             # cls token and patches should not see slots
             attn_mask[: -self.num_slots, -self.num_slots :] = False

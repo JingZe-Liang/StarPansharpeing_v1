@@ -29,9 +29,7 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
-    )  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
     if keep_prob > 0.0:
         random_tensor.div_(keep_prob)
@@ -72,23 +70,13 @@ def deform_inputs(x, patch_size):
         dtype=torch.long,
         device=x.device,
     )
-    level_start_index = torch.cat(
-        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
-    )
-    reference_points = get_reference_points(
-        [(h // patch_size, w // patch_size)], x.device
-    )
+    level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+    reference_points = get_reference_points([(h // patch_size, w // patch_size)], x.device)
     deform_inputs1 = [reference_points, spatial_shapes, level_start_index]
 
-    spatial_shapes = torch.as_tensor(
-        [(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device
-    )
-    level_start_index = torch.cat(
-        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
-    )
-    reference_points = get_reference_points(
-        [(h // 8, w // 8), (h // 16, w // 16), (h // 32, w // 32)], x.device
-    )
+    spatial_shapes = torch.as_tensor([(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device)
+    level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+    reference_points = get_reference_points([(h // 8, w // 8), (h // 16, w // 16), (h // 32, w // 32)], x.device)
     deform_inputs2 = [reference_points, spatial_shapes, level_start_index]
 
     return deform_inputs1, deform_inputs2
@@ -120,25 +108,15 @@ def deform_inputs_v2(x, patch_size: int, downsample_ratios: list[int]):
     spatial_shapes_list = [(h // ratio, w // ratio) for ratio in downsample_ratios]
 
     # deform_inputs1: reference points for patch-level features
-    reference_points1 = get_reference_points(
-        [(h // patch_size, w // patch_size)], x.device
-    )
-    spatial_shapes = torch.as_tensor(
-        spatial_shapes_list, dtype=torch.long, device=x.device
-    )
-    level_start_index = torch.cat(
-        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
-    )
+    reference_points1 = get_reference_points([(h // patch_size, w // patch_size)], x.device)
+    spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=x.device)
+    level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
     deform_inputs1 = [reference_points1, spatial_shapes, level_start_index]
 
     # deform_inputs2: reference points for multi-scale features
     reference_points2 = get_reference_points(spatial_shapes_list, x.device)
-    spatial_shapes = torch.as_tensor(
-        [(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device
-    )
-    level_start_index = torch.cat(
-        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
-    )
+    spatial_shapes = torch.as_tensor([(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device)
+    level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
     deform_inputs2 = [reference_points2, spatial_shapes, level_start_index]
 
     return deform_inputs1, deform_inputs2
@@ -286,9 +264,7 @@ class Extractor(nn.Module):
             self.ffn_norm = norm_layer(dim)
             self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(
-        self, query, reference_points, feat, spatial_shapes, level_start_index, H, W
-    ):
+    def forward(self, query, reference_points, feat, spatial_shapes, level_start_index, H, W):
         def _inner_forward(query, feat):
             attn = self.attn(
                 self.query_norm(query),
@@ -366,9 +342,7 @@ class InteractionBlockWithCls(nn.Module):
         else:
             self.extra_extractors = None
 
-    def forward(
-        self, x, c, cls, deform_inputs1, deform_inputs2, H_c, W_c, H_toks, W_toks
-    ):
+    def forward(self, x, c, cls, deform_inputs1, deform_inputs2, H_c, W_c, H_toks, W_toks):
         c = self.extractor(
             query=c,
             reference_points=deform_inputs2[0],
@@ -424,14 +398,10 @@ class SpatialPriorModule(nn.Module):
                 ),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(
-                    inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False
-                ),
+                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(
-                    inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False
-                ),
+                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
@@ -499,18 +469,10 @@ class SpatialPriorModule(nn.Module):
                 ]
             )
 
-        self.fc1 = nn.Conv2d(
-            inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True
-        )
-        self.fc2 = nn.Conv2d(
-            2 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True
-        )
-        self.fc3 = nn.Conv2d(
-            4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True
-        )
-        self.fc4 = nn.Conv2d(
-            4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True
-        )
+        self.fc1 = nn.Conv2d(inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc2 = nn.Conv2d(2 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc3 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc4 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
     def forward(self, x):
         def _inner_forward(x):
@@ -633,9 +595,7 @@ class DINOv3_Adapter(nn.Module):
         inp_mean_std=(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ):
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
-        self.spm = SpatialPriorModule(
-            inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False
-        )
+        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False)
         self.interactions = nn.Sequential(
             *[
                 InteractionBlockWithCls(
@@ -650,8 +610,7 @@ class DINOv3_Adapter(nn.Module):
                     deform_ratio=deform_ratio,
                     dw_ratios=dw_ratios,
                     extra_extractor=(
-                        (True if i == len(self.interaction_indexes) - 1 else False)
-                        and use_extra_extractor
+                        (True if i == len(self.interaction_indexes) - 1 else False) and use_extra_extractor
                     ),
                     with_cp=with_cp,
                 )
@@ -659,26 +618,10 @@ class DINOv3_Adapter(nn.Module):
             ]
         )
         self.up = nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2)
-        self.norm1 = (
-            nn.SyncBatchNorm(embed_dim)
-            if use_bn
-            else create_norm_layer("layernorm2d", embed_dim)
-        )
-        self.norm2 = (
-            nn.SyncBatchNorm(embed_dim)
-            if use_bn
-            else create_norm_layer("layernorm2d", embed_dim)
-        )
-        self.norm3 = (
-            nn.SyncBatchNorm(embed_dim)
-            if use_bn
-            else create_norm_layer("layernorm2d", embed_dim)
-        )
-        self.norm4 = (
-            nn.SyncBatchNorm(embed_dim)
-            if use_bn
-            else create_norm_layer("layernorm2d", embed_dim)
-        )
+        self.norm1 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
 
         self._input_norm = Normalize(*inp_mean_std)
 
@@ -793,18 +736,10 @@ class DINOv3_Adapter(nn.Module):
         if self.add_vit_feature:
             x1, x2, x3, x4 = outs
 
-            x1 = F.interpolate(
-                x1, size=(4 * H_c, 4 * W_c), mode="bilinear", align_corners=False
-            )
-            x2 = F.interpolate(
-                x2, size=(2 * H_c, 2 * W_c), mode="bilinear", align_corners=False
-            )
-            x3 = F.interpolate(
-                x3, size=(1 * H_c, 1 * W_c), mode="bilinear", align_corners=False
-            )
-            x4 = F.interpolate(
-                x4, size=(H_c // 2, W_c // 2), mode="bilinear", align_corners=False
-            )
+            x1 = F.interpolate(x1, size=(4 * H_c, 4 * W_c), mode="bilinear", align_corners=False)
+            x2 = F.interpolate(x2, size=(2 * H_c, 2 * W_c), mode="bilinear", align_corners=False)
+            x3 = F.interpolate(x3, size=(1 * H_c, 1 * W_c), mode="bilinear", align_corners=False)
+            x4 = F.interpolate(x4, size=(H_c // 2, W_c // 2), mode="bilinear", align_corners=False)
             c1, c2, c3, c4 = c1 + x1, c2 + x2, c3 + x3, c4 + x4
 
         # Final Norm
@@ -896,9 +831,7 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
         )
 
         delattr(self, "up")
-        self.downs = nn.ModuleList(
-            [DownsampleBlock(self.backbone.embed_dim) for _ in range(2)]
-        )
+        self.downs = nn.ModuleList([DownsampleBlock(self.backbone.embed_dim) for _ in range(2)])
 
     def forward(self, x, ret_lvls=True):
         """
@@ -920,9 +853,7 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
         """
         x = self._input_norm(x)  # for input is 0-1
         # Use deform_inputs_v2 with 16x downsample ratios for MS_Down variant
-        deform_inputs1, deform_inputs2 = deform_inputs_v2(
-            x, self.patch_size, downsample_ratios=[8, 16, 16]
-        )
+        deform_inputs1, deform_inputs2 = deform_inputs_v2(x, self.patch_size, downsample_ratios=[8, 16, 16])
 
         # SPM forward - generate multi-scale features
         c1, c2, c3, c4 = self.spm(x)
@@ -957,9 +888,7 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
                 H_toks,
                 W_toks,
             )
-            outs.append(
-                x_layer.transpose(1, 2).view(bs, dim, H_toks, W_toks).contiguous()
-            )
+            outs.append(x_layer.transpose(1, 2).view(bs, dim, H_toks, W_toks).contiguous())
 
         # Split & Reshape distilled features
         c2 = c[:, 0 : c2.size(1), :]
@@ -985,19 +914,11 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
             x1, x2, x3, x4 = outs
 
             # Interpolate ViT features to match corresponding scales
-            x1 = F.interpolate(
-                x1, size=(4 * H_c, 4 * W_c), mode="bilinear", align_corners=False
-            )
-            x2 = F.interpolate(
-                x2, size=(2 * H_c, 2 * W_c), mode="bilinear", align_corners=False
-            )
-            x3 = F.interpolate(
-                x3, size=(1 * H_c, 1 * W_c), mode="bilinear", align_corners=False
-            )
+            x1 = F.interpolate(x1, size=(4 * H_c, 4 * W_c), mode="bilinear", align_corners=False)
+            x2 = F.interpolate(x2, size=(2 * H_c, 2 * W_c), mode="bilinear", align_corners=False)
+            x3 = F.interpolate(x3, size=(1 * H_c, 1 * W_c), mode="bilinear", align_corners=False)
             # For 16x downsampling, x4 should match c4 resolution (same as c3)
-            x4 = F.interpolate(
-                x4, size=(H_c, W_c), mode="bilinear", align_corners=False
-            )
+            x4 = F.interpolate(x4, size=(H_c, W_c), mode="bilinear", align_corners=False)
 
             # Add ViT features to enhanced features
             c2 = c2 + x2
@@ -1086,18 +1007,14 @@ def test_ms_adapter():
             backbone.embed_dim,
             expected_size,
             expected_size,
-        ), (
-            f"Expected shape ({batch_size}, {backbone.embed_dim}, {expected_size}, {expected_size}), got {actual_shape}"
-        )
+        ), f"Expected shape ({batch_size}, {backbone.embed_dim}, {expected_size}, {expected_size}), got {actual_shape}"
 
         # Check if output is valid
         assert not torch.isnan(output["4"]).any(), "Output contains NaN values"
         assert torch.isfinite(output["4"]).all(), "Output contains infinite values"
 
         print("✓ Forward pass test passed")
-        print(
-            f"✓ Output shape: {actual_shape} (16x downsampling from {input_size}x{input_size})"
-        )
+        print(f"✓ Output shape: {actual_shape} (16x downsampling from {input_size}x{input_size})")
 
         # Test backward pass
         print("Testing backward pass...")
@@ -1122,15 +1039,11 @@ def test_ms_adapter():
             expected_size = size // 16
             actual_shape = output_test["4"].shape
 
-            assert (
-                actual_shape[2] == expected_size and actual_shape[3] == expected_size
-            ), (
+            assert actual_shape[2] == expected_size and actual_shape[3] == expected_size, (
                 f"Size {size}x{size}: expected {expected_size}x{expected_size}, got {actual_shape[2]}x{actual_shape[3]}"
             )
 
-            print(
-                f"✓ Input {size}x{size} -> Output {actual_shape[2]}x{actual_shape[3]} (16x downsampling)"
-            )
+            print(f"✓ Input {size}x{size} -> Output {actual_shape[2]}x{actual_shape[3]} (16x downsampling)")
 
         print("✓ All size tests passed")
 
@@ -1250,9 +1163,7 @@ def test_dinov3_adapter():
 
         print("✓ Forward pass test passed")
         for key, out in output.items():
-            print(
-                f"✓ Output {key}: {out.shape} ({input_size // out.shape[2]}x downsampling)"
-            )
+            print(f"✓ Output {key}: {out.shape} ({input_size // out.shape[2]}x downsampling)")
 
         # Test backward pass
         print("Testing backward pass...")
@@ -1286,10 +1197,7 @@ def test_dinov3_adapter():
                 actual_shape = output_test[key].shape
                 expected_size = expected_sizes[key]
 
-                assert (
-                    actual_shape[2] == expected_size
-                    and actual_shape[3] == expected_size
-                ), (
+                assert actual_shape[2] == expected_size and actual_shape[3] == expected_size, (
                     f"Size {size}x{size}, key {key}: expected {expected_size}x{expected_size}, got {actual_shape[2]}x{actual_shape[3]}"
                 )
 
@@ -1324,9 +1232,7 @@ def test_dinov3_adapter():
             std_val = out.std().item()
             min_val = out.min().item()
             max_val = out.max().item()
-            print(
-                f"✓ Output {key}: mean={mean_val:.4f}, std={std_val:.4f}, min={min_val:.4f}, max={max_val:.4f}"
-            )
+            print(f"✓ Output {key}: mean={mean_val:.4f}, std={std_val:.4f}, min={min_val:.4f}, max={max_val:.4f}")
 
         print("\n🎉 All DINOv3_Adapter tests passed!")
 

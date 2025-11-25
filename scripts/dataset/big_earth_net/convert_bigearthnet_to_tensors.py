@@ -127,15 +127,11 @@ class BigEarthNetProcessor:
                     dtype=np.int16,  # assume the data type is int16
                 )
             else:
-                band_data, dtype = self.load_and_resample_band(
-                    tif_path, self.target_size
-                )
+                band_data, dtype = self.load_and_resample_band(tif_path, self.target_size)
 
                 if band_data is None:
                     # 如果加载失败，创建空白数组
-                    band_data = np.zeros(
-                        (self.target_size, self.target_size), dtype=dtype
-                    )
+                    band_data = np.zeros((self.target_size, self.target_size), dtype=dtype)
 
             bands_data.append(band_data)
 
@@ -215,9 +211,7 @@ class BigEarthNetProcessor:
             # 获取该瓦片下的所有补丁目录
             patch_dirs = [d for d in tile_dir.iterdir() if d.is_dir()]
 
-            for patch_dir in tqdm(
-                patch_dirs, desc=f"Processing patches in {tile_dir.name}", leave=False
-            ):
+            for patch_dir in tqdm(patch_dirs, desc=f"Processing patches in {tile_dir.name}", leave=False):
                 patch_name = patch_dir.name
 
                 # 处理补丁
@@ -260,9 +254,7 @@ class BigEarthNetProcessor:
         except Exception as e:
             return (patch_name, False, str(e))
 
-    def process_dataset_multiprocess(
-        self, input_dir, output_dir, tile_dirs=None, max_workers=None, batch_size=100
-    ):
+    def process_dataset_multiprocess(self, input_dir, output_dir, tile_dirs=None, max_workers=None, batch_size=100):
         """
         多进程处理整个数据集
 
@@ -303,9 +295,7 @@ class BigEarthNetProcessor:
         logger.info(f"Found {total_patches} patches to process")
 
         # 准备任务参数
-        patch_tasks = [
-            (patch_dir, output_dir, self.target_size) for patch_dir in all_patch_dirs
-        ]
+        patch_tasks = [(patch_dir, output_dir, self.target_size) for patch_dir in all_patch_dirs]
 
         # 多进程处理
         processed_count = 0
@@ -321,15 +311,10 @@ class BigEarthNetProcessor:
                 end_idx = min(start_idx + batch_size, len(patch_tasks))
                 batch = patch_tasks[start_idx:end_idx]
 
-                logger.info(
-                    f"Processing batch {batch_idx + 1}/{total_batches} ({len(batch)} patches)"
-                )
+                logger.info(f"Processing batch {batch_idx + 1}/{total_batches} ({len(batch)} patches)")
 
                 # 提交批次任务
-                future_to_patch = {
-                    executor.submit(process_patch_worker, task): task[0].name
-                    for task in batch
-                }
+                future_to_patch = {executor.submit(process_patch_worker, task): task[0].name for task in batch}
 
                 # 处理完成的任务
                 for future in tqdm(
@@ -344,21 +329,15 @@ class BigEarthNetProcessor:
                             processed_count += 1
                         else:
                             failed_count += 1
-                            logger.error(
-                                f"Failed to process {result_patch_name}: {error_msg}"
-                            )
+                            logger.error(f"Failed to process {result_patch_name}: {error_msg}")
                     except Exception as e:
                         failed_count += 1
                         logger.error(f"Exception processing {patch_name}: {e}")
 
-        logger.info(
-            f"Processing completed! Processed: {processed_count}, Failed: {failed_count}"
-        )
+        logger.info(f"Processing completed! Processed: {processed_count}, Failed: {failed_count}")
         logger.info(f"Total patches expected: {total_patches}")
 
-    def process_dataset_multithread(
-        self, input_dir, output_dir, tile_dirs=None, max_workers=None
-    ):
+    def process_dataset_multithread(self, input_dir, output_dir, tile_dirs=None, max_workers=None):
         """
         多线程处理整个数据集（适用于I/O密集型任务）
 
@@ -418,20 +397,13 @@ class BigEarthNetProcessor:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
-            futures = [
-                executor.submit(process_patch_thread, patch_dir)
-                for patch_dir in all_patch_dirs
-            ]
+            futures = [executor.submit(process_patch_thread, patch_dir) for patch_dir in all_patch_dirs]
 
             # 等待所有任务完成
-            for future in tqdm(
-                as_completed(futures), total=len(futures), desc="Processing patches"
-            ):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing patches"):
                 future.result()  # 获取结果，如果有异常会抛出
 
-        logger.info(
-            f"Processing completed! Processed: {processed_count}, Failed: {failed_count}"
-        )
+        logger.info(f"Processing completed! Processed: {processed_count}, Failed: {failed_count}")
 
     def process_dataset_multithread_online(
         self,
@@ -510,10 +482,7 @@ class BigEarthNetProcessor:
                     submitted_count += 1
 
                     # 每处理一定数量的任务或达到批次大小时，等待部分任务完成
-                    if (
-                        len(pending_futures) >= submit_batch_size
-                        or i == len(patch_dirs) - 1
-                    ):
+                    if len(pending_futures) >= submit_batch_size or i == len(patch_dirs) - 1:
                         # 等待一些任务完成，避免队列过长
                         completed_count = 0
                         target_complete = (
@@ -543,9 +512,7 @@ class BigEarthNetProcessor:
 
                 # 更新进度
                 with lock:
-                    logger.info(
-                        f"Tile {tile_dir.name} completed. Processed: {processed_count}, Failed: {failed_count}"
-                    )
+                    logger.info(f"Tile {tile_dir.name} completed. Processed: {processed_count}, Failed: {failed_count}")
 
             # 等待所有剩余任务完成
             logger.info("Waiting for remaining tasks to complete...")
@@ -629,22 +596,16 @@ class BigEarthNetProcessor:
 
                                 if future.done():
                                     try:
-                                        result_patch_name, success, error_msg = (
-                                            future.result()
-                                        )
+                                        result_patch_name, success, error_msg = future.result()
                                         if success:
                                             processed_count += 1
                                         else:
                                             failed_count += 1
-                                            logger.error(
-                                                f"Failed to process {result_patch_name}: {error_msg}"
-                                            )
+                                            logger.error(f"Failed to process {result_patch_name}: {error_msg}")
                                         batch_processed += 1
                                     except Exception as e:
                                         failed_count += 1
-                                        logger.error(
-                                            f"Exception processing {patch_name}: {e}"
-                                        )
+                                        logger.error(f"Exception processing {patch_name}: {e}")
                                         batch_processed += 1
                                 else:
                                     pending_futures.append((future, patch_name))
@@ -660,18 +621,14 @@ class BigEarthNetProcessor:
 
             # 处理所有剩余任务
             logger.info("Processing remaining tasks...")
-            for future, patch_name in tqdm(
-                pending_futures, desc="Finishing remaining tasks"
-            ):
+            for future, patch_name in tqdm(pending_futures, desc="Finishing remaining tasks"):
                 try:
                     result_patch_name, success, error_msg = future.result()
                     if success:
                         processed_count += 1
                     else:
                         failed_count += 1
-                        logger.error(
-                            f"Failed to process {result_patch_name}: {error_msg}"
-                        )
+                        logger.error(f"Failed to process {result_patch_name}: {error_msg}")
                 except Exception as e:
                     failed_count += 1
                     logger.error(f"Exception processing {patch_name}: {e}")
@@ -707,9 +664,7 @@ def process_patch_worker(patch_info):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Convert BigEarthNet-S2 patches to tensors"
-    )
+    parser = argparse.ArgumentParser(description="Convert BigEarthNet-S2 patches to tensors")
     parser.add_argument(
         "--input_dir",
         type=str,
@@ -722,9 +677,7 @@ def main():
         default="/HardDisk/ZiHanCao/datasets/Multispectral-BigEarthNet/S2/S2_tiff_jp2k_80",
         help="Output directory for tensor files",
     )
-    parser.add_argument(
-        "--target_size", type=int, default=128, help="Target size for resampling"
-    )
+    parser.add_argument("--target_size", type=int, default=128, help="Target size for resampling")
     parser.add_argument(
         "--tile_dirs",
         nargs="+",

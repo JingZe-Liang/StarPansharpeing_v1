@@ -38,9 +38,7 @@ class Encoding(nn.Module):
         expanded_x = x.unsqueeze(2).expand((batch_size, x.size(1), num_codes, channels))
         reshaped_codewords = codewords.view((1, 1, num_codes, channels))
 
-        scaled_l2_norm = reshaped_scale * (expanded_x - reshaped_codewords).pow(2).sum(
-            dim=3
-        )
+        scaled_l2_norm = reshaped_scale * (expanded_x - reshaped_codewords).pow(2).sum(dim=3)
         return scaled_l2_norm
 
     @staticmethod
@@ -50,9 +48,7 @@ class Encoding(nn.Module):
         batch_size = x.size(0)
 
         expanded_x = x.unsqueeze(2).expand((batch_size, x.size(1), num_codes, channels))
-        encoded_feat = (
-            assignment_weights.unsqueeze(3) * (expanded_x - reshaped_codewords)
-        ).sum(dim=1)
+        encoded_feat = (assignment_weights.unsqueeze(3) * (expanded_x - reshaped_codewords)).sum(dim=1)
         return encoded_feat
 
     def forward(self, x):
@@ -62,9 +58,7 @@ class Encoding(nn.Module):
         # [batch_size, height x width, channels]
         x = x.view(batch_size, self.channels, -1).transpose(1, 2).contiguous()
         # assignment_weights: [batch_size, channels, num_codes]
-        assignment_weights = F.softmax(
-            self.scaled_l2(x, self.codewords, self.scale), dim=2
-        )
+        assignment_weights = F.softmax(self.scaled_l2(x, self.codewords, self.scale), dim=2)
         # aggregate
         encoded_feat = self.aggregate(assignment_weights, x, self.codewords)
         return encoded_feat

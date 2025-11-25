@@ -28,9 +28,7 @@ def neighbor(
     """
     if torch.is_tensor(center):
         center = center.squeeze()
-        assert center.ndim == 1 and center.numel() == 2, (
-            f"Center must be a 1D tensor with 2 elements, got {center}"
-        )
+        assert center.ndim == 1 and center.numel() == 2, f"Center must be a 1D tensor with 2 elements, got {center}"
         x, y = center.tolist()
     else:
         x, y = center
@@ -53,9 +51,7 @@ def neighbor(
         # Handle 2D tensors (labels) by adding a channel dimension
         if img.dim() == 2:
             # For 2D tensors, use constant padding mode since non-constant modes aren't supported
-            img = torch.nn.functional.pad(
-                img.unsqueeze(0), padding, mode="constant"
-            ).squeeze(0)
+            img = torch.nn.functional.pad(img.unsqueeze(0), padding, mode="constant").squeeze(0)
         else:
             # For 3D+ tensors, use the specified padding mode
             img = torch.nn.functional.pad(img, padding, mode=padding_mode)
@@ -158,14 +154,10 @@ def label_centrical_patcher(
         ...     loss = model(img1_patches, img2_patches, label_patches)
     """
     collect_fn_ = lambda img_or_gt, center: neighbor(img_or_gt, center, patch_size)
-    selected_collect_fn = lambda data, selected_indices: [
-        collect_fn_(data, center) for center in selected_indices
-    ]
+    selected_collect_fn = lambda data, selected_indices: [collect_fn_(data, center) for center in selected_indices]
 
     # Assertions
-    assert img1.shape == img2.shape, (
-        f"Image shapes must match, got {img1.shape} and {img2.shape}"
-    )
+    assert img1.shape == img2.shape, f"Image shapes must match, got {img1.shape} and {img2.shape}"
     assert img1.shape[-2:] == label.shape[-2:], (
         f"Image and label spatial shapes must match, got {img1.shape[-2:]} and {label.shape[-2:]}"
     )
@@ -180,9 +172,7 @@ def label_centrical_patcher(
     for i in range(bs):
         label_i = label[i]
 
-        changed_idx, unchanged_idx = img_changed_by_label(
-            label_i, unchanged_label, changed_label
-        )
+        changed_idx, unchanged_idx = img_changed_by_label(label_i, unchanged_label, changed_label)
         if len(changed_idx) == 0 or len(unchanged_idx) == 0:
             if raise_if_not_enough_changes:
                 # If no changes, raise ValueError
@@ -195,25 +185,19 @@ def label_centrical_patcher(
                     continue
                 elif len(unchanged_idx) == 0:
                     # Only changed patches available, no unchanged patches
-                    unchanged_indices[i] = torch.empty(
-                        (0, 2), dtype=torch.long, device=changed_idx.device
-                    )
+                    unchanged_indices[i] = torch.empty((0, 2), dtype=torch.long, device=changed_idx.device)
                     changed_indices[i] = changed_idx
                     warnings.warn(
-                        f"No unchanged patches found in batch item {i}. "
-                        f"Using only changed patches for training.",
+                        f"No unchanged patches found in batch item {i}. Using only changed patches for training.",
                         UserWarning,
                         stacklevel=2,
                     )
                 elif len(changed_idx) == 0:
                     # Only unchanged patches available, no changed patches
                     unchanged_indices[i] = unchanged_idx
-                    changed_indices[i] = torch.empty(
-                        (0, 2), dtype=torch.long, device=unchanged_idx.device
-                    )
+                    changed_indices[i] = torch.empty((0, 2), dtype=torch.long, device=unchanged_idx.device)
                     warnings.warn(
-                        f"No changed patches found in batch item {i}. "
-                        f"Using only unchanged patches for training.",
+                        f"No changed patches found in batch item {i}. Using only unchanged patches for training.",
                         UserWarning,
                         stacklevel=2,
                     )
@@ -243,27 +227,19 @@ def label_centrical_patcher(
         elif len(changed_idx) == 0:
             # Sample only unchanged patches
             num_unchanged_to_sample = min(len(unchanged_idx), micro_batch_size)
-            unchanged_perm = torch.randperm(len(unchanged_idx))[
-                :num_unchanged_to_sample
-            ]
+            unchanged_perm = torch.randperm(len(unchanged_idx))[:num_unchanged_to_sample]
             selected_unchanged = unchanged_idx[unchanged_perm]
-            selected_changed = torch.empty(
-                (0, 2), dtype=torch.long, device=unchanged_idx.device
-            )
+            selected_changed = torch.empty((0, 2), dtype=torch.long, device=unchanged_idx.device)
         elif len(unchanged_idx) == 0:
             # Sample only changed patches
             num_changed_to_sample = min(len(changed_idx), micro_batch_size)
             changed_perm = torch.randperm(len(changed_idx))[:num_changed_to_sample]
             selected_changed = changed_idx[changed_perm]
-            selected_unchanged = torch.empty(
-                (0, 2), dtype=torch.long, device=changed_idx.device
-            )
+            selected_unchanged = torch.empty((0, 2), dtype=torch.long, device=changed_idx.device)
         else:
             # Normal sampling with both changed and unchanged patches
             changed_perm = torch.randperm(len(changed_idx))[:num_changed_per_batch]
-            unchanged_perm = torch.randperm(len(unchanged_idx))[
-                :num_unchanged_per_batch
-            ]
+            unchanged_perm = torch.randperm(len(unchanged_idx))[:num_unchanged_per_batch]
 
             selected_changed = changed_idx[changed_perm]
             selected_unchanged = unchanged_idx[unchanged_perm]
@@ -289,9 +265,7 @@ def label_centrical_patcher(
                 label_y = torch.stack(label_patches)[:micro_batch_size]
             else:
                 # for cls
-                label_y = torch.as_tensor(
-                    label_patches[:micro_batch_size], dtype=torch.int64
-                )
+                label_y = torch.as_tensor(label_patches[:micro_batch_size], dtype=torch.int64)
 
             # permute
             img1_y, perm = permute_batch(img1_y)

@@ -13,9 +13,7 @@ model = dict(
         attn_drop_rate=0.0,
         drop_path_rate=0.1,
     ),
-    neck=dict(
-        type="FPN", in_channels=[64, 128, 320, 512], out_channels=256, num_outs=4
-    ),
+    neck=dict(type="FPN", in_channels=[64, 128, 320, 512], out_channels=256, num_outs=4),
     decode_head=dict(
         type="FPNHead",
         in_channels=[256, 256, 256, 256],

@@ -158,9 +158,7 @@ class FusedBiasLeakyReLUFunction(Function):
     def forward(ctx, input, bias, negative_slope, scale):
         empty = input.new_empty(0)
 
-        out = ext_module.fused_bias_leakyrelu(
-            input, bias, empty, act=3, grad=0, alpha=negative_slope, scale=scale
-        )
+        out = ext_module.fused_bias_leakyrelu(input, bias, empty, act=3, grad=0, alpha=negative_slope, scale=scale)
         ctx.save_for_backward(out)
         ctx.negative_slope = negative_slope
         ctx.scale = scale
@@ -240,9 +238,7 @@ def fused_bias_leakyrelu(input, bias, negative_slope=0.2, scale=2**0.5):
     if not input.is_cuda:
         return bias_leakyrelu_ref(input, bias, negative_slope, scale)
 
-    return FusedBiasLeakyReLUFunction.apply(
-        input, bias.to(input.dtype), negative_slope, scale
-    )
+    return FusedBiasLeakyReLUFunction.apply(input, bias.to(input.dtype), negative_slope, scale)
 
 
 def bias_leakyrelu_ref(x, bias, negative_slope=0.2, scale=2**0.5):

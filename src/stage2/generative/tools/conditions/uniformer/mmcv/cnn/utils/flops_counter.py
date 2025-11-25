@@ -108,9 +108,7 @@ def get_model_complexity_info(
 
     flops_count, params_count = flops_model.compute_average_flops_cost()
     if print_per_layer_stat:
-        print_model_with_flops(
-            flops_model, flops_count, params_count, ost=ost, flush=flush
-        )
+        print_model_with_flops(flops_model, flops_count, params_count, ost=ost, flush=flush)
     flops_model.stop_flops_count()
 
     if as_strings:
@@ -299,13 +297,9 @@ def print_model_with_flops(
         accumulated_flops_cost = self.accumulate_flops()
         return ", ".join(
             [
-                params_to_string(
-                    accumulated_num_params, units="M", precision=precision
-                ),
+                params_to_string(accumulated_num_params, units="M", precision=precision),
                 "{:.3%} Params".format(accumulated_num_params / total_params),
-                flops_to_string(
-                    accumulated_flops_cost, units=units, precision=precision
-                ),
+                flops_to_string(accumulated_flops_cost, units=units, precision=precision),
                 "{:.3%} FLOPs".format(accumulated_flops_cost / total_flops),
                 self.original_extra_repr(),
             ]
@@ -393,9 +387,7 @@ def start_flops_count(self):
                 return
 
             else:
-                handle = module.register_forward_hook(
-                    get_modules_mapping()[type(module)]
-                )
+                handle = module.register_forward_hook(get_modules_mapping()[type(module)])
 
             module.__flops_handle__ = handle
 
@@ -444,9 +436,7 @@ def relu_flops_counter_hook(module, input, output):
 
 def linear_flops_counter_hook(module, input, output):
     input = input[0]
-    output_last_dim = output.shape[
-        -1
-    ]  # pytorch checks dimensions, so here we don't care much
+    output_last_dim = output.shape[-1]  # pytorch checks dimensions, so here we don't care much
     module.__flops__ += int(np.prod(input.shape) * output_last_dim)
 
 
@@ -477,9 +467,7 @@ def deconv_flops_counter_hook(conv_module, input, output):
     groups = conv_module.groups
 
     filters_per_channel = out_channels // groups
-    conv_per_position_flops = (
-        kernel_height * kernel_width * in_channels * filters_per_channel
-    )
+    conv_per_position_flops = kernel_height * kernel_width * in_channels * filters_per_channel
 
     active_elements_count = batch_size * input_height * input_width
     overall_conv_flops = conv_per_position_flops * active_elements_count
@@ -505,9 +493,7 @@ def conv_flops_counter_hook(conv_module, input, output):
     groups = conv_module.groups
 
     filters_per_channel = out_channels // groups
-    conv_per_position_flops = (
-        int(np.prod(kernel_dims)) * in_channels * filters_per_channel
-    )
+    conv_per_position_flops = int(np.prod(kernel_dims)) * in_channels * filters_per_channel
 
     active_elements_count = batch_size * int(np.prod(output_dims))
 
@@ -531,10 +517,7 @@ def batch_counter_hook(module, input, output):
         batch_size = len(input)
     else:
         pass
-        print(
-            "Warning! No positional inputs found for a module, "
-            "assuming batch size is 1."
-        )
+        print("Warning! No positional inputs found for a module, assuming batch size is 1.")
     module.__batch_counter__ += batch_size
 
 
@@ -561,9 +544,7 @@ def add_flops_counter_variable_or_reset(module):
         if hasattr(module, "__flops__") or hasattr(module, "__params__"):
             print(
                 "Warning: variables __flops__ or __params__ are already "
-                "defined for the module"
-                + type(module).__name__
-                + " ptflops can affect your code!"
+                "defined for the module" + type(module).__name__ + " ptflops can affect your code!"
             )
         module.__flops__ = 0
         module.__params__ = get_model_parameters_number(module)

@@ -85,9 +85,7 @@ def per_channel_normalize(img: torch.Tensor | np.ndarray, c_dim: tuple = (-2, -1
         min_c = einops.reduce(img, pattern=pattern, reduction="min")
         max_c = einops.reduce(img, pattern=pattern, reduction="max")
 
-        img = (img - min_c) / (
-            max_c - min_c + 1e-8
-        )  # Add small epsilon to avoid division by zero
+        img = (img - min_c) / (max_c - min_c + 1e-8)  # Add small epsilon to avoid division by zero
 
         # Use torch.clamp for PyTorch tensors and np.clip for NumPy arrays to ensure compatibility
         if torch.is_tensor(img):
@@ -146,17 +144,13 @@ def sliding_window(
             image = torch.as_tensor(image) if isinstance(image, np.ndarray) else image
             image, shape_inverse = to_batched(image, is_hwc)
             orig_dtype = image.dtype
-            image = torch.nn.functional.pad(
-                image.float(), (0, pad_w, 0, pad_h), mode="reflect"
-            ).to(orig_dtype)
+            image = torch.nn.functional.pad(image.float(), (0, pad_w, 0, pad_h), mode="reflect").to(orig_dtype)
             image = shape_inverse(image)
 
     shape = image.shape
     logger.info(f"img shape: {shape}")
     h_padded, w_padded = shape[:-1] if is_hwc else shape[-2:]
-    logger.info(
-        f"clip patch with shape: {(h_padded, w_padded)}, patch_size: {patch_size}, stride: {stride}"
-    )
+    logger.info(f"clip patch with shape: {(h_padded, w_padded)}, patch_size: {patch_size}, stride: {stride}")
     rows = list(range(0, h_padded, stride[0]))
     cols = list(range(0, w_padded, stride[1]))
     logger.info(f"Got {len(rows) * len(cols)} patches")
@@ -177,9 +171,7 @@ def sliding_window(
 
             if isinstance(img_slide, np.memmap):
                 # img_slide = np.array(img_slide)
-                logger.debug(
-                    f"Copying memmap to numpy array at patch ({i_start}:{i_end}, {j_start}:{j_end})"
-                )
+                logger.debug(f"Copying memmap to numpy array at patch ({i_start}:{i_end}, {j_start}:{j_end})")
                 img_slide = img_slide.copy()  # Ensure we have a copy, not a view
 
             if is_yield:
@@ -251,9 +243,7 @@ def merge_patches(patches, coords, original_shape, patch_size, stride):
         count_map[..., i : i + patch_size[0], j : j + patch_size[1]] += 1
 
     # 避免除以零的情况
-    merged_image = torch.where(
-        count_map > 0, merged_image / count_map, torch.tensor(0.0)
-    )
+    merged_image = torch.where(count_map > 0, merged_image / count_map, torch.tensor(0.0))
 
     # 移除 padding
     if pad_h > 0 or pad_w > 0:
@@ -282,10 +272,7 @@ def read_image(
             key_ = list(d.keys())[-1]
             img = d[key_]
         except NotImplementedError as e:
-            logger.warning(
-                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
-                "read using h5py."
-            )
+            logger.warning(f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to read using h5py.")
             import h5py
 
             with h5py.File(img_path, "r") as f:
@@ -343,9 +330,7 @@ def postprocess_img(
             img = img.clamp(min=0)
             img = img / img_max
         elif rescale == "min_max":
-            img = per_channel_normalize(
-                img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1)
-            )
+            img = per_channel_normalize(img, c_dim=(-2, -1) if img.ndim == 4 else (0, 1))
         else:
             raise ValueError(f"Unsupported rescale method: {rescale} for {normalize=}")
     else:
@@ -444,9 +429,7 @@ def img_saver_backend_compact_with_wds(
         assert img.dtype == np.uint8, "img must be uint8"
         Image.fromarray(img).save(byte_io, format=extension, quality=jpeg_quality)
     elif extension == "safetensors":
-        byte = safetensors.torch.save(
-            {"img": torch.as_tensor(img, dtype=_numpy_dtype_to_tensor[img.dtype.name])}
-        )
+        byte = safetensors.torch.save({"img": torch.as_tensor(img, dtype=_numpy_dtype_to_tensor[img.dtype.name])})
         return byte
     elif extension == "webdataset":
         # left for webdataset to encode
@@ -512,9 +495,7 @@ def clip_img_to_webdataset(
             rescale=rescale,
         )
         # img_max = patch.max()
-        patch, dtype = to_int_dtype_img(
-            patch, img_max, dtype=save_dtype, is_normed=False
-        )
+        patch, dtype = to_int_dtype_img(patch, img_max, dtype=save_dtype, is_normed=False)
         save_dtype = dtype
 
         # write to webdataset

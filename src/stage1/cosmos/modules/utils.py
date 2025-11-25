@@ -118,11 +118,7 @@ class RMSNorm2d(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.nn.functional.normalize(x, dim=1, eps=self.eps)
         w = self.weight.view(1, -1, 1, 1) if self.elementwise_affine else 1
-        b = (
-            self.bias.view(1, -1, 1, 1)
-            if (self.elementwise_affine and self.use_bias)
-            else 0.0
-        )
+        b = self.bias.view(1, -1, 1, 1) if (self.elementwise_affine and self.use_bias) else 0.0
         x = x * self.scale * w + b
 
         return x
@@ -176,17 +172,13 @@ class AdaptiveNormBase(nn.Module):
         super().__init__()
 
     def forward(self, x, z):
-        return _adaptive_norm_fn(
-            x, z, eps=self.eps, norm=self.norm, gamma=self.gamma, beta=self.beta
-        )
+        return _adaptive_norm_fn(x, z, eps=self.eps, norm=self.norm, gamma=self.gamma, beta=self.beta)
 
 
 class AdaptiveGroupNorm(AdaptiveNormBase):
     def __init__(self, cond_chan, in_chan, num_groups=32, eps=1e-6, norm_eps=1e-6):
         super().__init__()
-        self.norm = nn.GroupNorm(
-            num_groups=num_groups, num_channels=in_chan, eps=norm_eps, affine=False
-        )
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=in_chan, eps=norm_eps, affine=False)
         self.gamma = nn.Linear(cond_chan, in_chan)
         self.beta = nn.Linear(cond_chan, in_chan)
         self.eps = eps
@@ -259,9 +251,7 @@ def unit_magnitude_normalize(x, dim=None, eps=1e-4):
     return x / norm.to(x.dtype)
 
 
-def Normalize(
-    in_channels, norm_type: str | None = "gn", **norm_kwargs
-) -> nn.Module | Callable:
+def Normalize(in_channels, norm_type: str | None = "gn", **norm_kwargs) -> nn.Module | Callable:
     if norm_type == "gn":
         return torch.nn.GroupNorm(
             num_channels=in_channels,
@@ -277,9 +267,7 @@ def Normalize(
     elif norm_type == "ln2d":
         cls = tl.LayerNorm2d
     elif norm_type == "unit_vec_norm":
-        return partial(
-            unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4)
-        )
+        return partial(unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4))
     elif norm_type == "rms_native":
         cls = RMSNorm2d
     elif norm_type == "rms_triton":
@@ -353,9 +341,7 @@ def entropy(prob):
     return (-prob * log(prob)).sum(dim=-1)
 
 
-def extract_needed_kwargs(
-    kwargs: dict, cls: Callable | type, include_default: bool = False
-) -> dict:
+def extract_needed_kwargs(kwargs: dict, cls: Callable | type, include_default: bool = False) -> dict:
     """
     Extracts the subset of `kwargs` that match the parameters of a given class's __init__ method or a function.
 

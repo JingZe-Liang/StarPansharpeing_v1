@@ -74,19 +74,11 @@ class SwiGLU(nn.Module):
         self.is_fused = is_fused is not None
         self.fused_type = is_fused
         if self.is_fused:
-            assert XFORMERS_AVAILABLE or FLA_AVAILABLE, (
-                f"Xformers and FLA is not installed, can not use fused FFN."
-            )
-            assert norm_layer is None, (
-                "Fused FFN does not support norm layer, please set norm_layer to None."
-            )
+            assert XFORMERS_AVAILABLE or FLA_AVAILABLE, f"Xformers and FLA is not installed, can not use fused FFN."
+            assert norm_layer is None, "Fused FFN does not support norm layer, please set norm_layer to None."
 
         # is fused need to flatten and permute
-        linear_layer = (
-            functools.partial(nn.Conv2d, kernel_size=1)
-            if (use_conv and not is_fused)
-            else nn.Linear
-        )
+        linear_layer = functools.partial(nn.Conv2d, kernel_size=1) if (use_conv and not is_fused) else nn.Linear
         # split g, x. not packed
         self.packed_weights = packed_weights
         if packed_weights:
@@ -97,9 +89,7 @@ class SwiGLU(nn.Module):
             self.w2 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer()
         self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = (
-            norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
-        )
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
         self.w3 = linear_layer(hidden_features, out_features, bias=bias[1])
         self.drop2 = nn.Dropout(drop_probs[1])
 
@@ -223,9 +213,7 @@ class ClipSwiGLUMlp(SwiGLU):
             is_fused=None,
             packed_weights=False,
         )
-        self.mlp_bias = (
-            nn.Parameter(torch.zeros(self.w3.weight.shape[0])) if mlp_bias else None
-        )
+        self.mlp_bias = nn.Parameter(torch.zeros(self.w3.weight.shape[0])) if mlp_bias else None
 
     def forward(self, x, **kwargs):
         x_gate = self.w1(x)
@@ -248,9 +236,7 @@ class ClipSwiGLUMlp(SwiGLU):
 
 
 class GLUMBConvMlp(GLUMBConv):
-    def forward(
-        self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None) -> torch.Tensor:
         B, N, C = x.shape
         if HW is None:
             H = W = int(N**0.5)

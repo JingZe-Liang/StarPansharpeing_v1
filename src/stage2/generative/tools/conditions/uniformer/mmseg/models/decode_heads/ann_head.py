@@ -16,9 +16,7 @@ class PPMConcat(nn.ModuleList):
     """
 
     def __init__(self, pool_scales=(1, 3, 6, 8)):
-        super(PPMConcat, self).__init__(
-            [nn.AdaptiveAvgPool2d(pool_scale) for pool_scale in pool_scales]
-        )
+        super(PPMConcat, self).__init__([nn.AdaptiveAvgPool2d(pool_scale) for pool_scale in pool_scales])
 
     def forward(self, feats):
         """Forward function."""

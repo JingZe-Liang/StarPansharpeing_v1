@@ -12,7 +12,7 @@ cnn_cfg:
     resolution: 1024
     in_channels: 512 # nested channels !!
     out_channels: 512 # nested channels !!
-    z_channels: 768
+    z_channels: 512
     latent_channels: 64
     channels: 128
     channels_mult: [2, 4, 4]
@@ -42,13 +42,13 @@ cnn_dec_cfg:
   resolution: 1024
   in_channels: 512 # nested channels !!
   out_channels: 512 # nested channels !!
-  z_channels: 768
+  z_channels: 512
   latent_channels: 64
   channels: 128
   channels_mult: [2, 2, 4, 4]
   num_res_blocks: 3
   attn_resolutions: []
-  dropout: 0.0
+  dropout: 0.1
   spatial_compression: 16
   patch_size: 1
   block_name: res_block
@@ -68,15 +68,15 @@ trans_enc_cfg:
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
-  norm_layer: rmsnorm
+  norm_layer: layernorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial
   img_size: 32
-  in_chans: 768
-  out_chans: 768
+  in_chans: 512
+  out_chans: 512
   unpatch_size: 1
-  reg_tokens: 0
+  reg_tokens: 2
   compile_model: false
 
 # trans_dec_cfg:

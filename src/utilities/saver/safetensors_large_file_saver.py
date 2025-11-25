@@ -62,9 +62,7 @@ def save_tensors_incrementally_to_safetensors(
             if not isinstance(name, str):
                 raise TypeError(f"Tensor name must be a string, got {type(name)}")
             if not isinstance(tensor, torch.Tensor):
-                raise TypeError(
-                    f"Tensor data must be a torch.Tensor, got {type(tensor)} for '{name}'"
-                )
+                raise TypeError(f"Tensor data must be a torch.Tensor, got {type(tensor)} for '{name}'")
 
             # Ensure tensor is on CPU and contiguous for .numpy().tobytes()
             if tensor.device.type != "cpu":
@@ -120,9 +118,7 @@ def save_tensors_incrementally_to_safetensors(
         if not isinstance(global_metadata, dict):
             # Clean up temporary file before raising
             os.remove(tmp_data_filename)
-            raise TypeError(
-                f"global_metadata must be a dictionary, got {type(global_metadata)}"
-            )
+            raise TypeError(f"global_metadata must be a dictionary, got {type(global_metadata)}")
 
         # Ensure all values in global_metadata are strings to conform to safetensors spec
         stringified_global_metadata = {}
@@ -139,9 +135,7 @@ def save_tensors_incrementally_to_safetensors(
     # Sort tensor metadata by name for consistent output (optional but good practice)
     # Note: The order of data in the file is determined by the generator,
     # this sorting only affects the JSON header order.
-    sorted_tensors_metadata = {
-        k: tensors_metadata[k] for k in sorted(tensors_metadata.keys())
-    }
+    sorted_tensors_metadata = {k: tensors_metadata[k] for k in sorted(tensors_metadata.keys())}
     final_header_dict.update(sorted_tensors_metadata)
 
     # header_json_bytes = json.dumps(final_header_dict, indent=2).encode("utf-8")
@@ -150,13 +144,9 @@ def save_tensors_incrementally_to_safetensors(
     #     8, "little"
     # )  # 8-byte little-endian header length
 
-    header_json_bytes = json.dumps(
-        final_header_dict, indent=None, separators=(",", ":")
-    ).encode("utf-8")
+    header_json_bytes = json.dumps(final_header_dict, indent=None, separators=(",", ":")).encode("utf-8")
     header_len = len(header_json_bytes)
-    header_len_bytes = header_len.to_bytes(
-        8, "little"
-    )  # 8-byte little-endian header length
+    header_len_bytes = header_len.to_bytes(8, "little")  # 8-byte little-endian header length
 
     log_print(f"Writing final safetensors file: {output_filename}")
     # Write the final safetensors file
@@ -200,28 +190,14 @@ def large_tensor_generator(num_tensors=5, tensor_size_gb=0.5):
     # X * 1024 * 1024 = elements_per_tensor  => X = elements_per_tensor / (1024*1024)
 
     dim_x = elements_per_tensor // (1024 * 1024)
-    if (
-        dim_x == 0 and elements_per_tensor > 0
-    ):  # If tensor is smaller than 1024*1024 floats
+    if dim_x == 0 and elements_per_tensor > 0:  # If tensor is smaller than 1024*1024 floats
         dim_x = 1
-        dim_y = (
-            elements_per_tensor // 1024
-            if elements_per_tensor // 1024 > 0
-            else elements_per_tensor
-        )
+        dim_y = elements_per_tensor // 1024 if elements_per_tensor // 1024 > 0 else elements_per_tensor
         dim_z = 1024 if elements_per_tensor // 1024 > 0 else 1
-        if (
-            dim_y * dim_z < elements_per_tensor and dim_y == elements_per_tensor
-        ):  # single dimension
+        if dim_y * dim_z < elements_per_tensor and dim_y == elements_per_tensor:  # single dimension
             shape = (elements_per_tensor,)
-        elif (
-            dim_y * dim_z < elements_per_tensor
-        ):  # couldn't make it work, use a simpler shape
-            shape = (
-                (elements_per_tensor // 1024, 1024)
-                if elements_per_tensor >= 1024
-                else (elements_per_tensor,)
-            )
+        elif dim_y * dim_z < elements_per_tensor:  # couldn't make it work, use a simpler shape
+            shape = (elements_per_tensor // 1024, 1024) if elements_per_tensor >= 1024 else (elements_per_tensor,)
         else:
             shape = (dim_y, dim_z)
 
@@ -234,9 +210,7 @@ def large_tensor_generator(num_tensors=5, tensor_size_gb=0.5):
     for s_dim in shape:
         actual_elements *= s_dim
     log_print(f"Targeting tensor_size_gb: {tensor_size_gb:.2f} GB per tensor.")
-    log_print(
-        f"Calculated shape for each tensor: {shape} (approx {actual_elements * 4 / (1024**3):.2f} GB)"
-    )
+    log_print(f"Calculated shape for each tensor: {shape} (approx {actual_elements * 4 / (1024**3):.2f} GB)")
 
     for i in range(num_tensors):
         # In a real scenario, you would load this tensor from disk,
@@ -252,12 +226,8 @@ def large_tensor_generator(num_tensors=5, tensor_size_gb=0.5):
             tensor_data = torch.randn(shape, dtype=torch.float32, device="cpu")
         except RuntimeError as e:
             log_print(f"Error creating tensor of shape {shape}: {e}")
-            log_print(
-                "This might be due to insufficient RAM for a single large tensor."
-            )
-            log_print(
-                "Consider reducing tensor_size_gb or using a machine with more RAM."
-            )
+            log_print("This might be due to insufficient RAM for a single large tensor.")
+            log_print("Consider reducing tensor_size_gb or using a machine with more RAM.")
             raise
 
         yield f"layer_{i}_weight", tensor_data
@@ -270,9 +240,7 @@ def large_tensor_generator(num_tensors=5, tensor_size_gb=0.5):
             yield f"layer_{i}_bias", bias_data
             del bias_data
 
-        log_print(
-            f"Yielded tensor 'layer_{i}_weight' (and bias). Freeing its memory before next iteration."
-        )
+        log_print(f"Yielded tensor 'layer_{i}_weight' (and bias). Freeing its memory before next iteration.")
         del tensor_data  # Important to free memory if tensors are large
         torch.cuda.empty_cache()  # If tensors were ever on GPU then moved to CPU
 
@@ -292,27 +260,19 @@ def inspect_safetensors_header(filepath):
             header_len_bytes = f.read(8)
             if len(header_len_bytes) < 8:
                 print(f"Error: File is too short. Could not read 8-byte header length.")
-                print(
-                    f"Read bytes: {header_len_bytes.hex() if header_len_bytes else 'None'}"
-                )
+                print(f"Read bytes: {header_len_bytes.hex() if header_len_bytes else 'None'}")
                 return
 
             header_len = int.from_bytes(header_len_bytes, "little")
-            print(
-                f"Reported JSON header length (from first 8 bytes): {header_len} bytes"
-            )
+            print(f"Reported JSON header length (from first 8 bytes): {header_len} bytes")
 
             if header_len <= 0:
-                print(
-                    f"Error: Reported header length is {header_len}, which is invalid."
-                )
+                print(f"Error: Reported header length is {header_len}, which is invalid.")
                 # Peek at the next few bytes to see if they look like JSON
                 peek_bytes = f.read(100)
                 print(f"Next 100 bytes (or fewer): {peek_bytes}")
                 try:
-                    print(
-                        f"Decoded peek bytes (best effort): {peek_bytes.decode('utf-8', errors='replace')}"
-                    )
+                    print(f"Decoded peek bytes (best effort): {peek_bytes.decode('utf-8', errors='replace')}")
                 except:
                     pass
                 return
@@ -321,12 +281,8 @@ def inspect_safetensors_header(filepath):
             header_json_bytes = f.read(header_len)
             if len(header_json_bytes) < header_len:
                 print(f"Error: File is truncated or header length is incorrect.")
-                print(
-                    f"Expected {header_len} bytes for JSON header, but only got {len(header_json_bytes)} bytes."
-                )
-                print(
-                    f"Read JSON bytes (partial): {header_json_bytes.hex()[:200]}..."
-                )  # Print first 100 hex chars
+                print(f"Expected {header_len} bytes for JSON header, but only got {len(header_json_bytes)} bytes.")
+                print(f"Read JSON bytes (partial): {header_json_bytes.hex()[:200]}...")  # Print first 100 hex chars
                 try:
                     print(
                         f"Decoded partial header (best effort UTF-8):\n{header_json_bytes.decode('utf-8', errors='replace')}"
@@ -360,17 +316,11 @@ def inspect_safetensors_header(filepath):
                             print(f"  Tensor '{key}':")
                             for meta_key in ["dtype", "shape", "data_offsets"]:
                                 if meta_key not in parsed_header[key]:
-                                    print(
-                                        f"    Warning: Missing '{meta_key}' for tensor '{key}'"
-                                    )
+                                    print(f"    Warning: Missing '{meta_key}' for tensor '{key}'")
                                 else:
-                                    print(
-                                        f"    '{meta_key}': {parsed_header[key][meta_key]}"
-                                    )
+                                    print(f"    '{meta_key}': {parsed_header[key][meta_key]}")
                         else:
-                            print(
-                                f"    Warning: Tensor metadata for '{key}' is not a dict: {parsed_header[key]}"
-                            )
+                            print(f"    Warning: Tensor metadata for '{key}' is not a dict: {parsed_header[key]}")
 
             except UnicodeDecodeError as e:
                 print(f"UnicodeDecodeError while decoding JSON header: {e}")
@@ -384,26 +334,19 @@ def inspect_safetensors_header(filepath):
                 start = max(0, error_pos - context)
                 end = min(len(header_str), error_pos + context)
                 print(f"\n--- Context around JSON error (char pos {error_pos}) ---")
-                print(
-                    f"...{header_str[start:error_pos]} [[[ERROR AT/NEAR HERE]]] {header_str[error_pos:end]}..."
-                )
+                print(f"...{header_str[start:error_pos]} [[[ERROR AT/NEAR HERE]]] {header_str[error_pos:end]}...")
                 print("--- End of Context ---")
 
             # 4. Check if there's data afterwards (optional, but good sanity check)
             # The total size of tensor data should match the offsets.
             # This is a more involved check. For now, just see if there's *any* data.
             remaining_data_peek = f.read(64)  # Read a bit of what should be tensor data
-            if (
-                not remaining_data_peek and tensor_keys
-            ):  # If header lists tensors but no data follows
+            if not remaining_data_peek and tensor_keys:  # If header lists tensors but no data follows
                 # This can be valid if all tensors are empty.
                 # Let's find the expected end of data from the last offset.
                 max_offset_end = 0
                 for key in tensor_keys:
-                    if (
-                        "data_offsets" in parsed_header[key]
-                        and len(parsed_header[key]["data_offsets"]) == 2
-                    ):
+                    if "data_offsets" in parsed_header[key] and len(parsed_header[key]["data_offsets"]) == 2:
                         offset_end = parsed_header[key]["data_offsets"][1]
                         if offset_end > max_offset_end:
                             max_offset_end = offset_end
@@ -422,9 +365,7 @@ def inspect_safetensors_header(filepath):
                     f"Found {len(remaining_data_peek)} bytes of data immediately after the header (peek: {remaining_data_peek.hex()[:32]}...)."
                 )
             else:
-                print(
-                    "No data found after header (this is OK if there are no tensors or all are empty)."
-                )
+                print("No data found after header (this is OK if there are no tensors or all are empty).")
 
     except Exception as e:
         print(f"An unexpected error occurred during inspection: {e}")
@@ -452,14 +393,9 @@ if __name__ == "__main__":
     TENSOR_SIZE_GB_EACH = 0.1  # Approx GB for each "weight" tensor (0.1 GB = 100MB)
     OUTPUT_FILE = "large_model_streamed.safetensors"
 
-    log_print(
-        f"Attempting to create a safetensors file of approx "
-        f"{NUM_TENSORS * TENSOR_SIZE_GB_EACH:.2f} GB."
-    )
+    log_print(f"Attempting to create a safetensors file of approx {NUM_TENSORS * TENSOR_SIZE_GB_EACH:.2f} GB.")
 
-    my_generator = large_tensor_generator(
-        num_tensors=NUM_TENSORS, tensor_size_gb=TENSOR_SIZE_GB_EACH
-    )
+    my_generator = large_tensor_generator(num_tensors=NUM_TENSORS, tensor_size_gb=TENSOR_SIZE_GB_EACH)
 
     custom_metadata = {
         "format": "pt_streamed",
@@ -468,17 +404,13 @@ if __name__ == "__main__":
     }
 
     try:
-        save_tensors_incrementally_to_safetensors(
-            my_generator, OUTPUT_FILE, global_metadata=custom_metadata
-        )
+        save_tensors_incrementally_to_safetensors(my_generator, OUTPUT_FILE, global_metadata=custom_metadata)
         log_print("-" * 30)
         log_print(f"To verify, you can try loading with: ")
         log_print(f"from safetensors.torch import load_file")
         log_print(f"tensors = load_file('{OUTPUT_FILE}')")
         log_print(f"Or for memory-mapped loading of specific tensors:")
-        log_print(
-            f"with safe_open('{OUTPUT_FILE}', framework='pt', device='cpu') as f:"
-        )
+        log_print(f"with safe_open('{OUTPUT_FILE}', framework='pt', device='cpu') as f:")
         log_print(f"  tensor_slice = f.get_slice('layer_0_weight')")
         log_print(f"  # Do something with the slice")
 

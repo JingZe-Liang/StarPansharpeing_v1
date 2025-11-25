@@ -22,9 +22,7 @@ class BackboneLayersSet(Enum):
 
 def _get_backbone_out_indices(
     model: nn.Module,
-    backbone_out_layers: Union[
-        list[int], BackboneLayersSet
-    ] = BackboneLayersSet.FOUR_EVEN_INTERVALS,
+    backbone_out_layers: Union[list[int], BackboneLayersSet] = BackboneLayersSet.FOUR_EVEN_INTERVALS,
 ):
     """
     Get indices for output layers of the ViT backbone. For now there are 3 options available:
@@ -78,9 +76,7 @@ class DinoVisionTransformerWrapper(nn.Module):
         self.backbone_out_indices = _get_backbone_out_indices(
             self.backbone,
             backbone_out_layers=(
-                backbone_out_layers
-                if isinstance(backbone_out_layers, list)
-                else BackboneLayersSet(backbone_out_layers)
+                backbone_out_layers if isinstance(backbone_out_layers, list) else BackboneLayersSet(backbone_out_layers)
             ),
         )
 
@@ -90,22 +86,16 @@ class DinoVisionTransformerWrapper(nn.Module):
         except AttributeError:
             embed_dim = self.backbone.embed_dim
             n_blocks = self.backbone.n_blocks
-            logger.warning(
-                f"Backbone does not define embed_dims, using {[embed_dim] * n_blocks=} instead"
-            )
+            logger.warning(f"Backbone does not define embed_dims, using {[embed_dim] * n_blocks=} instead")
             embed_dims = [embed_dim] * n_blocks
-        self.embed_dims: Sequence[int] = [
-            embed_dims[idx] for idx in self.backbone_out_indices
-        ]
+        self.embed_dims: Sequence[int] = [embed_dims[idx] for idx in self.backbone_out_indices]
 
         # How to adapt input images to the patch size of the model?
         try:
             input_pad_size = self.backbone.input_pad_size
         except AttributeError:
             patch_size = self.backbone.patch_size
-            logger.warning(
-                f"Backbone does not define input_pad_size, using {patch_size=} instead"
-            )
+            logger.warning(f"Backbone does not define input_pad_size, using {patch_size=} instead")
             input_pad_size = patch_size
         if adapt_to_patch_size is PatchSizeAdaptationStrategy.CENTER_PADDING:
             self.patch_size_adapter = CenterPadding(input_pad_size)

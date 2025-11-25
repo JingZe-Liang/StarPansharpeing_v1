@@ -59,11 +59,7 @@ class TritonRMSNorm2d(nn.LayerNorm):
             num_chunks = (input_numel - 1) // (1 << 31) + 1
             output = []
             for x_chunk in x.chunk(num_chunks, dim=2):
-                output.append(
-                    TritonRMSNorm2dFunc.apply(
-                        x_chunk.contiguous(), self.weight, self.bias, self.eps
-                    )
-                )
+                output.append(TritonRMSNorm2dFunc.apply(x_chunk.contiguous(), self.weight, self.bias, self.eps))
             output = torch.cat(output, dim=2)
             return output
         else:
@@ -75,9 +71,7 @@ class TritonRMSNorm2d(nn.LayerNorm):
 class AdaptiveGroupNorm(nn.Module):
     def __init__(self, in_chan, cond_chan, num_groups=32, eps=1e-6):
         super().__init__()
-        self.gn = nn.GroupNorm(
-            num_groups=num_groups, num_channels=in_chan, eps=eps, affine=False
-        )
+        self.gn = nn.GroupNorm(num_groups=num_groups, num_channels=in_chan, eps=eps, affine=False)
         self.gamma = nn.Linear(cond_chan, in_chan)
         self.beta = nn.Linear(cond_chan, in_chan)
         self.eps = eps
@@ -179,9 +173,7 @@ def _register_new_acts():
     try:
         from fla.modules.activations import fast_gelu_impl, swiglu, swish
 
-        get_act_layer = lambda act, name: partial(
-            ActLayerMeta, name=name, act_layer=act
-        )
+        get_act_layer = lambda act, name: partial(ActLayerMeta, name=name, act_layer=act)
 
         fla_acts = {
             "fla_swish": get_act_layer(swish, "fla_swish"),
@@ -252,9 +244,7 @@ def _register_new_norms():
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
     create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
-    logger.debug(
-        f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d'"
-    )
+    logger.debug(f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d'")
 
 
 _register_new_acts()

@@ -42,9 +42,7 @@ def create_denoise_WDC_dataset(
         *[wds.handle_extension("clean noisy", tiff_decode_io), "torch"],
         handler=wds.reraise_exception,
     )
-    dataset = dataset.map(
-        partial(norm_img, to_neg_1_1=to_neg_1_1, norm_keys=["clean", "noisy"])
-    )
+    dataset = dataset.map(partial(norm_img, to_neg_1_1=to_neg_1_1, norm_keys=["clean", "noisy"]))
     if remove_meta:
         dataset = dataset.map(remove_meta_data)
 

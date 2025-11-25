@@ -117,9 +117,7 @@ def img_dict_mapper_with_ext(
         )
         if hrms is not None:
             hrms, hrms_min, hrms_max = norm_fn_partial(hrms)
-        (lrms, lrms_min, lrms_max), (pan, pan_min, pan_max) = map(
-            norm_fn_partial, [lrms, pan]
-        )
+        (lrms, lrms_min, lrms_max), (pan, pan_min, pan_max) = map(norm_fn_partial, [lrms, pan])
         if norm_info_add_in_sample:
             if hrms is not None:
                 sample["hrms_min"] = hrms_min
@@ -150,9 +148,7 @@ def img_dict_mapper_with_ext(
         # where H = h * ratio
         if lrms.ndim == 3:
             lrms.unsqueeze_(0)
-        lrms = torch.nn.functional.interpolate(
-            lrms, size=pan.shape[-2:], mode="bilinear", align_corners=False
-        )
+        lrms = torch.nn.functional.interpolate(lrms, size=pan.shape[-2:], mode="bilinear", align_corners=False)
         lrms.squeeze_(0)
 
     # normalize to [-1, 1]
@@ -199,11 +195,7 @@ def img_dict_mapper_with_ext(
         }
 
     else:
-        sample_new = (
-            {"hrms": hrms, "lrms": lrms, "pan": pan}
-            if hrms is not None
-            else {"lrms": lrms, "pan": pan}
-        )
+        sample_new = {"hrms": hrms, "lrms": lrms, "pan": pan} if hrms is not None else {"lrms": lrms, "pan": pan}
     sample.update(sample_new)
 
     return sample
@@ -214,8 +206,7 @@ def satellite_name_add(sample: dict):
     file_stem = Path(url).stem
     sat_name = file_stem.split("_")[-2]  # e.g., Pansharpening_WV3_train
     assert sat_name in SUPPORTED_SATELLITES, (
-        f"Satellite name {sat_name} not in supported list {SUPPORTED_SATELLITES}, "
-        f"but got from {url}"
+        f"Satellite name {sat_name} not in supported list {SUPPORTED_SATELLITES}, but got from {url}"
     )
     sample["satellite"] = sat_name
     return sample
@@ -236,8 +227,7 @@ def satellite_name_add_collated(sample: dict):
     assert _lrms_for_shape is not None, "No lrms or img in the sample"
     if len(satellite_names) != _lrms_for_shape.shape[0]:
         raise ValueError(
-            f"Batch size {sample['lrms'].shape[0]} does not match satellite names "
-            f"length {len(satellite_names)}"
+            f"Batch size {sample['lrms'].shape[0]} does not match satellite names length {len(satellite_names)}"
         )
 
     sample["satellite"] = satellite_names
@@ -303,9 +293,7 @@ def get_pansharp_wds_dataloader(
             norm=norm if not isinstance(norm, bool) else float(norm),
         )
     )
-    dataset = dataset.map(
-        get_default_pan_pair_transform(p=transform_prob, img_size=img_size)
-    )
+    dataset = dataset.map(get_default_pan_pair_transform(p=transform_prob, img_size=img_size))
     if add_satellite_name:
         dataset = dataset.map(satellite_name_add)
     if shuffle_size > 0:
@@ -446,16 +434,13 @@ class H5Dataset(Dataset):
         if transform is not None:
             self.transform = transform
         else:
-            self.transform = Compose(
-                [lambda x: torch.as_tensor(x, dtype=torch.float32).clip_(min=0) / norm]
-            )
+            self.transform = Compose([lambda x: torch.as_tensor(x, dtype=torch.float32).clip_(min=0) / norm])
             if to_neg_1_1:
                 self.transform.transforms.append(lambda x: x.mul_(2).sub_(1))
         self._h5dataset_check()
 
         log_print(
-            f"[H5Dataset] Subgroups in the H5 file: <green>{self.grp_names}</>, "
-            f"has <green>n_sample={len(self)}</>"
+            f"[H5Dataset] Subgroups in the H5 file: <green>{self.grp_names}</>, has <green>n_sample={len(self)}</>"
         )
 
     def _h5dataset_check(self):
@@ -477,26 +462,18 @@ class H5Dataset(Dataset):
                     )
 
             # Store file lengths for indexing
-            self._file_lengths = [
-                h5file[self.grp_names[0]].shape[0] for h5file in self.h5file
-            ]
+            self._file_lengths = [h5file[self.grp_names[0]].shape[0] for h5file in self.h5file]
         else:
             # Single file handling
             sub_grp_ds = self.h5file[self.grp_names[0]]
             if hasattr(sub_grp_ds, "keys"):
-                sub_grp_keys = (
-                    sub_grp_ds.keys()
-                )  # the samples are stored in sub-groups, not in one array
+                sub_grp_keys = sub_grp_ds.keys()  # the samples are stored in sub-groups, not in one array
                 for k in self.grp_names[1:]:
-                    assert self.h5file[k].keys() == sub_grp_keys, (
-                        "Inconsistent sub-groups in H5 file"
-                    )
+                    assert self.h5file[k].keys() == sub_grp_keys, "Inconsistent sub-groups in H5 file"
                 self.grp_keys = list(sub_grp_keys)
                 self._is_persample_h5 = True
             else:
-                assert hasattr(sub_grp_ds, "shape"), (
-                    "H5 group is not a dataset or group of datasets"
-                )
+                assert hasattr(sub_grp_ds, "shape"), "H5 group is not a dataset or group of datasets"
                 ds_shape = sub_grp_ds.shape
                 for k in self.grp_names[1:]:
                     shape_k = self.h5file[k].shape
@@ -552,9 +529,7 @@ class H5Dataset(Dataset):
                 break
             cumulative_length += file_length
         else:
-            raise IndexError(
-                f"Index {index} out of range for total length {cumulative_length}"
-            )
+            raise IndexError(f"Index {index} out of range for total length {cumulative_length}")
 
         # Load data from the specific file
         data = {}
@@ -721,9 +696,7 @@ def test_mat_full_resolution_loading():
         "lrms": "data/WorldView4/pansharpening_full/MS_shardindex.json",
         "pan": "data/WorldView4/pansharpening_full/PAN_shardindex.json",
     }
-    dataset, dataloader = get_wids_mat_full_resolution_dataloder(
-        wds_paths, 2, 0, to_neg_1_1=True
-    )
+    dataset, dataloader = get_wids_mat_full_resolution_dataloder(wds_paths, 2, 0, to_neg_1_1=True)
     for sample in dataloader:
         print(
             sample.keys(),
@@ -751,9 +724,7 @@ def test_cache_dataset():
 
 def test_h5_dataset():
     # h5_path = "data/WorldView3/pansharpening_reduced/tmp.h5"
-    h5_path = (
-        "data/Downstreams/PanCollectionV1/qb/reduced_examples/test_qb_multiExm1.h5"
-    )
+    h5_path = "data/Downstreams/PanCollectionV1/qb/reduced_examples/test_qb_multiExm1.h5"
     ds = H5Dataset(h5_path)
     print(f"Length of H5Dataset: {len(ds)}")
     dl = torch.utils.data.DataLoader(ds, batch_size=4, num_workers=0)
@@ -822,27 +793,17 @@ def test_multi_file_h5_dataset():
             print(f"Sample {i} (index {idx}):")
             print(f"  Keys: {list(sample.keys())}")
             for key, value in sample.items():
-                print(
-                    f"  {key}: {value.shape}, dtype: {value.dtype}, range: [{value.min():.3f}, {value.max():.3f}]"
-                )
+                print(f"  {key}: {value.shape}, dtype: {value.dtype}, range: [{value.min():.3f}, {value.max():.3f}]")
 
         # Verify continuity by checking if we can access all indices
-        print(
-            f"\nTesting access to all {total_length} samples (this may take a while)..."
-        )
+        print(f"\nTesting access to all {total_length} samples (this may take a while)...")
         error_count = 0
-        for idx in tqdm(
-            range(min(total_length, 100))
-        ):  # Test first 100 samples to avoid long runtime
+        for idx in tqdm(range(min(total_length, 100))):  # Test first 100 samples to avoid long runtime
             try:
                 sample = multi_ds[idx]
                 # Basic validation
                 for key, value in sample.items():
-                    if (
-                        value.ndim == 0
-                        or torch.isnan(value).any()
-                        or torch.isinf(value).any()
-                    ):
+                    if value.ndim == 0 or torch.isnan(value).any() or torch.isinf(value).any():
                         print(f"Warning: Invalid data at index {idx}, key {key}")
                         error_count += 1
             except Exception as e:

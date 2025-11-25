@@ -65,9 +65,7 @@ def load_file_from_url(
                 print(f"File already exists and hash verified: {cached_file}")
                 return cached_file
             else:
-                print(
-                    f"File exists but hash verification failed, re-downloading: {cached_file}"
-                )
+                print(f"File exists but hash verification failed, re-downloading: {cached_file}")
                 os.remove(cached_file)
         else:
             print(f"File already exists: {cached_file}")
@@ -98,9 +96,7 @@ def load_file_from_url(
         raise RuntimeError(f"Failed to download {url}: {str(e)}")
 
 
-def download_url_to_file(
-    url: str, dst: str, progress: bool = True, chunk_size: int = 8192
-) -> None:
+def download_url_to_file(url: str, dst: str, progress: bool = True, chunk_size: int = 8192) -> None:
     """
     Download a file from a URL to a destination path with progress bar.
 

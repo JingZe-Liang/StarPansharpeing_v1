@@ -98,17 +98,13 @@ class Muon(torch.optim.Optimizer):
                 # TODO: figure out how to store optim step state without exploding DCP
                 self.state[p] = dict(m=torch.zeros_like(p))
                 if p.ndim < 2:
-                    raise ValueError(
-                        f"0/1D parameters are banned from Muon; user provided {p.shape=}"
-                    )
+                    raise ValueError(f"0/1D parameters are banned from Muon; user provided {p.shape=}")
                 if p.ndim > 2:
                     print(f"WARNING: muon used for {p.shape=}")
             # todo: also declare tensorlists for foreach
             ...
 
-    def filter_group(
-        self, group: dict
-    ) -> Generator[tuple[DTensor, DTensor, DTensor, int], None, None]:
+    def filter_group(self, group: dict) -> Generator[tuple[DTensor, DTensor, DTensor, int], None, None]:
         pg, lr, wd, beta = group["params"], group["lr"], group["wd"], group["beta"]
         pg = [p for p in pg if p.grad is not None]
         list_p = [p.data for p in pg]
@@ -120,9 +116,7 @@ class Muon(torch.optim.Optimizer):
         yield from zip(list_p, list_g, list_m)
 
     @torch.no_grad()
-    def step(
-        self, *, prefetch_factor: int = 8
-    ):  # <-- changeme to 1 if you have numerical bugs
+    def step(self, *, prefetch_factor: int = 8):  # <-- changeme to 1 if you have numerical bugs
         # fsdp sharding mesh dim is always last
         r, ws = self.mesh.get_local_rank(-1), self.mesh.size(-1)
 
@@ -148,11 +142,7 @@ class Muon(torch.optim.Optimizer):
                     gather_lists = [torch.zeros_like(g.to_local()) for _ in range(ws)]
                     gather(g.to_local(), gather_lists, dst=dest_rank, async_op=True)
                     g_full_block = torch.cat(gather_lists, dim=0)
-                    g_full_block.copy_(
-                        zeropower_via_newtonschulz(
-                            g_full_block, steps=group["ns_steps"]
-                        )
-                    )
+                    g_full_block.copy_(zeropower_via_newtonschulz(g_full_block, steps=group["ns_steps"]))
                     g_full_block = g_full_block.view_as(p).type_as(p)
                 else:
                     g_local = g.to_local()
@@ -271,8 +261,7 @@ class MuonDDP(torch.optim.Optimizer):
                     p_world.mul_(1 - group["lr"] * group["weight_decay"])
                     p_world.add_(
                         g_world.view_as(p_world),
-                        alpha=-group["lr"]
-                        * max(1, p_world.size(-2) / p_world.size(-1)) ** 0.5,
+                        alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1)) ** 0.5,
                     )
 
             for base_i in range(len(params))[:: self.world_size]:
@@ -288,9 +277,7 @@ class MuonDDP(torch.optim.Optimizer):
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                     if g.ndim == 4:  # for the case of conv filters
                         g = g.view(len(g), -1)
-                    g = zeropower_via_newtonschulz5(
-                        g, steps=group["ns_steps"]
-                    ).flatten()
+                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
                 else:
                     g = update_buffer_views[self.rank]
                 if base_i > 0:

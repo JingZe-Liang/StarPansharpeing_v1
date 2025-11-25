@@ -78,9 +78,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
 
     @override
     def latent_to_pixel_fusion_forward(self, pixel_in: tuple, latent_in: tuple):
-        transfomer_out, _, abunds = (
-            super().latent_to_pixel_fusion_forward(pixel_in, latent_in).values()
-        )
+        transfomer_out, _, abunds = super().latent_to_pixel_fusion_forward(pixel_in, latent_in).values()
         recon = self.end_member_model(abunds)
         endmembers = self.end_member_model.get_endmember()  # type: ignore
 
@@ -102,9 +100,7 @@ class LatentUnmixingModel(AmotizedModelMixin):
             else ToEndMemberParameter(**asdict(config.to_endmember))
         )
 
-        assert config.amotize_type == "latent_to_pixel_fusion", (
-            "other types of amotize fn does not implemented yet"
-        )
+        assert config.amotize_type == "latent_to_pixel_fusion", "other types of amotize fn does not implemented yet"
 
         return cls(
             pixel_model=pixel_model,

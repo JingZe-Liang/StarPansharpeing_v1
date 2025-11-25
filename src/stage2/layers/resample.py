@@ -57,9 +57,7 @@ class UpSampleLayer(nn.Module):
 
     @autocast(device_type="cuda", enabled=False)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if (
-            self.size is not None and tuple(x.shape[-2:]) == self.size
-        ) or self.factor == 1:
+        if (self.size is not None and tuple(x.shape[-2:]) == self.size) or self.factor == 1:
             return x
         if x.dtype in [torch.float16, torch.bfloat16]:
             x = x.float()

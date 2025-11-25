@@ -24,9 +24,7 @@ def is_tensor(x):
 
 
 def get_q(state):
-    return [
-        q for q in (state["Q0"], state["Q1"], state["Q2"], state["Q3"]) if is_tensor(q)
-    ]
+    return [q for q in (state["Q0"], state["Q1"], state["Q2"], state["Q3"]) if is_tensor(q)]
 
 
 class KronMars(torch.optim.Optimizer):
@@ -126,9 +124,7 @@ class KronMars(torch.optim.Optimizer):
         self.fake_momentum_energies = []
         self.expr_cache = {}
 
-    def precond_update_prob_schedule(
-        self, n, max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
-    ):
+    def precond_update_prob_schedule(self, n, max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250):
         """Anneal preconditioner update probability during beginning of training.
 
         PSGD benefits from more preconditioner updates at the beginning of training,
@@ -156,9 +152,7 @@ class KronMars(torch.optim.Optimizer):
         total_precond_mb = 0
 
         state["step"] = 0
-        state["momentum_buffer"] = torch.zeros_like(
-            param, dtype=mu_dtype or param.dtype
-        )
+        state["momentum_buffer"] = torch.zeros_like(param, dtype=mu_dtype or param.dtype)
         state["prev_grad"] = torch.zeros_like(param)
         q_state, exprs = init_Q_exprs(
             param,
@@ -193,14 +187,8 @@ class KronMars(torch.optim.Optimizer):
         self.momentum_count[param] = 0
 
         if total_momentum_size > 0:
-            print(
-                f"PSGD Momentum buffer size: {total_momentum_size} "
-                f"elements, {total_momentum_mb:.2f} MB"
-            )
-            print(
-                f"PSGD Preconditioners size: {total_precond_size} "
-                f"elements, {total_precond_mb:.2f} MB"
-            )
+            print(f"PSGD Momentum buffer size: {total_momentum_size} elements, {total_momentum_mb:.2f} MB")
+            print(f"PSGD Preconditioners size: {total_precond_size} elements, {total_precond_mb:.2f} MB")
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -223,9 +211,7 @@ class KronMars(torch.optim.Optimizer):
                 self.param_groups[0]["flat_start"],
             )
         else:
-            raise ValueError(
-                "Only True is supported for preconditioner_update_probability_schedule"
-            )
+            raise ValueError("Only True is supported for preconditioner_update_probability_schedule")
         do_update = self.rng.random() < update_prob
         self._prob_step += 1
 
@@ -254,20 +240,13 @@ class KronMars(torch.optim.Optimizer):
                 state = self.state[p]
 
                 if len(state) == 0:
-                    self.init_state(
-                        state, p, group, mu_dtype=mu_dtype, precond_dtype=precond_dtype
-                    )
+                    self.init_state(state, p, group, mu_dtype=mu_dtype, precond_dtype=precond_dtype)
 
                 state["step"] += 1
 
                 # Calculate MARS correction term (without clipping)
                 prev_grad = state["prev_grad"]
-                correction = (
-                    group["gamma"]
-                    * group["mars_beta"]
-                    / (1 - group["mars_beta"])
-                    * (grad - prev_grad)
-                )
+                correction = group["gamma"] * group["mars_beta"] / (1 - group["mars_beta"]) * (grad - prev_grad)
                 c_t = grad + correction
 
                 # Store current gradient for next iteration
@@ -281,12 +260,8 @@ class KronMars(torch.optim.Optimizer):
                 nesterov_momentum = momentum_buffer.lerp(c_t, 1 - group["momentum"])
                 # Restore momentum dtype
                 if mu_dtype is not None:
-                    nesterov_momentum.copy_(
-                        nesterov_momentum.to(dtype=mu_dtype, non_blocking=True)
-                    )
-                nesterov_momentum = nesterov_momentum.to(
-                    dtype=precond_dtype, non_blocking=True
-                )
+                    nesterov_momentum.copy_(nesterov_momentum.to(dtype=mu_dtype, non_blocking=True))
+                nesterov_momentum = nesterov_momentum.to(dtype=precond_dtype, non_blocking=True)
 
                 # this time around, initializing the randn tensor and distributing it will not bode well, we would need to broadcast first
                 # but this op is full of operations that fail with dtensor anyway and in-place bits so we'll do it all local anyway
@@ -314,61 +289,36 @@ class KronMars(torch.optim.Optimizer):
 
                         # Check for nan/inf before creating fake momentum
                         if torch.isnan(std).any() or torch.isinf(std).any():
-                            print(
-                                "Warning: std contains nan/inf, using momentum buffer instead"
-                            )
-                            update_grad = (
-                                nesterov_momentum
-                                if group["momentum_into_precond_update"]
-                                else grad
-                            )
+                            print("Warning: std contains nan/inf, using momentum buffer instead")
+                            update_grad = nesterov_momentum if group["momentum_into_precond_update"] else grad
                         else:
-                            noise = torch.randn_like(
-                                momentum_buffer, dtype=precond_dtype
-                            )
+                            noise = torch.randn_like(momentum_buffer, dtype=precond_dtype)
                             # Clip the noise to prevent extreme values
                             noise = torch.clamp(noise, min=-3, max=3)
                             fake_momentum = mean + group["std_scale"] * std * noise
 
                             if group["verbose"]:
-                                fake_momentum_energy = torch.mean(
-                                    fake_momentum**2
-                                ).item()
-                                if not (
-                                    math.isnan(fake_momentum_energy)
-                                    or math.isinf(fake_momentum_energy)
-                                ):
+                                fake_momentum_energy = torch.mean(fake_momentum**2).item()
+                                if not (math.isnan(fake_momentum_energy) or math.isinf(fake_momentum_energy)):
                                     fake_momentum_energies.append(fake_momentum_energy)
 
-                            update_grad = (
-                                fake_momentum
-                                if group["momentum_into_precond_update"]
-                                else grad
-                            )
+                            update_grad = fake_momentum if group["momentum_into_precond_update"] else grad
 
                         # Reset statistics
                         self.momentum_mean[p].zero_()
                         self.momentum_var[p].zero_()
                         self.momentum_count[p] = 0
                     else:
-                        update_grad = (
-                            nesterov_momentum
-                            if group["momentum_into_precond_update"]
-                            else grad
-                        )
+                        update_grad = nesterov_momentum if group["momentum_into_precond_update"] else grad
 
                     if group["verbose"]:
                         momentum_energy = torch.mean(momentum_buffer**2).item()
-                        if not (
-                            math.isnan(momentum_energy) or math.isinf(momentum_energy)
-                        ):
+                        if not (math.isnan(momentum_energy) or math.isinf(momentum_energy)):
                             momentum_energies.append(momentum_energy)
 
                     # Check update_grad for nan/inf before updating preconditioner
                     if torch.isnan(update_grad).any() or torch.isinf(update_grad).any():
-                        print(
-                            "Warning: update_grad contains nan/inf, skipping preconditioner update"
-                        )
+                        print("Warning: update_grad contains nan/inf, skipping preconditioner update")
                         continue
 
                     if isinstance(update_grad, DTensor):
@@ -452,14 +402,10 @@ class KronMars(torch.optim.Optimizer):
 
             if pre_grad_energies:
                 mean_pre_grad_energy = sum(pre_grad_energies) / len(pre_grad_energies)
-                print(
-                    f"Mean preconditioned gradient energy: {mean_pre_grad_energy:.6f}"
-                )
+                print(f"Mean preconditioned gradient energy: {mean_pre_grad_energy:.6f}")
 
             if fake_momentum_energies:
-                mean_fake_momentum_energy = sum(fake_momentum_energies) / len(
-                    fake_momentum_energies
-                )
+                mean_fake_momentum_energy = sum(fake_momentum_energies) / len(fake_momentum_energies)
                 print(f"Mean fake momentum energy: {mean_fake_momentum_energy:.6f}")
 
         # Clear energy lists at the start of each step
@@ -505,9 +451,7 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
         exprP = ",,->"
     else:  # tensor
         if len(shape) > 13:
-            raise ValueError(
-                f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters!"
-            )
+            raise ValueError(f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters!")
 
         scale = scale ** (1 / len(shape))
 
@@ -521,8 +465,7 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
             dim_diag = [True for _ in shape]
         else:
             raise ValueError(
-                f"Invalid memory_save_mode: {memory_save_mode}, must be one of "
-                "[None, 'one_diag', 'all_diag']"
+                f"Invalid memory_save_mode: {memory_save_mode}, must be one of [None, 'one_diag', 'all_diag']"
             )
 
         Q = []
@@ -530,31 +473,19 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
         exprGs = []
         piece1P, piece2P, piece3P, piece4P = ([], [], "", "")
         for i, (size, dim_d) in enumerate(zip(shape, dim_diag)):
-            if (
-                size == 1
-                or size > max_size
-                or len(shape) < min_ndim_triangular
-                or dim_d
-            ):
+            if size == 1 or size > max_size or len(shape) < min_ndim_triangular or dim_d:
                 # use diagonal matrix as preconditioner for this dim
                 tensor = scale * torch.ones(size, dtype=dtype, device=t.device)
                 if isinstance(t, DTensor):
                     # again special case where we dont need to broadcast because init matrix is same on all devices
-                    tensor = distribute_tensor(
-                        tensor, device_mesh=t.device_mesh, placements=t.placements
-                    )
+                    tensor = distribute_tensor(tensor, device_mesh=t.device_mesh, placements=t.placements)
                 Q.append(tensor)
 
                 piece1A.append(letters[i])
                 piece2A = piece2A + letters[i]
                 piece3A = piece3A + letters[i]
 
-                piece1 = "".join(
-                    [
-                        (letters[i + 13] if j == i else letters[j])
-                        for j in range(len(shape))
-                    ]
-                )
+                piece1 = "".join([(letters[i + 13] if j == i else letters[j]) for j in range(len(shape))])
                 subscripts = piece1 + "," + piece1 + "->" + letters[i + 13]
                 exprGs.append(subscripts)
 
@@ -566,30 +497,16 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
                 # use triangular matrix as preconditioner for this dim
                 tensor = scale * torch.eye(size, dtype=dtype, device=t.device)
                 if isinstance(t, DTensor):
-                    tensor = distribute_tensor(
-                        tensor, device_mesh=t.device_mesh, placements=t.placements
-                    )
+                    tensor = distribute_tensor(tensor, device_mesh=t.device_mesh, placements=t.placements)
                 Q.append(tensor)
 
                 piece1A.append(letters[i] + letters[i + 13])
                 piece2A = piece2A + letters[i + 13]
                 piece3A = piece3A + letters[i]
 
-                piece1 = "".join(
-                    [
-                        (letters[i + 13] if j == i else letters[j])
-                        for j in range(len(shape))
-                    ]
-                )
-                piece2 = "".join(
-                    [
-                        (letters[i + 26] if j == i else letters[j])
-                        for j in range(len(shape))
-                    ]
-                )
-                subscripts = (
-                    piece1 + "," + piece2 + "->" + letters[i + 13] + letters[i + 26]
-                )
+                piece1 = "".join([(letters[i + 13] if j == i else letters[j]) for j in range(len(shape))])
+                piece2 = "".join([(letters[i + 26] if j == i else letters[j]) for j in range(len(shape))])
+                subscripts = piece1 + "," + piece2 + "->" + letters[i + 13] + letters[i + 26]
                 exprGs.append(subscripts)
 
                 a, b, c = (letters[i], letters[i + 13], letters[i + 26])
@@ -602,9 +519,7 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
             Q.append(-2)
 
         exprA = ",".join(piece1A) + "," + piece2A + "->" + piece3A
-        exprP = (
-            ",".join(piece1P) + "," + ",".join(piece2P) + "," + piece3P + "->" + piece4P
-        )
+        exprP = ",".join(piece1P) + "," + ",".join(piece2P) + "," + piece3P + "->" + piece4P
     exprGs = tuple(exprGs)
     return [Q, (exprA, exprGs, exprP)]
 
@@ -625,14 +540,10 @@ def _lb(A, max_abs):
     value1, j = torch.max(torch.sum(aa, dim=1), 0)
     if value0 > value1:
         x = A[:, i].conj() @ A
-        return max_abs * torch.linalg.vector_norm(
-            (x / torch.linalg.vector_norm(x)) @ A.H
-        )
+        return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A.H)
     else:
         x = A @ A[j].conj()
-        return max_abs * torch.linalg.vector_norm(
-            A.H @ (x / torch.linalg.vector_norm(x))
-        )
+        return max_abs * torch.linalg.vector_norm(A.H @ (x / torch.linalg.vector_norm(x)))
 
 
 def _norm_lower_bound(A):
@@ -646,9 +557,9 @@ def _solve_triangular_right(X, A):
     orig_dtype = X.dtype
     X = X.to(dtype=torch.float32, non_blocking=True)
     A = A.to(dtype=torch.float32, non_blocking=True)
-    return torch.linalg.solve_triangular(A, X[None, :], upper=True, left=False).to(
-        dtype=orig_dtype, non_blocking=True
-    )[0]
+    return torch.linalg.solve_triangular(A, X[None, :], upper=True, left=False).to(dtype=orig_dtype, non_blocking=True)[
+        0
+    ]
 
 
 # @torch.compile(fullgraph=True, dynamic=False)

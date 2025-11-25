@@ -12,9 +12,7 @@ def to_dist(x, from_local=False, **meta):
             stride=meta["stride"],
         )
     else:
-        return distribute_tensor(
-            x, device_mesh=meta["device_mesh"], placements=meta["placements"]
-        )
+        return distribute_tensor(x, device_mesh=meta["device_mesh"], placements=meta["placements"])
 
 
 def to_local(x, keep_sharded=False):

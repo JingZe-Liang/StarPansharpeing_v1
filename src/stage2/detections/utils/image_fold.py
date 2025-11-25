@@ -86,9 +86,7 @@ class WindowMerger(nn.Module):
 
         # use the average operation to deal with the overlapped areas among blocks.
         tmp = torch.ones_like(ori)
-        tmp_unfold = F.unfold(
-            tmp, (self.ksize, self.ksize), padding=pad, stride=self.stride
-        )
+        tmp_unfold = F.unfold(tmp, (self.ksize, self.ksize), padding=pad, stride=self.stride)
         fold_mask = F.fold(
             tmp_unfold,
             (row, col),

@@ -64,10 +64,7 @@ class DualBranchSharedBasis(nn.Module):
 
         # 2. Specific branch: a ModuleList creating independent 1x1 convolutions for each scale
         self.specific_branches = nn.ModuleList(
-            [
-                nn.Conv2d(in_ch, specific_rank, kernel_size=1, bias=bias)
-                for _ in range(num_scales)
-            ]
+            [nn.Conv2d(in_ch, specific_rank, kernel_size=1, bias=bias) for _ in range(num_scales)]
         )
 
     def forward(self, x: torch.Tensor, scale_idx: int) -> torch.Tensor:
@@ -110,9 +107,7 @@ class DepthwiseSeparableConv(nn.Module):
         super().__init__()
         norm_kwargs = {} if norm_kwargs is None else norm_kwargs
         act_kwargs = {"inplace": True} if act_kwargs is None else act_kwargs
-        self.depthwise = create_conv2d(
-            in_ch, in_ch, kernel_size, bias=bias, depthwise=True
-        )
+        self.depthwise = create_conv2d(in_ch, in_ch, kernel_size, bias=bias, depthwise=True)
         self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=bias)
         if norm is not None:
             self.norm_act = create_norm_act_layer(norm, out_ch, act, inplace=inplace)
@@ -184,16 +179,11 @@ class FAPM(nn.Module):
 
         # --- Stage 1: Dual-branch feature extraction ---
         self.shared_basis = nn.Conv2d(in_ch, inner_ch, kernel_size=1, bias=bias)
-        self.specific_bases = nn.ModuleList(
-            [nn.Conv2d(in_ch, inner_ch, kernel_size=1, bias=bias) for _ in out_ch_list]
-        )
+        self.specific_bases = nn.ModuleList([nn.Conv2d(in_ch, inner_ch, kernel_size=1, bias=bias) for _ in out_ch_list])
 
         # --- FiLM parameter generators ---
         self.modulations = nn.ModuleList(
-            [
-                nn.Conv2d(inner_ch, inner_ch * 2, kernel_size=1, bias=bias)
-                for _ in out_ch_list
-            ]
+            [nn.Conv2d(inner_ch, inner_ch * 2, kernel_size=1, bias=bias) for _ in out_ch_list]
         )
 
         # --- Stage 2: Scale-wise progressive refinement ---
@@ -222,9 +212,7 @@ class FAPM(nn.Module):
             self.refinement_blocks.append(
                 nn.Sequential(
                     reduce,
-                    create_norm_act_layer(norm, oc, act, inplace=False)
-                    if norm
-                    else nn.Identity(),
+                    create_norm_act_layer(norm, oc, act, inplace=False) if norm else nn.Identity(),
                     dw,
                     refine,
                     se,
@@ -234,9 +222,7 @@ class FAPM(nn.Module):
             # --- Shortcut branch ---
             # If refinement block input/output channel counts differ, need 1x1 conv to match dimensions
             if inner_ch != oc:
-                self.shortcut_projections.append(
-                    nn.Conv2d(inner_ch, oc, kernel_size=1, bias=bias)
-                )
+                self.shortcut_projections.append(nn.Conv2d(inner_ch, oc, kernel_size=1, bias=bias))
             else:
                 # If dimensions are the same, no operation needed
                 self.shortcut_projections.append(nn.Identity())
@@ -271,9 +257,7 @@ class LearnableUpsampleBlock(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        self.up2 = nn.ConvTranspose2d(
-            channels, channels, kernel_size=2, stride=2, bias=True
-        )
+        self.up2 = nn.ConvTranspose2d(channels, channels, kernel_size=2, stride=2, bias=True)
 
     def forward(self, x: torch.Tensor, target_size: Tuple[int, int]) -> torch.Tensor:
         h, w = x.shape[2], x.shape[3]
@@ -283,9 +267,7 @@ class LearnableUpsampleBlock(nn.Module):
             out = self.up2(out)
             h, w = out.shape[2], out.shape[3]
         if (h, w) != target_size:
-            out = F.interpolate(
-                out, size=target_size, mode="bilinear", align_corners=False
-            )
+            out = F.interpolate(out, size=target_size, mode="bilinear", align_corners=False)
         return out
 
 
@@ -312,9 +294,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.norm_op = norm_op if norm_op is not None else nn.BatchNorm2d
         self.norm_op_kwargs = norm_op_kwargs if norm_op_kwargs is not None else {}
         self.nonlin = nonlin if nonlin is not None else nn.ReLU
-        self.nonlin_kwargs = (
-            nonlin_kwargs if nonlin_kwargs is not None else {"inplace": True}
-        )
+        self.nonlin_kwargs = nonlin_kwargs if nonlin_kwargs is not None else {"inplace": True}
         self.conv_bias = conv_bias
 
         self.dropout_op = dropout_op
@@ -424,19 +404,11 @@ class UNetDecoder(nn.Module):
         # transpconv_op = get_matching_convtransp(conv_op=encoder.conv_op)
         conv_bias = encoder.conv_bias if conv_bias is None else conv_bias
         norm_op = encoder.norm_op if norm_op is None else norm_op
-        norm_op_kwargs = (
-            encoder.norm_op_kwargs if norm_op_kwargs is None else norm_op_kwargs
-        )
+        norm_op_kwargs = encoder.norm_op_kwargs if norm_op_kwargs is None else norm_op_kwargs
         dropout_op = encoder.dropout_op if dropout_op is None else dropout_op
-        dropout_op_kwargs = (
-            encoder.dropout_op_kwargs
-            if dropout_op_kwargs is None
-            else dropout_op_kwargs
-        )
+        dropout_op_kwargs = encoder.dropout_op_kwargs if dropout_op_kwargs is None else dropout_op_kwargs
         nonlin = encoder.nonlin if nonlin is None else nonlin
-        nonlin_kwargs = (
-            encoder.nonlin_kwargs if nonlin_kwargs is None else nonlin_kwargs
-        )
+        nonlin_kwargs = encoder.nonlin_kwargs if nonlin_kwargs is None else nonlin_kwargs
 
         # we start with the bottleneck and work out way up
         stages = []
@@ -473,9 +445,7 @@ class UNetDecoder(nn.Module):
             # we always build the deep supervision outputs so that we can always load parameters. If we don't do this
             # then a model trained with deep_supervision=True could not easily be loaded at inference time where
             # deep supervision is not needed. It's just a convenience thing
-            seg_layers.append(
-                encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True)
-            )
+            seg_layers.append(encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True))
 
         self.stages = nn.ModuleList(stages)
         self.transpconvs = nn.ModuleList(transpconvs)

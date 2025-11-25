@@ -6,9 +6,7 @@ import torch.nn.functional as F
 from .registry import CONV_LAYERS
 
 
-def conv_ws_2d(
-    input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, eps=1e-5
-):
+def conv_ws_2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, eps=1e-5):
     c_in = weight.size(0)
     weight_flat = weight.view(c_in, -1)
     mean = weight_flat.mean(dim=1, keepdim=True).view(c_in, 1, 1, 1)
@@ -114,9 +112,7 @@ class ConvAWS2d(nn.Conv2d):
 
     def forward(self, x):
         weight = self._get_weight(self.weight)
-        return F.conv2d(
-            x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups
-        )
+        return F.conv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
     def _load_from_state_dict(
         self,
@@ -159,11 +155,7 @@ class ConvAWS2d(nn.Conv2d):
         std = torch.sqrt(weight_flat.var(dim=1) + 1e-5).view(-1, 1, 1, 1)
         self.weight_beta.data.copy_(mean)
         self.weight_gamma.data.copy_(std)
-        missing_gamma_beta = [
-            k
-            for k in local_missing_keys
-            if k.endswith("weight_gamma") or k.endswith("weight_beta")
-        ]
+        missing_gamma_beta = [k for k in local_missing_keys if k.endswith("weight_gamma") or k.endswith("weight_beta")]
         for k in missing_gamma_beta:
             local_missing_keys.remove(k)
         for k in local_missing_keys:

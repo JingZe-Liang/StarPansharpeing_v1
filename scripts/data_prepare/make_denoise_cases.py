@@ -94,9 +94,7 @@ def _get_hypersigma_5cases_noise_adder_reimplem(case_name: str, use_torch: bool 
 
     if case_name not in case_configs:
         available_cases = list(case_configs.keys())
-        raise ValueError(
-            f"Unknown case name: {case_name}. Available cases: {available_cases}"
-        )
+        raise ValueError(f"Unknown case name: {case_name}. Available cases: {available_cases}")
 
     config = case_configs[case_name]
     return UniHSINoiseAdderKornia(
@@ -110,22 +108,15 @@ def _get_hypersigma_5cases_noise_adder_reimplem(case_name: str, use_torch: bool 
     )
 
 
-def get_all_hypersigma_noise_adders(
-    use_torch: bool = True, cases: list[str] | None = None
-):
+def get_all_hypersigma_noise_adders(use_torch: bool = True, cases: list[str] | None = None):
     """
     Get all HyperSIGMA noise adders in a dictionary.
 
     Returns:
         Dictionary with case names as keys and noise adders as values
     """
-    case_names = (
-        ["case1", "case2", "case3", "case4", "case5"] if cases is None else cases
-    )
-    return {
-        case: _get_hypersigma_5cases_noise_adder_reimplem(case, use_torch)
-        for case in case_names
-    }
+    case_names = ["case1", "case2", "case3", "case4", "case5"] if cases is None else cases
+    return {case: _get_hypersigma_5cases_noise_adder_reimplem(case, use_torch) for case in case_names}
 
 
 def create_denoising_dataset(
@@ -192,9 +183,7 @@ def test_generate_case():
         item = ds[i]
         img_clean = item["img_clean"]
         img_noisy = item["img_noisy"]
-        print(
-            f"Batch {i} - name {item['__key__']}:  Noisy image shape: {img_noisy.shape}"
-        )
+        print(f"Batch {i} - name {item['__key__']}:  Noisy image shape: {img_noisy.shape}")
 
 
 if __name__ == "__main__":

@@ -17,9 +17,7 @@ from src.utilities.logging import log
 @dataclass
 class ConvCfg:
     expand_ratio: float = 4.0
-    expand_output: bool = (
-        True  # calculate expansion channels from output (vs input chs)
-    )
+    expand_output: bool = True  # calculate expansion channels from output (vs input chs)
     kernel_size: int = 3
     group_size: int = 1  # 1 == depthwise
     pre_norm_act: bool = False  # activation after pre-norm
@@ -58,21 +56,15 @@ class VitaminModel(nn.Module):
         self.cfg = cfg
 
         patchers = nn.ModuleDict()
-        patchers["pan_conv"] = create_patcher(
-            cfg.pan_channel, cfg.stem_width, cfg.patch_size
-        )
-        patchers["ms_conv"] = create_patcher(
-            cfg.ms_channel, cfg.stem_width, cfg.patch_size
-        )
+        patchers["pan_conv"] = create_patcher(cfg.pan_channel, cfg.stem_width, cfg.patch_size)
+        patchers["ms_conv"] = create_patcher(cfg.ms_channel, cfg.stem_width, cfg.patch_size)
         patchers["fused_conv"] = create_conv3x3_same(cfg.stem_width * 2, cfg.stem_width)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer(cfg.conv_cfg.norm_layer, cfg.condition_channel),
             create_conv3x3_same(cfg.condition_channel, cfg.stem_width),
         )
         self.patchers = patchers
-        self.unpatcher = create_unpatcher(
-            cfg.embed_dim[-1], cfg.embed_dim[-1], cfg.patch_size
-        )
+        self.unpatcher = create_unpatcher(cfg.embed_dim[-1], cfg.embed_dim[-1], cfg.patch_size)
 
         self.stages = MbConvStages(
             cfg.stem_width,
@@ -91,9 +83,7 @@ class VitaminModel(nn.Module):
     def init_weights(self):
         for name, module in self.stages.named_modules():
             if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu"
-                )
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)):
@@ -106,9 +96,7 @@ class VitaminModel(nn.Module):
 
         for patcher in self.patchers.values():
             for name, module in patcher.named_modules():
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu"
-                )
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -141,9 +129,7 @@ if __name__ == "__main__":
     import torch
 
     # Example usage of ConvCfg dataclass
-    conv_cfg = ConvCfg(
-        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-    )
+    conv_cfg = ConvCfg(expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d")
     print("ConvCfg example:", conv_cfg)
 
     # Example usage of VitaminCfg dataclass

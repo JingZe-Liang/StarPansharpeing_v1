@@ -7,9 +7,7 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from stage1.utilities.losses.repa.feature_pca import feature_pca_cuml
 
 # read image
-img = Image.open(
-    "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/scripts/tests/imgs/rs_mmseg_demo.jpg"
-)
+img = Image.open("/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/scripts/tests/imgs/rs_mmseg_demo.jpg")
 _next_pow_of_x = lambda x, y: int(np.ceil(x / y)) * y
 _sz = _next_pow_of_x(512, 14)
 img = img.resize((_sz, _sz))
@@ -27,9 +25,7 @@ img = (img - _mean) / _std
 
 # dino
 _model_kwargs = {"interpolate_antialias": True}
-repa_encoder = torch.hub.load(
-    "facebookresearch/dinov2", "dinov2_vitb14", source="local"
-).cuda()
+repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", source="local").cuda()
 repa_encoder.eval()
 repa_encoder.image_size = 224
 

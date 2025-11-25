@@ -27,10 +27,7 @@ def flowread(flow_or_path, quantize=False, concat_axis=0, *args, **kwargs):
             raise ValueError(f"Invalid flow with shape {flow_or_path.shape}")
         return flow_or_path
     elif not is_str(flow_or_path):
-        raise TypeError(
-            f'"flow_or_path" must be a filename or numpy array, '
-            f"not {type(flow_or_path)}"
-        )
+        raise TypeError(f'"flow_or_path" must be a filename or numpy array, not {type(flow_or_path)}')
 
     if not quantize:
         with open(flow_or_path, "rb") as f:
@@ -40,10 +37,7 @@ def flowread(flow_or_path, quantize=False, concat_axis=0, *args, **kwargs):
                 raise IOError(f"Invalid flow file: {flow_or_path}")
             else:
                 if header != "PIEH":
-                    raise IOError(
-                        f"Invalid flow file: {flow_or_path}, "
-                        "header does not contain PIEH"
-                    )
+                    raise IOError(f"Invalid flow file: {flow_or_path}, header does not contain PIEH")
 
             w = np.fromfile(f, np.int32, 1).squeeze()
             h = np.fromfile(f, np.int32, 1).squeeze()
@@ -52,10 +46,7 @@ def flowread(flow_or_path, quantize=False, concat_axis=0, *args, **kwargs):
         assert concat_axis in [0, 1]
         cat_flow = imread(flow_or_path, flag="unchanged")
         if cat_flow.ndim != 2:
-            raise IOError(
-                f"{flow_or_path} is not a valid quantized flow file, "
-                f"its dimension is {cat_flow.ndim}."
-            )
+            raise IOError(f"{flow_or_path} is not a valid quantized flow file, its dimension is {cat_flow.ndim}.")
         assert cat_flow.shape[concat_axis] % 2 == 0
         dx, dy = np.split(cat_flow, 2, axis=concat_axis)
         flow = dequantize_flow(dx, dy, *args, **kwargs)
@@ -156,10 +147,7 @@ def flow_warp(img, flow, filling_value=0, interpolate_mode="nearest"):
     Returns:
         ndarray: Warped image with the same shape of img
     """
-    warnings.warn(
-        "This function is just for prototyping and cannot "
-        "guarantee the computational efficiency."
-    )
+    warnings.warn("This function is just for prototyping and cannot guarantee the computational efficiency.")
     assert flow.ndim == 3, "Flow must be in 3D arrays."
     height = flow.shape[0]
     width = flow.shape[1]
@@ -175,9 +163,7 @@ def flow_warp(img, flow, filling_value=0, interpolate_mode="nearest"):
     valid = (sx >= 0) & (sx < height - 1) & (sy >= 0) & (sy < width - 1)
 
     if interpolate_mode == "nearest":
-        output[valid, :] = img[
-            dx[valid].round().astype(int), dy[valid].round().astype(int), :
-        ]
+        output[valid, :] = img[dx[valid].round().astype(int), dy[valid].round().astype(int), :]
     elif interpolate_mode == "bilinear":
         # dirty walkround for integer positions
         eps_ = 1e-6
@@ -205,8 +191,7 @@ def flow_warp(img, flow, filling_value=0, interpolate_mode="nearest"):
         output[valid, :] = left_top_ + left_down_ + right_top_ + right_down_
     else:
         raise NotImplementedError(
-            "We only support interpolation modes of nearest and bilinear, "
-            f"but got {interpolate_mode}."
+            f"We only support interpolation modes of nearest and bilinear, but got {interpolate_mode}."
         )
     return output.astype(img.dtype)
 
@@ -235,9 +220,7 @@ def flow_from_bytes(content):
     # height in third 4 bytes
     height = np.frombuffer(content[8:], np.int32, 1).squeeze()
     # after first 12 bytes, all bytes are flow
-    flow = np.frombuffer(content[12:], np.float32, width * height * 2).reshape(
-        (height, width, 2)
-    )
+    flow = np.frombuffer(content[12:], np.float32, width * height * 2).reshape((height, width, 2))
 
     return flow
 

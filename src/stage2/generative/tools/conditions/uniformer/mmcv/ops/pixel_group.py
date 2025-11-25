@@ -70,9 +70,7 @@ def pixel_group(
         list_index = kernel_region_num
         pixel_assignment = []
         for x in range(kernel_region_num):
-            pixel_assignment.append(
-                np.array(label[list_index : list_index + int(label[x])], dtype=np.float)
-            )
+            pixel_assignment.append(np.array(label[list_index : list_index + int(label[x])], dtype=np.float))
             list_index = list_index + int(label[x])
     else:
         pixel_assignment = ext_module.pixel_group(

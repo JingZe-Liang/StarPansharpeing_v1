@@ -65,11 +65,7 @@ class DisentangledNonLocal2d(NonLocal2d):
         # y: [N, HxW, C]
         y = torch.matmul(pairwise_weight, g_x)
         # y: [N, C, H, W]
-        y = (
-            y.permute(0, 2, 1)
-            .contiguous()
-            .reshape(n, self.inter_channels, *x.size()[2:])
-        )
+        y = y.permute(0, 2, 1).contiguous().reshape(n, self.inter_channels, *x.size()[2:])
 
         # unary_mask: [N, 1, HxW]
         unary_mask = self.conv_mask(x)
@@ -78,9 +74,7 @@ class DisentangledNonLocal2d(NonLocal2d):
         # unary_x: [N, 1, C]
         unary_x = torch.matmul(unary_mask, g_x)
         # unary_x: [N, C, 1, 1]
-        unary_x = (
-            unary_x.permute(0, 2, 1).contiguous().reshape(n, self.inter_channels, 1, 1)
-        )
+        unary_x = unary_x.permute(0, 2, 1).contiguous().reshape(n, self.inter_channels, 1, 1)
 
         output = x + self.conv_out(y + unary_x)
 

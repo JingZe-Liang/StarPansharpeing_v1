@@ -56,9 +56,7 @@ class FeedForward(nn.Module):
             inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
 
-        self.proj_in_act = get_linear_activation(
-            activation_fn, dim, inner_dim=inner_dim, bias=bias
-        )
+        self.proj_in_act = get_linear_activation(activation_fn, dim, inner_dim=inner_dim, bias=bias)
         self.drop = nn.Dropout(dropout)
         self.proj_out = nn.Linear(inner_dim, dim_out, bias=bias)
 
@@ -206,9 +204,7 @@ class TransformerBlock(nn.Module):
         # Positional bias
         self.relative_position_bias = None
         if relative_bias:
-            self.relative_position_bias = RelativePositionBias(
-                attn_window, num_attention_heads
-            )
+            self.relative_position_bias = RelativePositionBias(attn_window, num_attention_heads)
 
     def forward(
         self,
@@ -299,13 +295,9 @@ class VisionTransformer(nn.Module):
 
         self.pos_embeddings = None
         if learned_pos_embed:
-            assert sample_size is not None, (
-                "sample_size must be provided for learned positional embeddings."
-            )
+            assert sample_size is not None, "sample_size must be provided for learned positional embeddings."
             H, W = sample_size
-            self.pos_embeddings = LearnedPositionalEmbedding(
-                (inner_dim, H // patch_size, W // patch_size)
-            )
+            self.pos_embeddings = LearnedPositionalEmbedding((inner_dim, H // patch_size, W // patch_size))
 
         # If num_attention_heads is not specified, use inner_dim // 64
         if num_attention_heads is None:

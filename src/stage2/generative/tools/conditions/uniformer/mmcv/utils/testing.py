@@ -39,9 +39,7 @@ def _any(judge_result):
     return False
 
 
-def assert_dict_contains_subset(
-    dict_obj: Dict[Any, Any], expected_subset: Dict[Any, Any]
-) -> bool:
+def assert_dict_contains_subset(dict_obj: Dict[Any, Any], expected_subset: Dict[Any, Any]) -> bool:
     """Check if the dict_obj contains the expected_subset.
 
     Args:

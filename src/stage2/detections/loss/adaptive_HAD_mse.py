@@ -90,10 +90,7 @@ class AdaptiveHADMSE(nn.Module):
         if self.residual is None:
             # residual is batch-wise spatial map: (batch, height, width)
             batch, channels, height, width = shape
-            self.residual = (
-                torch.ones((batch, height, width), device=self.device)
-                * self.init_residual_value
-            )
+            self.residual = torch.ones((batch, height, width), device=self.device) * self.init_residual_value
 
     def _update_weights(self, output: torch.Tensor, target: torch.Tensor):
         """
@@ -119,9 +116,7 @@ class AdaptiveHADMSE(nn.Module):
 
         # Get max values for each sample in the batch [B]
         r_max_per_sample = residual_img.view(batch, -1).max(dim=1)[0]  # [B]
-        r_max_per_sample = r_max_per_sample.view(
-            batch, 1, 1
-        )  # [B, 1, 1] for broadcasting
+        r_max_per_sample = r_max_per_sample.view(batch, 1, 1)  # [B, 1, 1] for broadcasting
 
         # Convert residuals to weights (inverse relationship)
         # Higher error -> lower weight
@@ -129,12 +124,8 @@ class AdaptiveHADMSE(nn.Module):
 
         # Normalize each sample individually to [0, 1]
         # Get min and max for each sample
-        r_min_per_sample = torch.amin(
-            batch_residual_weights, dim=(1, 2), keepdim=True
-        )  # [B, 1, 1]
-        r_max_per_sample = torch.amax(
-            batch_residual_weights, dim=(1, 2), keepdim=True
-        )  # [B, 1, 1]
+        r_min_per_sample = torch.amin(batch_residual_weights, dim=(1, 2), keepdim=True)  # [B, 1, 1]
+        r_max_per_sample = torch.amax(batch_residual_weights, dim=(1, 2), keepdim=True)  # [B, 1, 1]
 
         # Already in correct shape for broadcasting
         # r_min_per_sample and r_max_per_sample are already [B, 1, 1]
@@ -145,17 +136,17 @@ class AdaptiveHADMSE(nn.Module):
         # Handle both batch and single sample cases
         if valid_range.dim() == 0:  # Single sample case
             if valid_range:
-                batch_residual_weights[0] = (
-                    batch_residual_weights[0] - r_min_per_sample[0]
-                ) / (r_max_per_sample[0] - r_min_per_sample[0] + self.epsilon)
+                batch_residual_weights[0] = (batch_residual_weights[0] - r_min_per_sample[0]) / (
+                    r_max_per_sample[0] - r_min_per_sample[0] + self.epsilon
+                )
             else:
                 batch_residual_weights[0] = 1.0
         else:  # Batch case
             for b in range(batch):
                 if valid_range[b]:
-                    batch_residual_weights[b] = (
-                        batch_residual_weights[b] - r_min_per_sample[b]
-                    ) / (r_max_per_sample[b] - r_min_per_sample[b] + self.epsilon)
+                    batch_residual_weights[b] = (batch_residual_weights[b] - r_min_per_sample[b]) / (
+                        r_max_per_sample[b] - r_min_per_sample[b] + self.epsilon
+                    )
 
             # Set uniform weights for samples with no range
             for b in range(batch):
@@ -233,9 +224,7 @@ class AdaptiveHADMSE(nn.Module):
             score_max = anomaly_score[b].max()
 
             if score_max > score_min:
-                anomaly_score[b] = (anomaly_score[b] - score_min) / (
-                    score_max - score_min + self.epsilon
-                )
+                anomaly_score[b] = (anomaly_score[b] - score_min) / (score_max - score_min + self.epsilon)
 
         return anomaly_score
 
@@ -256,11 +245,7 @@ class AdaptiveHADMSE(nn.Module):
         self.current_residual = None
 
     def extra_repr(self) -> str:
-        return (
-            f"update_interval={self.update_interval}, "
-            f"step_name='{self.step_name}', "
-            f"epsilon={self.epsilon}"
-        )
+        return f"update_interval={self.update_interval}, step_name='{self.step_name}', epsilon={self.epsilon}"
 
 
 # Example usage and testing
@@ -293,18 +278,14 @@ def test_adaptive_had_mse():
         target = torch.randn(batch_size, channels, height, width, device=device)
 
         # Add some "anomalies" to different samples
-        output = target + 0.1 * torch.randn(
-            batch_size, channels, height, width, device=device
-        )
+        output = target + 0.1 * torch.randn(batch_size, channels, height, width, device=device)
 
         # Add specific anomalies to each sample
         for b in range(batch_size):
             # Each sample has anomaly in different location
             anomaly_y = (height // (batch_size + 1)) * (b + 1)
             anomaly_x = width // 2
-            output[
-                b, :, anomaly_y - 2 : anomaly_y + 3, anomaly_x - 2 : anomaly_x + 3
-            ] *= 2.0
+            output[b, :, anomaly_y - 2 : anomaly_y + 3, anomaly_x - 2 : anomaly_x + 3] *= 2.0
 
         # Simulate training loop
         for step in range(50):
@@ -315,10 +296,7 @@ def test_adaptive_had_mse():
             loss, anomaly_score = loss_fn(output, target)
 
             if step % 25 == 0:
-                print(
-                    f"Step {step}: Loss = {loss.item():.6f}, "
-                    f"Anomaly score shape = {anomaly_score.shape}"
-                )
+                print(f"Step {step}: Loss = {loss.item():.6f}, Anomaly score shape = {anomaly_score.shape}")
 
                 # Show anomaly score range for each sample
                 for b in range(batch_size):
@@ -328,9 +306,7 @@ def test_adaptive_had_mse():
 
                 # Show mask statistics (should be same for all samples)
                 mask = loss_fn.get_current_mask()
-                print(
-                    f"  Mask shape = {mask.shape}, range = [{mask.min():.4f}, {mask.max():.4f}]"
-                )
+                print(f"  Mask shape = {mask.shape}, range = [{mask.min():.4f}, {mask.max():.4f}]")
 
                 # Show residual shape
                 residual = loss_fn.get_current_residual()

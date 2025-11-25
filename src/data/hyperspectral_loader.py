@@ -74,9 +74,7 @@ type SupportedLoaderType = Literal["webdataset", "folder", "wids", "mds"]
 
 import hashlib
 
-loader_seed = int(
-    hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16
-) % (2**31)
+loader_seed = int(hashlib.sha256("uestc_ZihanCao_add_my_wechat:iamzihan123".encode()).hexdigest(), 16) % (2**31)
 loader_generator = torch.Generator().manual_seed(loader_seed)
 
 
@@ -262,16 +260,10 @@ def get_hyperspectral_dataloaders(
     Returns:
         tuple[wds.WebDataset, wds.WebLoader]: Returns a tuple containing the WebDataset object and its corresponding dataloader
     """
-    use_transf = (
-        hyper_transforms_lst is not None
-        and len(hyper_transforms_lst) > 0
-        and transform_prob > 0
-    )
+    use_transf = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0
     if use_transf:
         transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)  # type: ignore
-        log_print(
-            f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
-        )
+        log_print(f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}")
     use_deg = hyper_degradation_lst is not None and degradation_prob > 0
 
     dataset = wds.WebDataset(
@@ -327,21 +319,11 @@ def get_hyperspectral_dataloaders(
     if img_key == "auto":
         if tgt_key is None:
             tgt_key = "img"
-        assert isinstance(tgt_key, str), (
-            f'tgt_key must be a string if img_key is "auto", but got {type(tgt_key)}'
-        )
+        assert isinstance(tgt_key, str), f'tgt_key must be a string if img_key is "auto", but got {type(tgt_key)}'
         # only search one key as the tgt_key, it will remove other keys if you have multiple image keys
-        dataset = dataset.map(
-            partial(
-                search_one_key_not_dunder, out_key=tgt_key, random_one=random_one_key
-            )
-        )
-    elif isinstance(img_key, (str, tuple, list)) and (
-        isinstance(tgt_key, (str, tuple, list))
-    ):
-        dataset = dataset.map(
-            partial(rename_keys, tgt_keys=tgt_key, source_keys=img_key)
-        )
+        dataset = dataset.map(partial(search_one_key_not_dunder, out_key=tgt_key, random_one=random_one_key))
+    elif isinstance(img_key, (str, tuple, list)) and (isinstance(tgt_key, (str, tuple, list))):
+        dataset = dataset.map(partial(rename_keys, tgt_keys=tgt_key, source_keys=img_key))
     elif tgt_key is None:
         tgt_key = img_key
     else:
@@ -360,9 +342,7 @@ def get_hyperspectral_dataloaders(
 
     # pass the minimal size or range of the image
     if constraint_size is not None:
-        _sz_filter_fn = partial(
-            size_filtering, tgt_key=tgt_key, constraint_size=constraint_size
-        )
+        _sz_filter_fn = partial(size_filtering, tgt_key=tgt_key, constraint_size=constraint_size)
         dataset = dataset.map(_sz_filter_fn)
 
     # norm
@@ -382,9 +362,7 @@ def get_hyperspectral_dataloaders(
 
     # channel check
     if check_channels_n is not None:
-        check_fn = partial(
-            check_img_channel, expect_channels=check_channels_n, img_key=tgt_key
-        )
+        check_fn = partial(check_img_channel, expect_channels=check_channels_n, img_key=tgt_key)
         dataset = dataset.map(check_fn)
 
     # resize
@@ -400,9 +378,7 @@ def get_hyperspectral_dataloaders(
 
     # re-batched
     if shuffle_within_workers:
-        dataset = dataset.batched(
-            batch_size, collation_fn=collate_fn_for_dict
-        )  # stacked into batch
+        dataset = dataset.batched(batch_size, collation_fn=collate_fn_for_dict)  # stacked into batch
 
     # augmentations
     if use_transf:
@@ -440,11 +416,7 @@ def get_hyperspectral_dataloaders(
         dataloader.map_dict(**{k: deg_pipe for k in tgt_key})
 
     if epoch_len > 0:
-        _world_size = (
-            torch.distributed.get_world_size()
-            if torch.distributed.is_initialized()
-            else 1
-        )
+        _world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
         dataloader = dataloader.with_epoch(epoch_len // _world_size)
         log_print(f"dataloader with epoch length: {epoch_len // _world_size}")
 
@@ -589,8 +561,7 @@ def ms_pan_dir_paired_loader(
             self.to_neg_1_1 = to_neg_1_1
 
             self.ms_paths = natsorted(
-                list((self.path / self.ms_dir_name).glob("*.tiff"))
-                + list((self.path / self.ms_dir_name).glob("*.mat"))
+                list((self.path / self.ms_dir_name).glob("*.tiff")) + list((self.path / self.ms_dir_name).glob("*.mat"))
             )
             self.pan_paths = natsorted(
                 list((self.path / self.pan_dir_name).glob("*.tiff"))
@@ -737,16 +708,10 @@ def only_hyperspectral_img_folder_dataloader(
     log_print(f"discarded kwargs: {__discard_kwargs}", "debug")
 
     # transforms
-    use_transf = (
-        hyper_transforms_lst is not None
-        and len(hyper_transforms_lst) > 0
-        and transform_prob > 0
-    )
+    use_transf = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0
     if use_transf:
         transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)
-        log_print(
-            f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
-        )
+        log_print(f"[HyperWebdataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}")
 
     dataset = HyperImageDataset(dir, return_key=ret_key)
     if use_transf:
@@ -769,9 +734,7 @@ def only_hyperspectral_img_folder_dataloader(
         collate_fn=_collate_fn,
         generator=loader_generator,
         pin_memory=pin_memory,
-        multiprocessing_context="spawn"
-        if (num_workers > 0 and __compile_collate_fn)
-        else None,
+        multiprocessing_context="spawn" if (num_workers > 0 and __compile_collate_fn) else None,
         timeout=30 if num_workers > 0 else 0,
     )
 
@@ -879,9 +842,7 @@ def get_hyperspectral_wids_dataloaders(
         decodes.append(wids_filter_img_size(constraint_size=constraint_size))
     dataset = wids.ShardListDataset(
         index_file,
-        localname=lambda x: f"{wids_local_name_prefix}/{x}"
-        if wids_local_name_prefix is not None
-        else x,
+        localname=lambda x: f"{wids_local_name_prefix}/{x}" if wids_local_name_prefix is not None else x,
         transformations=decodes,
     )
 
@@ -890,9 +851,7 @@ def get_hyperspectral_wids_dataloaders(
     if constraint_size is not None and img_size_filter_file is not None:
         img_index = wids_img_size_filter_by_parquet_index(
             img_size_filter_file,
-            min_size=constraint_size
-            if isinstance(constraint_size, int)
-            else constraint_size[0],
+            min_size=constraint_size if isinstance(constraint_size, int) else constraint_size[0],
             max_size=None if isinstance(constraint_size, int) else constraint_size[1],  # type: ignore
         )
 
@@ -928,9 +887,7 @@ def get_hyperspectral_wids_dataloaders(
     if resize_before_transform is not None:
         if isinstance(resize_before_transform, int):
             resize_before_transform = to_2tuple(resize_before_transform, 2)
-        resizer = large_image_resizer_clipper(
-            tgt_size=resize_before_transform, op_for_large="clip"
-        )
+        resizer = large_image_resizer_clipper(tgt_size=resize_before_transform, op_for_large="clip")
         dataloader = dataloader.map(resizer, handler=wds.warn_and_continue)
     else:
         log_print(
@@ -947,16 +904,10 @@ def get_hyperspectral_wids_dataloaders(
         dataloader = dataloader.map(remove_meta_data_fn)
 
     # augmentations
-    use_transf = (
-        hyper_transforms_lst is not None
-        and len(hyper_transforms_lst) > 0
-        and transform_prob > 0
-    )
+    use_transf = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0
     if use_transf:
         transform = hyper_transform(hyper_transforms_lst, transform_prob, random_apply)  # type: ignore
-        log_print(
-            f"[Wids dataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}"
-        )
+        log_print(f"[Wids dataset]: use augmentations {hyper_transforms_lst} with prob {transform_prob}")
         # dataloader = dataloader.map_dict(img=transform)
         # img keys with one same transform?
         assert tgt_key is not None, "tgt_key must be specified"
@@ -1024,9 +975,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
     if loader_type == "webdataset":
         log_print("Using WebDataset loader")
 
-        def expand_paths_and_correct_loader_kwargs(
-            paths: str | list[str], loader_kwargs: dict
-        ):
+        def expand_paths_and_correct_loader_kwargs(paths: str | list[str], loader_kwargs: dict):
             # Ensure that the number of workers is not greater than the number of shards
             if isinstance(paths, str):
                 paths = list(braceexpand.braceexpand(paths))
@@ -1043,9 +992,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
                 _len = len(path_exp)
                 paths = path_exp
             else:
-                raise ValueError(
-                    f"paths should be a string or a list of strings, but got {type(paths)}"
-                )
+                raise ValueError(f"paths should be a string or a list of strings, but got {type(paths)}")
 
             assert _len > 0, f"paths should not be empty, but got {paths}"
 
@@ -1067,13 +1014,9 @@ def get_hyperspectral_img_loaders_with_different_backends(
 
         # Groups of dataloaders
         if isinstance(paths, list) and isinstance(paths[0], Sequence):
-            log_print(
-                "input paths contains list of lists, we will chain the dataloader with each loader"
-            )
+            log_print("input paths contains list of lists, we will chain the dataloader with each loader")
             if rep_loader_kwargs is not None:
-                log_print(
-                    f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug"
-                )
+                log_print(f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug")
                 assert isinstance(rep_loader_kwargs, list), (
                     f"rep_loader_kwargs should be a list, but got {type(rep_loader_kwargs)}"
                 )
@@ -1087,9 +1030,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     changed_kwargs_by_loader = [{}] * len(paths)
 
                 # assertions
-                assert isinstance(basic_kwargs, dict), (
-                    f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
-                )
+                assert isinstance(basic_kwargs, dict), f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
                 assert isinstance(changed_kwargs_by_loader, list), (
                     f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
                 )
@@ -1098,9 +1039,7 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
                 )
 
-                rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
-                    basic_kwargs, changed_kwargs_by_loader
-                )
+                rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(basic_kwargs, changed_kwargs_by_loader)
             else:
                 log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
                 rep_loader_kwargs = [loader_kwargs] * len(paths)
@@ -1132,25 +1071,16 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     loader_kwargs["resample"] = False
                 loader_kwargs["epoch_len"] = -1
 
-                p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
-                    p_lst, loader_kwargs
-                )
-                log_print(
-                    f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n"
-                    + "-" * 30
-                )
+                p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(p_lst, loader_kwargs)
+                log_print(f"dataset group {i} gets paths: \n<cyan>[{'\n'.join(p_lst)}]</>\n" + "-" * 30)
 
-                dataset, dataloader = get_hyperspectral_dataloaders(
-                    p_lst, **loader_kwargs
-                )
+                dataset, dataloader = get_hyperspectral_dataloaders(p_lst, **loader_kwargs)
                 datasets.append(dataset)
                 dataloaders.append(dataloader)
 
             # curriculum
             if curriculum_type is not None:
-                assert curriculum_kwargs is not None, (
-                    f"curriculum_kwargs must be provided if {curriculum_type=}."
-                )
+                assert curriculum_kwargs is not None, f"curriculum_kwargs must be provided if {curriculum_type=}."
                 curriculum_fn = get_curriculum_fn(  # type: ignore
                     c_type=curriculum_type,
                     **curriculum_kwargs,
@@ -1169,29 +1099,19 @@ def get_hyperspectral_img_loaders_with_different_backends(
                     "Please set <cyan>chain_loader_infinit=True</> if you are know what you are doing.",
                     "warning",
                 )
-            dataloader = chained_dataloaders(
-                dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
-            )
+            dataloader = chained_dataloaders(dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn)
             return datasets, dataloader
         else:
-            paths, loader_kwargs = expand_paths_and_correct_loader_kwargs(
-                paths, loader_kwargs
-            )
-            log_print(
-                f"dataset gets paths: \n<green>[{'\n'.join(paths)}</>\n" + "-" * 30
-            )
+            paths, loader_kwargs = expand_paths_and_correct_loader_kwargs(paths, loader_kwargs)
+            log_print(f"dataset gets paths: \n<green>[{'\n'.join(paths)}</>\n" + "-" * 30)
             return get_hyperspectral_dataloaders(paths, **loader_kwargs)
 
     # torch dataset
     elif loader_type == "folder":
         log_print("Using folder loader")
 
-        assert rep_loader_kwargs is None, (
-            "rep_loader_kwargs is not supported for folder loader"
-        )
-        assert isinstance(paths, str), (
-            f"paths should be a string, but got {type(paths)}"
-        )
+        assert rep_loader_kwargs is None, "rep_loader_kwargs is not supported for folder loader"
+        assert isinstance(paths, str), f"paths should be a string, but got {type(paths)}"
 
         return only_hyperspectral_img_folder_dataloader(paths, **loader_kwargs)
     else:
@@ -1254,17 +1174,14 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     loader_types: list[SupportedLoaderType] = []
     if loader_type is not None:
         log_print(
-            f"loader_type is provided: {loader_type}, "
-            f"input all paths should be {loader_type} loader",
+            f"loader_type is provided: {loader_type}, input all paths should be {loader_type} loader",
             "debug",
         )
 
     # clear the kwargs
     # 1. paths is a list of list of string
     if isinstance(paths, list) and isinstance(paths[0], Sequence):
-        log_print(
-            "input paths contains list of lists, we will chain the dataloader with each loader"
-        )
+        log_print("input paths contains list of lists, we will chain the dataloader with each loader")
         if rep_loader_kwargs is not None:  # every loader kwargs
             log_print(f"rep_loader_kwargs is provided: {rep_loader_kwargs}", "debug")
             assert isinstance(rep_loader_kwargs, list), (
@@ -1279,9 +1196,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
             if changed_kwargs_by_loader is None:
                 changed_kwargs_by_loader = [{}] * len(paths)
 
-            assert isinstance(basic_kwargs, dict), (
-                f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
-            )
+            assert isinstance(basic_kwargs, dict), f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
             assert isinstance(changed_kwargs_by_loader, list), (
                 f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
             )
@@ -1290,9 +1205,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
                 f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
             )
 
-            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
-                basic_kwargs, changed_kwargs_by_loader
-            )
+            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(basic_kwargs, changed_kwargs_by_loader)
         else:
             log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
             rep_loader_kwargs = [loader_kwargs] * len(paths)
@@ -1333,53 +1246,38 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
     dataloaders = []
 
     # for-loop over the paths and rep_loader_kwargs
-    for i, (p_lst, loader_kwargs, loader_type) in enumerate(
-        zip(paths, rep_loader_kwargs, loader_types)
-    ):
+    for i, (p_lst, loader_kwargs, loader_type) in enumerate(zip(paths, rep_loader_kwargs, loader_types)):
         # one group of datasets that have the same channel
         p_lst: list[str] | str
 
         # > webdataset or wids loader
         if loader_type in ("webdataset", "wids"):
             # assertions
-            assert isinstance(p_lst, (list, tuple)), (
-                f"paths should be a list of lists, but got {type(p_lst)}"
-            )
+            assert isinstance(p_lst, (list, tuple)), f"paths should be a list of lists, but got {type(p_lst)}"
             assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
 
             p_lst = list(flatten_nested_list(p_lst))  # type: ignore
             for p in p_lst:
-                assert isinstance(p, str), (
-                    f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
-                )
+                assert isinstance(p, str), f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
 
             # resample must be false
             if not shuffle_loaders:
                 loader_kwargs["resample"] = False
             loader_kwargs["epoch_len"] = -1
 
-            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
-                loader_type, p_lst, loader_kwargs
-            )
-            log_print(
-                f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n"
-                + "-" * 30
-            )
+            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(loader_type, p_lst, loader_kwargs)
+            log_print(f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n" + "-" * 30)
 
             # construct webdataset/wids datasets and dataloaders
             if loader_type == "webdataset":
                 log_print("Using webdataset loader")
-                dataset, dataloader = get_hyperspectral_dataloaders(
-                    p_lst, **loader_kwargs
-                )
+                dataset, dataloader = get_hyperspectral_dataloaders(p_lst, **loader_kwargs)
             elif loader_type == "wids":
                 log_print("Using wids loader")
                 if isinstance(p_lst, list) and len(p_lst) == 1:
                     p_lst = p_lst[0]
 
-                dataset, dataloader = get_hyperspectral_wids_dataloaders(
-                    index_file=p_lst, **loader_kwargs
-                )
+                dataset, dataloader = get_hyperspectral_wids_dataloaders(index_file=p_lst, **loader_kwargs)
             else:
                 raise ValueError(f"loader_type {loader_type} is not supported")
 
@@ -1396,9 +1294,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
 
     # > prepare for curriculum
     if curriculum_type is not None:
-        assert curriculum_kwargs is not None, (
-            f"curriculum_kwargs must be provided if {curriculum_type=}."
-        )
+        assert curriculum_kwargs is not None, f"curriculum_kwargs must be provided if {curriculum_type=}."
         curriculum_fn = get_curriculum_fn(  # type: ignore
             c_type=curriculum_type,
             **curriculum_kwargs,
@@ -1415,9 +1311,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v2(
         )
 
     # > prepare chained unified dataloader
-    dataloader = chained_dataloaders(
-        dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
-    )
+    dataloader = chained_dataloaders(dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn)
 
     return datasets, dataloader
 

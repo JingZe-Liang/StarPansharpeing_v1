@@ -115,9 +115,7 @@ class FusionNet(nn.Module):
 
         self.is_classifier = is_classifier
         if is_classifier:
-            self.classifier = nn.Conv2d(
-                channel, spectral_num * 2, kernel_size=3, stride=1, padding=1, bias=True
-            )
+            self.classifier = nn.Conv2d(channel, spectral_num * 2, kernel_size=3, stride=1, padding=1, bias=True)
 
             log_print("[Fusionet]: construct the classifier head")
 

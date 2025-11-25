@@ -62,9 +62,7 @@ classes = [
 ]
 
 
-def targz_file_to_tarfile(
-    targz_file_path: str, tar_file_writer: wds.ShardWriter, use_tbar=False
-):
+def targz_file_to_tarfile(targz_file_path: str, tar_file_writer: wds.ShardWriter, use_tbar=False):
     file = tarfile.open(targz_file_path, mode="r:gz")
     if use_tbar:
         total = len(file.getmembers())

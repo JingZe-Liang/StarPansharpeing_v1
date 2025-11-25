@@ -64,26 +64,17 @@ class TextLoggerHook(LoggerHook):
         keep_local=True,
         file_client_args=None,
     ):
-        super(TextLoggerHook, self).__init__(
-            interval, ignore_last, reset_flag, by_epoch
-        )
+        super(TextLoggerHook, self).__init__(interval, ignore_last, reset_flag, by_epoch)
         self.by_epoch = by_epoch
         self.time_sec_tot = 0
         self.interval_exp_name = interval_exp_name
 
         if out_dir is None and file_client_args is not None:
-            raise ValueError(
-                'file_client_args should be "None" when `out_dir` is notspecified.'
-            )
+            raise ValueError('file_client_args should be "None" when `out_dir` is notspecified.')
         self.out_dir = out_dir
 
-        if not (
-            out_dir is None or isinstance(out_dir, str) or is_tuple_of(out_dir, str)
-        ):
-            raise TypeError(
-                'out_dir should be  "None" or string or tuple of '
-                "string, but got {out_dir}"
-            )
+        if not (out_dir is None or isinstance(out_dir, str) or is_tuple_of(out_dir, str)):
+            raise TypeError('out_dir should be  "None" or string or tuple of string, but got {out_dir}')
         self.out_suffix = out_suffix
 
         self.keep_local = keep_local
@@ -95,18 +86,13 @@ class TextLoggerHook(LoggerHook):
         super(TextLoggerHook, self).before_run(runner)
 
         if self.out_dir is not None:
-            self.file_client = FileClient.infer_client(
-                self.file_client_args, self.out_dir
-            )
+            self.file_client = FileClient.infer_client(self.file_client_args, self.out_dir)
             # The final `self.out_dir` is the concatenation of `self.out_dir`
             # and the last level directory of `runner.work_dir`
             basename = osp.basename(runner.work_dir.rstrip(osp.sep))
             self.out_dir = self.file_client.join_path(self.out_dir, basename)
             runner.logger.info(
-                (
-                    f"Text logs will be saved to {self.out_dir} by "
-                    f"{self.file_client.name} after the training process."
-                )
+                (f"Text logs will be saved to {self.out_dir} by {self.file_client.name} after the training process.")
             )
 
         self.start_iter = runner.iter
@@ -126,9 +112,7 @@ class TextLoggerHook(LoggerHook):
         # print exp name for users to distinguish experiments
         # at every ``interval_exp_name`` iterations and the end of each epoch
         if runner.meta is not None and "exp_name" in runner.meta:
-            if (self.every_n_iters(runner, self.interval_exp_name)) or (
-                self.by_epoch and self.end_of_epoch(runner)
-            ):
+            if (self.every_n_iters(runner, self.interval_exp_name)) or (self.by_epoch and self.end_of_epoch(runner)):
                 exp_info = f"Exp name: {runner.meta['exp_name']}"
                 runner.logger.info(exp_info)
 
@@ -144,10 +128,7 @@ class TextLoggerHook(LoggerHook):
             # by epoch: Epoch [4][100/1000]
             # by iter:  Iter [100/100000]
             if self.by_epoch:
-                log_str = (
-                    f"Epoch [{log_dict['epoch']}]"
-                    f"[{log_dict['iter']}/{len(runner.data_loader)}]\t"
-                )
+                log_str = f"Epoch [{log_dict['epoch']}][{log_dict['iter']}/{len(runner.data_loader)}]\t"
             else:
                 log_str = f"Iter [{log_dict['iter']}/{runner.max_iters}]\t"
             log_str += f"{lr_str}, "
@@ -158,10 +139,7 @@ class TextLoggerHook(LoggerHook):
                 eta_sec = time_sec_avg * (runner.max_iters - runner.iter - 1)
                 eta_str = str(datetime.timedelta(seconds=int(eta_sec)))
                 log_str += f"eta: {eta_str}, "
-                log_str += (
-                    f"time: {log_dict['time']:.3f}, "
-                    f"data_time: {log_dict['data_time']:.3f}, "
-                )
+                log_str += f"time: {log_dict['time']:.3f}, data_time: {log_dict['data_time']:.3f}, "
                 # statistic memory
                 if torch.cuda.is_available():
                     log_str += f"memory: {log_dict['memory']}, "
@@ -171,10 +149,7 @@ class TextLoggerHook(LoggerHook):
             # by epoch: Epoch[val] [4][1000]
             # by iter: Iter[val] [1000]
             if self.by_epoch:
-                log_str = (
-                    f"Epoch({log_dict['mode']}) "
-                    f"[{log_dict['epoch']}][{log_dict['iter']}]\t"
-                )
+                log_str = f"Epoch({log_dict['mode']}) [{log_dict['epoch']}][{log_dict['iter']}]\t"
             else:
                 log_str = f"Iter({log_dict['mode']}) [{log_dict['iter']}]\t"
 
@@ -226,9 +201,7 @@ class TextLoggerHook(LoggerHook):
         else:
             cur_iter = self.get_iter(runner, inner_iter=True)
 
-        log_dict = OrderedDict(
-            mode=self.get_mode(runner), epoch=self.get_epoch(runner), iter=cur_iter
-        )
+        log_dict = OrderedDict(mode=self.get_mode(runner), epoch=self.get_epoch(runner), iter=cur_iter)
 
         # only record lr of the first param group
         cur_lr = runner.current_lr()
@@ -261,15 +234,8 @@ class TextLoggerHook(LoggerHook):
                 with open(local_filepath, "r") as f:
                     self.file_client.put_text(f.read(), out_filepath)
 
-                runner.logger.info(
-                    (f"The file {local_filepath} has been uploaded to {out_filepath}.")
-                )
+                runner.logger.info((f"The file {local_filepath} has been uploaded to {out_filepath}."))
 
                 if not self.keep_local:
                     os.remove(local_filepath)
-                    runner.logger.info(
-                        (
-                            f"{local_filepath} was removed due to the "
-                            "`self.keep_local=False`"
-                        )
-                    )
+                    runner.logger.info((f"{local_filepath} was removed due to the `self.keep_local=False`"))

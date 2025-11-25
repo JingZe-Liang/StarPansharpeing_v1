@@ -17,17 +17,11 @@ def register_network_init(
     # model __init__ has cfg arg
     sig = inspect.signature(model.__init__)
     if dataclass_in_name not in sig.parameters:
-        raise ValueError(
-            f"Model {model} __init__ has no argument named {dataclass_in_name}"
-        )
+        raise ValueError(f"Model {model} __init__ has no argument named {dataclass_in_name}")
 
     @function_config_to_basic_types
-    def register_init_fn(
-        cls, cfg_overrides: dict | None = None, init_kwargs: dict | None = None
-    ):
-        cfg = dataclass_from_dict(
-            cfg_dataclass, {} if cfg_overrides is None else cfg_overrides
-        )
+    def register_init_fn(cls, cfg_overrides: dict | None = None, init_kwargs: dict | None = None):
+        cfg = dataclass_from_dict(cfg_dataclass, {} if cfg_overrides is None else cfg_overrides)
         # bind signature
         bindings = {dataclass_in_name: cfg}
         bindings.update({} if init_kwargs is None else init_kwargs)
@@ -36,10 +30,7 @@ def register_network_init(
         for name, p in sig.parameters.items():
             if name == dataclass_in_name:
                 continue
-            if (
-                name not in bound_args.arguments
-                and p.default is inspect.Parameter.empty
-            ):
+            if name not in bound_args.arguments and p.default is inspect.Parameter.empty:
                 raise ValueError(f"Missing required parameter: {name}")
         return cls(**bound_args.arguments)
 

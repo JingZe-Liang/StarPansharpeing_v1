@@ -66,9 +66,7 @@ def _sample(cfg: SamplingConfig, sample_size: int, device: str) -> torch.Tensor:
     device : str
         Device string ("cuda" or "cpu").
     """
-    t = _sample_t_distributional(
-        bs=sample_size, device=device, noise_type_cfg=cfg.noise_type_cfg
-    )
+    t = _sample_t_distributional(bs=sample_size, device=device, noise_type_cfg=cfg.noise_type_cfg)
     return t.flatten()
 
 
@@ -102,9 +100,7 @@ def _plot_hist(ax, data: torch.Tensor, title: str, upper: float) -> None:
 
 def _describe(data: torch.Tensor) -> dict[str, float]:
     """Compute summary statistics for sampled t."""
-    q25, q50, q75 = torch.quantile(
-        data, torch.tensor([0.25, 0.5, 0.75], device=data.device)
-    ).tolist()
+    q25, q50, q75 = torch.quantile(data, torch.tensor([0.25, 0.5, 0.75], device=data.device)).tolist()
     return {
         "mean": float(data.mean()),
         "std": float(data.std(unbiased=False)),
@@ -184,6 +180,4 @@ if __name__ == "__main__":
         "beta_1_20",
         "normal",  # default fallback
     ]
-    generate_and_plot(
-        noise_cfgs=noise_cfgs, sample_size=100_000, out_path="tmp/t_sampling_hist.png"
-    )
+    generate_and_plot(noise_cfgs=noise_cfgs, sample_size=100_000, out_path="tmp/t_sampling_hist.png")

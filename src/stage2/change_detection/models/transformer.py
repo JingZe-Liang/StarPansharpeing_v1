@@ -78,15 +78,11 @@ class Transformer(nn.Module):
         self.num_heads = num_heads
         self.feature_layer_ids = feature_layer_ids
         if feature_layer_ids:
-            assert max(feature_layer_ids) < depth, (
-                "max feature_layer_id must be less than depth"
-            )
+            assert max(feature_layer_ids) < depth, "max feature_layer_id must be less than depth"
 
         # layers
         layers = []
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
-        ]  # stochastic depth decay rule
+        drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         norm_layer = get_norm_layer(norm_layer)
         act_layer = get_act_layer(act_layer)
         for i in range(depth):
@@ -99,9 +95,7 @@ class Transformer(nn.Module):
                     qk_norm=norm_layer,
                     drop=drop,
                     attn_drop=drop,
-                    drop_path=drop_path[i]
-                    if isinstance(drop_path, list)
-                    else drop_path,
+                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                     norm_layer=mlp_norm_layer,
                     act_layer=act_layer,
                 )
@@ -131,9 +125,7 @@ class Transformer(nn.Module):
 
         if self.pos_embed_type == "sincos":
             self.pos_embed_latent: nn.Buffer
-            self.register_buffer(
-                "pos_embed_latent", torch.zeros(1, self.num_patches, dim)
-            )
+            self.register_buffer("pos_embed_latent", torch.zeros(1, self.num_patches, dim))
             # sincos
             pos_embed = get_2d_sincos_pos_embed(
                 self.pos_embed_latent.shape[-1],
@@ -141,9 +133,7 @@ class Transformer(nn.Module):
                 pe_interpolation=self.pe_interpolation,
                 base_size=self.base_size,
             )
-            self.pos_embed_latent.data.copy_(
-                torch.from_numpy(pos_embed).float().unsqueeze(0)
-            )
+            self.pos_embed_latent.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
             if self.with_raw_img:
                 pos_embed_raw = get_2d_sincos_pos_embed(
                     dim,
@@ -152,9 +142,7 @@ class Transformer(nn.Module):
                     base_size=self.raw_img_size // self.patch_size,
                 )
                 self.pos_embed_raw: nn.Buffer
-                self.register_buffer(
-                    "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
-                )
+                self.register_buffer("pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0))
 
         elif self.pos_embed_type == "rope":
             if rope_options is None:
@@ -176,8 +164,7 @@ class Transformer(nn.Module):
             )
         else:
             raise ValueError(
-                f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                f"Unsupported pos_embed_type: {self.pos_embed_type}. Supported types are 'sincos' and 'rope'."
             )
 
     def get_pe(self, hw: tuple | torch.Size, img_type=None):
@@ -224,8 +211,7 @@ class Transformer(nn.Module):
 
         else:
             raise ValueError(
-                f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                f"Unsupported pos_embed_type: {self.pos_embed_type}. Supported types are 'sincos' and 'rope'."
             )
 
     def unpatchify(self, x: torch.Tensor):
@@ -238,9 +224,7 @@ class Transformer(nn.Module):
         h = w = int(x.shape[1] ** 0.5)
         assert h * w == x.shape[1]
 
-        x = rearrange(
-            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
-        )
+        x = rearrange(x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c)
         return x
 
     def forward(

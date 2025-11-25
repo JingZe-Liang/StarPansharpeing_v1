@@ -36,9 +36,7 @@ def get_conv_in_out_modules(
     return conv_in_module, conv_out_module  # type: ignore
 
 
-def in_out_chans_from_modules(
-    conv_in_module: DiffBandsInputConvIn, conv_out_module: DiffBandsInputConvOut
-):
+def in_out_chans_from_modules(conv_in_module: DiffBandsInputConvIn, conv_out_module: DiffBandsInputConvOut):
     in_chans = conv_in_module.band_lst
     out_chans = conv_out_module.band_lst
 
@@ -64,9 +62,7 @@ def change_new_conv_in_out_modules(
         add_chans: List of channel numbers to add modules for
         drop_chans: List of channel numbers to remove modules for
     """
-    conv_in_module, conv_out_module = get_conv_in_out_modules(
-        current_model, conv_in_name, conv_out_name
-    )
+    conv_in_module, conv_out_module = get_conv_in_out_modules(current_model, conv_in_name, conv_out_name)
 
     # Call module-level methods to handle add/drop operations
     conv_in_module.add_or_drop_modules(add_chans=add_chans, drop_chans=drop_chans)
@@ -84,9 +80,7 @@ class TokenizerLoRAMixin(nn.Module):
         lora_weights: dict[str, str | Path],
         lora_hyper_chans: dict[str, int],
         active_lora: str | None = None,
-        tokenizer_scale_shift: tuple[float, float]
-        | tuple[list[float], list[float]]
-        | None = None,
+        tokenizer_scale_shift: tuple[float, float] | tuple[list[float], list[float]] | None = None,
         # Optional, since configs are in directories
         lora_cfg: dict | LoraConfig | None = None,
         is_diffbands_lora: bool = True,
@@ -119,22 +113,16 @@ class TokenizerLoRAMixin(nn.Module):
         self.shift_factor: nn.Buffer
 
         # Store LoRA info for lazy loading
-        self.lora_weights = {
-            str(name): str(path) for name, path in lora_weights.items()
-        }
+        self.lora_weights = {str(name): str(path) for name, path in lora_weights.items()}
 
         # Lora channels
-        self.base_model_chans = in_out_chans_from_modules(
-            *get_conv_in_out_modules(tokenizer)
-        )
+        self.base_model_chans = in_out_chans_from_modules(*get_conv_in_out_modules(tokenizer))
         self.lora_names = list(self.lora_weights.keys())
         assert len(lora_hyper_chans) == len(self.lora_weights), (
-            f"Lora channels={lora_hyper_chans} and lora weights={self.lora_weights} "
-            "should have the equal length"
+            f"Lora channels={lora_hyper_chans} and lora weights={self.lora_weights} should have the equal length"
         )
         assert set(self.lora_names) == set(lora_hyper_chans.keys()), (
-            f"Lora names={self.lora_names} and lora channels={list(lora_hyper_chans.keys())} "
-            "should be equal"
+            f"Lora names={self.lora_names} and lora channels={list(lora_hyper_chans.keys())} should be equal"
         )
         self.lora_changed_chans = lora_hyper_chans
 
@@ -191,9 +179,7 @@ class TokenizerLoRAMixin(nn.Module):
     def _load_single_lora(self, lora_name: str):
         """Load a single LoRA adapter on demand"""
         if lora_name not in self.lora_weights:
-            raise ValueError(
-                f"LoRA '{lora_name}' not found in available weights: {list(self.lora_weights.keys())}"
-            )
+            raise ValueError(f"LoRA '{lora_name}' not found in available weights: {list(self.lora_weights.keys())}")
         assert self.base_model is not None, "base model is None"
         log_print(f"Loading LoRA '{lora_name}' from: {self.lora_weights[lora_name]}")
 
@@ -215,10 +201,7 @@ class TokenizerLoRAMixin(nn.Module):
                 ignore_mismatched_sizes=True,  # load it anyway
             )
             loaded_result = "Loaded from directory with auto config"
-        elif (
-            sd_path.with_suffix(".safetensors").exists()
-            or sd_path.with_suffix(".pt").exists()
-        ):
+        elif sd_path.with_suffix(".safetensors").exists() or sd_path.with_suffix(".pt").exists():
             # Load from state dict file
             sd = accelerate.utils.load_state_dict(str(sd_path))
             # Try to load config from same directory
@@ -251,9 +234,7 @@ class TokenizerLoRAMixin(nn.Module):
         else:
             raise ValueError(f"Unsupported LoRA loading path: {sd_path}")
 
-        log_print(
-            f"Successfully loaded LoRA adapter: {lora_name}, result: {loaded_result}"
-        )
+        log_print(f"Successfully loaded LoRA adapter: {lora_name}, result: {loaded_result}")
 
         self.current_lora = lora_name
         self.current_lora_chan = self.lora_changed_chans[lora_name]
@@ -265,9 +246,7 @@ class TokenizerLoRAMixin(nn.Module):
         # Update methods to use PEFT model instead of base tokenizer
         # self._update_methods_from_model(self.model_peft)
 
-    def change_lora(
-        self, lora_name: str, merge=False, not_cache_action: str = "warning"
-    ):
+    def change_lora(self, lora_name: str, merge=False, not_cache_action: str = "warning"):
         """Change to a different LoRA adapter, loading it if necessary"""
         if lora_name == self.current_lora:
             log_print(f"Already using LoRA adapter: {lora_name}")
@@ -281,9 +260,7 @@ class TokenizerLoRAMixin(nn.Module):
                 return
             elif not_cache_action == "fallback":
                 self.drop_current_lora()
-                log_print(
-                    f"Can not change lora {lora_name}, fall back to no lora base model."
-                )
+                log_print(f"Can not change lora {lora_name}, fall back to no lora base model.")
             elif not_cache_action in ("error", "raise"):
                 raise ValueError(string)
             else:
@@ -362,18 +339,14 @@ class TokenizerLoRAMixin(nn.Module):
 
             # Update methods to use base model
             # self._update_methods_from_model(self.base_model)
-            log_print(
-                f"Drop LoRA <green>{self.current_lora}</>, reverted to base model"
-            )
+            log_print(f"Drop LoRA <green>{self.current_lora}</>, reverted to base model")
 
             self.current_lora = None
             self.current_lora_chan = None
 
             # Remove the added conv-in-out expert
             if self.current_lora_chan in self.base_model_chans:
-                change_new_conv_in_out_modules(
-                    self.base_model, drop_chans=[self.current_lora_chan]
-                )
+                change_new_conv_in_out_modules(self.base_model, drop_chans=[self.current_lora_chan])
 
     def _enable_lora(self):
         """Re-enable current LoRA if exists"""

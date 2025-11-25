@@ -44,9 +44,7 @@ class LogitLaplaceLoss(nn.Module):
     def forward(self, mu, lnb, target):
         logit = torch.logit(target)
         b = torch.exp(lnb)
-        loss = torch.mean(
-            torch.abs(logit - mu) / b + lnb + torch.log(target * (1 - target))
-        )
+        loss = torch.mean(torch.abs(logit - mu) / b + lnb + torch.log(target * (1 - target)))
         return loss
 
 
@@ -137,9 +135,7 @@ class BinarySphericalQuantizer(nn.Module):
         self.soft_entropy = soft_entropy  # soft_entropy: Sec 3.2 of https://arxiv.org/pdf/1911.05894.pdf
 
     def quantize(self, z):
-        assert z.shape[-1] == self.embed_dim, (
-            f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
-        )
+        assert z.shape[-1] == self.embed_dim, f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
 
         zhat = torch.where(
             z > 0,
@@ -164,9 +160,7 @@ class BinarySphericalQuantizer(nn.Module):
             persample_entropy, cb_entropy, avg_prob = self.soft_entropy_loss(z)
             entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
         else:
-            zb_by_sample = (
-                ((zq + 1) / 2).reshape(z.shape[0], -1, z.shape[-1]).to(torch.float32)
-            )
+            zb_by_sample = ((zq + 1) / 2).reshape(z.shape[0], -1, z.shape[-1]).to(torch.float32)
             persample_entropy = self.get_hard_per_sample_entropy(zb_by_sample)
             cb_entropy = codebook_entropy(zq, self.basis, self.embed_dim)
             entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
@@ -201,15 +195,11 @@ class BinarySphericalQuantizer(nn.Module):
     def soft_entropy_loss(self, z):
         # if we divide the code in subgroups of size group_size, the codebook will be of size 2 ** group_size
         # the sub-code is the last group_size bits of the full code
-        group_code_book = self.group_codebook / (
-            self.embed_dim**0.5 if self.l2_norm else 1
-        )
+        group_code_book = self.group_codebook / (self.embed_dim**0.5 if self.l2_norm else 1)
         divided_z = rearrange(z, "... (g c) -> ... g c", c=self.group_size)
 
         # we calculate the distance between the divided_z and the codebook for each subgroup
-        distance = -2 * torch.einsum(
-            "... g c, d c ->... g d", divided_z, group_code_book
-        )
+        distance = -2 * torch.einsum("... g c, d c ->... g d", divided_z, group_code_book)
         prob = (-distance * self.inv_temperature).softmax(dim=-1)
         if self.persample_entropy_compute == "analytical":
             if self.l2_norm:
@@ -217,13 +207,9 @@ class BinarySphericalQuantizer(nn.Module):
             else:
                 p = torch.sigmoid(-4 * z * self.inv_temperature)
             prob = torch.stack([p, 1 - p], dim=-1)
-            per_sample_entropy = (
-                self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
-            )
+            per_sample_entropy = self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
         else:
-            per_sample_entropy = (
-                self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
-            )
+            per_sample_entropy = self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
 
         # macro average of the probability of each subgroup
         avg_prob = reduce(prob, "... g d ->g d", "mean")
@@ -234,9 +220,9 @@ class BinarySphericalQuantizer(nn.Module):
 
     def get_hard_per_sample_entropy(self, zb_by_sample):
         probs_per_dim = zb_by_sample.sum(1) / zb_by_sample.shape[1]
-        persample_entropy = -probs_per_dim * torch.log(probs_per_dim + 1e-8) - (
-            1 - probs_per_dim
-        ) * torch.log(1 - probs_per_dim + 1e-8)
+        persample_entropy = -probs_per_dim * torch.log(probs_per_dim + 1e-8) - (1 - probs_per_dim) * torch.log(
+            1 - probs_per_dim + 1e-8
+        )
         persample_entropy = persample_entropy.sum(-1)
         return persample_entropy.mean()
 
@@ -245,9 +231,7 @@ class BinarySphericalQuantizer(nn.Module):
         Args:
             zhat: A tensor of shape (B, ..., C) containing the codes. must be in {-1, 1}
         """
-        assert zhat.shape[-1] == self.embed_dim, (
-            f"Expected {self.embed_dim} dimensions, got {zhat.shape[-1]}"
-        )
+        assert zhat.shape[-1] == self.embed_dim, f"Expected {self.embed_dim} dimensions, got {zhat.shape[-1]}"
         return ((zhat + 1) / 2 * self.basis).sum(axis=-1).to(torch.int64)
 
     def codes_to_group_indexes(self, zhat):
@@ -267,9 +251,7 @@ class BinarySphericalQuantizer(nn.Module):
     def group_indexes_to_codes(self, group_indices):
         """Inverse of `group_indexes_to_codes`."""
         group_indices = group_indices.unsqueeze(-1)
-        codes_non_centered = torch.remainder(
-            torch.floor_divide(group_indices, self.group_basis), 2
-        )
+        codes_non_centered = torch.remainder(torch.floor_divide(group_indices, self.group_basis), 2)
         codes_non_centered = rearrange(codes_non_centered, "b ... g c -> b ... (g c)")
         return codes_non_centered * 2 - 1
 

@@ -108,12 +108,8 @@ class HyperHADTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -149,10 +145,7 @@ class HyperHADTrainer:
     def setup_detection_model(self):
         self.model = hydra.utils.instantiate(self.cfg.detect_model)
 
-        detection_name = (
-            getattr(self.train_cfg, "detection_name", None)
-            or self.model.__class__.__name__
-        )
+        detection_name = getattr(self.train_cfg, "detection_name", None) or self.model.__class__.__name__
         self.log_msg(f"use detection model: {detection_name}")
 
     def setup_tokenizer(self):
@@ -163,34 +156,26 @@ class HyperHADTrainer:
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
         if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
+            self.log_msg("[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder")
             tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
+            self.tokenizer_encoder, self._enc_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.enc_path,
+                tokenizer_config,
+                device=self.device,
+                part="encoder",
             )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
+            self.tokenizer_decoder, self._dec_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.dec_path,
+                tokenizer_config,
+                device=self.device,
+                part="decoder",
             )
             self.tokenizer_encoder: nn.Module
             self.tokenizer_decoder: nn.Module
 
             # quantizer
             if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
+                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(self.device)
             elif hasattr(self.tokenizer, "quantizer"):
                 self.quantizer = self.tokenizer.quantizer
             else:
@@ -206,21 +191,15 @@ class HyperHADTrainer:
                 self.log_msg("[Quantizer]: quantizer has parameters")
 
         else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
+            self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
 
             if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                )
+                self.log_msg(f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}")
                 self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
                     base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
+                    base_model_pretrained_path=getattr(self.train_cfg, "base_model_pretrained_path", None),
                     peft_pretrained_path=self.train_cfg.peft_pretrained_path,
                     merge_and_unload=True,
                 )
@@ -229,13 +208,9 @@ class HyperHADTrainer:
             # vq, bsq, fsq, kl
             self.use_quantizer = hasattr(self.tokenizer, "quantizer")
             self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
+            self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
             if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
+                self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
 
         # set to eval
         if self.sep_enc_dec:
@@ -290,9 +265,7 @@ class HyperHADTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
             self.logger.add(
@@ -432,8 +405,7 @@ class HyperHADTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
@@ -441,36 +413,25 @@ class HyperHADTrainer:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                     params = params_getter(with_name=False)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_model_params = (
-                lambda with_name: self.model.named_parameters()
-                if with_name
-                else self.model.parameters()
+                lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
             )
-            model_opt = _optimizer_creater(
-                self.train_cfg.model_optim, _get_model_params
-            )
+            model_opt = _optimizer_creater(self.train_cfg.model_optim, _get_model_params)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            model_sched = hydra.utils.instantiate(self.train_cfg.detection_sched)(
-                optimizer=model_opt
-            )
+            model_sched = hydra.utils.instantiate(self.train_cfg.detection_sched)(optimizer=model_opt)
         else:
             model_sched = DummyScheduler(model_opt)
 
@@ -529,13 +490,9 @@ class HyperHADTrainer:
         if self.train_cfg.prepare_tokenizer_in_accelerator:
             if self.sep_enc_dec:
                 # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
+                self.tokenizer_encoder = self.accelerator.prepare(self.tokenizer_encoder)
                 self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
+                self.tokenizer_decoder = self.accelerator.prepare(self.tokenizer_decoder)
                 self.accelerator._models.pop(-1)
             else:
                 self.tokenizer = self.accelerator.prepare(self.tokenizer)
@@ -563,14 +520,10 @@ class HyperHADTrainer:
 
     def get_training_sample_channels(self):
         bands: int = getattr(self, "_processed_bands", self.dataset_cfg.consts.bands)
-        assert bands is not None and bands.is_integer() and bands > 0, (
-            f"channel num: {bands}"
-        )
+        assert bands is not None and bands.is_integer() and bands > 0, f"channel num: {bands}"
         return bands
 
-    def forward_tokenizer(
-        self, x: torch.Tensor, mode: str = "encode", no_grad=True
-    ) -> dict:
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True) -> dict:
         assert hasattr(self, "tokenizer"), "Tokenizer not found"
         grad_ctx = torch.no_grad() if no_grad else nullcontext()
 
@@ -623,9 +576,7 @@ class HyperHADTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -640,9 +591,7 @@ class HyperHADTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -650,9 +599,7 @@ class HyperHADTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -666,10 +613,7 @@ class HyperHADTrainer:
         else:
             assert self.online_tokenize and (
                 hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
+                or (hasattr(self, "tokenizer_encoder") and hasattr(self, "tokenizer_decoder"))
             ), "tokenizer not found for online tokenize"
             img_latent = self.forward_tokenizer(batch["img"])["latent"]
 
@@ -785,17 +729,12 @@ class HyperHADTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def get_val_loader_iter(self):
@@ -822,9 +761,7 @@ class HyperHADTrainer:
                     self._val_loader_iter = iter(self.val_dataloader)
                     yield next(self._val_loader_iter)
         else:
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
+            self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
             for batch in self.val_dataloader:
                 yield batch
 
@@ -832,9 +769,7 @@ class HyperHADTrainer:
         img_latent = self.get_tokenizer_encoded(batch)
         # forward the HAD network
         with torch.no_grad():
-            anomaly_scores, *_ = self.forward_detection_model(
-                batch["img"], batch["gt"], img_latent
-            )
+            anomaly_scores, *_ = self.forward_detection_model(batch["img"], batch["gt"], img_latent)
         return anomaly_scores
 
     def val_loop(self):
@@ -862,9 +797,7 @@ class HyperHADTrainer:
             self.tenb_log_any("metric", metrics, step=self.global_step)
 
             # visualize the last val batch
-            assert anomaly_scores is not None and gt is not None, (
-                "anomaly_scores or gt is None"
-            )
+            assert anomaly_scores is not None and gt is not None, "anomaly_scores or gt is None"
             self.visualize_anomaly_detection(
                 anomaly_scores,  # anomaly scores
                 gt,  # gt
@@ -885,9 +818,7 @@ class HyperHADTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "had_ema_model"
-        )
+        self.accelerator.save_model(self.ema_model.ema_model, ema_path / "had_ema_model")
         # train state
         _ema_path_state_train = ema_path / "had_train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -897,17 +828,13 @@ class HyperHADTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.model, ema_path / "model", strict=strict
-        )
+        accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -966,9 +893,7 @@ class HyperHADTrainer:
 
             # Create RGB visualization
             # Anomaly scores as heatmap
-            anomaly_heatmap = plt.cm.hot(anomaly_norm.cpu().numpy())[
-                :, :, :3
-            ]  # Remove alpha
+            anomaly_heatmap = plt.cm.hot(anomaly_norm.cpu().numpy())[:, :, :3]  # Remove alpha
 
             # Binary prediction
             binary_vis = np.zeros((*binary_pred.shape, 3))
@@ -1016,9 +941,7 @@ class HyperHADTrainer:
         if self.accelerator.is_main_process:
             img_to_save.save(save_path, quality=95)
 
-        self.log_msg(
-            "[Visualize]: save anomaly detection visualization at {}".format(save_path)
-        )
+        self.log_msg("[Visualize]: save anomaly detection visualization at {}".format(save_path))
 
     def run(self):
         if self.train_cfg.resume_path is not None:

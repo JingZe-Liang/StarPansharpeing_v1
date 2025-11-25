@@ -30,9 +30,7 @@ def save_to_h5(dir: str | Path, h5file: h5py.File):
         group_files = [f"{i}.hrms.tiff", f"{i}.lrms.tiff", f"{i}.pan.tiff"]
         for n, gf in zip(names, group_files):
             img = read_image(dir / gf)
-            grps[n].create_dataset(
-                str(i), data=img.transpose([-1, 0, 1]), compression="gzip"
-            )
+            grps[n].create_dataset(str(i), data=img.transpose([-1, 0, 1]), compression="gzip")
 
 
 def save_to_h5_from_tar(tar_path: str, h5file: h5py.File):
@@ -48,9 +46,7 @@ def save_to_h5_from_tar(tar_path: str, h5file: h5py.File):
         img = tiff_decode_io(content)
         # name
         n, grp_name = Path(member_name).stem.split(".")
-        grps[grp_name].create_dataset(
-            n, data=img.transpose([-1, 0, 1]), compression="gzip"
-        )
+        grps[grp_name].create_dataset(n, data=img.transpose([-1, 0, 1]), compression="gzip")
 
 
 def save_to_npz_tar_from_tar(tar_path: str, save_tar_path: str):
@@ -125,9 +121,7 @@ def save_to_npz_tar_from_tar(tar_path: str, save_tar_path: str):
     tar_writter.close()
 
 
-def save_to_npz_tar_from_tar_full_resolution(
-    tar_path: dict[str, str], save_tar_path: str
-):
+def save_to_npz_tar_from_tar_full_resolution(tar_path: dict[str, str], save_tar_path: str):
     """
     Convert TIFF files in tar archive to NPZ format using webdataset loader.
 
@@ -161,9 +155,7 @@ def save_to_npz_tar_from_tar_full_resolution(
     tar_writter = TarWriter(save_tar_path)
 
     # Process each sample
-    for i, sample in enumerate(
-        (tbar := tqdm(dataloader, desc="Converting to NPZ ..."))
-    ):
+    for i, sample in enumerate((tbar := tqdm(dataloader, desc="Converting to NPZ ..."))):
         try:
             # Extract image data from sample
             lrms = sample["lrms"][0].numpy().astype("uint16")
@@ -258,8 +250,5 @@ if __name__ == "__main__":
     for wids_dict_path in full_paths:
         lrms_path = wids_dict_path["lrms"]
         satellite_name = Path(lrms_path).parents[1].name
-        save_path = (
-            Path(lrms_path).parent
-            / f"Pansharpening_FullResolution_{satellite_name}_val.npz.tar"
-        )
+        save_path = Path(lrms_path).parent / f"Pansharpening_FullResolution_{satellite_name}_val.npz.tar"
         save_to_npz_tar_from_tar_full_resolution(wids_dict_path, save_path.as_posix())

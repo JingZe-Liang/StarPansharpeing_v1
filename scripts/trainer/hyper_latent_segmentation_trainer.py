@@ -96,9 +96,7 @@ class HyperSegmentationTrainer:
         self.log_msg("Training is configured and ready to start.")
 
         # Initialize indexing mode
-        self._use_single_img_indexing = getattr(
-            self.train_cfg, "use_single_img_indexing", False
-        )
+        self._use_single_img_indexing = getattr(self.train_cfg, "use_single_img_indexing", False)
         if self._use_single_img_indexing:
             self.log_msg("Using HyperSIGMA-style indexing for loss computation")
             # Initialize accumulation buffers for HyperSIGMA mode
@@ -137,12 +135,8 @@ class HyperSegmentationTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -178,10 +172,7 @@ class HyperSegmentationTrainer:
     def setup_segmentation_model(self):
         self.model = hydra.utils.instantiate(self.cfg.segment_model)
 
-        segment_name = (
-            getattr(self.train_cfg, "segment_name", None)
-            or self.model.__class__.__name__
-        )
+        segment_name = getattr(self.train_cfg, "segment_name", None) or self.model.__class__.__name__
         self.log_msg(f"use segmentation model: {segment_name}")
 
     def setup_tokenizer(self):
@@ -192,34 +183,26 @@ class HyperSegmentationTrainer:
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
         if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
+            self.log_msg("[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder")
             tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
+            self.tokenizer_encoder, self._enc_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.enc_path,
+                tokenizer_config,
+                device=self.device,
+                part="encoder",
             )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
+            self.tokenizer_decoder, self._dec_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.dec_path,
+                tokenizer_config,
+                device=self.device,
+                part="decoder",
             )
             self.tokenizer_encoder: nn.Module
             self.tokenizer_decoder: nn.Module
 
             # quantizer
             if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
+                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(self.device)
             elif hasattr(self.tokenizer, "quantizer"):
                 self.quantizer = self.tokenizer.quantizer
             else:
@@ -235,21 +218,15 @@ class HyperSegmentationTrainer:
                 self.log_msg("[Quantizer]: quantizer has parameters")
 
         else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
+            self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
 
             if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                )
+                self.log_msg(f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}")
                 self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
                     base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
+                    base_model_pretrained_path=getattr(self.train_cfg, "base_model_pretrained_path", None),
                     peft_pretrained_path=self.train_cfg.peft_pretrained_path,
                     merge_and_unload=True,
                 )
@@ -258,13 +235,9 @@ class HyperSegmentationTrainer:
             # vq, bsq, fsq, kl
             self.use_quantizer = hasattr(self.tokenizer, "quantizer")
             self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
+            self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
             if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
+                self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
 
         # set to eval
         if self.sep_enc_dec:
@@ -315,9 +288,7 @@ class HyperSegmentationTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
             self.logger.add(
@@ -457,8 +428,7 @@ class HyperSegmentationTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
@@ -466,20 +436,14 @@ class HyperSegmentationTrainer:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                     params = params_getter(with_name=False)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_model_params = (
-                lambda with_name: self.model.named_parameters()
-                if with_name
-                else self.model.parameters()
+                lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
             )
             model_opt = _optimizer_creater(self.train_cfg.seg_optim, _get_model_params)
         else:
@@ -488,12 +452,9 @@ class HyperSegmentationTrainer:
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            model_sched = hydra.utils.instantiate(self.train_cfg.segment_sched)(
-                optimizer=model_opt
-            )
+            model_sched = hydra.utils.instantiate(self.train_cfg.segment_sched)(optimizer=model_opt)
         else:
             model_sched = DummyScheduler(model_opt)
 
@@ -603,13 +564,9 @@ class HyperSegmentationTrainer:
         if self.train_cfg.prepare_tokenizer_in_accelerator:
             if self.sep_enc_dec:
                 # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
+                self.tokenizer_encoder = self.accelerator.prepare(self.tokenizer_encoder)
                 self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
+                self.tokenizer_decoder = self.accelerator.prepare(self.tokenizer_decoder)
                 self.accelerator._models.pop(-1)
             else:
                 self.tokenizer = self.accelerator.prepare(self.tokenizer)
@@ -637,14 +594,10 @@ class HyperSegmentationTrainer:
 
     def get_training_sample_channels(self):
         bands: int = getattr(self, "_processed_bands", self.dataset_cfg.consts.bands)
-        assert bands is not None and bands.is_integer() and bands > 0, (
-            f"channel num: {bands}"
-        )
+        assert bands is not None and bands.is_integer() and bands > 0, f"channel num: {bands}"
         return bands
 
-    def forward_tokenizer(
-        self, x: torch.Tensor, mode: str = "encode", no_grad=True
-    ) -> dict:
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True) -> dict:
         assert hasattr(self, "tokenizer"), "Tokenizer not found"
         grad_ctx = torch.no_grad() if no_grad else nullcontext()
 
@@ -697,9 +650,7 @@ class HyperSegmentationTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -714,9 +665,7 @@ class HyperSegmentationTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -724,9 +673,7 @@ class HyperSegmentationTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -740,10 +687,7 @@ class HyperSegmentationTrainer:
         else:
             assert self.online_tokenize and (
                 hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
+                or (hasattr(self, "tokenizer_encoder") and hasattr(self, "tokenizer_decoder"))
             ), "tokenizer not found for online tokenize"
             img_latent = self.forward_tokenizer(batch["img"])["latent"]
 
@@ -799,9 +743,7 @@ class HyperSegmentationTrainer:
 
         return SegmentationOutput(loss=loss, pred_pixel=pred_2d)
 
-    def _reconstruct_hypersigma_image(
-        self, accumulated_preds: list[Tensor] | None = None, mode="train"
-    ):
+    def _reconstruct_hypersigma_image(self, accumulated_preds: list[Tensor] | None = None, mode="train"):
         """Reconstruct complete hyperspectral image from accumulated patches."""
 
         # Stack all predictions
@@ -810,16 +752,12 @@ class HyperSegmentationTrainer:
             accumulated_preds = self._accumulated_preds
         all_preds = torch.cat(accumulated_preds, dim=0)
 
-        ds: SingleImageHyperspectralSegmentationDataset = (
-            self.train_dataset if mode == "train" else self.val_dataset
-        )
+        ds: SingleImageHyperspectralSegmentationDataset = self.train_dataset if mode == "train" else self.val_dataset
         index = ds._sampled_index
         gt_indexed_1d = ds.gt_for_loss  # (indices,)
         n_row, n_cols = ds.n_rows, ds.n_cols
         hp, wp = all_preds[0].shape[-2:]
-        assert ds.total_patches == all_preds.shape[0], (
-            f"{all_preds.shape[0]=} should equal to {ds.total_patches=}"
-        )
+        assert ds.total_patches == all_preds.shape[0], f"{all_preds.shape[0]=} should equal to {ds.total_patches=}"
 
         # Revert back to a full image
         pred_1d = rearrange(
@@ -853,9 +791,7 @@ class HyperSegmentationTrainer:
 
     def _macro_forward_seg_model(self, batch: dict, macro_batch_size: int = 32):
         total_img_patches: Tensor = batch["img"]
-        img_macro_batches: tuple[Tensor, ...] = total_img_patches.chunk(
-            macro_batch_size, dim=0
-        )
+        img_macro_batches: tuple[Tensor, ...] = total_img_patches.chunk(macro_batch_size, dim=0)
         macro_outputs: list[Tensor] = []
         with self.accelerator.autocast():
             for macro_img in img_macro_batches:
@@ -901,9 +837,7 @@ class HyperSegmentationTrainer:
 
     def _get_metric_fn(self, clear=False):
         if not hasattr(self, "_seg_metrics"):
-            self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(
-                self.metric_cfg
-            )
+            self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(self.metric_cfg)
         elif clear:
             self._seg_metrics.reset()
 
@@ -920,10 +854,7 @@ class HyperSegmentationTrainer:
         seg_metrics = self._get_metric_fn()
         assert seg_metrics is not None
         metrics = seg_metrics._compute_all_metrics()
-        return {
-            k: v.item() if isinstance(v, torch.Tensor) else v
-            for k, v in metrics.items()
-        }
+        return {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}
 
     def train_step(self, batch: dict):
         # NOTE: in HyperSIGMA mode: the batch is a single image patches, to input
@@ -937,17 +868,13 @@ class HyperSegmentationTrainer:
         if self._use_single_img_indexing:
             # HyperSIGMA mode: accumulate predictions
             with self.accelerator.accumulate(self.model):  # use gradient accmulation ?
-                train_out = self.train_single_img_accum_step(
-                    batch, self.macro_batch_size
-                )
+                train_out = self.train_single_img_accum_step(batch, self.macro_batch_size)
         else:
             # Standard mode: process immediately
             with self.accelerator.accumulate(self.model):
                 img_latent = self.get_tokenizer_encoded(batch)
                 # train segmentation model
-                train_out = self.train_segment_step(
-                    batch["img"], batch["gt"], img_latent
-                )
+                train_out = self.train_segment_step(batch["img"], batch["gt"], img_latent)
 
         # update training state
         self.step_train_state()
@@ -995,17 +922,12 @@ class HyperSegmentationTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def _finite_val_loader(self):
@@ -1034,9 +956,7 @@ class HyperSegmentationTrainer:
             )
         else:
             iterable_ = self._finite_val_loader()
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
+            self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
 
         return iterable_
 
@@ -1052,9 +972,7 @@ class HyperSegmentationTrainer:
         else:
             img_latent = self.get_tokenizer_encoded(batch)
             # forward the segmentation network
-            pred_seg = self.forward_segment_model(
-                batch["img"], batch["gt"], img_latent
-            ).pred_pixel
+            pred_seg = self.forward_segment_model(batch["img"], batch["gt"], img_latent).pred_pixel
         return pred_seg
 
     def val_loop(self):
@@ -1107,9 +1025,7 @@ class HyperSegmentationTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "seg_ema_model"
-        )
+        self.accelerator.save_model(self.ema_model.ema_model, ema_path / "seg_ema_model")
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -1119,17 +1035,13 @@ class HyperSegmentationTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.model, ema_path / "model", strict=strict
-        )
+        accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1202,18 +1114,12 @@ class HyperSegmentationTrainer:
             if isinstance(pred_vis, Image.Image):
                 pred_vis = np.array(pred_vis)
             elif isinstance(pred_vis, list):
-                pred_vis = (
-                    np.array(pred_vis[0])
-                    if len(pred_vis) > 0
-                    else np.zeros((100, 100, 3))
-                )
+                pred_vis = np.array(pred_vis[0]) if len(pred_vis) > 0 else np.zeros((100, 100, 3))
 
             if isinstance(gt_vis, Image.Image):
                 gt_vis = np.array(gt_vis)
             elif isinstance(gt_vis, list):
-                gt_vis = (
-                    np.array(gt_vis[0]) if len(gt_vis) > 0 else np.zeros((100, 100, 3))
-                )
+                gt_vis = np.array(gt_vis[0]) if len(gt_vis) > 0 else np.zeros((100, 100, 3))
 
             # Concatenate the two visualizations side by side
             combined_vis = np.concatenate([pred_vis, gt_vis], axis=1)
@@ -1253,9 +1159,7 @@ class HyperSegmentationTrainer:
         if self.accelerator.is_main_process:
             img_to_save.save(save_path, quality=95)
 
-        self.log_msg(
-            "[Visualize]: save segmentation visualization at {}".format(save_path)
-        )
+        self.log_msg("[Visualize]: save segmentation visualization at {}".format(save_path))
 
     def run(self):
         if self.train_cfg.resume_path is not None:

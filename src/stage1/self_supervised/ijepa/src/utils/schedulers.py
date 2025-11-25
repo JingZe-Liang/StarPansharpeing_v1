@@ -37,10 +37,7 @@ class WarmupCosineSchedule(object):
             progress = float(self._step - self.warmup_steps) / float(max(1, self.T_max))
             new_lr = max(
                 self.final_lr,
-                self.final_lr
-                + (self.ref_lr - self.final_lr)
-                * 0.5
-                * (1.0 + math.cos(math.pi * progress)),
+                self.final_lr + (self.ref_lr - self.final_lr) * 0.5 * (1.0 + math.cos(math.pi * progress)),
             )
 
         for group in self.optimizer.param_groups:
@@ -60,9 +57,7 @@ class CosineWDSchedule(object):
     def step(self):
         self._step += 1
         progress = self._step / self.T_max
-        new_wd = self.final_wd + (self.ref_wd - self.final_wd) * 0.5 * (
-            1.0 + math.cos(math.pi * progress)
-        )
+        new_wd = self.final_wd + (self.ref_wd - self.final_wd) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
         if self.final_wd <= self.ref_wd:
             new_wd = max(self.final_wd, new_wd)

@@ -44,9 +44,7 @@ class MaskCollator(object):
         self.nenc = nenc
         self.npred = npred
         self.min_keep = min_keep  # minimum number of patches to keep
-        self.allow_overlap = (
-            allow_overlap  # whether to allow overlap b/w enc and pred masks
-        )
+        self.allow_overlap = allow_overlap  # whether to allow overlap b/w enc and pred masks
         self._itr_counter = Value("i", -1)  # collator is shared across worker processes
 
     def step(self):
@@ -137,9 +135,7 @@ class MaskCollator(object):
             scale=self.pred_mask_scale,
             aspect_ratio_scale=self.aspect_ratio,
         )
-        e_size = self._sample_block_size(
-            generator=g, scale=self.enc_mask_scale, aspect_ratio_scale=(1.0, 1.0)
-        )
+        e_size = self._sample_block_size(generator=g, scale=self.enc_mask_scale, aspect_ratio_scale=(1.0, 1.0))
 
         collated_masks_pred, collated_masks_enc = [], []
         min_keep_pred = self.height * self.width
@@ -162,21 +158,15 @@ class MaskCollator(object):
 
             masks_e = []
             for _ in range(self.nenc):
-                mask, _ = self._sample_block_mask(
-                    e_size, acceptable_regions=acceptable_regions
-                )
+                mask, _ = self._sample_block_mask(e_size, acceptable_regions=acceptable_regions)
                 masks_e.append(mask)
                 min_keep_enc = min(min_keep_enc, len(mask))
             collated_masks_enc.append(masks_e)
 
-        collated_masks_pred = [
-            [cm[:min_keep_pred] for cm in cm_list] for cm_list in collated_masks_pred
-        ]
+        collated_masks_pred = [[cm[:min_keep_pred] for cm in cm_list] for cm_list in collated_masks_pred]
         collated_masks_pred = torch.utils.data.default_collate(collated_masks_pred)
         # --
-        collated_masks_enc = [
-            [cm[:min_keep_enc] for cm in cm_list] for cm_list in collated_masks_enc
-        ]
+        collated_masks_enc = [[cm[:min_keep_enc] for cm in cm_list] for cm_list in collated_masks_enc]
         collated_masks_enc = torch.utils.data.default_collate(collated_masks_enc)
 
         return collated_batch, collated_masks_enc, collated_masks_pred

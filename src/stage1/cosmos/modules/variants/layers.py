@@ -10,9 +10,7 @@ from torch.nn import functional as F
 from timm.models.vision_transformer import Block
 
 
-def drop_path(
-    x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True
-):
+def drop_path(x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
 
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
@@ -25,9 +23,7 @@ def drop_path(
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
-    )  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
     if keep_prob > 0.0 and scale_by_keep:
         random_tensor.div_(keep_prob)
@@ -109,9 +105,7 @@ class Attention(nn.Module):
             )
             self.kv_cache_size = (bsz, max_seq_len)
 
-    def update_kv_cache(
-        self, start_pos, end_pos, keys: torch.Tensor, values: torch.Tensor
-    ):
+    def update_kv_cache(self, start_pos, end_pos, keys: torch.Tensor, values: torch.Tensor):
         self.k_cache[:, :, start_pos:end_pos, :] = keys
         self.v_cache[:, :, start_pos:end_pos, :] = values
         return (
@@ -230,9 +224,7 @@ class TransformerBlock(nn.Module):
         start_pos: int,
         end_pos: int,
     ):
-        h = x + self.drop_path(
-            self.attention(self.attention_norm(x), freqs_cis, start_pos, end_pos)
-        )
+        h = x + self.drop_path(self.attention(self.attention_norm(x), freqs_cis, start_pos, end_pos))
         out = h + self.drop_path(self.feed_forward(self.ffn_norm(h)))
         return out
 
@@ -253,14 +245,10 @@ def get_2d_pos(resolution, patch_size, num_scales=1):
     return torch.cat(coords_list, dim=0)
 
 
-def precompute_freqs_cis_2d(
-    pos_2d, n_elem: int, base: float = 10000, cls_token_num=120
-):
+def precompute_freqs_cis_2d(pos_2d, n_elem: int, base: float = 10000, cls_token_num=120):
     # split the dimension into half, one for x and one for y
     half_dim = n_elem // 2
-    freqs = 1.0 / (
-        base ** (torch.arange(0, half_dim, 2)[: (half_dim // 2)].float() / half_dim)
-    )
+    freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2)[: (half_dim // 2)].float() / half_dim))
     t = pos_2d + 1.0
     if cls_token_num > 0:
         t = torch.cat(
@@ -274,12 +262,8 @@ def precompute_freqs_cis_2d(
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor):
     # x: (bs, seq_len, n_head, head_dim)
     # freqs_cis (seq_len, head_dim // 2, 2)
-    xshaped = x.float().reshape(
-        *x.shape[:-1], -1, 2
-    )  # (bs, seq_len, n_head, head_dim//2, 2)
-    freqs_cis = freqs_cis.view(
-        1, xshaped.size(1), 1, xshaped.size(3), 2
-    )  # (1, seq_len, 1, head_dim//2, 2)
+    xshaped = x.float().reshape(*x.shape[:-1], -1, 2)  # (bs, seq_len, n_head, head_dim//2, 2)
+    freqs_cis = freqs_cis.view(1, xshaped.size(1), 1, xshaped.size(3), 2)  # (1, seq_len, 1, head_dim//2, 2)
     x_out2 = torch.stack(
         [
             xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1],

@@ -24,9 +24,7 @@ class MMDistributedDataParallel(nn.Module):
         for tensors in _take_tensors(tensors, buffer_size):
             flat_tensors = _flatten_dense_tensors(tensors)
             dist.broadcast(flat_tensors, 0)
-            for tensor, synced in zip(
-                tensors, _unflatten_dense_tensors(flat_tensors, tensors)
-            ):
+            for tensor, synced in zip(tensors, _unflatten_dense_tensors(flat_tensors, tensors)):
                 tensor.copy_(synced)
 
     def _sync_params(self):
@@ -34,9 +32,7 @@ class MMDistributedDataParallel(nn.Module):
         if len(module_states) > 0:
             self._dist_broadcast_coalesced(module_states, self.broadcast_bucket_size)
         if self.broadcast_buffers:
-            if TORCH_VERSION != "parrots" and digit_version(
-                TORCH_VERSION
-            ) < digit_version("1.0"):
+            if TORCH_VERSION != "parrots" and digit_version(TORCH_VERSION) < digit_version("1.0"):
                 buffers = [b.data for b in self.module._all_buffers()]
             else:
                 buffers = [b.data for b in self.module.buffers()]

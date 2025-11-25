@@ -6,11 +6,7 @@ from ..stylegan_utils.ops import upfirdn2d
 
 
 def CreateLowpassKernel(Weights, Inplace):
-    Kernel = (
-        numpy.array([Weights])
-        if Inplace
-        else numpy.convolve(Weights, [1, 1]).reshape(1, -1)
-    )
+    Kernel = numpy.array([Weights]) if Inplace else numpy.convolve(Weights, [1, 1]).reshape(1, -1)
     Kernel = torch.Tensor(Kernel.T @ Kernel)
     return Kernel / torch.sum(Kernel)
 
@@ -23,9 +19,7 @@ class InterpolativeUpsamplerReference(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        Kernel = 4 * self.Kernel.view(
-            1, 1, self.Kernel.shape[0], self.Kernel.shape[1]
-        ).to(x.dtype)
+        Kernel = 4 * self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(x.dtype)
         y = nn.functional.conv_transpose2d(
             x.view(x.shape[0] * x.shape[1], 1, x.shape[2], x.shape[3]),
             Kernel,
@@ -44,9 +38,7 @@ class InterpolativeDownsamplerReference(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(
-            x.dtype
-        )
+        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(x.dtype)
         y = nn.functional.conv2d(
             x.view(x.shape[0] * x.shape[1], 1, x.shape[2], x.shape[3]),
             Kernel,
@@ -65,9 +57,7 @@ class InplaceUpsamplerReference(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(
-            x.dtype
-        )
+        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(x.dtype)
         x = nn.functional.pixel_shuffle(x, 2)
 
         return nn.functional.conv2d(
@@ -86,9 +76,7 @@ class InplaceDownsamplerReference(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(
-            x.dtype
-        )
+        Kernel = self.Kernel.view(1, 1, self.Kernel.shape[0], self.Kernel.shape[1]).to(x.dtype)
         y = nn.functional.conv2d(
             x.view(x.shape[0] * x.shape[1], 1, x.shape[2], x.shape[3]),
             Kernel,
@@ -127,9 +115,7 @@ class InplaceUpsamplerCUDA(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        return upfirdn2d.upfirdn2d(
-            nn.functional.pixel_shuffle(x, 2), self.Kernel, padding=self.FilterRadius
-        )
+        return upfirdn2d.upfirdn2d(nn.functional.pixel_shuffle(x, 2), self.Kernel, padding=self.FilterRadius)
 
 
 class InplaceDownsamplerCUDA(nn.Module):
@@ -140,9 +126,7 @@ class InplaceDownsamplerCUDA(nn.Module):
         self.FilterRadius = len(Filter) // 2
 
     def forward(self, x):
-        return nn.functional.pixel_unshuffle(
-            upfirdn2d.upfirdn2d(x, self.Kernel, padding=self.FilterRadius), 2
-        )
+        return nn.functional.pixel_unshuffle(upfirdn2d.upfirdn2d(x, self.Kernel, padding=self.FilterRadius), 2)
 
 
 InterpolativeUpsampler = InterpolativeUpsamplerCUDA

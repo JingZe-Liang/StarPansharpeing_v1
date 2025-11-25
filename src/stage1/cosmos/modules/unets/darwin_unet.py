@@ -129,11 +129,9 @@ def gamma_embedding(gammas, dim, max_period=10000):
     :return: an [N x dim] Tensor of positional embeddings.
     """
     half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period)
-        * torch.arange(start=0, end=half, dtype=torch.float32)
-        / half
-    ).to(device=gammas.device)
+    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+        device=gammas.device
+    )
     args = gammas[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
@@ -146,9 +144,7 @@ class TimestepEmbedder(nn.Module):
     Embeds scalar timesteps into vector representations.
     """
 
-    def __init__(
-        self, hidden_size, frequency_embedding_size=256, time_scale: float = 1.0
-    ):
+    def __init__(self, hidden_size, frequency_embedding_size=256, time_scale: float = 1.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -173,23 +169,17 @@ class TimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
-            / half
-        ).to(device=t.device)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(
-            t * self.time_scale, self.frequency_embedding_size
-        )
+        t_freq = self.timestep_embedding(t * self.time_scale, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
 
@@ -264,9 +254,7 @@ class Downsample(nn.Module):
         self.use_conv = use_conv
         stride = 2
         if use_conv:
-            self.op = nn.Conv2d(
-                self.channels, self.out_channel, 3, stride=stride, padding=1
-            )
+            self.op = nn.Conv2d(self.channels, self.out_channel, 3, stride=stride, padding=1)
         else:
             assert self.channels == self.out_channel
             self.op = nn.AvgPool2d(kernel_size=stride, stride=stride)
@@ -485,9 +473,7 @@ class QKVAttentionLegacy(nn.Module):
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
         scale = 1 / math.sqrt(math.sqrt(ch))
-        weight = torch.einsum(
-            "bct,bcs->bts", q * scale, k * scale
-        )  # More stable with f16 than dividing afterwards
+        weight = torch.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
         weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
         a = torch.einsum("bts,bcs->bct", weight, v)
         return a.reshape(bs, -1, length)
@@ -524,9 +510,7 @@ class QKVAttention(nn.Module):
             (k * scale).view(bs * self.n_heads, ch, length),
         )  # More stable with f16 than dividing afterwards
         weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = torch.einsum(
-            "bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length)
-        )
+        a = torch.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
         return a.reshape(bs, -1, length)
 
     def forward_sdpa(self, qkv: Tensor):
@@ -534,9 +518,7 @@ class QKVAttention(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.chunk(3, dim=1)  # [bs, h * d, l]
-        q, k, v = map(
-            lambda x: x.view(bs, self.n_heads, ch, length).permute(0, 1, -1, 2)
-        )
+        q, k, v = map(lambda x: x.view(bs, self.n_heads, ch, length).permute(0, 1, -1, 2))
         out = F.scaled_dot_product_attention(q, k, v)
         out = out.permute(0, 1, -1, 2).view(bs, -1, length)
 
@@ -634,9 +616,7 @@ class UNet(nn.Module):
             "cosine",
         ], "t_embed_type must be gamma or cosine"
         if self.t_embed_type == "cosine":
-            self.t_embedder = TimestepEmbedder(
-                cond_embed_dim, 256, time_scale=time_scale
-            )
+            self.t_embedder = TimestepEmbedder(cond_embed_dim, 256, time_scale=time_scale)
         elif self.t_embed_type == "gamma":
             self.t_embedder = nn.Sequential(
                 nn.Linear(inner_channel, cond_embed_dim),
@@ -651,9 +631,7 @@ class UNet(nn.Module):
         # * backbone
 
         ch = input_ch = int(channel_mults[0] * inner_channel)
-        self.input_blocks = nn.ModuleList(
-            [EmbedSequential(nn.Conv2d(in_channel, ch, 3, padding=1))]
-        )
+        self.input_blocks = nn.ModuleList([EmbedSequential(nn.Conv2d(in_channel, ch, 3, padding=1))])
         self._feature_size = ch
         input_block_chans = [ch]
         ds = image_size
@@ -792,9 +770,7 @@ class UNet(nn.Module):
         bs = z.shape[0]
         null_cond_interp = self.null_cond
         if null_cond_interp.shape[-2] != z.shape[-2]:
-            null_cond_interp = F.interpolate(
-                null_cond_interp, size=z.shape[-2], mode="bicubic"
-            )
+            null_cond_interp = F.interpolate(null_cond_interp, size=z.shape[-2], mode="bicubic")
 
         if self.training:
             drop_ids = torch.rand(bs, 1, 1, 1).to(z) < self.z_cfg_drop

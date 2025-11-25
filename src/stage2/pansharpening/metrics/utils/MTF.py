@@ -39,9 +39,7 @@ def MTF(I_MS, sensor, ratio):
 
     I_MS_LP = np.zeros((I_MS.shape))
     for ii in range(I_MS.shape[2]):
-        I_MS_LP[:, :, ii] = ndimage.correlate(
-            I_MS[:, :, ii], h[:, :, ii], mode="nearest"
-        )
+        I_MS_LP[:, :, ii] = ndimage.correlate(I_MS[:, :, ii], h[:, :, ii], mode="nearest")
         ### This can speed-up the processing, but with slightly different results with respect to the MATLAB toolbox
         # hb = h[:,:,ii]
         # I_MS_LP[:,:,ii] = signal.fftconvolve(I_MS[:,:,ii],hb[::-1],mode='same')
@@ -65,9 +63,7 @@ def MTF_torch(fused: torch.Tensor, sensor: str, ratio: int):
         ratio (int): upsampled ratio from MS
     """
     nbands = fused.shape[1]
-    h = genMTF_torch(ratio, sensor, nbands).permute(
-        2, 0, 1
-    )  # [k_h, k_w, c] -> [c, k_h, k_w]
+    h = genMTF_torch(ratio, sensor, nbands).permute(2, 0, 1)  # [k_h, k_w, c] -> [c, k_h, k_w]
     # Expand h to match batch dimension
     B = fused.shape[0]
     h = h.unsqueeze(0).expand(B, -1, -1, -1)  # [c, k_h, k_w] -> [B, c, k_h, k_w]
@@ -80,9 +76,7 @@ def MTF_torch(fused: torch.Tensor, sensor: str, ratio: int):
     return I_MS_LP
 
 
-def correlate_torch(
-    input: torch.Tensor, kernel: torch.Tensor, mode="nearest", constant_value=0
-) -> torch.Tensor:
+def correlate_torch(input: torch.Tensor, kernel: torch.Tensor, mode="nearest", constant_value=0) -> torch.Tensor:
     """
     模拟 scipy.ndimage.filters.correlate 的功能，并支持多种边界填充模式。
 
@@ -114,13 +108,9 @@ def correlate_torch(
     # 根据模式选择填充方式
     padding = kernel.shape[0] // 2  # 假设卷积核大小为奇数
     if mode == "nearest":
-        input_padded = F.pad(
-            input, (padding, padding, padding, padding), mode="replicate"
-        )
+        input_padded = F.pad(input, (padding, padding, padding, padding), mode="replicate")
     elif mode == "reflect":
-        input_padded = F.pad(
-            input, (padding, padding, padding, padding), mode="reflect"
-        )
+        input_padded = F.pad(input, (padding, padding, padding, padding), mode="reflect")
     elif mode == "constant":
         input_padded = F.pad(
             input,
@@ -129,9 +119,7 @@ def correlate_torch(
             value=constant_value,
         )
     elif mode == "zeros":
-        input_padded = F.pad(
-            input, (padding, padding, padding, padding), mode="constant", value=0
-        )
+        input_padded = F.pad(input, (padding, padding, padding, padding), mode="constant", value=0)
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 

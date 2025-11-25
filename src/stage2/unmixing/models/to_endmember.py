@@ -21,13 +21,9 @@ class ToEndMemberConfig:
 class EndMemberBase(nn.Module, ABC):
     _is_inited: bool = False
 
-    def init_endmembers(
-        self, init_value: Float[torch.Tensor, "channels num_endmember"]
-    ):
+    def init_endmembers(self, init_value: Float[torch.Tensor, "channels num_endmember"]):
         if self._is_inited:
-            logger.error(
-                "[Endmember Base]: Endmembers have already been initialized, skipping."
-            )
+            logger.error("[Endmember Base]: Endmembers have already been initialized, skipping.")
             return
         self._is_inited = True
         self.init_endmembers_fn(init_value)
@@ -77,9 +73,7 @@ class ToEndMemberConv(EndMemberBase):
             code = torch.nn.functional.relu(code)
         return code
 
-    def init_endmembers_fn(
-        self, init_value: Float[torch.Tensor, "channels num_endmember"]
-    ):
+    def init_endmembers_fn(self, init_value: Float[torch.Tensor, "channels num_endmember"]):
         """Initialize endmembers with given values.
 
         Args:
@@ -89,9 +83,7 @@ class ToEndMemberConv(EndMemberBase):
 
         init_value.squeeze_(0)
 
-        assert self.decoder.kernel_size[0] == 1, (
-            "Kernel size must be 1 for endmember initialization"
-        )
+        assert self.decoder.kernel_size[0] == 1, "Kernel size must be 1 for endmember initialization"
         assert init_value.ndim == 2, "init_value must be 2D"
 
         # channels, num_endmember, 1, 1
@@ -115,9 +107,7 @@ class ToEndMemberParameter(EndMemberBase):
         **kwargs,
     ):
         super(ToEndMemberParameter, self).__init__()
-        self.endmember = nn.Parameter(
-            torch.empty(channels, num_endmember), requires_grad=True
-        )
+        self.endmember = nn.Parameter(torch.empty(channels, num_endmember), requires_grad=True)
 
         self.apply_relu = apply_relu
 
@@ -147,9 +137,7 @@ class ToEndMemberParameter(EndMemberBase):
 
         return code
 
-    def init_endmembers_fn(
-        self, init_value: Float[torch.Tensor, "channels num_endmember"]
-    ):
+    def init_endmembers_fn(self, init_value: Float[torch.Tensor, "channels num_endmember"]):
         """Initialize endmembers with given values.
 
         Args:
@@ -158,9 +146,7 @@ class ToEndMemberParameter(EndMemberBase):
         """
         init_value.squeeze_(0)
         assert init_value.ndim == 2, "init_value must be 2D"
-        assert self.endmember.data.shape == init_value.shape, (
-            f"init_value shape must be {self.endmember.data.shape}"
-        )
+        assert self.endmember.data.shape == init_value.shape, f"init_value shape must be {self.endmember.data.shape}"
 
         self.endmember.data.copy_(init_value)
 
@@ -216,17 +202,13 @@ class ToEndMemberMutliLinear(EndMemberBase):
             recon = torch.relu(recon)
         return recon
 
-    def init_endmembers_fn(
-        self, init_value: Float[torch.Tensor, "channels num_endmember"]
-    ):
+    def init_endmembers_fn(self, init_value: Float[torch.Tensor, "channels num_endmember"]):
         # [e, c1] @ [c1, c1] @ [c1, c] -> [e, c1] @ [c1, c] -> [e, c]
         # [e, c] (inited) @ [c, c1] (eyes) -> [e, c1] (inited, first layer) @ [c1, c] (eyes, seq layers) -> [e, c]
         device = self.decoder[0].weight.device
 
         eyes = (
-            torch.zeros(self.hidden_channel, self.channels, device=device)
-            .fill_diagonal_(1.0)
-            .type_as(init_value)
+            torch.zeros(self.hidden_channel, self.channels, device=device).fill_diagonal_(1.0).type_as(init_value)
         )  # [c1, c]
         first_inited_w = eyes @ init_value.to(device)  # [c1, c] @ [c, em] -> [c1, em]
         self.decoder[0].weight.data.copy_(first_inited_w)
@@ -240,9 +222,7 @@ class ToEndMemberMutliLinear(EndMemberBase):
 
 
 if __name__ == "__main__":
-    model = ToEndMemberMutliLinear(
-        3, 5, n_layers=5, hidden_channel=256, apply_relu=False
-    )
+    model = ToEndMemberMutliLinear(3, 5, n_layers=5, hidden_channel=256, apply_relu=False)
 
     # x = torch.randn(1, 3)
     # print(x)

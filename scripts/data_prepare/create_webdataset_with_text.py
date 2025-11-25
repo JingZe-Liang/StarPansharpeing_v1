@@ -41,11 +41,7 @@ def create_webdataset_with_encoded_text(
 
     # 创建tar文件
     with tarfile.open(output_tar, "w") as tar:
-        image_files = [
-            f
-            for f in os.listdir(image_dir)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ]
+        image_files = [f for f in os.listdir(image_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
 
         processed = 0
         for img_file in tqdm(image_files, desc="Processing images"):
@@ -144,9 +140,7 @@ def main():
     parser.add_argument("--image_dir", required=True, help="图片目录")
     parser.add_argument("--encoded_text_dir", required=True, help="编码文本目录")
     parser.add_argument("--output_tar", required=True, help="输出tar文件路径")
-    parser.add_argument(
-        "--caption_types", nargs="+", default=["qwen"], help="caption类型列表"
-    )
+    parser.add_argument("--caption_types", nargs="+", default=["qwen"], help="caption类型列表")
     parser.add_argument("--image_extension", default=".png", help="图片扩展名")
     parser.add_argument("--validate", action="store_true", help="验证创建的tar文件")
 

@@ -36,7 +36,7 @@ The image provided to you is a remote sensing image from a satellite. NOT a norm
 Do not use the markdown format.
 Do not use the bullet points or numbered lists.
 All reponse and answers must be in English, NO other languages.
-Do not include any personal opinions or subjective views. 
+Do not include any personal opinions or subjective views.
 """
 
 
@@ -52,9 +52,7 @@ def img_to_base64(img: np.ndarray | str | Image.Image) -> str:
         img.save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
     img_bytes = io.BytesIO()
     Image.fromarray(img).save(img_bytes, format="PNG")
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
@@ -116,9 +114,7 @@ def create_batch_template(
                             {"type": "text", "text": default_prompt},
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_img}"
-                                },
+                                "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"},
                             },
                         ],
                     },
@@ -152,9 +148,7 @@ def create_batch_requests(
     for i, img_path in enumerate(img_paths):
         img_id = f"{i:05d}_{Path(img_path).stem}"
         img = read_image(img_path)
-        img = visualize_hyperspectral_image(
-            img, rgb_channels="mean", use_linstretch=True
-        )
+        img = visualize_hyperspectral_image(img, rgb_channels="mean", use_linstretch=True)
 
         assert isinstance(img, (np.ndarray, Image.Image, str)), (
             f"Image must be a numpy array, PIL Image, or file path string, but got {type(img)}"
@@ -293,9 +287,7 @@ class GLM45BatchProcessor:
         """Download results file"""
         log(f"Printing and downloading successful request results from Batch job...")
         content = self.client.files.content(output_file_id)
-        log(
-            f"Printing first 1000 characters of successful request results: {content.text[:1000]}..."
-        )
+        log(f"Printing first 1000 characters of successful request results: {content.text[:1000]}...")
         content.write_to_file(output_file_path)
         log(f"Complete output results saved to local output file {output_file_path}")
 
@@ -303,9 +295,7 @@ class GLM45BatchProcessor:
         """Download error file"""
         log(f"Printing and downloading failed request information from Batch job...")
         content = self.client.files.content(error_file_id)
-        log(
-            f"Printing first 1000 characters of failed request information: {content.text[:1000]}..."
-        )
+        log(f"Printing first 1000 characters of failed request information: {content.text[:1000]}...")
         content.write_to_file(error_file_path)
         log(f"Complete error information saved to local error file {error_file_path}")
 
@@ -328,9 +318,7 @@ class GLM45BatchProcessor:
 
             # Step 3: Wait for job completion (smart query interval)
             self.monitor = SmartBatchMonitor(base_interval=check_interval)
-            log(
-                f"Starting to monitor GLM job status, base query interval: {check_interval} seconds"
-            )
+            log(f"Starting to monitor GLM job status, base query interval: {check_interval} seconds")
 
             while True:
                 status = self.check_job_status(batch_id)
@@ -442,9 +430,7 @@ class QwenVLBatchProcessor:
         """Download results file"""
         log(f"Printing and downloading successful request results from Batch job...")
         content = self.client.files.content(output_file_id)
-        log(
-            f"Printing first 1000 characters of successful request results: {content.text[:1000]}..."
-        )
+        log(f"Printing first 1000 characters of successful request results: {content.text[:1000]}...")
         content.write_to_file(output_file_path)
         log(f"Complete output results saved to local output file {output_file_path}")
 
@@ -452,9 +438,7 @@ class QwenVLBatchProcessor:
         """Download error file"""
         log(f"Printing and downloading failed request information from Batch job...")
         content = self.client.files.content(error_file_id)
-        log(
-            f"Printing first 1000 characters of failed request information: {content.text[:1000]}..."
-        )
+        log(f"Printing first 1000 characters of failed request information: {content.text[:1000]}...")
         content.write_to_file(error_file_path)
         log(f"Complete error information saved to local error file {error_file_path}")
 
@@ -477,9 +461,7 @@ class QwenVLBatchProcessor:
 
             # Step 3: Wait for job completion (smart query interval)
             self.monitor = SmartBatchMonitor(base_interval=check_interval)
-            log(
-                f"Starting to monitor job status, base query interval: {check_interval} seconds"
-            )
+            log(f"Starting to monitor job status, base query interval: {check_interval} seconds")
 
             while True:
                 status = self.check_job_status(batch_id)
@@ -636,9 +618,7 @@ def demonstrate_architecture() -> None:
     log("\n3. Architecture Features:")
     log("  - Unified interface design: Both processors have the same method signatures")
     log("  - Smart monitoring: Built-in SmartBatchMonitor optimizes query intervals")
-    log(
-        "  - Factory pattern: Create corresponding processors through create_batch_processor()"
-    )
+    log("  - Factory pattern: Create corresponding processors through create_batch_processor()")
     log("  - Error handling: Unified exception handling and error information")
     log("  - Progress display: Detailed task progress and status information")
 
@@ -710,23 +690,17 @@ def main_api_call() -> None:
 
     # Get image paths
     img_paths = [
-        str(p)
-        for p in (Path(img_dir).rglob("*"))
-        if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".tif", ".tiff"]
+        str(p) for p in (Path(img_dir).rglob("*")) if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".tif", ".tiff"]
     ]
 
     log(f"Found {len(img_paths)} images")
 
     # Select model and process
-    model: Literal["glm-4v-plus", "qwen-vl-max-latest"] = (
-        "qwen-vl-max-latest"  # Can be changed to "glm-4v-plus"
-    )
+    model: Literal["glm-4v-plus", "qwen-vl-max-latest"] = "qwen-vl-max-latest"  # Can be changed to "glm-4v-plus"
 
     # Ask user if they want to run actual batch processing
     try:
-        user_input = (
-            input("Do you want to run actual batch processing? (y/N): ").strip().lower()
-        )
+        user_input = input("Do you want to run actual batch processing? (y/N): ").strip().lower()
     except EOFError:
         user_input = "n"
         log("\nNon-interactive environment detected, skipping batch processing.")
@@ -747,9 +721,7 @@ def main_api_call() -> None:
         else:
             log("Batch processing failed!")
     else:
-        log(
-            "Skipping batch processing, only demonstrating architecture and monitoring features."
-        )
+        log("Skipping batch processing, only demonstrating architecture and monitoring features.")
 
     log("\n=== New Architecture Usage Examples ===")
     log("# Direct use of processor classes")
@@ -976,11 +948,7 @@ def prepare_jsonl_from_dataloader(
     samples_since_last_flush = 0
 
     # Open file once and write incrementally
-    id_mapping_file = (
-        Path(output_file)
-        .with_name("id_mappings.jsonl")
-        .open(mode="w", encoding="utf-8")
-    )
+    id_mapping_file = Path(output_file).with_name("id_mappings.jsonl").open(mode="w", encoding="utf-8")
     with open(output_file, "w", encoding="utf-8") as f:
         for batch in tqdm(dataloader):
             if max_batches is not None and batch_count >= max_batches:
@@ -990,9 +958,7 @@ def prepare_jsonl_from_dataloader(
             # This is a single sample
             real_id = batch["__key__"][0]
             upload_id = str(processed_count).zfill(10)
-            batch["__key__"] = [
-                upload_id
-            ]  # avoid the custom id not exceed 64 limitation
+            batch["__key__"] = [upload_id]  # avoid the custom id not exceed 64 limitation
 
             if _process_and_write_sample(
                 batch,
@@ -1008,9 +974,7 @@ def prepare_jsonl_from_dataloader(
                 processed_count += 1
                 samples_since_last_flush += 1
 
-                id_mapping_file.write(
-                    json.dumps({upload_id: real_id}, ensure_ascii=False) + "\n"
-                )
+                id_mapping_file.write(json.dumps({upload_id: real_id}, ensure_ascii=False) + "\n")
 
                 # Flush periodically
                 if samples_since_last_flush >= flush_every:
@@ -1220,9 +1184,7 @@ def process_hyperspectral_image_to_base64(
         log(f"Read image file: {img_path}, shape: {img.shape}")
 
     # Convert to RGB visualization image
-    img = visualize_hyperspectral_image(
-        img, rgb_channels=rgb_channels, use_linstretch=use_linstretch
-    )
+    img = visualize_hyperspectral_image(img, rgb_channels=rgb_channels, use_linstretch=use_linstretch)
     img = np.squeeze(img, 0)
     assert img.ndim == 3, "Visualization image should have 3 dimensions (h, w, c)"
 
@@ -1245,17 +1207,13 @@ def process_hyperspectral_image_to_base64(
 # * --- Batching response into txt file --- #
 
 
-def batch_reponse_to_txt_files(
-    batch_rs_file: str, id_mapping_file: str, output_dir: str = "tmp/batch_captions"
-):
+def batch_reponse_to_txt_files(batch_rs_file: str, id_mapping_file: str, output_dir: str = "tmp/batch_captions"):
     """
     Example of the GLM response:
         {"response":{"status_code":200,"body":{"created":1759613407,"usage":{"completion_tokens":95,"prompt_tokens":2519,"total_tokens":2614},"model":"glm-4v-plus","id":"20251005053005301451c87e664e3f","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"The image depicts an urban scene, characterized by a dense arrangement of buildings and roads. Prominent features include a large circular structure, likely a stadium or arena, surrounded by smaller buildings and residential areas. The roads are organized in a grid pattern, indicating a planned urban layout. The image appears to be captured during daylight, with clear visibility of the structures and their spatial relationships. The overall scene suggests a well-developed urban area with a mix of commercial and residential zones."}}],"request_id":"0000000000"}},"custom_id":"0000000000","id":"batch_1974586444170264576"}
 
     """
-    assert id_mapping_file.endswith(".jsonl"), (
-        "ID mapping file should be in JSONL format"
-    )
+    assert id_mapping_file.endswith(".jsonl"), "ID mapping file should be in JSONL format"
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # Load ID mappings

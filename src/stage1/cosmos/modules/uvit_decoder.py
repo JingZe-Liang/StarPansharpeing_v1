@@ -129,10 +129,7 @@ class UViTDecoder(nn.Module):
         self.grad_checkpointing = use_act_ckpt
 
         # Compute appropriate number of channels for each level, adjust for GroupNorm
-        self.ch_level = [
-            math.ceil(channels * ch_f / norm_num_groups) * norm_num_groups
-            for ch_f in ch_mult
-        ]
+        self.ch_level = [math.ceil(channels * ch_f / norm_num_groups) * norm_num_groups for ch_f in ch_mult]
         channels = self.ch_level[0]  # The first channel is the input channel
         self.mid_dim = self.ch_level[-1]
 
@@ -145,9 +142,7 @@ class UViTDecoder(nn.Module):
         ### Input ###
         z_conv_in = create_conv2d(z_dim, channels, 3)
         if isinstance(in_channels, (list, tuple)):
-            noise_conv_in = DiffBandsInputConvIn(
-                in_channels, channels, padding_mode="reflect"
-            )
+            noise_conv_in = DiffBandsInputConvIn(in_channels, channels, padding_mode="reflect")
         else:
             noise_conv_in = AdaptiveInputConvLayer(in_channels, channels, mode="interp")
         fused_conv = create_conv2d(channels * 2, channels, 3, groups=channels)
@@ -160,9 +155,7 @@ class UViTDecoder(nn.Module):
         )
 
         ### Time ###
-        time_embed_dim = (
-            channels * t_emb_mult if t_emb_mult is not None else channels * 4
-        )
+        time_embed_dim = channels * t_emb_mult if t_emb_mult is not None else channels * 4
         self.time_cond_type = time_cond_type
         self.use_delta_t_embed = time_cond_type in ["t-r", "r", "t,t-r", "r,t-r", "t,r,t-r"]  # fmt: skip
 
@@ -191,9 +184,7 @@ class UViTDecoder(nn.Module):
             )
 
         ### Down blocks ###
-        assert (n_resamples := math.log2(total_resolutions)) % 1 == 0, (
-            "total_resamples should be a power of 2"
-        )
+        assert (n_resamples := math.log2(total_resolutions)) % 1 == 0, "total_resamples should be a power of 2"
         n_resamples = int(n_resamples)
         self.down_blocks = nn.ModuleList([])
         output_channel = channels
@@ -210,8 +201,7 @@ class UViTDecoder(nn.Module):
                         out_channels=output_channel,
                         temb_channels=time_embed_dim,
                         dropout=dropout[i_level],
-                        add_downsample=not is_final_block
-                        and (i_level < n_resamples),  # FIXME: add downsample earlier?
+                        add_downsample=not is_final_block and (i_level < n_resamples),  # FIXME: add downsample earlier?
                         resnet_act_fn=act_fn,
                         resnet_groups=norm_num_groups,
                         time_scale_shift=time_scale_shift,
@@ -220,9 +210,7 @@ class UViTDecoder(nn.Module):
                         ada_emb_dim=ctx_emb_dim,
                     )
                 )
-                logger.debug(
-                    f"[UVit ResDown] {i_level=}, {input_channel=}, {output_channel=}"
-                )
+                logger.debug(f"[UVit ResDown] {i_level=}, {input_channel=}, {output_channel=}")
 
         self.connectors = [
             nn.Conv2d(output_channel, mid_chan, 1),
@@ -245,11 +233,7 @@ class UViTDecoder(nn.Module):
             ada_norm=ada_norm,
             ada_emb_dim=ctx_emb_dim,
             learned_pos_embed=learned_pos_embed,
-            sample_size=(
-                (image_size // down_scale, image_size // down_scale)
-                if image_size is not None
-                else None
-            )
+            sample_size=((image_size // down_scale, image_size // down_scale) if image_size is not None else None)
             if learned_pos_embed
             else None,
             relative_pos_embed=relative_pos_embed,
@@ -259,19 +243,13 @@ class UViTDecoder(nn.Module):
             delta_t_aware=True if self.use_delta_t_embed else False,
             jvp=jvp,
         )
-        logger.debug(
-            f"[UVit MidTransformer]: hiddens={output_channel}, n_layers={mid_nlayers}"
-        )
+        logger.debug(f"[UVit MidTransformer]: hiddens={output_channel}, n_layers={mid_nlayers}")
 
         ### Up blocks ###
         self.up_blocks = nn.ModuleList([])
 
         for i_level, ch in enumerate(reversed(self.ch_level)):
-            input_channel = (
-                self.ch_level[-i_level - 2]
-                if i_level < len(self.ch_level) - 1
-                else self.ch_level[0]
-            )
+            input_channel = self.ch_level[-i_level - 2] if i_level < len(self.ch_level) - 1 else self.ch_level[0]
             prev_output_channel = output_channel
             output_channel = ch
 
@@ -296,25 +274,17 @@ class UViTDecoder(nn.Module):
                         ada_emb_dim=ctx_emb_dim,
                     )
                 )
-                logger.debug(
-                    f"[UVit ResUp]: {i_level=}, {input_channel=}, {output_channel=}"
-                )
+                logger.debug(f"[UVit ResUp]: {i_level=}, {input_channel=}, {output_channel=}")
 
         ### Output ###
-        self.conv_norm_out = nn.GroupNorm(
-            num_channels=channels, num_groups=norm_num_groups, eps=eps
-        )
+        self.conv_norm_out = nn.GroupNorm(num_channels=channels, num_groups=norm_num_groups, eps=eps)
         self.conv_out_act = create_act_layer(act_fn)
         assert self.conv_out_act is not None, f"Unsupported act fn: {act_fn}"
 
         if isinstance(in_channels, (list, tuple)):
-            self.conv_out = DiffBandsInputConvOut(
-                in_channels, channels, padding_mode="reflect"
-            )
+            self.conv_out = DiffBandsInputConvOut(in_channels, channels, padding_mode="reflect")
         else:
-            self.conv_out = AdaptiveOutputConvLayer(
-                channels, in_channels, mode="interp"
-            )
+            self.conv_out = AdaptiveOutputConvLayer(channels, in_channels, mode="interp")
 
         ### Null condition h ###
         # self.null_cond_h = nn.Buffer(torch.zeros(1, z_dim, 1, 1))
@@ -334,9 +304,7 @@ class UViTDecoder(nn.Module):
             if size in cls.SIZES:
                 kwargs = {**cls.SIZES[size], **(asdict(cfg) or {})}
             else:
-                raise ValueError(
-                    f"Unknown size '{size}' for UViTDecoder. Available sizes: {list(cls.SIZES.keys())}"
-                )
+                raise ValueError(f"Unknown size '{size}' for UViTDecoder. Available sizes: {list(cls.SIZES.keys())}")
         return cls(**kwargs)
 
     def init_weights(self, method="xavier_uniform", ckpt_module="decoder", **kwargs):
@@ -384,9 +352,7 @@ class UViTDecoder(nn.Module):
         timestep = timestep.expand(bs)
         return timestep
 
-    def get_time_embed(
-        self, sample: torch.Tensor, timesteps: tuple | torch.Tensor | float
-    ):
+    def get_time_embed(self, sample: torch.Tensor, timesteps: tuple | torch.Tensor | float):
         bs, device = sample.shape[0], sample.device
         if isinstance(timesteps, (list, tuple)):
             timesteps = [self._expand_time(t, bs, device) for t in timesteps]
@@ -424,9 +390,7 @@ class UViTDecoder(nn.Module):
             elif self.time_cond_type == "t,r,t-r":
                 delta_embed = t_emb + self.time_embed(r) + delta_embedder(t - r)
             else:
-                raise NotImplementedError(
-                    f"Time cond type {self.time_cond_type} not implemented"
-                )
+                raise NotImplementedError(f"Time cond type {self.time_cond_type} not implemented")
 
         main_t_emb = (t_emb + delta_embed) if delta_embed is not None else t_emb
         return main_t_emb, delta_embed
@@ -436,20 +400,14 @@ class UViTDecoder(nn.Module):
         down_block_res = [x]
         for downsample_block in self.down_blocks:
             if use_act_ckpt:
-                x, res_samples = checkpoint(
-                    downsample_block, x, t_emb, ctx_emb, use_reentrant=False
-                )
+                x, res_samples = checkpoint(downsample_block, x, t_emb, ctx_emb, use_reentrant=False)
             else:
-                x, res_samples = downsample_block(
-                    hidden_states=x, temb=t_emb, ctx_emb=ctx_emb
-                )
+                x, res_samples = downsample_block(hidden_states=x, temb=t_emb, ctx_emb=ctx_emb)
             down_block_res.extend(res_samples)
         x = self.connectors[0](x)
         return x, down_block_res
 
-    def _forward_ups(
-        self, x, t_emb, ctx_emb, down_block_res, use_act_ckpt=False
-    ) -> torch.Tensor:
+    def _forward_ups(self, x, t_emb, ctx_emb, down_block_res, use_act_ckpt=False) -> torch.Tensor:
         x = self.connectors[1](x)
         for upsample_block in self.up_blocks:
             res_samples = down_block_res[-len(upsample_block.resnets) :]
@@ -495,16 +453,12 @@ class UViTDecoder(nn.Module):
         derivative=False,
     ) -> Tensor:
         # t: timestep, t or (t, r)
-        out_chan = (
-            inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
-        )
+        out_chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
         ### Prepare input ###
 
         # Concat with z and project
-        z_expanded = torch.nn.functional.interpolate(
-            z, size=(x.shape[-2], x.shape[-1]), mode="nearest"
-        )
+        z_expanded = torch.nn.functional.interpolate(z, size=(x.shape[-2], x.shape[-1]), mode="nearest")
 
         # conv ins
         z_expanded = self.conv_in["z_conv_in"](z_expanded)
@@ -636,9 +590,7 @@ class UViTMiddleTransformer(VisionTransformer):
         ######### Positional Embedding #########
         self.pre_pos_embeddings = None
         if learned_pos_embed and sample_size is not None:
-            self.pre_pos_embeddings = LearnedPositionalEmbedding(
-                (self.inner_dim, *sample_size)
-            )
+            self.pre_pos_embeddings = LearnedPositionalEmbedding((self.inner_dim, *sample_size))
 
     def forward(
         self,
@@ -664,9 +616,7 @@ class UViTMiddleTransformer(VisionTransformer):
         if ctx_emb is not None and ctx_emb.shape[-2:] != hidden_states.shape[-2:]:
             if ctx_emb.shape[0] >= 32:
                 ctx_emb = ctx_emb.contiguous()
-            ctx_emb = nn.functional.interpolate(
-                ctx_emb, size=hidden_states.shape[-2:], mode="nearest"
-            )
+            ctx_emb = nn.functional.interpolate(ctx_emb, size=hidden_states.shape[-2:], mode="nearest")
 
         #### Attention and FFN
         hidden_states = super().forward(

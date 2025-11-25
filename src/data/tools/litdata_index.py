@@ -11,6 +11,17 @@ from litdata.streaming.reader import BinaryReader, ChunksConfig
 from litdata.utilities import dataset_utilities as litdata_utils
 from loguru import logger
 
+logger.remove()
+logger.add(
+    sys.stderr,
+    colorize=True,
+    format=(
+        "<green>{time:HH:mm:ss}</green> "
+        "- {level.icon} <level>[{level:^6}] {file.name}:{line}</level> "
+        "- <level>{message}</level>"
+    ),
+)
+
 
 def _catch_signals(handler=None):
     """
@@ -66,9 +77,7 @@ class _BaseStreamingDataset(StreamingDataset):
             index_file_name = input_dir.stem
             input_dir = input_dir.parent
         else:
-            raise ValueError(
-                f"input_dir must be a directory or a index json file, got: {input_dir}"
-            )
+            raise ValueError(f"input_dir must be a directory or a index json file, got: {input_dir}")
 
         # FIXME: I don't know why the 'index_path' args does not work
         index_file_name = kwargs.pop("index_file_name", index_file_name)
@@ -109,7 +118,7 @@ def _modify_config_data_format(config: dict):
 
 def _build_dataset(data_dir: str, index_file_name="index.json"):
     config = _read_config_from_dir(data_dir, index_file_name)
-    config = _modify_config_data_format(config)
+    config = _modify_config_data_format(config)  # no decode in the StreamingDataset
 
     # write to a temp file
     config_temp_file = tempfile.NamedTemporaryFile(
@@ -133,7 +142,7 @@ def _build_dataset(data_dir: str, index_file_name="index.json"):
 
 def _read_item_key(ds: StreamingDataset, index: int):
     item = ds[index]
-    return item["__key__"]
+    return item["__key__"] if "__key__" in item else "No_key_found"
 
 
 def read_keys(data_dir: str, save_file: str | None = None):
@@ -154,11 +163,19 @@ def read_keys(data_dir: str, save_file: str | None = None):
         logger.info("Temporary config file deleted.")
 
 
+def count_files(data_dir: str):
+    ds, config_temp_file = _build_dataset(data_dir)
+    logger.info(f"The dataset at {data_dir} has {len(ds)} items.")
+    return len(ds)
+
+
 def main():
     """
     Usage:
         ## read all keys
         python litdata_index.py read --data-dir /path/to/input/dir --save-file /path/to/save/file
+        ## count number of items
+        python litdata_index.py count --data-dir /path/to/input/dir
     """
 
     parser = argparse.ArgumentParser()
@@ -168,10 +185,17 @@ def main():
     read_parser.add_argument("-d", "--data-dir", type=str, required=True)
     read_parser.add_argument("-s", "--save-file", type=str, default=None)
 
+    count_parser = subparser.add_parser("count", help="Count keys in dataset")
+    count_parser.add_argument("-d", "--data-dir", type=str, required=True)
+
     args = parser.parse_args()
 
     if args.subcommand == "read":
         read_keys(args.data_dir, args.save_file)
+    elif args.subcommand == "count":
+        count_files(args.data_dir)
+    else:
+        raise ValueError(f"Unknown subcommand: {args.subcommand}")
 
 
 if __name__ == "__main__":

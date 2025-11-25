@@ -112,14 +112,10 @@ class Gemma2TextEncoder:
 
 def main():
     parser = argparse.ArgumentParser(description="预编码Gemma2文本特征")
-    parser.add_argument(
-        "--captions_json", required=True, help="QwenVL生成的caption JSON文件路径"
-    )
+    parser.add_argument("--captions_json", required=True, help="QwenVL生成的caption JSON文件路径")
     parser.add_argument("--output_dir", required=True, help="输出目录")
     parser.add_argument("--max_length", type=int, default=300, help="最大文本长度")
-    parser.add_argument(
-        "--model_name", default="google/gemma-2-2b", help="Gemma2模型名称"
-    )
+    parser.add_argument("--model_name", default="google/gemma-2-2b", help="Gemma2模型名称")
     parser.add_argument("--device", default="auto", help="设备(auto/cuda/cpu)")
 
     args = parser.parse_args()

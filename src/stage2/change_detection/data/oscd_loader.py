@@ -138,9 +138,7 @@ def shared_times_norm_img(
     elif isinstance(norm_keys, str):
         norm_keys = [norm_keys]
 
-    assert len(norm_keys) > 1, (
-        f"need at least 2 keys to do shared-times normalization for CD task, but got {norm_keys}"
-    )
+    assert len(norm_keys) > 1, f"need at least 2 keys to do shared-times normalization for CD task, but got {norm_keys}"
 
     for key in norm_keys:
         if key not in sample:
@@ -356,9 +354,7 @@ def create_window_slider_oscd_dataloader(
     shuffle: bool = False,
     remove_meta: bool = False,
     norm_img_keys: list[str] = ["img1", "img2"],
-) -> tuple[
-    wds.WebDataset, Generator[dict[str, torch.Tensor | np.ndarray | str], None, None]
-]:
+) -> tuple[wds.WebDataset, Generator[dict[str, torch.Tensor | np.ndarray | str], None, None]]:
     """
     Create a window sliding dataloader for OSCD (Onera Satellite Change Detection) dataset.
 
@@ -508,9 +504,7 @@ def test_oscd_loader(mode=None):
                 win_info = batch_s["window_info"]
                 model_out_lst.append({"gt": label, "window_info": win_info})
             # merge
-            gt_merged = window_slider.merge_windows(model_out_lst, merged_keys=["gt"])[
-                "gt"
-            ]
+            gt_merged = window_slider.merge_windows(model_out_lst, merged_keys=["gt"])["gt"]
             print("merged gt shape", gt_merged, "unique", torch.unique(gt_merged))
         else:
             # do nothing

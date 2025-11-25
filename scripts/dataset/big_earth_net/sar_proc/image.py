@@ -77,8 +77,7 @@ class LoadImageFromDisk(LoadSegment):
             "meta": dataset.GetMetadata(),
         }
         metadata["band_meta"] = [
-            dataset.GetRasterBand(band).GetMetadata()
-            for band in range(1, dataset.RasterCount + 1)
+            dataset.GetRasterBand(band).GetMetadata() for band in range(1, dataset.RasterCount + 1)
         ]
         if name is None:
             name = os.path.splitext(os.path.split(pathstring)[1])[0]
@@ -167,9 +166,7 @@ class SaveImage(PipeSegment):
             if pin.data.dtype in (bool, np.dtype("bool")):
                 datatype = gdal.GDT_Byte
             else:
-                warnings.warn(
-                    "! SaveImage did not find data type match; saving as float."
-                )
+                warnings.warn("! SaveImage did not find data type match; saving as float.")
                 datatype = gdal.GDT_Float32
         dataset = driver.Create(
             self.pathstring,
@@ -181,10 +178,7 @@ class SaveImage(PipeSegment):
         for band in range(pin.data.shape[0]):
             bandptr = dataset.GetRasterBand(band + 1)
             bandptr.WriteArray(pin.data[band, :, :])
-            if (
-                isinstance(self.no_data_value, str)
-                and self.no_data_value.lower() == "nan"
-            ):
+            if isinstance(self.no_data_value, str) and self.no_data_value.lower() == "nan":
                 bandptr.SetNoDataValue(math.nan)
             elif self.no_data_value is not None:
                 bandptr.SetNoDataValue(self.no_data_value)
@@ -253,14 +247,8 @@ class ShowImage(PipeSegment):
             else:
                 image_formatted = pin.data[self.bands]
             pyplot_formatted = np.squeeze(np.moveaxis(image_formatted, 0, -1))
-            if (
-                np.ndim(pyplot_formatted) == 3
-                and self.vmin is not None
-                and self.vmax is not None
-            ):
-                pyplot_formatted = np.clip(
-                    (pyplot_formatted - self.vmin) / (self.vmax - self.vmin), 0.0, 1.0
-                )
+            if np.ndim(pyplot_formatted) == 3 and self.vmin is not None and self.vmax is not None:
+                pyplot_formatted = np.clip((pyplot_formatted - self.vmin) / (self.vmax - self.vmin), 0.0, 1.0)
             # Select image size
             if self.height is None and self.width is None:
                 rc = {}
@@ -272,9 +260,7 @@ class ShowImage(PipeSegment):
                 rc = {"figure.figsize": [self.width, self.height]}
             # Show image
             with plt.rc_context(rc):
-                plt.imshow(
-                    pyplot_formatted, cmap=self.cmap, vmin=self.vmin, vmax=self.vmax
-                )
+                plt.imshow(pyplot_formatted, cmap=self.cmap, vmin=self.vmin, vmax=self.vmax)
                 plt.show()
         return pin
 

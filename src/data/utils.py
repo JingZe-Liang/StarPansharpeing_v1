@@ -176,9 +176,7 @@ def check_img_channel(
                 )
                 img = None
         else:
-            raise ValueError(
-                f"Unsupported number of dimensions for img: {img.ndim}. Expected 2 or 3."
-            )
+            raise ValueError(f"Unsupported number of dimensions for img: {img.ndim}. Expected 2 or 3.")
 
         return img
 
@@ -255,9 +253,8 @@ def search_one_key_not_dunder(
 
         # else not in default keys, then assert only one key not starting with "__"
         if not _searched_flag:
-            assert len(_not_dunder_keys) == 1, (
-                'Expected exactly one key not starting with "__", but found: '
-                + str(_not_dunder_keys)
+            assert len(_not_dunder_keys) == 1, 'Expected exactly one key not starting with "__", but found: ' + str(
+                _not_dunder_keys
             )
             ch_key = _not_dunder_keys[0]
     else:
@@ -308,17 +305,13 @@ def rename_keys(
     if isinstance(source_keys, str):
         source_keys = [source_keys]
 
-    assert len(tgt_keys) == len(source_keys), (
-        "tgt_keys and source_keys must have the same length"
-    )
+    assert len(tgt_keys) == len(source_keys), "tgt_keys and source_keys must have the same length"
 
     for sk, tk in zip(source_keys, tgt_keys):
         if sk in sample and tk is not None:
             sample[tk] = sample.pop(sk, None)
             if sample[tk] is None:
-                log_print(
-                    '"Key {sk} not found in sample, setting {tk} to None"', "warning"
-                )
+                log_print('"Key {sk} not found in sample, setting {tk} to None"', "warning")
 
     if remove_others:
         for k in sample.keys():
@@ -341,9 +334,7 @@ def remove_dot_and_extensions(sample, tgt_key: str | dict[str, str] | None = Non
                 sample[tgt_key] = v
                 break
             else:
-                raise ValueError(
-                    f"Unsupported type for tgt_key: {type(tgt_key)}. Expected str or dict."
-                )
+                raise ValueError(f"Unsupported type for tgt_key: {type(tgt_key)}. Expected str or dict.")
 
             sample[tgt_key] = v
 
@@ -370,9 +361,7 @@ def _is_large_img(img, max_hw: int = 2048):
     return False
 
 
-def _downsample_img(
-    img: Float[Tensor, "c h w"], tgt_hw: int = 1024, downsample_type: str = "slice"
-):
+def _downsample_img(img: Float[Tensor, "c h w"], tgt_hw: int = 1024, downsample_type: str = "slice"):
     if not _is_large_img(img, tgt_hw):
         return img
 
@@ -391,9 +380,7 @@ def _downsample_img(
         # add batch dim
         img = img.unsqueeze(0)  # 1, c, h, w
         scale = get_longest_downsample_scale(tuple(img.shape[2:]))
-        img = torch.nn.functional.interpolate(
-            img, scale_factor=1 / scale, mode="bilinear", align_corners=False
-        )
+        img = torch.nn.functional.interpolate(img, scale_factor=1 / scale, mode="bilinear", align_corners=False)
     else:
         raise ValueError(f"Unknown downsample_type: {downsample_type}")
 
@@ -421,22 +408,14 @@ def quantile_clip_(
     def q_clip_closure_(x: Tensor):
         q_dim = -1
         if clip_mode == "both":
-            q_min = x.quantile(
-                1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-            )
-            q_max = x.quantile(
-                quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-            )
+            q_min = x.quantile(1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
+            q_max = x.quantile(quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
         elif clip_mode == "min":
-            q_min = x.quantile(
-                1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-            )
+            q_min = x.quantile(1 - quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
             q_max = None
         elif clip_mode == "max":
             q_min = None
-            q_max = x.quantile(
-                quantile, dim=q_dim, interpolation=q_interp, keepdim=True
-            )
+            q_max = x.quantile(quantile, dim=q_dim, interpolation=q_interp, keepdim=True)
         else:
             raise ValueError(f"Unknown clip_mode: {clip_mode}")
 
@@ -604,21 +583,13 @@ def normalize_image_(
     # 2. Sigma clipping or quantile clipping
     is_ch_3 = img.shape[0] == 3
     use_quantile_clip = q_clip < 1.0 and not is_ch_3  # ignore RGB image, always use max
-    use_sigma_clip = (
-        sigma_clip > 0.0 and not is_ch_3
-    )  # ignore RGB image for sigma clipping
+    use_sigma_clip = sigma_clip > 0.0 and not is_ch_3  # ignore RGB image for sigma clipping
 
-    assert not (use_quantile_clip and use_sigma_clip), (
-        "Use either quantile clipping or sigma clipping or not used both"
-    )
+    assert not (use_quantile_clip and use_sigma_clip), "Use either quantile clipping or sigma clipping or not used both"
     if use_sigma_clip:
-        img = sigma_clip_(
-            img, sigma=sigma_clip, per_channel=per_channel, clip_mode="both", eps=eps
-        )
+        img = sigma_clip_(img, sigma=sigma_clip, per_channel=per_channel, clip_mode="both", eps=eps)
     if use_quantile_clip:
-        img = quantile_clip_(
-            img, quantile=q_clip, per_channel=per_channel, clip_mode="both"
-        )
+        img = quantile_clip_(img, quantile=q_clip, per_channel=per_channel, clip_mode="both")
 
     # 3. Image normalization to (0, 1)
     if is_ch_3:
@@ -757,9 +728,7 @@ def norm_img(
 # * --- Filters --- #
 
 
-def size_filtering(
-    sample, tgt_key: str | list[str] | None, constraint_size: int | tuple
-):
+def size_filtering(sample, tgt_key: str | list[str] | None, constraint_size: int | tuple):
     if tgt_key is None:
         tgt_key = [k for k in sample.keys() if not k.startswith("__")]
     elif isinstance(tgt_key, str):
@@ -772,9 +741,7 @@ def size_filtering(
             if img_size < constraint_size:  # larger than, keep
                 return None
         elif isinstance(constraint_size, tuple):
-            if not (
-                constraint_size[0] <= img_size <= constraint_size[1]
-            ):  # in the range, keep
+            if not (constraint_size[0] <= img_size <= constraint_size[1]):  # in the range, keep
                 return None
 
     return sample
@@ -790,9 +757,7 @@ def loop_apply_filters(
 
     for v in loop_kwargs.values():
         if not isinstance(v, (list, tuple)):
-            raise ValueError(
-                f"Expected list or tuple for loop_kwargs values, but got {type(v)}"
-            )
+            raise ValueError(f"Expected list or tuple for loop_kwargs values, but got {type(v)}")
 
     # compose looped kwargs
     keys = loop_kwargs.keys()
@@ -837,9 +802,7 @@ def merge_modalities(
         elif len(modality_names) == 1:
             # Brace expand doesn't work with a single entry, e.g. shard_dir/[foo]/shard00000.tar
             multi_tar_urls = [multi_tar_urls.replace("{", "", 1).replace("}", "", 1)]
-            multi_tar_urls = [
-                list(braceexpand.braceexpand(tar_url)) for tar_url in multi_tar_urls
-            ]
+            multi_tar_urls = [list(braceexpand.braceexpand(tar_url)) for tar_url in multi_tar_urls]
             multi_tar_urls = sum(multi_tar_urls, [])  # Flatten the list
         else:
             # Remaining cases where multiple modalities are specified, e.g. shard_dir/[foo,bar]/shard00000.tar
@@ -852,23 +815,15 @@ def merge_modalities(
                 f"but got {len(multi_tar_urls)} shards and {len(modality_names)} modalities"
                 f"multi_tar_files: {multi_tar_urls}, modality_names: {modality_names}"
             )
-            tar_files = [
-                wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
-            ]
+            tar_files = [wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls]
             chained_per_modality = [
-                chain.from_iterable(
-                    tar_files[i : i + len(multi_tar_urls) // len(modality_names)]
-                )
-                for i in range(
-                    0, len(multi_tar_urls), len(multi_tar_urls) // len(modality_names)
-                )
+                chain.from_iterable(tar_files[i : i + len(multi_tar_urls) // len(modality_names)])
+                for i in range(0, len(multi_tar_urls), len(multi_tar_urls) // len(modality_names))
             ]
             multi_tar_loop = zip(*chained_per_modality)
         else:
             # Create tar iterators for shards of all modalities
-            tar_iters = [
-                wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
-            ]
+            tar_iters = [wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls]
             multi_tar_loop = zip(*tar_iters)
 
         # * --- Try to loop the multi-modality tar sources --- #
@@ -880,9 +835,7 @@ def merge_modalities(
                 merged_dict["__key__"] = multi_tar_files[0]["__key__"]
                 merged_dict["__url__"] = src["url"]
 
-                for modality_name, modality_dict in zip(
-                    modality_names, multi_tar_files
-                ):
+                for modality_name, modality_dict in zip(modality_names, multi_tar_files):
                     _key = modality_dict.pop("__key__")
                     _url = modality_dict.pop("__url__")
 
@@ -934,9 +887,7 @@ def wids_img_size_filter_by_parquet_index(
     if max_size is not None:
         shapes = shapes[(shapes["height"] <= max_size) & (shapes["width"] <= max_size)]
     indexes = shapes["index"].tolist()
-    log_print(
-        "[img_size_filter] Found {len(indexes)} samples that fit the size constraint."
-    )
+    log_print("[img_size_filter] Found {len(indexes)} samples that fit the size constraint.")
     return set(indexes)
 
 
@@ -1207,23 +1158,17 @@ def chained_dataloaders(
                     total_prob = sum(valid_probs)
                     if total_prob > 0:
                         # softmax the valid probabilities
-                        normalized_probs = scipy.special.softmax(
-                            valid_probs, axis=0
-                        ).tolist()
+                        normalized_probs = scipy.special.softmax(valid_probs, axis=0).tolist()
                         # normalized_probs = [p / total_prob for p in valid_probs]
                         # Select loader based on curriculum probabilities
-                        idx = random.choices(
-                            valid_indices, weights=normalized_probs, k=1
-                        )[0]
+                        idx = random.choices(valid_indices, weights=normalized_probs, k=1)[0]
                         if _log_cur:
                             log_print(
                                 f"[Curriculum]: selected loader {idx} with prob: {normalized_probs}",
                                 only_rank_zero=False,
                             )
                     else:
-                        log_print(
-                            "All curriculum probabilities are less than 0", "warning"
-                        )
+                        log_print("All curriculum probabilities are less than 0", "warning")
 
                         # Fallback to uniform selection if all probs zero
                         idx = random.choice(valid_indices)
@@ -1251,9 +1196,7 @@ def chained_dataloaders(
                         is_exhausted[idx] = True
 
                     # Remove the index from active_indices only if it failed
-                    if (
-                        idx in active_indices
-                    ):  # Check if it's still there (it should be)
+                    if idx in active_indices:  # Check if it's still there (it should be)
                         active_indices.remove(idx)
 
                     # Refresh active indices if needed
@@ -1272,9 +1215,7 @@ def chained_dataloaders(
             else:
                 # All attempts failed
                 if infinit:
-                    log_print(
-                        "All loaders failed to yield data unexpectedly", "warning"
-                    )
+                    log_print("All loaders failed to yield data unexpectedly", "warning")
                 else:
                     break  # In finite mode, exit when we can't get any samples
 
@@ -1294,9 +1235,7 @@ def chained_dataloaders(
     return chained_loader
 
 
-def generate_wds_config_modify_only_some_kwgs(
-    basic_cfg: dict, changed_kwargs: list[dict[str, Any]]
-) -> list[dict]:
+def generate_wds_config_modify_only_some_kwgs(basic_cfg: dict, changed_kwargs: list[dict[str, Any]]) -> list[dict]:
     """
     Generate a list of modified configurations based on a basic configuration and a list of changed keyword arguments.
 
@@ -1307,12 +1246,8 @@ def generate_wds_config_modify_only_some_kwgs(
     Returns:
         list[dict]: A list of modified configurations.
     """
-    assert isinstance(basic_cfg, dict), (
-        f"basic_cfg should be a dict, but got {type(basic_cfg)}"
-    )
-    assert isinstance(changed_kwargs, list), (
-        f"changed_kwargs should be a list, but got {type(changed_kwargs)}"
-    )
+    assert isinstance(basic_cfg, dict), f"basic_cfg should be a dict, but got {type(basic_cfg)}"
+    assert isinstance(changed_kwargs, list), f"changed_kwargs should be a list, but got {type(changed_kwargs)}"
 
     cfgs = []
     for kwg in changed_kwargs:
@@ -1324,18 +1259,12 @@ def generate_wds_config_modify_only_some_kwgs(
 
 
 def get_wids_index_json_info(path: str) -> tuple[list[dict], int]:
-    assert path.endswith(".json"), (
-        f"wids json file should end with .json, but got {path}"
-    )
-    assert os.path.exists(path), (
-        f"wids json file {path} does not exist, please check the path"
-    )
+    assert path.endswith(".json"), f"wids json file should end with .json, but got {path}"
+    assert os.path.exists(path), f"wids json file {path} does not exist, please check the path"
 
     with open(path, "r") as f:
         index_d = json.load(f)
-    assert "shardlist" in index_d, (
-        f"wids json file {path} should contain 'shardlist' key, but got {index_d.keys()}"
-    )
+    assert "shardlist" in index_d, f"wids json file {path} should contain 'shardlist' key, but got {index_d.keys()}"
 
     index_info = index_d["shardlist"]
     n = len(index_info)
@@ -1343,9 +1272,7 @@ def get_wids_index_json_info(path: str) -> tuple[list[dict], int]:
     return index_info, n
 
 
-def expand_paths_and_correct_loader_kwargs(
-    load_type: str, paths: str | list, loader_kwargs: dict
-):
+def expand_paths_and_correct_loader_kwargs(load_type: str, paths: str | list, loader_kwargs: dict):
     # Ensure that the number of workers is not greater than the number of shards
     if load_type == "wids":
         if isinstance(paths, str):
@@ -1355,16 +1282,13 @@ def expand_paths_and_correct_loader_kwargs(
             _len = 0
             for p in paths:
                 assert isinstance(p, str) and p.endswith(".json"), (
-                    "'paths' should be a list of strings that are wids json files, "
-                    f"but got {type(p)} with value {p}"
+                    f"'paths' should be a list of strings that are wids json files, but got {type(p)} with value {p}"
                 )
                 _, len_i = get_wids_index_json_info(p)
                 _len += len_i
             path_exp = paths
         else:
-            raise ValueError(
-                f"'paths' should be a string or list of stirng that is json files but got {paths}"
-            )
+            raise ValueError(f"'paths' should be a string or list of stirng that is json files but got {paths}")
 
     else:  # webdataset
         if isinstance(paths, str):
@@ -1388,9 +1312,7 @@ def expand_paths_and_correct_loader_kwargs(
                 lst_p = list(braceexpand.braceexpand(p))
                 path_exp.extend(lst_p)
         else:
-            raise ValueError(
-                f"paths should be a string or a list of strings, but got {type(paths)}"
-            )
+            raise ValueError(f"paths should be a string or a list of strings, but got {type(paths)}")
         _len = len(path_exp)
 
     assert _len > 0, f"paths should not be empty, but got {paths}"
@@ -1413,16 +1335,12 @@ def expand_paths_and_correct_loader_kwargs(
 
 
 # multimodal version of expand_paths_and_correct_loader_kwargs
-def expand_paths_and_correct_loader_kwargs_mm(
-    paths: str | list[str] | dict[str, str], loader_kwargs: dict
-):
+def expand_paths_and_correct_loader_kwargs_mm(paths: str | list[str] | dict[str, str], loader_kwargs: dict):
     # Ensure that the number of workers is not greater than the number of shards
     if isinstance(paths, str):
         # Ensure is multimodal
         n_modalities = len(extract_modality_names(paths, square_bracket=True))
-        assert n_modalities > 1, (
-            f"n_modalities must be greater than 1, when the path is {paths}"
-        )
+        assert n_modalities > 1, f"n_modalities must be greater than 1, when the path is {paths}"
 
         mm_paths = paths.translate(str.maketrans("[]", "{}"))
         mm_paths = list(braceexpand.braceexpand(mm_paths))
@@ -1432,13 +1350,10 @@ def expand_paths_and_correct_loader_kwargs_mm(
         n_modalities = 1
         for p in paths:
             assert isinstance(p, str), (
-                "'paths' should be a list of strings or a string that can be expanded"
-                f"list of {type(p)} is not allowed."
+                f"'paths' should be a list of strings or a string that can be expandedlist of {type(p)} is not allowed."
             )
             n_modalities = len(extract_modality_names(p, square_bracket=True))
-            assert n_modalities > 1, (
-                f"n_modalities must be greater than 1, when the path is {p}"
-            )
+            assert n_modalities > 1, f"n_modalities must be greater than 1, when the path is {p}"
             mm_p = p.translate(str.maketrans("[]", "{}"))
             lst_p = list(braceexpand.braceexpand(mm_p))
             mm_paths.extend(lst_p)
@@ -1453,9 +1368,7 @@ def expand_paths_and_correct_loader_kwargs_mm(
         assert len(total_shards) == 1, "all files must have equal number of shards"
         _len = total_shards.pop()
     else:
-        raise ValueError(
-            f"paths should be a string or a list of strings, but got {type(paths)}"
-        )
+        raise ValueError(f"paths should be a string or a list of strings, but got {type(paths)}")
 
     assert _len > 0, f"paths should not be empty, but got {paths}"
 

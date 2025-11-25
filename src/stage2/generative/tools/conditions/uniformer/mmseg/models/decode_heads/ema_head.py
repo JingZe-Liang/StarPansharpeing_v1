@@ -105,9 +105,7 @@ class EMAHead(BaseDecodeHead):
         self.num_stages = num_stages
         self.concat_input = concat_input
         self.momentum = momentum
-        self.ema_module = EMAModule(
-            self.ema_channels, self.num_bases, self.num_stages, self.momentum
-        )
+        self.ema_module = EMAModule(self.ema_channels, self.num_bases, self.num_stages, self.momentum)
 
         self.ema_in_conv = ConvModule(
             self.in_channels,

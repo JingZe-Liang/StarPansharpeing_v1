@@ -73,8 +73,7 @@ def _create_flow_transport_cfg():
     )
     tim_schedule_cfg = OmegaConf.from_dotlist(tim_schedule_kwargs_str.split(" "))
     tim_transport_str = (
-        "P_mean=0.0 P_std=1.0 sigma_d=1.0 enhance_target=false "
-        "w_gt=1.0 w_cond=0.75 w_start=0.3 w_end=0.8"
+        "P_mean=0.0 P_std=1.0 sigma_d=1.0 enhance_target=false w_gt=1.0 w_cond=0.75 w_start=0.3 w_end=0.8"
     )
     tim_transport_cfg = OmegaConf.from_dotlist(tim_transport_str.split(" "))
 
@@ -89,16 +88,14 @@ def _create_flow_transport_cfg():
     ################## MeanFlow config
     # flow_ratio=0.75 is for the training stability
     mf_kwargs_str = (
-        "flow_ratio=0.75 time_dist=['lognorm',-0.4,1.0] "
-        "cfg_ratio=0.2 cfg_scale=2.0 cfg_uncond='v' jvp_api='autograd'"
+        "flow_ratio=0.75 time_dist=['lognorm',-0.4,1.0] cfg_ratio=0.2 cfg_scale=2.0 cfg_uncond='v' jvp_api='autograd'"
     )
     mf_kwargs_cfg = OmegaConf.from_dotlist(mf_kwargs_str.split(" "))
 
     ################## Sampling Configs ##################
 
     tim_sample_str = (
-        "num_steps=8 stochasticity_ratio=0.1 sample_type='transition' cfg_scale=2.0 "
-        "cfg_low=0.0 cfg_high=0.7"
+        "num_steps=8 stochasticity_ratio=0.1 sample_type='transition' cfg_scale=2.0 cfg_low=0.0 cfg_high=0.7"
     )
     tim_sample_cfg = OmegaConf.from_dotlist(tim_sample_str.split(" "))
 
@@ -263,9 +260,7 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
 
     ######## Tokenizer main config
 
-    main_str = (
-        f"decoder_type={decoder_type} compile=false straight_through_latent=false"
-    )
+    main_str = f"decoder_type={decoder_type} compile=false straight_through_latent=false"
     main_cfg = OmegaConf.from_dotlist(main_str.split(" "))
     main_cfg.sampling_options_default = flow_dec_cfg_dict[flow_type][-1]
 
@@ -315,22 +310,16 @@ def latent1d_to_2d(
             "Either feat_2d_shape or inp_shape and total_resolutions must be provided"
         )
         gh, gw = (torch.as_tensor(inp_shape[-2:]) // total_resolutions).tolist()
-    elif (
-        isinstance(feat_2d_shape, (torch.Size, tuple, list)) and len(feat_2d_shape) == 4
-    ):
+    elif isinstance(feat_2d_shape, (torch.Size, tuple, list)) and len(feat_2d_shape) == 4:
         gh, gw = feat_2d_shape[2:]
     elif feat.ndim == 4:
         # Assume is square
         gh = gw = int(feat.shape[1] ** 0.5)
     else:
-        raise ValueError(
-            f"Invalid input args: {feat.shape=}, {feat_2d_shape=}, {inp_shape=}, {total_resolutions=}"
-        )
+        raise ValueError(f"Invalid input args: {feat.shape=}, {feat_2d_shape=}, {inp_shape=}, {total_resolutions=}")
 
     if feat.ndim == 4:
-        assert feat.shape[-2:] == (gh, gw), (
-            f"feat shape {feat.shape} already 2d with shape {gh},{gw}"
-        )
+        assert feat.shape[-2:] == (gh, gw), f"feat shape {feat.shape} already 2d with shape {gh},{gw}"
         return feat
     elif feat.ndim == 3:
         feat_2d = rearrange(feat, "b (h w) c -> b c h w", h=gh, w=gw)
@@ -378,11 +367,7 @@ def create_sampling_step_fn(
             elif isinstance(get_null_cond, Tensor):
                 null_cond = get_null_cond
             else:
-                raise ValueError(
-                    "get_null_cond must be a callable or a Tensor, got {}".format(
-                        type(get_null_cond)
-                    )
-                )
+                raise ValueError("get_null_cond must be a callable or a Tensor, got {}".format(type(get_null_cond)))
         elif model_cond is None:
             null_cond = None
         else:
@@ -515,9 +500,7 @@ class EncoderLowLevel(nn.Module):
             out = {"intermidates": feats}
 
         else:  # transformer only
-            z, out = self.transformer_encoder(
-                x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates
-            )
+            z, out = self.transformer_encoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates)
             h = self.z_to_latent(z)
 
         assert h.shape[-1] == self.latent_dim
@@ -539,9 +522,7 @@ class DecoderSemantic(nn.Module):
         """
         Encode the latent low-level tokens and convert into semantic tokens.
         """
-        h, out = self.encoder(
-            x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates
-        )
+        h, out = self.encoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates)
         return dict(sem_tokens=h, **out)
 
 
@@ -657,9 +638,7 @@ class DecoderFlowHead(nn.Module):
 
     ############ Traning functions #############
 
-    def flow_train_forward_head_standalone(
-        self, x, h, inp_shape, ema_model, clamp=False
-    ):
+    def flow_train_forward_head_standalone(self, x, h, inp_shape, ema_model, clamp=False):
         assert not self.transformer_t_conditioned
         assert self.training, "flow_train_forward should only be used in training mode"
 
@@ -701,9 +680,7 @@ class DecoderFlowHead(nn.Module):
 
         if self.flow_type == "fm":
             self.transport = cast(FM_Transport, self.transport)
-            terms = self.transport.training_losses(
-                self._forward_non_standalone_all_model, x, model_kwargs={"z": h}
-            )
+            terms = self.transport.training_losses(self._forward_non_standalone_all_model, x, model_kwargs={"z": h})
             flow_loss = terms["loss"].mean()
             recon = terms["pred_x_clean"]
             return recon, flow_loss
@@ -751,9 +728,7 @@ class DecoderFlowHead(nn.Module):
             raise ValueError(f"Unknown flow_type: {self.flow_type}")
         return recon
 
-    def flow_sample_all(
-        self, x, h, inp_shape, sample_kwargs={}, clamp=False, ret_trajectory=False
-    ):
+    def flow_sample_all(self, x, h, inp_shape, sample_kwargs={}, clamp=False, ret_trajectory=False):
         assert self.transformer_t_conditioned
         if self.flow_type == "fm":
             cfg_scale, cfg_interval, clip_v = (
@@ -780,9 +755,7 @@ class DecoderFlowHead(nn.Module):
                     # classifier-free guidance
                     assert cfg_scale > 1.0, "cfg_scale must be > 1.0 for CFG"
                     assert null_cond_h is not None, "null_cond_h is None for CFG"
-                    v_uncond = self._forward_non_standalone_all_model(
-                        x, t, null_cond_h, inp_shape=inp_shape
-                    )
+                    v_uncond = self._forward_non_standalone_all_model(x, t, null_cond_h, inp_shape=inp_shape)
                     v = v_uncond + cfg_scale * (v - v_uncond)
 
                 # clip fake x1 to (-1, 1)
@@ -834,19 +807,11 @@ class DecoderFlowHead(nn.Module):
         # Flow decoder handles time internally and uses processed tokens as conditioning
         if mode == "train":
             train_fn_ = (
-                self.flow_train_all
-                if self.transformer_t_conditioned
-                else self.flow_train_forward_head_standalone
+                self.flow_train_all if self.transformer_t_conditioned else self.flow_train_forward_head_standalone
             )
-            recon, flow_loss = train_fn_(
-                x, h, inp_shape=inp_shape, ema_model=ema_model, clamp=clamp
-            )
+            recon, flow_loss = train_fn_(x, h, inp_shape=inp_shape, ema_model=ema_model, clamp=clamp)
         elif mode == "sample":
-            sample_fn_ = (
-                self.flow_sample_all
-                if self.transformer_t_conditioned
-                else self.flow_sample_head_stand_alone
-            )
+            sample_fn_ = self.flow_sample_all if self.transformer_t_conditioned else self.flow_sample_head_stand_alone
             recon = sample_fn_(
                 x,
                 h,
@@ -923,8 +888,7 @@ class DecoderUViT(nn.Module):
             self.transport = FM_Transport(**cfg.transport)
             self.sampler = Sampler(transport=self.transport)
             logger.info(
-                f"[Decoder UViT]: FM transport={cfg.transport}"
-                f"FM train time type={self.transport.time_sample_type}"
+                f"[Decoder UViT]: FM transport={cfg.transport}FM train time type={self.transport.time_sample_type}"
             )
         elif cfg.flow_type == "mf":  # meanflow
             self.transport = MeanFlow(
@@ -966,9 +930,7 @@ class DecoderUViT(nn.Module):
         else:
             n_cfg = int(h.shape[0] * cfg_prob)
             cfg_mask = torch.rand(h.shape[0], device=h.device) < cfg_prob
-            null_h = (
-                self._get_null_h(h) + 0.0 * h
-            )  # partial gradients flow back to encoder/semantic decoder
+            null_h = self._get_null_h(h) + 0.0 * h  # partial gradients flow back to encoder/semantic decoder
             h = torch.where(cfg_mask[:, None, None, None], null_h, h)
 
         return h
@@ -1006,9 +968,7 @@ class DecoderUViT(nn.Module):
         if mode == "train":
             if self.transition_schedule.transport.enhance_target:
                 assert ema_model is not None, "EMA model is required for enhance_target"
-                assert hasattr(self, "null_cond_h"), (
-                    "The decoder must have null_cond_h for CFG"
-                )
+                assert hasattr(self, "null_cond_h"), "The decoder must have null_cond_h for CFG"
 
             # training: h is condition, x is the input
             noise = torch.randn_like(x)
@@ -1085,9 +1045,7 @@ class DecoderUViT(nn.Module):
             # x_init = torch.randn_like(x)
             x_init = x.clone()
             cfg_scale: float = sample_kwargs.pop("cfg", 1.0)
-            cfg_interval: tuple[float, float] | None = sample_kwargs.pop(
-                "cfg_interval", None
-            )
+            cfg_interval: tuple[float, float] | None = sample_kwargs.pop("cfg_interval", None)
             clip_v = sample_kwargs.pop("clip_velocity_per_step", False)
             sample_fn_ = self.sampler.sample_ode(**sample_kwargs)
             model_type = self.transport.model_type
@@ -1141,9 +1099,7 @@ class DecoderUViT(nn.Module):
         chan = get_chan_from_shape(inp_shape)
 
         # Create model function for MeanFlow - it expects (z, t, r, y=c)
-        def model_fn(
-            x: torch.Tensor, t: torch.Tensor, r: torch.Tensor, y: torch.Tensor = h
-        ) -> torch.Tensor:
+        def model_fn(x: torch.Tensor, t: torch.Tensor, r: torch.Tensor, y: torch.Tensor = h) -> torch.Tensor:
             return self.decoder(x, t, r, y, inp_shape)
 
         flow_loss = None
@@ -1152,9 +1108,7 @@ class DecoderUViT(nn.Module):
         if mode == "train":
             # Training mode: compute MeanFlow loss
             # MeanFlow expects clean image as input for training
-            flow_loss, mse_val, recon = self.transport.loss(
-                model_fn, x, null_c=self._get_null_h(h)
-            )
+            flow_loss, mse_val, recon = self.transport.loss(model_fn, x, null_c=self._get_null_h(h))
             flow_loss = flow_loss.mean()  # Ensure scalar loss
         elif mode == "sample":
             # Sampling mode: generate reconstruction from noise
@@ -1223,18 +1177,14 @@ class FlowTokenizer(nn.Module):
         self.semantic_decoder = DecoderSemantic(self.sem_cfg)
 
         logger.info(f"Init pixel decoder of type {self.tok_cfg.decoder_type}.")
-        decoder_cls = {"flow_head": DecoderFlowHead, "uvit": DecoderUViT}[
-            self.tok_cfg.decoder_type
-        ]
+        decoder_cls = {"flow_head": DecoderFlowHead, "uvit": DecoderUViT}[self.tok_cfg.decoder_type]
         self.pixel_decoder = decoder_cls(self.pix_flow_cfg)
 
         self._build_st_cat_lin()
 
         # Attrs
         self.total_resolutions: int = self.pix_flow_cfg.total_resolutions
-        self.sampling_options_default: dict[str, Any] = getattr(
-            self.tok_cfg, "sampling_options_default", {}
-        )
+        self.sampling_options_default: dict[str, Any] = getattr(self.tok_cfg, "sampling_options_default", {})
         logger.info(f"Set the sampling options to {self.sampling_options_default}.")
 
         # TODO: add quantizer
@@ -1349,29 +1299,19 @@ class FlowTokenizer(nn.Module):
     def _encode_latent(self, x):
         low_lvl_out = self.low_level_encoder(
             x,
-            get_intermidates=self.low_lvl_cache_layers
-            if self.training and self.use_repa
-            else None,
+            get_intermidates=self.low_lvl_cache_layers if self.training and self.use_repa else None,
         )
         # Cache low level features
-        self.z = (
-            low_lvl_out["intermidates"]
-            if self.low_lvl_proj_is_multi
-            else low_lvl_out["latent"]
-        )
+        self.z = low_lvl_out["intermidates"] if self.low_lvl_proj_is_multi else low_lvl_out["latent"]
         return low_lvl_out
 
     def _sem_decode(self, latent):
         sem_out = self.semantic_decoder(
             latent,
-            get_intermidates=self.sem_cache_layers
-            if (self.training and self.use_repa)
-            else None,
+            get_intermidates=self.sem_cache_layers if (self.training and self.use_repa) else None,
         )
         # Cache semantic features
-        self.sem_z = (
-            sem_out["intermidates"] if self.sem_proj_is_multi else sem_out["sem_tokens"]
-        )
+        self.sem_z = sem_out["intermidates"] if self.sem_proj_is_multi else sem_out["sem_tokens"]
         return sem_out
 
     @no_type_check
@@ -1388,19 +1328,13 @@ class FlowTokenizer(nn.Module):
 
         # Low-level feature distillation
         if self.low_lvl_proj_is_multi:
-            low_lvl_features = [
-                to_2d(self._repa_proj["low_lvl_repa_proj"][i](feat))
-                for i, feat in enumerate(self.z)
-            ]
+            low_lvl_features = [to_2d(self._repa_proj["low_lvl_repa_proj"][i](feat)) for i, feat in enumerate(self.z)]
         else:
             low_lvl_features = to_2d(self._repa_proj["low_lvl_repa_proj"](self.z))
 
         # Semantic feature distillation
         if self.sem_proj_is_multi:
-            sem_features = [
-                to_2d(self._repa_proj["sem_repa_proj"][i](feat))
-                for i, feat in enumerate(self.sem_z)
-            ]
+            sem_features = [to_2d(self._repa_proj["sem_repa_proj"][i](feat)) for i, feat in enumerate(self.sem_z)]
         else:
             sem_features = to_2d(self._repa_proj["sem_repa_proj"](self.sem_z))
 
@@ -1415,9 +1349,7 @@ class FlowTokenizer(nn.Module):
             latent = low_lvl_out["latent"]
             mask = low_lvl_out["mask"]
         elif latent is not None:
-            assert latent.ndim == 3, (
-                f"latent must be of shape (bs, n, dim), but got {latent.shape=}"
-            )
+            assert latent.ndim == 3, f"latent must be of shape (bs, n, dim), but got {latent.shape=}"
             hw_l = latent.shape[1]
             if hw is None:
                 hw = to_2tuple(int(math.sqrt(hw_l)))
@@ -1430,23 +1362,18 @@ class FlowTokenizer(nn.Module):
         # sem_proj_out = sem_out["sem_proj_out"]
 
         if self.st_skip_semantic_decoder:
-            assert latent.shape[1] == sem_tokens.shape[1], (
-                f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
-            )
+            assert latent.shape[1] == sem_tokens.shape[1], f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
             lat_sem_tokens = torch.cat([latent, sem_tokens], dim=-1)
             sem_tokens = self.st_cat_lin(lat_sem_tokens)  # input into the cnn decoder
 
         # To 2d
         assert hw is not None, "hw must be provided"
         assert math.prod(hw) == latent.shape[1], (
-            f"hw {hw} product does not match latent shape {latent.shape} "
-            f"and total_resolutions={self.total_resolutions}"
+            f"hw {hw} product does not match latent shape {latent.shape} and total_resolutions={self.total_resolutions}"
         )
 
         # output of 2d shape
-        latent, sem_tokens, mask = map(
-            partial(self._to_2d, hw=hw), (latent, sem_tokens, mask)
-        )
+        latent, sem_tokens, mask = map(partial(self._to_2d, hw=hw), (latent, sem_tokens, mask))
         out = dict(latent=latent, sem_tokens=sem_tokens, mask=mask)
         return out
 
@@ -1569,13 +1496,9 @@ class FlowTokenizer(nn.Module):
         sd = accelerate.utils.load_state_dict(path)
         missing_keys, unexpected_keys = load_weights_with_shape_check(self, sd)
         if len(missing_keys) > 0:
-            logger.warning(
-                f"Missing keys when loading pretrained model: {missing_keys}"
-            )
+            logger.warning(f"Missing keys when loading pretrained model: {missing_keys}")
         if len(unexpected_keys) > 0:
-            logger.warning(
-                f"Unexpected keys when loading pretrained model: {unexpected_keys}"
-            )
+            logger.warning(f"Unexpected keys when loading pretrained model: {unexpected_keys}")
         return missing_keys, unexpected_keys
 
     def set_grad_checkpointing(self, enable: bool = True):
@@ -1745,9 +1668,7 @@ def test_decoder_flow_head():
     x = torch.randn(batch_size, 3, img_size, img_size).to("cuda", torch.bfloat16)
 
     # Semantic tokens condition (3D: bs, n, dim)
-    sem_tokens = torch.randn(batch_size, grid_size * grid_size, 512).to(
-        "cuda", torch.bfloat16
-    )
+    sem_tokens = torch.randn(batch_size, grid_size * grid_size, 512).to("cuda", torch.bfloat16)
 
     # Input shape
     inp_shape = (batch_size, 202, img_size, img_size)
@@ -1756,13 +1677,9 @@ def test_decoder_flow_head():
 
     # Test training mode
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        recon, losses = decoder(
-            x=x, h=sem_tokens, inp_shape=inp_shape, mode="train", clamp=False
-        )
+        recon, losses = decoder(x=x, h=sem_tokens, inp_shape=inp_shape, mode="train", clamp=False)
 
-    print(
-        f"Training mode - recon shape: {recon.shape}, flow_loss: {losses['flow_loss']}"
-    )
+    print(f"Training mode - recon shape: {recon.shape}, flow_loss: {losses['flow_loss']}")
 
     # Test inference mode
     with torch.no_grad():
@@ -1777,9 +1694,7 @@ def test_decoder_flow_head():
                 sample_kwargs={"num_steps": 10},
             )
 
-    print(
-        f"Inference mode - recon shape: {recon.shape}, flow_loss: {losses['flow_loss']}"
-    )
+    print(f"Inference mode - recon shape: {recon.shape}, flow_loss: {losses['flow_loss']}")
     print(f"Reconstruction range: [{recon.min().item():.4f}, {recon.max().item():.4f}]")
 
     # Test gradient flow
@@ -1793,9 +1708,7 @@ def test_decoder_flow_head():
 
         # Check for gradients
         grad_params = [
-            name
-            for name, param in decoder.named_parameters()
-            if param.requires_grad and param.grad is not None
+            name for name, param in decoder.named_parameters() if param.requires_grad and param.grad is not None
         ]
         print(f"Parameters with gradients: {len(grad_params)}")
     else:

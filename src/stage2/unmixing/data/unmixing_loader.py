@@ -40,9 +40,7 @@ def img_divisible_by(img: Tensor | np.ndarray, divisor: int = 8) -> Tensor:
     if img.ndim == 3:
         img = img[None]  # add batch dim
 
-    img = torch.nn.functional.interpolate(
-        img, size=(hp, wp), mode="bicubic", align_corners=True
-    )
+    img = torch.nn.functional.interpolate(img, size=(hp, wp), mode="bicubic", align_corners=True)
     img = img.squeeze(0)
 
     return img  # type: ignore[return-value]
@@ -52,9 +50,7 @@ def img_clip(img: Tensor):
     return torch.clamp(img, 0.0, 1.0)
 
 
-def compute_init_em_abunds(
-    force: bool = False, cache_disable: bool = False, fclsu_solver_kwargs: dict = {}
-):
+def compute_init_em_abunds(force: bool = False, cache_disable: bool = False, fclsu_solver_kwargs: dict = {}):
     cached_solver = cache_solver_result(cache_disable, size=1)
     _last_hits = 0
 
@@ -99,9 +95,7 @@ def get_unmixing_dataloader(
 ):
     dataset = wds.WebDataset(
         wds_paths,
-        resampled=resample
-        if not cache
-        else False,  # no need `iter(dataloader)` for `next` function
+        resampled=resample if not cache else False,  # no need `iter(dataloader)` for `next` function
         shardshuffle=False,
         nodesplitter=wds.shardlists.single_node_only
         if not accelerate.state.PartialState().use_distributed
@@ -197,16 +191,10 @@ def test_loader_loading(only_first_batch: bool = True, plot=True) -> None:
             if plot:
                 plt.figure(figsize=(7, 5))
                 img_rgb = (
-                    get_rgb_image(
-                        sample["img"], rgb_channels="mean", use_linstretch=True
-                    )[0]
-                    .permute(1, 2, 0)
-                    .numpy()
+                    get_rgb_image(sample["img"], rgb_channels="mean", use_linstretch=True)[0].permute(1, 2, 0).numpy()
                 )
                 img_abunds = (
-                    sample["abunds"][0][:3]
-                    .permute(1, 2, 0)
-                    .numpy()  # .transpose(1, 0, 2)
+                    sample["abunds"][0][:3].permute(1, 2, 0).numpy()  # .transpose(1, 0, 2)
                 )
                 # subplots
                 plt.subplot(1, 2, 1)
@@ -250,9 +238,7 @@ def test_loader_loading(only_first_batch: bool = True, plot=True) -> None:
                 # Plot endmembers comparison
                 from src.stage2.unmixing.metrics.basic import UnmixingMetrics
 
-                _, _, _, fig_endmembers, _ = UnmixingMetrics._plot_endmembers(
-                    endmembers, endmembers_gt, abundances
-                )
+                _, _, _, fig_endmembers, _ = UnmixingMetrics._plot_endmembers(endmembers, endmembers_gt, abundances)
 
                 # Save endmembers plot
                 plt.savefig(
@@ -337,9 +323,7 @@ def test_loader() -> None:
             print(f"Collected {i} windows, shaped as {window_sample['img'].shape}")
 
     # Test merging with no overlap
-    merged_no_overlap = WindowSlider.merge_windows(
-        window_results_no_overlap, merge_method="average"
-    )
+    merged_no_overlap = WindowSlider.merge_windows(window_results_no_overlap, merge_method="average")
 
     # Compare merged data with original data for slide_keys
     slide_keys = ["img", "abunds"]
@@ -376,9 +360,7 @@ def test_loader() -> None:
 
                 # Debug: Check if shapes match
                 if original_np.shape != merged_np.shape:
-                    print(
-                        f"  Shape mismatch: original {original_np.shape} vs merged {merged_np.shape}"
-                    )
+                    print(f"  Shape mismatch: original {original_np.shape} vs merged {merged_np.shape}")
             else:
                 print(f"  ✓ Data consistency verified for {key}")
 

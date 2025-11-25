@@ -158,9 +158,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # add mid block
         if cache_index[-1] == -1:
             self.low_lvl_repa_proj_chans.append(out_chan)
-            logger.info(
-                f"Low-level repa projection channels: {self.low_lvl_repa_proj_chans}"
-            )
+            logger.info(f"Low-level repa projection channels: {self.low_lvl_repa_proj_chans}")
 
     def _build_transformers(self, cnn_cfg, trans_enc_cfg, trans_dec_cfg=None):
         # cnn_cfg is already set as self.cnn_cfg in __init__
@@ -183,9 +181,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.st_skip_sem_decoder = False
         if trans_dec_cfg is not None:
             self.semantic_transformer_dec = dec_model_cls(self.trans_dec_cfg)
-            self.semantic_transformer_dec.set_grad_checkpointing(
-                self.grad_checkpointing
-            )
+            self.semantic_transformer_dec.set_grad_checkpointing(self.grad_checkpointing)
             logger.info(f"Init semantic transformer decoder.")
 
             # Straight through skip for low-level features
@@ -265,13 +261,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Directly load all weights if specified
         if directly_load:
-            missing_ks, unexp_ks = load_weights_with_shape_check(
-                self, weights, load_strategy="search"
-            )
+            missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
             if len(missing_ks) > 0 or len(unexp_ks) > 0:
-                logger.warning(
-                    f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}"
-                )
+                logger.warning(f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
             logger.info(f"Finished directly loading pretrained weights.")
             return
 
@@ -289,26 +281,18 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         logger.info(f"Loading CNN Cosmos tokenizer weights ...")
         missing_k, unexp_k = load_weights_with_shape_check(self.encoder, cnn_enc_ws)
         if len(missing_k) > 0 or len(unexp_k) > 0:
-            logger.warning(
-                f"CNN Encoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
-            )
+            logger.warning(f"CNN Encoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
 
         missing_k, unexp_k = load_weights_with_shape_check(self.decoder, cnn_dec_ws)
         if len(missing_k) > 0 or len(unexp_k) > 0:
-            logger.warning(
-                f"CNN Decoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
-            )
+            logger.warning(f"CNN Decoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
 
         logger.info(f"Loading semantic Transformer weights ...")
         # Load Transformer weights
         if len(trans_ws) != 0:
-            missing_k, unexp_k = self.semantic_enc_transformer.load_state_dict(
-                trans_ws, strict=False
-            )
+            missing_k, unexp_k = self.semantic_enc_transformer.load_state_dict(trans_ws, strict=False)
             if len(missing_k) > 0 or len(unexp_k) > 0:
-                logger.warning(
-                    f"Transformer Missing keys: {missing_k}, Unexpected keys: {unexp_k}"
-                )
+                logger.warning(f"Transformer Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
 
         logger.info(f"Finished loading pretrained weights.")
 
@@ -320,9 +304,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         interp_feats = []
         for f in feats:
             if f.shape[-2:] != max_size:
-                f = F.interpolate(
-                    f, size=max_size, mode="bilinear", align_corners=False
-                )
+                f = F.interpolate(f, size=max_size, mode="bilinear", align_corners=False)
             interp_feats.append(f)
         return interp_feats
 
@@ -376,9 +358,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         cache_low_lvl = None
         last_hidden_cached = self.cache_layers["low_level"] == -1
         if self.training or get_intermediate_features:
-            low_lvl_out = self.encoder.encoder(
-                x, ret_interm_feats=not last_hidden_cached
-            )
+            low_lvl_out = self.encoder.encoder(x, ret_interm_feats=not last_hidden_cached)
             if last_hidden_cached:
                 z_low_lvl = low_lvl_out
                 cache_low_lvl = z_low_lvl
@@ -405,12 +385,10 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 output_dict=False,
             )
             # forward intermediates does not support jepa masks
-            z_semantic, cache_semantic = (
-                self.semantic_enc_transformer.forward_intermediates(**_model_kwargs)
-            )
+            z_semantic, cache_semantic = self.semantic_enc_transformer.forward_intermediates(**_model_kwargs)
 
             # Add head forward
-            z_semantic = z_semantic[:, self.trans_enc_cfg.reg_tokens :]
+            z_semantic = z_semantic[:, self.semantic_enc_transformer.num_prefix_tokens :]
             z_semantic = self.semantic_enc_transformer._forward_after_backbone(
                 z_semantic,
                 hw=self.semantic_enc_transformer._get_output_shape(z_low_lvl),
@@ -423,9 +401,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         h = self.encoder.quant_conv(z_semantic)
 
         # Quantization
-        maybe_q_ret = self.apply_quantizer(
-            h, z_semantic, use_quantizer, cache_type=None
-        )  # Disable cache z or h
+        maybe_q_ret = self.apply_quantizer(h, z_semantic, use_quantizer, cache_type=None)  # Disable cache z or h
 
         # Do cache here
         self.z = cache_low_lvl  # [b, c, h, w]
@@ -477,9 +453,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             h = self.decoder.quant_conv["st_cat_conv"](h)
 
         # Decode using the CNN decoder
-        dec = self.decoder.decoder(
-            h, chan, ret_all_res_features=self._is_deep_supervision
-        )
+        dec = self.decoder.decoder(h, chan, ret_all_res_features=self._is_deep_supervision)
 
         # Deep supervision output to 'dec'
         dec: Tensor | dict[str, Tensor | list[Tensor]]
@@ -565,8 +539,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         if self.low_lvl_repa_proj_is_multi:
             assert isinstance(z, list)
             low_lvl_z_proj = [
-                self._repa_proj["low_lvl_repa_proj"][i](z[i])
-                for i in range(len(self.low_lvl_repa_proj_chans))
+                self._repa_proj["low_lvl_repa_proj"][i](z[i]) for i in range(len(self.low_lvl_repa_proj_chans))
             ]
         else:
             assert torch.is_tensor(z)
@@ -575,9 +548,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         ######## Semantic feature repa projection
         if self.sem_repa_proj_is_multi:
             assert isinstance(sem_z, list)
-            sem_z_proj = [
-                self._repa_proj["sem_repa_proj"][i](sem_z[i]) for i in range(len(sem_z))
-            ]
+            sem_z_proj = [self._repa_proj["sem_repa_proj"][i](sem_z[i]) for i in range(len(sem_z))]
         else:
             assert torch.is_tensor(sem_z)
             sem_z_proj = self._repa_proj["sem_repa_proj"](sem_z)
@@ -589,15 +560,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Set the low-level cache layers for the feature alignment
         self._set_low_level_proj_chans()
 
-        assert self._vf_on_z_or_module == "z", (
-            f"Only support z for _vf_on_z_or_modulebut got {self._vf_on_z_or_module}"
-        )
+        assert self._vf_on_z_or_module == "z", f"Only support z for _vf_on_z_or_modulebut got {self._vf_on_z_or_module}"
 
         if self._use_repa_loss:
             # Low-level projection
-            self.low_lvl_repa_proj_is_multi = isinstance(
-                self.cache_layers["low_level"], (tuple, list)
-            )
+            self.low_lvl_repa_proj_is_multi = isinstance(self.cache_layers["low_level"], (tuple, list))
             if not self.low_lvl_repa_proj_is_multi:
                 low_lvl_z_proj = build_mlp(
                     self.cnn_cfg.model.z_channels,
@@ -605,9 +572,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                     self._dino_feature_dim,
                 )
             else:
-                assert len(self.low_lvl_repa_proj_chans) == len(
-                    self.cache_layers["low_level"]
-                ), (
+                assert len(self.low_lvl_repa_proj_chans) == len(self.cache_layers["low_level"]), (
                     f"Length of low_lvl_repa_proj_chans {len(self.low_lvl_repa_proj_chans)} "
                     f"should match length of cached low level layers "
                     f"{len(self.cache_layers['low_level'])}"
@@ -656,9 +621,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         """
         with torch.no_grad():
             for name, param in self.named_parameters():
-                if starts_with is None or any(
-                    name.startswith(sw) for sw in starts_with
-                ):
+                if starts_with is None or any(name.startswith(sw) for sw in starts_with):
                     if param.requires_grad and param.grad is None:
                         param.grad = torch.zeros_like(param)
 
@@ -739,9 +702,7 @@ def test_model_forward_backward():
         "reg_tokens": 0,
     }
 
-    model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
-        cnn_cfg, trans_enc_cfg, trans_dec_cfg
-    )
+    model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
     model = model.to(device)  # Move model to device (CUDA or CPU)
     model.eval()
     logger.info("Model created successfully!")
@@ -848,9 +809,7 @@ def test_forward_pca():
         feature_pca_torch,
     )
 
-    cfg = OmegaConf.load(
-        "scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml"
-    )
+    cfg = OmegaConf.load("scripts/configs/tokenizer_gan/tokenizer/comos_hybrid_f16c32.yaml")
     logger.info(str(cfg))
 
     logger.log("NOTE", f"Rope type: {cfg.trans_enc_cfg.rope_type}")

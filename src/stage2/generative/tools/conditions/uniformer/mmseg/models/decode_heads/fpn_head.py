@@ -28,9 +28,7 @@ class FPNHead(BaseDecodeHead):
 
         self.scale_heads = nn.ModuleList()
         for i in range(len(feature_strides)):
-            head_length = max(
-                1, int(np.log2(feature_strides[i]) - np.log2(feature_strides[0]))
-            )
+            head_length = max(1, int(np.log2(feature_strides[i]) - np.log2(feature_strides[0])))
             scale_head = []
             for k in range(head_length):
                 scale_head.append(

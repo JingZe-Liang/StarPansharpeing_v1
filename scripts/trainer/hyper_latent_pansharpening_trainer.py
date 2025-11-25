@@ -113,15 +113,9 @@ class PansharpeningTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
-        )
-        self.val_full_dataset, self.val_full_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val_full
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
+        self.val_full_dataset, self.val_full_dataloader = hydra.utils.instantiate(self.dataset_cfg.val_full)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -144,9 +138,7 @@ class PansharpeningTrainer:
         else:
             # default loss
             self.pansp_loss = nn.L1Loss()
-            assert not self.pansp_amotizing_pixels, (
-                "pansharpening loss must be set in the config"
-            )
+            assert not self.pansp_amotizing_pixels, "pansharpening loss must be set in the config"
         self.log_msg(f"use pansharpening loss: {self.pansp_loss.__class__.__name__}")
 
         # training state counter
@@ -161,9 +153,7 @@ class PansharpeningTrainer:
         # cast to dtype
         # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
-        self.pansp_amotizing_pixels = self.accelerator.unwrap_model(
-            self.pansp_model.downstream_model
-        ).amotizing_pixels
+        self.pansp_amotizing_pixels = self.accelerator.unwrap_model(self.pansp_model.downstream_model).amotizing_pixels
 
         # add processors
         if self.train_cfg.add_pan_processor:
@@ -175,10 +165,7 @@ class PansharpeningTrainer:
 
         # checkpoint
         _unwrapped_model = self.accelerator.unwrap_model(self.pansp_model)
-        use_checkpoint = (
-            hasattr(_unwrapped_model, "set_checkpoint_mode")
-            and self.train_cfg.model_act_checkpoint
-        )
+        use_checkpoint = hasattr(_unwrapped_model, "set_checkpoint_mode") and self.train_cfg.model_act_checkpoint
         if use_checkpoint:
             _unwrapped_model.set_grad_checkpointing(True)  # type: ignore
 
@@ -188,13 +175,8 @@ class PansharpeningTrainer:
         else:
             self.backward_detokenizer = self.train_cfg.backward_detokenizer
 
-        pansp_name = (
-            getattr(self.train_cfg, "pansharpening_name", None)
-            or self.pansp_model.__class__.__name__
-        )
-        self.log_msg(
-            f"use pansharpening model: {pansp_name}, amotizing pixels: {self.pansp_amotizing_pixels}"
-        )
+        pansp_name = getattr(self.train_cfg, "pansharpening_name", None) or self.pansp_model.__class__.__name__
+        self.log_msg(f"use pansharpening model: {pansp_name}, amotizing pixels: {self.pansp_amotizing_pixels}")
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -230,9 +212,7 @@ class PansharpeningTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level>- <level>{message}</level>"
         )
         logger.disable("ema_pytorch")
         if not self.train_cfg.debug:
@@ -396,8 +376,7 @@ class PansharpeningTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
@@ -405,40 +384,27 @@ class PansharpeningTrainer:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                     params = params_getter(with_name=False)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_panshap_model_params = (
-                lambda with_name: {
-                    k: v
-                    for k, v in self.pansp_model.named_parameters()
-                    if v.requires_grad
-                }
+                lambda with_name: {k: v for k, v in self.pansp_model.named_parameters() if v.requires_grad}
                 if with_name
                 else [p for p in self.pansp_model.parameters() if p.requires_grad]
             )
-            pansp_opt = _optimizer_creater(
-                self.train_cfg.pansharp_optim, _get_panshap_model_params
-            )
+            pansp_opt = _optimizer_creater(self.train_cfg.pansharp_optim, _get_panshap_model_params)
         else:
             pansp_opt = DummyOptim([{"params": list(self.pansp_model.parameters())}])
 
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            pansp_sched = hydra.utils.instantiate(self.train_cfg.pansharp_sched)(
-                optimizer=pansp_opt
-            )
+            pansp_sched = hydra.utils.instantiate(self.train_cfg.pansharp_sched)(optimizer=pansp_opt)
         else:
             pansp_sched = DummyScheduler(pansp_opt)
 
@@ -492,16 +458,12 @@ class PansharpeningTrainer:
             self.pansp_model.dtype = torch.float
 
         # prepare the model, optimizer, dataloader
-        self.pansp_model, self.pansp_optim = self.accelerator.prepare(
-            self.pansp_model, self.pansp_optim
-        )
+        self.pansp_model, self.pansp_optim = self.accelerator.prepare(self.pansp_model, self.pansp_optim)
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
         )
         if hasattr(self, "val_full_dataloader"):
-            self.val_full_dataloader = self.accelerator.prepare(
-                self.val_full_dataloader
-            )
+            self.val_full_dataloader = self.accelerator.prepare(self.val_full_dataloader)
 
     def step_train_state(self):
         self.train_state.update("train")
@@ -527,9 +489,7 @@ class PansharpeningTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -544,9 +504,7 @@ class PansharpeningTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -554,9 +512,7 @@ class PansharpeningTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -602,9 +558,7 @@ class PansharpeningTrainer:
             # loss
             sr_loss, sr_log_losses = None, {}
             if sr is not None or sr_latent is not None:
-                sr_loss = self.pansp_loss(
-                    pred_latent, sr_latent, pred_sr, sr, pred_sr_from_latent, sr
-                )
+                sr_loss = self.pansp_loss(pred_latent, sr_latent, pred_sr, sr, pred_sr_from_latent, sr)
 
                 if isinstance(sr_loss, torch.Tensor):
                     sr_log_losses = {"pansharp_loss": sr_loss.detach()}
@@ -632,9 +586,7 @@ class PansharpeningTrainer:
         pan_latent: torch.Tensor | None = None,
         sr_latent: torch.Tensor | None = None,
     ):
-        out = self.forward_pansp_model(
-            lrms, pan, sr, lrms_latent, pan_latent, sr_latent
-        )
+        out = self.forward_pansp_model(lrms, pan, sr, lrms_latent, pan_latent, sr_latent)
 
         if self.accelerator.sync_gradients:
             # backward
@@ -697,12 +649,8 @@ class PansharpeningTrainer:
         quality_track_after = self.train_cfg.track_metrics_after
         if quality_track_n >= 0:
             ratio = self.train_cfg.pansp_ratio
-            self.pan_acc_reduced = PansharpeningMetrics(
-                ratio=ratio, ref=True, ergas_ratio=ratio
-            )
-            self.pan_acc_reduced_latent = PansharpeningMetrics(
-                ratio=ratio, ref=True, ergas_ratio=ratio
-            )
+            self.pan_acc_reduced = PansharpeningMetrics(ratio=ratio, ref=True, ergas_ratio=ratio)
+            self.pan_acc_reduced_latent = PansharpeningMetrics(ratio=ratio, ref=True, ergas_ratio=ratio)
 
         with self.accelerator.accumulate(self.pansp_model):
             # train pansharpening model
@@ -723,9 +671,7 @@ class PansharpeningTrainer:
                 and self.global_step % quality_track_n != 0
                 and self.global_step >= quality_track_after
             ):
-                self.check_quality(
-                    self.pan_acc_reduced, pred_sr=pred_img, gt=batch["hrms"]
-                )
+                self.check_quality(self.pan_acc_reduced, pred_sr=pred_img, gt=batch["hrms"])
 
         self.step_train_state()
 
@@ -742,11 +688,7 @@ class PansharpeningTrainer:
             # tensorboard log
             self.tenb_log_any("metric", train_out.sr_log_losses, self.global_step)
 
-        if (
-            quality_track_n >= 0
-            and self.global_step % quality_track_n == 0
-            and self.global_step >= quality_track_after
-        ):
+        if quality_track_n >= 0 and self.global_step % quality_track_n == 0 and self.global_step >= quality_track_after:
             self.log_msg(f"[Real GT Metrics]: {self.pan_acc_reduced.print_str()}")
             self.log_msg(f"[Latent Metrics]: {self.pan_acc_reduced_latent.print_str()}")
 
@@ -760,9 +702,7 @@ class PansharpeningTrainer:
             )
 
     def format_log(self, log_sr_loss: dict) -> str:
-        def dict_round_to_list_str(
-            d: dict, n_round: int = 4, select: list[str] | None = None
-        ):
+        def dict_round_to_list_str(d: dict, n_round: int = 4, select: list[str] | None = None):
             strings = []
             for k, v in d.items():
                 if select is not None and k not in select:
@@ -833,17 +773,12 @@ class PansharpeningTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def _ensure_paired_shapes(self, lrms, pan, hrms=None):
@@ -856,13 +791,9 @@ class PansharpeningTrainer:
         ms_shape = H // self.train_cfg.pansp_ratio, W // self.train_cfg.pansp_ratio
         if lrms.shape[-2:] == tuple(ms_shape):
             if getattr(self.train_cfg, "upsample_lrms", True):
-                lrms = torch.nn.functional.interpolate(
-                    lrms, size=(H, W), mode="bilinear"
-                )
+                lrms = torch.nn.functional.interpolate(lrms, size=(H, W), mode="bilinear")
             else:
-                raise ValueError(
-                    f"MS upsampled shape {lrms.shape} does not match MS shape {ms_shape}"
-                )
+                raise ValueError(f"MS upsampled shape {lrms.shape} does not match MS shape {ms_shape}")
         else:
             assert lrms.shape[-2:] == torch.Size((H, W)), (
                 f"lrms shape {lrms.shape} does not match pan/hrms shape {pan.shape}/{hrms.shape}"
@@ -879,9 +810,7 @@ class PansharpeningTrainer:
 
         def _model_step_fn(lrms, pan):
             # lrms, pan = map(self.to_tokenizer_range, (lrms, pan))
-            pred_sr = self.forward_pansp_model(
-                lrms, pan, None, None, None, None, ema=True
-            ).pred_sr
+            pred_sr = self.forward_pansp_model(lrms, pan, None, None, None, None, ema=True).pred_sr
             return pred_sr
 
         patcher = PatchMergeModule(
@@ -909,13 +838,9 @@ class PansharpeningTrainer:
             batch["pan"],
             batch.get("hrms", None),
         )
-        assert self.train_cfg.online_tokenize, (
-            "only support online tokenize for val full"
-        )
+        assert self.train_cfg.online_tokenize, "only support online tokenize for val full"
         patcher_kwargs = dict(window_size=64, stride=32)
-        lrms_patches, pan_patches = map(
-            partial(extract_tensor_patches, **patcher_kwargs), [lrms, pan]
-        )
+        lrms_patches, pan_patches = map(partial(extract_tensor_patches, **patcher_kwargs), [lrms, pan])
         assert lrms_patches.shape[1] == pan_patches.shape[1]
         n = lrms_patches.shape[1]
         sr_s = []
@@ -928,9 +853,7 @@ class PansharpeningTrainer:
             sr_s.append(pred_sr_i)
         pred_sr = torch.stack(sr_s, dim=1)
         # combine patches
-        pred_sr = combine_tensor_patches(
-            pred_sr, original_size=tuple(lrms.shape[-2:]), **patcher_kwargs
-        )
+        pred_sr = combine_tensor_patches(pred_sr, original_size=tuple(lrms.shape[-2:]), **patcher_kwargs)
         return PansharpeningOutput(pred_sr)
 
     @torch.no_grad()
@@ -946,19 +869,13 @@ class PansharpeningTrainer:
             gt_latent = self.pansp_model.encode(hrms)
 
         # forward the fusion network
-        out = self.forward_pansp_model(
-            lrms, pan, hrms, lrms_latent, pan_latent, gt_latent, ema=True
-        )
+        out = self.forward_pansp_model(lrms, pan, hrms, lrms_latent, pan_latent, gt_latent, ema=True)
 
         return out
 
-    def _get_val_tbar_iter(
-        self, mode="reduced"
-    ) -> tqdm | Generator[BatchInput, None, None]:
+    def _get_val_tbar_iter(self, mode="reduced") -> tqdm | Generator[BatchInput, None, None]:
         max_iters = getattr(self.val_cfg, f"max_val_{mode}_iters")
-        val_loader = (
-            self.val_dataloader if mode == "reduced" else self.val_full_dataloader
-        )
+        val_loader = self.val_dataloader if mode == "reduced" else self.val_full_dataloader
         if max_iters > 0:
             # Create a generator that limits the number of iterations
             def _val_loader():
@@ -985,9 +902,7 @@ class PansharpeningTrainer:
             return _val_loader()
         else:
             # Use the full validation set
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
+            self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
             return tqdm(
                 val_loader,
                 desc="validating ...",
@@ -1018,9 +933,7 @@ class PansharpeningTrainer:
 
             # l1 loss
             pred_sr = val_out.pred_sr
-            loss_of_latent = nn.functional.l1_loss(
-                pred_sr, gt.to(pred_sr)
-            )  # latent to img and then loss
+            loss_of_latent = nn.functional.l1_loss(pred_sr, gt.to(pred_sr))  # latent to img and then loss
             loss_metrics.update(loss_of_latent)
 
             # metrics
@@ -1107,9 +1020,7 @@ class PansharpeningTrainer:
             (ema_path / "pansharp_model").mkdir(parents=True, exist_ok=True)
 
         # for accelerate dir loading
-        self.accelerator.save_model(
-            self.ema_pansp_model.ema_model, ema_path / "pansharp_model"
-        )
+        self.accelerator.save_model(self.ema_pansp_model.ema_model, ema_path / "pansharp_model")
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,9 +1031,7 @@ class PansharpeningTrainer:
         ema_path = Path(ema_path)
 
         try:
-            accelerate.load_checkpoint_in_model(
-                self.pansp_model, ema_path / "pansharp_model", strict=strict
-            )
+            accelerate.load_checkpoint_in_model(self.pansp_model, ema_path / "pansharp_model", strict=strict)
         except Exception as e:
             logger.warning(f"[Load EMA]: {e}")
             from safetensors.torch import load_file
@@ -1136,9 +1045,7 @@ class PansharpeningTrainer:
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1210,9 +1117,7 @@ class PansharpeningTrainer:
 
         # Get RGB channels configuration for hyperspectral data
         rgb_channels = None
-        if hasattr(self.dataset_cfg, "consts") and hasattr(
-            self.dataset_cfg.consts, "rgb_channels"
-        ):
+        if hasattr(self.dataset_cfg, "consts") and hasattr(self.dataset_cfg.consts, "rgb_channels"):
             rgb_channels = to_cont(self.dataset_cfg.consts.rgb_channels)
             # Ensure rgb_channels is the correct type
             if isinstance(rgb_channels, list):

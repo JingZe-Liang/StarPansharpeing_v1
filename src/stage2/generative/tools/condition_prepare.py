@@ -84,14 +84,10 @@ class UnifiedAnnotator:
         elif isinstance(device, (str, torch.device)):
             if isinstance(self.annotator, torch.nn.Module):
                 self.annotator = self.annotator.to(device)
-            if hasattr(self, "_ann_inner_model") and isinstance(
-                self._ann_inner_model, torch.nn.Module
-            ):
+            if hasattr(self, "_ann_inner_model") and isinstance(self._ann_inner_model, torch.nn.Module):
                 self._ann_inner_model = self._ann_inner_model.to(device)
         else:
-            raise ValueError(
-                f"Invalid device type: {type(device)}. Expected str or torch.device."
-            )
+            raise ValueError(f"Invalid device type: {type(device)}. Expected str or torch.device.")
 
     def reallocate_gpu(self, device=None):
         if self._del:
@@ -181,9 +177,7 @@ def prepare_condition_from_webdataset(
 
     _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
     for sample in ds:
-        assert len(sample["__key__"]) == 1, (
-            "WebDataset sample key must be a single string."
-        )
+        assert len(sample["__key__"]) == 1, "WebDataset sample key must be a single string."
 
         key = sample["__key__"][0]
         if resume_from is not None and not _resumed_flag:
@@ -237,9 +231,7 @@ def prepare_condition_from_webdataset(
                     interpolation=cv2.INTER_LINEAR,
                 )
 
-            ret[cond] = (
-                Image.fromarray(out) if to_pil and isinstance(out, np.ndarray) else out
-            )
+            ret[cond] = Image.fromarray(out) if to_pil and isinstance(out, np.ndarray) else out
 
         yield sample, ret
 
@@ -312,6 +304,4 @@ if __name__ == "__main__":
             else:
                 raise ValueError("Invalid Condition")
 
-            Image.fromarray(condition).save(
-                os.path.join(save_path, condition_name + ".png")
-            )
+            Image.fromarray(condition).save(os.path.join(save_path, condition_name + ".png"))

@@ -47,8 +47,7 @@ def moe_balance_info(num_experts: int):
         balance_info["expert_counts"] = counts_dict
         balance_info["total_tokens"] = total_tokens
         balance_info["expert_percent"] = {
-            expert_idx: counts_dict[expert_idx] / total_tokens
-            for expert_idx in range(num_experts)
+            expert_idx: counts_dict[expert_idx] / total_tokens for expert_idx in range(num_experts)
         }
 
         return balance_info
@@ -73,11 +72,7 @@ class All2All(torch.autograd.Function):
         ctx.output_splits = output_splits
         ctx.input_splits = input_splits
         ctx.group = group
-        output = (
-            input.new_empty(sum(output_splits), *input.shape[1:])
-            if output_splits
-            else torch.empty_like(input)
-        )
+        output = input.new_empty(sum(output_splits), *input.shape[1:]) if output_splits else torch.empty_like(input)
         dist.all_to_all_single(output, input, output_splits, input_splits, group)
         return output
 
@@ -91,9 +86,7 @@ class All2All(torch.autograd.Function):
             if input_splits
             else torch.empty_like(grad_output)
         )
-        dist.all_to_all_single(
-            grad_input, grad_output, input_splits, output_splits, group
-        )
+        dist.all_to_all_single(grad_input, grad_output, input_splits, output_splits, group)
         return grad_input, None, None, None
 
 
@@ -148,9 +141,7 @@ class MoEGate(nn.Module):
         # topk selection algorithm
         self.norm_topk_prob = norm_topk_prob
         self.gating_dim = hidden_size
-        self.weight = nn.Parameter(
-            torch.empty((self.n_routed_experts, self.gating_dim))
-        )
+        self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -162,41 +153,27 @@ class MoEGate(nn.Module):
         bsz, seq_len, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.reshape(-1, h)
-        logits = F.linear(
-            hidden_states.type(torch.float32), self.weight.type(torch.float32), None
-        )  # [n, e]
+        logits = F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32), None)  # [n, e]
         if self.scoring_func == "softmax":
             scores = logits.softmax(dim=-1, dtype=torch.float32)  # [n, e]
         else:
-            raise NotImplementedError(
-                f"insupportable scoring function for MoE gating: {self.scoring_func}"
-            )
+            raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
 
         ### select top-k experts
         if self.topk_method == "gready":
-            topk_weight, topk_idx = torch.topk(
-                scores, k=self.top_k, dim=-1, sorted=False
-            )  # [n, top_k]
+            topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)  # [n, top_k]
         elif self.topk_method == "group_limited_greedy":
-            group_scores = (
-                scores.view(bsz * seq_len, self.n_group, -1).max(dim=-1).values
-            )  # [n, n_group]
-            group_idx = torch.topk(
-                group_scores, k=self.topk_group, dim=-1, sorted=False
-            )[1]  # [n, top_k_group]
+            group_scores = scores.view(bsz * seq_len, self.n_group, -1).max(dim=-1).values  # [n, n_group]
+            group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
             score_mask = (
                 group_mask.unsqueeze(-1)
-                .expand(
-                    bsz * seq_len, self.n_group, self.n_routed_experts // self.n_group
-                )
+                .expand(bsz * seq_len, self.n_group, self.n_routed_experts // self.n_group)
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
             tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-            topk_weight, topk_idx = torch.topk(
-                tmp_scores, k=self.top_k, dim=-1, sorted=False
-            )
+            topk_weight, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
 
         ### norm gate to sum 1
         if self.top_k > 1 and self.norm_topk_prob:
@@ -212,17 +189,13 @@ class MoEGate(nn.Module):
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1)  # [n, l * top_k]
             if self.seq_aux:
                 scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)  # [n, l, e]
-                ce = torch.zeros(
-                    bsz, self.n_routed_experts, device=hidden_states.device
-                )  # [n, e]
+                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device)  # [n, e]
                 ce.scatter_add_(
                     1,
                     topk_idx_for_aux_loss,  # [n, l * top_k]
                     torch.ones(bsz, seq_len * aux_topk, device=hidden_states.device),
                 ).div_(seq_len * aux_topk / self.n_routed_experts)
-                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(
-                    dim=1
-                ).mean() * self.alpha
+                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=1).mean() * self.alpha
             else:
                 mask_ce = F.one_hot(
                     topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts
@@ -305,8 +278,7 @@ class DeepseekV2MoE(nn.Module):
                             hidden_act=activation,
                         )
                         if i
-                        >= self.ep_rank
-                        * self.experts_per_rank  # ep_rank 0, i >= 0, i < 2; ep_rank 1, i >= 2, i < 4
+                        >= self.ep_rank * self.experts_per_rank  # ep_rank 0, i >= 0, i < 2; ep_rank 1, i >= 2, i < 4
                         and i < (self.ep_rank + 1) * self.experts_per_rank
                         else None
                     )
@@ -364,15 +336,11 @@ class DeepseekV2MoE(nn.Module):
         if self.training:
             # training with EP or not
             if self.ep_size == 1:
-                hidden_states = hidden_states.repeat_interleave(
-                    self.num_experts_per_tok, dim=0
-                )  # [n * l * top_k, d]
+                hidden_states = hidden_states.repeat_interleave(self.num_experts_per_tok, dim=0)  # [n * l * top_k, d]
                 y = torch.empty_like(hidden_states, dtype=hidden_states.dtype)
                 for i, expert in enumerate(self.experts):
                     assert expert is not None
-                    y[flat_topk_idx == i] = expert(
-                        hidden_states[flat_topk_idx == i]
-                    ).to(hidden_states.dtype)
+                    y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i]).to(hidden_states.dtype)
             else:
                 y = self.moe_ep(hidden_states, topk_idx)
 
@@ -404,17 +372,9 @@ class DeepseekV2MoE(nn.Module):
         sorted_tokens_shape = sorted_tokens.shape
         if self.ep_size > 1:
             tokens_per_ep_rank = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
+            tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
             dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1)
-                .sum(1)
-                .cpu()
-                .numpy()
-                .tolist()
-            )
+            output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(1).cpu().numpy().tolist()
             gathered_tokens = sorted_tokens.new_empty(
                 tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
             )
@@ -423,9 +383,7 @@ class DeepseekV2MoE(nn.Module):
                 list(gathered_tokens.split(output_splits)),
                 list(sorted_tokens.split(input_split_sizes)),
             )
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank
-            ).sum(dim=0)
+            tokens_per_expert_post_gather = tokens_per_expert_group.view(self.ep_size, self.experts_per_rank).sum(dim=0)
             gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
             s = 0
             for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
@@ -495,12 +453,7 @@ class DeepseekV2MoE(nn.Module):
         """
 
         # for EP
-        if (
-            dist.is_initialized()
-            and dist.get_world_size() > 1
-            and self.is_first_moe_layer
-            and self.use_ep
-        ):
+        if dist.is_initialized() and dist.get_world_size() > 1 and self.is_first_moe_layer and self.use_ep:
             _req_grad = torch.is_grad_enabled()
             hidden_states = hidden_states.requires_grad_(_req_grad)
             return self._forward_implm(hidden_states)
@@ -516,18 +469,10 @@ class DeepseekV2MoE(nn.Module):
         sorted_tokens = x[idxs // self.num_experts_per_tok]
         if self.ep_size > 1:
             tokens_per_expert_group = torch.empty_like(tokens_per_expert)
-            dist.all_to_all_single(
-                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
-            )
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1).sum(dim=1).cpu().tolist()
-            )
-            input_splits = (
-                tokens_per_expert.view(self.ep_size, -1).sum(dim=1).cpu().tolist()
-            )
-            gathered_tokens = All2All.apply(
-                sorted_tokens, output_splits, input_splits, self.ep_group
-            )
+            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert, group=self.ep_group)
+            output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=1).cpu().tolist()
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1).cpu().tolist()
+            gathered_tokens = All2All.apply(sorted_tokens, output_splits, input_splits, self.ep_group)
             gatherd_idxs = idxs.new_empty(gathered_tokens.shape[0], device="cpu")
             s = 0
             for i, k in enumerate(tokens_per_expert_group.cpu()):
@@ -535,9 +480,7 @@ class DeepseekV2MoE(nn.Module):
                 s += k
             gatherd_idxs = gatherd_idxs.to(idxs.device).argsort()
             sorted_tokens = gathered_tokens[gatherd_idxs]
-            tokens_per_expert = tokens_per_expert_group.view(self.ep_size, -1).sum(
-                dim=0
-            )
+            tokens_per_expert = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=0)
         tokens_per_expert = tokens_per_expert.cpu().numpy()
 
         outputs = []
@@ -554,9 +497,7 @@ class DeepseekV2MoE(nn.Module):
         if self.ep_size > 1:
             sorted_tokens = torch.empty_like(outs)
             sorted_tokens[gatherd_idxs] = outs
-            gathered_tokens = All2All.apply(
-                sorted_tokens, input_splits, output_splits, self.ep_group
-            )
+            gathered_tokens = All2All.apply(sorted_tokens, input_splits, output_splits, self.ep_group)
             outs = gathered_tokens
 
         y = torch.empty_like(outs)
@@ -589,10 +530,7 @@ class DeepseekV1MoE(nn.Module):
         self.compute_moe_info = moe_kwargs.pop("compute_moe_info", False)
 
         self.experts = nn.ModuleList(
-            [
-                DeepseekV2MLP(hidden_size, moe_intermediate_size)
-                for i in range(n_routed_experts)
-            ]
+            [DeepseekV2MLP(hidden_size, moe_intermediate_size) for i in range(n_routed_experts)]
         )
         self.gate = MoEGate(
             num_experts_per_tok=num_experts_per_tok,
@@ -615,9 +553,7 @@ class DeepseekV1MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
         if self.training:
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0
-            )
+            hidden_states = hidden_states.repeat_interleave(self.num_experts_per_tok, dim=0)
             y = torch.empty_like(hidden_states)
             for i, expert in enumerate(self.experts):
                 y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
@@ -625,9 +561,7 @@ class DeepseekV1MoE(nn.Module):
             y = y.view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            y = self.moe_infer(
-                hidden_states, flat_topk_idx, topk_weight.view(-1, 1)
-            ).view(*orig_shape)
+            y = self.moe_infer(hidden_states, flat_topk_idx, topk_weight.view(-1, 1)).view(*orig_shape)
         if self.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
@@ -694,9 +628,7 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 128
     hidden_size = 128
-    test_input = torch.randn(
-        batch_size, seq_len, hidden_size
-    ).cuda()  # 将输入数据移动到GPU
+    test_input = torch.randn(batch_size, seq_len, hidden_size).cuda()  # 将输入数据移动到GPU
     out = moe(test_input)
     print(out[0].shape)
     print(out[1])

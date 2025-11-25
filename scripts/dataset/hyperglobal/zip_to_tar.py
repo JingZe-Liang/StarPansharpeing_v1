@@ -13,9 +13,7 @@ from tqdm import tqdm
 from src.data.codecs import tiff_codec_io
 
 
-def targz_file_to_tarfile(
-    tar_gz_file_path: str, tar_file_writer: wds.ShardWriter, use_tbar=True
-):
+def targz_file_to_tarfile(tar_gz_file_path: str, tar_file_writer: wds.ShardWriter, use_tbar=True):
     file = tarfile.open(tar_gz_file_path, "r:gz")
     if use_tbar:
         tbar = tqdm(file)
@@ -23,11 +21,7 @@ def targz_file_to_tarfile(
         tbar = file
 
     for member in tbar:
-        if (
-            member.isfile()
-            and member.name.endswith(".tiff")
-            or member.name.endswith(".tif")
-        ):
+        if member.isfile() and member.name.endswith(".tiff") or member.name.endswith(".tif"):
             string = f"Processing {member.name}, "
             if use_tbar:
                 tbar.set_description(string)
@@ -164,9 +158,7 @@ def process_mat_file(
         try:
             mat_data = loadmat(io.BytesIO(mat_file_bytes))
         except ImportError:
-            progress.console.print(
-                f"Raw bytes of {info.filename}: {len(mat_file_bytes)} bytes"
-            )
+            progress.console.print(f"Raw bytes of {info.filename}: {len(mat_file_bytes)} bytes")
             return
 
         assert "img" in mat_data, f"Key 'img' not found in {file}"
@@ -203,9 +195,7 @@ def process_mat_file(
         progress.console.print(f"Error processing {file}: {e}")
 
 
-def process_single_zip(
-    zip_file_path: str, shard_pattern: str, progress: Progress, max_workers=4
-):
+def process_single_zip(zip_file_path: str, shard_pattern: str, progress: Progress, max_workers=4):
     """处理单个zip文件，创建独立的tar文件"""
 
     # 为每个zip文件创建独立的ShardWriter
@@ -221,9 +211,7 @@ def process_single_zip(
     try:
         with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
             # 获取所有 mat 文件
-            mat_files = [
-                info for info in zip_ref.infolist() if info.filename.endswith(".mat")
-            ]
+            mat_files = [info for info in zip_ref.infolist() if info.filename.endswith(".mat")]
 
             if not mat_files:
                 return
@@ -303,14 +291,10 @@ if __name__ == "__main__":
     # 创建全局进度显示
     with Progress(console=Console()) as progress:
         # 总体进度条
-        main_task = progress.add_task(
-            "[bold blue]Overall Progress", total=len(zipfiles)
-        )
+        main_task = progress.add_task("[bold blue]Overall Progress", total=len(zipfiles))
 
         # 使用线程池并行处理所有zip文件
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(zipfiles)
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(zipfiles)) as executor:
             # 提交所有zip文件处理任务
             futures = []
             for zip_file_path in zipfiles:

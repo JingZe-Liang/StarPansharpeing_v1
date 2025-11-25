@@ -2,9 +2,7 @@
 norm_cfg = dict(type="SyncBN", eps=0.001, requires_grad=True)
 model = dict(
     type="EncoderDecoder",
-    backbone=dict(
-        type="MobileNetV3", arch="large", out_indices=(1, 3, 16), norm_cfg=norm_cfg
-    ),
+    backbone=dict(type="MobileNetV3", arch="large", out_indices=(1, 3, 16), norm_cfg=norm_cfg),
     decode_head=dict(
         type="LRASPPHead",
         in_channels=(16, 24, 960),

@@ -28,9 +28,7 @@ def dict_extract(
     extract_type: ExtractMode = ExtractMode.LAST,
     force_load: bool = True,
 ) -> dict | Any:
-    etype = (
-        extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
-    )
+    etype = extract_type.value if isinstance(extract_type, ExtractMode) else extract_type
     force_load_fn = lambda x: x[:] if force_load else x
 
     if keys is None:
@@ -44,9 +42,7 @@ def dict_extract(
         else:
             raise Exception(f"Invalid extract_type: {etype} when keys is None")
     else:
-        assert etype == "specific", (
-            f"extract_type must be 'specific' when keys is provided, got {etype}"
-        )
+        assert etype == "specific", f"extract_type must be 'specific' when keys is provided, got {etype}"
         ret = {}
         d_keys = list(d.keys())
         for k in keys:
@@ -80,9 +76,7 @@ def read_image(
     if isinstance(key_if_dict, str):
         key_if_dict = [key_if_dict]
     if key_if_dict is not None:
-        assert not mat_ret_all, (
-            "mat_ret_all is not supported when key_if_dict is not None"
-        )
+        assert not mat_ret_all, "mat_ret_all is not supported when key_if_dict is not None"
         dict_extract_type = ExtractMode.SPECIFIC
 
     if verbose:
@@ -94,8 +88,7 @@ def read_image(
             return dict_extract(d, key_if_dict, dict_extract_type)
         except Exception as e:
             log(
-                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
-                "read using h5py.",
+                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to read using h5py.",
                 level="warning",
             )
 
@@ -105,9 +98,7 @@ def read_image(
     elif img_path.suffix.lower() == ".img":
         with rasterio.open(img_path) as dataset:
             bands = dataset.count
-            img = np.zeros(
-                (dataset.height, dataset.width, bands), dtype=dataset.dtypes[0]
-            )
+            img = np.zeros((dataset.height, dataset.width, bands), dtype=dataset.dtypes[0])
             for i in range(bands):
                 img[..., i] = dataset.read(i + 1)
     elif img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
@@ -123,14 +114,10 @@ def read_image(
         img = np.load(img_path)
     elif img_path.suffix.lower() in [".tif", ".tiff"] and tiff_bands_seperated:
         # assume img_path endswith *B01.tif
-        basic_name = (
-            img_path.name
-        )  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
+        basic_name = img_path.name  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
         uni_tif_paths = []
 
-        assert bands_name is not None, (
-            "bands_name should be provided when tiff_bands_seperated is True"
-        )
+        assert bands_name is not None, "bands_name should be provided when tiff_bands_seperated is True"
         for band_name in bands_name:
             parts = basic_name.split(".")  # replace B01 with band_name
             name = ".".join(parts[:-2]) + "." + band_name + ".tif"
@@ -166,11 +153,7 @@ def read_image(
         # memmap
         tif = tifffile.TiffFile(img_path)
         try:
-            img = (
-                tif.asarray(out="memmap")
-                if tiff_read_mode == "memmap"
-                else tif.asarray()
-            )
+            img = tif.asarray(out="memmap") if tiff_read_mode == "memmap" else tif.asarray()
         except Exception as e:
             log(
                 f"failed to load image from: {img_path.as_posix()}. {e}",
@@ -184,9 +167,7 @@ def read_image(
         for frame in reader:
             pts = frame["pts"]
             if pts % 0.5 <= 0.001:
-                data = (
-                    frame["data"].numpy().transpose(1, 2, 0)
-                )  # [c, h, w] -> [h, w, c]
+                data = frame["data"].numpy().transpose(1, 2, 0)  # [c, h, w] -> [h, w, c]
                 frames.append(data)
 
             if pts > 60:

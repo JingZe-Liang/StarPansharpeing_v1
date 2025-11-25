@@ -84,9 +84,7 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
-    )  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
@@ -152,11 +150,7 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -222,9 +216,7 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.num_patches = num_patches
 
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -256,9 +248,7 @@ class ConvEmbed(nn.Module):
             if batch_norm:
                 stem += [nn.BatchNorm2d(channels[i + 1])]
             stem += [nn.ReLU(inplace=True)]
-        stem += [
-            nn.Conv2d(channels[-2], channels[-1], kernel_size=1, stride=strides[-1])
-        ]
+        stem += [nn.Conv2d(channels[-2], channels[-1], kernel_size=1, stride=strides[-1])]
         self.stem = nn.Sequential(*stem)
 
         # Comptute the number of patches
@@ -293,19 +283,13 @@ class VisionTransformerPredictor(nn.Module):
         super().__init__()
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_embed_dim))
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         # --
-        self.predictor_pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, predictor_embed_dim), requires_grad=False
-        )
+        self.predictor_pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_embed_dim), requires_grad=False)
         predictor_pos_embed = get_2d_sincos_pos_embed(
             self.predictor_pos_embed.shape[-1], int(num_patches**0.5), cls_token=False
         )
-        self.predictor_pos_embed.data.copy_(
-            torch.from_numpy(predictor_pos_embed).float().unsqueeze(0)
-        )
+        self.predictor_pos_embed.data.copy_(torch.from_numpy(predictor_pos_embed).float().unsqueeze(0))
         # --
         self.predictor_blocks = nn.ModuleList(
             [
@@ -353,9 +337,7 @@ class VisionTransformerPredictor(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, masks_x, masks):
-        assert (masks is not None) and (masks_x is not None), (
-            "Cannot run predictor without mask indices"
-        )
+        assert (masks is not None) and (masks_x is not None), "Cannot run predictor without mask indices"
 
         if not isinstance(masks_x, list):
             masks_x = [masks_x]
@@ -433,9 +415,7 @@ class VisionTransformer(nn.Module):
         )
         num_patches = self.patch_embed.num_patches
         # --
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, embed_dim), requires_grad=False
-        )
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)
         pos_embed = get_2d_sincos_pos_embed(
             self.pos_embed.shape[-1],
             int(self.patch_embed.num_patches**0.5),
@@ -443,9 +423,7 @@ class VisionTransformer(nn.Module):
         )
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         # --
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -524,9 +502,7 @@ class VisionTransformer(nn.Module):
         pos_embed = pos_embed[:, 1:]
         dim = x.shape[-1]
         pos_embed = nn.functional.interpolate(
-            pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(
-                0, 3, 1, 2
-            ),
+            pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
             scale_factor=math.sqrt(npatch / N),
             mode="bicubic",
         )
@@ -535,9 +511,7 @@ class VisionTransformer(nn.Module):
 
 
 def vit_predictor(**kwargs):
-    model = VisionTransformerPredictor(
-        mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs
-    )
+    model = VisionTransformerPredictor(mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 

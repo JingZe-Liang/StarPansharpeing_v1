@@ -65,9 +65,7 @@ def vca(Y, R, verbose=True, snr_input=0):
     # Initializations
     #############################################
     if len(Y.shape) != 2:
-        raise ValueError(
-            "Input data must be of size L (number of bands i.e. channels) by N (number of pixels)"
-        )
+        raise ValueError("Input data must be of size L (number of bands i.e. channels) by N (number of pixels)")
 
     [L, N] = Y.shape  # L number of bands (channels), N number of pixels
 
@@ -82,9 +80,7 @@ def vca(Y, R, verbose=True, snr_input=0):
     if snr_input == 0:
         y_m = np.mean(Y, axis=1, keepdims=True)
         Y_o = Y - y_m  # data with zero-mean
-        Ud = np.linalg.svd(np.dot(Y_o, Y_o.T) / float(N))[0][
-            :, :R
-        ]  # computes the R-projection matrix
+        Ud = np.linalg.svd(np.dot(Y_o, Y_o.T) / float(N))[0][:, :R]  # computes the R-projection matrix
         x_p = np.dot(Ud.T, Y_o)  # project the zero-mean data onto p-subspace
 
         SNR = estimate_snr(Y, y_m, x_p)
@@ -114,9 +110,7 @@ def vca(Y, R, verbose=True, snr_input=0):
             y_m = np.mean(Y, axis=1, keepdims=True)
             Y_o = Y - y_m  # data with zero-mean
 
-            Ud = np.linalg.svd(np.dot(Y_o, Y_o.T) / float(N))[0][
-                :, :d
-            ]  # computes the p-projection matrix
+            Ud = np.linalg.svd(np.dot(Y_o, Y_o.T) / float(N))[0][:, :d]  # computes the p-projection matrix
             x_p = np.dot(Ud.T, Y_o)  # project thezeros mean data onto p-subspace
 
         Yp = np.dot(Ud, x_p[:d, :]) + y_m  # again in dimension L
@@ -129,14 +123,10 @@ def vca(Y, R, verbose=True, snr_input=0):
             logger.debug("... Select the projective proj.")
 
         d = R
-        Ud = np.linalg.svd(np.dot(Y, Y.T) / float(N))[0][
-            :, :d
-        ]  # computes the p-projection matrix
+        Ud = np.linalg.svd(np.dot(Y, Y.T) / float(N))[0][:, :d]  # computes the p-projection matrix
 
         x_p = np.dot(Ud.T, Y)
-        Yp = np.dot(
-            Ud, x_p[:d, :]
-        )  # again in dimension L (note that x_p has no null mean)
+        Yp = np.dot(Ud, x_p[:d, :])  # again in dimension L (note that x_p has no null mean)
 
         x = np.dot(Ud.T, Y)
         u = np.mean(x, axis=1, keepdims=True)  # equivalent to  u = Ud.T * r_m
@@ -212,9 +202,7 @@ def vca_torch(Y, R, verbose=True, snr_input=0, device: str | torch.device = "cud
     """
     # Input validation
     if len(Y.shape) != 2:
-        raise ValueError(
-            "Input data must be of size L (number of bands) by N (number of pixels)"
-        )
+        raise ValueError("Input data must be of size L (number of bands) by N (number of pixels)")
 
     L, N = Y.shape
     R = int(R)
@@ -350,9 +338,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
         return vca_torch(Y, R, verbose, snr_input, device)
 
     if verbose:
-        logger.debug(
-            f"Processing large dataset ({N} pixels) in batches of {batch_size}"
-        )
+        logger.debug(f"Processing large dataset ({N} pixels) in batches of {batch_size}")
 
     # Process in batches for memory efficiency
     Y_batches = torch.split(Y, batch_size, dim=1)
@@ -364,9 +350,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
             logger.debug(f"Processing batch {i + 1}/{len(Y_batches)}")
 
         # Run VCA on batch
-        Ae_batch, indice_batch, _ = vca_torch(
-            Y_batch, R, verbose=False, snr_input=snr_input, device=device
-        )
+        Ae_batch, indice_batch, _ = vca_torch(Y_batch, R, verbose=False, snr_input=snr_input, device=device)
 
         # Adjust indices to global coordinates
         global_offset = i * batch_size
@@ -383,9 +367,7 @@ def vca_torch_batch(Y, R, batch_size=10000, verbose=True, snr_input=0, device="c
         logger.debug("Selecting final endmembers from candidates...")
 
     # Run VCA on candidate endmembers
-    Ae_final, indice_final, Yp = vca_torch(
-        all_endmembers, R, verbose=False, snr_input=snr_input, device=device
-    )
+    Ae_final, indice_final, Yp = vca_torch(all_endmembers, R, verbose=False, snr_input=snr_input, device=device)
 
     # Map back to original indices
     original_indices = torch.tensor(
@@ -497,9 +479,7 @@ def test_vca_torch():
     logger.debug(f"\nOptimal matching results:")
     for i, (np_idx, torch_idx) in enumerate(zip(row_ind, col_ind)):
         corr = correlations[i]
-        logger.debug(
-            f"Match {i + 1}: NP endmember {np_idx} <-> Torch endmember {torch_idx}, correlation: {corr:.4f}"
-        )
+        logger.debug(f"Match {i + 1}: NP endmember {np_idx} <-> Torch endmember {torch_idx}, correlation: {corr:.4f}")
 
     logger.debug(f"Average correlation: {np.mean(correlations):.4f}")
 

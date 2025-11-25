@@ -45,9 +45,7 @@ class ImageTokenizer(torch.nn.Module):
         self._device = device
         self._dtype = getattr(torch, dtype)
         self._full_model = (
-            load_model(checkpoint, tokenizer_config, device).to(self._dtype)
-            if checkpoint is not None
-            else None
+            load_model(checkpoint, tokenizer_config, device).to(self._dtype) if checkpoint is not None else None
         )
         self._enc_model = (
             load_encoder_model(checkpoint_enc, tokenizer_config, device).to(self._dtype)
@@ -71,9 +69,7 @@ class ImageTokenizer(torch.nn.Module):
         """
         if self._full_model is not None:
             output_tensor = self._full_model(input_tensor)
-            output_tensor = (
-                output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
-            )
+            output_tensor = output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
         else:
             output_latent = self.encode(input_tensor)[0]
             output_tensor = self.decode(output_latent)
@@ -122,9 +118,7 @@ class ImageTokenizer(torch.nn.Module):
             The reconstructed image in range [0..255], layout BxHxWxC.
         """
         padded_input_image, crop_region = pad_image_batch(image)
-        input_tensor = numpy2tensor(
-            padded_input_image, dtype=self._dtype, device=self._device
-        )
+        input_tensor = numpy2tensor(padded_input_image, dtype=self._dtype, device=self._device)
         output_tensor = self.autoencode(input_tensor)
         padded_output_image = tensor2numpy(output_tensor)
         return unpad_image_batch(padded_output_image, crop_region)

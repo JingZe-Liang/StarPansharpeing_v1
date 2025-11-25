@@ -20,9 +20,7 @@ import torch
 # ----------------------------------------------------------------------------
 
 enabled = False  # Enable the custom op by setting this to true.
-weight_gradients_disabled = (
-    False  # Forcefully disable computation of gradients with respect to the weights.
-)
+weight_gradients_disabled = False  # Forcefully disable computation of gradients with respect to the weights.
 
 
 @contextlib.contextmanager
@@ -120,9 +118,7 @@ def _tuple_of_ints(xs, ndim):
 _conv2d_gradfix_cache = dict()
 
 
-def _conv2d_gradfix(
-    transpose, weight_shape, stride, padding, output_padding, dilation, groups
-):
+def _conv2d_gradfix(transpose, weight_shape, stride, padding, output_padding, dilation, groups):
     # Parse arguments.
     ndim = 2
     weight_shape = tuple(weight_shape)
@@ -145,14 +141,10 @@ def _conv2d_gradfix(
     if not transpose:
         assert all(output_padding[i] == 0 for i in range(ndim))
     else:  # transpose
-        assert all(
-            0 <= output_padding[i] < max(stride[i], dilation[i]) for i in range(ndim)
-        )
+        assert all(0 <= output_padding[i] < max(stride[i], dilation[i]) for i in range(ndim))
 
     # Helpers.
-    common_kwargs = dict(
-        stride=stride, padding=padding, dilation=dilation, groups=groups
-    )
+    common_kwargs = dict(stride=stride, padding=padding, dilation=dilation, groups=groups)
 
     def calc_output_padding(input_shape, output_shape):
         if transpose:
@@ -171,9 +163,7 @@ def _conv2d_gradfix(
         def forward(ctx, input, weight, bias):
             assert weight.shape == weight_shape
             if not transpose:
-                output = torch.nn.functional.conv2d(
-                    input=input, weight=weight, bias=bias, **common_kwargs
-                )
+                output = torch.nn.functional.conv2d(input=input, weight=weight, bias=bias, **common_kwargs)
             else:  # transpose
                 output = torch.nn.functional.conv_transpose2d(
                     input=input,
@@ -193,9 +183,7 @@ def _conv2d_gradfix(
             grad_bias = None
 
             if ctx.needs_input_grad[0]:
-                p = calc_output_padding(
-                    input_shape=input.shape, output_shape=grad_output.shape
-                )
+                p = calc_output_padding(input_shape=input.shape, output_shape=grad_output.shape)
                 grad_input = _conv2d_gradfix(
                     transpose=(not transpose),
                     weight_shape=weight_shape,
@@ -252,9 +240,7 @@ def _conv2d_gradfix(
                 assert grad2_grad_output.shape == grad_output.shape
 
             if ctx.needs_input_grad[1]:
-                p = calc_output_padding(
-                    input_shape=input.shape, output_shape=grad_output.shape
-                )
+                p = calc_output_padding(input_shape=input.shape, output_shape=grad_output.shape)
                 grad2_input = _conv2d_gradfix(
                     transpose=(not transpose),
                     weight_shape=weight_shape,

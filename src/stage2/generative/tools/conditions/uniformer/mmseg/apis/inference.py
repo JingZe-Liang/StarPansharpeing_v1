@@ -24,11 +24,7 @@ def init_segmentor(config, checkpoint=None, device="cuda"):
     if isinstance(config, str):
         config = mmcv.Config.fromfile(config)
     elif not isinstance(config, mmcv.Config):
-        raise TypeError(
-            "config must be a filename or Config object, but got {}".format(
-                type(config)
-            )
-        )
+        raise TypeError("config must be a filename or Config object, but got {}".format(type(config)))
     config.model.pretrained = None
     config.model.train_cfg = None
     model = build_segmentor(config.model, test_cfg=config.get("test_cfg"))

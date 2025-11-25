@@ -92,19 +92,13 @@ class CARAFENaive(Module):
     def __init__(self, kernel_size, group_size, scale_factor):
         super(CARAFENaive, self).__init__()
 
-        assert (
-            isinstance(kernel_size, int)
-            and isinstance(group_size, int)
-            and isinstance(scale_factor, int)
-        )
+        assert isinstance(kernel_size, int) and isinstance(group_size, int) and isinstance(scale_factor, int)
         self.kernel_size = kernel_size
         self.group_size = group_size
         self.scale_factor = scale_factor
 
     def forward(self, features, masks):
-        return carafe_naive(
-            features, masks, self.kernel_size, self.group_size, self.scale_factor
-        )
+        return carafe_naive(features, masks, self.kernel_size, self.group_size, self.scale_factor)
 
 
 class CARAFEFunction(Function):
@@ -206,19 +200,13 @@ class CARAFE(Module):
     def __init__(self, kernel_size, group_size, scale_factor):
         super(CARAFE, self).__init__()
 
-        assert (
-            isinstance(kernel_size, int)
-            and isinstance(group_size, int)
-            and isinstance(scale_factor, int)
-        )
+        assert isinstance(kernel_size, int) and isinstance(group_size, int) and isinstance(scale_factor, int)
         self.kernel_size = kernel_size
         self.group_size = group_size
         self.scale_factor = scale_factor
 
     def forward(self, features, masks):
-        return carafe(
-            features, masks, self.kernel_size, self.group_size, self.scale_factor
-        )
+        return carafe(features, masks, self.kernel_size, self.group_size, self.scale_factor)
 
 
 @UPSAMPLE_LAYERS.register_module(name="carafe")
@@ -264,11 +252,7 @@ class CARAFEPack(nn.Module):
         self.channel_compressor = nn.Conv2d(channels, self.compressed_channels, 1)
         self.content_encoder = nn.Conv2d(
             self.compressed_channels,
-            self.up_kernel
-            * self.up_kernel
-            * self.up_group
-            * self.scale_factor
-            * self.scale_factor,
+            self.up_kernel * self.up_kernel * self.up_group * self.scale_factor * self.scale_factor,
             self.encoder_kernel,
             padding=int((self.encoder_kernel - 1) * self.encoder_dilation / 2),
             dilation=self.encoder_dilation,

@@ -73,9 +73,7 @@ def orthogonalize_blockwise(
     return P.to(orig_dtype), Q.to(orig_dtype), R.to(orig_dtype)
 
 
-def _spectral_hardcap_blockwise(
-    W: torch.Tensor, sigma_max=1.0, ortho_dtype=torch.float32, num_ns_steps=5
-):
+def _spectral_hardcap_blockwise(W: torch.Tensor, sigma_max=1.0, ortho_dtype=torch.float32, num_ns_steps=5):
     def _spectral_hardcap_blockwise_util(W: torch.Tensor):
         if transpose := W.shape[0] > W.shape[1]:
             W = W.T
@@ -201,9 +199,7 @@ def batch_project(M: torch.Tensor, project_fn: Callable) -> torch.Tensor:
 # *==============================================================
 
 
-def spectral_hardcap(
-    W: torch.Tensor, sigma_max=1.0, ortho_dtype=torch.float32, num_ns_steps=5
-):
+def spectral_hardcap(W: torch.Tensor, sigma_max=1.0, ortho_dtype=torch.float32, num_ns_steps=5):
     # return batch_project(W, lambda x: _spectral_hardcap_fully_materialized(x, sigma_max=sigma_max, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps))
     # return batch_project(W, lambda x: _spectral_hardcap_nested(x, sigma_max=sigma_max, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps))
     # return batch_project(W, lambda x: _spectral_clip(x, sigma_min=0., sigma_max=sigma_max))
@@ -234,14 +230,10 @@ def spectral_clip(
     )
 
 
-def spectral_relu(
-    W: torch.Tensor, sigma_min: float = 1.0, ortho_dtype=torch.float32, num_ns_steps=5
-):
+def spectral_relu(W: torch.Tensor, sigma_min: float = 1.0, ortho_dtype=torch.float32, num_ns_steps=5):
     return batch_project(
         W,
-        lambda x: _spectral_relu(
-            x, sigma_min=sigma_min, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps
-        ),
+        lambda x: _spectral_relu(x, sigma_min=sigma_min, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps),
     )
 
 
@@ -254,12 +246,7 @@ def spectral_hardcap_v2(
             W = W.T
 
         OW = msign(W)
-        result = 0.5 * (
-            OW
-            + W
-            - msign(torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T)
-            @ (OW - W)
-        )
+        result = 0.5 * (OW + W - msign(torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T) @ (OW - W))
         if transpose:
             result = result.T
         return result
@@ -277,14 +264,8 @@ def spectral_clip_v2(
     OW = msign(W)
     result = (1 / 2) * (
         (sigma_min + sigma_max) * OW
-        + msign(
-            sigma_min * torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T
-        )
-        @ (sigma_min * OW - W)
-        - msign(
-            sigma_max * torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T
-        )
-        @ (sigma_max * OW - W)
+        + msign(sigma_min * torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T) @ (sigma_min * OW - W)
+        - msign(sigma_max * torch.eye(W.shape[0], device=W.device, dtype=W.dtype) - OW @ W.T) @ (sigma_max * OW - W)
     )
     if transpose:
         result = result.T
@@ -382,9 +363,7 @@ def __test():
     # 1. SVD
     G_svd = U @ torch.diag(S.clip(0, 1)) @ Vt
     S_svd = torch.linalg.svdvals(G_svd)
-    print(
-        f"SVD max sigular value: {S_svd.max()}, mean abs error: {torch.abs(S_svd - S.clip(0, 1)).mean()}"
-    )
+    print(f"SVD max sigular value: {S_svd.max()}, mean abs error: {torch.abs(S_svd - S.clip(0, 1)).mean()}")
 
     # 2. spectral hardcap v1
     G_clip_hardcap = spectral_hardcap(G, ortho_dtype=torch.bfloat16, num_ns_steps=6)

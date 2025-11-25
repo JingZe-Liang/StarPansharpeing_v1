@@ -39,9 +39,7 @@ def merge_tar_files(tar_files, output_path):
                             member = tar1.next()  # Get the next member info
                             if member is None:
                                 # End of a valid archive marker found
-                                logger.info(
-                                    "Reached end of archive markers for this file."
-                                )
+                                logger.info("Reached end of archive markers for this file.")
                                 break  # Exit the while loop for this tar file
 
                             # If member is successfully read, add it to the output tar
@@ -49,9 +47,7 @@ def merge_tar_files(tar_files, output_path):
                             if member.isfile():  # Only process regular files
                                 f = tar1.extractfile(member)
                                 if f is not None:
-                                    out_tar.addfile(
-                                        member, f
-                                    )  # Add member to output tar``
+                                    out_tar.addfile(member, f)  # Add member to output tar``
                                     f.close()
                                     member_count += 1
                                     # Optional: log progress or member name
@@ -64,9 +60,7 @@ def merge_tar_files(tar_files, output_path):
 
                         except tarfile.ReadError as e:
                             # Caught the error indicating incomplete file
-                            logger.warning(
-                                f"Caught tarfile.ReadError for {tar_file_path}: {e}"
-                            )
+                            logger.warning(f"Caught tarfile.ReadError for {tar_file_path}: {e}")
                             logger.warning(
                                 f"The tar file appears to be incomplete or corrupted. Processed {member_count} members from this file before the error."
                             )
@@ -85,13 +79,9 @@ def merge_tar_files(tar_files, output_path):
             except FileNotFoundError:
                 logger.error(f"Source tar file not found: {tar_file_path}")
             except tarfile.TarError as e:
-                logger.error(
-                    f"An error occurred while opening or processing tar file {tar_file_path}: {e}"
-                )
+                logger.error(f"An error occurred while opening or processing tar file {tar_file_path}: {e}")
             except Exception as e:
-                logger.error(
-                    f"An unexpected error occurred with file {tar_file_path}: {e}"
-                )
+                logger.error(f"An unexpected error occurred with file {tar_file_path}: {e}")
 
 
 if __name__ == "__main__":

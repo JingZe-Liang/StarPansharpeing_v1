@@ -11,9 +11,7 @@ base_path = "/Data4/cao/ZiHanCao/exps/Cosmos/checkpoints/Cosmos-0.1-Tokenizer-CI
 enc_path = f"{base_path}/encoder.jit"
 dec_path = f"{base_path}/decoder.jit"
 dataset_path = "/HardDisk/ZiHanCao/datasets/Multispectral_webdatasets/DCF_2019_Track_2-8_bands-px_512-MSI-0017.tar"
-save_base_dir = (
-    "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/scripts/tests/test_cosmos_imgs"
-)
+save_base_dir = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/scripts/tests/test_cosmos_imgs"
 
 device = "cuda:1"
 

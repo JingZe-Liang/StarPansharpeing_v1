@@ -39,29 +39,21 @@ class ContinuousImageTokenizer(nn.Module):
         self.latent_channels = latent_channels
 
         encoder_name = kwargs.get("encoder", EncoderType.Default.name)
-        self.encoder = EncoderType[encoder_name].value(
-            z_channels=z_factor * z_channels, **kwargs
-        )
+        self.encoder = EncoderType[encoder_name].value(z_channels=z_factor * z_channels, **kwargs)
 
         decoder_name = kwargs.get("decoder", DecoderType.Default.name)
         self.decoder = DecoderType[decoder_name].value(z_channels=z_channels, **kwargs)
 
-        self.quant_conv = torch.nn.Conv2d(
-            z_factor * z_channels, z_factor * latent_channels, 1
-        )
+        self.quant_conv = torch.nn.Conv2d(z_factor * z_channels, z_factor * latent_channels, 1)
         self.post_quant_conv = torch.nn.Conv2d(latent_channels, z_channels, 1)
 
         formulation_name = kwargs.get("formulation", ContinuousFormulation.AE.name)
         self.distribution = ContinuousFormulation[formulation_name].value()
-        logging.info(
-            f"{self.name} based on {formulation_name} formulation, with {kwargs}."
-        )
+        logging.info(f"{self.name} based on {formulation_name} formulation, with {kwargs}.")
 
         num_parameters = sum(param.numel() for param in self.parameters())
         logging.info(f"model={self.name}, num_parameters={num_parameters:,}")
-        logging.info(
-            f"z_channels={z_channels}, latent_channels={self.latent_channels}."
-        )
+        logging.info(f"z_channels={z_channels}, latent_channels={self.latent_channels}.")
 
     def encoder_jit(self):
         return nn.Sequential(
@@ -118,29 +110,21 @@ class ContinuousImageTokenizerDiff(nn.Module):
         self.latent_channels = latent_channels
 
         encoder_name = kwargs.get("encoder", EncoderType.Default.name)
-        self.encoder = EncoderType[encoder_name].value(
-            z_channels=z_factor * z_channels, **kwargs
-        )
+        self.encoder = EncoderType[encoder_name].value(z_channels=z_factor * z_channels, **kwargs)
 
         decoder_name = kwargs.get("decoder", DecoderType.Diffusion.name)
         self.decoder = DecoderType[decoder_name].value(z_channels=z_channels, **kwargs)
 
-        self.quant_conv = torch.nn.Conv2d(
-            z_factor * z_channels, z_factor * latent_channels, 1
-        )
+        self.quant_conv = torch.nn.Conv2d(z_factor * z_channels, z_factor * latent_channels, 1)
         self.post_quant_conv = torch.nn.Conv2d(latent_channels, z_channels, 1)
 
         formulation_name = kwargs.get("formulation", ContinuousFormulation.AE.name)
         self.distribution = ContinuousFormulation[formulation_name].value()
-        logging.info(
-            f"{self.name} based on {formulation_name} formulation, with {kwargs}."
-        )
+        logging.info(f"{self.name} based on {formulation_name} formulation, with {kwargs}.")
 
         num_parameters = sum(param.numel() for param in self.parameters())
         logging.info(f"model={self.name}, num_parameters={num_parameters:,}")
-        logging.info(
-            f"z_channels={z_channels}, latent_channels={self.latent_channels}."
-        )
+        logging.info(f"z_channels={z_channels}, latent_channels={self.latent_channels}.")
 
     def encoder_jit(self):
         return nn.Sequential(

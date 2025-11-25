@@ -229,8 +229,6 @@ class BaseDecodeHead(nn.Module, metaclass=ABCMeta):
         else:
             seg_weight = None
         seg_label = seg_label.squeeze(1)
-        loss["loss_seg"] = self.loss_decode(
-            seg_logit, seg_label, weight=seg_weight, ignore_index=self.ignore_index
-        )
+        loss["loss_seg"] = self.loss_decode(seg_logit, seg_label, weight=seg_weight, ignore_index=self.ignore_index)
         loss["acc_seg"] = accuracy(seg_logit, seg_label)
         return loss

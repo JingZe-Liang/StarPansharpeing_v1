@@ -19,9 +19,7 @@ def _time_shift(
 
     # time shift
     sigma = 1.0
-    shifted_timesteps = math.exp(mu) / (
-        math.exp(mu) + (1 / basic_timesteps - 1) ** sigma
-    )
+    shifted_timesteps = math.exp(mu) / (math.exp(mu) + (1 / basic_timesteps - 1) ** sigma)
     return shifted_timesteps
 
 
@@ -32,9 +30,7 @@ def get_timesteps(
     time_type: str = "uniform",
     discrete_timesteps: th.Tensor | None = None,
 ):
-    logger.debug(
-        f"[FM sampler]: use timestep type: {time_type} with {num_steps} steps."
-    )
+    logger.debug(f"[FM sampler]: use timestep type: {time_type} with {num_steps} steps.")
 
     if discrete_timesteps is not None:
         # ensure the discreate timesteps are sorted
@@ -78,9 +74,7 @@ def get_timesteps(
 
     # Ensure the last timestep is 1.
     if float(t[-1]) != 1.0:
-        logger.warning(
-            f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0."
-        )
+        logger.warning(f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0.")
         t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
 
     return t
@@ -130,9 +124,7 @@ class sde:
         K1 = self.drift(xhat, t_cur, model, **model_kwargs)
         xp = xhat + self.dt * K1
         K2 = self.drift(xp, t_cur + self.dt, model, **model_kwargs)
-        return xhat + 0.5 * self.dt * (
-            K1 + K2
-        ), xhat  # at last time point we do not perform the heun step
+        return xhat + 0.5 * self.dt * (K1 + K2), xhat  # at last time point we do not perform the heun step
 
     def __forward_fn(self):
         """TODO: generalize here by adding all private functions ending with steps to it"""
@@ -194,11 +186,7 @@ class ode:
         device = x[0].device if isinstance(x, tuple) else x.device
 
         def _fn(t, x):
-            t = (
-                th.ones(x[0].size(0)).to(device) * t
-                if isinstance(x, tuple)
-                else th.ones(x.size(0)).to(device) * t
-            )
+            t = th.ones(x[0].size(0)).to(device) * t if isinstance(x, tuple) else th.ones(x.size(0)).to(device) * t
             # For ODE, we scale the drift by the temperature
             # This is equivalent to scaling time by 1/temperature
             model_output = self.drift(x, t, model, **model_kwargs)

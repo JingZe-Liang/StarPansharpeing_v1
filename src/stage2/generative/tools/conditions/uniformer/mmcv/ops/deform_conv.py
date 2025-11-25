@@ -95,9 +95,7 @@ class DeformConv2dFunction(Function):
         ctx.bufs_ = [input.new_empty(0), input.new_empty(0)]  # columns, ones
 
         cur_im2col_step = min(ctx.im2col_step, input.size(0))
-        assert (input.size(0) % cur_im2col_step) == 0, (
-            "im2col step must divide batchsize"
-        )
+        assert (input.size(0) % cur_im2col_step) == 0, "im2col step must divide batchsize"
         ext_module.deform_conv_forward(
             input,
             weight,
@@ -127,9 +125,7 @@ class DeformConv2dFunction(Function):
         grad_input = grad_offset = grad_weight = None
 
         cur_im2col_step = min(ctx.im2col_step, input.size(0))
-        assert (input.size(0) % cur_im2col_step) == 0, (
-            "batch size must be divisible by im2col_step"
-        )
+        assert (input.size(0) % cur_im2col_step) == 0, "batch size must be divisible by im2col_step"
 
         grad_output = grad_output.contiguous()
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
@@ -203,11 +199,7 @@ class DeformConv2dFunction(Function):
             stride_ = ctx.stride[d]
             output_size += ((in_size + (2 * pad) - kernel) // stride_ + 1,)
         if not all(map(lambda s: s > 0, output_size)):
-            raise ValueError(
-                "convolution input is too small (output would be "
-                + "x".join(map(str, output_size))
-                + ")"
-            )
+            raise ValueError("convolution input is too small (output would be " + "x".join(map(str, output_size)) + ")")
         return output_size
 
 
@@ -248,9 +240,7 @@ class DeformConv2d(nn.Module):
             `New in version 1.3.17.`
     """
 
-    @deprecated_api_warning(
-        {"deformable_groups": "deform_groups"}, cls_name="DeformConv2d"
-    )
+    @deprecated_api_warning({"deformable_groups": "deform_groups"}, cls_name="DeformConv2d")
     def __init__(
         self,
         in_channels: int,
@@ -267,9 +257,7 @@ class DeformConv2d(nn.Module):
         super(DeformConv2d, self).__init__()
 
         assert not bias, f"bias={bias} is not supported in DeformConv2d."
-        assert in_channels % groups == 0, (
-            f"in_channels {in_channels} cannot be divisible by groups {groups}"
-        )
+        assert in_channels % groups == 0, f"in_channels {in_channels} cannot be divisible by groups {groups}"
         assert out_channels % groups == 0, (
             f"out_channels {out_channels} cannot be divisible by groups \
               {groups}"
@@ -289,9 +277,7 @@ class DeformConv2d(nn.Module):
         self.output_padding = _single(0)
 
         # only weight, no bias
-        self.weight = nn.Parameter(
-            torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size)
-        )
+        self.weight = nn.Parameter(torch.Tensor(out_channels, in_channels // self.groups, *self.kernel_size))
 
         self.reset_parameters()
 
@@ -325,9 +311,7 @@ class DeformConv2d(nn.Module):
         """
         # To fix an assert error in deform_conv_cuda.cpp:128
         # input image is smaller than kernel
-        input_pad = (x.size(2) < self.kernel_size[0]) or (
-            x.size(3) < self.kernel_size[1]
-        )
+        input_pad = (x.size(2) < self.kernel_size[0]) or (x.size(3) < self.kernel_size[1])
         if input_pad:
             pad_h = max(self.kernel_size[0] - x.size(2), 0)
             pad_w = max(self.kernel_size[1] - x.size(3), 0)
@@ -440,20 +424,10 @@ class DeformConv2dPack(DeformConv2d):
         if version is None or version < 2:
             # the key is different in early versions
             # In version < 2, DeformConvPack loads previous benchmark models.
-            if (
-                prefix + "conv_offset.weight" not in state_dict
-                and prefix[:-1] + "_offset.weight" in state_dict
-            ):
-                state_dict[prefix + "conv_offset.weight"] = state_dict.pop(
-                    prefix[:-1] + "_offset.weight"
-                )
-            if (
-                prefix + "conv_offset.bias" not in state_dict
-                and prefix[:-1] + "_offset.bias" in state_dict
-            ):
-                state_dict[prefix + "conv_offset.bias"] = state_dict.pop(
-                    prefix[:-1] + "_offset.bias"
-                )
+            if prefix + "conv_offset.weight" not in state_dict and prefix[:-1] + "_offset.weight" in state_dict:
+                state_dict[prefix + "conv_offset.weight"] = state_dict.pop(prefix[:-1] + "_offset.weight")
+            if prefix + "conv_offset.bias" not in state_dict and prefix[:-1] + "_offset.bias" in state_dict:
+                state_dict[prefix + "conv_offset.bias"] = state_dict.pop(prefix[:-1] + "_offset.bias")
 
         if version is not None and version > 1:
             print_log(

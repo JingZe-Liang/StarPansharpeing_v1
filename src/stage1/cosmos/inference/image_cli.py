@@ -52,9 +52,7 @@ from .utils import (
 
 
 def _parse_args() -> tuple[Namespace, dict[str, Any]]:
-    parser = ArgumentParser(
-        description="A CLI for running ImageTokenizer on plain images."
-    )
+    parser = ArgumentParser(description="A CLI for running ImageTokenizer on plain images.")
     parser.add_argument(
         "--image_pattern",
         type=str,
@@ -117,9 +115,7 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         default="cuda",
         help="Device for invoking the model.",
     )
-    parser.add_argument(
-        "--output_dir", type=str, default=None, help="Output directory."
-    )
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory.")
     parser.add_argument(
         "--save_input",
         action="store_true",
@@ -139,14 +135,8 @@ if args.mode == "torch" and args.tokenizer_type not in ["CI", "DI"]:
 def _run_eval() -> None:
     """Invokes the evaluation pipeline."""
 
-    if (
-        args.checkpoint_enc is None
-        and args.checkpoint_dec is None
-        and args.checkpoint is None
-    ):
-        logging.warning(
-            "Aborting. Both encoder or decoder JIT required. Or provide the full autoencoder JIT model."
-        )
+    if args.checkpoint_enc is None and args.checkpoint_dec is None and args.checkpoint is None:
+        logging.warning("Aborting. Both encoder or decoder JIT required. Or provide the full autoencoder JIT model.")
         return
 
     if args.mode == "torch":

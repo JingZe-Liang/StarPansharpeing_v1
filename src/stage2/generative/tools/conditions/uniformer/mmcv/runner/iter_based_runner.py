@@ -99,22 +99,15 @@ class IterBasedRunner(BaseRunner):
         assert len(data_loaders) == len(workflow)
         if max_iters is not None:
             warnings.warn(
-                "setting max_iters in run is deprecated, "
-                "please set max_iters in runner_config",
+                "setting max_iters in run is deprecated, please set max_iters in runner_config",
                 DeprecationWarning,
             )
             self._max_iters = max_iters
-        assert self._max_iters is not None, (
-            "max_iters must be specified during instantiation"
-        )
+        assert self._max_iters is not None, "max_iters must be specified during instantiation"
 
         work_dir = self.work_dir if self.work_dir is not None else "NONE"
-        self.logger.info(
-            "Start running, host: %s, work_dir: %s", get_host_info(), work_dir
-        )
-        self.logger.info(
-            "Hooks will be executed in the following order:\n%s", self.get_hook_info()
-        )
+        self.logger.info("Start running, host: %s, work_dir: %s", get_host_info(), work_dir)
+        self.logger.info("Hooks will be executed in the following order:\n%s", self.get_hook_info())
         self.logger.info("workflow: %s, max: %d iters", workflow, self._max_iters)
         self.call_hook("before_run")
 
@@ -127,9 +120,7 @@ class IterBasedRunner(BaseRunner):
                 self._inner_iter = 0
                 mode, iters = flow
                 if not isinstance(mode, str) or not hasattr(self, mode):
-                    raise ValueError(
-                        'runner has no method named "{}" to run a workflow'.format(mode)
-                    )
+                    raise ValueError('runner has no method named "{}" to run a workflow'.format(mode))
                 iter_runner = getattr(self, mode)
                 for _ in range(iters):
                     if mode == "train" and self.iter >= self._max_iters:
@@ -152,9 +143,7 @@ class IterBasedRunner(BaseRunner):
         """
         if map_location == "default":
             device_id = torch.cuda.current_device()
-            checkpoint = self.load_checkpoint(
-                checkpoint, map_location=lambda storage, loc: storage.cuda(device_id)
-            )
+            checkpoint = self.load_checkpoint(checkpoint, map_location=lambda storage, loc: storage.cuda(device_id))
         else:
             checkpoint = self.load_checkpoint(checkpoint, map_location=map_location)
 
@@ -168,10 +157,7 @@ class IterBasedRunner(BaseRunner):
                 for k in self.optimizer.keys():
                     self.optimizer[k].load_state_dict(checkpoint["optimizer"][k])
             else:
-                raise TypeError(
-                    "Optimizer should be dict or torch.optim.Optimizer "
-                    f"but got {type(self.optimizer)}"
-                )
+                raise TypeError(f"Optimizer should be dict or torch.optim.Optimizer but got {type(self.optimizer)}")
 
         self.logger.info(f"resumed from epoch: {self.epoch}, iter {self.iter}")
 

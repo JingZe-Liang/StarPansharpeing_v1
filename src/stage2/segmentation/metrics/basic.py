@@ -35,17 +35,13 @@ class HyperSegmentationScore(nn.Module):
             top_k=top_k,
             average=reduction,
         )
-        self.cohen_kappa = CohenKappa(
-            task=task, num_classes=n_classes, ignore_index=ignore_index
-        )
+        self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
         self.dice_score = GeneralizedDiceScore(
             include_background=include_bg,
             num_classes=n_classes,
             per_class=per_class,
         )
-        self.mean_iou = MeanIoU(
-            num_classes=n_classes, per_class=per_class, include_background=include_bg
-        )
+        self.mean_iou = MeanIoU(num_classes=n_classes, per_class=per_class, include_background=include_bg)
         self.f1_score = F1Score(
             task=task,
             num_classes=n_classes,
@@ -125,9 +121,7 @@ def test_metrics():
             assert (value <= 1).all(), f"{metric_name} should be <= 1"
         # Cohen's kappa should be between -1 and 1
         if metric_name == "kappa":
-            assert ((value >= -1) & (value <= 1)).all(), (
-                f"{metric_name} should be between -1 and 1"
-            )
+            assert ((value >= -1) & (value <= 1)).all(), f"{metric_name} should be between -1 and 1"
 
     print("✓ Basic test passed")
     return results
@@ -136,9 +130,7 @@ def test_metrics():
 def test_perfect_prediction():
     """Test with perfect predictions (should give maximum scores)"""
     # Create perfect predictions
-    pred = torch.tensor(
-        [[[0, 1], [2, 3]], [[1, 2], [3, 0]]]
-    )  # 2 images, 2x2, 4 classes
+    pred = torch.tensor([[[0, 1], [2, 3]], [[1, 2], [3, 0]]])  # 2 images, 2x2, 4 classes
     gt = pred.clone()
 
     metrics = HyperSegmentationScore(
@@ -167,9 +159,7 @@ def test_perfect_prediction():
 def test_wrong_prediction():
     """Test with completely wrong predictions"""
     # Create completely wrong predictions
-    pred = torch.tensor(
-        [[[0, 1], [2, 3]], [[1, 2], [3, 0]]]
-    )  # 2 images, 2x2, 4 classes
+    pred = torch.tensor([[[0, 1], [2, 3]], [[1, 2], [3, 0]]])  # 2 images, 2x2, 4 classes
     gt = torch.tensor([[[1, 2], [3, 0]], [[2, 3], [0, 1]]])  # All different
 
     metrics = HyperSegmentationScore(
@@ -214,9 +204,7 @@ def test_ignore_index():
     # Should ignore the 255 positions
     assert isinstance(results["accuracy"], torch.Tensor), "Should return a tensor"
     assert not torch.isnan(results["accuracy"]).any(), "Should not be NaN"
-    assert (results["accuracy"] >= 0).all() and (results["accuracy"] <= 1).all(), (
-        "Accuracy should be between 0 and 1"
-    )
+    assert (results["accuracy"] >= 0).all() and (results["accuracy"] <= 1).all(), "Accuracy should be between 0 and 1"
 
     print("✓ Ignore index test passed")
 

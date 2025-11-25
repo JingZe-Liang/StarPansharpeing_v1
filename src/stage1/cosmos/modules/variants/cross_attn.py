@@ -79,13 +79,11 @@ class Qwen3NextRMSNorm(nn.Module):
 
 
 # Register custom norm
-create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore 
+create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
 
 
 class CrossAttention(nn.Module):
-    config = SimpleNamespace(
-        _attn_implementation="flash_attention_2"
-    )  # for flash_attention_2 config
+    config = SimpleNamespace(_attn_implementation="flash_attention_2")  # for flash_attention_2 config
 
     def __init__(
         self,
@@ -103,9 +101,7 @@ class CrossAttention(nn.Module):
     ):
         super().__init__()
         self.ctx_dim = ctx_dim if ctx_dim is not None else dim
-        assert self.ctx_dim is not None, (
-            "ctx_dim must be specified if different from dim"
-        )
+        assert self.ctx_dim is not None, "ctx_dim must be specified if different from dim"
 
         self.n_q_heads = n_q_heads
         self.n_kv_heads = n_kv_heads = n_kv_heads or n_q_heads
@@ -118,9 +114,7 @@ class CrossAttention(nn.Module):
         self.head_dim = dim // n_q_heads
         self.scale = self.head_dim**-0.5
 
-        q_dim = (
-            n_q_heads * self.head_dim if not use_gate else n_q_heads * self.head_dim * 2
-        )
+        q_dim = n_q_heads * self.head_dim if not use_gate else n_q_heads * self.head_dim * 2
         kv_dim = n_kv_heads * self.head_dim
         self.q_proj = nn.Linear(dim, q_dim, bias=qkv_bias)
         self.kv_proj = nn.Linear(self.ctx_dim, kv_dim * 2, bias=qkv_bias)
@@ -136,13 +130,9 @@ class CrossAttention(nn.Module):
         self.attn_drop = attn_drop
 
         self.is_causal = False
-        self._attn_implementation = (
-            attn_implem  # flash_attention_2, spda, flex_attention
-        )
+        self._attn_implementation = attn_implem  # flash_attention_2, spda, flex_attention
 
-    def _qkv_proj(
-        self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None
-    ):
+    def _qkv_proj(self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None):
         bl_shape = x.shape[:-1]  # (B, L)
         qg = self.q_proj(x)
         qg = qg.view(*bl_shape, -1, self.head_dim * 2)
@@ -152,9 +142,7 @@ class CrossAttention(nn.Module):
 
         b_ctxl_shape = context.shape[:-1]  # (B, L2)
         kv_states = self.kv_proj(context)
-        kv_states = kv_states.view(
-            *b_ctxl_shape, -1, self.head_dim * 2
-        )  # (B, L2, n_kv_heads, head_dim*2)
+        kv_states = kv_states.view(*b_ctxl_shape, -1, self.head_dim * 2)  # (B, L2, n_kv_heads, head_dim*2)
         k_states, v_states = kv_states.chunk(2, dim=-1)
         k_states = self.k_norm(k_states).transpose(1, 2)
         v_states = v_states.transpose(1, 2)
@@ -170,12 +158,8 @@ class CrossAttention(nn.Module):
     def _attention(self, q, k, v, mask: Tensor | BlockMask | None = None):
         if self._attn_implementation == "flex_attention":
             # not compiled: transformers == 4.57.0
-            assert isinstance(mask, BlockMask) or mask is None, (
-                f"mask must be BlockMask or None, got {type(mask)}"
-            )
-            attn_out, attn_weights = flex_attention(
-                q, k, v, block_mask=mask, return_lse=False, enable_gqa=True
-            )
+            assert isinstance(mask, BlockMask) or mask is None, f"mask must be BlockMask or None, got {type(mask)}"
+            attn_out, attn_weights = flex_attention(q, k, v, block_mask=mask, return_lse=False, enable_gqa=True)
         else:
             attn_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
             attn_out, attn_weights = attn_interface(

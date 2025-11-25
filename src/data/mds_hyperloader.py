@@ -26,9 +26,7 @@ encodings._encodings["nvimage"] = NVImageEncoding  # type: ignore
 encodings._encodings["jpeg"] = SkipLargeJpegImageEncoding  # type: ignore
 
 
-def to_tensor_img(
-    img: Image.Image | np.ndarray | Tensor, is_permuted=False
-) -> torch.Tensor:
+def to_tensor_img(img: Image.Image | np.ndarray | Tensor, is_permuted=False) -> torch.Tensor:
     if torch.is_tensor(img):
         if not is_permuted:
             img = img.permute(2, 0, 1)  # hwc -> chw
@@ -93,11 +91,7 @@ class ImageStreamDataset(StreamingDataset):
             )
 
         # Augmentations
-        self.use_aug = (
-            hyper_transforms_lst is not None
-            and len(hyper_transforms_lst) > 0
-            and transform_prob > 0.0
-        )
+        self.use_aug = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0.0
         if self.use_aug:
             self.augmentation: Callable = hyper_transform(
                 op_list=hyper_transforms_lst,
@@ -119,16 +113,12 @@ class ImageStreamDataset(StreamingDataset):
                     is_neg_1_1=True,
                 )
             else:
-                raise ValueError(
-                    f"hyper_degradation_lst: {hyper_degradation_lst} is not supported"
-                )
+                raise ValueError(f"hyper_degradation_lst: {hyper_degradation_lst} is not supported")
             self.deg_pipe = deg_pipe
 
     def _pil_to_tensor(self, sample):
         """Convert a PIL Image to a tensor."""
-        sample[self._img_key] = to_tensor_img(
-            sample[self._img_key], is_permuted=not self.permute
-        )
+        sample[self._img_key] = to_tensor_img(sample[self._img_key], is_permuted=not self.permute)
         return sample
 
     def _augment(self, sample):

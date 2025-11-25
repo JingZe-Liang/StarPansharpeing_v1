@@ -99,11 +99,7 @@ class Attention(nn.Module):
 
     def forward(self, x):
         b, n, c = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(b, n, 3, self.num_heads, c // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(b, n, 3, self.num_heads, c // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -161,9 +157,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         _, self.norm2 = build_norm_layer(norm_cfg, dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_cfg=act_cfg, drop=drop
-        )
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_cfg=act_cfg, drop=drop)
 
     def forward(self, x):
         def _inner_forward(x):
@@ -202,9 +196,7 @@ class PatchEmbed(nn.Module):
         h, w = self.img_size
         self.patch_size = (patch_size, patch_size)
         self.num_patches = (h // patch_size) * (w // patch_size)
-        self.proj = Conv2d(
-            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         return self.proj(x).flatten(2).transpose(1, 2)
@@ -287,9 +279,7 @@ class VisionTransformer(nn.Module):
 
         self.with_cls_token = with_cls_token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)
-        )
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         if isinstance(out_indices, int):
@@ -299,9 +289,7 @@ class VisionTransformer(nn.Module):
         else:
             raise TypeError("out_indices must be type of int, list or tuple")
 
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -398,18 +386,11 @@ class VisionTransformer(nn.Module):
         )
         x_len, pos_len = patched_img.shape[1], pos_embed.shape[1]
         if x_len != pos_len:
-            if (
-                pos_len
-                == (self.img_size[0] // self.patch_size)
-                * (self.img_size[1] // self.patch_size)
-                + 1
-            ):
+            if pos_len == (self.img_size[0] // self.patch_size) * (self.img_size[1] // self.patch_size) + 1:
                 pos_h = self.img_size[0] // self.patch_size
                 pos_w = self.img_size[1] // self.patch_size
             else:
-                raise ValueError(
-                    "Unexpected shape of pos_embed, got {}.".format(pos_embed.shape)
-                )
+                raise ValueError("Unexpected shape of pos_embed, got {}.".format(pos_embed.shape))
             pos_embed = self.resize_pos_embed(
                 pos_embed,
                 img.shape[2:],
@@ -437,9 +418,7 @@ class VisionTransformer(nn.Module):
         pos_h, pos_w = pos_shape
         cls_token_weight = pos_embed[:, 0]
         pos_embed_weight = pos_embed[:, (-1 * pos_h * pos_w) :]
-        pos_embed_weight = pos_embed_weight.reshape(
-            1, pos_h, pos_w, pos_embed.shape[2]
-        ).permute(0, 3, 1, 2)
+        pos_embed_weight = pos_embed_weight.reshape(1, pos_h, pos_w, pos_embed.shape[2]).permute(0, 3, 1, 2)
         pos_embed_weight = F.interpolate(
             pos_embed_weight,
             size=[input_h // patch_size, input_w // patch_size],

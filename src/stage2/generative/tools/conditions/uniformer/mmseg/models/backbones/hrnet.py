@@ -38,9 +38,7 @@ class HRModule(nn.Module):
         self.norm_cfg = norm_cfg
         self.conv_cfg = conv_cfg
         self.with_cp = with_cp
-        self.branches = self._make_branches(
-            num_branches, blocks, num_blocks, num_channels
-        )
+        self.branches = self._make_branches(num_branches, blocks, num_blocks, num_channels)
         self.fuse_layers = self._make_fuse_layers()
         self.relu = nn.ReLU(inplace=False)
 
@@ -51,25 +49,17 @@ class HRModule(nn.Module):
             raise ValueError(error_msg)
 
         if num_branches != len(num_channels):
-            error_msg = (
-                f"NUM_BRANCHES({num_branches}) <> NUM_CHANNELS({len(num_channels)})"
-            )
+            error_msg = f"NUM_BRANCHES({num_branches}) <> NUM_CHANNELS({len(num_channels)})"
             raise ValueError(error_msg)
 
         if num_branches != len(in_channels):
-            error_msg = (
-                f"NUM_BRANCHES({num_branches}) <> NUM_INCHANNELS({len(in_channels)})"
-            )
+            error_msg = f"NUM_BRANCHES({num_branches}) <> NUM_INCHANNELS({len(in_channels)})"
             raise ValueError(error_msg)
 
     def _make_one_branch(self, branch_index, block, num_blocks, num_channels, stride=1):
         """Build one branch."""
         downsample = None
-        if (
-            stride != 1
-            or self.in_channels[branch_index]
-            != num_channels[branch_index] * block.expansion
-        ):
+        if stride != 1 or self.in_channels[branch_index] != num_channels[branch_index] * block.expansion:
             downsample = nn.Sequential(
                 build_conv_layer(
                     self.conv_cfg,
@@ -79,9 +69,7 @@ class HRModule(nn.Module):
                     stride=stride,
                     bias=False,
                 ),
-                build_norm_layer(
-                    self.norm_cfg, num_channels[branch_index] * block.expansion
-                )[1],
+                build_norm_layer(self.norm_cfg, num_channels[branch_index] * block.expansion)[1],
             )
 
         layers = []
@@ -332,9 +320,7 @@ class HRNet(nn.Module):
         )
 
         self.add_module(self.norm1_name, norm1)
-        self.conv2 = build_conv_layer(
-            self.conv_cfg, 64, 64, kernel_size=3, stride=2, padding=1, bias=False
-        )
+        self.conv2 = build_conv_layer(self.conv_cfg, 64, 64, kernel_size=3, stride=2, padding=1, bias=False)
 
         self.add_module(self.norm2_name, norm2)
         self.relu = nn.ReLU(inplace=True)
@@ -356,12 +342,8 @@ class HRNet(nn.Module):
 
         block = self.blocks_dict[block_type]
         num_channels = [channel * block.expansion for channel in num_channels]
-        self.transition1 = self._make_transition_layer(
-            [stage1_out_channels], num_channels
-        )
-        self.stage2, pre_stage_channels = self._make_stage(
-            self.stage2_cfg, num_channels
-        )
+        self.transition1 = self._make_transition_layer([stage1_out_channels], num_channels)
+        self.stage2, pre_stage_channels = self._make_stage(self.stage2_cfg, num_channels)
 
         # stage 3
         self.stage3_cfg = self.extra["stage3"]
@@ -371,9 +353,7 @@ class HRNet(nn.Module):
         block = self.blocks_dict[block_type]
         num_channels = [channel * block.expansion for channel in num_channels]
         self.transition2 = self._make_transition_layer(pre_stage_channels, num_channels)
-        self.stage3, pre_stage_channels = self._make_stage(
-            self.stage3_cfg, num_channels
-        )
+        self.stage3, pre_stage_channels = self._make_stage(self.stage3_cfg, num_channels)
 
         # stage 4
         self.stage4_cfg = self.extra["stage4"]
@@ -383,9 +363,7 @@ class HRNet(nn.Module):
         block = self.blocks_dict[block_type]
         num_channels = [channel * block.expansion for channel in num_channels]
         self.transition3 = self._make_transition_layer(pre_stage_channels, num_channels)
-        self.stage4, pre_stage_channels = self._make_stage(
-            self.stage4_cfg, num_channels
-        )
+        self.stage4, pre_stage_channels = self._make_stage(self.stage4_cfg, num_channels)
 
     @property
     def norm1(self):
@@ -417,9 +395,7 @@ class HRNet(nn.Module):
                                 padding=1,
                                 bias=False,
                             ),
-                            build_norm_layer(self.norm_cfg, num_channels_cur_layer[i])[
-                                1
-                            ],
+                            build_norm_layer(self.norm_cfg, num_channels_cur_layer[i])[1],
                             nn.ReLU(inplace=True),
                         )
                     )
@@ -429,11 +405,7 @@ class HRNet(nn.Module):
                 conv_downsamples = []
                 for j in range(i + 1 - num_branches_pre):
                     in_channels = num_channels_pre_layer[-1]
-                    out_channels = (
-                        num_channels_cur_layer[i]
-                        if j == i - num_branches_pre
-                        else in_channels
-                    )
+                    out_channels = num_channels_cur_layer[i] if j == i - num_branches_pre else in_channels
                     conv_downsamples.append(
                         nn.Sequential(
                             build_conv_layer(

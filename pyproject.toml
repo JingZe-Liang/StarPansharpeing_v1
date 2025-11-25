@@ -92,7 +92,7 @@ document-start = { present = false }
 
 [tool.ruff]
 target-version = "py312"
-line-length = 88
+line-length = 120
 indent-width = 4
 extend-exclude = [
     ".vscode",
@@ -158,19 +158,22 @@ ignore = [
     "E731",    # lambda assigned to variable
     "E741",    # multiple statements on one line (semicolon)
     "E701",    # multiple statements on one line (colon)
+    "E721",    # do not compare types directly
     "E731",    # lambda
     "E501",    # line too long
     "E722",    # do not use bare except
     "PLR0913",
     "W291",    # trailing whitespace
     "W293",    # blank line at end of file
-    "D103",
-    "D202",
-    "D403",
+    # "D103",
+    # "D202",
+    # "D403",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/*.py" = ["D"] # Disable all docstring-related rules
+"**/*.py" = ["D"]        # Disable all docstring-related rules
+"__init__.py" = ["F401"]
+"hubconf.py" = ["F401"]
 
 [tool.ruff.lint.pylint]
 max-args = 20

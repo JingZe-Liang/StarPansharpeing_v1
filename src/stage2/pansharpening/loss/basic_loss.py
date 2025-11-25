@@ -56,31 +56,18 @@ def grad_norm(x):
 
 
 def gaussian(window_size, sigma):
-    gauss = torch.Tensor(
-        [
-            exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2))
-            for x in range(window_size)
-        ]
-    )
+    gauss = torch.Tensor([exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2)) for x in range(window_size)])
     return gauss / gauss.sum()
 
 
 def gradient(input):
-    filter1 = nn.Conv2d(
-        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
-    )
-    filter2 = nn.Conv2d(
-        kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1
-    )
+    filter1 = nn.Conv2d(kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1)
+    filter2 = nn.Conv2d(kernel_size=3, in_channels=1, out_channels=1, bias=False, padding=1, stride=1)
     filter1.weight.data = (
-        torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
-        .reshape(1, 1, 3, 3)
-        .to(input.device)
+        torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]).reshape(1, 1, 3, 3).to(input.device)
     )
     filter2.weight.data = (
-        torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]])
-        .reshape(1, 1, 3, 3)
-        .to(input.device)
+        torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]]).reshape(1, 1, 3, 3).to(input.device)
     )
 
     g1 = filter1(input)
@@ -92,9 +79,7 @@ def gradient(input):
 def create_window(window_size, channel, sigma=1.5):
     _1D_window = gaussian(window_size, sigma).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = Variable(
-        _2D_window.expand(channel, 1, window_size, window_size).contiguous()
-    )
+    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
 
@@ -116,16 +101,10 @@ def sf(f1, kernel_radius=5):
     device = f1.device
     b, c, h, w = f1.shape
     r_shift_kernel = (
-        torch.FloatTensor([[0, 0, 0], [1, 0, 0], [0, 0, 0]])
-        .to(device)
-        .reshape((1, 1, 3, 3))
-        .repeat(c, 1, 1, 1)
+        torch.FloatTensor([[0, 0, 0], [1, 0, 0], [0, 0, 0]]).to(device).reshape((1, 1, 3, 3)).repeat(c, 1, 1, 1)
     )
     b_shift_kernel = (
-        torch.FloatTensor([[0, 1, 0], [0, 0, 0], [0, 0, 0]])
-        .to(device)
-        .reshape((1, 1, 3, 3))
-        .repeat(c, 1, 1, 1)
+        torch.FloatTensor([[0, 1, 0], [0, 0, 0], [0, 0, 0]]).to(device).reshape((1, 1, 3, 3)).repeat(c, 1, 1, 1)
     )
     f1_r_shift = F.conv2d(f1, r_shift_kernel, padding=1, groups=c)
     f1_b_shift = F.conv2d(f1, b_shift_kernel, padding=1, groups=c)
@@ -133,15 +112,11 @@ def sf(f1, kernel_radius=5):
     kernel_size = kernel_radius * 2 + 1
     add_kernel = torch.ones((c, 1, kernel_size, kernel_size)).float().to(device)
     kernel_padding = kernel_size // 2
-    f1_sf = torch.sum(
-        F.conv2d(f1_grad, add_kernel, padding=kernel_padding, groups=c), dim=1
-    )
+    f1_sf = torch.sum(F.conv2d(f1_grad, add_kernel, padding=kernel_padding, groups=c), dim=1)
     return 1 - f1_sf
 
 
-def elementwise_charbonnier_loss(
-    input: Tensor, target: Tensor, eps: float = 1e-3
-) -> Tensor:
+def elementwise_charbonnier_loss(input: Tensor, target: Tensor, eps: float = 1e-3) -> Tensor:
     """Apply element-wise weight and reduce loss between a pair of input and
     target.
     """
@@ -181,9 +156,7 @@ def inspect_func_kwargs(func: Callable, arg_dict: dict | None = None):
         ):
             if param.default is not inspect.Parameter.empty:
                 in_func_kwargs[name] = param.default
-                logger.debug(
-                    f'keyword {name} is not provided, use default value "{param.default}"'
-                )
+                logger.debug(f'keyword {name} is not provided, use default value "{param.default}"')
             else:
                 raise ValueError(
                     f"keyword {name} is not provided and no default value is set (raised by inspect._empty)"
@@ -195,9 +168,7 @@ def inspect_func_kwargs(func: Callable, arg_dict: dict | None = None):
 
     if not _has_var_keywords:
         if len(arg_dict) > 0:
-            logger.warning(
-                f"init function {func.__name__} got unused key words {arg_dict}"
-            )
+            logger.warning(f"init function {func.__name__} got unused key words {arg_dict}")
         return in_func_kwargs, arg_dict
     else:
         in_func_kwargs.update(arg_dict)
@@ -212,9 +183,7 @@ def init_cls_with_kwargs(cls: type, arg_dict: dict):
         # support singleton pattern
         raise NotImplementedError("singleton pattern is not supported yet")
     else:
-        raise ValueError(
-            f"cls {cls} should have __init__ or __new__ method with kwargs {arg_dict}"
-        )
+        raise ValueError(f"cls {cls} should have __init__ or __new__ method with kwargs {arg_dict}")
 
     return cls(**kwargs), remained_kwargs
 
@@ -227,9 +196,7 @@ class LossWarpper(torch.nn.Module):
     ):
         super(LossWarpper, self).__init__()
         self.names = []
-        assert len(weighted_ratio) == len(losses.keys()), (
-            "`weighted_ratio` must be the same length as `losses`"
-        )
+        assert len(weighted_ratio) == len(losses.keys()), "`weighted_ratio` must be the same length as `losses`"
         self.weighted_ratio = weighted_ratio
         for k, v in losses.items():
             self.names.append(k)
@@ -277,9 +244,7 @@ class TorchLossWrapper(torch.nn.Module):
 
 
 class SSIMLoss(torch.nn.Module):
-    def __init__(
-        self, window_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=3
-    ):
+    def __init__(self, window_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=3):
         super(SSIMLoss, self).__init__()
         self.window_size = window_size
         self.size_average = size_average
@@ -303,9 +268,7 @@ class SSIMLoss(torch.nn.Module):
             self.window = window
             self.channel = channel
 
-        return 1 - self._ssim(
-            img1, img2, window, self.window_size, channel, self.size_average
-        )
+        return 1 - self._ssim(img1, img2, window, self.window_size, channel, self.size_average)
 
     @classmethod
     def ssim_map(cls, img1, img2, win_size=11, data_range=1, size_average=True):
@@ -327,25 +290,14 @@ class SSIMLoss(torch.nn.Module):
         mu2_sq = mu2.pow(2)
         mu1_mu2 = mu1 * mu2
 
-        sigma1_sq = (
-            F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel)
-            - mu1_sq
-        )
-        sigma2_sq = (
-            F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel)
-            - mu2_sq
-        )
-        sigma12 = (
-            F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
-            - mu1_mu2
-        )
+        sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+        sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+        sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
 
         C1 = 0.01**2
         C2 = 0.03**2
 
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
-            (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
-        )
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
         if size_average:
             return ssim_map.nanmean()
@@ -369,9 +321,7 @@ class HybridL1SSIM(torch.nn.Module):
         if grad_norm:
             weighted_r = (1.0, 1.0)
         self.loss = LossWarpper(weighted_r, l1=self._l1, ssim=self._ssim)
-        logger.info(
-            f"weighted_r: {weighted_r} for L1 SSIM loss, grad_norm: {grad_norm}"
-        )
+        logger.info(f"weighted_r: {weighted_r} for L1 SSIM loss, grad_norm: {grad_norm}")
 
     def forward(self, pred, gt):
         if self.grad_norm:
@@ -423,9 +373,7 @@ class SAMLoss(torch.nn.Module):
 
         t = sum1 / t
         angle = torch.acos(t)
-        sumangle = torch.where(
-            torch.isnan(angle), torch.full_like(angle, 0), angle
-        ).sum()
+        sumangle = torch.where(torch.isnan(angle), torch.full_like(angle, 0), angle).sum()
 
         if num == 0:
             averangle = sumangle
@@ -556,16 +504,10 @@ class MaxGradientLoss(torch.nn.Module):
         max_grad_y = torch.maximum(ir_grad_y, vis_grad_y)
 
         if self.mean_batch:
-            max_gradient_loss = (
-                F.l1_loss(fuse_grad_x, max_grad_x) + F.l1_loss(fuse_grad_y, max_grad_y)
-            ) / 2
+            max_gradient_loss = (F.l1_loss(fuse_grad_x, max_grad_x) + F.l1_loss(fuse_grad_y, max_grad_y)) / 2
         else:
-            x_loss_b = F.l1_loss(fuse_grad_x, max_grad_x, reduction="none").mean(
-                dim=(1, 2, 3)
-            )
-            y_loss_b = F.l1_loss(fuse_grad_y, max_grad_y, reduction="none").mean(
-                dim=(1, 2, 3)
-            )
+            x_loss_b = F.l1_loss(fuse_grad_x, max_grad_x, reduction="none").mean(dim=(1, 2, 3))
+            y_loss_b = F.l1_loss(fuse_grad_y, max_grad_y, reduction="none").mean(dim=(1, 2, 3))
 
             max_gradient_loss = (x_loss_b + y_loss_b) / 2
 
@@ -635,9 +577,7 @@ class RMILoss(nn.Module):
         p_cov = p @ self.transpose(p)
         y_p_cov = y @ self.transpose(p)
 
-        m = y_cov - y_p_cov @ self.transpose(
-            self.inverse(p_cov + eps)
-        ) @ self.transpose(y_p_cov)
+        m = y_cov - y_p_cov @ self.transpose(self.inverse(p_cov + eps)) @ self.transpose(y_p_cov)
 
         if self.use_log_trace:
             rmi = 0.5 * self.log_trace(m + eps)
@@ -665,13 +605,9 @@ class RMILoss(nn.Module):
 
         padding = self.stride // 2
         if self.downsampling_method == "max":
-            return F.max_pool2d(
-                x, kernel_size=self.stride, stride=self.stride, padding=padding
-            )
+            return F.max_pool2d(x, kernel_size=self.stride, stride=self.stride, padding=padding)
         if self.downsampling_method == "avg":
-            return F.avg_pool2d(
-                x, kernel_size=self.stride, stride=self.stride, padding=padding
-            )
+            return F.avg_pool2d(x, kernel_size=self.stride, stride=self.stride, padding=padding)
         raise ValueError(self.downsampling_method)
 
     @staticmethod
@@ -719,9 +655,7 @@ class HybridSSIMRMIFuse(nn.Module):
 class HybridPIALoss(nn.Module):
     def __init__(self, weight_ratio=(3, 7, 20, 10)) -> None:
         super().__init__()
-        assert len(weight_ratio) == 4, (
-            "@weight_ratio must be a tuple or list of length 4"
-        )
+        assert len(weight_ratio) == 4, "@weight_ratio must be a tuple or list of length 4"
         self.weight_ratio = weight_ratio
         self._mcg_loss = MaxGradientLoss()
         self.perceptual_loss = PerceptualLoss(norm=True)
@@ -737,9 +671,7 @@ class HybridPIALoss(nn.Module):
         # l1_grad = (F.l1_loss(gradient(fuse), gradient(vis)) + F.l1_loss(gradient(fuse), gradient(ir))) * \
         #           self.weight_ratio[2]
         l1_grad = self._mcg_loss(fuse, ir, vis) * self.weight_ratio[2]
-        percep_loss = (
-            self.perceptual_loss(fuse, vis) + self.perceptual_loss(fuse, ir)
-        ) * self.weight_ratio[3]
+        percep_loss = (self.perceptual_loss(fuse, vis) + self.perceptual_loss(fuse, ir)) * self.weight_ratio[3]
 
         loss_d = dict(
             intensity_loss=l1_int,
@@ -755,9 +687,7 @@ class HybridPIALoss(nn.Module):
 
 
 class U2FusionLoss(nn.Module):
-    def __init__(
-        self, loss_weights: tuple[float, float, float] = (5.0, 2.0, 10.0)
-    ) -> None:
+    def __init__(self, loss_weights: tuple[float, float, float] = (5.0, 2.0, 10.0)) -> None:
         # loss_weights:
         super().__init__()
         # modified from https://github.com/ytZhang99/U2Fusion-pytorch/blob/master/train.py
@@ -786,8 +716,7 @@ class U2FusionLoss(nn.Module):
 
         # here we do not follow U2Fusion paper and change it into other losses
         l1_int = (
-            vi_w * self.mse_loss(fuse, vi).mean((1, 2, 3))
-            + ir_w * self.mse_loss(fuse, ir).mean((1, 2, 3))
+            vi_w * self.mse_loss(fuse, vi).mean((1, 2, 3)) + ir_w * self.mse_loss(fuse, ir).mean((1, 2, 3))
         ).mean() * self.loss_weights[0]
 
         l1_aux = F.mse_loss(fuse, torch.max(ir, vi)) * self.loss_weights[1]
@@ -814,9 +743,7 @@ class U2FusionLoss(nn.Module):
         #     ir_w * self.ssim_loss(fuse, gt[:, 1:])
         #     + vi_w * self.ssim_loss(fuse, gt[:, 0:1])
         # ).mean() * self.loss_weights[2]
-        loss_ssim = (
-            self.ssim_loss(fuse, ir) + self.ssim_loss(fuse, vi)
-        ) * self.loss_weights[2]
+        loss_ssim = (self.ssim_loss(fuse, ir) + self.ssim_loss(fuse, vi)) * self.loss_weights[2]
 
         loss_d = dict(intensity_loss=l1_int, aux_loss=l1_aux, ssim_loss=loss_ssim)
         # print(ir_w, vi_w)
@@ -861,14 +788,8 @@ class U2FusionLoss(nn.Module):
     @staticmethod
     def features_grad(features):
         kernel = [[1 / 8, 1 / 8, 1 / 8], [1 / 8, -1, 1 / 8], [1 / 8, 1 / 8, 1 / 8]]
-        kernel = (
-            torch.FloatTensor(kernel)
-            .expand(features.shape[1], 1, 3, 3)
-            .to(features.device)
-        )
-        feat_grads = F.conv2d(
-            features, kernel, stride=1, padding=1, groups=features.shape[1]
-        )
+        kernel = torch.FloatTensor(kernel).expand(features.shape[1], 1, 3, 3).to(features.device)
+        feat_grads = F.conv2d(features, kernel, stride=1, padding=1, groups=features.shape[1])
         # _, c, _, _ = features.shape
         # c = int(c)
         # for i in range(c):
@@ -932,9 +853,7 @@ class L_SSIM(nn.Module):
     def forward(self, image_A, image_B, image_fused):
         weight_A = 0.5
         weight_B = 0.5
-        Loss_SSIM = weight_A * ssim(image_A, image_fused) + weight_B * ssim(
-            image_B, image_fused
-        )
+        Loss_SSIM = weight_A * ssim(image_A, image_fused) + weight_B * ssim(image_B, image_fused)
         return Loss_SSIM
 
 
@@ -1008,9 +927,7 @@ class CorrelationLoss(nn.Module):
     def corr2(self, img1, img2):
         img1 = img1 - img1.mean()
         img2 = img2 - img2.mean()
-        r = torch.sum(img1 * img2) / torch.sqrt(
-            torch.sum(img1 * img1) * torch.sum(img2 * img2)
-        )
+        r = torch.sum(img1 * img2) / torch.sqrt(torch.sum(img1 * img1) * torch.sum(img2 * img2))
         return r
 
     def forward(self, image_ir, img_vis, img_fusion):
@@ -1054,9 +971,7 @@ def YCbCr2RGB(Y, Cb, Cr):
     ycrcb = torch.cat([Y, Cr, Cb], dim=1)
     B, C, W, H = ycrcb.shape
     im_flat = ycrcb.transpose(1, 3).transpose(1, 2).reshape(-1, 3)
-    mat = torch.tensor(
-        [[1.0, 1.0, 1.0], [1.403, -0.714, 0.0], [0.0, -0.344, 1.773]]
-    ).to(Y.device)
+    mat = torch.tensor([[1.0, 1.0, 1.0], [1.403, -0.714, 0.0], [0.0, -0.344, 1.773]]).to(Y.device)
     bias = torch.tensor([0.0 / 255, -0.5, -0.5]).to(Y.device)
     temp = (im_flat + bias).mm(mat)
     out = temp.reshape(B, W, H, C).transpose(1, 3).transpose(2, 3)
@@ -1169,22 +1084,16 @@ class DRMFFusionLoss(nn.Module):
         if mask_loss:
             logger.info(
                 f"{__class__.__name__}: mask loss performs [green]{
-                    'only on background'
-                    if color_loss_bg_masked
-                    else 'on the whole image'
+                    'only on background' if color_loss_bg_masked else 'on the whole image'
                 }[/green]"
             )
 
         self.loss_func = (
-            nn.L1Loss(reduction="none")
-            if pseudo_l1_const == 0
-            else partial(self.pseudo_l2_loss, c=pseudo_l1_const)
+            nn.L1Loss(reduction="none") if pseudo_l1_const == 0 else partial(self.pseudo_l2_loss, c=pseudo_l1_const)
         )
         main_loss = "l1 loss" if pseudo_l1_const == 0 else "pseudo l2 loss"
 
-        assert self.boundary or self.use_prior, (
-            "one or both of boundary loss and prior ([max or mean]) should be used"
-        )
+        assert self.boundary or self.use_prior, "one or both of boundary loss and prior ([max or mean]) should be used"
 
         if grad_loss:
             if grad_op.startswith("sobel"):
@@ -1194,22 +1103,18 @@ class DRMFFusionLoss(nn.Module):
             elif grad_op.startswith("k_sobel"):
                 order = int(grad_op.split("_")[-1])
                 assert order in [1, 2], "order should be 1 or 2"
-                self.grad_op = lambda img: spatial_gradient(
-                    img, mode="sobel", order=order, normalized=False
-                ).max(dim=2)[0]
+                self.grad_op = lambda img: spatial_gradient(img, mode="sobel", order=order, normalized=False).max(
+                    dim=2
+                )[0]
             elif grad_op.startswith("k_laplacian"):
                 k = int(grad_op.split("_")[-1])
                 # kernel size recommand to be 7 or 11
                 assert k <= 13, (
                     "kernel size should be less than 13, larger kernel size brings higher computational cost"
                 )
-                self.grad_op = lambda img: laplacian(
-                    img, kernel_size=k, normalized=False
-                )
+                self.grad_op = lambda img: laplacian(img, kernel_size=k, normalized=False)
             else:
-                raise ValueError(
-                    "grad_op should be sobel or starts with k_sobel or k_laplacian"
-                )
+                raise ValueError("grad_op should be sobel or starts with k_sobel or k_laplacian")
         if ssim_loss:
             assert self.grad, "ssim loss should be used with grad loss"
             self.ssim_func = get_ssim_loss(
@@ -1222,20 +1127,16 @@ class DRMFFusionLoss(nn.Module):
         if correlation_loss:
             self.cc_loss = CorrelationLoss()
         if lpips_loss:
-            self.lpips_loss = PerceptualLoss(
-                norm=True
-            )  # norm: image value range is changed to [-1, 1] from [0, 1]
+            self.lpips_loss = PerceptualLoss(norm=True)  # norm: image value range is changed to [-1, 1] from [0, 1]
 
         if latent_weighted:
-            assert self.boundary, (
-                "if using latent weighted, boundary loss should be used"
-            )
+            assert self.boundary, "if using latent weighted, boundary loss should be used"
             logger.info("using vgg16 to extract latent features")
             self.latent_model = vgg16(pretrained=True).eval()
             self.latent_temp = 0.1
-            feature_grad_kernel = torch.tensor(
-                [[1 / 8, 1 / 8, 1 / 8], [1 / 8, -1, 1 / 8], [1 / 8, 1 / 8, 1 / 8]]
-            ).type(torch.float32)
+            feature_grad_kernel = torch.tensor([[1 / 8, 1 / 8, 1 / 8], [1 / 8, -1, 1 / 8], [1 / 8, 1 / 8, 1 / 8]]).type(
+                torch.float32
+            )
             self.register_buffer("kernel", feature_grad_kernel)
 
         # rescale the loss using weight_dict
@@ -1297,9 +1198,7 @@ class DRMFFusionLoss(nn.Module):
     def dynamic_weight(self, ir, vi):
         def features_grad(features):
             kernel = self.kernel.expand(features.shape[1], 1, 3, 3)
-            feat_grads = F.conv2d(
-                features, kernel, stride=1, padding=1, groups=features.shape[1]
-            )
+            feat_grads = F.conv2d(features, kernel, stride=1, padding=1, groups=features.shape[1])
             return feat_grads
 
         ir_f = self.latent_model(ir)
@@ -1369,9 +1268,7 @@ class DRMFFusionLoss(nn.Module):
         elif boundary_gt.size(1) == 6:
             ir, vi = boundary_gt[:, 3:], boundary_gt[:, :3]
         else:
-            raise ValueError(
-                f"The channel of the boundary_gt should be 2, 4, or 6, but got {boundary_gt.size(1)}"
-            )
+            raise ValueError(f"The channel of the boundary_gt should be 2, 4, or 6, but got {boundary_gt.size(1)}")
 
         return vi, ir
 
@@ -1412,7 +1309,7 @@ class DRMFFusionLoss(nn.Module):
 
         # split boundary gt
         no_batch_ndim = img_fusion.ndim - 1
-        broadcast_fn = lambda x: x.reshape(-1, *[1] * no_batch_ndim)  # noqa: py3.11 supported
+        broadcast_fn = lambda x: x.reshape(-1, *[1] * no_batch_ndim)  # noqa: E731
 
         # img_A: ir/under/MRI, img_B: vi/over/spect
         if isinstance(boundary_gt, (tuple, list)):
@@ -1446,9 +1343,7 @@ class DRMFFusionLoss(nn.Module):
 
         # YCbCr decomposition
         # use for intensity, color, and gradient loss
-        Y_fusion, Cb_fusion, Cr_fusion = kornia.color.rgb_to_ycbcr(img_fusion).chunk(
-            3, dim=1
-        )
+        Y_fusion, Cb_fusion, Cr_fusion = kornia.color.rgb_to_ycbcr(img_fusion).chunk(3, dim=1)
         Y_A, Cb_A, Cr_A = kornia.color.rgb_to_ycbcr(img_A).chunk(3, dim=1)  # ir
         Y_B, Cb_B, Cr_B = kornia.color.rgb_to_ycbcr(img_B).chunk(3, dim=1)  # vi
 
@@ -1476,22 +1371,14 @@ class DRMFFusionLoss(nn.Module):
                 # 3. || (1 - mask) * fusion - (1 - mask) * vi ||    vi loss (background)
 
                 loss_intensity = (
-                    (
-                        wd["inten_f_joint"] * self.loss_func(Y_fusion, Y_joint)
-                        if self.use_prior
-                        else 0.0
-                    )
+                    (wd["inten_f_joint"] * self.loss_func(Y_fusion, Y_joint) if self.use_prior else 0.0)
                     + (
-                        wd["inten_f_ir"]
-                        * ir_w
-                        * self.loss_func(mask2 * Y_fusion, mask2 * Y_A)
+                        wd["inten_f_ir"] * ir_w * self.loss_func(mask2 * Y_fusion, mask2 * Y_A)
                         if self.boundary
                         else 0.0
                     )
                     + (
-                        wd["inten_f_vi"]
-                        * vi_w
-                        * self.loss_func(Y_fusion * (1 - mask2), Y_B * (1 - mask2))
+                        wd["inten_f_vi"] * vi_w * self.loss_func(Y_fusion * (1 - mask2), Y_B * (1 - mask2))
                         if self.boundary
                         else 0.0
                     )
@@ -1508,44 +1395,28 @@ class DRMFFusionLoss(nn.Module):
                     if B_is_color:
                         loss_color += wd["color_f_cb"] * vi_w * self.loss_func(
                             Cb_fusion * bg_mask, Cb_B * bg_mask
-                        ) + wd["color_f_cr"] * ir_w * self.loss_func(
-                            Cr_fusion * bg_mask, Cr_B * bg_mask
-                        )
+                        ) + wd["color_f_cr"] * ir_w * self.loss_func(Cr_fusion * bg_mask, Cr_B * bg_mask)
                     if A_is_color:
                         loss_color += wd["color_f_cb"] * ir_w * self.loss_func(
                             Cb_fusion * bg_mask, Cb_A * bg_mask
-                        ) + wd["color_f_cr"] * vi_w * self.loss_func(
-                            Cr_fusion * bg_mask, Cr_A * bg_mask
-                        )
+                        ) + wd["color_f_cr"] * vi_w * self.loss_func(Cr_fusion * bg_mask, Cr_A * bg_mask)
             else:
                 loss_intensity = (
-                    (
-                        wd["inten_f_joint"] * self.loss_func(Y_fusion, Y_joint)
-                        if self.use_prior
-                        else 0.0
-                    )
-                    + (
-                        wd["inten_f_ir"] * ir_w * self.loss_func(Y_fusion, Y_A)
-                        if self.boundary
-                        else 0.0
-                    )
-                    + (
-                        wd["inten_f_vi"] * vi_w * self.loss_func(Y_fusion, Y_B)
-                        if self.boundary
-                        else 0.0
-                    )
+                    (wd["inten_f_joint"] * self.loss_func(Y_fusion, Y_joint) if self.use_prior else 0.0)
+                    + (wd["inten_f_ir"] * ir_w * self.loss_func(Y_fusion, Y_A) if self.boundary else 0.0)
+                    + (wd["inten_f_vi"] * vi_w * self.loss_func(Y_fusion, Y_B) if self.boundary else 0.0)
                 )
 
                 if self.color_loss:
                     loss_color = 0.0
                     if B_is_color:
-                        loss_color += wd["color_f_cb"] * self.loss_func(
-                            Cb_fusion, Cb_B
-                        ) + wd["color_f_cr"] * self.loss_func(Cr_fusion, Cr_B)
+                        loss_color += wd["color_f_cb"] * self.loss_func(Cb_fusion, Cb_B) + wd[
+                            "color_f_cr"
+                        ] * self.loss_func(Cr_fusion, Cr_B)
                     if A_is_color:
-                        loss_color += wd["color_f_cb"] * self.loss_func(
-                            Cb_fusion, Cb_A
-                        ) + wd["color_f_cr"] * self.loss_func(Cr_fusion, Cr_A)
+                        loss_color += wd["color_f_cb"] * self.loss_func(Cb_fusion, Cb_A) + wd[
+                            "color_f_cr"
+                        ] * self.loss_func(Cr_fusion, Cr_A)
 
             loss_intensity = loss_intensity.nanmean()
             loss_fusion += loss_intensity
@@ -1753,9 +1624,7 @@ class EMMAFusionLoss(nn.Module):
             _Ft_A_cbcr = None
         Ft_refused = self.fusion_model.only_fusion_step(_Ft_A_y, Ft_to_B)
         if self.model_is_y_pred:
-            Ft_refused = kornia.color.ycbcr_to_rgb(
-                torch.cat([Ft_refused, _Ft_A_cbcr], dim=1)
-            )
+            Ft_refused = kornia.color.ycbcr_to_rgb(torch.cat([Ft_refused, _Ft_A_cbcr], dim=1))
 
         # three losses
         # 1. source A loss
@@ -1765,10 +1634,7 @@ class EMMAFusionLoss(nn.Module):
         loss_B = self.translation_basic_loss(F_to_B, s_B)
 
         # 3. refusion loss
-        loss_refusion = (
-            self.translation_basic_loss(Ft_refused, trans_fused_img)
-            * self.refusion_weight
-        )
+        loss_refusion = self.translation_basic_loss(Ft_refused, trans_fused_img) * self.refusion_weight
 
         return loss_A + loss_B + loss_refusion
 
@@ -1822,20 +1688,11 @@ class EMMAFusionLoss(nn.Module):
     @staticmethod
     def shift_random(x, n_trans=5):
         H, W = x.shape[-2], x.shape[-1]
-        assert n_trans <= H - 1 and n_trans <= W - 1, (
-            "n_shifts should less than {}".format(H - 1)
-        )
-        shifts_row = random.sample(
-            list(np.concatenate([-1 * np.arange(1, H), np.arange(1, H)])), n_trans
-        )
-        shifts_col = random.sample(
-            list(np.concatenate([-1 * np.arange(1, W), np.arange(1, W)])), n_trans
-        )
+        assert n_trans <= H - 1 and n_trans <= W - 1, "n_shifts should less than {}".format(H - 1)
+        shifts_row = random.sample(list(np.concatenate([-1 * np.arange(1, H), np.arange(1, H)])), n_trans)
+        shifts_col = random.sample(list(np.concatenate([-1 * np.arange(1, W), np.arange(1, W)])), n_trans)
         x = torch.cat(
-            [
-                torch.roll(x, shifts=[sx, sy], dims=[-2, -1]).type_as(x)
-                for sx, sy in zip(shifts_row, shifts_col)
-            ],
+            [torch.roll(x, shifts=[sx, sy], dims=[-2, -1]).type_as(x) for sx, sy in zip(shifts_row, shifts_col)],
             dim=0,
         )
 
@@ -1887,12 +1744,7 @@ class LpLssimLossweight(nn.Module):
         """
         Get the gaussian kernel which will be used in SSIM computation
         """
-        gauss = torch.Tensor(
-            [
-                exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2))
-                for x in range(window_size)
-            ]
-        )
+        gauss = torch.Tensor([exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2)) for x in range(window_size)])
         return gauss / gauss.sum()
 
     def create_window(self, window_size, channel):
@@ -1900,9 +1752,7 @@ class LpLssimLossweight(nn.Module):
         Create the gaussian window
         """
         _1D_window = self.gaussian(window_size, 1.5).unsqueeze(1)  # [window_size, 1]
-        _2D_window = (
-            _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-        )  # [1,1,window_size, window_size]
+        _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)  # [1,1,window_size, window_size]
         window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
         return window
 
@@ -1918,25 +1768,14 @@ class LpLssimLossweight(nn.Module):
         mu2_sq = mu2.pow(2)
         mu1_mu2 = mu1 * mu2
 
-        sigma1_sq = (
-            F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel)
-            - mu1_sq
-        )
-        sigma2_sq = (
-            F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel)
-            - mu2_sq
-        )
-        sigma12 = (
-            F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
-            - mu1_mu2
-        )
+        sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+        sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+        sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
 
         C1 = 0.01**2
         C2 = 0.03**2
 
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
-            (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
-        )
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
         if size_average:
             return ssim_map.mean()
@@ -2023,9 +1862,7 @@ class FILMFusionLoss(nn.Module):
         self.weight_ssim = weight_ssim
 
         self.lp_ssim = LpLssimLossweight(window_size=ssim_window_size)
-        self.fusion_loss = Fusionloss(
-            coeff_int=weight_intensity, coeff_grad=weight_grad, in_max=prior == "max"
-        )
+        self.fusion_loss = Fusionloss(coeff_int=weight_intensity, coeff_grad=weight_grad, in_max=prior == "max")
 
     def color_convert(self, img):
         if img.shape[1] == 1:
@@ -2049,9 +1886,7 @@ class FILMFusionLoss(nn.Module):
             else:
                 img_vis, img_ir = boundary_gt[:, :3], boundary_gt[:, 3:]
         else:
-            raise ValueError(
-                f"boundary_gt should be a tensor or a tuple/list, but got {type(boundary_gt)}"
-            )
+            raise ValueError(f"boundary_gt should be a tensor or a tuple/list, but got {type(boundary_gt)}")
 
         # convert to grayscale to compute loss
         img_vis = self.color_convert(img_vis)
@@ -2090,15 +1925,11 @@ class FILMFusionLoss(nn.Module):
 
 
 class MLMLoss(torch.nn.Module):
-    def __init__(
-        self, label_smoothing: float = 0.1, loss_weight_unmasked_token: float = 1.0
-    ):
+    def __init__(self, label_smoothing: float = 0.1, loss_weight_unmasked_token: float = 1.0):
         super().__init__()
         self.label_smoothing = label_smoothing
         self.loss_weight_unmasked_token = loss_weight_unmasked_token
-        self.criterion = torch.nn.CrossEntropyLoss(
-            label_smoothing=self.label_smoothing, reduction="none"
-        )
+        self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=self.label_smoothing, reduction="none")
 
     def forward(
         self, inputs: torch.Tensor, targets: torch.Tensor, weights=None
@@ -2107,13 +1938,11 @@ class MLMLoss(torch.nn.Module):
         loss = self.criterion(inputs, targets)
         weights = weights.to(loss)
         loss_weights = (
-            (1.0 - weights) * self.loss_weight_unmasked_token + weights
-        )  # set 0 to self.loss_weight_unasked_token
+            1.0 - weights
+        ) * self.loss_weight_unmasked_token + weights  # set 0 to self.loss_weight_unasked_token
         loss = (loss * loss_weights).sum() / (loss_weights.sum() + 1e-8)
         # we only compute correct tokens on masked tokens
-        correct_tokens = ((torch.argmax(inputs, dim=1) == targets) * weights).sum(
-            dim=1
-        ) / (weights.sum(1) + 1e-8)
+        correct_tokens = ((torch.argmax(inputs, dim=1) == targets) * weights).sum(dim=1) / (weights.sum(1) + 1e-8)
         return loss, {"loss": loss, "correct_tokens": correct_tokens.mean()}
 
 
@@ -2123,20 +1952,14 @@ class ARLoss(torch.nn.Module):
         self.target_vocab_size = codebook_size
         self.criterion = torch.nn.CrossEntropyLoss(reduction="mean")
 
-    def forward(
-        self, logits: torch.Tensor, labels: torch.Tensor
-    ) -> Tuple[torch.Tensor, Mapping[Text, torch.Tensor]]:
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, Mapping[Text, torch.Tensor]]:
         shift_logits = logits[..., :-1, :].permute(0, 2, 1).contiguous()  # NLC->NCL
         shift_labels = labels.contiguous()
-        shift_logits = shift_logits.view(
-            shift_logits.shape[0], self.target_vocab_size, -1
-        )
+        shift_logits = shift_logits.view(shift_logits.shape[0], self.target_vocab_size, -1)
         shift_labels = shift_labels.view(shift_labels.shape[0], -1)
         shift_labels = shift_labels.to(shift_logits.device)
         loss = self.criterion(shift_logits, shift_labels)
-        correct_tokens = (torch.argmax(shift_logits, dim=1) == shift_labels).sum(
-            dim=1
-        ) / shift_labels.size(1)
+        correct_tokens = (torch.argmax(shift_logits, dim=1) == shift_labels).sum(dim=1) / shift_labels.size(1)
         return loss, {"loss": loss, "correct_tokens": correct_tokens.mean()}
 
 
@@ -2194,9 +2017,7 @@ def get_ssim_loss(implem_by: str = "kornia", **ssim_kwargs):
         raise ValueError(f"Invalid implementation choice: {implem_by}")
 
 
-def get_emma_fusion_loss(
-    fusion_model: nn.Module, device: str | None = None, model_is_y_pred: bool = True
-):
+def get_emma_fusion_loss(fusion_model: nn.Module, device: str | None = None, model_is_y_pred: bool = True):
     from utils.utils_modules import TranslationUnet
 
     # color bg may cause object color shift, so we constraint on the whole image
@@ -2246,9 +2067,7 @@ def get_loss(loss_type, channel=31, **kwargs):
         # perceptual loss should be less weighted
         criterion = HybridPIALoss(weight_ratio=(3, 7, 20, 10))
     elif loss_type == "charbssim":
-        criterion = HybridCharbonnierSSIM(
-            channel=kwargs.pop("channel", 1), weighted_r=(1.0, 1.0)
-        )
+        criterion = HybridCharbonnierSSIM(channel=kwargs.pop("channel", 1), weighted_r=(1.0, 1.0))
     elif loss_type == "ssimsf":
         # YDTR loss
         # not hack weighted ratio

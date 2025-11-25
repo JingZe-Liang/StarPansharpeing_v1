@@ -34,6 +34,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
 from timm.layers import LayerScale2d, create_conv2d, create_norm_layer
+from timm.layers.weight_init import init_weight_jax
+from timm.models._manipulate import named_apply
 from typing_extensions import deprecated
 
 from .blocks import (
@@ -233,15 +235,10 @@ class Encoder(nn.Module):
 
         # Patcher.
         self.patcher = Patcher(patch_size, patch_method)
-        logger.info(
-            f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, "
-            f"patch_method: {patch_method}"
-        )
+        logger.info(f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, patch_method: {patch_method}")
 
         # calculate the number of downsample operations
-        self.num_downsamples = int(math.log2(spatial_compression)) - int(
-            math.log2(patch_size)
-        )
+        self.num_downsamples = int(math.log2(spatial_compression)) - int(math.log2(patch_size))
         assert self.num_downsamples <= self.num_resolutions, (
             f"we can only downsample {self.num_resolutions} times at most"
         )
@@ -309,11 +306,7 @@ class Encoder(nn.Module):
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     logger.info(f"[Encoder]: use attn at {curr_res}")
-                    attn.append(
-                        make_attn(
-                            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-                        )
-                    )
+                    attn.append(make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -334,9 +327,7 @@ class Encoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = block_fn(block_in, block_out, dropout, curr_res)
-        self.mid.attn_1 = make_attn(
-            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-        )
+        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
         self.mid.block_2 = block_fn(block_in, block_out, dropout, curr_res)
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
@@ -348,6 +339,9 @@ class Encoder(nn.Module):
             padding=1,
             padding_mode=padding_mode,
         )
+
+        # Init weights
+        self.init_weights()
 
     @no_type_check
     def forward(
@@ -370,9 +364,7 @@ class Encoder(nn.Module):
                     h = self.down[i_level].attn[i_block](h)
             if i_level < self.num_downsamples:
                 h = self.down[i_level].downsample(h)
-            if ret_interm_feats is True or (
-                is_list_tuple(ret_interm_feats) and i_level in ret_interm_feats
-            ):
+            if ret_interm_feats is True or (is_list_tuple(ret_interm_feats) and i_level in ret_interm_feats):
                 feats.append(h)
 
         # middle
@@ -391,6 +383,10 @@ class Encoder(nn.Module):
         h = self.conv_out(h)
         return h if not ret_interm_feats else (h, feats)
 
+    def init_weights(self):
+        named_apply(partial(init_weight_jax, classifier_name=""), self)
+        logger.info("[Encoder]: init weights.")
+
 
 class Decoder(nn.Module):
     def __init__(
@@ -406,9 +402,7 @@ class Decoder(nn.Module):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
-        upsample_type: Literal[
-            "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
-        ] = "RepeatConv",
+        upsample_type: Literal["RepeatConv", "ConvPixelShuffle", "InterpolateConv"] = "RepeatConv",
         upsample_shortcut: Literal["duplicating"] | None = None,
         upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
@@ -451,12 +445,8 @@ class Decoder(nn.Module):
         self.unpatcher = UnPatcher(patch_size, patch_method)
 
         # calculate the number of upsample operations
-        self.num_upsamples = int(math.log2(spatial_compression)) - int(
-            math.log2(patch_size)
-        )
-        assert self.num_upsamples <= self.num_resolutions, (
-            f"we can only upsample {self.num_resolutions} times at most"
-        )
+        self.num_upsamples = int(math.log2(spatial_compression)) - int(math.log2(patch_size))
+        assert self.num_upsamples <= self.num_resolutions, f"we can only upsample {self.num_resolutions} times at most"
 
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
@@ -539,9 +529,7 @@ class Decoder(nn.Module):
         if isinstance(out_channels, list):
             logger.info("[Decoder]: use diffbands input")
             out_ch = [c * patch_size * patch_size for c in out_channels]
-            conv_out = DiffBandsInputConvOut(
-                band_lst=out_ch, hidden_dim=block_in, basic_module=conv_out_module
-            )
+            conv_out = DiffBandsInputConvOut(band_lst=out_ch, hidden_dim=block_in, basic_module=conv_out_module)
         else:
             out_ch = out_channels * patch_size * patch_size
             # Use a nested conv
@@ -554,15 +542,16 @@ class Decoder(nn.Module):
             )
 
         # Ignore it: fsdp warpper, but not used
-        _wrap_fsdp_last_layer = ignore_kwargs.get(
-            "wrap_fsdp_last_layer", False
-        )  # TODO: remove this
+        _wrap_fsdp_last_layer = ignore_kwargs.get("wrap_fsdp_last_layer", False)  # TODO: remove this
         self._wrap_fsdp_last_layer = _wrap_fsdp_last_layer
         if _wrap_fsdp_last_layer:
             self.conv_out = FSDPNoWarpModule(conv_out)
             logger.info("[Decoder] use FSDPNoWarpModule")
         else:
             self.conv_out = conv_out
+
+        # Init weights
+        self.init_weights()
 
     @no_type_check
     def forward(
@@ -615,6 +604,10 @@ class Decoder(nn.Module):
         else:
             return self.conv_out.wrap_mod.weight
 
+    def init_weights(self):
+        named_apply(partial(init_weight_jax, classifier_name=""), self)
+        logger.info("[Decoder]: init weights.")
+
 
 # *==============================================================
 # * Generative Decoder
@@ -637,9 +630,7 @@ class GenerativeDecoder(Decoder):
         spatial_compression: int,
         act_checkpoint: bool = False,
         use_residual_factor: bool = False,
-        upsample_type: Literal[
-            "RepeatConv", "ConvPixelShuffle", "InterpolateConv"
-        ] = "RepeatConv",
+        upsample_type: Literal["RepeatConv", "ConvPixelShuffle", "InterpolateConv"] = "RepeatConv",
         upsample_shortcut: Literal["duplicating"] | None = None,
         upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
@@ -699,9 +690,7 @@ class GenerativeDecoder(Decoder):
 
         # First conv_in should be [z, noise]
         block_in = channels * channels_mult[self.num_resolutions - 1]
-        self.conv_in = create_conv2d(
-            z_channels * 2, block_in, 3, padding_mode=padding_mode
-        )
+        self.conv_in = create_conv2d(z_channels * 2, block_in, 3, padding_mode=padding_mode)
 
         # Code conditioning blocks
         self.cond_layers = nn.ModuleList()
@@ -709,20 +698,14 @@ class GenerativeDecoder(Decoder):
         for i_level in reversed(range(self.num_resolutions)):
             block_out = channels * channels_mult[i_level]
             # adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
-            adap_gn = create_norm_layer(
-                "adaptivegn", z_channels, in_chan=block_in, eps=1e-6
-            )
+            adap_gn = create_norm_layer("adaptivegn", z_channels, in_chan=block_in, eps=1e-6)
             self.cond_layers.append(adap_gn)
             if self.per_layer_noise:
                 layer_noise_proj = nn.ModuleDict(
                     {
                         # ls(cat(h, noise)) init relative small
-                        "ls": LayerScale2d(
-                            block_in * 2, init_values=1e-4, inplace=True
-                        ),
-                        "norm": create_norm_layer(
-                            "groupnorm", z_channels, num_groups=32
-                        ),
+                        "ls": LayerScale2d(block_in * 2, init_values=1e-4, inplace=True),
+                        "norm": create_norm_layer("groupnorm", z_channels, num_groups=32),
                         "proj": nn.Sequential(
                             nn.SiLU(),
                             create_conv2d(
@@ -805,9 +788,7 @@ class DecoderDiff(nn.Module):
         act_checkpoint: bool = False,
         z_cfg_drop: float = 0.1,
         learn_sigma: bool = False,
-        diff_cond_inject_strategy: Literal[
-            "cat", "inject_part", "inject_full"
-        ] = "inject_part",
+        diff_cond_inject_strategy: Literal["cat", "inject_part", "inject_full"] = "inject_part",
         decoder_patch_size: int = 4,
         patch_method: str = "rearrange",
         unpatch_type: Literal["upsample", "unpatch"] = "unpatch",
@@ -843,11 +824,7 @@ class DecoderDiff(nn.Module):
         z_res = resolution // spatial_compression
         self.z_shape = (1, z_channels, z_res, z_res)
         curr_res = resolution // decoder_patch_size
-        logger.info(
-            "Working with z of shape {} = {} dimensions.".format(
-                self.z_shape, np.prod(self.z_shape)
-            )
-        )
+        logger.info("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
 
         # UnPatcher.
         if self.unpatch_type == "unpatch":
@@ -883,9 +860,7 @@ class DecoderDiff(nn.Module):
 
         # z to block_in
         cat_x_z_in = conv_in_ch * 2
-        self.conv_in = torch.nn.Conv2d(
-            cat_x_z_in, block_in, kernel_size=3, stride=1, padding=1
-        )
+        self.conv_in = torch.nn.Conv2d(cat_x_z_in, block_in, kernel_size=3, stride=1, padding=1)
 
         # timestep embedder
         self.t_embedder = TimestepEmbedder(t_in, time_scale=time_scale)  # base channels
@@ -904,9 +879,7 @@ class DecoderDiff(nn.Module):
                 use_residual_factor=use_residual_factor,
             )
         else:
-            raise ValueError(
-                "diff_cond_inject_strategy must be either 'inject' or 'cat'"
-            )
+            raise ValueError("diff_cond_inject_strategy must be either 'inject' or 'cat'")
 
         # middle
         self.mid = nn.Module()
@@ -967,9 +940,7 @@ class DecoderDiff(nn.Module):
             up = nn.Module()
             up.block = block
             # up.attn = attn
-            if i_level >= (
-                self.num_resolutions - self.num_upsamples
-            ):  # [2,1] upsample, 1
+            if i_level >= (self.num_resolutions - self.num_upsamples):  # [2,1] upsample, 1
                 # last layers upsample
                 up.upsample = UpsampleRepeatConv(block_in)
                 logger.info(f"upsample {i_level}")
@@ -1008,9 +979,7 @@ class DecoderDiff(nn.Module):
                     f"null_cond_interp.shape[-2] ({null_cond_interp.shape[-2:]})!= z.shape[-2] ({z.shape[-2:]})"
                 )
 
-            null_cond_interp = F.interpolate(
-                null_cond_interp, size=z.shape[-2], mode="bicubic"
-            )
+            null_cond_interp = F.interpolate(null_cond_interp, size=z.shape[-2], mode="bicubic")
 
         if self.training:
             drop_ids = torch.rand(bs, 1, 1, 1).to(z) < self.z_cfg_drop
@@ -1099,9 +1068,7 @@ if __name__ == "__main__":
 
             # 打印显存占用信息
             print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
-            print(
-                f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
-            )
+            print(f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB")
             print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
             print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
 
@@ -1354,12 +1321,7 @@ if __name__ == "__main__":
         for _ in range(200):
             bs = 4
             # img = torch.randn(bs, 8, *[img_size] * 2).to(device, dtype).clip(-1,1)
-            x = (
-                torch.randint(0, 255, (bs, 8, 512, 512), dtype=torch.float32).to(
-                    device, dtype
-                )
-                / 255.0
-            )
+            x = torch.randint(0, 255, (bs, 8, 512, 512), dtype=torch.float32).to(device, dtype) / 255.0
             x = x * 2 - 1
             img = x.clip(-1, 1)
 

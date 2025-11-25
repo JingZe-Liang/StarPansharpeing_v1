@@ -43,9 +43,7 @@ def to_full_tensor(tensor: DTensor) -> torch.Tensor:
             return tensor._local_tensor.to(device)
 
 
-def safe_dtensor_operation(
-    tensor: DTensor | torch.Tensor, prefer_full: bool = True
-) -> torch.Tensor:
+def safe_dtensor_operation(tensor: DTensor | torch.Tensor, prefer_full: bool = True) -> torch.Tensor:
     if not isinstance(tensor, DTensor):
         return tensor
 

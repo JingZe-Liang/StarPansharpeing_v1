@@ -101,9 +101,7 @@ def whole2_train_and_test_data(img_size, img):
     sub_imgs = []
     for i in range(num_H):
         for j in range(num_W):
-            z = img[
-                i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :
-            ]
+            z = img[i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :]
             sub_imgs.append(z)
     sub_imgs = np.array(sub_imgs)
     return sub_imgs, num_H, num_W

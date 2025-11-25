@@ -194,29 +194,23 @@ class MobileNetV2(nn.Module):
         ]
 
         # only check the first element, assuming user knows t,c,n,s are required
-        if (
-            len(inverted_residual_setting) == 0
-            or len(inverted_residual_setting[0]) != 4
-        ):
+        if len(inverted_residual_setting) == 0 or len(inverted_residual_setting[0]) != 4:
             raise ValueError(
-                "inverted_residual_setting should be non-empty "
-                "or a 4-element list, got {}".format(inverted_residual_setting)
+                "inverted_residual_setting should be non-empty or a 4-element list, got {}".format(
+                    inverted_residual_setting
+                )
             )
 
         # building first layer
         input_channel = _make_divisible(input_channel * width_mult, round_nearest)
-        self.last_channel = _make_divisible(
-            last_channel * max(1.0, width_mult), round_nearest
-        )
+        self.last_channel = _make_divisible(last_channel * max(1.0, width_mult), round_nearest)
         features = [ConvBNReLU(4, input_channel, stride=2)]
         # building inverted residual blocks
         for t, c, n, s in inverted_residual_setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
-                features.append(
-                    block(input_channel, output_channel, stride, expand_ratio=t)
-                )
+                features.append(block(input_channel, output_channel, stride, expand_ratio=t))
                 input_channel = output_channel
 
         self.features = nn.Sequential(*features)
@@ -254,9 +248,7 @@ class MobileNetV2(nn.Module):
         return self._forward_impl(x)
 
     def _load_pretrained_model(self):
-        pretrain_dict = model_zoo.load_url(
-            "https://download.pytorch.org/models/mobilenet_v2-b0353104.pth"
-        )
+        pretrain_dict = model_zoo.load_url("https://download.pytorch.org/models/mobilenet_v2-b0353104.pth")
         model_dict = {}
         state_dict = self.state_dict()
         for k, v in pretrain_dict.items():
@@ -272,9 +264,7 @@ class MobileV2_MLSD_Large(nn.Module):
 
         self.backbone = MobileNetV2(pretrained=False)
         ## A, B
-        self.block15 = BlockTypeA(
-            in_c1=64, in_c2=96, out_c1=64, out_c2=64, upscale=False
-        )
+        self.block15 = BlockTypeA(in_c1=64, in_c2=96, out_c1=64, out_c2=64, upscale=False)
         self.block16 = BlockTypeB(128, 64)
 
         ## A, B

@@ -133,9 +133,7 @@ class FlowTransformerConditioned(TransformerTokenizer):
         if self.use_delta_t_embed:
             self.delta_t_embed = TimestepEmbedder(self.time_embed_dim)
 
-    def _setup_context_projection(
-        self, ctx_format: str, ctx_embed_dim: int, embed_dim: int
-    ):
+    def _setup_context_projection(self, ctx_format: str, ctx_embed_dim: int, embed_dim: int):
         # Context embedding projection
         # Assume the context is 1d
         self.ctx_format = ctx_format
@@ -227,9 +225,7 @@ class FlowTransformerConditioned(TransformerTokenizer):
         # Process through transformer layers with conditioning
         for layer in self.layers:
             if not self.act_checkpointing:
-                x_tokens = layer(
-                    x_tokens, ctx_emb=layer_cond, rope=rope, inp_shape=inp_shape
-                )
+                x_tokens = layer(x_tokens, ctx_emb=layer_cond, rope=rope, inp_shape=inp_shape)
             else:
                 x_tokens = checkpoint(
                     layer,

@@ -42,9 +42,7 @@ class HyperSegmentationLoss(torch.nn.Module):
         super().__init__()
         ce_weight = torch.as_tensor(ce_weight).cuda() if ce_weight is not None else None
 
-        self.cross_entropy = torch.nn.CrossEntropyLoss(
-            weight=ce_weight, ignore_index=ignore_index
-        )
+        self.cross_entropy = torch.nn.CrossEntropyLoss(weight=ce_weight, ignore_index=ignore_index)
         self.dice_loss = smp.losses.DiceLoss(
             mode=mode,
             classes=dice_cal_classes,
@@ -62,9 +60,7 @@ class HyperSegmentationLoss(torch.nn.Module):
 
     def _forward_loss(self, pred: Tensor, gt: Tensor):
         if pred.shape[-2:] != gt.shape[-2:]:
-            gt = torch.nn.functional.interpolate(
-                gt, size=pred.shape[-2:], mode="nearest", align_corners=False
-            )
+            gt = torch.nn.functional.interpolate(gt, size=pred.shape[-2:], mode="nearest", align_corners=False)
         dice_loss = self.dice_loss(pred, gt)
         ce_loss = self.cross_entropy(pred, gt)
         lovasz_loss = self.lovasz_loss(pred, gt)
@@ -78,15 +74,11 @@ class HyperSegmentationLoss(torch.nn.Module):
         )
         return loss, loss_dict
 
-    def forward(
-        self, pred: Float[Tensor, "b c h w"] | list[Tensor], gt: Int[Tensor, "b h w"]
-    ):
+    def forward(self, pred: Float[Tensor, "b c h w"] | list[Tensor], gt: Int[Tensor, "b h w"]):
         # Multiple outputs (deep supervision)
         if isinstance(pred, (tuple, list)):
             total_loss = 0.0
-            loss_dict = {
-                name: torch.tensor(0.0, device=pred.device) for name in self.loss_names
-            }
+            loss_dict = {name: torch.tensor(0.0, device=pred.device) for name in self.loss_names}
             for p in pred:
                 loss, l_dict = self._forward_loss(p, gt)
                 total_loss += loss

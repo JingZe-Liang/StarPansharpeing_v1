@@ -63,12 +63,8 @@ def genMTF_pan_torch(ratio: int, sensor: str, nbands: int):
     fcut = 1 / ratio
 
     # Calculate alpha and generate Gaussian filter using PyTorch tensors
-    alpha = torch.sqrt(
-        torch.tensor(((N - 1) * (fcut / 2)) ** 2 / (-2 * torch.log(torch.tensor(GNyq))))
-    )
-    H = gaussian2d_torch(
-        N, alpha.item()
-    )  # Assuming gaussian2d still returns a NumPy array
+    alpha = torch.sqrt(torch.tensor(((N - 1) * (fcut / 2)) ** 2 / (-2 * torch.log(torch.tensor(GNyq)))))
+    H = gaussian2d_torch(N, alpha.item())  # Assuming gaussian2d still returns a NumPy array
     Hd = H / H.max()
 
     # Generate Kaiser window and apply it to the filter

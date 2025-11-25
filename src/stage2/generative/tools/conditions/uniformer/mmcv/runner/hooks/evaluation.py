@@ -106,9 +106,7 @@ class EvalHook(Hook):
         **eval_kwargs,
     ):
         if not isinstance(dataloader, DataLoader):
-            raise TypeError(
-                f"dataloader must be a pytorch DataLoader, but got {type(dataloader)}"
-            )
+            raise TypeError(f"dataloader must be a pytorch DataLoader, but got {type(dataloader)}")
 
         if interval <= 0:
             raise ValueError(f"interval must be a positive number, but got {interval}")
@@ -201,9 +199,7 @@ class EvalHook(Hook):
                     rule = "less"
                 else:
                     raise ValueError(
-                        f"Cannot infer the rule for key "
-                        f"{key_indicator}, thus a specific rule "
-                        f"must be specified."
+                        f"Cannot infer the rule for key {key_indicator}, thus a specific rule must be specified."
                     )
         self.rule = rule
         self.key_indicator = key_indicator
@@ -223,12 +219,7 @@ class EvalHook(Hook):
         if self.out_dir != runner.work_dir:
             basename = osp.basename(runner.work_dir.rstrip(osp.sep))
             self.out_dir = self.file_client.join_path(self.out_dir, basename)
-            runner.logger.info(
-                (
-                    f"The best checkpoint will be saved to {self.out_dir} by "
-                    f"{self.file_client.name}"
-                )
-            )
+            runner.logger.info((f"The best checkpoint will be saved to {self.out_dir} by {self.file_client.name}"))
 
         if self.save_best is not None:
             if runner.meta is None:
@@ -337,31 +328,22 @@ class EvalHook(Hook):
             current = f"iter_{runner.iter + 1}"
             cur_type, cur_time = "iter", runner.iter + 1
 
-        best_score = runner.meta["hook_msgs"].get(
-            "best_score", self.init_value_map[self.rule]
-        )
+        best_score = runner.meta["hook_msgs"].get("best_score", self.init_value_map[self.rule])
         if self.compare_func(key_score, best_score):
             best_score = key_score
             runner.meta["hook_msgs"]["best_score"] = best_score
 
             if self.best_ckpt_path and self.file_client.isfile(self.best_ckpt_path):
                 self.file_client.remove(self.best_ckpt_path)
-                runner.logger.info(
-                    (f"The previous best checkpoint {self.best_ckpt_path} was removed")
-                )
+                runner.logger.info((f"The previous best checkpoint {self.best_ckpt_path} was removed"))
 
             best_ckpt_name = f"best_{self.key_indicator}_{current}.pth"
-            self.best_ckpt_path = self.file_client.join_path(
-                self.out_dir, best_ckpt_name
-            )
+            self.best_ckpt_path = self.file_client.join_path(self.out_dir, best_ckpt_name)
             runner.meta["hook_msgs"]["best_ckpt"] = self.best_ckpt_path
 
             runner.save_checkpoint(self.out_dir, best_ckpt_name, create_symlink=False)
             runner.logger.info(f"Now best checkpoint is saved as {best_ckpt_name}.")
-            runner.logger.info(
-                f"Best {self.key_indicator} is {best_score:0.4f} "
-                f"at {cur_time} {cur_type}."
-            )
+            runner.logger.info(f"Best {self.key_indicator} is {best_score:0.4f} at {cur_time} {cur_type}.")
 
     def evaluate(self, runner, results):
         """Evaluate the results.
@@ -370,9 +352,7 @@ class EvalHook(Hook):
             runner (:obj:`mmcv.Runner`): The underlined training runner.
             results (list): Output results.
         """
-        eval_res = self.dataloader.dataset.evaluate(
-            results, logger=runner.logger, **self.eval_kwargs
-        )
+        eval_res = self.dataloader.dataset.evaluate(results, logger=runner.logger, **self.eval_kwargs)
 
         for name, val in eval_res.items():
             runner.log_buffer.output[name] = val
@@ -510,9 +490,7 @@ class DistEvalHook(EvalHook):
         if tmpdir is None:
             tmpdir = osp.join(runner.work_dir, ".eval_hook")
 
-        results = self.test_fn(
-            runner.model, self.dataloader, tmpdir=tmpdir, gpu_collect=self.gpu_collect
-        )
+        results = self.test_fn(runner.model, self.dataloader, tmpdir=tmpdir, gpu_collect=self.gpu_collect)
         if runner.rank == 0:
             print("\n")
             runner.log_buffer.output["eval_iter_num"] = len(self.dataloader)

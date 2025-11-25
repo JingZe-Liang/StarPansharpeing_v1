@@ -62,9 +62,7 @@ class SPlus(Optimizer):
                     for p in group["params"]:
                         state = self.state[p]
                         if "param_buffer" in state:
-                            p.lerp_(
-                                state["param_buffer"], 1
-                            )  # p.copy_(state['param_buffer'])
+                            p.lerp_(state["param_buffer"], 1)  # p.copy_(state['param_buffer'])
                             del state["param_buffer"]
                     group["train_mode"] = True
 
@@ -88,24 +86,14 @@ class SPlus(Optimizer):
                     group["train_mode"] = True
                     if len(p.shape) == 2:
                         state["sides"] = [
-                            torch.zeros((d, d), device=p.device)
-                            if d < group["max_dim"]
-                            else None
-                            for d in p.shape
+                            torch.zeros((d, d), device=p.device) if d < group["max_dim"] else None for d in p.shape
                         ]
                         state["q_sides"] = [
-                            torch.eye(d, device=p.device)
-                            if d < group["max_dim"]
-                            else None
-                            for d in p.shape
+                            torch.eye(d, device=p.device) if d < group["max_dim"] else None for d in p.shape
                         ]
 
                 # Shape-dependent scaling
-                if (
-                    len(p.shape) != 2
-                    or p.shape[0] > group["max_dim"]
-                    or p.shape[1] > group["max_dim"]
-                ):
+                if len(p.shape) != 2 or p.shape[0] > group["max_dim"] or p.shape[1] > group["max_dim"]:
                     scaled_lr = group["lr"] * group["nonstandard_constant"]
                 else:
                     scaled_lr = group["lr"] * (2 / (p.shape[0] + p.shape[1]))
@@ -115,16 +103,8 @@ class SPlus(Optimizer):
                 m = state["momentum"]
                 m.lerp_(grad, 1 - group["b1"])
                 if len(p.shape) == 2:
-                    m = (
-                        state["q_sides"][0].T @ m
-                        if state["q_sides"][0] is not None
-                        else m
-                    )
-                    m = (
-                        m @ state["q_sides"][1]
-                        if state["q_sides"][1] is not None
-                        else m
-                    )
+                    m = state["q_sides"][0].T @ m if state["q_sides"][0] is not None else m
+                    m = m @ state["q_sides"][1] if state["q_sides"][1] is not None else m
                     state["sides"][0] = (
                         torch.lerp(state["sides"][0], grad @ grad.T, 1 - group["b2"])
                         if state["sides"][0] is not None
@@ -136,34 +116,21 @@ class SPlus(Optimizer):
                         else None
                     )
                     u = torch.sign(m)
-                    u = (
-                        state["q_sides"][0] @ u
-                        if state["q_sides"][0] is not None
-                        else u
-                    )
-                    u = (
-                        u @ state["q_sides"][1].T
-                        if state["q_sides"][1] is not None
-                        else u
-                    )
+                    u = state["q_sides"][0] @ u if state["q_sides"][0] is not None else u
+                    u = u @ state["q_sides"][1].T if state["q_sides"][1] is not None else u
 
                     # Every `inverse_every` steps, we update the inverse eigendecomposition.
-                    if (
-                        state["step"] == 1
-                        or state["step"] % group["inverse_every"] == 0
-                    ):
+                    if state["step"] == 1 or state["step"] % group["inverse_every"] == 0:
                         if state["sides"][0] is not None:
                             _, eigvecs = torch.linalg.eigh(
                                 state["sides"][0]
-                                + group["eps"]
-                                * torch.eye(state["sides"][0].shape[0], device=p.device)
+                                + group["eps"] * torch.eye(state["sides"][0].shape[0], device=p.device)
                             )
                             state["q_sides"][0] = eigvecs
                         if state["sides"][1] is not None:
                             _, eigvecs = torch.linalg.eigh(
                                 state["sides"][1]
-                                + group["eps"]
-                                * torch.eye(state["sides"][1].shape[0], device=p.device)
+                                + group["eps"] * torch.eye(state["sides"][1].shape[0], device=p.device)
                             )
                             state["q_sides"][1] = eigvecs
                 else:

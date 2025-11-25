@@ -89,12 +89,10 @@ class TokenizerInferenceWrapper(nn.Module):
         self.scale_factor: nn.Buffer
         self.shift_factor: nn.Buffer
         assert self.scale_factor.numel() in [1, self.tokenizer.latent_channels], (
-            "scale_factor must be a float or a list of float with length equal to "
-            "the number of latent channels or 1"
+            "scale_factor must be a float or a list of float with length equal to the number of latent channels or 1"
         )
         assert self.shift_factor.numel() in [1, self.tokenizer.latent_channels], (
-            "shift_factor must be a float or a list of float with length equal to "
-            "the number of latent channels or 1"
+            "shift_factor must be a float or a list of float with length equal to the number of latent channels or 1"
         )
 
     @property
@@ -130,9 +128,7 @@ class TokenizerInferenceWrapper(nn.Module):
         """Decode latent tokens to an image."""
         z = self._shift_scale_latent(z, reverse=True)
         input_shape = input_shape or self._last_x_shape
-        assert input_shape is not None, (
-            "input_shape must be provided for the first decode call."
-        )
+        assert input_shape is not None, "input_shape must be provided for the first decode call."
 
         recon = self.tokenizer.decode(z, inp_shape=input_shape, clamp=True)
         self._last_x_shape = None

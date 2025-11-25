@@ -37,11 +37,7 @@ def list_mean(x: list) -> Any:
 
 def weighted_list_sum(x: list, weights: list) -> Any:
     assert len(x) == len(weights)
-    return (
-        x[0] * weights[0]
-        if len(x) == 1
-        else x[0] * weights[0] + weighted_list_sum(x[1:], weights[1:])
-    )
+    return x[0] * weights[0] if len(x) == 1 else x[0] * weights[0] + weighted_list_sum(x[1:], weights[1:])
 
 
 def list_join(x: list, sep="\t", format_str="%s") -> str:
@@ -54,9 +50,7 @@ def val2list(x: Union[list, tuple, Any], repeat_time=1) -> list:
     return [x for _ in range(repeat_time)]
 
 
-def val2tuple(
-    x: Union[list, tuple, Any], min_len: int = 1, idx_repeat: int = -1
-) -> tuple:
+def val2tuple(x: Union[list, tuple, Any], min_len: int = 1, idx_repeat: int = -1) -> tuple:
     x = val2list(x)
 
     # repeat elements if necessary

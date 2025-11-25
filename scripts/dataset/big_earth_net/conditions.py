@@ -7,7 +7,9 @@ from src.data.tar_utils import extract_tar_files_safe, read_tar_filenames_safe
 
 def main():
     path = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/conditions/BigEarthNet_data_0001.tar"
-    path_img = "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0001.tar"
+    path_img = (
+        "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/BigEarthNet_S2/hyper_images/BigEarthNet_data_0001.tar"
+    )
 
     # no ext
     img_lst = read_tar_filenames_safe(path_img, close_tar=True)

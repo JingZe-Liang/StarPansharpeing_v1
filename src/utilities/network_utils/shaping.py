@@ -31,9 +31,7 @@ def get_einops_op(op: str | Callable) -> Callable:
     elif isinstance(op, str):
         ops = {"rearrange": rearrange, "reduce": reduce, "repeat": repeat}
         if op not in ops:
-            raise ValueError(
-                f"Unsupported operation: {op}. Supported: {list(ops.keys())}"
-            )
+            raise ValueError(f"Unsupported operation: {op}. Supported: {list(ops.keys())}")
         return ops[op]
     else:
         raise TypeError(f"Operation must be a string or callable, got {type(op)}")
@@ -99,13 +97,9 @@ def reshape_wrapper(
                                 op = input_op
 
                             op_func = get_einops_op(op)
-                            bound_args.arguments[inp_key] = op_func(
-                                inp_value, inp_reshp
-                            )
+                            bound_args.arguments[inp_key] = op_func(inp_value, inp_reshp)
                     else:
-                        raise KeyError(
-                            f"Input key '{inp_key}' for reshaping not found in function signature or call."
-                        )
+                        raise KeyError(f"Input key '{inp_key}' for reshaping not found in function signature or call.")
                 output = func(*bound_args.args, **bound_args.kwargs)
             else:
                 raise TypeError(
@@ -121,17 +115,12 @@ def reshape_wrapper(
                     if isinstance(output, tuple):
                         new_output = []
                         for i, out in enumerate(output):
-                            if (
-                                i < len(output_reshping)
-                                and (out_reshp := output_reshping[i]) is not None
-                            ):
+                            if i < len(output_reshping) and (out_reshp := output_reshping[i]) is not None:
                                 if isinstance(output_op, list):
                                     op = (
                                         output_op[i]
                                         if i < len(output_op)
-                                        else (
-                                            output_op[0] if output_op else "rearrange"
-                                        )
+                                        else (output_op[0] if output_op else "rearrange")
                                     )
                                 else:
                                     op = output_op if output_op else "rearrange"
@@ -149,9 +138,7 @@ def reshape_wrapper(
                         op_func = get_einops_op(op)
                         return op_func(output, output_reshping[0])
                     elif isinstance(output, dict):
-                        for i, (out_reshp, (out_k, out_v)) in enumerate(
-                            zip(output_reshping, output.items())
-                        ):
+                        for i, (out_reshp, (out_k, out_v)) in enumerate(zip(output_reshping, output.items())):
                             assert isinstance(out_v, (torch.Tensor, np.ndarray)), (
                                 f"Output {out_k} must be a torch.Tensor or a numpy.ndarray, got {type(out_v)}"
                             )
@@ -160,9 +147,7 @@ def reshape_wrapper(
                                     op = (
                                         output_op[i]
                                         if i < len(output_op)
-                                        else (
-                                            output_op[0] if output_op else "rearrange"
-                                        )
+                                        else (output_op[0] if output_op else "rearrange")
                                     )
                                 else:
                                     op = output_op if output_op else "rearrange"
@@ -172,9 +157,7 @@ def reshape_wrapper(
                 elif isinstance(output_reshping, dict):
                     for out_key, out_reshp in output_reshping.items():
                         if out_reshp is not None:
-                            assert out_key in output, (
-                                f"Output key {out_key} not found in output"
-                            )
+                            assert out_key in output, f"Output key {out_key} not found in output"
                             assert isinstance(
                                 (out_value := output[out_key]),
                                 (torch.Tensor, np.ndarray),
@@ -199,9 +182,7 @@ def reshape_wrapper(
 
 
 @lru_cache(maxsize=16)
-def get_reduce_einops_pattern(
-    tensor_dim: int | list, reduce_dims: tuple[int, ...]
-) -> str:
+def get_reduce_einops_pattern(tensor_dim: int | list, reduce_dims: tuple[int, ...]) -> str:
     """
     Generate einops pattern for reducing specified dimensions.
 
@@ -288,9 +269,7 @@ def get_flatten_einops_pattern(
         output_axes.insert(f_dim_at, f"({flatten_pattern})")
 
         # create dictionary mapping axis names to dimension indices
-        flatten_dim_dict = {
-            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
-        }
+        flatten_dim_dict = {axis: i for i, axis in enumerate(axes) if axis in flatten_axes}
 
         return f"{' '.join(axes)} -> {' '.join(output_axes)}", flatten_dim_dict
     elif remaining_axes:
@@ -298,9 +277,7 @@ def get_flatten_einops_pattern(
         return f"{' '.join(axes)} -> {' '.join(remaining_axes)}", {}
     elif flatten_axes:
         # if only flatten axes (flatten to 1D)
-        flatten_dim_dict = {
-            axis: i for i, axis in enumerate(axes) if axis in flatten_axes
-        }
+        flatten_dim_dict = {axis: i for i, axis in enumerate(axes) if axis in flatten_axes}
         return f"{' '.join(axes)} -> ({' '.join(flatten_axes)})", flatten_dim_dict
     else:
         # edge case: no axes specified

@@ -15,6 +15,7 @@ import toml
 from openai import AsyncOpenAI
 from PIL import Image
 
+
 # 假设的批量处理接口
 class BatchImageCaptioner:
     def __init__(self, max_batch_size: int = 10, max_concurrent_batches: int = 3):
@@ -30,10 +31,7 @@ class BatchImageCaptioner:
         批量处理图像 - 模拟智谱AI的批量API
         """
         # 将批量请求分成多个子批次
-        batches = [
-            images[i:i + self.max_batch_size]
-            for i in range(0, len(images), self.max_batch_size)
-        ]
+        batches = [images[i : i + self.max_batch_size] for i in range(0, len(images), self.max_batch_size)]
 
         semaphore = asyncio.Semaphore(self.max_concurrent_batches)
 
@@ -42,31 +40,26 @@ class BatchImageCaptioner:
                 # 构造批量请求
                 batch_requests = []
                 for img_data in batch:
-                    base64_image = self._img_to_base64(img_data['image'])
-                    batch_requests.append({
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                    base64_image = self._img_to_base64(img_data["image"])
+                    batch_requests.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                                 },
-                            },
-                            {"type": "text", "text": img_data.get('prompt', 'Describe this image.')},
-                        ],
-                    })
+                                {"type": "text", "text": img_data.get("prompt", "Describe this image.")},
+                            ],
+                        }
+                    )
 
                 # 发送批量请求（这里模拟为多个并发请求）
-                tasks = [
-                    self._single_image_captioning(request)
-                    for request in batch_requests
-                ]
+                tasks = [self._single_image_captioning(request) for request in batch_requests]
                 return await asyncio.gather(*tasks)
 
         # 并发处理所有批次
-        batch_results = await asyncio.gather(*[
-            process_single_batch(batch) for batch in batches
-        ])
+        batch_results = await asyncio.gather(*[process_single_batch(batch) for batch in batches])
 
         # 展平结果
         return [result for batch_result in batch_results for result in batch_result]
@@ -95,12 +88,11 @@ class BatchImageCaptioner:
             img.save(img_bytes, format="PNG")
             return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-        assert (
-            img.ndim == 3 and img.dtype == np.uint8
-        ), "Image must be a 3D numpy array with dtype uint8."
+        assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
         img_bytes = io.BytesIO()
         Image.fromarray(img).save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+
 
 # 使用示例
 async def main():
@@ -119,7 +111,8 @@ async def main():
     results = await batch_processor.process_batch(batch_data)
 
     for i, result in enumerate(results):
-        print(f"Image {i+1}: {result}")
+        print(f"Image {i + 1}: {result}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

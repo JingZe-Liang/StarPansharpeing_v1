@@ -70,9 +70,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         self._build_transformer_encoder(tokenizer_cfg, trans_enc_cfg, trans_dec_cfg)
         self._build_transition_schedule(transport, transition_schedule_kwargs)
 
-    def _build_encoder_decoder(
-        self, cfg: UViTTokenizerConfig, model_cfg: EncoderDecoderConfig
-    ):
+    def _build_encoder_decoder(self, cfg: UViTTokenizerConfig, model_cfg: EncoderDecoderConfig):
         model_cfg.act_checkpoint = cfg.act_checkpoint
         cfg.decoder.use_act_ckpt = cfg.act_checkpoint
 
@@ -87,9 +85,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
             **transition_schedule_kwargs,
         )
 
-    def _build_transformer_encoder(
-        self, tokenizer_cfg, trans_enc_cfg=None, trans_dec_cfg=None
-    ):
+    def _build_transformer_encoder(self, tokenizer_cfg, trans_enc_cfg=None, trans_dec_cfg=None):
         # Store transformer configurations
         self.trans_enc_cfg = trans_enc_cfg
         self.trans_dec_cfg = trans_dec_cfg
@@ -98,16 +94,12 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         self.semantic_enc_transformer = None
         if trans_enc_cfg is not None:
             self.semantic_enc_transformer = Transformer(trans_enc_cfg)
-            self.semantic_enc_transformer.set_grad_checkpointing(
-                self.grad_checkpointing
-            )
+            self.semantic_enc_transformer.set_grad_checkpointing(self.grad_checkpointing)
 
         self.semantic_transformer_dec = None
         if trans_dec_cfg is not None:
             self.semantic_transformer_dec = Transformer(trans_dec_cfg)
-            self.semantic_transformer_dec.set_grad_checkpointing(
-                self.grad_checkpointing
-            )
+            self.semantic_transformer_dec.set_grad_checkpointing(self.grad_checkpointing)
 
     def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
         """Init the model from the pretrained only CNN weights."""
@@ -115,19 +107,13 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
 
         # Directly load all weights if specified
         if directly_load:
-            missing_ks, unexp_ks = load_weights_with_shape_check(
-                self, weights, load_strategy="search"
-            )
+            missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
             if len(missing_ks) > 0 or len(unexp_ks) > 0:
-                logger.warning(
-                    f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}"
-                )
+                logger.warning(f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
             logger.info(f"Finished directly loading pretrained weights.")
             return
 
-    def encode(
-        self, x, use_quantizer=None
-    ) -> Union[Tuple[Tensor, Tensor, Union[dict, NamedTuple]], Tensor]:
+    def encode(self, x, use_quantizer=None) -> Union[Tuple[Tensor, Tensor, Union[dict, NamedTuple]], Tensor]:
         """Encode the image into latent.
         Output the latent tensor or latent, quantizer loss and loss breakdowns
         if has a quantizer.
@@ -139,9 +125,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         h = self.encoder.quant_conv(z_semantic)
 
         # Quantization
-        maybe_q_ret = self.apply_quantizer(
-            h, z_semantic, use_quantizer, cache_type=None
-        )  # Disable cache z or h
+        maybe_q_ret = self.apply_quantizer(h, z_semantic, use_quantizer, cache_type=None)  # Disable cache z or h
 
         # Do cache here
         self.z = z_low_lvl
@@ -184,11 +168,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         assert torch.is_tensor(h), "h should be the (quantized) latent"
 
         # Decoder channels
-        chan = (
-            inp_shape[1]
-            if isinstance(inp_shape, (torch.Size, tuple, list))
-            else inp_shape
-        )
+        chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple, list)) else inp_shape
 
         # Unquantization conv
         h = unquant_conv(h)
@@ -203,9 +183,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         if mode == "step":
             if self.transition_schedule.transport.enhance_target:
                 assert ema_model is not None, "EMA model is required for enhance_target"
-                assert hasattr(decoder, "null_cond_h"), (
-                    "The decoder must have null_cond_h for CFG"
-                )
+                assert hasattr(decoder, "null_cond_h"), "The decoder must have null_cond_h for CFG"
 
             # training: h is condition, x is the input
             noise = torch.randn_like(x)
@@ -331,9 +309,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
             trans_dec_cfg,
         )
 
-    def peft_lora_modules(
-        self, conv_stem_reinit=False, conv_stem_chan: int | None = None
-    ) -> list[str]:
+    def peft_lora_modules(self, conv_stem_reinit=False, conv_stem_chan: int | None = None) -> list[str]:
         assert not conv_stem_reinit, "Conv stem reinit not supported for Flow tokenizer"
         lora_modules = [
             "nin_shortcut.1",
@@ -358,9 +334,7 @@ class CosmosFlowTokenizer(ContinuousImageTokenizer):
         ]
         return lora_modules
 
-    def peft_fully_finetune_modules(
-        self, add_norms: bool = False, conv_stem_reinit=False
-    ) -> list[str]:
+    def peft_fully_finetune_modules(self, add_norms: bool = False, conv_stem_reinit=False) -> list[str]:
         if isinstance(self.cfg.model.in_channels, (list, tuple)):
             return super().peft_fully_finetune_modules(add_norms, conv_stem_reinit)
 
@@ -486,9 +460,7 @@ def test_model_forward_backward():
             print(f"Decoded shape (step): {decoded_tensor.shape}")
 
         print("Testing decode mode 'loop'...")
-        decoded_loop = model.decode(
-            x, encoded_tensor, x.shape, mode="loop", sample_kwargs={"num_steps": 4}
-        )
+        decoded_loop = model.decode(x, encoded_tensor, x.shape, mode="loop", sample_kwargs={"num_steps": 4})
         if isinstance(decoded_loop, tuple):
             decoded_tensor, _, _ = decoded_loop
             print(f"Decoded shape (loop): {decoded_tensor.shape}")
@@ -529,9 +501,7 @@ def test_model_forward_backward():
     # Test decode in loop mode (doesn't require EMA)
     print("Testing decode in loop mode...")
     model.zero_grad()
-    decoded, loss_dict, _ = model.decode(
-        x, encoded_tensor, x.shape, mode="step", sample_kwargs={"num_steps": 4}
-    )
+    decoded, loss_dict, _ = model.decode(x, encoded_tensor, x.shape, mode="step", sample_kwargs={"num_steps": 4})
 
     # Compute loss and backward
     flow_loss = loss_dict.get("flow_loss", 0.0) or 0.0

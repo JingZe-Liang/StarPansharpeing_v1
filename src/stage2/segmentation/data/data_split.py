@@ -86,9 +86,7 @@ def oversample_weak_classes(X, y):
 # * --- Label related --- #
 
 
-def single_image_get_seg_label(
-    gt_flatten: Float[np.ndarray, "h*w"], train_index, val_index, test_index
-):
+def single_image_get_seg_label(gt_flatten: Float[np.ndarray, "h*w"], train_index, val_index, test_index):
     train_samples_gt = np.zeros(gt_flatten.shape)
     for i in range(len(train_index)):
         train_samples_gt[train_index[i]] = gt_flatten[train_index[i]]
@@ -143,9 +141,7 @@ def label_to_one_hot(data_gt: np.ndarray | Tensor, class_num: int, flatten_hw=Tr
     if isinstance(data_gt, np.ndarray):
         # To Tensor
         data_gt = torch.as_tensor(data_gt).to(torch.int32)
-    oh_data_gt = torch.nn.functional.one_hot(
-        data_gt, num_classes=class_num
-    )  # (h, w, n_class)
+    oh_data_gt = torch.nn.functional.one_hot(data_gt, num_classes=class_num)  # (h, w, n_class)
 
     if flatten_hw:
         oh_data_gt = oh_data_gt.view(-1, class_num)
@@ -153,9 +149,7 @@ def label_to_one_hot(data_gt: np.ndarray | Tensor, class_num: int, flatten_hw=Tr
     return oh_data_gt.cpu().numpy()
 
 
-def single_image_slide_train_data(
-    img_size: int, img: Float[np.ndarray, "h w c"], img_gt: Float[np.ndarray, "h w"]
-):
+def single_image_slide_train_data(img_size: int, img: Float[np.ndarray, "h w c"], img_gt: Float[np.ndarray, "h w"]):
     """
     Sliding window from HyperSIGMA.
     """
@@ -200,9 +194,7 @@ def single_image_slide_train_data(
     sub_imgs = []
     for i in range(num_H):
         for j in range(num_W):
-            z = img[
-                i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :
-            ]
+            z = img[i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :]
             sub_imgs.append(z)
     sub_imgs = np.array(sub_imgs)  # [num_H*num_W,img_size,img_size, C]
 
@@ -245,9 +237,7 @@ def single_img_slide_test_data(img_size, img):
     sub_imgs = []
     for i in range(num_H):
         for j in range(num_W):
-            z = img[
-                i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :
-            ]
+            z = img[i * img_size : (i + 1) * img_size, j * img_size : (j + 1) * img_size, :]
             sub_imgs.append(z)
     sub_imgs = np.array(sub_imgs)  # [num_H*num_W,img_size,img_size, C ]
 
@@ -277,9 +267,7 @@ class SingleImageHyperspectralSegmentationDataset(torch.utils.data.Dataset):
 
         self.gt = torch.as_tensor(ori_gt).to(torch.int64)
         self._sampled_index = torch.as_tensor(sampled_index).to(torch.int64)
-        self._sampled_gt = torch.as_tensor(sampled_gt).to(
-            torch.int64
-        )  # (train_indices,)
+        self._sampled_gt = torch.as_tensor(sampled_gt).to(torch.int64)  # (train_indices,)
         self._mask = mask
         self._norm_type = norm_type
 

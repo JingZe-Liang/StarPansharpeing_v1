@@ -15,9 +15,7 @@ def tar_dir_and_remove(num_files_per_tar: int, dir_path: str | Path):
     n_sample = 0
 
     _total_tbar = len(itered := list(dir_path.iterdir()))
-    for path in track(
-        itered, description="Tarring files", total=_total_tbar, console=_console
-    ):
+    for path in track(itered, description="Tarring files", total=_total_tbar, console=_console):
         if (
             path.is_file()
             # and path.stat().st_size > 5 * 1024 * 1024

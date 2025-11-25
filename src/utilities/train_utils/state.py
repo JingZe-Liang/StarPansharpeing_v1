@@ -108,13 +108,9 @@ class StepsCounter(metaclass=SingletonMeta):
                     setattr(self, f"n_{name}_steps", 0)
             return
         elif step_names is None:
-            raise ValueError(
-                "step_names must be provided for the first initialization of StepsCounter."
-            )
+            raise ValueError("step_names must be provided for the first initialization of StepsCounter.")
 
-        assert step_names is not None, (
-            "step_names cannot be None when first initializing StepsCounter."
-        )
+        assert step_names is not None, "step_names cannot be None when first initializing StepsCounter."
         self.step_names = list(step_names)
         for name in self.step_names:
             setattr(self, f"n_{name}_steps", 0)
@@ -124,10 +120,7 @@ class StepsCounter(metaclass=SingletonMeta):
         return f"StepsCounter({self.state_dict()})"
 
     def state_dict(self):
-        return {
-            f"n_{name}_steps": getattr(self, f"n_{name}_steps")
-            for name in self.step_names
-        }
+        return {f"n_{name}_steps": getattr(self, f"n_{name}_steps") for name in self.step_names}
 
     def load_state_dict(self, state_dict):
         for name in self.step_names:
@@ -160,18 +153,12 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             self.loss_metrics_values = {}
             self.loss_metrics_tracked = {}
         else:
-            self.loss_metrics_values = {
-                name: None for name in self.loss_metrics_values.keys()
-            }
-            self.loss_metrics_tracked = {
-                name: [] for name in self.loss_metrics_tracked.keys()
-            }
+            self.loss_metrics_values = {name: None for name in self.loss_metrics_values.keys()}
+            self.loss_metrics_tracked = {name: [] for name in self.loss_metrics_tracked.keys()}
 
     def clear_values(self, name: str | list | None = None, clear_name: bool = False):
         if name is None:
-            self.loss_metrics_values = (
-                {} if clear_name else {n: None for n in self.loss_metrics_values.keys()}
-            )
+            self.loss_metrics_values = {} if clear_name else {n: None for n in self.loss_metrics_values.keys()}
         elif isinstance(name, str):
             if name in self.loss_metrics_values:
                 self.loss_metrics_values[name] = None
@@ -182,9 +169,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
 
     def clear_tracked(self, name: str | list | None = None, clear_name: bool = False):
         if name is None:
-            self.loss_metrics_tracked = (
-                {} if clear_name else {n: [] for n in self.loss_metrics_tracked.keys()}
-            )
+            self.loss_metrics_tracked = {} if clear_name else {n: [] for n in self.loss_metrics_tracked.keys()}
         elif isinstance(name, str):
             if name in self.loss_metrics_tracked:
                 self.loss_metrics_tracked[name] = []
@@ -212,9 +197,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                         self.add_tracked(name, values)
 
         elif not loss_metrics_values and not loss_metrics_tracked:
-            raise ValueError(
-                "Loss metrics must be provided for the first initialization of LossMetricTracker."
-            )
+            raise ValueError("Loss metrics must be provided for the first initialization of LossMetricTracker.")
 
         self.loss_metrics_values: dict[str, float | None]
         self.loss_metrics_tracked: dict[str, list[float] | None]
@@ -238,27 +221,20 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         elif not isinstance(value, float):
             raise ValueError(f"Expected float for {name}, got {type(value)}")
 
-        if (
-            name in self.loss_metrics_values
-            and self.loss_metrics_values[name] is not None
-        ):
+        if name in self.loss_metrics_values and self.loss_metrics_values[name] is not None:
             self.loss_metrics_values[name] = (
                 self.loss_metrics_values[name] * (1 - ema) + value * ema  # type: ignore
             )
         else:
             self.loss_metrics_values[name] = value
 
-    def add_tracked(
-        self, name: str, value: float | list[float] | np.ndarray | torch.Tensor
-    ):
+    def add_tracked(self, name: str, value: float | list[float] | np.ndarray | torch.Tensor):
         if not isinstance(value, (float, list)):
             raise ValueError(f"Expected float or list for {name}, got {type(value)}")
         elif isinstance(value, float):
             value = [value]
         elif isinstance(value, (np.ndarray, torch.Tensor)):
-            assert value.ndim == 1, (
-                f"{name=} with {value} should be 1-d array or tensor"
-            )
+            assert value.ndim == 1, f"{name=} with {value} should be 1-d array or tensor"
             if torch.is_tensor(value):
                 value = value.detach().cpu().numpy()
             value = value.tolist()
@@ -284,15 +260,11 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         elif value is None:
             return None
         else:
-            raise ValueError(
-                f"Unknown type for {value} in loss_metrics: {self.loss_metrics_values}"
-            )
+            raise ValueError(f"Unknown type for {value} in loss_metrics: {self.loss_metrics_values}")
 
     def round(self, names: list[str] | None = None, decimals: int | None = 4):
         if names is None:
-            names = list(self.loss_metrics_values.keys()) + list(
-                self.loss_metrics_tracked.keys()
-            )
+            names = list(self.loss_metrics_values.keys()) + list(self.loss_metrics_tracked.keys())
 
         loss_metrics_values = {}
         loss_metrics_tracked = {}
@@ -353,19 +325,14 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             elif op == "all":
                 return lst
             else:
-                raise ValueError(
-                    f"Unknown operation {op} for tracked values."
-                    f"Supported operations: max, min, mean, all"
-                )
+                raise ValueError(f"Unknown operation {op} for tracked values.Supported operations: max, min, mean, all")
 
         tracked_values_oped = {}
         for n in name:
             if n in self.loss_metrics_tracked:
                 tracked_oped = op_tracked(self.loss_metrics_tracked[n], track_value_op)
                 tracked_values_oped[n] = (
-                    self.round_value(tracked_oped, round_decimals)
-                    if round_decimals is not None
-                    else tracked_oped
+                    self.round_value(tracked_oped, round_decimals) if round_decimals is not None else tracked_oped
                 )
             elif none_if_not_found:
                 log_print(f"Tracked values for {n} not found", "warning")
@@ -474,13 +441,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         values_str = []
         tracked_str = []
         for n, v in loss_metrics_values.items():
-            values_str.append(
-                f"{with_color_fn(n)}: {v if v is not None else default_val}"
-            )
+            values_str.append(f"{with_color_fn(n)}: {v if v is not None else default_val}")
         for n, v in loss_metrics_tracked.items():
-            tracked_str.append(
-                f"{with_color_fn(n)}: {v if v is not None else default_val}"
-            )
+            tracked_str.append(f"{with_color_fn(n)}: {v if v is not None else default_val}")
 
         return sep.join(values_str), sep.join(tracked_str)
 
@@ -507,16 +470,12 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         overwrite_instance_use_sync: bool = False,
     ):
         # Get the existing instance
-        instance: LossMetricTracker = cls(
-            __force_new_instance__=False, __instance_name__=instance_name
-        )
+        instance: LossMetricTracker = cls(__force_new_instance__=False, __instance_name__=instance_name)
 
         # Sync
         if hasattr(torch, "distributed") and torch.distributed.is_initialized():
             instance_cp = deepcopy(instance)
-            ins_lst: list[LossMetricTracker] = [
-                None
-            ] * torch.distributed.get_world_size()  # type: ignore
+            ins_lst: list[LossMetricTracker] = [None] * torch.distributed.get_world_size()  # type: ignore
             torch.distributed.all_gather_object(ins_lst, instance)
 
             # mean all values and tracked
@@ -549,9 +508,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                 # ]
                 # -> return:
                 #         [0.25, 0.35, 0.45]
-                instance_cp.loss_metrics_tracked[name] = [
-                    sum(values) / len(values) for values in zip(*tracked)
-                ]
+                instance_cp.loss_metrics_tracked[name] = [sum(values) / len(values) for values in zip(*tracked)]
 
             if overwrite_instance_use_sync:
                 # overwrite the instance with the synchronized instance
@@ -562,9 +519,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                 )
             return instance_cp
         else:
-            log_print(
-                "Torch distributed is not initialized. Skipping sync_state.", "debug"
-            )
+            log_print("Torch distributed is not initialized. Skipping sync_state.", "debug")
             return instance
 
     @classmethod
@@ -580,9 +535,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             del cls._instances[instance_name]
             log_print(f"Instance {instance_name} removed from {cls.__name__}.", "info")
         else:
-            log_print(
-                f"Instance {instance_name} not found in {cls.__name__}.", "warning"
-            )
+            log_print(f"Instance {instance_name} not found in {cls.__name__}.", "warning")
 
 
 # * --- Utilities --- * #
@@ -598,9 +551,7 @@ def metrics_sync(
     synced_metrics = {}
 
     for name, metric in metrics.items():
-        assert isinstance(metric, (Metric, torch.Tensor)), (
-            f"Expected Metric or Tensor for {name}, got {type(metric)}"
-        )
+        assert isinstance(metric, (Metric, torch.Tensor)), f"Expected Metric or Tensor for {name}, got {type(metric)}"
         if isinstance(metric, Metric):
             synced_metrics[name] = metric
         else:
@@ -655,9 +606,7 @@ def dict_tensor_sync(
             ):
                 tensor_ = tensor_.float()
             if isinstance(reduce_op, Callable):
-                raise ValueError(
-                    "reduce_op cannot be a Callable when use_reduce is True."
-                )
+                raise ValueError("reduce_op cannot be a Callable when use_reduce is True.")
             op = str2reduce_op[reduce_op] if isinstance(reduce_op, str) else reduce_op
             assert op is not None, "Expected a valid reduce operation"
             dist.all_reduce(tensor_, op=op)
@@ -668,10 +617,7 @@ def dict_tensor_sync(
         lst_metrics: list[dict] = [None] * dist.get_world_size()  # type: ignore
         dist.all_gather_object(lst_metrics, metrics)
         if reduce_op == "AVG":
-            return {
-                name: sum(d[name] for d in lst_metrics) / len(lst_metrics)
-                for name in lst_metrics[0]
-            }
+            return {name: sum(d[name] for d in lst_metrics) / len(lst_metrics) for name in lst_metrics[0]}
         elif reduce_op == "MAX":
             return {name: max(d[name] for d in lst_metrics) for name in lst_metrics[0]}
         elif reduce_op == "MIN":

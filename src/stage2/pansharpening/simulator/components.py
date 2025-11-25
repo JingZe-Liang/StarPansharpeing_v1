@@ -124,9 +124,7 @@ def genMTF(ratio: int, sensor: str, nbands: int) -> np.ndarray:
         else:
             GNyq = np.asarray([0.35] * nbands, dtype="float32")
     elif sensor == "WV3":
-        GNyq = np.asarray(
-            [0.325, 0.355, 0.360, 0.350, 0.365, 0.360, 0.335, 0.315], dtype="float32"
-        )
+        GNyq = np.asarray([0.325, 0.355, 0.360, 0.350, 0.365, 0.360, 0.335, 0.315], dtype="float32")
     elif sensor == "GF2":
         GNyq = np.asarray([0.18, 0.18, 0.18, 0.18], dtype="float32")  # GF2 specific
     else:
@@ -190,9 +188,7 @@ class MTFConv(nn.Module):
         self.register_buffer("kernels", kernels)
 
     def __repr__(self):
-        return (
-            f"MTFConv(ratio={self.ratio}, sensor='{self.sensor}', nbands={self.nbands})"
-        )
+        return f"MTFConv(ratio={self.ratio}, sensor='{self.sensor}', nbands={self.nbands})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -210,9 +206,7 @@ class MTFConv(nn.Module):
         """
         _, c, _, _ = x.shape
         if c != self.nbands:
-            raise ValueError(
-                f"Input channel count ({c}) does not match MTFConv nbands ({self.nbands})"
-            )
+            raise ValueError(f"Input channel count ({c}) does not match MTFConv nbands ({self.nbands})")
 
         # Apply padding for 'same' convolution
         padding = self.kernels.shape[-1] // 2
@@ -312,9 +306,7 @@ class Interp23Tap(nn.Module):
             w_curr = current_img.shape[3] * 2
 
             # Create upsampled tensor with zeros
-            upsampled = torch.zeros(
-                bs, c, h_curr, w_curr, device=x.device, dtype=x.dtype
-            )
+            upsampled = torch.zeros(bs, c, h_curr, w_curr, device=x.device, dtype=x.dtype)
 
             # Place original pixels according to MATLAB logic
             # First iteration: place at odd indices (1::2, 1::2)
@@ -353,9 +345,7 @@ class Interp23Tap(nn.Module):
                     )
                     # Apply 1D convolution along height (dim 2)
                     kernel_v = self.kernel.view(1, 1, -1, 1)
-                    filtered_v = F.conv2d(
-                        filtered_h_padded, kernel_v, padding=0
-                    ).squeeze()
+                    filtered_v = F.conv2d(filtered_h_padded, kernel_v, padding=0).squeeze()
 
                     # Store result
                     filtered_result[batch_idx, channel_idx] = filtered_v
@@ -385,9 +375,7 @@ class PansharpSimulator(nn.Module):
             log_print(f"Using mean pan weights: {actual_pan_weight_lst}")
         elif isinstance(pan_weight_lst, list):
             if len(pan_weight_lst) != nbands:
-                raise ValueError(
-                    f"Length of pan_weight_lst ({len(pan_weight_lst)}) must match nbands ({nbands})"
-                )
+                raise ValueError(f"Length of pan_weight_lst ({len(pan_weight_lst)}) must match nbands ({nbands})")
             weight_sum = sum(pan_weight_lst)
             if not np.isclose(weight_sum, 1.0):
                 log_print(
@@ -398,9 +386,7 @@ class PansharpSimulator(nn.Module):
             else:
                 actual_pan_weight_lst = pan_weight_lst
         else:
-            raise TypeError(
-                f"pan_weight_lst must be 'mean' or a list of floats, got {type(pan_weight_lst)}"
-            )
+            raise TypeError(f"pan_weight_lst must be 'mean' or a list of floats, got {type(pan_weight_lst)}")
 
         self.mtf_conv = MTFConv(ratio, sensor, nbands)
         self.ratio = ratio
@@ -439,14 +425,10 @@ class PansharpSimulator(nn.Module):
                 antialias=antialias,
             )
 
-        pan_weights = torch.tensor(actual_pan_weight_lst, dtype=torch.float32).view(
-            1, -1, 1, 1
-        )
+        pan_weights = torch.tensor(actual_pan_weight_lst, dtype=torch.float32).view(1, -1, 1, 1)
         self.register_buffer("pan_weights", pan_weights, persistent=False)
 
-    def forward(
-        self, hrms: torch.Tensor, pan: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, hrms: torch.Tensor, pan: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Simulates LRMS and PAN images from an HRMS image using Wald's protocol.
 
@@ -477,15 +459,11 @@ class PansharpSimulator(nn.Module):
 
         # Ensure hrms is a tensor
         if not isinstance(hrms, torch.Tensor):
-            raise TypeError(
-                f"Input 'hrms' must be a torch.Tensor, but got {type(hrms)}"
-            )
+            raise TypeError(f"Input 'hrms' must be a torch.Tensor, but got {type(hrms)}")
 
         # Ensure hrms has 4 dimensions (bs, c, h, w)
         if hrms.ndim != 4:
-            raise ValueError(
-                f"Input HRMS tensor must have 4 dimensions (bs, c, h, w), but got shape {hrms.shape}"
-            )
+            raise ValueError(f"Input HRMS tensor must have 4 dimensions (bs, c, h, w), but got shape {hrms.shape}")
 
         bs, c, h, w = hrms.shape
         if pan is not None:
@@ -494,9 +472,7 @@ class PansharpSimulator(nn.Module):
                 f"Provided PAN dimensions ({pan_h}, {pan_w}) do not match expected size based on "
                 "HRMS and ratio ({h * self.ratio}, {w * self.ratio})"
             )
-            assert dtype == pan.dtype, (
-                f"hrms and pan must have the same dtype. Got {dtype} and {pan.dtype}"
-            )
+            assert dtype == pan.dtype, f"hrms and pan must have the same dtype. Got {dtype} and {pan.dtype}"
 
         device = hrms.device
 
@@ -505,9 +481,7 @@ class PansharpSimulator(nn.Module):
 
         # --- 2. Downsample HRMS to LRMS resolution --- (Simulates spatial resolution difference)
         if self.downsample_type == "avgpool":
-            lrms_down = F.avg_pool2d(
-                hrms_mtf, kernel_size=self.ratio, stride=self.ratio
-            )
+            lrms_down = F.avg_pool2d(hrms_mtf, kernel_size=self.ratio, stride=self.ratio)
         elif self.downsample_type.startswith("interpolate"):
             mode = self.downsample_type.split("_")[-1]  # bilinear or bicubic
             lrms_down = F.interpolate(
@@ -518,9 +492,7 @@ class PansharpSimulator(nn.Module):
                 antialias=True,
             )
         else:  # Should not happen due to check in init, but as fallback
-            lrms_down = F.avg_pool2d(
-                hrms_mtf, kernel_size=self.ratio, stride=self.ratio
-            )
+            lrms_down = F.avg_pool2d(hrms_mtf, kernel_size=self.ratio, stride=self.ratio)
 
         # --- 3. Upsample LRMS back to HRMS size --- (Using the defined upsampler)
         lrms_upsampled = self.upsample(lrms_down)
@@ -689,9 +661,7 @@ def test_mtf():
     # pan: panchromatic image
 
     # Create lms by upsampling the lrms_original to match hrms size
-    lms = F.interpolate(
-        lrms_original, scale_factor=4, mode="bilinear", align_corners=False
-    )
+    lms = F.interpolate(lrms_original, scale_factor=4, mode="bilinear", align_corners=False)
 
     try:
         # Using 4 parameters: (sr, ms, lms, pan)
@@ -789,9 +759,7 @@ def test_mtf():
     print("\n=== Summary Statistics ===")
     print(f"Original HRMS - Mean: {ms_tensor.mean():.4f}, Std: {ms_tensor.std():.4f}")
     print(f"MTF filtered - Mean: {ms_mtf.mean():.4f}, Std: {ms_mtf.std():.4f}")
-    print(
-        f"LRMS upsampled - Mean: {lrms_upsampled.mean():.4f}, Std: {lrms_upsampled.std():.4f}"
-    )
+    print(f"LRMS upsampled - Mean: {lrms_upsampled.mean():.4f}, Std: {lrms_upsampled.std():.4f}")
     print(f"PAN - Mean: {pan.mean():.4f}, Std: {pan.std():.4f}")
 
     # Calculate PSNR between HRMS and LRMS upsampled

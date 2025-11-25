@@ -10,9 +10,7 @@ from .utils import get_class_weight, weighted_loss
 
 
 @weighted_loss
-def dice_loss(
-    pred, target, valid_mask, smooth=1, exponent=2, class_weight=None, ignore_index=255
-):
+def dice_loss(pred, target, valid_mask, smooth=1, exponent=2, class_weight=None, ignore_index=255):
     assert pred.shape[0] == target.shape[0]
     total_loss = 0
     num_classes = pred.shape[1]
@@ -95,9 +93,7 @@ class DiceLoss(nn.Module):
 
         pred = F.softmax(pred, dim=1)
         num_classes = pred.shape[1]
-        one_hot_target = F.one_hot(
-            torch.clamp(target.long(), 0, num_classes - 1), num_classes=num_classes
-        )
+        one_hot_target = F.one_hot(torch.clamp(target.long(), 0, num_classes - 1), num_classes=num_classes)
         valid_mask = (target != self.ignore_index).long()
 
         loss = self.loss_weight * dice_loss(

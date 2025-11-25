@@ -30,9 +30,7 @@ class DenoisingMetrics(torch.nn.Module):
         data_range: float = 1.0,
         sigma: float = 1.5,
         kernel_size: int = 11,
-        reduction: Literal[
-            "elementwise_mean", "sum", "none", None
-        ] = "elementwise_mean",
+        reduction: Literal["elementwise_mean", "sum", "none", None] = "elementwise_mean",
     ):
         super().__init__()
         self.psnr = PeakSignalNoiseRatio(data_range=data_range, reduction=reduction)

@@ -73,9 +73,7 @@ class CrossAttention(nn.Module):
     ):
         super().__init__()
         self.ctx_dim = ctx_dim if ctx_dim is not None else dim
-        assert self.ctx_dim is not None, (
-            "ctx_dim must be specified if different from dim"
-        )
+        assert self.ctx_dim is not None, "ctx_dim must be specified if different from dim"
 
         self.n_q_heads = n_q_heads
         self.n_kv_heads = n_kv_heads = n_kv_heads or n_q_heads
@@ -129,9 +127,7 @@ class CrossAttention(nn.Module):
                 q, k = apply_rotary_pos_emb(q, k, cos, sin)
         return q, k
 
-    def _qkv_proj(
-        self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None
-    ):
+    def _qkv_proj(self, x, context, rope: Callable | tuple[Tensor, Tensor] | None = None):
         bl_shape = x.shape[:-1]  # (B, L)
 
         # query and gate
@@ -151,9 +147,7 @@ class CrossAttention(nn.Module):
         # context key and value
         b_ctxl_shape = context.shape[:-1]  # (B, L2)
         kv_states = self.kv_proj(context)
-        kv_states = kv_states.view(
-            *b_ctxl_shape, -1, self.head_dim * 2
-        )  # (B, L2, n_kv_heads, head_dim*2)
+        kv_states = kv_states.view(*b_ctxl_shape, -1, self.head_dim * 2)  # (B, L2, n_kv_heads, head_dim*2)
         k_states, v_states = kv_states.chunk(2, dim=-1)
         k_states = self.k_norm(k_states).transpose(1, 2)
         v_states = v_states.transpose(1, 2)
@@ -211,9 +205,7 @@ def test_forward(batch_size, seq_len_q, seq_len_kv, dim, gate_type):
     n_q_heads = 8
     n_kv_heads = 8
 
-    model = CrossAttention(
-        dim, n_q_heads=n_q_heads, n_kv_heads=n_kv_heads, gate_type=gate_type
-    )
+    model = CrossAttention(dim, n_q_heads=n_q_heads, n_kv_heads=n_kv_heads, gate_type=gate_type)
     x = torch.randn(batch_size, seq_len_q, dim)
     context = torch.randn(batch_size, seq_len_kv, dim)
 

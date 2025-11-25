@@ -27,9 +27,7 @@ def dim_zero_stack(x: Tensor | list[Tensor]) -> Tensor:
                 )
             xi = xi.unsqueeze(0)
         else:
-            logger.error(
-                f"Expected each tensor to be a scalar or 1D tensor, got {xi.shape}. "
-            )
+            logger.error(f"Expected each tensor to be a scalar or 1D tensor, got {xi.shape}. ")
             raise ValueError("Expected each tensor to be a scalar or 1D tensor.")
         xs.append(xi)
 
@@ -91,16 +89,13 @@ class StackMeanMetrics(BaseAggregator):
             weight = []
         if len(weight) != 0 and len(value) != len(weight):
             raise ValueError(
-                "If weight is provided, it must have the same length as value. "
-                f"Got {len(value)} and {len(weight)}."
+                f"If weight is provided, it must have the same length as value. Got {len(value)} and {len(weight)}."
             )
 
         for v, w in zip_longest(value, weight):
             self._per_sample_update(v, w)
 
-    def _per_sample_update(
-        self, value: float | Tensor, weight: float | Tensor | None = None
-    ):
+    def _per_sample_update(self, value: float | Tensor, weight: float | Tensor | None = None):
         # broadcast weight to value shape
         if not isinstance(value, Tensor):
             value = torch.as_tensor(value, dtype=self.dtype, device=self.device)
@@ -122,9 +117,7 @@ class StackMeanMetrics(BaseAggregator):
                 f"Expected value shape {self.mean_value.shape}, got {value.shape}."
             )
 
-        self.mean_value = (
-            self.mean_value + weight * value
-        )  # no sum up, take per-update is one sample
+        self.mean_value = self.mean_value + weight * value  # no sum up, take per-update is one sample
         self.weight = self.weight + weight
 
     def compute(self) -> Tensor:

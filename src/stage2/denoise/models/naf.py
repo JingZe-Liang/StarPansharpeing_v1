@@ -72,12 +72,10 @@ class DenoiseNAFNet(nn.Module):
 
         # Validate configuration
         assert len(cfg.enc_blk_nums) == len(cfg.enc_blk_type), (
-            f"enc_blk_nums length ({len(cfg.enc_blk_nums)}) must match "
-            f"enc_blk_type length ({len(cfg.enc_blk_type)})"
+            f"enc_blk_nums length ({len(cfg.enc_blk_nums)}) must match enc_blk_type length ({len(cfg.enc_blk_type)})"
         )
         assert len(cfg.dec_blk_nums) == len(cfg.dec_blk_type), (
-            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match "
-            f"dec_blk_type length ({len(cfg.dec_blk_type)})"
+            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match dec_blk_type length ({len(cfg.dec_blk_type)})"
         )
         assert cfg.middle_blk_type in [
             "naf",
@@ -90,9 +88,7 @@ class DenoiseNAFNet(nn.Module):
 
         # Patch embedding layers for different input modalities
         patchers = nn.ModuleDict()
-        patchers["lr_conv"] = create_patcher(
-            cfg.lr_channels, cfg.width, cfg.patch_size
-        )  # LR image patch embedding
+        patchers["lr_conv"] = create_patcher(cfg.lr_channels, cfg.width, cfg.patch_size)  # LR image patch embedding
         patchers["latent_conv"] = nn.Sequential(
             create_norm_layer("layernorm2d", cfg.condition_channel),
             create_conv2d(cfg.condition_channel, cfg.width, 3, bias=True),
@@ -100,9 +96,7 @@ class DenoiseNAFNet(nn.Module):
 
         self.cfg = cfg
         self.patchers = patchers
-        self.unpatcher = create_unpatcher(
-            cfg.width, cfg.width, cfg.patch_size
-        )  # Output unpatching
+        self.unpatcher = create_unpatcher(cfg.width, cfg.width, cfg.patch_size)  # Output unpatching
         self.head = self._create_head()  # Output head
 
         # =====================================================================
@@ -111,12 +105,8 @@ class DenoiseNAFNet(nn.Module):
 
         # Add output rescaling layer for value range normalization
         if cfg.output_rescale:
-            out_val_range = (
-                ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
-            )
-            self.output_rescale = RescaleOutput(
-                rescale=True, out_val_range=out_val_range
-            )
+            out_val_range = ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
+            self.output_rescale = RescaleOutput(rescale=True, out_val_range=out_val_range)
         else:
             self.output_rescale = nn.Identity()  # do nothing
 
@@ -203,9 +193,7 @@ class DenoiseNAFNet(nn.Module):
             log(f"[NAFNet Encoder Block {i}] Type: {enc_fn.func}, Num: {num}")
             enc_fn = self._replace_nat_defaults(enc_fn, cfg.nat_enc_kwargs, i)
             self.encoders.append(nn.ModuleList([enc_fn(chan) for _ in range(num)]))
-            self.downs.append(
-                nn.Conv2d(chan, 2 * chan, 2, 2)
-            )  # Downsampling with stride 2
+            self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))  # Downsampling with stride 2
             chan = chan * 2  # Double channels after downsampling
 
         # =====================================================================
@@ -220,9 +208,7 @@ class DenoiseNAFNet(nn.Module):
         middle_fn = middle_mapping[cfg.middle_blk_type]
         middle_fn = self._replace_nat_defaults(middle_fn, cfg.nat_mid_kwargs, None)
         log(f"[NAFNet Middile Block] Type: {middle_fn.func}, Num: {cfg.middle_blk_num}")
-        self.middle_blks = nn.ModuleList(
-            [middle_fn(chan) for _ in range(cfg.middle_blk_num)]
-        )
+        self.middle_blks = nn.ModuleList([middle_fn(chan) for _ in range(cfg.middle_blk_num)])
 
         # =====================================================================
         # Decoder Path (Upsampling)
@@ -275,9 +261,7 @@ class DenoiseNAFNet(nn.Module):
         if nat_kwgs is None:
             return nat_partial
 
-        assert isinstance(nat_kwgs, NATBlockConfig), (
-            f"{nat_kwgs=} is not a NATBlockConfig"
-        )
+        assert isinstance(nat_kwgs, NATBlockConfig), f"{nat_kwgs=} is not a NATBlockConfig"
         # Get existing partial arguments
         existing_kwargs = nat_partial.keywords.copy()
         # Update with NATBlockConfig parameters, but preserve existing ones
@@ -301,9 +285,7 @@ class DenoiseNAFNet(nn.Module):
             nn.Conv2d(embed_dim // 4, embed_dim, 3, 1, 1),
         )
         head_out = nn.Conv2d(embed_dim, out_chan, 1)
-        lr_shortcut = create_unpatcher(
-            embed_dim, embed_dim, patch_size=self.cfg.patch_size
-        )
+        lr_shortcut = create_unpatcher(embed_dim, embed_dim, patch_size=self.cfg.patch_size)
 
         head = nn.ModuleDict()
         head["head_conv"] = head_conv
@@ -367,9 +349,7 @@ class DenoiseNAFNet(nn.Module):
         # =====================================================================
         # Decoder Path (Upsampling with skip connections)
         # =====================================================================
-        for i, (decoder, up, enc_skip) in enumerate(
-            zip(self.decoders, self.ups, encs[::-1])
-        ):
+        for i, (decoder, up, enc_skip) in enumerate(zip(self.decoders, self.ups, encs[::-1])):
             x = up(x)  # Upsample to higher resolution
             x = x + enc_skip  # Add skip connection from encoder
             for block in decoder:

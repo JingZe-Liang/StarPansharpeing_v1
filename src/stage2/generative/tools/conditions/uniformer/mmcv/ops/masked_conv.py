@@ -9,9 +9,7 @@ from torch.nn.modules.utils import _pair
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["masked_im2col_forward", "masked_col2im_forward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["masked_im2col_forward", "masked_col2im_forward"])
 
 
 class MaskedConv2dFunction(Function):
@@ -39,24 +37,14 @@ class MaskedConv2dFunction(Function):
         out_channel, in_channel, kernel_h, kernel_w = weight.size()
 
         batch_size = features.size(0)
-        out_h = int(
-            math.floor(
-                (features.size(2) + 2 * pad_h - (kernel_h - 1) - 1) / stride_h + 1
-            )
-        )
-        out_w = int(
-            math.floor(
-                (features.size(3) + 2 * pad_w - (kernel_h - 1) - 1) / stride_w + 1
-            )
-        )
+        out_h = int(math.floor((features.size(2) + 2 * pad_h - (kernel_h - 1) - 1) / stride_h + 1))
+        out_w = int(math.floor((features.size(3) + 2 * pad_w - (kernel_h - 1) - 1) / stride_w + 1))
         mask_inds = torch.nonzero(mask[0] > 0, as_tuple=False)
         output = features.new_zeros(batch_size, out_channel, out_h, out_w)
         if mask_inds.numel() > 0:
             mask_h_idx = mask_inds[:, 0].contiguous()
             mask_w_idx = mask_inds[:, 1].contiguous()
-            data_col = features.new_zeros(
-                in_channel * kernel_h * kernel_w, mask_inds.size(0)
-            )
+            data_col = features.new_zeros(in_channel * kernel_h * kernel_w, mask_inds.size(0))
             ext_module.masked_im2col_forward(
                 features,
                 mask_h_idx,
@@ -68,9 +56,7 @@ class MaskedConv2dFunction(Function):
                 pad_w=pad_w,
             )
 
-            masked_output = torch.addmm(
-                1, bias[:, None], 1, weight.view(out_channel, -1), data_col
-            )
+            masked_output = torch.addmm(1, bias[:, None], 1, weight.view(out_channel, -1), data_col)
             ext_module.masked_col2im_forward(
                 masked_output,
                 mask_h_idx,

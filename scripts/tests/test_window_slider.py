@@ -128,15 +128,11 @@ def test_window_slider_non_integer_multiples():
                                 window_shape = tuple(window_data.shape)
                             else:
                                 window_shape = window_data.shape
-                            case_results["window_shapes"].append(
-                                {"key": key, "shape": window_shape}
-                            )
+                            case_results["window_shapes"].append({"key": key, "shape": window_shape})
 
                 # Test edge coverage
                 last_window = windows[-1]["window_info"]
-                case_results["edge_coverage"] = (
-                    last_window["h_end"] >= h and last_window["w_end"] >= w
-                )
+                case_results["edge_coverage"] = last_window["h_end"] >= h and last_window["w_end"] >= w
 
                 # Debug: Print coverage information
                 if not case_results["edge_coverage"]:
@@ -183,9 +179,7 @@ def test_window_slider_non_integer_multiples():
                             # Could be (1, C, H, W) or (C, H, W)
                             if len(merged_shape) == 4 and merged_shape[0] == 1:
                                 expected_shape_with_batch = (1,) + original_shape
-                                shape_correct = (
-                                    merged_shape == expected_shape_with_batch
-                                )
+                                shape_correct = merged_shape == expected_shape_with_batch
                             else:
                                 shape_correct = merged_shape == original_shape
                         else:
@@ -200,16 +194,11 @@ def test_window_slider_non_integer_multiples():
 
                             # Remove batch dimension if present
                             if torch.is_tensor(merged_prediction):
-                                if (
-                                    merged_prediction.dim() == 4
-                                    and merged_prediction.shape[0] == 1
-                                ):
+                                if merged_prediction.dim() == 4 and merged_prediction.shape[0] == 1:
                                     merged_prediction = merged_prediction.squeeze(0)
 
                                 # Create a mask of covered regions based on window positions
-                                covered_mask = torch.zeros_like(
-                                    merged_prediction[0]
-                                )  # Use first channel
+                                covered_mask = torch.zeros_like(merged_prediction[0])  # Use first channel
                                 for window_info in [w["window_info"] for w in windows]:
                                     h_start, h_end = (
                                         window_info["h_start"],
@@ -222,30 +211,19 @@ def test_window_slider_non_integer_multiples():
                                     covered_mask[h_start:h_end, w_start:w_end] = 1.0
 
                                 # Check covered regions have correct values
-                                if (
-                                    covered_mask.sum() > 0
-                                ):  # If there are covered regions
-                                    covered_values = merged_prediction[
-                                        :, covered_mask == 1
-                                    ]
+                                if covered_mask.sum() > 0:  # If there are covered regions
+                                    covered_values = merged_prediction[:, covered_mask == 1]
                                     if len(covered_values) > 0:
                                         # All covered values should be 2.0
                                         min_val = covered_values.min().item()
                                         max_val = covered_values.max().item()
-                                        if (
-                                            abs(min_val - 2.0) > 1e-6
-                                            or abs(max_val - 2.0) > 1e-6
-                                        ):
+                                        if abs(min_val - 2.0) > 1e-6 or abs(max_val - 2.0) > 1e-6:
                                             value_correct = False
                                             error_msg = f"Covered region values [{min_val}, {max_val}] not constant 2.0"
 
                                 # Check uncovered regions remain 0
-                                if (
-                                    covered_mask.sum() < covered_mask.numel()
-                                ):  # If there are uncovered regions
-                                    uncovered_values = merged_prediction[
-                                        :, covered_mask == 0
-                                    ]
+                                if covered_mask.sum() < covered_mask.numel():  # If there are uncovered regions
+                                    uncovered_values = merged_prediction[:, covered_mask == 0]
                                     if len(uncovered_values) > 0:
                                         max_uncovered = uncovered_values.max().item()
                                         if max_uncovered > 1e-6:
@@ -253,10 +231,7 @@ def test_window_slider_non_integer_multiples():
                                             error_msg = f"Uncovered region has non-zero values (max: {max_uncovered})"
                             else:
                                 # Similar check for numpy arrays
-                                if (
-                                    merged_prediction.ndim == 4
-                                    and merged_prediction.shape[0] == 1
-                                ):
+                                if merged_prediction.ndim == 4 and merged_prediction.shape[0] == 1:
                                     merged_prediction = merged_prediction.squeeze(0)
 
                                 # Create a mask of covered regions
@@ -274,24 +249,17 @@ def test_window_slider_non_integer_multiples():
 
                                 # Check covered regions
                                 if covered_mask.sum() > 0:
-                                    covered_values = merged_prediction[
-                                        :, covered_mask == 1
-                                    ]
+                                    covered_values = merged_prediction[:, covered_mask == 1]
                                     if len(covered_values) > 0:
                                         min_val = covered_values.min()
                                         max_val = covered_values.max()
-                                        if (
-                                            abs(min_val - 2.0) > 1e-6
-                                            or abs(max_val - 2.0) > 1e-6
-                                        ):
+                                        if abs(min_val - 2.0) > 1e-6 or abs(max_val - 2.0) > 1e-6:
                                             value_correct = False
                                             error_msg = f"Covered region values [{min_val}, {max_val}] not constant 2.0"
 
                                 # Check uncovered regions
                                 if covered_mask.sum() < covered_mask.size:
-                                    uncovered_values = merged_prediction[
-                                        :, covered_mask == 0
-                                    ]
+                                    uncovered_values = merged_prediction[:, covered_mask == 0]
                                     if len(uncovered_values) > 0:
                                         max_uncovered = uncovered_values.max()
                                         if max_uncovered > 1e-6:
@@ -311,12 +279,8 @@ def test_window_slider_non_integer_multiples():
                             case_results["shape_correct"] = shape_correct
                             case_results["value_correct"] = False
 
-                        print(
-                            f"Merge test: {'PASSED' if case_results['merge_test_passed'] else 'FAILED'}"
-                        )
-                        print(
-                            f"Merged shape: {merged_shape}, Original: {original_shape}"
-                        )
+                        print(f"Merge test: {'PASSED' if case_results['merge_test_passed'] else 'FAILED'}")
+                        print(f"Merged shape: {merged_shape}, Original: {original_shape}")
 
                 except Exception as e:
                     case_results["merge_test_passed"] = False
@@ -333,9 +297,7 @@ def test_window_slider_non_integer_multiples():
             else:
                 print(f"Unexpected error for {case['name']}: {e}")
                 results[case["name"]] = {"error": str(e), "expected_error": False}
-                raise AssertionError(
-                    f"Unexpected error in test case {case['name']}: {e}"
-                )
+                raise AssertionError(f"Unexpected error in test case {case['name']}: {e}")
 
     # Summary report
     print("\n" + "=" * 60)
@@ -397,10 +359,7 @@ def test_window_slider_non_integer_multiples():
         second_window = test_windows[1]["window_info"]
 
         # For horizontal adjacent windows
-        if (
-            first_window["i"] == second_window["i"]
-            and first_window["j"] + 1 == second_window["j"]
-        ):
+        if first_window["i"] == second_window["i"] and first_window["j"] + 1 == second_window["j"]:
             overlap_amount = first_window["w_end"] - second_window["w_start"]
             expected_overlap = window_size - expected_stride
             assert overlap_amount == expected_overlap, (
@@ -477,9 +436,7 @@ def test_lossless_round_trip():
     ]
 
     for config in test_configs:
-        print(
-            f"\nTesting {config['name']}: {config['size']} with window {config['window_size']}"
-        )
+        print(f"\nTesting {config['name']}: {config['size']} with window {config['window_size']}")
 
         try:
             # Create original random data
@@ -540,23 +497,13 @@ def test_lossless_round_trip():
                             "passed": True,
                             "windows_generated": len(windows),
                             "shape_match": shape_match,
-                            "max_diff": torch.max(
-                                torch.abs(merged_data - original_data)
-                            ).item(),
-                            "mean_diff": torch.mean(
-                                torch.abs(merged_data - original_data)
-                            ).item(),
+                            "max_diff": torch.max(torch.abs(merged_data - original_data)).item(),
+                            "mean_diff": torch.mean(torch.abs(merged_data - original_data)).item(),
                         }
-                        print(
-                            f"✓ Round-trip test PASSED (max_diff: {results[config['name']]['max_diff']:.2e})"
-                        )
+                        print(f"✓ Round-trip test PASSED (max_diff: {results[config['name']]['max_diff']:.2e})")
                     else:
-                        max_diff = torch.max(
-                            torch.abs(merged_data - original_data)
-                        ).item()
-                        mean_diff = torch.mean(
-                            torch.abs(merged_data - original_data)
-                        ).item()
+                        max_diff = torch.max(torch.abs(merged_data - original_data)).item()
+                        mean_diff = torch.mean(torch.abs(merged_data - original_data)).item()
                         results[config["name"]] = {
                             "passed": False,
                             "error": f"Values don't match. Max diff: {max_diff:.2e}, Mean diff: {mean_diff:.2e}",
@@ -569,12 +516,8 @@ def test_lossless_round_trip():
 
                         # Debug: Check specific regions
                         if len(windows) > 1:
-                            print(
-                                f"  Original range: [{original_data.min():.6f}, {original_data.max():.6f}]"
-                            )
-                            print(
-                                f"  Merged range: [{merged_data.min():.6f}, {merged_data.max():.6f}]"
-                            )
+                            print(f"  Original range: [{original_data.min():.6f}, {original_data.max():.6f}]")
+                            print(f"  Merged range: [{merged_data.min():.6f}, {merged_data.max():.6f}]")
 
                             # Check coverage
                             covered_mask = torch.zeros_like(merged_data[0])
@@ -655,9 +598,7 @@ def test_edge_cases():
         test_sample = {"test": test_image}
         windows = list(slider.slide_windows(test_sample))
 
-        assert len(windows) == 1, (
-            f"Expected 1 window for 64x64 image, got {len(windows)}"
-        )
+        assert len(windows) == 1, f"Expected 1 window for 64x64 image, got {len(windows)}"
         results["min_valid_size"] = {"passed": True, "windows": len(windows)}
         print("✓ Minimum valid size test passed")
     except Exception as e:
@@ -695,9 +636,7 @@ def test_edge_cases():
         # Check that data types are preserved
         first_window = windows[0]
         assert torch.is_tensor(first_window["tensor"]), "Tensor data type not preserved"
-        assert isinstance(first_window["array"], np.ndarray), (
-            "Array data type not preserved"
-        )
+        assert isinstance(first_window["array"], np.ndarray), "Array data type not preserved"
         assert first_window["scalar"] == 42, "Scalar data not preserved"
 
         results["data_types"] = {"passed": True, "windows": len(windows)}

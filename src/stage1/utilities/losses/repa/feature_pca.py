@@ -69,9 +69,7 @@ def feature_pca_cuml(img_feat: torch.Tensor, pca_k: int = 3, norm_pca=True):
 
     projected_data = pca.fit_transform(data)
 
-    img_feats_reduced_flat = torch.as_tensor(
-        projected_data, device=data.device, dtype=img_feat.dtype
-    )
+    img_feats_reduced_flat = torch.as_tensor(projected_data, device=data.device, dtype=img_feat.dtype)
 
     img_feats_reduced = einops.rearrange(img_feats_reduced_flat, **_back_kwargs)
     if norm_pca:
@@ -129,9 +127,7 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int, norm_pca=True):
         c = _shape[-1]
         data = einops.rearrange(img_feat, "bs l c -> (bs l) c")
         # Define pattern for reshaping back to [bs, l, pca_k]
-        _back_kwargs = dict(
-            pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1]
-        )
+        _back_kwargs = dict(pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1])
     else:  # len(_shape) == 4
         # Input is [bs, c, h, w] (e.g., CNN features)
         # We want to reduce the channel dimension c.
@@ -149,9 +145,7 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int, norm_pca=True):
         )
 
     # Assert that the target dimension is achievable
-    assert pca_k <= c, (
-        f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
-    )
+    assert pca_k <= c, f"Target dimension pca_k ({pca_k}) cannot be larger than original feature dimension c ({c})"
     # Also assert that the number of samples is sufficient for SVD
     N_samples = data.shape[0]
     # SVD of A (m x n) where m >= n with full_matrices=False gives Vh (n x n).
@@ -191,9 +185,7 @@ def feature_pca_torch(img_feat: torch.Tensor, pca_k: int, norm_pca=True):
     # This projection matrix is Vh[:pca_k].T.
     # Vh[:pca_k, :] selects the top pca_k rows, shape [pca_k, c].
     # Transposing gives shape [c, pca_k].
-    principal_components = Vh[
-        :pca_k, :
-    ].T  # Take first pca_k rows of Vh, then transpose
+    principal_components = Vh[:pca_k, :].T  # Take first pca_k rows of Vh, then transpose
 
     # 4. Project the centered data onto the principal components
     # centered_data [N_samples, c] @ principal_components [c, pca_k] -> projected_data [N_samples, pca_k]
@@ -272,9 +264,7 @@ def pca_list(
     """
     device = image_feats_list[0].device
 
-    def flatten(
-        tensor: torch.Tensor, target_size: Optional[int] = None
-    ) -> torch.Tensor:
+    def flatten(tensor: torch.Tensor, target_size: Optional[int] = None) -> torch.Tensor:
         """
         Flatten feature tensor for PCA processing.
 
@@ -295,13 +285,7 @@ def pca_list(
         if target_size is not None and fit_pca is None:
             tensor = F.interpolate(tensor, (target_size, target_size), mode="bilinear")
         B, C, H, W = tensor.shape
-        return (
-            tensor.permute(1, 0, 2, 3)
-            .reshape(C, B * H * W)
-            .permute(1, 0)
-            .detach()
-            .cpu()
-        )
+        return tensor.permute(1, 0, 2, 3).reshape(C, B * H * W).permute(1, 0).detach().cpu()
 
     if len(image_feats_list) > 1 and fit_pca is None:
         if len(image_feats_list[0].shape) == 2:
@@ -338,9 +322,7 @@ def pca_list(
             reduced_feats.append(x_red)  # 1D
         else:
             B, C, H, W = feats.shape
-            reduced_feats.append(
-                x_red.reshape(B, H, W, dim).permute(0, 3, 1, 2).to(device)
-            )  # 3D
+            reduced_feats.append(x_red.reshape(B, H, W, dim).permute(0, 3, 1, 2).to(device))  # 3D
 
     return reduced_feats, fit_pca
 
@@ -383,9 +365,7 @@ class TorchPCA:
         """
         self.mean_ = X.mean(dim=0)
         unbiased = X - self.mean_.unsqueeze(0)
-        U, S, V = torch.pca_lowrank(
-            unbiased, q=self.n_components, center=False, niter=4
-        )
+        U, S, V = torch.pca_lowrank(unbiased, q=self.n_components, center=False, niter=4)
         self.components_ = V.T
         self.singular_values_ = S
         return self
@@ -450,9 +430,7 @@ if __name__ == "__main__":
         bs_vit, l_vit, c_vit = 4, 256, 768
         pca_k_vit = 64
         log("\n--- Testing 3D ViT-like Features ---")
-        vit_features = torch.randn(
-            bs_vit, l_vit, c_vit, device=device, dtype=torch.float32
-        )
+        vit_features = torch.randn(bs_vit, l_vit, c_vit, device=device, dtype=torch.float32)
 
         log("Running PCA with PyTorch manual SVD...")
         reduced_vit_features_torch = feature_pca_torch(vit_features, pca_k=pca_k_vit)
@@ -464,9 +442,7 @@ if __name__ == "__main__":
         bs_cnn, c_cnn, h_cnn, w_cnn = 2, 512, 14, 14
         pca_k_cnn = 32
         log("\n--- Testing 4D CNN-like Features ---")
-        cnn_features = torch.randn(
-            bs_cnn, c_cnn, h_cnn, w_cnn, device=device, dtype=torch.float32
-        )
+        cnn_features = torch.randn(bs_cnn, c_cnn, h_cnn, w_cnn, device=device, dtype=torch.float32)
 
         log("Running PCA with PyTorch manual SVD...")
         reduced_cnn_features_torch = feature_pca_torch(cnn_features, pca_k=pca_k_cnn)
@@ -488,9 +464,7 @@ if __name__ == "__main__":
                 if len(_shape) == 3:
                     c = _shape[-1]  # [bs, l, c]
                     data = einops.rearrange(img_feat, "bs l c -> (bs l) c")
-                    _back_kwargs = dict(
-                        pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1]
-                    )
+                    _back_kwargs = dict(pattern="(bs l) k -> bs l k", k=pca_k, bs=_shape[0], l=_shape[1])
                 else:
                     c = _shape[1]
                     data = einops.rearrange(img_feat, "bs c h w -> (bs h w) c")
@@ -508,12 +482,8 @@ if __name__ == "__main__":
                 pca = cuML_PCA(n_components=pca_k)
                 projected_data = pca.fit_transform(data)
 
-                img_feats_reduced_flat = torch.as_tensor(
-                    projected_data, device=data.device, dtype=img_feat.dtype
-                )
-                img_feats_reduced = einops.rearrange(
-                    img_feats_reduced_flat, **_back_kwargs
-                )
+                img_feats_reduced_flat = torch.as_tensor(projected_data, device=data.device, dtype=img_feat.dtype)
+                img_feats_reduced = einops.rearrange(img_feats_reduced_flat, **_back_kwargs)
                 return img_feats_reduced
 
             log("Running PCA with cuML...")

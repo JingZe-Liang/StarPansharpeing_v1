@@ -34,8 +34,7 @@ class LrUpdaterHook(Hook):
         if warmup is not None:
             if warmup not in ["constant", "linear", "exp"]:
                 raise ValueError(
-                    f'"{warmup}" is not a supported type for warming up, valid'
-                    ' types are "constant" and "linear"'
+                    f'"{warmup}" is not a supported type for warming up, valid types are "constant" and "linear"'
                 )
         if warmup is not None:
             assert warmup_iters > 0, '"warmup_iters" must be a positive integer'
@@ -72,9 +71,7 @@ class LrUpdaterHook(Hook):
         if isinstance(runner.optimizer, dict):
             lr_groups = {}
             for k in runner.optimizer.keys():
-                _lr_group = [
-                    self.get_lr(runner, _base_lr) for _base_lr in self.base_lr[k]
-                ]
+                _lr_group = [self.get_lr(runner, _base_lr) for _base_lr in self.base_lr[k]]
                 lr_groups.update({k: _lr_group})
 
             return lr_groups
@@ -114,9 +111,7 @@ class LrUpdaterHook(Hook):
         else:
             for group in runner.optimizer.param_groups:
                 group.setdefault("initial_lr", group["lr"])
-            self.base_lr = [
-                group["initial_lr"] for group in runner.optimizer.param_groups
-            ]
+            self.base_lr = [group["initial_lr"] for group in runner.optimizer.param_groups]
 
     def before_train_epoch(self, runner):
         if self.warmup_iters is None:
@@ -287,14 +282,8 @@ class FlatCosineAnnealingLrUpdaterHook(LrUpdaterHook):
 
     def __init__(self, start_percent=0.75, min_lr=None, min_lr_ratio=None, **kwargs):
         assert (min_lr is None) ^ (min_lr_ratio is None)
-        if (
-            start_percent < 0
-            or start_percent > 1
-            or not isinstance(start_percent, float)
-        ):
-            raise ValueError(
-                f"expected float between 0 and 1 start_percent, but got {start_percent}"
-            )
+        if start_percent < 0 or start_percent > 1 or not isinstance(start_percent, float):
+            raise ValueError(f"expected float between 0 and 1 start_percent, but got {start_percent}")
         self.start_percent = start_percent
         self.min_lr = min_lr
         self.min_lr_ratio = min_lr_ratio
@@ -335,9 +324,7 @@ class CosineRestartLrUpdaterHook(LrUpdaterHook):
             Default: None.
     """
 
-    def __init__(
-        self, periods, restart_weights=[1], min_lr=None, min_lr_ratio=None, **kwargs
-    ):
+    def __init__(self, periods, restart_weights=[1], min_lr=None, min_lr_ratio=None, **kwargs):
         assert (min_lr is None) ^ (min_lr_ratio is None)
         self.periods = periods
         self.min_lr = min_lr
@@ -348,9 +335,7 @@ class CosineRestartLrUpdaterHook(LrUpdaterHook):
         )
         super(CosineRestartLrUpdaterHook, self).__init__(**kwargs)
 
-        self.cumulative_periods = [
-            sum(self.periods[0 : i + 1]) for i in range(0, len(self.periods))
-        ]
+        self.cumulative_periods = [sum(self.periods[0 : i + 1]) for i in range(0, len(self.periods))]
 
     def get_lr(self, runner, base_lr):
         if self.by_epoch:
@@ -391,9 +376,7 @@ def get_position_from_periods(iteration, cumulative_periods):
     for i, period in enumerate(cumulative_periods):
         if iteration < period:
             return i
-    raise ValueError(
-        f"Current iteration {iteration} exceeds cumulative_periods {cumulative_periods}"
-    )
+    raise ValueError(f"Current iteration {iteration} exceeds cumulative_periods {cumulative_periods}")
 
 
 @HOOKS.register_module()
@@ -431,20 +414,11 @@ class CyclicLrUpdaterHook(LrUpdaterHook):
         if isinstance(target_ratio, float):
             target_ratio = (target_ratio, target_ratio / 1e5)
         elif isinstance(target_ratio, tuple):
-            target_ratio = (
-                (target_ratio[0], target_ratio[0] / 1e5)
-                if len(target_ratio) == 1
-                else target_ratio
-            )
+            target_ratio = (target_ratio[0], target_ratio[0] / 1e5) if len(target_ratio) == 1 else target_ratio
         else:
-            raise ValueError(
-                "target_ratio should be either float "
-                f"or tuple, got {type(target_ratio)}"
-            )
+            raise ValueError(f"target_ratio should be either float or tuple, got {type(target_ratio)}")
 
-        assert len(target_ratio) == 2, (
-            '"target_ratio" must be list or tuple of two floats'
-        )
+        assert len(target_ratio) == 2, '"target_ratio" must be list or tuple of two floats'
         assert 0 <= step_ratio_up < 1.0, '"step_ratio_up" must be in range [0,1)'
 
         self.target_ratio = target_ratio
@@ -453,10 +427,7 @@ class CyclicLrUpdaterHook(LrUpdaterHook):
         self.lr_phases = []  # init lr_phases
         # validate anneal_strategy
         if anneal_strategy not in ["cos", "linear"]:
-            raise ValueError(
-                'anneal_strategy must be one of "cos" or '
-                f'"linear", instead got {anneal_strategy}'
-            )
+            raise ValueError(f'anneal_strategy must be one of "cos" or "linear", instead got {anneal_strategy}')
         elif anneal_strategy == "cos":
             self.anneal_func = annealing_cos
         elif anneal_strategy == "linear":
@@ -471,9 +442,7 @@ class CyclicLrUpdaterHook(LrUpdaterHook):
         # total lr_phases are separated as up and down
         max_iter_per_phase = runner.max_iters // self.cyclic_times
         iter_up_phase = int(self.step_ratio_up * max_iter_per_phase)
-        self.lr_phases.append(
-            [0, iter_up_phase, max_iter_per_phase, 1, self.target_ratio[0]]
-        )
+        self.lr_phases.append([0, iter_up_phase, max_iter_per_phase, 1, self.target_ratio[0]])
         self.lr_phases.append(
             [
                 iter_up_phase,
@@ -555,29 +524,19 @@ class OneCycleLrUpdaterHook(LrUpdaterHook):
         else:
             assert not kwargs["by_epoch"], 'currently only support "by_epoch" = False'
         if not isinstance(max_lr, (numbers.Number, list, dict)):
-            raise ValueError(
-                "the type of max_lr must be the one of list or "
-                f"dict, but got {type(max_lr)}"
-            )
+            raise ValueError(f"the type of max_lr must be the one of list or dict, but got {type(max_lr)}")
         self._max_lr = max_lr
         if total_steps is not None:
             if not isinstance(total_steps, int):
-                raise ValueError(
-                    f"the type of total_steps must be int, butgot {type(total_steps)}"
-                )
+                raise ValueError(f"the type of total_steps must be int, butgot {type(total_steps)}")
             self.total_steps = total_steps
         # validate pct_start
         if pct_start < 0 or pct_start > 1 or not isinstance(pct_start, float):
-            raise ValueError(
-                f"expected float between 0 and 1 pct_start, but got {pct_start}"
-            )
+            raise ValueError(f"expected float between 0 and 1 pct_start, but got {pct_start}")
         self.pct_start = pct_start
         # validate anneal_strategy
         if anneal_strategy not in ["cos", "linear"]:
-            raise ValueError(
-                'anneal_strategy must be one of "cos" or '
-                f'"linear", instead got {anneal_strategy}'
-            )
+            raise ValueError(f'anneal_strategy must be one of "cos" or "linear", instead got {anneal_strategy}')
         elif anneal_strategy == "cos":
             self.anneal_func = annealing_cos
         elif anneal_strategy == "linear":
@@ -615,20 +574,12 @@ class OneCycleLrUpdaterHook(LrUpdaterHook):
                 group.setdefault("initial_lr", lr)
 
         if self.three_phase:
-            self.lr_phases.append(
-                [float(self.pct_start * total_steps) - 1, 1, self.div_factor]
-            )
-            self.lr_phases.append(
-                [float(2 * self.pct_start * total_steps) - 2, self.div_factor, 1]
-            )
+            self.lr_phases.append([float(self.pct_start * total_steps) - 1, 1, self.div_factor])
+            self.lr_phases.append([float(2 * self.pct_start * total_steps) - 2, self.div_factor, 1])
             self.lr_phases.append([total_steps - 1, 1, 1 / self.final_div_factor])
         else:
-            self.lr_phases.append(
-                [float(self.pct_start * total_steps) - 1, 1, self.div_factor]
-            )
-            self.lr_phases.append(
-                [total_steps - 1, self.div_factor, 1 / self.final_div_factor]
-            )
+            self.lr_phases.append([float(self.pct_start * total_steps) - 1, 1, self.div_factor])
+            self.lr_phases.append([total_steps - 1, self.div_factor, 1 / self.final_div_factor])
 
     def get_lr(self, runner, base_lr):
         curr_iter = runner.iter
@@ -679,10 +630,7 @@ def format_param(name, optim, param):
         return [param] * len(optim.param_groups)
     elif isinstance(param, (list, tuple)):  # multi param groups
         if len(param) != len(optim.param_groups):
-            raise ValueError(
-                f"expected {len(optim.param_groups)} "
-                f"values for {name}, got {len(param)}"
-            )
+            raise ValueError(f"expected {len(optim.param_groups)} values for {name}, got {len(param)}")
         return param
     else:  # multi optimizers
         if name not in param:

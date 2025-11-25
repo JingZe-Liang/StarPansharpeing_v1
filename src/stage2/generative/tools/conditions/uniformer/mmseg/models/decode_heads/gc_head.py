@@ -20,9 +20,7 @@ class GCHead(FCNHead):
             Options are 'channel_add', 'channel_mul'. Default: ('channel_add',)
     """
 
-    def __init__(
-        self, ratio=1 / 4.0, pooling_type="att", fusion_types=("channel_add",), **kwargs
-    ):
+    def __init__(self, ratio=1 / 4.0, pooling_type="att", fusion_types=("channel_add",), **kwargs):
         super(GCHead, self).__init__(num_convs=2, **kwargs)
         self.ratio = ratio
         self.pooling_type = pooling_type

@@ -62,9 +62,7 @@ def _jvp_flash_attention(
 ):
     """JVP-compatible flash attention implementation"""
     if not JVP_FLASH_ATTN_ENABLED:
-        logger.warning(
-            "JVP Flash Attention not available, falling back to math attention"
-        )
+        logger.warning("JVP Flash Attention not available, falling back to math attention")
         return _jvp_math_attention(module, query, key, value, attention_mask, dropout)
 
     if dropout > 0:
@@ -74,9 +72,7 @@ def _jvp_flash_attention(
         x = jvp_attention(query, key, value, attn_mask=attention_mask)
         return x, None
     except Exception as e:
-        logger.warning(
-            f"JVP Flash Attention failed: {e}, falling back to math attention"
-        )
+        logger.warning(f"JVP Flash Attention failed: {e}, falling back to math attention")
         return _jvp_math_attention(module, query, key, value, attention_mask, dropout)
 
 
@@ -207,22 +203,16 @@ class Attention(nn.Module):
             hidden_states = rearrange(hidden_states, "B C H W -> B (H W) C")
 
         batch_size, sequence_length, _ = (
-            hidden_states.shape
-            if cross_hidden_states is None
-            else cross_hidden_states.shape
+            hidden_states.shape if cross_hidden_states is None else cross_hidden_states.shape
         )
 
         if not self.training and self._cache_attn_mask is not None:
             # If eval and have cached attention mask, use it
             attention_mask = self._cache_attn_mask
         elif attention_mask is not None:
-            attention_mask = self.prepare_attention_mask(
-                attention_mask, sequence_length, batch_size
-            )
+            attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
             # scaled_dot_product_attention expects attention_mask shape to be
-            attention_mask = attention_mask.view(
-                batch_size, self.heads, -1, attention_mask.shape[-1]
-            )
+            attention_mask = attention_mask.view(batch_size, self.heads, -1, attention_mask.shape[-1])
 
         ######## Q, K, V #########
         query = self.to_q(hidden_states)
@@ -267,18 +257,14 @@ class Attention(nn.Module):
         # output of sdp: (batch, num_heads, seq_len, head_dim)
         hidden_states = self._process_attn(query, key, value, attn_mask=attention_mask)
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(
-            batch_size, -1, self.heads * head_dim
-        )
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
 
         hidden_states = self.out_proj(hidden_states)
         hidden_states = self.out_drop(hidden_states)
 
         if input_ndim == 4:
-            hidden_states = hidden_states.transpose(-1, -2).reshape(
-                batch_size, channel, height, width
-            )
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
 
         if self.residual_connection:
             hidden_states = hidden_states + residual

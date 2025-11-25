@@ -40,9 +40,11 @@ vq_loss:
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
-    repa_model_type: pe
-    repa_model_name: "PE-Spatial-L14-448"
-    repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
+    repa_model_type: dinov3
+    repa_model_name: "dinov3_vitl16"
+    # repa_model_type: pe
+    # repa_model_name: "PE-Spatial-L14-448"
+    # repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
     feature_normalize: false

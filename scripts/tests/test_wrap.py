@@ -24,7 +24,5 @@ if __name__ == "__main__":
     print("Non-wrapped numpy function result:")
     print(non_wrap_result)
 
-    assert np.allclose(result.cpu().numpy(), non_wrap_result), (
-        "Wrapped and non-wrapped results do not match!"
-    )
+    assert np.allclose(result.cpu().numpy(), non_wrap_result), "Wrapped and non-wrapped results do not match!"
     print("Test passed: Wrapped and non-wrapped results match.")

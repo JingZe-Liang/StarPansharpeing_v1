@@ -47,11 +47,7 @@ class Spatial2DNatStage(nn.Module):
                 norm_eps=norm_eps,
                 drop_path=drop_path,
             )
-            block_cls = (
-                Spatial2DNATBlockConditional
-                if self._use_condition
-                else Spatial2DNATBlock
-            )
+            block_cls = Spatial2DNATBlockConditional if self._use_condition else Spatial2DNATBlock
             blocks = [
                 block_cls(
                     in_channels=stage_in_chs if i == 0 else dim,
@@ -73,9 +69,7 @@ class Spatial2DNatStage(nn.Module):
     def forward(self, x, cond=None):
         # interpolate the condition
         if cond is not None:
-            cond = nn.functional.interpolate(
-                cond, size=x.shape[2:], mode="bilinear", align_corners=False
-            )
+            cond = nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
         def _closure(x, cond):
             for stage in self.layers:

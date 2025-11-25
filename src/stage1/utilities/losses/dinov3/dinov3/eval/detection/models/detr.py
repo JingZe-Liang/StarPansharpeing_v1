@@ -19,6 +19,7 @@
 """
 Deformable DETR model and criterion classes.
 """
+
 import math
 
 import torch

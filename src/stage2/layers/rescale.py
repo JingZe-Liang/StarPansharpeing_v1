@@ -21,11 +21,7 @@ class RescaleOutput(nn.Module):
     ):
         super().__init__()
         self.rescale = rescale
-        self.out_val_range = (
-            ValueRange(out_val_range)
-            if isinstance(out_val_range, str)
-            else out_val_range
-        )
+        self.out_val_range = ValueRange(out_val_range) if isinstance(out_val_range, str) else out_val_range
 
     def forward(self, x):
         if self.rescale is True:
@@ -80,9 +76,7 @@ class FeaturesToDepth(torch.nn.Module):
         self.min_depth = min_depth
         self.max_depth = max_depth
         assert bins_strategy in ["linear", "log"], "Support bins_strategy: linear, log"
-        assert norm_strategy in ["linear", "softmax", "sigmoid"], (
-            "Support norm_strategy: linear, softmax, sigmoid"
-        )
+        assert norm_strategy in ["linear", "softmax", "sigmoid"], "Support norm_strategy: linear, softmax, sigmoid"
 
         self.bins_strategy = bins_strategy
         self.norm_strategy = norm_strategy
@@ -91,9 +85,7 @@ class FeaturesToDepth(torch.nn.Module):
         n_bins = x.shape[1]  # N n_bins H W
         if n_bins > 1:
             if self.bins_strategy == "linear":
-                bins = torch.linspace(
-                    self.min_depth, self.max_depth, n_bins, device=x.device
-                )
+                bins = torch.linspace(self.min_depth, self.max_depth, n_bins, device=x.device)
             elif self.bins_strategy == "log":
                 bins = torch.linspace(
                     torch.log(torch.tensor(self.min_depth)),

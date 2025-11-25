@@ -1,0 +1,287 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer ==========
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
+  - tokenizer: cosmos_hybrid_pure_cnn_decoder_f16c64
+  - quantizer: quant
+  - accelerator: base
+  - vq_loss: remote_clip_RN50
+  # self ============
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+
+tokenizer:
+  cnn_cfg:
+    model:
+      latent_channels: 64
+    quantizer_type: null
+    use_channel_drop: false
+    channel_drop_config:
+      drop_type: ${list:[16,32,48]}
+      max_channels: 64
+      drop_prob: 0.5
+
+vq_loss:
+  # perceptual loss
+  perceptual_weight: 0.1
+  # repa loss
+  repa_loss_weight: 0.1
+  repa_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 512 # null for no resize
+    repa_img_size: 512
+    # repa_model_type: dinov3
+    # repa_model_name: "dinov3_vitl16"
+    repa_model_type: pe
+    repa_model_name: "PE-Spatial-L14-448"
+    repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
+    feature_resample_type: match_teacher
+    loss_type: hier_distillation
+    feature_normalize: false
+    get_hier_teacher_feature: true
+  # semantic distillatin loss
+  sem_distill_weight: 0.1
+  sem_distill_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 512 # null for no resize
+    repa_img_size: 512
+    repa_model_type: siglip2
+    repa_model_name: "google/siglip2-large-patch16-512"
+    feature_resample_type: match_teacher
+    loss_type: hier_distillation
+    feature_normalize: false
+    get_hier_teacher_feature: true
+  # vf loss
+  vf_loss_weight:
+  vf_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean #${dataset.rgb_channels}
+    img_resize: 384
+    repa_img_size: 384
+    distmat_margin: 0.25
+    cos_margin: 0.5
+    repa_model_name: "dinov3_vitl16"
+  # gram loss
+  gram_loss_weight:
+  gram_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 384 # null for no resize
+    repa_img_size: 384
+    repa_model_name: "dinov3_vitl16"
+  # quantizer loss
+  quantizer_type:
+  quantizer_options:
+  # discriminator loss
+  disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_in_channels: 512 #${dataset.channels} ## interp conv
+  disc_ndf: 128
+  disc_num_layers: 3
+  use_actnorm: false
+  disc_norm_type: bn2d # gn or bn? works with patchgan_v2; bn does not support the r1, r2 loss
+  disc_start_for_g: 0
+  disc_start_for_d: 0
+  disc_loss: relative
+  ssim_weight: 0.04
+  disc_weight: 0.4
+  reconstruction_loss_type: mse
+  # r1, r2 loss seems not necessary
+  # disc_reg_gamma: 1
+  # disc_reg_type: r1r2
+  # disc_reg_freq: 2
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
+  update_after_step: 1000
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  update_model_with_ema_every: 5_000
+
+train:
+  tokenizer_name: hybrid_pure_cnn_decoder_f16c64
+  proj_dir: runs/stage1_cosmos_hybrid_pure_cnn_decoder_f16c64
+  finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
+  max_grad_norm: 3.0
+  track_metrics: true
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 500
+  max_steps: 1_000_000
+  save_every: 1000
+  grad_checkpoint: true
+  resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
+  ema_load_path: #runs/stage1_cosmos_hybrid/2025-11-11_23-38-40_hybrid_cosmos_f16c64/ema
+  compile_model: false
+  only_load_tokenizer: false
+  seperate_enc_dec: false
+
+  # augmentations
+  aug_pipeline_train_obj: #decoder_deg
+  aug_pipeline:
+    # _target_: src.stage2.denoise.utils.noise_adder.get_tokenizer_trainer_noise_adder
+    # p: 0.1
+    # use_torch: true
+
+  finetune_cfg:
+    refine_decoder_head_n_layers: all
+    adapt_latent_n_layers: 0
+
+  tokenizer_optimizer:
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    # _target_: src.utilities.optim.get_muon_triton_optimizer
+    # _partial_: true
+    # general_defaults:
+    #   lr: 4.0e-4
+    # muon_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.1
+    #   momentum: 0.95
+    # adamw_defaults:
+    #   lr: 2.0e-4
+    #   weight_decay: 0.0
+    #   betas: [0.9, 0.95]
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.95, 0.99]
+    oned_param_algo: lion
+    use_triton: true
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.0
+
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 1.0e-4
+    # betas: ${tuple:[0.9, 0.99]}
+    # caution: true
+    # mars: false
+    # foreach: true
+    # eps: 1.0e-9
+
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
+    # eps: 1.0e-8
+    # betas: [0.95, 0.99]
+    # # foreach: true
+    # fused: true
+
+  disc_optimizer:
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    # _target_: src.utilities.optim.get_muon_triton_optimizer
+    # _partial_: true
+    # general_defaults:
+    #   lr: 4.0e-4
+    # muon_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.1
+    #   momentum: 0.95
+    # adamw_defaults:
+    #   lr: 2.0e-4
+    #   weight_decay: 0.0
+    #   betas: [0.9, 0.95]
+
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _partial_: true
+    # betas: [0.5, 0.9]
+    # oned_param_algo: lion
+    # muon_params_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.01
+    # oned_params_defaults:
+    #   lr: 2.0e-4
+    #   weight_decay: 0.0
+
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 4.0e-4
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
+    # fused: true
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+    # _target_: transformers.optimization.get_constant_schedule_with_warmup
+    # _partial_: true
+    # num_warmup_steps: 1000
+
+  log:
+    run_comment: hybrid_cosmos_f16c64_pure_cnn_decoder
+    log_with_time: true
+    visualize_every: 500
+    log_every: 10
+
+  debug: true
+
+model_sampling: {}
+
+val:
+  val_duration: 1000
+  max_val_iters: 200 # val only `max_val_iters` batches

@@ -21,9 +21,7 @@ def boxes_iou_bev(boxes_a, boxes_b):
     """
     ans_iou = boxes_a.new_zeros(torch.Size((boxes_a.shape[0], boxes_b.shape[0])))
 
-    ext_module.iou3d_boxes_iou_bev_forward(
-        boxes_a.contiguous(), boxes_b.contiguous(), ans_iou
-    )
+    ext_module.iou3d_boxes_iou_bev_forward(boxes_a.contiguous(), boxes_b.contiguous(), ans_iou)
 
     return ans_iou
 

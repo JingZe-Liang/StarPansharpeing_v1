@@ -85,9 +85,7 @@ class Sobel(nn.Module):
         G2 = torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]]) / 4
         G3 = torch.tensor([[2.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, -2.0]]) / 4
         G4 = torch.tensor([[0.0, -1.0, -2.0], [1.0, 0.0, -1.0], [2.0, 1.0, 0.0]]) / 4
-        G = torch.cat(
-            [G1.unsqueeze(0), G2.unsqueeze(0), G3.unsqueeze(0), G4.unsqueeze(0)], 0
-        )
+        G = torch.cat([G1.unsqueeze(0), G2.unsqueeze(0), G3.unsqueeze(0), G4.unsqueeze(0)], 0)
         G = G.unsqueeze(1).cuda(device=device_ids[0])
         self.filter.weight = nn.Parameter(G, requires_grad=False)
 

@@ -29,15 +29,10 @@ except ImportError:
 
 def lt_hook():
     lt.monkey_patch()
-    logger.warning(
-        "Lovely-Tensors hook is enabled. "
-        "Make sure only call this function in trackback!"
-    )
+    logger.warning("Lovely-Tensors hook is enabled. Make sure only call this function in trackback!")
 
 
 if sys.version_info >= (3, 12) and LT_ENABLED:
     # only patch tensor when any error raised, it won't slow down the training process
     dowhen.do(lt_hook).when(logger.catch, "from_decorator = self._from_decorator")
-    logger.info(
-        "Dowhen hook is enabled. Make sure only call this function in trackback!"
-    )
+    logger.info("Dowhen hook is enabled. Make sure only call this function in trackback!")

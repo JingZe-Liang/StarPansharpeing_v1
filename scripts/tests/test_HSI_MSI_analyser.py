@@ -31,9 +31,7 @@ const = 2047.0
 analysis(
     d["Z_CNMF"],
     d["HSI"],
-    torch.nn.functional.interpolate(
-        d["HSI"], scale_factor=4, mode="bilinear", align_corners=False
-    ),
+    torch.nn.functional.interpolate(d["HSI"], scale_factor=4, mode="bilinear", align_corners=False),
     d["MSI"],
 )
 

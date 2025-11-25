@@ -30,9 +30,7 @@ def set_random_seed(seed, deterministic=False):
         torch.backends.cudnn.benchmark = False
 
 
-def train_segmentor(
-    model, dataset, cfg, distributed=False, validate=False, timestamp=None, meta=None
-):
+def train_segmentor(model, dataset, cfg, distributed=False, validate=False, timestamp=None, meta=None):
     """Launch segmentor training."""
     logger = get_root_logger(cfg.log_level)
 
@@ -72,8 +70,7 @@ def train_segmentor(
     if cfg.get("runner") is None:
         cfg.runner = {"type": "IterBasedRunner", "max_iters": cfg.total_iters}
         warnings.warn(
-            "config is now expected to have a `runner` section, "
-            "please set `runner` in your config.",
+            "config is now expected to have a `runner` section, please set `runner` in your config.",
             UserWarning,
         )
 

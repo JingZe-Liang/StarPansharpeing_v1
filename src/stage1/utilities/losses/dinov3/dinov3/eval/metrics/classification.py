@@ -256,7 +256,7 @@ class GroupByAnyMatchAccuracy(AnyMatchAccuracy):
         results_dict = {"top-1": global_score}
         for label_name, label_value in self._groupby_labels.items():
             groupby_results = self.groupby_metric(label_value, indices, tp)
-            printable_results = {k: f"{100. * v.item():.4g}" for k, v in groupby_results.items()}
+            printable_results = {k: f"{100.0 * v.item():.4g}" for k, v in groupby_results.items()}
             logger.info(f"Scores by {label_name} {printable_results}\n")
             results_dict = {**results_dict, **groupby_results}
         return results_dict

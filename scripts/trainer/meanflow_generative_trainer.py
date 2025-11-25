@@ -90,12 +90,8 @@ class MeanFlowGenerativeTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -124,10 +120,7 @@ class MeanFlowGenerativeTrainer:
 
     def setup_meanflow_model(self):
         self.flow_model = hydra.utils.instantiate(self.cfg.meanflow_model)
-        flow_name = (
-            getattr(self.train_cfg, "meanflow_name", None)
-            or self.flow_model.__class__.__name__
-        )
+        flow_name = getattr(self.train_cfg, "meanflow_name", None) or self.flow_model.__class__.__name__
         self.log_msg(f"use meanflow model: {flow_name}")
 
     def setup_tokenizer(self):
@@ -138,34 +131,26 @@ class MeanFlowGenerativeTrainer:
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
         if self.train_cfg.seperate_enc_dec:
-            self.log_msg(
-                "[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder"
-            )
+            self.log_msg("[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder")
             tokenizer_config: dict = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.enc_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="encoder",
-                )
+            self.tokenizer_encoder, self._enc_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.enc_path,
+                tokenizer_config,
+                device=self.device,
+                part="encoder",
             )
-            self.tokenizer_decoder, self._dec_model_mody_keys = (
-                load_jit_model_shape_matched(
-                    self.cfg.tokenizer.dec_path,
-                    tokenizer_config,
-                    device=self.device,
-                    part="decoder",
-                )
+            self.tokenizer_decoder, self._dec_model_mody_keys = load_jit_model_shape_matched(
+                self.cfg.tokenizer.dec_path,
+                tokenizer_config,
+                device=self.device,
+                part="decoder",
             )
             self.tokenizer_encoder: nn.Module
             self.tokenizer_decoder: nn.Module
 
             # quantizer
             if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(
-                    self.device
-                )
+                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(self.device)
             elif hasattr(self.tokenizer, "quantizer"):
                 self.quantizer = self.tokenizer.quantizer
             else:
@@ -181,37 +166,25 @@ class MeanFlowGenerativeTrainer:
                 self.log_msg("[Quantizer]: quantizer has parameters")
 
         else:
-            self.log_msg(
-                "[Tokenizer]: Use encoder, decoder, and quantizer in one class"
-            )
+            self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
             self.norm_z = False  # in the model, not in trainer
             self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
 
             if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(
-                    f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}"
-                )
+                self.log_msg(f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}")
                 self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
                     base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(
-                        self.train_cfg, "base_model_pretrained_path", None
-                    ),
+                    base_model_pretrained_path=getattr(self.train_cfg, "base_model_pretrained_path", None),
                     peft_pretrained_path=self.train_cfg.peft_pretrained_path,
                     merge_and_unload=True,
                 )
 
             # quantizer in the tokenizer, not handled by this trainer
-            self.use_quantizer = hasattr(
-                self.tokenizer, "quantizer"
-            )  # vq, bsq, fsq, kl
+            self.use_quantizer = hasattr(self.tokenizer, "quantizer")  # vq, bsq, fsq, kl
             self.quantizer = None
-            self.log_msg(
-                f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}"
-            )
+            self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
             if self.use_quantizer:
-                self.log_msg(
-                    f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}"
-                )
+                self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
 
         # set to eval
         if self.sep_enc_dec:
@@ -267,9 +240,7 @@ class MeanFlowGenerativeTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}:{file.name}:{line}]</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
             self.logger.add(
@@ -325,9 +296,7 @@ class MeanFlowGenerativeTrainer:
             if self.accelerator.is_main_process:
                 self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
                 self.accelerator.init_trackers("train")
-                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(
-                    "tensorboard"
-                )
+                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker("tensorboard")
 
         return log_file
 
@@ -437,8 +406,7 @@ class MeanFlowGenerativeTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
@@ -446,36 +414,25 @@ class MeanFlowGenerativeTrainer:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                     params = params_getter(with_name=False)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_flow_model_params = (
-                lambda with_name: self.flow_model.named_parameters()
-                if with_name
-                else self.flow_model.parameters()
+                lambda with_name: self.flow_model.named_parameters() if with_name else self.flow_model.parameters()
             )
-            flow_opt = _optimizer_creater(
-                self.train_cfg.flow_model_optim, _get_flow_model_params
-            )
+            flow_opt = _optimizer_creater(self.train_cfg.flow_model_optim, _get_flow_model_params)
         else:
             flow_opt = DummyOptim([{"params": list(self.flow_model.parameters())}])
 
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            flow_sched = hydra.utils.instantiate(self.train_cfg.flow_model_sched)(
-                optimizer=flow_opt
-            )
+            flow_sched = hydra.utils.instantiate(self.train_cfg.flow_model_sched)(optimizer=flow_opt)
         else:
             flow_sched = DummyScheduler(flow_opt)
 
@@ -535,13 +492,9 @@ class MeanFlowGenerativeTrainer:
         if self.train_cfg.prepare_tokenizer_in_accelerator:
             if self.sep_enc_dec:
                 # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(
-                    self.tokenizer_encoder
-                )
+                self.tokenizer_encoder = self.accelerator.prepare(self.tokenizer_encoder)
                 self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(
-                    self.tokenizer_decoder
-                )
+                self.tokenizer_decoder = self.accelerator.prepare(self.tokenizer_decoder)
                 self.accelerator._models.pop(-1)
             else:
                 self.tokenizer = self.accelerator.prepare(self.tokenizer)
@@ -616,9 +569,7 @@ class MeanFlowGenerativeTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -633,9 +584,7 @@ class MeanFlowGenerativeTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -643,9 +592,7 @@ class MeanFlowGenerativeTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -689,10 +636,7 @@ class MeanFlowGenerativeTrainer:
         else:
             assert self.online_tokenize and (
                 hasattr(self, "tokenizer")
-                or (
-                    hasattr(self, "tokenizer_encoder")
-                    and hasattr(self, "tokenizer_decoder")
-                )
+                or (hasattr(self, "tokenizer_encoder") and hasattr(self, "tokenizer_decoder"))
             ), "tokenizer not found for online tokenize"
             hrms_latent = self.forward_tokenizer(batch["hrms"])["latent"]
 
@@ -703,9 +647,7 @@ class MeanFlowGenerativeTrainer:
         with self.accelerator.accumulate(self.flow_model):
             # train pansharpening model
             train_out = self.train_flow_step(hrms_latent.detech())
-            pred_img = self.forward_tokenizer(train_out["model_x0"], mode="decode")[
-                "recon"
-            ]
+            pred_img = self.forward_tokenizer(train_out["model_x0"], mode="decode")["recon"]
 
             # track reconstruction quality
             if (
@@ -738,17 +680,11 @@ class MeanFlowGenerativeTrainer:
             # tensorboard log
             self.tenb_log_any("metric", train_out["log_mf_losses"], self.global_step)
 
-        if (
-            quality_track_n >= 0
-            and self.global_step % quality_track_n == 0
-            and self.global_step >= quality_track_after
-        ):
+        if quality_track_n >= 0 and self.global_step % quality_track_n == 0 and self.global_step >= quality_track_after:
             ...
 
     def format_log(self, log_mf_loss: dict) -> str:
-        def dict_round_to_list_str(
-            d: dict, n_round: int = 3, select: list[str] | None = None
-        ):
+        def dict_round_to_list_str(d: dict, n_round: int = 3, select: list[str] | None = None):
             strings = []
             for k, v in d.items():
                 if select is not None and k not in select:
@@ -792,17 +728,12 @@ class MeanFlowGenerativeTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def finite_val_loader(self):
@@ -857,9 +788,7 @@ class MeanFlowGenerativeTrainer:
             )
         elif self.val_cfg.max_val_iters <= 0:
             tbar = self.finite_val_loader()
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
+            self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
         else:
             raise ValueError("max_val_iters must be greater than 0 or less than 0")
 
@@ -926,9 +855,7 @@ class MeanFlowGenerativeTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.accelerator.save_model(
-            self.ema_flow_model.ema_model, ema_path / "flow_model"
-        )
+        self.accelerator.save_model(self.ema_flow_model.ema_model, ema_path / "flow_model")
 
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
@@ -939,17 +866,13 @@ class MeanFlowGenerativeTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.flow_model, ema_path / "flow_model", strict=strict
-        )
+        accelerate.load_checkpoint_in_model(self.flow_model, ema_path / "flow_model", strict=strict)
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -982,19 +905,13 @@ class MeanFlowGenerativeTrainer:
             if c in (1, 3):
                 x_np = to_img(x)
             elif hasattr(self.dataset_cfg, "consts"):
-                rgb_channels = to_cont(
-                    self.dataset_cfg.consts.rgb_channels
-                )  # _prefixed_rgb_channels[c]
+                rgb_channels = to_cont(self.dataset_cfg.consts.rgb_channels)  # _prefixed_rgb_channels[c]
                 x_np = to_img(x[:, rgb_channels])
-            elif hasattr(self.dataset_cfg, "rgb_channels") and callable(
-                self.dataset_cfg.rgb_channels
-            ):
+            elif hasattr(self.dataset_cfg, "rgb_channels") and callable(self.dataset_cfg.rgb_channels):
                 # rgb_channels is a callable function
                 x_np = to_img(self.dataset_cfg.rgb_channels(x))
             else:
-                raise ValueError(
-                    "rgb channels not found in dataset config and not callable"
-                )
+                raise ValueError("rgb channels not found in dataset config and not callable")
 
             return x_np
 

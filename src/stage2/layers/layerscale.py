@@ -14,17 +14,11 @@ class LayerScale(nn.Module):
         super().__init__()
         self.inplace = inplace
         self.gamma = nn.Parameter(torch.empty(dim, device=device))
-        self.init_values = (
-            float(init_values) if not isinstance(init_values, Tensor) else init_values
-        )
+        self.init_values = float(init_values) if not isinstance(init_values, Tensor) else init_values
         self.reset_parameters()  # 确保初始化被调用
 
     def reset_parameters(self):
-        init_val = (
-            float(self.init_values)
-            if not isinstance(self.init_values, Tensor)
-            else self.init_values
-        )
+        init_val = float(self.init_values) if not isinstance(self.init_values, Tensor) else self.init_values
         nn.init.constant_(self.gamma, init_val)
 
     def forward(self, x: Tensor) -> Tensor:

@@ -144,11 +144,7 @@ class SOAP(optim.Optimizer):
                         state,
                         precondition_frequency=group["precondition_frequency"],
                         precondition_1d=group["precondition_1d"],
-                        shampoo_beta=(
-                            group["shampoo_beta"]
-                            if group["shampoo_beta"] >= 0
-                            else group["betas"][1]
-                        ),
+                        shampoo_beta=(group["shampoo_beta"] if group["shampoo_beta"] >= 0 else group["betas"][1]),
                         max_precond_dim=group["max_precond_dim"],
                         merge_dims=group["merge_dims"],
                     )
@@ -178,9 +174,7 @@ class SOAP(optim.Optimizer):
                 # Decay the first and second moment running average coefficient
                 # In-place operations to update the averages at the same time
                 exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
-                exp_avg_sq.mul_(beta2).add_(
-                    grad_projected.square(), alpha=(1.0 - beta2)
-                )
+                exp_avg_sq.mul_(beta2).add_(grad_projected.square(), alpha=(1.0 - beta2))
 
                 denom = exp_avg_sq.sqrt().add_(group["eps"])
 
@@ -249,9 +243,7 @@ class SOAP(optim.Optimizer):
         Initializes the preconditioner matrices (L and R in the paper).
         """
         # -2: None, -1: []
-        state[
-            "GG0"
-        ] = -2  # Will hold all the preconditioner matrices (L and R in the paper).
+        state["GG0"] = -2  # Will hold all the preconditioner matrices (L and R in the paper).
         state["GG1"] = -2
         state["GG2"] = -2
         state["GG3"] = -2
@@ -261,9 +253,7 @@ class SOAP(optim.Optimizer):
             else:
                 tensor = torch.zeros(grad.shape[0], grad.shape[0], device=grad.device)
                 if isinstance(grad, DTensor):
-                    tensor = distribute_tensor(
-                        tensor, device_mesh=grad.device_mesh, placements=grad.placements
-                    )
+                    tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=grad.placements)
                 state["GG0"] = tensor
         else:
             if merge_dims:
@@ -338,9 +328,7 @@ class SOAP(optim.Optimizer):
         """
         if grad.dim() == 1:
             if precondition_1d and grad.shape[0] <= max_precond_dim:
-                state["GG0"].lerp_(
-                    grad.unsqueeze(1) @ grad.unsqueeze(0), 1 - state["shampoo_beta"]
-                )
+                state["GG0"].lerp_(grad.unsqueeze(1) @ grad.unsqueeze(0), 1 - state["shampoo_beta"])
         else:
             if merge_dims:
                 new_grad = self.merge_dims(grad, max_precond_dim)
@@ -349,18 +337,9 @@ class SOAP(optim.Optimizer):
                         outer_product = torch.tensordot(
                             new_grad,
                             new_grad,
-                            dims=[
-                                [
-                                    *chain(
-                                        range(idx), range(idx + 1, len(new_grad.shape))
-                                    )
-                                ]
-                            ]
-                            * 2,
+                            dims=[[*chain(range(idx), range(idx + 1, len(new_grad.shape)))]] * 2,
                         )
-                        state[f"GG{idx}"].lerp_(
-                            outer_product, 1 - state["shampoo_beta"]
-                        )
+                        state[f"GG{idx}"].lerp_(outer_product, 1 - state["shampoo_beta"])
             else:
                 for idx, sh in enumerate(grad.shape):
                     if sh <= max_precond_dim:
@@ -374,24 +353,17 @@ class SOAP(optim.Optimizer):
                             grad,
                             grad,
                             # Contracts across all dimensions except for k.
-                            dims=[[*chain(range(idx), range(idx + 1, len(grad.shape)))]]
-                            * 2,
+                            dims=[[*chain(range(idx), range(idx + 1, len(grad.shape)))]] * 2,
                         )
-                        state[f"GG{idx}"].lerp_(
-                            outer_product, 1 - state["shampoo_beta"]
-                        )
+                        state[f"GG{idx}"].lerp_(outer_product, 1 - state["shampoo_beta"])
 
-        if (
-            not isinstance(state["Q0"], torch.Tensor) and state["Q0"] == -2
-        ):  # not yet initialized
-            state["Q0"], state["Q1"], state["Q2"], state["Q3"] = (
-                self.get_orthogonal_matrix(
-                    [state["GG0"], state["GG1"], state["GG2"], state["GG3"]]
-                )
+        if not isinstance(state["Q0"], torch.Tensor) and state["Q0"] == -2:  # not yet initialized
+            state["Q0"], state["Q1"], state["Q2"], state["Q3"] = self.get_orthogonal_matrix(
+                [state["GG0"], state["GG1"], state["GG2"], state["GG3"]]
             )
         if state["step"] > 0 and state["step"] % state["precondition_frequency"] == 0:
-            state["Q0"], state["Q1"], state["Q2"], state["Q3"] = (
-                self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims)
+            state["Q0"], state["Q1"], state["Q2"], state["Q3"] = self.get_orthogonal_matrix_QR(
+                state, max_precond_dim, merge_dims
             )
 
     def project_back(self, grad, state, merge_dims=False, max_precond_dim=10000):
@@ -452,13 +424,9 @@ class SOAP(optim.Optimizer):
                 is_dtensor = True
                 m, meta = to_local(m, keep_sharded=False)
             try:
-                _, Q = torch.linalg.eigh(
-                    m + 1e-30 * torch.eye(m.shape[0], device=m.device)
-                )
+                _, Q = torch.linalg.eigh(m + 1e-30 * torch.eye(m.shape[0], device=m.device))
             except:
-                _, Q = torch.linalg.eigh(
-                    m.to(torch.float64) + 1e-30 * torch.eye(m.shape[0], device=m.device)
-                )
+                _, Q = torch.linalg.eigh(m.to(torch.float64) + 1e-30 * torch.eye(m.shape[0], device=m.device))
                 Q = Q.to(m.dtype)
             Q = torch.flip(Q, [1])
 

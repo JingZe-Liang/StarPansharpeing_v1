@@ -74,23 +74,16 @@ def _validate_callable_arguments(
     if args_count < required_params:
         if print_warning:
             logger.warning(
-                f"{func_name} requires at least {required_params} "
-                f"positional arguments, but got {args_count}"
+                f"{func_name} requires at least {required_params} positional arguments, but got {args_count}"
             )
         return False, filtered_kwargs
 
     if args_count > param_count:
         # Check if function accepts *args
-        has_var_args = any(
-            param.kind == inspect.Parameter.VAR_POSITIONAL
-            for param in func_params.values()
-        )
+        has_var_args = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in func_params.values())
         if not has_var_args:
             if print_warning:
-                logger.warning(
-                    f"{func_name} accepts at most {param_count} "
-                    f"positional arguments, but got {args_count}"
-                )
+                logger.warning(f"{func_name} accepts at most {param_count} positional arguments, but got {args_count}")
             return False, filtered_kwargs
 
     return True, filtered_kwargs
@@ -181,8 +174,7 @@ def maybe_call(
         if not isinstance(func, str):
             if print_warning:
                 logger.warning(
-                    f"When both cls and func are provided, func must be a string "
-                    f"method name, got {type(func)}"
+                    f"When both cls and func are provided, func must be a string method name, got {type(func)}"
                 )
             return None
 

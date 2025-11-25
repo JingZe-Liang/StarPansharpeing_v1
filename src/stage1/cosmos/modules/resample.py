@@ -168,9 +168,7 @@ class PixelUnshuffleChannelAveragingDownSampleLayer(nn.Module):
         # hidden = out_channels * group_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.pixel_unshuffle(
-            x, self.factor
-        )  # c * factor ** 2 -> hidden = out_c * group_size
+        x = F.pixel_unshuffle(x, self.factor)  # c * factor ** 2 -> hidden = out_c * group_size
         B, C, H, W = x.shape
         x = x.view(B, self.out_channels, self.group_size, H, W)
         x = x.mean(dim=2)
@@ -190,9 +188,7 @@ class ConvPixelShuffleUpSampleLayer(nn.Module):
         super().__init__()
         self.factor = factor
         out_ratio = factor**2
-        self.norm = Normalize(
-            in_channels=in_channels, num_groups=32, norm_type=norm_type
-        )
+        self.norm = Normalize(in_channels=in_channels, num_groups=32, norm_type=norm_type)
         self.conv = nn.Conv2d(
             in_channels,
             out_channels * out_ratio,

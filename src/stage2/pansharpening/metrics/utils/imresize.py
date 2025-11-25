@@ -57,9 +57,7 @@ def contributions(in_length, out_length, scale, kernel, k_width):
     indices = ind.astype(np.int32)
     weights = h(np.expand_dims(u, axis=1) - indices - 1)  # -1 because indexing from 0
     weights = np.divide(weights, np.expand_dims(np.sum(weights, axis=1), axis=1))
-    aux = np.concatenate(
-        (np.arange(in_length), np.arange(in_length - 1, -1, step=-1))
-    ).astype(np.int32)
+    aux = np.concatenate((np.arange(in_length), np.arange(in_length - 1, -1, step=-1))).astype(np.int32)
     indices = aux[np.mod(indices, aux.size)]
     ind2store = np.nonzero(np.any(weights, axis=0))
     weights = weights[:, ind2store]
@@ -79,18 +77,14 @@ def imresizemex(inimg, weights, indices, dim):
                 w = weights[i_w, :]
                 ind = indices[i_w, :]
                 im_slice = inimg[ind, i_img].astype(np.float64)
-                outimg[i_w, i_img] = np.sum(
-                    np.multiply(np.squeeze(im_slice, axis=0), w.T), axis=0
-                )
+                outimg[i_w, i_img] = np.sum(np.multiply(np.squeeze(im_slice, axis=0), w.T), axis=0)
     elif dim == 1:
         for i_img in range(in_shape[0]):
             for i_w in range(w_shape[0]):
                 w = weights[i_w, :]
                 ind = indices[i_w, :]
                 im_slice = inimg[i_img, ind].astype(np.float64)
-                outimg[i_img, i_w] = np.sum(
-                    np.multiply(np.squeeze(im_slice, axis=0), w.T), axis=0
-                )
+                outimg[i_img, i_w] = np.sum(np.multiply(np.squeeze(im_slice, axis=0), w.T), axis=0)
     if inimg.dtype == np.uint8:
         outimg = np.clip(outimg, 0, 255)
         return np.around(outimg).astype(np.uint8)
@@ -102,14 +96,10 @@ def imresizevec(inimg, weights, indices, dim):
     wshape = weights.shape
     if dim == 0:
         weights = weights.reshape((wshape[0], wshape[2], 1, 1))
-        outimg = np.sum(
-            weights * ((inimg[indices].squeeze(axis=1)).astype(np.float64)), axis=1
-        )
+        outimg = np.sum(weights * ((inimg[indices].squeeze(axis=1)).astype(np.float64)), axis=1)
     elif dim == 1:
         weights = weights.reshape((1, wshape[0], wshape[2], 1))
-        outimg = np.sum(
-            weights * ((inimg[:, indices].squeeze(axis=2)).astype(np.float64)), axis=2
-        )
+        outimg = np.sum(weights * ((inimg[:, indices].squeeze(axis=2)).astype(np.float64)), axis=2)
     if inimg.dtype == np.uint8:
         outimg = np.clip(outimg, 0, 255)
         return np.around(outimg).astype(np.uint8)
@@ -150,9 +140,7 @@ def imresize(I, scalar_scale=None, method="bicubic", output_shape=None, mode="ve
     weights = []
     indices = []
     for k in range(2):
-        w, ind = contributions(
-            I.shape[k], output_size[k], scale[k], kernel, kernel_width
-        )
+        w, ind = contributions(I.shape[k], output_size[k], scale[k], kernel, kernel_width)
         weights.append(w)
         indices.append(ind)
     B = np.copy(I)
