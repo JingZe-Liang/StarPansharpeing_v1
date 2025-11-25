@@ -816,6 +816,7 @@ class ContinuousImageTokenizer(nn.Module):
     def _has_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
         h_dtype = h.dtype
         h = h.float()  # quantizers are in float32
+        assert self.quantizer is not None, "quantizer should not be None"
 
         ####### Quantization get h as the latent #######
 

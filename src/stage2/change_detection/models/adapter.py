@@ -546,8 +546,13 @@ class UNetDecoder(nn.Module):
             ):  # Zihan NOTE: add this
                 # add segmentation layer each layer or only at the last layer
                 seg_layers.append(
-                    encoder.conv_op(
-                        input_features_skip, num_classes, 1, 1, 0, bias=True
+                    nn.Sequential(
+                        create_norm_act_layer(
+                            "layernorm2d", input_features_skip, "gelu"
+                        ),
+                        encoder.conv_op(
+                            input_features_skip, num_classes, 1, 1, 0, bias=True
+                        ),
                     )
                 )
                 logger.debug(f"Make segmentation layer at layer {s}")

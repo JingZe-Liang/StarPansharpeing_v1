@@ -49,7 +49,7 @@ def _create_default_cfg():
     # h16d12c1024
     _trans_enc_str = (
         "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=2 norm_layer=rmsnorm pos_embed=learned rope_type=axial "
+        "patch_size=2 norm_layer=layernorm pos_embed=learned rope_type=axial "
         "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
         "out_chans=512 unpatch_size=1 reg_tokens=0"
     )
@@ -59,7 +59,7 @@ def _create_default_cfg():
     # h16d12c1024
     _trans_dec_str = (
         "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=1 norm_layer=rmsnorm pos_embed=learned rope_type=axial "
+        "patch_size=1 norm_layer=layernorm pos_embed=learned rope_type=axial "
         "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
         "out_chans=512 unpatch_size=2 reg_tokens=0"
     )
@@ -381,12 +381,13 @@ class TokenizerHybridUNet(nn.Module):
         logger.info(f"[TokenizerHybridUNet]: Initialized weights (except backbone).")
 
     @classmethod
-    def create_model(cls, cfg=_create_default_cfg(), overrides: dict | None = None):
+    @function_config_to_basic_types
+    def create_model(cls, cfg=_create_default_cfg(), **overrides):
         """
         Create DinoUNet instance from network configuration dictionary
         """
         if overrides is not None:
-            cfg = cfg.merge_with(overrides)
+            cfg.merge_with(overrides)
 
         return cls(cfg)
 
@@ -432,7 +433,7 @@ def __test_model():
     cfg = _create_default_cfg()
     cfg._debug = True
     cfg.tokenizer_pretrained_path = (
-        "runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors"
+        "runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors"
     )
     unet = TokenizerHybridUNet(cfg).cuda()
     print(parameter_count_table(unet))
@@ -441,16 +442,16 @@ def __test_model():
     with torch.autocast("cuda", torch.bfloat16):
         with torch.no_grad():
             y = unet(x1, x2)
-            # y_recon = unet.encoder.dinov3_adapter.backbone(x)
+            # y_recon = unet.encoder.dinov3_adapter.backbone(x1)
     print(y.shape)
 
     # from torchmetrics import PeakSignalNoiseRatio
 
-    # logger.info(f"Input shape: {x.shape}")
+    # logger.info(f"Input shape: {x1.shape}")
     # logger.info(f"Output shape: {y_recon.shape}")
 
     # psnr_fn = PeakSignalNoiseRatio(data_range=1.0).cuda()
-    # psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
+    # psnr = psnr_fn((y_recon + 1) / 2, (x1 + 1) / 2)
     # logger.info(f"Reconstruction PSNR: {psnr}")
 
 

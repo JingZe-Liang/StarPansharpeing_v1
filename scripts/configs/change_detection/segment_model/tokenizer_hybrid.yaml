@@ -3,9 +3,12 @@
 
 defaults:
   - tokenizer: hybrid
+  - _self_
 
-# CNN Model Configuration (cm244c384)
+# CNN Model Configuration
 # in defaults
+
+_target_: src.stage2.change_detection.models.tokenizer_backbone_adapted.TokenizerHybridUNet.create_model
 
 # Tokenizer Feature Configuration
 tokenizer_feature:
@@ -15,7 +18,7 @@ tokenizer_feature:
   # encoder settings
   pretrained_size: 512
   conv_inplane: 64
-  drop_path_rate: 0.3
+  drop_path_rate: 0.2
   with_cffn: true
   cffn_ratio: 0.25
   deform_num_heads: 16
@@ -57,4 +60,4 @@ ensure_rgb_type: null
 _debug: false
 
 # Tokenizer pretrained path (needs to be overridden)
-tokenizer_pretrained_path: runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors
+tokenizer_pretrained_path: runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors

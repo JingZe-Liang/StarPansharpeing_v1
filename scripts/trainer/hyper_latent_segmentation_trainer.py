@@ -17,7 +17,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from einops import rearrange
 from ema_pytorch import EMA
 from jaxtyping import Float, Int
