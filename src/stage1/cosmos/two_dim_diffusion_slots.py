@@ -97,9 +97,7 @@ class TwoDimDiffusionSlots(nn.Module):
             ], 'fm_sample_type must be "sde" or "ode"'
         if diffusion_type == "diffusion":
             _train_diff_opts = (
-                dict(timestep_respacing="", learn_sigma=False)
-                if diffusion_options is None
-                else diffusion_options
+                dict(timestep_respacing="", learn_sigma=False) if diffusion_options is None else diffusion_options
             )
             self.learn_sigma = learn_sigma = _train_diff_opts.get("learn_sigma", False)
             _generate_diff_opts = _train_diff_opts.copy()
@@ -120,15 +118,12 @@ class TwoDimDiffusionSlots(nn.Module):
 
         # double channels
         if self.diffusion_type in ("diffusion", "fm"):
-            assert quantizer_type != "kl", (
-                "when using kl quantizer, diffusion_type should can not be any diffusion"
-            )
+            assert quantizer_type != "kl", "when using kl quantizer, diffusion_type should can not be any diffusion"
         if self.diffusion_type == "fm":
             double_out_channel = False
             if self.learn_sigma:
                 logger.warning(
-                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True, "
-                    "set it to False"
+                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True, set it to False"
                 )
         elif self.diffusion_type == "diffusion":
             double_out_channel = learn_sigma
@@ -139,15 +134,11 @@ class TwoDimDiffusionSlots(nn.Module):
         tokenizer_cfg["learn_sigma"] = double_out_channel
 
         if enc_path is not None and dec_path is not None:
-            logger.info(
-                f"[Tokenizer]: fintuning model from pretrained Cosmos tokenizer"
-            )
-            self.encoder, self.enc_parsed_keys, self.decoder, self.dec_parsed_keys = (
-                build_pretrained_cosmos_tokenizer(
-                    enc_path=enc_path,
-                    dec_path=dec_path,
-                    tokenizer_cfg=tokenizer_cfg,
-                )
+            logger.info(f"[Tokenizer]: fintuning model from pretrained Cosmos tokenizer")
+            self.encoder, self.enc_parsed_keys, self.decoder, self.dec_parsed_keys = build_pretrained_cosmos_tokenizer(
+                enc_path=enc_path,
+                dec_path=dec_path,
+                tokenizer_cfg=tokenizer_cfg,
             )
         else:
             logger.info(f"[Tokenizer]: building a new Cosmos tokenizer")
@@ -157,16 +148,8 @@ class TwoDimDiffusionSlots(nn.Module):
         # * compile models =================
 
         logger.info(f"[Compile]: compile models ...") if compile_model else None
-        self.decoder = (
-            torch.compile(self.decoder, mode="reduce-overhead")
-            if compile_model
-            else self.decoder
-        )
-        self.encoder = (
-            torch.compile(self.encoder, mode="reduce-overhead")
-            if compile_model
-            else self.encoder
-        )
+        self.decoder = torch.compile(self.decoder, mode="reduce-overhead") if compile_model else self.decoder
+        self.encoder = torch.compile(self.encoder, mode="reduce-overhead") if compile_model else self.encoder
 
         # * ==========================================================
         # * quantizer
@@ -198,17 +181,12 @@ class TwoDimDiffusionSlots(nn.Module):
             self.bsq_logit_laplace = self.quantizer_kwargs.pop("logit_laplace", False)
             if self.bsq_logit_laplace:
                 self.bsq_logt_lap_loss = LogitLaplaceLoss(logit_laplace_eps=0.1)
-                logger.warning(
-                    f"[Quantizer]: Logit Laplace Loss is not implemented yet,"
-                    "it will not take any effect"
-                )
+                logger.warning(f"[Quantizer]: Logit Laplace Loss is not implemented yet,it will not take any effect")
             self.quantizer = BinarySphericalQuantizer(**kwargs)  # type: ignore
         elif quantizer_type == "kl":
             self.kl_weight = quantizer_kwargs.get("kl_weight", 1e-6)
             logvar_init = quantizer_kwargs.get("logvar_init", 0.0)
-            self.logvar = nn.Parameter(
-                torch.ones(size=()) * logvar_init, requires_grad=False
-            )
+            self.logvar = nn.Parameter(torch.ones(size=()) * logvar_init, requires_grad=False)
             self.quantizer_kwargs = {}
             self.quantizer = DiagonalGaussianDistribution
         elif quantizer_type is None:
@@ -227,9 +205,7 @@ class TwoDimDiffusionSlots(nn.Module):
         self.use_repa = use_repa
         self.repa_loss_weight = repa_loss_weight
         if use_repa:
-            self.repa_encoder = torch.hub.load(
-                "facebookresearch/dinov2", "dinov2_vitb14"
-            )
+            self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
             self.repa_encoder.image_size = 224
             for param in self.repa_encoder.parameters():
                 param.requires_grad = False
@@ -313,27 +289,13 @@ class TwoDimDiffusionSlots(nn.Module):
 
     @torch.no_grad()
     def repa_encode(self, x):
-        mean = (
-            torch.Tensor(IMAGENET_DEFAULT_MEAN)
-            .to(x.device)
-            .unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
-        std = (
-            torch.Tensor(IMAGENET_DEFAULT_STD)
-            .to(x.device)
-            .unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        mean = torch.Tensor(IMAGENET_DEFAULT_MEAN).to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        std = torch.Tensor(IMAGENET_DEFAULT_STD).to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         x = (x - mean) / std
 
         # interpolate to image size
         if self.repa_encoder.image_size != self.enc_img_size:
-            x = torch.nn.functional.interpolate(
-                x, self.repa_encoder.image_size, mode="bicubic"
-            )
+            x = torch.nn.functional.interpolate(x, self.repa_encoder.image_size, mode="bicubic")
 
         # get dino features
         x = self.repa_encoder.forward_features(x)["x_norm_patchtokens"]
@@ -543,9 +505,7 @@ if __name__ == "__main__":
             train_eps=1e-4,
             sample_eps=1e-4,
         ),
-        diffusion_options=dict(
-            timestep_respacing="", noise_schedule="linear", learn_sigma=False
-        ),
+        diffusion_options=dict(timestep_respacing="", noise_schedule="linear", learn_sigma=False),
         quantizer_type=None,
         fm_sample_type="ode",
     ).cuda()
@@ -575,9 +535,7 @@ if __name__ == "__main__":
 
             # 打印显存占用信息
             print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
-            print(
-                f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
-            )
+            print(f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB")
             print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
             print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
 
@@ -622,9 +580,7 @@ if __name__ == "__main__":
     def run_sampling():
         tokenizer.eval()
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            y = tokenizer(
-                x, sample=True, epoch=None, inference_with_n_slots=-1, cfg=2.0
-            )[0]
+            y = tokenizer(x, sample=True, epoch=None, inference_with_n_slots=-1, cfg=2.0)[0]
         print(y.shape)
 
     # run_forward_backward()

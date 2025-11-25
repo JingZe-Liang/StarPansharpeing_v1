@@ -10,8 +10,7 @@ class MomentumUpdaterHook(Hook):
         if warmup is not None:
             if warmup not in ["constant", "linear", "exp"]:
                 raise ValueError(
-                    f'"{warmup}" is not a supported type for warming up, valid'
-                    ' types are "constant" and "linear"'
+                    f'"{warmup}" is not a supported type for warming up, valid types are "constant" and "linear"'
                 )
         if warmup is not None:
             assert warmup_iters > 0, '"warmup_iters" must be a positive integer'
@@ -48,28 +47,20 @@ class MomentumUpdaterHook(Hook):
             momentum_groups = {}
             for k in runner.optimizer.keys():
                 _momentum_group = [
-                    self.get_momentum(runner, _base_momentum)
-                    for _base_momentum in self.base_momentum[k]
+                    self.get_momentum(runner, _base_momentum) for _base_momentum in self.base_momentum[k]
                 ]
                 momentum_groups.update({k: _momentum_group})
             return momentum_groups
         else:
-            return [
-                self.get_momentum(runner, _base_momentum)
-                for _base_momentum in self.base_momentum
-            ]
+            return [self.get_momentum(runner, _base_momentum) for _base_momentum in self.base_momentum]
 
     def get_warmup_momentum(self, cur_iters):
         def _get_warmup_momentum(cur_iters, regular_momentum):
             if self.warmup == "constant":
-                warmup_momentum = [
-                    _momentum / self.warmup_ratio for _momentum in self.regular_momentum
-                ]
+                warmup_momentum = [_momentum / self.warmup_ratio for _momentum in self.regular_momentum]
             elif self.warmup == "linear":
                 k = (1 - cur_iters / self.warmup_iters) * (1 - self.warmup_ratio)
-                warmup_momentum = [
-                    _momentum / (1 - k) for _momentum in self.regular_mom
-                ]
+                warmup_momentum = [_momentum / (1 - k) for _momentum in self.regular_mom]
             elif self.warmup == "exp":
                 k = self.warmup_ratio ** (1 - cur_iters / self.warmup_iters)
                 warmup_momentum = [_momentum / k for _momentum in self.regular_mom]
@@ -95,9 +86,7 @@ class MomentumUpdaterHook(Hook):
                         group.setdefault("initial_momentum", group["momentum"])
                     else:
                         group.setdefault("initial_momentum", group["betas"][0])
-                _base_momentum = [
-                    group["initial_momentum"] for group in optim.param_groups
-                ]
+                _base_momentum = [group["initial_momentum"] for group in optim.param_groups]
                 self.base_momentum.update({k: _base_momentum})
         else:
             for group in runner.optimizer.param_groups:
@@ -105,9 +94,7 @@ class MomentumUpdaterHook(Hook):
                     group.setdefault("initial_momentum", group["momentum"])
                 else:
                     group.setdefault("initial_momentum", group["betas"][0])
-            self.base_momentum = [
-                group["initial_momentum"] for group in runner.optimizer.param_groups
-            ]
+            self.base_momentum = [group["initial_momentum"] for group in runner.optimizer.param_groups]
 
     def before_train_epoch(self, runner):
         if not self.by_epoch:
@@ -234,20 +221,11 @@ class CyclicMomentumUpdaterHook(MomentumUpdaterHook):
         if isinstance(target_ratio, float):
             target_ratio = (target_ratio, target_ratio / 1e5)
         elif isinstance(target_ratio, tuple):
-            target_ratio = (
-                (target_ratio[0], target_ratio[0] / 1e5)
-                if len(target_ratio) == 1
-                else target_ratio
-            )
+            target_ratio = (target_ratio[0], target_ratio[0] / 1e5) if len(target_ratio) == 1 else target_ratio
         else:
-            raise ValueError(
-                "target_ratio should be either float "
-                f"or tuple, got {type(target_ratio)}"
-            )
+            raise ValueError(f"target_ratio should be either float or tuple, got {type(target_ratio)}")
 
-        assert len(target_ratio) == 2, (
-            '"target_ratio" must be list or tuple of two floats'
-        )
+        assert len(target_ratio) == 2, '"target_ratio" must be list or tuple of two floats'
         assert 0 <= step_ratio_up < 1.0, '"step_ratio_up" must be in range [0,1)'
 
         self.target_ratio = target_ratio
@@ -264,9 +242,7 @@ class CyclicMomentumUpdaterHook(MomentumUpdaterHook):
         # total momentum_phases are separated as up and down
         max_iter_per_phase = runner.max_iters // self.cyclic_times
         iter_up_phase = int(self.step_ratio_up * max_iter_per_phase)
-        self.momentum_phases.append(
-            [0, iter_up_phase, max_iter_per_phase, 1, self.target_ratio[0]]
-        )
+        self.momentum_phases.append([0, iter_up_phase, max_iter_per_phase, 1, self.target_ratio[0]])
         self.momentum_phases.append(
             [
                 iter_up_phase,
@@ -346,27 +322,18 @@ class OneCycleMomentumUpdaterHook(MomentumUpdaterHook):
         else:
             assert not kwargs["by_epoch"], 'currently only support "by_epoch" = False'
         if not isinstance(base_momentum, (float, list, dict)):
-            raise ValueError(
-                "base_momentum must be the type among of float,list or dict."
-            )
+            raise ValueError("base_momentum must be the type among of float,list or dict.")
         self._base_momentum = base_momentum
         if not isinstance(max_momentum, (float, list, dict)):
-            raise ValueError(
-                "max_momentum must be the type among of float,list or dict."
-            )
+            raise ValueError("max_momentum must be the type among of float,list or dict.")
         self._max_momentum = max_momentum
         # validate pct_start
         if pct_start < 0 or pct_start > 1 or not isinstance(pct_start, float):
-            raise ValueError(
-                f"Expected float between 0 and 1 pct_start, but got {pct_start}"
-            )
+            raise ValueError(f"Expected float between 0 and 1 pct_start, but got {pct_start}")
         self.pct_start = pct_start
         # validate anneal_strategy
         if anneal_strategy not in ["cos", "linear"]:
-            raise ValueError(
-                'anneal_strategy must by one of "cos" or '
-                f'"linear", instead got {anneal_strategy}'
-            )
+            raise ValueError(f'anneal_strategy must by one of "cos" or "linear", instead got {anneal_strategy}')
         elif anneal_strategy == "cos":
             self.anneal_func = annealing_cos
         elif anneal_strategy == "linear":
@@ -379,15 +346,11 @@ class OneCycleMomentumUpdaterHook(MomentumUpdaterHook):
         if isinstance(runner.optimizer, dict):
             for k, optim in runner.optimizer.items():
                 if "momentum" not in optim.defaults and "betas" not in optim.defaults:
-                    raise ValueError(
-                        "optimizer must support momentum withoption enabled"
-                    )
+                    raise ValueError("optimizer must support momentum withoption enabled")
                 self.use_beta1 = "betas" in optim.defaults
                 _base_momentum = format_param(k, optim, self._base_momentum)
                 _max_momentum = format_param(k, optim, self._max_momentum)
-                for group, b_momentum, m_momentum in zip(
-                    optim.param_groups, _base_momentum, _max_momentum
-                ):
+                for group, b_momentum, m_momentum in zip(optim.param_groups, _base_momentum, _max_momentum):
                     if self.use_beta1:
                         _, beta2 = group["betas"]
                         group["betas"] = (m_momentum, beta2)
@@ -403,9 +366,7 @@ class OneCycleMomentumUpdaterHook(MomentumUpdaterHook):
             k = type(optim).__name__
             _base_momentum = format_param(k, optim, self._base_momentum)
             _max_momentum = format_param(k, optim, self._max_momentum)
-            for group, b_momentum, m_momentum in zip(
-                optim.param_groups, _base_momentum, _max_momentum
-            ):
+            for group, b_momentum, m_momentum in zip(optim.param_groups, _base_momentum, _max_momentum):
                 if self.use_beta1:
                     _, beta2 = group["betas"]
                     group["betas"] = (m_momentum, beta2)
@@ -487,10 +448,7 @@ class OneCycleMomentumUpdaterHook(MomentumUpdaterHook):
         if isinstance(runner.optimizer, dict):
             momentum_groups = {}
             for k, optim in runner.optimizer.items():
-                _momentum_group = [
-                    self.get_momentum(runner, param_group)
-                    for param_group in optim.param_groups
-                ]
+                _momentum_group = [self.get_momentum(runner, param_group) for param_group in optim.param_groups]
                 momentum_groups.update({k: _momentum_group})
             return momentum_groups
         else:

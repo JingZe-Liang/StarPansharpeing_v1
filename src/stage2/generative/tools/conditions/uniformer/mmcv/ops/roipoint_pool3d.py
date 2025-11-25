@@ -34,9 +34,7 @@ class RoIPointPool3d(nn.Module):
                 shape is (B, M, 512, 3 + C).
             pooled_empty_flag (torch.Tensor): Empty flag whose shape is (B, M).
         """
-        return RoIPointPool3dFunction.apply(
-            points, point_features, boxes3d, self.num_sampled_points
-        )
+        return RoIPointPool3dFunction.apply(points, point_features, boxes3d, self.num_sampled_points)
 
 
 class RoIPointPool3dFunction(Function):
@@ -63,9 +61,7 @@ class RoIPointPool3dFunction(Function):
             point_features.shape[2],
         )
         pooled_boxes3d = boxes3d.view(batch_size, -1, 7)
-        pooled_features = point_features.new_zeros(
-            (batch_size, boxes_num, num_sampled_points, 3 + feature_len)
-        )
+        pooled_features = point_features.new_zeros((batch_size, boxes_num, num_sampled_points, 3 + feature_len))
         pooled_empty_flag = point_features.new_zeros((batch_size, boxes_num)).int()
 
         ext_module.roipoint_pool3d_forward(

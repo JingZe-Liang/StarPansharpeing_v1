@@ -102,8 +102,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
 
         if dataset_name not in self.DATASET_CONFIGS:
             raise ValueError(
-                f"Unknown dataset: {dataset_name}. "
-                f"Available datasets: {list(self.DATASET_CONFIGS.keys())}"
+                f"Unknown dataset: {dataset_name}. Available datasets: {list(self.DATASET_CONFIGS.keys())}"
             )
 
         self.config = self.DATASET_CONFIGS[dataset_name]
@@ -134,16 +133,12 @@ class HyperspectralChangeDetectionDataset(Dataset):
         # Load first image (t1)
         image1_path = os.path.join(self.data_root, self.config["image1_path"])
         image1_data = sio.loadmat(image1_path)
-        image1 = image1_data[
-            self.config.get("image_key", self.config.get("image1_key"))
-        ]
+        image1 = image1_data[self.config.get("image_key", self.config.get("image1_key"))]
 
         # Load second image (t2)
         image2_path = os.path.join(self.data_root, self.config["image2_path"])
         image2_data = sio.loadmat(image2_path)
-        image2 = image2_data[
-            self.config.get("image_key", self.config.get("image2_key"))
-        ]
+        image2 = image2_data[self.config.get("image_key", self.config.get("image2_key"))]
 
         # Load ground truth
         gt_path = os.path.join(self.data_root, self.config["gt_path"])
@@ -162,14 +157,10 @@ class HyperspectralChangeDetectionDataset(Dataset):
 
         # Ensure consistent shapes
         if image1.shape != image2.shape:
-            raise ValueError(
-                f"Image shapes don't match: {image1.shape} vs {image2.shape}"
-            )
+            raise ValueError(f"Image shapes don't match: {image1.shape} vs {image2.shape}")
 
         if gt.shape != image1.shape[:2]:
-            raise ValueError(
-                f"GT shape {gt.shape} doesn't match image spatial shape {image1.shape[:2]}"
-            )
+            raise ValueError(f"GT shape {gt.shape} doesn't match image spatial shape {image1.shape[:2]}")
 
         # Normalize if requested
         if self.normalize:

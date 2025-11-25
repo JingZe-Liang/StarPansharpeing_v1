@@ -37,9 +37,7 @@ def filter_no_wds_into_optim_groups(
     logger.debug(f"filter out no wd params: {no_wd_named_params.keys()}")
     logger.debug(f"ilter out wd params: {len(wd_params)}")
 
-    assert len(wd_params) + len(no_wd_named_params) == len(params), (
-        "Parameter count mismatch after filtering."
-    )
+    assert len(wd_params) + len(no_wd_named_params) == len(params), "Parameter count mismatch after filtering."
 
     return [
         {"params": wd_params},  # with weight decay
@@ -57,13 +55,9 @@ if __name__ == "__main__":
         profile_memory=True,
         with_stack=True,
     ) as prof:
-        net = nn.Sequential(
-            nn.Linear(10, 10), nn.LayerNorm(10), nn.Linear(10, 10), nn.Conv2d(10, 10, 3)
-        )
+        net = nn.Sequential(nn.Linear(10, 10), nn.LayerNorm(10), nn.Linear(10, 10), nn.Conv2d(10, 10, 3))
 
-        optim_groups = filter_no_wds_into_optim_groups(
-            net.named_parameters(), ["bias", "1"]
-        )
+        optim_groups = filter_no_wds_into_optim_groups(net.named_parameters(), ["bias", "1"])
 
         for g in optim_groups:
             print(len(g["params"]), g.get("weight_decay", "default wd"))

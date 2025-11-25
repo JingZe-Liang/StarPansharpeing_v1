@@ -100,9 +100,7 @@ def test_solver_with_dc_data():
             # Check physical constraints
             print(f"\n物理约束检查:")
             print(f"  丰度非负性: {(abundances >= 0).all().item()}")
-            print(
-                f"  丰度和为1的偏差: {(abundances.sum(dim=0) - 1).abs().mean().item():.6f}"
-            )
+            print(f"  丰度和为1的偏差: {(abundances.sum(dim=0) - 1).abs().mean().item():.6f}")
 
             # Reconstruction validation
             print(f"\n重建验证:")
@@ -110,9 +108,7 @@ def test_solver_with_dc_data():
             # Reshape for matrix multiplication
             h, w = hyper_img.shape[-2:]
             img_1d = hyper_img.permute(1, 2, 0).reshape(h * w, -1)  # [h*w, bands]
-            abundances_1d = abundances.reshape(
-                n_endmembers, h * w
-            ).T  # [h*w, endmembers]
+            abundances_1d = abundances.reshape(n_endmembers, h * w).T  # [h*w, endmembers]
 
             # Reconstruct image
             reconstructed = abundances_1d @ endmembers.T  # [h*w, bands]
@@ -185,9 +181,7 @@ def visualize_results(original_img, endmembers, abundances, reconstructed):
 
     # Reconstructed image (RGB approximation)
     if reconstructed.shape[1] >= 3:
-        rgb_rec = reconstructed[:, rgb_bands].reshape(
-            original_img.shape[1], original_img.shape[2], 3
-        )
+        rgb_rec = reconstructed[:, rgb_bands].reshape(original_img.shape[1], original_img.shape[2], 3)
         rgb_rec = (rgb_rec - rgb_rec.min()) / (rgb_rec.max() - rgb_rec.min())
         axes[0, 1].imshow(rgb_rec)
         axes[0, 1].set_title("Reconstructed RGB")
@@ -195,8 +189,7 @@ def visualize_results(original_img, endmembers, abundances, reconstructed):
 
     # Error map
     error_map = torch.norm(
-        original_img.permute(1, 2, 0)
-        - reconstructed.reshape(original_img.shape[1], original_img.shape[2], -1),
+        original_img.permute(1, 2, 0) - reconstructed.reshape(original_img.shape[1], original_img.shape[2], -1),
         dim=2,
     )
     im = axes[0, 2].imshow(error_map, cmap="hot")

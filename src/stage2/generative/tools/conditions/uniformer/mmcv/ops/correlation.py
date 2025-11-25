@@ -7,9 +7,7 @@ from torch.nn.modules.utils import _pair
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["correlation_forward", "correlation_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["correlation_forward", "correlation_backward"])
 
 
 class CorrelationFunction(Function):

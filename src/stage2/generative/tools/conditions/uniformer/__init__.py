@@ -79,7 +79,9 @@ class SAMDetector(torch.nn.Module):
             )
         except ImportError:
             raise ImportError("Please install the segment-anything package")
-        remote_model_path = "https://huggingface.co/ybelkada/segment-anything/tree/main/checkpoints/sam_vit_h_4b8939.pth"
+        remote_model_path = (
+            "https://huggingface.co/ybelkada/segment-anything/tree/main/checkpoints/sam_vit_h_4b8939.pth"
+        )
         modelpath = os.path.join(annotator_ckpts_path, "sam_vit_h_4b8939.pth")
 
         if not os.path.exists(modelpath):
@@ -106,7 +108,5 @@ class SAMDetector(torch.nn.Module):
         for i, mask in enumerate(masks):
             mask = mask["segmentation"]
             result[0, mask] = i + 1
-        res_img = show_result_pyplot(
-            self.model, img, result, get_palette("ade"), opacity=1
-        )
+        res_img = show_result_pyplot(self.model, img, result, get_palette("ade"), opacity=1)
         return res_img, result

@@ -28,9 +28,7 @@ def process_tar_file(input_tar_path, output_tar_path, quality=80):
         print(f"Processing {input_tar_path}")
 
         # Extract all jpg files
-        jpg_members = [
-            member for member in tar.getmembers() if member.name.endswith(".jpg")
-        ]
+        jpg_members = [member for member in tar.getmembers() if member.name.endswith(".jpg")]
         print(f"Found {len(jpg_members)} JPG files")
 
         # Create output tar file
@@ -65,12 +63,8 @@ def process_tar_file(input_tar_path, output_tar_path, quality=80):
 def main():
     """Main function to process all tar files in the directory."""
     # Define paths
-    input_dir = Path(
-        "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/miniFrance/hyper_images"
-    )
-    output_dir = Path(
-        "/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/miniFrance/compressed_images"
-    )
+    input_dir = Path("/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/miniFrance/hyper_images")
+    output_dir = Path("/Data4/cao/ZiHanCao/exps/HyperspectralTokenizer/data/miniFrance/compressed_images")
 
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)

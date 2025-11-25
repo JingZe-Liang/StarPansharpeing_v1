@@ -34,9 +34,7 @@ except ImportError:
         f"please install it from {__url} if you want to use the cuda kernel ns optimization"
     )
 
-_cuda_dim_in_min = (
-    8  # ! should not be changed, CUDA kernel requires the minimum dimension to be 8
-)
+_cuda_dim_in_min = 8  # ! should not be changed, CUDA kernel requires the minimum dimension to be 8
 __abc_s_type = "su2"  # default ns a, b, c
 
 if __abc_s_type == "su":  # JianlinSu's abc_s
@@ -115,9 +113,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
 
 
 @torch.compile
-def zeropower_via_newtonschulz6_diff_abc(
-    G, steps: int = 6, norm=False, ns_dtype=torch.bfloat16
-):
+def zeropower_via_newtonschulz6_diff_abc(G, steps: int = 6, norm=False, ns_dtype=torch.bfloat16):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -165,9 +161,7 @@ def zeropower_via_newtonschulz6_diff_abc(
         if i == 0 and norm:
             n = ((A2**2).sum(dim=(-2, -1), keepdim=True) + eps) ** 0.125
             X, A, A2 = X / n, A / n**2, A2 / n**4
-        B = (
-            b * A + c * A2
-        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        B = b * A + c * A2  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
     if G.size(-2) > G.size(-1):
@@ -305,9 +299,7 @@ class Muon(torch.optim.Optimizer):
             A = param_shape[0]
             B = math.prod(list(param_shape[1:]))
         else:
-            raise ValueError(
-                f"Muon only supports 2D+ parameters, but got param shaped as {param_shape}"
-            )
+            raise ValueError(f"Muon only supports 2D+ parameters, but got param shaped as {param_shape}")
 
         # We adjust the learning rate and weight decay based on the size of the parameter matrix
         # as describted in the paper
@@ -351,14 +343,11 @@ class Muon(torch.optim.Optimizer):
                 g, meta = to_local(g, keep_sharded=False)
 
             if (
-                self.defaults["use_cuda_kernel"]
-                and min(list(g.shape)) % _cuda_dim_in_min == 0
+                self.defaults["use_cuda_kernel"] and min(list(g.shape)) % _cuda_dim_in_min == 0
             ):  # cuda kernel layout constraint
                 u = fast_newtonschulz(g, steps=group["ns_steps"])
             elif self.defaults["ns_diff_abc"]:
-                u = zeropower_via_newtonschulz6_diff_abc(
-                    g, steps=6, norm=group["ns_norm"]
-                )
+                u = zeropower_via_newtonschulz6_diff_abc(g, steps=6, norm=group["ns_norm"])
             else:
                 u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 
@@ -453,9 +442,7 @@ class Muon(torch.optim.Optimizer):
                 has_complex |= torch.is_complex(p)
                 params_with_grad.append(p)
                 if p.grad.is_sparse:
-                    raise RuntimeError(
-                        "Adam does not support sparse gradients, please consider SparseAdam instead"
-                    )
+                    raise RuntimeError("Adam does not support sparse gradients, please consider SparseAdam instead")
                 grads.append(p.grad)
 
                 state = self.state[p]
@@ -476,18 +463,12 @@ class Muon(torch.optim.Optimizer):
                         else torch.tensor(0.0, dtype=_get_scalar_dtype())
                     )
                     # Exponential moving average of gradient values
-                    state["exp_avg"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
+                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     # Exponential moving average of squared gradient values
-                    state["exp_avg_sq"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
+                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     if group["adamw_amsgrad"]:
                         # Maintains max of all exp. moving avg. of sq. grad. values
-                        state["max_exp_avg_sq"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format
-                        )
+                        state["max_exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
 
                 exp_avgs.append(state["exp_avg"])
                 exp_avg_sqs.append(state["exp_avg_sq"])
@@ -495,19 +476,11 @@ class Muon(torch.optim.Optimizer):
                 if group["adamw_amsgrad"]:
                     max_exp_avg_sqs.append(state["max_exp_avg_sq"])
                 if group["differentiable"] and state["step"].requires_grad:
-                    raise RuntimeError(
-                        "`requires_grad` is not supported for `step` in differentiable mode"
-                    )
+                    raise RuntimeError("`requires_grad` is not supported for `step` in differentiable mode")
 
                 # Foreach without capturable does not support a tensor lr
-                if (
-                    group["adamw_foreach"]
-                    and torch.is_tensor(group["lr"])
-                    and not group["capturable"]
-                ):
-                    raise RuntimeError(
-                        "lr as a Tensor is not supported for capturable=False and foreach=True"
-                    )
+                if group["adamw_foreach"] and torch.is_tensor(group["lr"]) and not group["capturable"]:
+                    raise RuntimeError("lr as a Tensor is not supported for capturable=False and foreach=True")
 
                 state_steps.append(state["step"])
         return has_complex
@@ -648,14 +621,11 @@ class Muon(torch.optim.Optimizer):
                     g, meta = to_local(g, keep_sharded=False)
 
                 if (
-                    self.defaults["use_cuda_kernel"]
-                    and min(list(g.shape)) % _cuda_dim_in_min == 0
+                    self.defaults["use_cuda_kernel"] and min(list(g.shape)) % _cuda_dim_in_min == 0
                 ):  # cuda kernel layout constraint
                     u = fast_newtonschulz(g, steps=group["ns_steps"])
                 elif self.defaults["ns_diff_abc"]:
-                    u = zeropower_via_newtonschulz6_diff_abc(
-                        g, steps=6, norm=group["ns_norm"]
-                    )
+                    u = zeropower_via_newtonschulz6_diff_abc(g, steps=6, norm=group["ns_norm"])
                 else:
                     u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 

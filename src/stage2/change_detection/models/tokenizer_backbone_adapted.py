@@ -39,10 +39,7 @@ def _create_default_cfg():
         "upsample_kwargs.interp_type=nearest_interp"
     )
     _cnn_model_cfg = OmegaConf.from_dotlist(_cnn_model_str.split(" "))
-    _cnn_str = (
-        "quantizer_type=null vf_on_z_or_module=z use_repa_loss=false "
-        "dino_feature_dim=1024 cache_type=h"
-    )
+    _cnn_str = "quantizer_type=null vf_on_z_or_module=z use_repa_loss=false dino_feature_dim=1024 cache_type=h"
     _cnn_cfg = OmegaConf.from_dotlist(_cnn_str.split(" "))
     tokenizer_cfg = OmegaConf.create({"cnn_cfg": {"model": _cnn_model_cfg, **_cnn_cfg}})
 
@@ -189,8 +186,7 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
 
         # None stands for cls feature
         all_layers = [
-            [rearrange(all_layers[i], "b c h w -> b (h w) c"), None]
-            for i in range(len(self.interaction_indexes))
+            [rearrange(all_layers[i], "b c h w -> b (h w) c"), None] for i in range(len(self.interaction_indexes))
         ]
 
         return all_layers, final_latent
@@ -222,9 +218,7 @@ class TokenizerHybridUNet(nn.Module):
 
         # Ensure we have 4 stages to match adapter output
         if cfg.n_stages != 4:
-            logger.error(
-                f"Warning: Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4."
-            )
+            logger.error(f"Warning: Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4.")
             raise ValueError("n_stages must be 4")
             # n_stages = 4
             # if isinstance(self.tok_cfg.feature_per_stage, int):
@@ -292,13 +286,9 @@ class TokenizerHybridUNet(nn.Module):
         )
         if self.cfg.tokenizer_pretrained_path is not None:
             tok_backbone.load_pretrained(self.cfg.tokenizer_pretrained_path)
-            logger.info(
-                f"Loaded tokenizer backbone from: {self.cfg.tokenizer_pretrained_path}"
-            )
+            logger.info(f"Loaded tokenizer backbone from: {self.cfg.tokenizer_pretrained_path}")
         elif cfg._debug:
-            logger.warning(
-                f"Using debug mode, using random weights for tokenizer backbone"
-            )
+            logger.warning(f"Using debug mode, using random weights for tokenizer backbone")
         else:
             raise ValueError("pretrained_path must be specified for tokenizer backbone")
 
@@ -361,9 +351,7 @@ class TokenizerHybridUNet(nn.Module):
                 if hasattr(module, "init_weights"):
                     module.init_weights()
                 elif isinstance(module, _ConvNd):
-                    nn.init.kaiming_normal_(
-                        module.weight, mode="fan_out", nonlinearity="relu"
-                    )
+                    nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
                 elif isinstance(module, nn.Linear):
@@ -431,9 +419,7 @@ def __test_model():
 
     cfg = _create_default_cfg()
     cfg._debug = True
-    cfg.tokenizer_pretrained_path = (
-        "runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors"
-    )
+    cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors"
     unet = TokenizerHybridUNet(cfg).cuda()
     print(parameter_count_table(unet))
 

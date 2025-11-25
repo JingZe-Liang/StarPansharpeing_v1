@@ -100,9 +100,7 @@ class EncoderDecoder(BaseSegmentor):
         """Run forward function and calculate loss for decode head in
         training."""
         losses = dict()
-        loss_decode = self.decode_head.forward_train(
-            x, img_metas, gt_semantic_seg, self.train_cfg
-        )
+        loss_decode = self.decode_head.forward_train(x, img_metas, gt_semantic_seg, self.train_cfg)
 
         losses.update(add_prefix(loss_decode, "decode"))
         return losses
@@ -119,14 +117,10 @@ class EncoderDecoder(BaseSegmentor):
         losses = dict()
         if isinstance(self.auxiliary_head, nn.ModuleList):
             for idx, aux_head in enumerate(self.auxiliary_head):
-                loss_aux = aux_head.forward_train(
-                    x, img_metas, gt_semantic_seg, self.train_cfg
-                )
+                loss_aux = aux_head.forward_train(x, img_metas, gt_semantic_seg, self.train_cfg)
                 losses.update(add_prefix(loss_aux, f"aux_{idx}"))
         else:
-            loss_aux = self.auxiliary_head.forward_train(
-                x, img_metas, gt_semantic_seg, self.train_cfg
-            )
+            loss_aux = self.auxiliary_head.forward_train(x, img_metas, gt_semantic_seg, self.train_cfg)
             losses.update(add_prefix(loss_aux, "aux"))
 
         return losses
@@ -207,9 +201,7 @@ class EncoderDecoder(BaseSegmentor):
         assert (count_mat == 0).sum() == 0
         if torch.onnx.is_in_onnx_export():
             # cast count_mat to constant while exporting to ONNX
-            count_mat = torch.from_numpy(count_mat.cpu().detach().numpy()).to(
-                device=img.device
-            )
+            count_mat = torch.from_numpy(count_mat.cpu().detach().numpy()).to(device=img.device)
         preds = preds / count_mat
         if rescale:
             preds = resize(

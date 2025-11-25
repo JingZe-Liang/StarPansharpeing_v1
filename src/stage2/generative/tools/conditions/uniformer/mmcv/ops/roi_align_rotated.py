@@ -4,16 +4,12 @@ from torch.autograd import Function
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["roi_align_rotated_forward", "roi_align_rotated_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["roi_align_rotated_forward", "roi_align_rotated_backward"])
 
 
 class RoIAlignRotatedFunction(Function):
     @staticmethod
-    def symbolic(
-        g, features, rois, out_size, spatial_scale, sample_num, aligned, clockwise
-    ):
+    def symbolic(g, features, rois, out_size, spatial_scale, sample_num, aligned, clockwise):
         if isinstance(out_size, int):
             out_h = out_size
             out_w = out_size
@@ -98,9 +94,7 @@ class RoIAlignRotatedFunction(Function):
         grad_input = grad_rois = None
 
         if ctx.needs_input_grad[0]:
-            grad_input = rois.new_zeros(
-                batch_size, num_channels, data_height, data_width
-            )
+            grad_input = rois.new_zeros(batch_size, num_channels, data_height, data_width)
             ext_module.roi_align_rotated_backward(
                 grad_output.contiguous(),
                 rois,
@@ -161,9 +155,7 @@ class RoIAlignRotated(nn.Module):
         performance if ROIAlign is used together with conv layers.
     """
 
-    def __init__(
-        self, out_size, spatial_scale, sample_num=0, aligned=True, clockwise=False
-    ):
+    def __init__(self, out_size, spatial_scale, sample_num=0, aligned=True, clockwise=False):
         super(RoIAlignRotated, self).__init__()
 
         self.out_size = out_size

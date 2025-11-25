@@ -92,16 +92,13 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
     loader_types: list[SupportedLoaderType] = []
     if loader_type is not None:
         logger.debug(
-            f"loader_type is provided: {loader_type}, "
-            f"input all paths should be {loader_type} loader",
+            f"loader_type is provided: {loader_type}, input all paths should be {loader_type} loader",
         )
 
     # clear the kwargs
     # 1. paths is a list of list of string
     if isinstance(paths, list) and isinstance(paths[0], Sequence):
-        logger.info(
-            "input paths contains list of lists, we will chain the dataloader with each loader"
-        )
+        logger.info("input paths contains list of lists, we will chain the dataloader with each loader")
         if rep_loader_kwargs is not None:  # every loader kwargs
             logger.debug(f"rep_loader_kwargs is provided: {rep_loader_kwargs}")
             assert isinstance(rep_loader_kwargs, list), (
@@ -116,9 +113,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
             if changed_kwargs_by_loader is None:
                 changed_kwargs_by_loader = [{}] * len(paths)
 
-            assert isinstance(basic_kwargs, dict), (
-                f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
-            )
+            assert isinstance(basic_kwargs, dict), f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
             assert isinstance(changed_kwargs_by_loader, list), (
                 f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
             )
@@ -127,9 +122,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
                 f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
             )
 
-            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
-                basic_kwargs, changed_kwargs_by_loader
-            )
+            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(basic_kwargs, changed_kwargs_by_loader)
         else:
             logger.debug("rep_loader_kwargs is None, use the loader_kwargs")
             rep_loader_kwargs = [loader_kwargs] * len(paths)
@@ -171,53 +164,38 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
     dataloaders = []
 
     # for-loop over the paths and rep_loader_kwargs
-    for i, (p_lst, loader_kwargs, loader_type) in enumerate(
-        zip(paths, rep_loader_kwargs, loader_types)
-    ):
+    for i, (p_lst, loader_kwargs, loader_type) in enumerate(zip(paths, rep_loader_kwargs, loader_types)):
         # one group of datasets that have the same channel
         p_lst: list[str] | str
 
         # > webdataset or wids loader
         if loader_type in ("webdataset", "wids"):
             # assertions
-            assert isinstance(p_lst, (list, tuple)), (
-                f"paths should be a list of lists, but got {type(p_lst)}"
-            )
+            assert isinstance(p_lst, (list, tuple)), f"paths should be a list of lists, but got {type(p_lst)}"
             assert len(p_lst) > 0, f"paths should not be empty, but got {p_lst}"
 
             p_lst = list(flatten_nested_list(p_lst))  # type: ignore
             for p in p_lst:
-                assert isinstance(p, str), (
-                    f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
-                )
+                assert isinstance(p, str), f"paths should be a list of strings, but got {type(p)} for paths {p_lst}"
 
             # resample must be false
             if not shuffle_loaders:
                 loader_kwargs["resample"] = False
             loader_kwargs["epoch_len"] = -1
 
-            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(
-                loader_type, p_lst, loader_kwargs
-            )
-            logger.debug(
-                f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n"
-                + "-" * 30
-            )
+            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs(loader_type, p_lst, loader_kwargs)
+            logger.debug(f"dataset group {i} gets paths: \n<green>[{'\n'.join(p_lst)}]</>\n" + "-" * 30)
 
             # construct webdataset/wids datasets and dataloaders
             if loader_type == "webdataset":
                 logger.info("Using webdataset loader")
-                dataset, dataloader = get_hyperspectral_dataloaders(
-                    p_lst, **loader_kwargs
-                )
+                dataset, dataloader = get_hyperspectral_dataloaders(p_lst, **loader_kwargs)
             elif loader_type == "wids":
                 logger.info("Using wids loader")
                 if isinstance(p_lst, list) and len(p_lst) == 1:
                     p_lst = p_lst[0]
 
-                dataset, dataloader = get_hyperspectral_wids_dataloaders(
-                    index_file=p_lst, **loader_kwargs
-                )
+                dataset, dataloader = get_hyperspectral_wids_dataloaders(index_file=p_lst, **loader_kwargs)
             elif loader_type == "mds":
                 logger.info("use mds loader")
                 ...
@@ -237,9 +215,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
 
     # > prepare for curriculum
     if curriculum_type is not None:
-        assert curriculum_kwargs is not None, (
-            f"curriculum_kwargs must be provided if {curriculum_type=}."
-        )
+        assert curriculum_kwargs is not None, f"curriculum_kwargs must be provided if {curriculum_type=}."
         curriculum_fn = get_curriculum_fn(  # type: ignore
             c_type=curriculum_type,
             **curriculum_kwargs,
@@ -256,9 +232,7 @@ def get_hyperspectral_img_loaders_with_different_backends_v3(
         )
 
     # > prepare chained unified dataloader
-    dataloader = chained_dataloaders(
-        dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
-    )
+    dataloader = chained_dataloaders(dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn)
 
     return datasets, dataloader
 
@@ -307,9 +281,7 @@ class ChainedDataLoader:
         if self.loader_type != "litdata":
             return None
         return {
-            "dl_state_dict": [
-                {f"dl_{i}": dl.state_dict()} for i, dl in enumerate(self.dataloaders)
-            ],
+            "dl_state_dict": [{f"dl_{i}": dl.state_dict()} for i, dl in enumerate(self.dataloaders)],
             # class attrs
             "infinite": self.infinite,
             "shuffle_loaders": self.shuffle_loaders,
@@ -372,9 +344,7 @@ class ChainedDataLoader:
         cls,
         input_dirs: list[dict[str, str | list[str]]],
         stream_ds_kwargs: list[dict[str, Any]] | dict[str, Any] = {},
-        combined_kwargs: list[dict[str, Any]] | dict[str, Any] = {
-            "batching_method": "per_stream"
-        },
+        combined_kwargs: list[dict[str, Any]] | dict[str, Any] = {"batching_method": "per_stream"},
         loader_kwargs: list[dict[str, Any]] | dict[str, Any] = {},
         **chain_kwargs,
     ):
@@ -386,20 +356,12 @@ class ChainedDataLoader:
         if not is_list(loader_kwargs):
             loader_kwargs = [loader_kwargs] * n_inputs
 
-        assert (
-            n_inputs
-            == len(stream_ds_kwargs)
-            == len(combined_kwargs)
-            == len(loader_kwargs)
-        ), (
-            "The number of inputs must be equal to the number of stream_ds_kwargs, "
-            "combined_kwargs, and loader_kwargs"
+        assert n_inputs == len(stream_ds_kwargs) == len(combined_kwargs) == len(loader_kwargs), (
+            "The number of inputs must be equal to the number of stream_ds_kwargs, combined_kwargs, and loader_kwargs"
         )
 
         ld_dataloaders = []
-        for stream, sk, ck, lk in zip(
-            input_dirs, stream_ds_kwargs, combined_kwargs, loader_kwargs
-        ):
+        for stream, sk, ck, lk in zip(input_dirs, stream_ds_kwargs, combined_kwargs, loader_kwargs):
             _, dl = cls._create_litdata_one_img_dataloader(stream, sk, ck, lk)
             ld_dataloaders.append(dl)
 
@@ -421,18 +383,12 @@ def create_litdata_img_hyper_loader(
     sub_combined_kwargs: list[dict],
     chained_loader_kwargs: dict,
 ):
-    assert len(paths) == len(loader_kwargs), (
-        "The number of paths must be equal to the number of loader_kwargs"
-    )
-    assert len(paths) == len(sub_combined_kwargs), (
-        "The number of paths must be equal to the number of combined_kwargs"
-    )
+    assert len(paths) == len(loader_kwargs), "The number of paths must be equal to the number of loader_kwargs"
+    assert len(paths) == len(sub_combined_kwargs), "The number of paths must be equal to the number of combined_kwargs"
 
     datasets = []
     dataloaders = []
-    for (path_sub_name, path_dict), load_kwgs, combined_kwgs in zip(
-        paths.items(), loader_kwargs, sub_combined_kwargs
-    ):
+    for (path_sub_name, path_dict), load_kwgs, combined_kwgs in zip(paths.items(), loader_kwargs, sub_combined_kwargs):
         datasets_ = []
         for subsub_name, path_lst in path_dict.items():
             path, ds_kwargs = path_lst
@@ -493,9 +449,7 @@ def test_litdata_hyper_dataloaders():
         combined_kwargs={"batching_method": "stratified"},
         **stream_ds_kwargs_,
     )
-    rgb_dl = StreamingDataLoader(
-        rgb_ds, batch_size=6, num_workers=8, persistent_workers=True
-    )
+    rgb_dl = StreamingDataLoader(rgb_ds, batch_size=6, num_workers=8, persistent_workers=True)
 
     # Multispectral dataset
     multi_ds = []

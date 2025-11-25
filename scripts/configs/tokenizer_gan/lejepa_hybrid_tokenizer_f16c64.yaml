@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: cosmos_hybrid_f16c32
+  - tokenizer: cosmos_hybrid_pure_cnn_decoder_f16c64
   - quantizer: quant
   - proxy_task: lejepa
   - accelerator: base
@@ -26,7 +26,6 @@ accelerator:
 tokenizer:
   cnn_cfg:
     model:
-      z_channels: 512
       latent_channels: 64
     quantizer_type: null
     use_channel_drop: false
@@ -36,6 +35,8 @@ tokenizer:
       drop_prob: 0.5
   trans_enc_cfg:
     pretrained_type: lejepa
+    class_token: true
+    global_pool: token
 
 vq_loss:
   # perceptual loss
@@ -173,24 +174,34 @@ train:
     #   weight_decay: 0.0
     #   betas: [0.9, 0.95]
 
-    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _target_: heavyball.ForeachAdamW
     _partial_: true
-    betas: [0.95, 0.99]
-    oned_param_algo: lion
-    use_triton: true
-    muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.01
-    oned_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.0
+    lr: 4.0e-4
+    weight_decay: 1.0e-4
+    betas: ${tuple:[0.99, 0.995]}
+    caution: true
+    mars: false
+    foreach: true
+    eps: 1.0e-9
+
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _partial_: true
+    # betas: [0.95, 0.99]
+    # oned_param_algo: lion
+    # use_triton: true
+    # muon_params_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.01
+    # oned_params_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.0
 
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 3.0e-4
+    # lr: 4.0e-4
     # weight_decay: 1.0e-5
     # eps: 1.0e-8
-    # betas: [0.95, 0.99]
+    # betas: [0.95, 0.995]
     # # foreach: true
     # fused: true
 
@@ -229,7 +240,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c64_jepa_pretrained
+    run_comment: hybrid_cosmos_f16c64_lejepa_pretrained_tokenizer
     log_with_time: true
     visualize_every: 500
     log_every: 10

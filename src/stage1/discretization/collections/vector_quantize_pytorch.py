@@ -60,11 +60,7 @@ def cdist(x, y, eps=1e-8):
     x2 = reduce(x**2, "b n d -> b n", "sum")
     y2 = reduce(y**2, "b n d -> b n", "sum")
     xy = einsum("b i d, b j d -> b i j", x, y) * -2
-    return (
-        (rearrange(x2, "b i -> b i 1") + rearrange(y2, "b j -> b 1 j") + xy)
-        .clamp(min=eps)
-        .sqrt()
-    )
+    return (rearrange(x2, "b i -> b i 1") + rearrange(y2, "b j -> b 1 j") + xy).clamp(min=eps).sqrt()
 
 
 def log(t, eps=1e-20):
@@ -172,9 +168,7 @@ def sample_vectors(samples, num):
 
 
 def batched_sample_vectors(samples, num):
-    return torch.stack(
-        [sample_vectors(sample, num) for sample in samples.unbind(dim=0)], dim=0
-    )
+    return torch.stack([sample_vectors(sample, num) for sample in samples.unbind(dim=0)], dim=0)
 
 
 def pad_shape(shape, size, dim=0):
@@ -194,11 +188,7 @@ def sample_multinomial(total_count, probs):
     for i, prob in enumerate(probs):
         is_last = i == (num_probs - 1)
 
-        s = (
-            torch.binomial(total_count, prob / remainder)
-            if not is_last
-            else total_count
-        )
+        s = torch.binomial(total_count, prob / remainder) if not is_last else total_count
         sample[i] = s
         total_count -= s
         remainder -= prob
@@ -235,9 +225,7 @@ def sample_vectors_distributed(local_samples, num):
     all_num_samples = all_gather_sizes(local_samples, dim=0)
 
     if rank == 0:
-        samples_per_rank = sample_multinomial(
-            num, all_num_samples / all_num_samples.sum()
-        )
+        samples_per_rank = sample_multinomial(num, all_num_samples / all_num_samples.sum())
     else:
         samples_per_rank = torch.empty_like(all_num_samples)
 
@@ -316,12 +304,7 @@ def efficient_rotation_trick_transform(u, q, e):
     return (
         e
         - 2 * (e @ rearrange(w, "b d -> b d 1") @ rearrange(w, "b d -> b 1 d"))
-        + 2
-        * (
-            e
-            @ rearrange(u, "b d -> b d 1").detach()
-            @ rearrange(q, "b d -> b 1 d").detach()
-        )
+        + 2 * (e @ rearrange(u, "b d -> b d 1").detach() @ rearrange(q, "b d -> b 1 d").detach())
     )
 
 
@@ -333,9 +316,7 @@ def rotate_to(src, tgt):
     norm_src = src.norm(dim=-1, keepdim=True)
     norm_tgt = tgt.norm(dim=-1, keepdim=True)
 
-    rotated_tgt = efficient_rotation_trick_transform(
-        safe_div(src, norm_src), safe_div(tgt, norm_tgt), src
-    ).squeeze()
+    rotated_tgt = efficient_rotation_trick_transform(safe_div(src, norm_src), safe_div(tgt, norm_tgt), src).squeeze()
 
     rotated = rotated_tgt * safe_div(norm_tgt, norm_src).detach()
 
@@ -414,21 +395,11 @@ class EuclideanCodebook(Module):
             "kmeans init is not compatible with multiple codebooks in distributed environment for now"
         )
 
-        self.sample_fn = (
-            sample_vectors_distributed
-            if use_ddp and sync_kmeans
-            else batched_sample_vectors
-        )
+        self.sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
 
-        self.replace_sample_fn = (
-            sample_vectors_distributed
-            if use_ddp and sync_kmeans
-            else batched_sample_vectors
-        )
+        self.replace_sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
 
-        self.kmeans_all_reduce_fn = (
-            distributed.all_reduce if use_ddp and sync_kmeans else noop
-        )
+        self.kmeans_all_reduce_fn = distributed.all_reduce if use_ddp and sync_kmeans else noop
         self.all_reduce_fn = distributed.all_reduce if use_ddp else noop
 
         self.register_buffer("initted", torch.Tensor([not kmeans_init]))
@@ -567,15 +538,11 @@ class EuclideanCodebook(Module):
         distributed.all_reduce(variance_numer)
         batch_variance = variance_numer / num_vectors
 
-        self.update_with_decay(
-            "batch_variance", batch_variance, self.affine_param_batch_decay
-        )
+        self.update_with_decay("batch_variance", batch_variance, self.affine_param_batch_decay)
 
     def replace(self, batch_samples, batch_mask):
         for ind, (samples, mask) in enumerate(zip(batch_samples, batch_mask)):
-            sampled = self.replace_sample_fn(
-                rearrange(samples, "... -> 1 ..."), mask.sum().item()
-            )
+            sampled = self.replace_sample_fn(rearrange(samples, "... -> 1 ..."), mask.sum().item())
             sampled = rearrange(sampled, "1 ... -> ...")
 
             self.embed.data[ind][mask] = sampled
@@ -595,9 +562,9 @@ class EuclideanCodebook(Module):
         self.replace(batch_samples, batch_mask=expired_codes)
 
     def update_ema(self):
-        cluster_size = laplace_smoothing(
-            self.cluster_size, self.codebook_size, self.eps
-        ) * self.cluster_size.sum(dim=-1, keepdim=True)
+        cluster_size = laplace_smoothing(self.cluster_size, self.codebook_size, self.eps) * self.cluster_size.sum(
+            dim=-1, keepdim=True
+        )
 
         embed_normalized = self.embed_avg / rearrange(cluster_size, "... -> ... 1")
         self.embed.data.copy_(embed_normalized)
@@ -644,9 +611,7 @@ class EuclideanCodebook(Module):
         if self.affine_param:
             codebook_std = self.codebook_variance.clamp(min=1e-5).sqrt()
             batch_std = self.batch_variance.clamp(min=1e-5).sqrt()
-            embed = (embed - self.codebook_mean) * (
-                batch_std / codebook_std
-            ) + self.batch_mean
+            embed = (embed - self.codebook_mean) * (batch_std / codebook_std) + self.batch_mean
 
         # handle maybe implicit neural codebook
         # and calculate distance
@@ -675,9 +640,7 @@ class EuclideanCodebook(Module):
             unpacked_onehot = unpack_one(embed_onehot, "h * c")
 
             if exists(codebook_transform_fn):
-                quantize = einsum(
-                    "h b n c, h b n c d -> h b n d", unpacked_onehot, transformed_embed
-                )
+                quantize = einsum("h b n c, h b n c d -> h b n d", unpacked_onehot, transformed_embed)
             else:
                 quantize = einsum("h b n c, h c d -> h b n d", unpacked_onehot, embed)
 
@@ -685,9 +648,7 @@ class EuclideanCodebook(Module):
             if exists(codebook_transform_fn):
                 # quantize = einx.get_at('h b n [c] d, h b n -> h b n d', transformed_embed, embed_ind)
 
-                repeated_embed_ind = repeat(
-                    embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1]
-                )
+                repeated_embed_ind = repeat(embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1])
                 quantize = transformed_embed.gather(-2, repeated_embed_ind)
                 quantize = rearrange(quantize, "h b n 1 d -> h b n d")
 
@@ -695,16 +656,12 @@ class EuclideanCodebook(Module):
                 # quantize = einx.get_at('h [c] d, h b n -> h b n d', embed, embed_ind)
 
                 repeated_embed = repeat(embed, "h c d -> h b c d", b=embed_ind.shape[1])
-                repeated_embed_ind = repeat(
-                    embed_ind, "h b n -> h b n d", d=embed.shape[-1]
-                )
+                repeated_embed_ind = repeat(embed_ind, "h b n -> h b n d", d=embed.shape[-1])
                 quantize = repeated_embed.gather(-2, repeated_embed_ind)
 
         if self.training and self.ema_update and not freeze_codebook:
             if self.affine_param:
-                flatten = (flatten - self.batch_mean) * (
-                    codebook_std / batch_std
-                ) + self.codebook_mean
+                flatten = (flatten - self.batch_mean) * (codebook_std / batch_std) + self.codebook_mean
 
             if exists(mask):
                 embed_onehot[~mask] = 0.0
@@ -723,9 +680,7 @@ class EuclideanCodebook(Module):
                 accum_grad_(self.cluster_size, cluster_size)
                 accum_grad_(self.embed_avg, embed_sum)
             else:
-                ema_inplace(
-                    self.cluster_size, cluster_size, self.decay, ema_update_weight
-                )
+                ema_inplace(self.cluster_size, cluster_size, self.decay, ema_update_weight)
                 ema_inplace(self.embed_avg, embed_sum, self.decay, ema_update_weight)
 
                 if not self.manual_ema_update:
@@ -733,9 +688,7 @@ class EuclideanCodebook(Module):
                     self.expire_codes_(x)
 
         if needs_codebook_dim:
-            quantize, embed_ind = map(
-                lambda t: rearrange(t, "1 ... -> ..."), (quantize, embed_ind)
-            )
+            quantize, embed_ind = map(lambda t: rearrange(t, "1 ... -> ..."), (quantize, embed_ind))
 
         dist = unpack_one(dist, "h * d")
 
@@ -787,21 +740,11 @@ class CosineSimCodebook(Module):
         self.gumbel_sample = gumbel_sample
         self.sample_codebook_temp = sample_codebook_temp
 
-        self.sample_fn = (
-            sample_vectors_distributed
-            if use_ddp and sync_kmeans
-            else batched_sample_vectors
-        )
+        self.sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
 
-        self.replace_sample_fn = (
-            sample_vectors_distributed
-            if use_ddp and sync_kmeans
-            else batched_sample_vectors
-        )
+        self.replace_sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
 
-        self.kmeans_all_reduce_fn = (
-            distributed.all_reduce if use_ddp and sync_kmeans else noop
-        )
+        self.kmeans_all_reduce_fn = distributed.all_reduce if use_ddp and sync_kmeans else noop
         self.all_reduce_fn = distributed.all_reduce if use_ddp else noop
 
         self.register_buffer("initted", torch.Tensor([not kmeans_init]))
@@ -843,9 +786,7 @@ class CosineSimCodebook(Module):
         batch_samples = l2norm(batch_samples)
 
         for ind, (samples, mask) in enumerate(zip(batch_samples, batch_mask)):
-            sampled = self.replace_sample_fn(
-                rearrange(samples, "... -> 1 ..."), mask.sum().item()
-            )
+            sampled = self.replace_sample_fn(rearrange(samples, "... -> 1 ..."), mask.sum().item())
             sampled = rearrange(sampled, "1 ... -> ...")
 
             self.embed.data[ind][mask] = sampled
@@ -865,9 +806,9 @@ class CosineSimCodebook(Module):
         self.replace(batch_samples, batch_mask=expired_codes)
 
     def update_ema(self):
-        cluster_size = laplace_smoothing(
-            self.cluster_size, self.codebook_size, self.eps
-        ) * self.cluster_size.sum(dim=-1, keepdim=True)
+        cluster_size = laplace_smoothing(self.cluster_size, self.codebook_size, self.eps) * self.cluster_size.sum(
+            dim=-1, keepdim=True
+        )
 
         embed_normalized = self.embed_avg / rearrange(cluster_size, "... -> ... 1")
         embed_normalized = l2norm(embed_normalized)
@@ -933,9 +874,7 @@ class CosineSimCodebook(Module):
             unpacked_onehot = unpack_one(embed_onehot, "h * c")
 
             if exists(codebook_transform_fn):
-                quantize = einsum(
-                    "h b n c, h b n c d -> h b n d", unpacked_onehot, transformed_embed
-                )
+                quantize = einsum("h b n c, h b n c d -> h b n d", unpacked_onehot, transformed_embed)
             else:
                 quantize = einsum("h b n c, h c d -> h b n d", unpacked_onehot, embed)
 
@@ -943,9 +882,7 @@ class CosineSimCodebook(Module):
             if exists(codebook_transform_fn):
                 # quantize = einx.get_at('h b n [c] d, h b n -> h b n d', transformed_embed, embed_ind)
 
-                repeated_embed_ind = repeat(
-                    embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1]
-                )
+                repeated_embed_ind = repeat(embed_ind, "h b n -> h b n 1 d", d=transformed_embed.shape[-1])
                 quantize = transformed_embed.gather(-2, repeated_embed_ind)
                 quantize = rearrange(quantize, "h b n 1 d -> h b n d")
 
@@ -953,9 +890,7 @@ class CosineSimCodebook(Module):
                 # quantize = einx.get_at('h [c] d, h b n -> h b n d', embed, embed_ind)
 
                 repeated_embed = repeat(embed, "h c d -> h b c d", b=embed_ind.shape[1])
-                repeated_embed_ind = repeat(
-                    embed_ind, "h b n -> h b n d", d=embed.shape[-1]
-                )
+                repeated_embed_ind = repeat(embed_ind, "h b n -> h b n d", d=embed.shape[-1])
                 quantize = repeated_embed.gather(-2, repeated_embed_ind)
 
         if self.training and self.ema_update and not freeze_codebook:
@@ -984,9 +919,7 @@ class CosineSimCodebook(Module):
                     self.expire_codes_(x)
 
         if needs_codebook_dim:
-            quantize, embed_ind = map(
-                lambda t: rearrange(t, "1 ... -> ..."), (quantize, embed_ind)
-            )
+            quantize, embed_ind = map(lambda t: rearrange(t, "1 ... -> ..."), (quantize, embed_ind))
 
         dist = unpack_one(dist, "h * d")
         return quantize, embed_ind, dist
@@ -1063,17 +996,13 @@ class VectorQuantize(Module):
         self.project_in = (
             Sequential(
                 nn.Linear(dim, codebook_input_dim),
-                nn.LayerNorm(codebook_input_dim)
-                if layernorm_after_project_in
-                else None,
+                nn.LayerNorm(codebook_input_dim) if layernorm_after_project_in else None,
             )
             if requires_projection
             else nn.Identity()
         )
 
-        self.project_out = (
-            nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
-        )
+        self.project_out = nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
 
         self.has_projections = requires_projection
 
@@ -1081,7 +1010,9 @@ class VectorQuantize(Module):
 
         self.has_commitment_loss = commitment_weight > 0.0
         self.commitment_weight = commitment_weight
-        self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss  # whether to use cross entropy loss to codebook as commitment loss
+        self.commitment_use_cross_entropy_loss = (
+            commitment_use_cross_entropy_loss  # whether to use cross entropy loss to codebook as commitment loss
+        )
 
         assert not (use_cosine_sim and learnable_codebook), (
             "cosine sim distance codebook not compatible with learnable codebook yet"
@@ -1102,14 +1033,10 @@ class VectorQuantize(Module):
         assert not (straight_through and rotation_trick)
         self.rotation_trick = rotation_trick
 
-        assert not (ema_update and learnable_codebook), (
-            "learnable codebook not compatible with EMA update"
-        )
+        assert not (ema_update and learnable_codebook), "learnable codebook not compatible with EMA update"
 
         assert 0 <= sync_update_v <= 1.0
-        assert not (sync_update_v > 0.0 and not learnable_codebook), (
-            "learnable codebook must be turned on"
-        )
+        assert not (sync_update_v > 0.0 and not learnable_codebook), "learnable codebook must be turned on"
 
         self.sync_update_v = sync_update_v
 
@@ -1143,9 +1070,7 @@ class VectorQuantize(Module):
         )
 
         if affine_param:
-            assert not use_cosine_sim, (
-                "affine param is only compatible with euclidean codebook"
-            )
+            assert not use_cosine_sim, "affine param is only compatible with euclidean codebook"
             codebook_kwargs = dict(
                 **codebook_kwargs,
                 affine_param=True,
@@ -1158,9 +1083,7 @@ class VectorQuantize(Module):
         self._codebook = codebook_class(**codebook_kwargs)
 
         self.in_place_codebook_optimizer = (
-            in_place_codebook_optimizer(self._codebook.parameters())
-            if exists(in_place_codebook_optimizer)
-            else None
+            in_place_codebook_optimizer(self._codebook.parameters()) if exists(in_place_codebook_optimizer) else None
         )
         self.manual_in_place_optimizer_update = manual_in_place_optimizer_update
 
@@ -1323,9 +1246,7 @@ class VectorQuantize(Module):
 
         # losses for loss breakdown
 
-        commit_loss = orthogonal_reg_loss = inplace_optimize_loss = (
-            codebook_diversity_loss
-        ) = self.zero
+        commit_loss = orthogonal_reg_loss = inplace_optimize_loss = codebook_diversity_loss = self.zero
 
         # one step in-place update
 
@@ -1356,17 +1277,11 @@ class VectorQuantize(Module):
 
             # quantize again
 
-            quantize, embed_ind, distances = self._codebook(
-                x, **codebook_forward_kwargs
-            )
+            quantize, embed_ind, distances = self._codebook(x, **codebook_forward_kwargs)
 
         if self.training:
             # determine code to use for commitment loss
-            maybe_detach = (
-                torch.detach
-                if not self.learnable_codebook or freeze_codebook
-                else identity
-            )
+            maybe_detach = torch.detach if not self.learnable_codebook or freeze_codebook else identity
 
             commit_quantize = maybe_detach(quantize)
 
@@ -1381,9 +1296,7 @@ class VectorQuantize(Module):
 
             if self.sync_update_v > 0.0:
                 # (21) in https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
-                quantize = quantize + self.sync_update_v * (
-                    quantize - quantize.detach()
-                )
+                quantize = quantize + self.sync_update_v * (quantize - quantize.detach())
 
         # function for calculating cross entropy loss to distance matrix
         # used for (1) naturalspeech2 training residual vq latents to be close to the correct codes and (2) cross-entropy based commitment loss
@@ -1396,9 +1309,7 @@ class VectorQuantize(Module):
             else:
                 dist_einops_eq = "1 (b h) n l -> b l n h"
 
-            ce_loss = F.cross_entropy(
-                rearrange(distances, dist_einops_eq, b=shape[0]), codes, ignore_index=-1
-            )
+            ce_loss = F.cross_entropy(rearrange(distances, dist_einops_eq, b=shape[0]), codes, ignore_index=-1)
 
             return ce_loss
 
@@ -1416,9 +1327,7 @@ class VectorQuantize(Module):
                 embed_ind = rearrange(embed_ind, "1 (b h) n -> b n h", h=heads)
 
         if self.accept_image_fmap:
-            embed_ind = rearrange(
-                embed_ind, "b (h w) ... -> b h w ...", h=height, w=width
-            )
+            embed_ind = rearrange(embed_ind, "b (h w) ... -> b h w ...", h=height, w=width)
 
         if only_one:
             embed_ind = rearrange(embed_ind, "b 1 ... -> b ...")
@@ -1431,15 +1340,11 @@ class VectorQuantize(Module):
             # calculate codebook diversity loss (negative of entropy) if needed
 
             if self.has_codebook_diversity_loss:
-                prob = (-distances * self.codebook_diversity_temperature).softmax(
-                    dim=-1
-                )
+                prob = (-distances * self.codebook_diversity_temperature).softmax(dim=-1)
                 avg_prob = reduce(prob, "... n l -> n l", "mean")
                 codebook_diversity_loss = -entropy(avg_prob).mean()
 
-                loss = (
-                    loss + codebook_diversity_loss * self.codebook_diversity_loss_weight
-                )
+                loss = loss + codebook_diversity_loss * self.codebook_diversity_loss_weight
 
             # commitment loss
 
@@ -1487,13 +1392,8 @@ class VectorQuantize(Module):
 
                 num_codes = codebook.shape[-2]
 
-                if (
-                    exists(self.orthogonal_reg_max_codes)
-                    and num_codes > self.orthogonal_reg_max_codes
-                ):
-                    rand_ids = torch.randperm(num_codes, device=device)[
-                        : self.orthogonal_reg_max_codes
-                    ]
+                if exists(self.orthogonal_reg_max_codes) and num_codes > self.orthogonal_reg_max_codes:
+                    rand_ids = torch.randperm(num_codes, device=device)[: self.orthogonal_reg_max_codes]
                     codebook = codebook[:, rand_ids]
 
                 orthogonal_reg_loss = orthogonal_loss_fn(codebook)
@@ -1530,9 +1430,7 @@ class VectorQuantize(Module):
             if self.return_zeros_for_masked_padding:
                 masked_out_value = torch.zeros_like(orig_input)
 
-            quantize = einx.where(
-                "b n, b n d, b n d -> b n d", mask, quantize, masked_out_value
-            )
+            quantize = einx.where("b n, b n d, b n d -> b n d", mask, quantize, masked_out_value)
 
             embed_ind = einx.where("b n, b n ..., -> b n ...", mask, embed_ind, -1)
 

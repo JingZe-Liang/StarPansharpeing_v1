@@ -42,10 +42,7 @@ def load_weights_with_shape_check(
         weight_items = list(weights.items())
 
         if len(param_items) != len(weight_items):
-            logging.warning(
-                f"Parameter count mismatch: model has {len(param_items)}, "
-                f"weights have {len(weight_items)}"
-            )
+            logging.warning(f"Parameter count mismatch: model has {len(param_items)}, weights have {len(weight_items)}")
 
         for (name, param), (weight_name, weight) in zip(param_items, weight_items):
             if name != weight_name:
@@ -63,20 +60,15 @@ def load_weights_with_shape_check(
                 logging.debug(f"Weights loaded for {name} (shape: {param.shape})")
             else:
                 logging.warning(
-                    f"Shape mismatch for {name}: "
-                    f"expected {param.shape}, got {weight.shape} - skipping",
+                    f"Shape mismatch for {name}: expected {param.shape}, got {weight.shape} - skipping",
                 )
                 missing_keys.append(name)
                 unexpected_keys.remove(weight_name)
 
     elif load_strategy == "search":
         for name, param in module.named_parameters():
-            if (
-                name in unexpected_keys
-            ):  # search in the whole weight keys, O(n) complexity
-                unexpected_keys.remove(
-                    name
-                )  # This key was expected, and remove from the total key set
+            if name in unexpected_keys:  # search in the whole weight keys, O(n) complexity
+                unexpected_keys.remove(name)  # This key was expected, and remove from the total key set
                 if param.shape == weights[name].shape:
                     param.data.copy_(weights[name].data)
                     # log_print(
@@ -84,8 +76,7 @@ def load_weights_with_shape_check(
                     # )
                 else:
                     logging.warning(
-                        f"Shape mismatch for {name}: "
-                        f"expected {param.shape}, got {weights[name].shape} - skipping",
+                        f"Shape mismatch for {name}: expected {param.shape}, got {weights[name].shape} - skipping",
                     )
                     # Consider this a missing key since we didn't load it
                     missing_keys.append(name)
@@ -96,9 +87,7 @@ def load_weights_with_shape_check(
     return _IncompatibleKeys(missing_keys=missing_keys, unexpected_keys=unexpected_keys)
 
 
-def load_fsdp_model(
-    fsdp_plugin, accelerator, model, input_dir, model_index=0, adapter_only=False
-):
+def load_fsdp_model(fsdp_plugin, accelerator, model, input_dir, model_index=0, adapter_only=False):
     """
     Load a Fully Sharded Data Parallel (FSDP) model's state dictionary from disk.
 
@@ -132,10 +121,7 @@ def load_fsdp_model(
     from torch.distributed.fsdp.fully_sharded_data_parallel import StateDictType
 
     accelerator.wait_for_everyone()
-    if (
-        fsdp_plugin.state_dict_type == StateDictType.FULL_STATE_DICT
-        and fsdp_plugin.fsdp_version == 1
-    ):
+    if fsdp_plugin.state_dict_type == StateDictType.FULL_STATE_DICT and fsdp_plugin.fsdp_version == 1:
         # FSDP raises error when single GPU is used with `offload_to_cpu=True` for FULL_STATE_DICT
         # so, only enable it when num_processes>1
         is_multi_process = accelerator.num_processes > 1
@@ -162,11 +148,7 @@ def load_fsdp_model(
                         "initializing FSDP object"
                     )
                 return
-            weights_name = (
-                f"{FSDP_MODEL_NAME}.bin"
-                if model_index == 0
-                else f"{FSDP_MODEL_NAME}_{model_index}.bin"
-            )
+            weights_name = f"{FSDP_MODEL_NAME}.bin" if model_index == 0 else f"{FSDP_MODEL_NAME}_{model_index}.bin"
             input_model_file = os.path.join(input_dir, weights_name)
             logging.info(f"Loading model from {input_model_file}")
             state_dict = torch.load(input_model_file)
@@ -188,9 +170,7 @@ def load_fsdp_model(
                 else input_dir
             )
             logging.info(f"Loading model from {ckpt_dir}")
-            state_dict = {
-                "model": _get_model_state_dict(model, adapter_only=adapter_only)
-            }
+            state_dict = {"model": _get_model_state_dict(model, adapter_only=adapter_only)}
             dist_cp.load(
                 state_dict=state_dict,
                 storage_reader=dist_cp.FileSystemReader(ckpt_dir),
@@ -200,9 +180,7 @@ def load_fsdp_model(
             logging.info(f"Model loaded from {ckpt_dir}")
 
         if fsdp_plugin.fsdp_version == 1:
-            load_result = _set_model_state_dict(
-                model, state_dict, adapter_only=adapter_only
-            )
+            load_result = _set_model_state_dict(model, state_dict, adapter_only=adapter_only)
         else:
             from torch.distributed.checkpoint.state_dict import set_model_state_dict
 
@@ -292,13 +270,9 @@ def remap_peft_model_state_dict(
                     v = state_dict[k].to(torch.long)
                     original_key = k.replace("_topk_indices", "")
                     # find the corresponding topk_weights from the state_dict
-                    topk_weights = state_dict[
-                        k.replace("_topk_indices", "_topk_weights")
-                    ]
+                    topk_weights = state_dict[k.replace("_topk_indices", "_topk_weights")]
                     # as we only save the first k-1 topk_weights, here we recover the last one
-                    topk_weights = torch.cat(
-                        [topk_weights, 1 - topk_weights.sum(-1, keepdim=True)], dim=-1
-                    )
+                    topk_weights = torch.cat([topk_weights, 1 - topk_weights.sum(-1, keepdim=True)], dim=-1)
                     # convert the weights to logits
                     topk_logits = torch.log(topk_weights)
                     matrix = (
@@ -322,17 +296,11 @@ def remap_peft_model_state_dict(
             if rank_pattern is not None:
                 model.resize_modules_by_rank_pattern(rank_pattern, adapter_name)
         elif config.peft_type == PeftType.VERA:
-            if (
-                config.save_projection
-                and "base_model.vera_A" not in peft_model_state_dict
-            ):
+            if config.save_projection and "base_model.vera_A" not in peft_model_state_dict:
                 raise ValueError(
                     "Specified to load vera_A and vera_B from state dictionary however they were not present!"
                 )
-            elif (
-                not config.save_projection
-                and "base_model.vera_A" in peft_model_state_dict
-            ):
+            elif not config.save_projection and "base_model.vera_A" in peft_model_state_dict:
                 warnings.warn(
                     "Specified to not load vera_A and vera_B from state dictionary however they are present in state"
                     " dictionary! Consider using them to ensure checkpoint loading is correct on all platforms using"
@@ -354,9 +322,7 @@ def remap_peft_model_state_dict(
                     k = k + ".weight"
                 return k
 
-            peft_model_state_dict = {
-                renamed_dora_weights(k): v for k, v in peft_model_state_dict.items()
-            }
+            peft_model_state_dict = {renamed_dora_weights(k): v for k, v in peft_model_state_dict.items()}
     else:
         raise NotImplementedError
 
@@ -391,15 +357,11 @@ def load_peft_model_checkpoint(
         _incompact_keys = base_model.load_state_dict(base_sd, strict=False)
         logging.info(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
     else:
-        warnings.warn(
-            "No base model checkpoint provided. Please make sure the base model is initialized correctly."
-        )
+        warnings.warn("No base model checkpoint provided. Please make sure the base model is initialized correctly.")
 
     # Load the PEFT model
     peft_config = PeftConfig.from_pretrained(peft_pretrained_path)
-    peft_model = PeftModel.from_pretrained(
-        base_model, peft_pretrained_path, adapter_name="default"
-    )
+    peft_model = PeftModel.from_pretrained(base_model, peft_pretrained_path, adapter_name="default")
 
     if merge_and_unload:
         peft_model = peft_model.merge_and_unload(  # type: ignore
@@ -460,9 +422,7 @@ def load_diffbands_tokenizer_then_peft_lora(
     peft_config, tokenizer = load_peft_model_checkpoint(
         tokenizer,
         peft_pretrained_path,
-        base_model_pretrained_path=tokenizer_pretrained_path
-        if load_main_model_in_peft_fn
-        else None,
+        base_model_pretrained_path=tokenizer_pretrained_path if load_main_model_in_peft_fn else None,
         **peft_kwargs,
     )
 

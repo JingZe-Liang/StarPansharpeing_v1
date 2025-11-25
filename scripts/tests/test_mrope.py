@@ -81,9 +81,7 @@ def get_rope_index(
     """
     mrope_position_deltas = []
 
-    if input_ids is not None and (
-        image_grid_thw is not None or video_grid_thw is not None
-    ):
+    if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
         total_input_ids = input_ids
         if attention_mask is None:
             attention_mask = torch.ones_like(total_input_ids)
@@ -99,9 +97,7 @@ def get_rope_index(
         for i, input_ids in enumerate(total_input_ids):
             input_ids = input_ids[attention_mask[i].to(input_ids.device) == 1]
             image_nums, video_nums = 0, 0
-            vision_start_indices = torch.argwhere(
-                input_ids == vision_start_token_id
-            ).squeeze(1)
+            vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
             vision_tokens = input_ids[vision_start_indices + 1]
             image_nums = (vision_tokens == image_token_id).sum()
             video_nums = (vision_tokens == video_token_id).sum()
@@ -146,67 +142,32 @@ def get_rope_index(
                 )
                 text_len = ed - st
 
-                st_idx = (
-                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                )
-                llm_pos_ids_list.append(
-                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                )
+                st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                t_index = (
-                    torch.arange(llm_grid_t)
-                    .view(-1, 1)
-                    .expand(-1, llm_grid_h * llm_grid_w)
-                    .flatten()
-                )
-                h_index = (
-                    torch.arange(llm_grid_h)
-                    .view(1, -1, 1)
-                    .expand(llm_grid_t, -1, llm_grid_w)
-                    .flatten()
-                )
-                w_index = (
-                    torch.arange(llm_grid_w)
-                    .view(1, 1, -1)
-                    .expand(llm_grid_t, llm_grid_h, -1)
-                    .flatten()
-                )
-                llm_pos_ids_list.append(
-                    torch.stack([t_index, h_index, w_index]) + text_len + st_idx
-                )
+                t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
+                w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
                 st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
             if st < len(input_tokens):
-                st_idx = (
-                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                )
+                st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 text_len = len(input_tokens) - st
-                llm_pos_ids_list.append(
-                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                )
+                llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-            position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(
-                position_ids.device
-            )
-            mrope_position_deltas.append(
-                llm_positions.max() + 1 - len(total_input_ids[i])
-            )
+            position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
+            mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
 
-        mrope_position_deltas = torch.tensor(
-            mrope_position_deltas, device=input_ids.device
-        ).unsqueeze(1)
+        mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
         return position_ids, mrope_position_deltas
     else:
         if attention_mask is not None:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
-            position_ids = (
-                position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-            )
-            max_position_ids = position_ids.max(0, keepdim=False)[0].max(
-                -1, keepdim=True
-            )[0]
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
+            max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
             mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
         else:
             position_ids = (
@@ -234,9 +195,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # Generate inverse frequencies
-        inv_freq = 1.0 / (
-            10000 ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
-        )
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(
@@ -259,11 +218,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         """
         # Expand inv_freq to shape (3, bs, d, 1)
         # (d, ) -> (3, bs, d, 1)
-        inv_freq_expanded = (
-            self.inv_freq[None, None, :, None]
-            .float()
-            .expand(3, position_ids.shape[1], -1, 1)
-        )
+        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
 
         # shape (3, bs, l) -> (3, bs, 1, l)
         position_ids_expanded = position_ids[:, :, None, :].float()
@@ -272,9 +227,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         device_type = device if device != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
             # outer product: [3, bs, d, 1] @ [3, bs, 1, l] -> [3, bs, d, l]
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(2, 3)
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
@@ -349,9 +302,7 @@ def test_mrope_logic():
     img_ids2 = [151652] * (128 * 128)
     video_ids = [151653] * 3 * 128 * 128
     text_ids = [1] * 300
-    input_ids = torch.tensor(
-        [*text_ids, 151651, *img_ids1, 15162, *img_ids2, *video_ids]
-    )[None]
+    input_ids = torch.tensor([*text_ids, 151651, *img_ids1, 15162, *img_ids2, *video_ids])[None]
     attention_mask = None  # torch.ones(batch_size, seq_length).long()
 
     # Sample image grid (2 images with different dimensions)
@@ -379,12 +330,8 @@ def test_mrope_logic():
         vision_start_token_id=151651,
     )
 
-    print(
-        f"  Position IDs shape: {position_ids.shape}"
-    )  # Expected: (3, batch_size, seq_length)
-    print(
-        f"  mRoPE position deltas shape: {mrope_position_deltas.shape}"
-    )  # Expected: (batch_size, 1)
+    print(f"  Position IDs shape: {position_ids.shape}")  # Expected: (3, batch_size, seq_length)
+    print(f"  mRoPE position deltas shape: {mrope_position_deltas.shape}")  # Expected: (batch_size, 1)
     print()
 
     # Test Qwen2VLRotaryEmbedding
@@ -397,12 +344,8 @@ def test_mrope_logic():
 
     # Get cos/sin embeddings
     cos, sin = rope_emb(x, position_ids)
-    print(
-        f"  Cosine embeddings shape: {cos.shape}"
-    )  # Expected: (3, batch_size, seq_length, head_dim)
-    print(
-        f"  Sine embeddings shape: {sin.shape}"
-    )  # Expected: (3, batch_size, seq_length, head_dim)
+    print(f"  Cosine embeddings shape: {cos.shape}")  # Expected: (3, batch_size, seq_length, head_dim)
+    print(f"  Sine embeddings shape: {sin.shape}")  # Expected: (3, batch_size, seq_length, head_dim)
     print()
 
     # Test apply_multimodal_rotary_pos_emb
@@ -420,9 +363,7 @@ def test_mrope_logic():
     k_trans = k.transpose(1, 2)  # [batch_size, num_heads, seq_length, head_dim]
 
     try:
-        q_rot, k_rot = apply_multimodal_rotary_pos_emb(
-            q_trans, k_trans, cos, sin, mrope_section
-        )
+        q_rot, k_rot = apply_multimodal_rotary_pos_emb(q_trans, k_trans, cos, sin, mrope_section)
         print(f"  Rotated query shape: {q_rot.shape}")
         print(f"  Rotated key shape: {k_rot.shape}")
     except Exception as e:

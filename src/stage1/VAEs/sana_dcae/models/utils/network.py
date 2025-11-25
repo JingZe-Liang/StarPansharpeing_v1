@@ -37,9 +37,7 @@ __all__ = [
 
 
 def is_parallel(model: nn.Module) -> bool:
-    return isinstance(
-        model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel)
-    )
+    return isinstance(model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel))
 
 
 def get_device(model: nn.Module) -> torch.device:
@@ -90,9 +88,7 @@ def build_kwargs_from_config(config: dict, target_func: Callable) -> dict[str, A
     return kwargs
 
 
-def load_state_dict_from_file(
-    file: str, only_state_dict=True
-) -> dict[str, torch.Tensor]:
+def load_state_dict_from_file(file: str, only_state_dict=True) -> dict[str, torch.Tensor]:
     file = os.path.realpath(os.path.expanduser(file))
     checkpoint = torch.load(file, map_location="cpu", weights_only=True)
     if only_state_dict and "state_dict" in checkpoint:
@@ -145,6 +141,4 @@ def shape_not_matched_ckpt_load(model: nn.Module, ckpt: dict | str):
                 f"expected <red>{param.shape}</>, got <red>{ckpt_p.shape}</>"
             )
 
-    logger.info(
-        f"[Model load] {model.__class__.__name__} loaded with {_n_not_matched}/{_n_params} params mismatched"
-    )
+    logger.info(f"[Model load] {model.__class__.__name__} loaded with {_n_not_matched}/{_n_params} params mismatched")

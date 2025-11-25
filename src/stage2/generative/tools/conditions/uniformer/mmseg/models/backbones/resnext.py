@@ -14,9 +14,7 @@ class Bottleneck(_Bottleneck):
     "caffe", the stride-two layer is the first 1x1 conv layer.
     """
 
-    def __init__(
-        self, inplanes, planes, groups=1, base_width=4, base_channels=64, **kwargs
-    ):
+    def __init__(self, inplanes, planes, groups=1, base_width=4, base_channels=64, **kwargs):
         super(Bottleneck, self).__init__(inplanes, planes, **kwargs)
 
         if groups == 1:
@@ -26,9 +24,7 @@ class Bottleneck(_Bottleneck):
 
         self.norm1_name, norm1 = build_norm_layer(self.norm_cfg, width, postfix=1)
         self.norm2_name, norm2 = build_norm_layer(self.norm_cfg, width, postfix=2)
-        self.norm3_name, norm3 = build_norm_layer(
-            self.norm_cfg, self.planes * self.expansion, postfix=3
-        )
+        self.norm3_name, norm3 = build_norm_layer(self.norm_cfg, self.planes * self.expansion, postfix=3)
 
         self.conv1 = build_conv_layer(
             self.conv_cfg,

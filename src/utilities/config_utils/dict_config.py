@@ -34,9 +34,7 @@ def flatten_dict(d, parent_key="", sep="_"):
     return dict(items)
 
 
-def load_config_file[T](
-    config_file, dataclass_cls: type[T] | None = None
-) -> T | edict | DictConfig | object:
+def load_config_file[T](config_file, dataclass_cls: type[T] | None = None) -> T | edict | DictConfig | object:
     """Load a config file and return a dataclass, Omegaconf DictConfig, or EasyDict."""
     try:
         config = OmegaConf.to_container(OmegaConf.load(config_file), resolve=True)
@@ -45,8 +43,7 @@ def load_config_file[T](
         return dataclass_from_dict(dataclass_cls, config)  # type: ignore
     except Exception as e:
         logger.warning(
-            f"Error loading config file {config_file}: {e}. Try with PyYaml UnsafeLoader, "
-            "ignore the dataclass"
+            f"Error loading config file {config_file}: {e}. Try with PyYaml UnsafeLoader, ignore the dataclass"
         )
 
         with open(config_file, "r") as f:
@@ -64,9 +61,7 @@ def dump_config(config, path, log_config=True):
         f.write(yaml_dump)
 
 
-def set_defaults(
-    cfg: dict | None, defaults: dict[str, Any], use_edict=True
-) -> dict | edict:
+def set_defaults(cfg: dict | None, defaults: dict[str, Any], use_edict=True) -> dict | edict:
     """set defaults for dict/edict config"""
     if cfg is None:
         cfg = edict() if use_edict else {}

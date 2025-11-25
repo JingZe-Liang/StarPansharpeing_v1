@@ -1,7 +1,7 @@
 import os
 import sys
 
-os.environ['MODEL_COMPILED'] = '0'
+os.environ["MODEL_COMPILED"] = "0"
 
 import hydra
 import lovely_tensors as lt
@@ -78,15 +78,14 @@ def test_init_model():
         else:
             logger.success(f"Forward pass successful")
             logger.info(f"Output type: {type(output)}")
-            if hasattr(output, 'shape'):
+            if hasattr(output, "shape"):
                 logger.info(f"Output shape: {output.shape}")
 
-
     logger.success("Model initialization test completed successfully!")
+
 
 if __name__ == "__main__":
     # Configure loguru to show test output
     lt.monkey_patch()
     with logger.catch():
         test_init_model()
-

@@ -27,14 +27,9 @@ def sample_logit_norm_time(
     Time Samples following the Logit Normal distribution of Stable Diffusion 3
     Produces times in [0, 1-eps] following "Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow"
     """
-    randn = (
-        torch.randn(shape, device=device) * time_sampling_cfg.scale
-        + time_sampling_cfg.location
-    )  # [b, ...]
+    randn = torch.randn(shape, device=device) * time_sampling_cfg.scale + time_sampling_cfg.location  # [b, ...]
     logit_normal = randn.sigmoid()  # [b, ...]
-    logit_normal_rescaled = logit_normal * (
-        1 - time_sampling_cfg.eps
-    )  # [b, ...]. Rescales between [0, 1-eps]
+    logit_normal_rescaled = logit_normal * (1 - time_sampling_cfg.eps)  # [b, ...]. Rescales between [0, 1-eps]
 
     return logit_normal_rescaled
 
@@ -112,26 +107,14 @@ class AlphaFlow(nn.Module):
                 progress = (cur_step - sampling_cfg.init_steps) / max(
                     1, (sampling_cfg.end_steps - sampling_cfg.init_steps)
                 )
-                alpha = (
-                    sampling_cfg.initial_alpha
-                    + (sampling_cfg.end_alpha - sampling_cfg.initial_alpha) * progress
-                )
-                beta = (
-                    sampling_cfg.initial_beta
-                    + (sampling_cfg.end_beta - sampling_cfg.initial_beta) * progress
-                )
-            beta_distrib = torch.distributions.Beta(
-                torch.tensor([alpha]), torch.tensor([beta])
-            )
+                alpha = sampling_cfg.initial_alpha + (sampling_cfg.end_alpha - sampling_cfg.initial_alpha) * progress
+                beta = sampling_cfg.initial_beta + (sampling_cfg.end_beta - sampling_cfg.initial_beta) * progress
+            beta_distrib = torch.distributions.Beta(torch.tensor([alpha]), torch.tensor([beta]))
             return beta_distrib.sample((batch_size,), device=device)
 
         ### Uniform distribution
         elif sampling_cfg.timestep_distrib_type == "uniform":
-            return (
-                torch.rand((batch_size,), device=device)
-                * (sampling_cfg.max - sampling_cfg.min)
-                + sampling_cfg.min
-            )
+            return torch.rand((batch_size,), device=device) * (sampling_cfg.max - sampling_cfg.min) + sampling_cfg.min
 
         ### Constant distribution
         elif sampling_cfg.timestep_distrib_type == "constant":
@@ -139,19 +122,12 @@ class AlphaFlow(nn.Module):
 
         ## Arctan timesteps
         elif sampling_cfg.timestep_distrib_type == "arctan":
-            sigma = torch.exp(
-                torch.randn((batch_size,), device=device) * sampling_cfg.scale
-                + sampling_cfg.location
-            )
+            sigma = torch.exp(torch.randn((batch_size,), device=device) * sampling_cfg.scale + sampling_cfg.location)
             return 2 / math.pi * torch.atan(sigma)
 
-    def _sample_timestep_mf(
-        self, cfg, cur_step, batch_size, device
-    ) -> tuple[Tensor, Tensor]:
+    def _sample_timestep_mf(self, cfg, cur_step, batch_size, device) -> tuple[Tensor, Tensor]:
         if cfg.type == "truncated":
-            t = self._sample_timestep(
-                cfg.time_sampling_mf_t, cur_step, batch_size, device=device
-            )
+            t = self._sample_timestep(cfg.time_sampling_mf_t, cur_step, batch_size, device=device)
             t_next = self._sample_timestep(
                 cfg.time_sampling_mf_t_next,
                 cur_step,
@@ -160,12 +136,8 @@ class AlphaFlow(nn.Module):
                 upper_truncated=t,
             )
         elif cfg.type in ["minmax", "min", "r_in_t_range"]:
-            t_1 = self._sample_timestep(
-                cfg.time_sampling_mf_t, cur_step, batch_size, device=device
-            )
-            t_2 = self._sample_timestep(
-                cfg.time_sampling_mf_t_next, cur_step, batch_size, device=device
-            )
+            t_1 = self._sample_timestep(cfg.time_sampling_mf_t, cur_step, batch_size, device=device)
+            t_2 = self._sample_timestep(cfg.time_sampling_mf_t_next, cur_step, batch_size, device=device)
 
             # make sure t > r
             if cfg.type == "minmax":
@@ -178,9 +150,7 @@ class AlphaFlow(nn.Module):
                 t = t_1
                 t_next = t_2 * t_1
             else:
-                raise NotImplementedError(
-                    f"Unknown meanflow distribution type: {cfg.type}"
-                )
+                raise NotImplementedError(f"Unknown meanflow distribution type: {cfg.type}")
 
         return t, t_next
 
@@ -191,9 +161,7 @@ class AlphaFlow(nn.Module):
             assert cfg.change_init_steps == cfg.change_end_steps, (
                 "For step scheduler, change_init_steps and change_end_steps must be equal."
             )
-            current_ratio = (
-                cfg.initial_value if cur_step < cfg.change_init_steps else cfg.end_value
-            )
+            current_ratio = cfg.initial_value if cur_step < cfg.change_init_steps else cfg.end_value
         elif cfg.scheduler in ["linear", "exponential", "log", "sigmoid"]:
             if cur_step < cfg.change_init_steps:
                 current_ratio = cfg.initial_value
@@ -201,38 +169,23 @@ class AlphaFlow(nn.Module):
                 current_ratio = cfg.end_value
             else:
                 if cfg.scheduler in ["linear", "exponential", "log"]:
-                    progress = (cur_step - cfg.change_init_steps) / (
-                        cfg.change_end_steps - cfg.change_init_steps
-                    )
+                    progress = (cur_step - cfg.change_init_steps) / (cfg.change_end_steps - cfg.change_init_steps)
                 elif cfg.scheduler == "sigmoid":
-                    middle_step = (
-                        cfg.change_init_steps
-                        + (cfg.change_end_steps - cfg.change_init_steps) / 2
-                    )
-                    progress = (cur_step - middle_step) / (
-                        cfg.change_end_steps - cfg.change_init_steps
-                    )
+                    middle_step = cfg.change_init_steps + (cfg.change_end_steps - cfg.change_init_steps) / 2
+                    progress = (cur_step - middle_step) / (cfg.change_end_steps - cfg.change_init_steps)
 
                 if cfg.scheduler == "linear":
-                    current_ratio = (
-                        cfg.initial_value
-                        + (cfg.end_value - cfg.initial_value) * progress
-                    )
+                    current_ratio = cfg.initial_value + (cfg.end_value - cfg.initial_value) * progress
                 elif cfg.scheduler == "exponential":
                     progress = progress**cfg.gamma
-                    current_ratio = cfg.initial_value * (
-                        (cfg.end_value / cfg.initial_value) ** progress
-                    )
+                    current_ratio = cfg.initial_value * ((cfg.end_value / cfg.initial_value) ** progress)
                 elif cfg.scheduler == "log":
                     log_progress = math.log(1 + progress * 9) / math.log(10)
-                    current_ratio = (
-                        cfg.initial_value
-                        + (cfg.end_value - cfg.initial_value) * log_progress
-                    )
+                    current_ratio = cfg.initial_value + (cfg.end_value - cfg.initial_value) * log_progress
                 elif cfg.scheduler == "sigmoid":
-                    current_ratio = cfg.initial_value + (
-                        cfg.end_value - cfg.initial_value
-                    ) * (1 / (1 + math.exp(-progress * cfg.gamma)))
+                    current_ratio = cfg.initial_value + (cfg.end_value - cfg.initial_value) * (
+                        1 / (1 + math.exp(-progress * cfg.gamma))
+                    )
         else:
             raise NotImplementedError(f"Unknown scheduler type: {cfg.scheduler}")
 
@@ -258,16 +211,12 @@ class AlphaFlow(nn.Module):
         bs_mf = batch_size - bs_fm
 
         # Timesteps for Flow Matching
-        t_fm: Tensor = self._sample_timestep(
-            self.time_sampling, cur_step, bs_fm, device=device
-        )
+        t_fm: Tensor = self._sample_timestep(self.time_sampling, cur_step, bs_fm, device=device)
         t_next_fm: Tensor = t_fm
         dt_fm = torch.zeros_like(t_next_fm)
 
         # Timesteps for Mean Flow
-        t_mf, t_next_mf = self._sample_timestep_mf(
-            self.distrib_t_t_next_mf, cur_step, bs_mf, device=device
-        )
+        t_mf, t_next_mf = self._sample_timestep_mf(self.distrib_t_t_next_mf, cur_step, bs_mf, device=device)
         dt_mf = alpha * (t_mf - t_next_mf)
 
         # t and t_next
@@ -310,8 +259,7 @@ class AlphaFlow(nn.Module):
             ## !! not used
             raise
             label_drop_mask_idx = (
-                torch.rand(cond.label.shape[0], device=cond.label.device)
-                < self.cfg.model.label_dropout
+                torch.rand(cond.label.shape[0], device=cond.label.device) < self.cfg.model.label_dropout
             )
             drop_mask = cfg_mask_idx & label_drop_mask_idx
             cond.label[drop_mask] = torch.zeros_like(cond.label[drop_mask])
@@ -344,11 +292,7 @@ class AlphaFlow(nn.Module):
         else:
             videos_u_t_t_cond = torch.zeros_like(x_t)
 
-        guided = (
-            omega * velocity
-            + kappa * videos_u_t_t_cond
-            + (1 - omega - kappa) * videos_u_t_t_uncond
-        )
+        guided = omega * velocity + kappa * videos_u_t_t_cond + (1 - omega - kappa) * videos_u_t_t_uncond
         velocity_cfg[cfg_mask_idx] = guided[cfg_mask_idx]
         return velocity_cfg
 
@@ -399,9 +343,7 @@ class AlphaFlow(nn.Module):
             (x_t_mf, t_next_mf, t_mf),
             (velocity_cfg_mf, torch.zeros_like(t_next_mf), torch.ones_like(t_mf)),
         )
-        mean_velocity_mf = (
-            velocity_cfg_mf - expand_to((t_mf - t_next_mf), batch_size_mf, 4) * dudt_mf
-        )
+        mean_velocity_mf = velocity_cfg_mf - expand_to((t_mf - t_next_mf), batch_size_mf, 4) * dudt_mf
         mean_velocity[mask_mf] = mean_velocity_mf
         return mean_velocity
 
@@ -435,12 +377,8 @@ class AlphaFlow(nn.Module):
                 # return_extra_output=True,
             )
 
-        mean_velocity = (dt * velocity_cfg + (t - dt - t_next) * mean_velocity_next) / (
-            t - t_next
-        )
-        mean_velocity = torch.clip(
-            mean_velocity, min=-self.clamp_utgt, max=self.clamp_utgt
-        )
+        mean_velocity = (dt * velocity_cfg + (t - dt - t_next) * mean_velocity_next) / (t - t_next)
+        mean_velocity = torch.clip(mean_velocity, min=-self.clamp_utgt, max=self.clamp_utgt)
         return mean_velocity
 
     def training_losses(
@@ -469,9 +407,7 @@ class AlphaFlow(nn.Module):
         velocity = noise_unscaled - x1
 
         # CFG training
-        velocity_cfg = self._compute_velocity_cfg(
-            velocity, x_t, t, cond, model, b, drop_label=False
-        )
+        velocity_cfg = self._compute_velocity_cfg(velocity, x_t, t, cond, model, b, drop_label=False)
 
         # Split batch for continuous (alpha == 1 or r == t) and discrete training (0 < alpha <= 1)
         mask_c = (dt == 0).flatten()  # [b]  # Continuous
@@ -535,9 +471,7 @@ class AlphaFlow(nn.Module):
         )
 
         ###### Adaptive loss
-        loss_unscaled = (
-            ((pred_mean_velocity - mean_velocity) ** 2).flatten(1).mean(1)
-        )  # [b]
+        loss_unscaled = ((pred_mean_velocity - mean_velocity) ** 2).flatten(1).mean(1)  # [b]
         weight_c = torch.ones(bc, device=velocity.device)  # [b_c]
         weight_d = torch.ones(bd, device=velocity.device) * alpha  # [b_d]
         weight = torch.cat([weight_c, weight_d], dim=0) / (
@@ -549,9 +483,7 @@ class AlphaFlow(nn.Module):
         loss_tfm = ((pred_mean_velocity - velocity_cfg) ** 2).flatten(1).mean(1)  # [b]
 
         ## Compute consistency flow matching loss
-        loss_tcc = (
-            (2 * (velocity_cfg - mean_velocity) * pred_mean_velocity).flatten(1).mean(1)
-        )  # [b]
+        loss_tcc = (2 * (velocity_cfg - mean_velocity) * pred_mean_velocity).flatten(1).mean(1)  # [b]
         loss_tfm_plus_tcc = loss_tfm + loss_tcc  # [b]
 
         loss_dict = {

@@ -65,9 +65,7 @@ class PansharpTokenizeProcessor(nn.Module):
         self.tokenizer: nn.Module | None = tokenizer
         self.has_tokenizer = self.tokenizer is not None
         if self.has_tokenizer:
-            assert hasattr(self.tokenizer, "encode"), (
-                "Tokenizer must have an encode method"
-            )
+            assert hasattr(self.tokenizer, "encode"), "Tokenizer must have an encode method"
             self.tokenizer.requires_grad_(False)
             self.tokenizer.eval()
             self.tokenizer = cast(nn.Module, self.tokenizer)
@@ -92,9 +90,7 @@ class PansharpTokenizeProcessor(nn.Module):
                             Tensors are moved to CPU.
         """
         if "img" not in batch or "__key__" not in batch:
-            log_print(
-                "Input batch missing 'img' or '__key__'. Skipping.", level="error"
-            )
+            log_print("Input batch missing 'img' or '__key__'. Skipping.", level="error")
             return None
 
         hrms = batch["img"]
@@ -192,9 +188,7 @@ class PansharpTokenizeProcessor(nn.Module):
                         do_compression=True,  # small enough data, no need for compression
                     )
                 else:
-                    raise ValueError(
-                        f"Unsupported latent_save_backend: {self.latent_save_backend}"
-                    )
+                    raise ValueError(f"Unsupported latent_save_backend: {self.latent_save_backend}")
 
             output_list.append(sample_data)
 
@@ -241,9 +235,7 @@ def seperate_pansharpening_latent_pairs(
 # * --- Main entry --- #
 
 
-def save_hwc_float_0_1(
-    cfg, img, const: float | None = None, dtype: np.dtype | None = None
-) -> np.ndarray:
+def save_hwc_float_0_1(cfg, img, const: float | None = None, dtype: np.dtype | None = None) -> np.ndarray:
     # Convert to float32 and scale to [0, 1]
     if cfg.consts.to_neg_1_1:
         img = (img + 1) / 2
@@ -283,9 +275,7 @@ def process_dataset(cfg: DictConfig) -> None:
     log_print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Determine device
-    device = torch.device(
-        f"cuda:{cfg.consts.run_device}" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device(f"cuda:{cfg.consts.run_device}" if torch.cuda.is_available() else "cpu")
     log_print(f"Using device: {device}")
 
     # 1. Instantiate components based on config
@@ -302,9 +292,7 @@ def process_dataset(cfg: DictConfig) -> None:
 
     # loading tokenizer
     if cfg.tokenizer is not None:
-        tokenizer: tuple[PeftConfig, nn.Module] | nn.Module | None = (
-            hydra.utils.instantiate(cfg.tokenizer)
-        )
+        tokenizer: tuple[PeftConfig, nn.Module] | nn.Module | None = hydra.utils.instantiate(cfg.tokenizer)
         if isinstance(tokenizer, tuple):
             assert len(tokenizer) == 2, (
                 "Tokenizer instantiation returns a tuple, must be a PEFT config and a lora-loaded network"
@@ -332,9 +320,7 @@ def process_dataset(cfg: DictConfig) -> None:
         tokenizer = None
         log_print("No tokenizer provided, skipping latent generation.")
 
-    before_save_fn_ = (
-        save_chw_uint if cfg.consts.save_fn == "chw_uint" else save_hwc_float_0_1
-    )
+    before_save_fn_ = save_chw_uint if cfg.consts.save_fn == "chw_uint" else save_hwc_float_0_1
     processor = PansharpTokenizeProcessor(
         pansharp_simulator=pansharp_sim,
         tokenizer=tokenizer,
@@ -342,9 +328,7 @@ def process_dataset(cfg: DictConfig) -> None:
         latent_save_backend="npz",
     )
     # 2. Setup WebDataset pipeline using get_hyperspectral_dataloaders
-    log_print(
-        f"Setting up WebDataset pipeline: {cfg.data.wds_paths} -> {cfg.output.output_dir} TAR files"
-    )
+    log_print(f"Setting up WebDataset pipeline: {cfg.data.wds_paths} -> {cfg.output.output_dir} TAR files")
 
     # We need the dataloader, not the dataset object returned by the function
     # The dataloader yields batches of dictionaries like {'img': tensor, '__key__': [keys...]}
@@ -363,10 +347,7 @@ def process_dataset(cfg: DictConfig) -> None:
     sink_manager = TarSinkManager(output_dir)
     for batch in progress_bar:
         # Move input batch data to the correct device
-        batch_on_device = {
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        batch_on_device = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
         # Process the batch
         processed_output = processor(batch_on_device)
@@ -384,20 +365,14 @@ def process_dataset(cfg: DictConfig) -> None:
                 else:
                     name = "default.tar"
 
-                pansharp_sink = sink_manager.get_sink(
-                    f"pansharpening_{name}", f"pansharpening_reduced/{name}"
-                )
+                pansharp_sink = sink_manager.get_sink(f"pansharpening_{name}", f"pansharpening_reduced/{name}")
 
                 if tokenizer is not None:
-                    latent_sink = sink_manager.get_sink(
-                        f"latent_{name}", f"pansharpening_latents/{name}"
-                    )
+                    latent_sink = sink_manager.get_sink(f"latent_{name}", f"pansharpening_latents/{name}")
 
                     # Seperate Pansharpening pairs and latents
-                    pansharp_sample, latent_sample = (
-                        seperate_pansharpening_latent_pairs(
-                            sample_data, processor.latent_save_backend
-                        )
+                    pansharp_sample, latent_sample = seperate_pansharpening_latent_pairs(
+                        sample_data, processor.latent_save_backend
                     )
 
                     assert latent_sample is not None, "Latent sample is None"
@@ -433,9 +408,7 @@ def process_dataset(cfg: DictConfig) -> None:
     # close all sinks
     sink_manager.close_all()
 
-    log_print(
-        f"Finished processing. {total_samples} samples written to {cfg.output.output_dir}"
-    )
+    log_print(f"Finished processing. {total_samples} samples written to {cfg.output.output_dir}")
 
 
 # Entry point for Hydra

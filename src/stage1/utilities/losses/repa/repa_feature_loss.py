@@ -117,9 +117,7 @@ def interpolate_features_2d(x: Tensor, tgt_size: InterpType) -> Tensor:
     if H == H_tgt and W == W_tgt:
         return x
     else:
-        return F.interpolate(
-            x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False
-        )
+        return F.interpolate(x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False)
 
 
 def interpolate_features_1d(x, target_len: int):
@@ -152,9 +150,7 @@ def mean_flat(x: Tensor):
     return x.mean(dim=list(range(1, len(x.shape))))
 
 
-def rearrange_lst(
-    x: list[Tensor] | Tensor, pattern: str, **pattern_kwargs: dict[str, int]
-):
+def rearrange_lst(x: list[Tensor] | Tensor, pattern: str, **pattern_kwargs: dict[str, int]):
     if isinstance(x, list):
         return [rearrange(f, pattern, **pattern_kwargs) for f in x]
     else:
@@ -244,9 +240,7 @@ def token_relation_loss(
         relation_s = relation_s.clamp(min=0.0)
     elif remove_only_teacher_neg:
         relation_t = relation_t.clamp(min=0.0)
-        relation_s[(relation_s < 0) & (relation_t < 0)] = (
-            0.0  # ? Check this, if is correct after do teacher clamp
-        )
+        relation_s[(relation_s < 0) & (relation_t < 0)] = 0.0  # ? Check this, if is correct after do teacher clamp
 
     loss = F.mse_loss(relation_t, relation_s)
     return loss
@@ -312,22 +306,12 @@ def hier_distillation_loss(
     # Assertions
     is_lst = is_list_tuple(feature_teacher) and is_list_tuple(feature_student)
     is_stacked = is_tensor(feature_teacher) and is_tensor(feature_student)
-    assert is_lst or is_stacked, (
-        "feature_teacher and feature_student should be lists or tensors"
-    )
+    assert is_lst or is_stacked, "feature_teacher and feature_student should be lists or tensors"
     layers_n = len(feature_teacher)
-    assert layers_n == len(feature_student), (
-        "Teacher and student should have the same number of layers"
-    )
+    assert layers_n == len(feature_student), "Teacher and student should have the same number of layers"
 
-    device = (
-        feature_teacher.device
-        if is_tensor(feature_teacher)
-        else feature_teacher[0].device
-    )
-    weight_base = (
-        torch.arange(1, layers_n + 1, dtype=torch.float32, device=device) / layers_n
-    )
+    device = feature_teacher.device if is_tensor(feature_teacher) else feature_teacher[0].device
+    weight_base = torch.arange(1, layers_n + 1, dtype=torch.float32, device=device) / layers_n
 
     # Compatibility: if the feature size are different across layers, use list form
     if is_stacked:
@@ -462,15 +446,11 @@ def load_perception_model(
     assert model_name in visual_available_cfgs, (
         f"Model {model_name} not available. Available models are {visual_available_cfgs}"
     )
-    assert weight_path is not None, (
-        "weight path should not be None when loading the perception encoder model"
-    )
+    assert weight_path is not None, "weight path should not be None when loading the perception encoder model"
 
     # Load the model
     # cfg = pe.PE_VISION_CONFIG[model_name]
-    model = pe.VisionTransformer.from_config(
-        model_name, pretrained=True, checkpoint_path=str(weight_path)
-    )
+    model = pe.VisionTransformer.from_config(model_name, pretrained=True, checkpoint_path=str(weight_path))
     logger.info(f"[PE Model]: Load model {model_name} with model_name {model_name}")
 
     # Patch forward method to support multiple-layer feature output
@@ -552,21 +532,15 @@ def load_repa_dino_v3_model(
             if search_name in p.stem:
                 weight_path = str(p)
                 break
-        assert weight_path is not None, (
-            f"can not find weight {model_name=} at {weight_dir}"
-        )
+        assert weight_path is not None, f"can not find weight {model_name=} at {weight_dir}"
     elif weight_path is None and model_name is None:
         raise ValueError("Either model_name or weight_path must be specified.")
 
     assert weight_path is not None, f"{weight_path=} does not exists"
-    logger.info(
-        f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}."
-    )
+    logger.info(f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}.")
     assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
     sys.path.append(str(repo_dir))
-    dino_model = torch.hub.load(
-        repo_dir, model_name, source="local", weights=weight_path
-    )
+    dino_model = torch.hub.load(repo_dir, model_name, source="local", weights=weight_path)
     dino_model = cast(nn.Module, dino_model)
     if compile:
         dino_model = torch.compile(dino_model, mode="reduce-overhead")
@@ -593,9 +567,7 @@ def load_repa_dino_v2_model(
         model = torch.hub.load("facebookresearch/dinov2", model_name)
         model = cast(nn.Module, model)
     else:
-        raise ValueError(
-            f"Unknown model loading source {load_from}, must be 'torch' or 'timm'."
-        )
+        raise ValueError(f"Unknown model loading source {load_from}, must be 'torch' or 'timm'.")
     if compile:
         model = torch.compile(model)
         logger.info("[Dino v2 model]: compiled model done")
@@ -631,9 +603,7 @@ def _siglip_vit_encoder_forward_features_patcher(
 def _siglip_vit_forward_features_patcher(
     self, pixel_values, interpolate_pos_encoding: Optional[bool] = False, **kwargs
 ):
-    hidden_states = self.embeddings(
-        pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
-    )
+    hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
 
     encoder_outputs: BaseModelOutput = self.encoder(
         inputs_embeds=hidden_states,
@@ -667,9 +637,7 @@ def load_siglip2_model(
 
     if not use_automodel:
         # model, processor = None, None
-        raise NotImplementedError(
-            "Directly load from Siglip2 class is not implemented yet"
-        )
+        raise NotImplementedError("Directly load from Siglip2 class is not implemented yet")
     else:
         if cache_dir is None:
             # default cache dir
@@ -685,9 +653,7 @@ def load_siglip2_model(
         # remove the text model
         model.text_model = None
         vision_model = model.vision_model
-        processor = AutoProcessor.from_pretrained(
-            name, cache_dir=cache_dir, local_files_only=local_files_only
-        )
+        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir, local_files_only=local_files_only)
 
     model = cast(Siglip2VisionModel, model)
 
@@ -696,14 +662,10 @@ def load_siglip2_model(
     logger.info(f"[Siglip2]: using feature index {SIGLIP2_FEATURE_INDEX=}")
 
     # Override the forward_features method
-    vision_model.encoder.forward = MethodType(
-        _siglip_vit_encoder_forward_features_patcher, vision_model.encoder
-    )
+    vision_model.encoder.forward = MethodType(_siglip_vit_encoder_forward_features_patcher, vision_model.encoder)
     logger.info("[Siglip2]: override forward_features method for Siglipv2 ViT encoder")
     if "naflex" not in name:
-        vision_model.forward = MethodType(
-            _siglip_vit_forward_features_patcher, vision_model
-        )
+        vision_model.forward = MethodType(_siglip_vit_forward_features_patcher, vision_model)
         logger.info("[Siglip2]: override forward method for Siglipv2 ViT")
 
     return vision_model, processor  # type: ignore[return-value]
@@ -759,9 +721,7 @@ def load_repa_encoder(
             compile=compile,
         )
     elif repa_name == "pe":
-        assert weight_path is not None, (
-            "weight_path should not be None when loading PE model"
-        )
+        assert weight_path is not None, "weight_path should not be None when loading PE model"
         pe_model = load_perception_model(weight_path, model_name, compile=compile)
         return pe_model
     elif repa_name == "siglip2":
@@ -787,17 +747,12 @@ class REPALoss(torch.nn.Module):
         c_dim_first=False,  # teacher model output is [b, l, c] or [b, c, h, w]
         build_proj=False,
         img_is_neg1_1=True,
-        rgb_channels: list[int]
-        | Literal["random", "mean", "largest"]
-        | str
-        | None = None,
+        rgb_channels: list[int] | Literal["random", "mean", "largest"] | str | None = None,
         img_resize: Literal["dino"] | tuple[int, int] | int | None = "dino",
         feature_normalize: bool = False,
         loss_type: str = "repa_original",
         get_hier_teacher_feature: bool = False,
-        feature_resample_type: Literal[
-            "match_teacher", "match_student"
-        ] = "match_student",
+        feature_resample_type: Literal["match_teacher", "match_student"] = "match_student",
         dtype: torch.dtype = torch.bfloat16,
         repa_fixed_bs: int | None = None,
         repa_img_size: int = 224,
@@ -830,9 +785,7 @@ class REPALoss(torch.nn.Module):
         if isinstance(img_resize, int):
             img_resize = (img_resize, img_resize)
         if isinstance(img_resize, (tuple, list)):
-            assert img_resize[0] % 16 == 0 and img_resize[1] % 16 == 0, (
-                f"{img_resize=} must be divisible by patch size"
-            )
+            assert img_resize[0] % 16 == 0 and img_resize[1] % 16 == 0, f"{img_resize=} must be divisible by patch size"
         self.img_resize = img_resize
 
         self.repa_fixed_bs = repa_fixed_bs
@@ -846,9 +799,7 @@ class REPALoss(torch.nn.Module):
             elif isinstance(self.rgb_channels, Sequence):
                 assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
             else:
-                raise TypeError(
-                    f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}"
-                )
+                raise TypeError(f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}")
 
         # encoder
         self.dino_type = dino_load_type
@@ -918,9 +869,7 @@ class REPALoss(torch.nn.Module):
         if self.repa_model_type == "pe":
             self.normalize = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         else:
-            self.normalize = Normalize(
-                mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
-            )
+            self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
     def _get_encoder(self):
         """Unwrap compiled model to access original attributes."""
@@ -947,22 +896,16 @@ class REPALoss(torch.nn.Module):
             img = (img + 1) / 2
 
         # norm, image dim must be 4d
-        assert img.ndim == 4 and img.shape[1] == 3, (
-            "img dim must be 4d and have 3 channels"
-        )
+        assert img.ndim == 4 and img.shape[1] == 3, "img dim must be 4d and have 3 channels"
         img = self.normalize(img)
         return img
 
-    def _forward_features(
-        self, x: BatchFeature | Tensor, get_interm_feats=False, detach=True, **kwargs
-    ):
+    def _forward_features(self, x: BatchFeature | Tensor, get_interm_feats=False, detach=True, **kwargs):
         if self.repa_model_type == "siglip2":
             return self._forward_siglip_features(x, get_interm_feats, detach=detach)
         elif self.repa_model_type in ("dinov2", "dinov3"):
             assert is_tensor(x), "inputs must be a tensor for DINOv2/v3 model"
-            return self._forward_dino_features(
-                x, get_interm_feats, detach=detach, **kwargs
-            )
+            return self._forward_dino_features(x, get_interm_feats, detach=detach, **kwargs)
         elif self.repa_model_type == "pe":
             return self._forward_pe_features(x, get_interm_feats, detach=detach)
         else:
@@ -970,9 +913,7 @@ class REPALoss(torch.nn.Module):
 
     @torch.autocast("cuda", torch.bfloat16)
     def _forward_siglip_features(self, inputs, get_interm_feats=False, detach=True):
-        assert self.repa_model_type == "siglip2", (
-            "repa mode type should be 'siglip2' when using Siglip2 model"
-        )
+        assert self.repa_model_type == "siglip2", "repa mode type should be 'siglip2' when using Siglip2 model"
 
         # image is the output of the processor
         _is_naflex = False
@@ -1010,9 +951,7 @@ class REPALoss(torch.nn.Module):
                     # valid length, but in general, we keep the for-loop
                     s = shapes[i]  # (2,): mean h, w
                     n_patches_i = s.prod().item()
-                    h_sample = (
-                        feat[i, :n_patches_i].view(1, *s, -1).permute(0, 3, 1, 2)
-                    )  # (1, c, h, w)
+                    h_sample = feat[i, :n_patches_i].view(1, *s, -1).permute(0, 3, 1, 2)  # (1, c, h, w)
                     feat_valid.append(h_sample)  # 2d feature
                 # Stack back to a tensor
                 # FIXME: may raise if the batch image is not the same size
@@ -1028,9 +967,7 @@ class REPALoss(torch.nn.Module):
 
         if get_interm_feats:
             # is a list of features
-            img_feats = [
-                _per_tensor_process(feat) for feat in out_feats
-            ]  # 2d list features
+            img_feats = [_per_tensor_process(feat) for feat in out_feats]  # 2d list features
         else:
             out_feats = cast(Tensor, out_feats)
             img_feats = _per_tensor_process(out_feats)  # 2d features
@@ -1048,9 +985,7 @@ class REPALoss(torch.nn.Module):
         return img_feats
 
     @torch.autocast("cuda", torch.bfloat16)
-    def _forward_dino_features(
-        self, img, get_interm_feats=False, detach=True
-    ) -> Tensor | list[Tensor]:
+    def _forward_dino_features(self, img, get_interm_feats=False, detach=True) -> Tensor | list[Tensor]:
         img = self._to_dtensor(img)
 
         if self.dino_type == "torch":
@@ -1059,11 +994,7 @@ class REPALoss(torch.nn.Module):
             #         "x_norm_patchtokens"
             #     ]  # (bs, 256, 768)
             # else:  # distill for cnn 2d features
-            layers_to_take = (
-                DINOv3_INTERACTION_INDEXES.get(self.repa_model_name, 1)
-                if get_interm_feats
-                else 1
-            )
+            layers_to_take = DINOv3_INTERACTION_INDEXES.get(self.repa_model_name, 1) if get_interm_feats else 1
             img_feats = self.repa_encoder.get_intermediate_layers(  # type: ignore
                 img, n=layers_to_take, reshape=self.c_dim_first, norm=True
             )  # the last layer feature
@@ -1078,9 +1009,7 @@ class REPALoss(torch.nn.Module):
                 .permute(0, 3, 1, 2)
             )  # (bs, c, h, w)
         else:
-            raise ValueError(
-                f"Unknown model type: {self.dino_type}. Must be 'torch', 'timm', or 'siglip2'"
-            )
+            raise ValueError(f"Unknown model type: {self.dino_type}. Must be 'torch', 'timm', or 'siglip2'")
 
         # Dtensor to Tensor
         if isinstance(img_feats, DTensor):
@@ -1107,27 +1036,17 @@ class REPALoss(torch.nn.Module):
         return img_feats
 
     def _forward_pe_features(self, img, get_interm_feats=False, detach=True):
-        assert self.repa_model_type == "pe", (
-            f'repa model type should be "pe" when using Perception Encoder model'
-        )
+        assert self.repa_model_type == "pe", f'repa model type should be "pe" when using Perception Encoder model'
         img = self._to_dtensor(img)
-        layers_to_take = (
-            PE_INTERACTION_INDEXES.get(self.repa_model_name, -1)
-            if get_interm_feats
-            else -1
-        )
-        out_feats = self.repa_encoder.forward_features(
-            img, layer_idx=layers_to_take, strip_cls_token=True, norm=True
-        )  # type: ignore
+        layers_to_take = PE_INTERACTION_INDEXES.get(self.repa_model_name, -1) if get_interm_feats else -1
+        out_feats = self.repa_encoder.forward_features(img, layer_idx=layers_to_take, strip_cls_token=True, norm=True)  # type: ignore
 
         # All to 2d features
         encoder = self._get_encoder()
         ps = encoder.patch_size
         h, w = img.shape[2] // ps, img.shape[3] // ps
         if is_list_tuple(out_feats):
-            out_feats = [
-                rearrange(f, "b (h w) c -> b c h w", h=h, w=w) for f in out_feats
-            ]
+            out_feats = [rearrange(f, "b (h w) c -> b c h w", h=h, w=w) for f in out_feats]
         else:
             out_feats = rearrange(out_feats, "b (h w) c -> b c h w", h=h, w=w)
 
@@ -1141,9 +1060,7 @@ class REPALoss(torch.nn.Module):
         return out_feats
 
     def _resize_img(self, img, size) -> Tensor:
-        assert img.shape[1] == 3, (
-            f"img must be rgb images but got image shaped as {img.shape}"
-        )
+        assert img.shape[1] == 3, f"img must be rgb images but got image shaped as {img.shape}"
 
         # Unwrap compiled model to access attributes
         encoder = self._get_encoder()
@@ -1161,9 +1078,7 @@ class REPALoss(torch.nn.Module):
                     next_divisble_of_y(img.shape[-2], 14),
                     next_divisble_of_y(img.shape[-1], 14),
                 )
-                logger.warning(
-                    "[Repa Resize]: image not resize into dino pretrained size"
-                )
+                logger.warning("[Repa Resize]: image not resize into dino pretrained size")
             img = F.interpolate(**_interp_kwargs)
 
         img = self._norm_img_before_repa(img)
@@ -1210,9 +1125,7 @@ class REPALoss(torch.nn.Module):
             )
         else:
             # TODO: add support for siglip2
-            assert self.dino_type != "siglip2", (
-                "Siglip2 model does not support fixed batch size inference"
-            )
+            assert self.dino_type != "siglip2", "Siglip2 model does not support fixed batch size inference"
 
             # macro-batch-size inference
             img_feats: list[torch.Tensor] = []
@@ -1220,9 +1133,7 @@ class REPALoss(torch.nn.Module):
             for i in range(0, img.shape[0], self.repa_fixed_bs):
                 img_mb = img[i : i + self.dino_fixed_bs]
                 img_feats_mb = list(
-                    self._forward_features(
-                        img_mb, get_interm_feats=get_interm_feats, detach=detach
-                    )
+                    self._forward_features(img_mb, get_interm_feats=get_interm_feats, detach=detach)
                 )  # 4 feature if is a list
                 if isinstance(img_feats_mb, (tuple, list)):
                     ret_lst = True
@@ -1280,8 +1191,7 @@ class REPALoss(torch.nn.Module):
 
             if is_feat_lst:
                 teacher_feat = [
-                    _interp_feat_match_stu(t_feat, s_feat)
-                    for t_feat, s_feat in zip(teacher_feat, student_feat)
+                    _interp_feat_match_stu(t_feat, s_feat) for t_feat, s_feat in zip(teacher_feat, student_feat)
                 ]
                 if is_feat_stacked:
                     teacher_feat = torch.stack(teacher_feat)
@@ -1303,8 +1213,7 @@ class REPALoss(torch.nn.Module):
 
             if is_feat_lst:
                 student_feat = [
-                    _interp_feat_match_tch(t_feat, s_feat)
-                    for t_feat, s_feat in zip(teacher_feat, student_feat)
+                    _interp_feat_match_tch(t_feat, s_feat) for t_feat, s_feat in zip(teacher_feat, student_feat)
                 ]
                 if is_feat_stacked:
                     student_feat = torch.stack(student_feat)
@@ -1315,9 +1224,7 @@ class REPALoss(torch.nn.Module):
         # multiple layer feature case: [n_layers, bs, c, h, w] or [n_layers, bs, l, c] or list of which
         return teacher_feat, student_feat
 
-    def repa_loss(
-        self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]
-    ):
+    def repa_loss(self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]):
         # [bs, l, c] or [bs, c, h, w]
         # 1. interpolate
         teacher_feat, student_feat = self._interp_teacher_or_student_features(  # type: ignore
@@ -1348,22 +1255,20 @@ class REPALoss(torch.nn.Module):
         teacher_feat = rearrange_lst(teacher_feat, rarg_pattn)
         student_feat = rearrange_lst(student_feat, rarg_pattn)
 
-        # 3.1 Whether to keep the feature magnitude
+        # 3.1 Whether to keep the feature magnitude (norm or not)
         dim = -2
         if self.feature_normalize and not self.loss_type == "hier_distillation":
+            # if hier_distillation, normalization in the function, see 'hier_distillation_loss'
             teacher_feat = norm_feature(teacher_feat, dim=dim)
             student_feat = norm_feature(student_feat, dim=dim)
 
         # Shape assertion
         _assertion_msg = (
-            lambda tf,
-            sf: f"img_feat and model_feat must have the same shape to compute the repa loss, "
+            lambda tf, sf: f"img_feat and model_feat must have the same shape to compute the repa loss, "
             f"but got {tuple(tf.shape)} and {tuple(sf.shape)}"
         )
         if isinstance(teacher_feat, Tensor) and isinstance(student_feat, Tensor):
-            assert teacher_feat.shape == student_feat.shape, _assertion_msg(
-                teacher_feat, student_feat
-            )
+            assert teacher_feat.shape == student_feat.shape, _assertion_msg(teacher_feat, student_feat)
         else:  # both are list
             for t_feat, s_feat in zip(teacher_feat, student_feat):
                 assert t_feat.shape == s_feat.shape, _assertion_msg(t_feat, s_feat)
@@ -1398,14 +1303,8 @@ class REPALoss(torch.nn.Module):
         return repa_loss
 
     def forward(self, img: Tensor, student_feature: Tensor | list[Tensor]):
-        teacher_feat = self._encode_img(
-            img, get_interm_feats=self.get_hier_teacher_feature
-        )
-        teacher_feat = (
-            teacher_feat.detach()
-            if is_tensor(teacher_feat)
-            else [f.detach() for f in teacher_feat]
-        )
+        teacher_feat = self._encode_img(img, get_interm_feats=self.get_hier_teacher_feature)
+        teacher_feat = teacher_feat.detach() if is_tensor(teacher_feat) else [f.detach() for f in teacher_feat]
         repa_loss = self.repa_loss(teacher_feat, student_feature)
         return repa_loss
 
@@ -1456,9 +1355,7 @@ class VFLoss(REPALoss):
         dino_img_size: int = 224,
         dtype: torch.dtype = torch.bfloat16,
         vf_weight: float = 1.0,
-        feature_resample_type: Literal[
-            "match_teacher", "match_student"
-        ] = "match_student",
+        feature_resample_type: Literal["match_teacher", "match_student"] = "match_student",
     ):
         """Visual foundation model loss for tokenizer feature alignment.
 
@@ -1530,9 +1427,7 @@ class VFLoss(REPALoss):
         z_norm = torch.nn.functional.normalize(z_flat, dim=1)
         aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
         z_cos_sim = torch.einsum("bci,bcj->bij", z_norm, z_norm)
-        aux_feature_cos_sim = torch.einsum(
-            "bci,bcj->bij", aux_feature_norm, aux_feature_norm
-        )
+        aux_feature_cos_sim = torch.einsum("bci,bcj->bij", aux_feature_norm, aux_feature_norm)
         diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
         vf_loss_1 = torch.nn.functional.relu(diff - self.distmat_margin).mean()
         vf_loss_2 = torch.nn.functional.relu(
@@ -1557,19 +1452,15 @@ class VFLoss(REPALoss):
         """
         # encode
         aux_feature = self._encode_img(img)
-        assert torch.is_tensor(aux_feature), (
-            "aux_feature must be a tensor not a list, but got {}".format(
-                type(aux_feature)
-            )
+        assert torch.is_tensor(aux_feature), "aux_feature must be a tensor not a list, but got {}".format(
+            type(aux_feature)
         )
         aux_feature = aux_feature.detach()
 
         # iterpolate features
         # _tgt_sz = feature.shape[-2:] if self.c_dim_first else feature.shape[-2]
         # aux_feature = self.interp_feat(aux_feature, _tgt_sz)
-        aux_feature, feature = self._interp_teacher_or_student_features(
-            aux_feature, feature
-        )
+        aux_feature, feature = self._interp_teacher_or_student_features(aux_feature, feature)
 
         feature = self.projector(feature)
         assert feature.shape == aux_feature.shape, (
@@ -1690,9 +1581,7 @@ class LatentGramLoss(REPALoss):
     def forward(self, img, recon_img, nll_loss=None, last_layer=None):
         # encode
         target_features = self._encode_img(img, get_interm_feats=True, detach=True)
-        student_features = self._encode_img(
-            recon_img, get_interm_feats=True, detach=False
-        )
+        student_features = self._encode_img(recon_img, get_interm_feats=True, detach=False)
 
         assert isinstance(target_features, (tuple, list)), (
             f"teacher features must be a list but got {type(student_features)}"
@@ -1703,9 +1592,7 @@ class LatentGramLoss(REPALoss):
         for sf, tf in zip(student_features, target_features):
             sf, tf = map(self._to_1d_seq, (sf, tf))
             gram_loss = self.gram_loss(sf, tf, img_level=self.img_level)
-            g_weight = (
-                1.0  # self.calculate_adaptive_weight(nll_loss, gram_loss, last_layer)
-            )
+            g_weight = 1.0  # self.calculate_adaptive_weight(nll_loss, gram_loss, last_layer)
             loss += g_weight * gram_loss
 
         return loss / len(student_features)
@@ -1756,9 +1643,7 @@ def test_dinov3_pca():
     pca_img = pca_img.cpu().numpy()[0].transpose(1, 2, 0)
     pca_img = pca_img - pca_img.min()
     pca_img = pca_img / pca_img.max()
-    PIL.Image.fromarray((pca_img * 255).astype(np.uint8)).save(
-        f"pca_img_{model_name}.png"
-    )
+    PIL.Image.fromarray((pca_img * 255).astype(np.uint8)).save(f"pca_img_{model_name}.png")
 
 
 def test_repa_loss():
@@ -1820,9 +1705,7 @@ def test_vf_loss():
 def test_gram_loss():
     from tqdm import trange
 
-    loss_fn = LatentGramLoss(
-        c_dim_first=True, build_proj=False, img_is_neg1_1=True, rgb_channels="mean"
-    )
+    loss_fn = LatentGramLoss(c_dim_first=True, build_proj=False, img_is_neg1_1=True, rgb_channels="mean")
     loss_fn = loss_fn.to(torch.bfloat16).cuda()
     img = torch.randn(2, 3, 224, 224).cuda()
     feature = torch.randn(2, 1024, 28, 28).cuda()
@@ -1905,9 +1788,7 @@ def test_pe_model():
     from src.data.litdata_hyperloader import ImageStreamingDataset
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk, pca_list
 
-    ds = ImageStreamingDataset(
-        input_dir="data2/RemoteSAM270k/LitData_hyper_images", to_neg_1_1=False
-    )
+    ds = ImageStreamingDataset(input_dir="data2/RemoteSAM270k/LitData_hyper_images", to_neg_1_1=False)
     x = ds[10]["img"][None]  # [1, 3, H, W]
     x = x.to("cuda", torch.bfloat16)
     x = F.interpolate(x, size=(448, 448))

@@ -115,11 +115,7 @@ def lovasz_hinge(
     """
     if per_image:
         loss = [
-            lovasz_hinge_flat(
-                *flatten_binary_logits(
-                    logit.unsqueeze(0), label.unsqueeze(0), ignore_index
-                )
-            )
+            lovasz_hinge_flat(*flatten_binary_logits(logit.unsqueeze(0), label.unsqueeze(0), ignore_index))
             for logit, label in zip(logits, labels)
         ]
         loss = weight_reduce_loss(torch.stack(loss), None, reduction, avg_factor)

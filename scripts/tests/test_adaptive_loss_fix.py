@@ -77,15 +77,9 @@ def test_adaptive_loss_batch_processing():
         masks_per_sample.append(sample_mask)
 
     # Check if masks are different across samples
-    mask_0_vs_1 = not torch.allclose(
-        masks_per_sample[0], masks_per_sample[1], atol=1e-6
-    )
-    mask_0_vs_2 = not torch.allclose(
-        masks_per_sample[0], masks_per_sample[2], atol=1e-6
-    )
-    mask_1_vs_2 = not torch.allclose(
-        masks_per_sample[1], masks_per_sample[2], atol=1e-6
-    )
+    mask_0_vs_1 = not torch.allclose(masks_per_sample[0], masks_per_sample[1], atol=1e-6)
+    mask_0_vs_2 = not torch.allclose(masks_per_sample[0], masks_per_sample[2], atol=1e-6)
+    mask_1_vs_2 = not torch.allclose(masks_per_sample[1], masks_per_sample[2], atol=1e-6)
 
     print(f"\nMask uniqueness check:")
     print(f"  Sample 0 vs Sample 1 different: {mask_0_vs_1}")
@@ -103,15 +97,9 @@ def test_adaptive_loss_batch_processing():
         sample_residual = current_residual[b]
         residuals_per_sample.append(sample_residual)
 
-    residual_0_vs_1 = not torch.allclose(
-        residuals_per_sample[0], residuals_per_sample[1], atol=1e-6
-    )
-    residual_0_vs_2 = not torch.allclose(
-        residuals_per_sample[0], residuals_per_sample[2], atol=1e-6
-    )
-    residual_1_vs_2 = not torch.allclose(
-        residuals_per_sample[1], residuals_per_sample[2], atol=1e-6
-    )
+    residual_0_vs_1 = not torch.allclose(residuals_per_sample[0], residuals_per_sample[1], atol=1e-6)
+    residual_0_vs_2 = not torch.allclose(residuals_per_sample[0], residuals_per_sample[2], atol=1e-6)
+    residual_1_vs_2 = not torch.allclose(residuals_per_sample[1], residuals_per_sample[2], atol=1e-6)
 
     print(f"\nResidual uniqueness check:")
     print(f"  Sample 0 vs Sample 1 different: {residual_0_vs_1}")
@@ -162,9 +150,7 @@ def test_single_sample_for_comparison():
     mask = loss_fn.get_current_mask()
     current_residual = loss_fn.get_current_residual()
 
-    print(
-        f"Single sample - Mask shape: {mask.shape}, Residual shape: {current_residual.shape}"
-    )
+    print(f"Single sample - Mask shape: {mask.shape}, Residual shape: {current_residual.shape}")
     print(f"Single sample - Loss: {loss.item():.6f}")
 
     # Weight range check

@@ -44,10 +44,7 @@ def read_image(
             key_ = list(d.keys())[-1]
             img = d[key_]
         except NotImplementedError as e:
-            logger.warning(
-                f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to "
-                "read using h5py."
-            )
+            logger.warning(f"Mat file is not supported by scipy.io.loadmat reading: {e}. Try to read using h5py.")
             import h5py
 
             with h5py.File(img_path, "r") as f:
@@ -66,9 +63,7 @@ def read_image(
         img = np.load(img_path)
     elif img_path.suffix.lower() in [".tif", ".tiff"] and tiff_bands_seperated:
         # assume img_path endswith *B01.tif
-        basic_name = (
-            img_path.name
-        )  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
+        basic_name = img_path.name  # data/HLS/HLS.L30.T58UEF.2025152T235555.v2.0.B01.tif
         uni_tif_paths = []
 
         for band_name in BANDS_NAME:
@@ -94,11 +89,7 @@ def read_image(
         # memmap
         tif = tifffile.TiffFile(img_path)
         try:
-            img = (
-                tif.asarray(out="memmap")
-                if tiff_read_mode == "memmap"
-                else tif.asarray()
-            )
+            img = tif.asarray(out="memmap") if tiff_read_mode == "memmap" else tif.asarray()
         except Exception as e:
             logger.warning(f"failed to load image from: {img_path.as_posix()}. {e}")
             return None
@@ -111,9 +102,7 @@ def read_image(
         for frame in reader:
             pts = frame["pts"]
             if pts % 0.5 <= 0.001:
-                data = (
-                    frame["data"].numpy().transpose(1, 2, 0)
-                )  # [c, h, w] -> [h, w, c]
+                data = frame["data"].numpy().transpose(1, 2, 0)  # [c, h, w] -> [h, w, c]
                 frames.append(data)
 
             if pts > 60:
@@ -165,9 +154,7 @@ def hyper_to_rgb(img: np.ndarray | torch.Tensor, rgb_bands: list[int]):
         # Assume shape is (C, H, W)
         img = einops.rearrange(img, "c h w -> h w c")
 
-    assert img.ndim == 3 and img.shape[2] > 3, (
-        "Input image must be HWC with more than 3 channels"
-    )
+    assert img.ndim == 3 and img.shape[2] > 3, "Input image must be HWC with more than 3 channels"
     assert len(rgb_bands) == 3, "rgb_bands must contain exactly three band indices"
 
     # Clip and normalize each channel
@@ -175,9 +162,7 @@ def hyper_to_rgb(img: np.ndarray | torch.Tensor, rgb_bands: list[int]):
     for i, band in enumerate(rgb_bands):
         band_data = img[:, :, band]
         band_data = np.clip(band_data, 0, None)  # Clip negative values
-        band_data = (band_data - band_data.min()) / (
-            band_data.max() - band_data.min() + 1e-8
-        )  # Normalize to [0, 1]
+        band_data = (band_data - band_data.min()) / (band_data.max() - band_data.min() + 1e-8)  # Normalize to [0, 1]
         rgb_img[:, :, i] = band_data
 
     rgb_img = (rgb_img * 255).astype(np.uint8)  # Scale to [0, 255]

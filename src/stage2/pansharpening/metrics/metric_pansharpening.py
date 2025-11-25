@@ -63,9 +63,7 @@ def psnr_one_img(img_gt, img_test):
     :param img_test: test or inference image, numpy array, shape [H, W, C]
     :return: PSNR, float type
     """
-    assert img_gt.shape == img_test.shape, (
-        "image 1 and image 2 should have the same size"
-    )
+    assert img_gt.shape == img_test.shape, "image 1 and image 2 should have the same size"
     return peak_signal_noise_ratio(img_gt, img_test)
 
 
@@ -85,12 +83,8 @@ def psnr_batch_tensor_metric(b_gt, b_pred):
 
 
 def ssim_one_image(img_gt, img_test, channel_axis=0):
-    assert img_gt.shape == img_test.shape, (
-        "image 1 and image 2 should have the same size"
-    )
-    return structural_similarity(
-        img_gt, img_test, channel_axis=channel_axis, data_range=1.0
-    )
+    assert img_gt.shape == img_test.shape, "image 1 and image 2 should have the same size"
+    return structural_similarity(img_gt, img_test, channel_axis=channel_axis, data_range=1.0)
 
 
 def ssim_batch_tensor_metric(b_gt, b_pred):
@@ -154,21 +148,16 @@ class AnalysisPanAcc(object):
 
         # metric functions
         if ref:
-            self.__sam_ergas_psnr_cc_one_image = partial(
-                analysis_accu, ratio=ergas_ratio, choices=5
-            )
+            self.__sam_ergas_psnr_cc_one_image = partial(analysis_accu, ratio=ergas_ratio, choices=5)
             self.ssim = ssim_batch_tensor_metric
         else:
-            assert (
-                "sensor" in unref_factory_kwargs
-                or "default_max_value" in unref_factory_kwargs
-            ), "sensor or default_max_value should be specified in unrefactory_kwargs"
+            assert "sensor" in unref_factory_kwargs or "default_max_value" in unref_factory_kwargs, (
+                "sensor or default_max_value should be specified in unrefactory_kwargs"
+            )
             sensor = unref_factory_kwargs.pop("sensor", "default").upper()
 
             if sensor == "DEFAULT":
-                log_print(
-                    "sensor is not specified, use default sensor type", warn_once=True
-                )
+                log_print("sensor is not specified, use default sensor type", warn_once=True)
             self.default_max_value = unref_factory_kwargs.pop("default_max_value", None)
 
             if self.default_max_value is None:
@@ -255,21 +244,15 @@ class AnalysisPanAcc(object):
     def D_lambda_D_s_HQNR_batch(self, sr=None, ms=None, lms=None, pan=None):
         assert sr is not None and lms is not None and pan is not None
         if ms is None:
-            ms = torch.nn.functional.interpolate(
-                lms, scale_factor=1 / self.ratio, mode="bilinear", align_corners=False
-            )
+            ms = torch.nn.functional.interpolate(lms, scale_factor=1 / self.ratio, mode="bilinear", align_corners=False)
 
         acc_ds = {"D_S": 1.0, "D_lambda": 1.0, "HQNR": 0.0}
         sr, ms, lms, pan = self.permute_dim(sr, ms, lms, pan, permute_dims=(0, 2, 3, 1))
         sr, ms, lms, pan = to_numpy(sr, ms, lms, pan)
         _max_value = getattr(self, "default_max_value")
-        sr, ms, lms, pan = map(
-            lambda x: np.clip(x * _max_value, 0, _max_value), [sr, ms, lms, pan]
-        )
+        sr, ms, lms, pan = map(lambda x: np.clip(x * _max_value, 0, _max_value), [sr, ms, lms, pan])
         for i, (sr_i, ms_i, lms_i, pan_i) in enumerate(zip(sr, ms, lms, pan)):
-            QNR_index, D_lambda, D_S = self.FS_metric_fn(
-                I_F=sr_i, I_MS_LR=ms_i, I_MS=lms_i, I_PAN=pan_i
-            )
+            QNR_index, D_lambda, D_S = self.FS_metric_fn(I_F=sr_i, I_MS_LR=ms_i, I_MS=lms_i, I_PAN=pan_i)
             acc_d = dict(HQNR=QNR_index, D_lambda=D_lambda, D_S=D_S)
             acc_ds = self._sum_acc(acc_ds, acc_d, i)
             acc_ds = self._average_acc(acc_ds, i + 1)
@@ -299,9 +282,7 @@ class AnalysisPanAcc(object):
         if len(args) == 2:
             assert self.ref, "ref mode should have 2 args"
             kwargs = dict(b_gt=args[0], b_pred=args[1])
-            assert args[0].shape == args[1].shape, (
-                f"shapes are not matched: {[arg.shape for arg in args]}"
-            )
+            assert args[0].shape == args[1].shape, f"shapes are not matched: {[arg.shape for arg in args]}"
         elif len(args) == 3:
             assert not self.ref, "unref mode should have more than 2 args"
             kwargs = dict(sr=args[0], lms=args[1], pan=args[2])
@@ -339,9 +320,7 @@ class AnalysisPanAcc(object):
         kwargs = self._call_check_args_to_kwargs(*args)
 
         n = args[0].shape[0]
-        self.acc_ave = self._sum_acc(
-            self.acc_ave, self.once_batch_call(**kwargs), self._call_n, n2=n
-        )
+        self.acc_ave = self._sum_acc(self.acc_ave, self.once_batch_call(**kwargs), self._call_n, n2=n)
         self.acc_ave = self._average_acc(self.acc_ave, self._call_n + n)
         self._call_n += n
         return self.acc_ave
@@ -382,9 +361,7 @@ class PansharpeningMetrics(AnalysisPanAcc):
 
         # Convert to all MeanMetric
         self.acc_ave: dict[str, float]
-        self.acc_ave_metrics = {
-            k: MeanMetric().to(device) for k, v in self.acc_ave.items()
-        }
+        self.acc_ave_metrics = {k: MeanMetric().to(device) for k, v in self.acc_ave.items()}
         self._curr_acc: dict[str, Tensor] | None = None
 
     def _to_sync_metrics(self, acc: dict, weight: float | int = 1.0):
@@ -410,9 +387,7 @@ class PansharpeningMetrics(AnalysisPanAcc):
 
         acc_dict = self.once_batch_call(**kwargs)
         # to tensor
-        acc_dict_th = {
-            k: torch.as_tensor(v, device=device) for k, v in acc_dict.items()
-        }
+        acc_dict_th = {k: torch.as_tensor(v, device=device) for k, v in acc_dict.items()}
         self._curr_acc = acc_dict_th
         self.acc_ave_metrics = self._to_sync_metrics(acc_dict_th)
         self.acc_ave = self._get_acc_ave()
@@ -492,9 +467,7 @@ def test_pansharpening_metrics_multi_ranks(rank):
     """Test function for multi-rank (distributed) pansharpening metrics"""
 
     # Initialize distributed process group
-    torch.distributed.init_process_group(
-        backend="gloo", init_method="tcp://localhost:12355", world_size=2, rank=rank
-    )
+    torch.distributed.init_process_group(backend="gloo", init_method="tcp://localhost:12355", world_size=2, rank=rank)
 
     # Set device
     device = torch.device(f"cpu")

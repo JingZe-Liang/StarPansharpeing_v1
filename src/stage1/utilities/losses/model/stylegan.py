@@ -21,14 +21,8 @@ class FullyConnectedLayer(torch.nn.Module):
     ):
         super().__init__()
         self.activation = activation
-        self.weight = torch.nn.Parameter(
-            torch.randn([out_features, in_features]) / lr_multiplier
-        )
-        self.bias = (
-            torch.nn.Parameter(torch.full([out_features], np.float32(bias_init)))
-            if bias
-            else None
-        )
+        self.weight = torch.nn.Parameter(torch.randn([out_features, in_features]) / lr_multiplier)
+        self.bias = torch.nn.Parameter(torch.full([out_features], np.float32(bias_init))) if bias else None
         self.weight_gain = lr_multiplier / np.sqrt(in_features)
         self.bias_gain = lr_multiplier
 
@@ -78,12 +72,8 @@ class Conv2dLayer(torch.nn.Module):
         self.weight_gain = 1 / np.sqrt(in_channels * (kernel_size**2))
         self.act_gain = bias_act.activation_funcs[activation].def_gain
 
-        memory_format = (
-            torch.channels_last if channels_last else torch.contiguous_format
-        )
-        weight = torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(
-            memory_format=memory_format
-        )
+        memory_format = torch.channels_last if channels_last else torch.contiguous_format
+        weight = torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format)
         bias = torch.zeros([out_channels]) if bias else None
         if trainable:
             self.weight = torch.nn.Parameter(weight)
@@ -144,9 +134,7 @@ class MappingNetwork(torch.nn.Module):
             embed_features = 0
         if layer_features is None:
             layer_features = w_dim
-        features_list = (
-            [z_dim + embed_features] + [layer_features] * (num_layers - 1) + [w_dim]
-        )
+        features_list = [z_dim + embed_features] + [layer_features] * (num_layers - 1) + [w_dim]
 
         if c_dim > 0:
             self.embed = FullyConnectedLayer(c_dim, embed_features)
@@ -164,9 +152,7 @@ class MappingNetwork(torch.nn.Module):
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer("w_avg", torch.zeros([w_dim]))
 
-    def forward(
-        self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False
-    ):
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function("input"):
@@ -186,9 +172,7 @@ class MappingNetwork(torch.nn.Module):
         # Update moving average of W.
         if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
             with torch.autograd.profiler.record_function("update_w_avg"):
-                self.w_avg.copy_(
-                    x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta)
-                )
+                self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
 
         # Broadcast.
         if self.num_ws is not None:
@@ -202,9 +186,7 @@ class MappingNetwork(torch.nn.Module):
                 if self.num_ws is None or truncation_cutoff is None:
                     x = self.w_avg.lerp(x, truncation_psi)
                 else:
-                    x[:, :truncation_cutoff] = self.w_avg.lerp(
-                        x[:, :truncation_cutoff], truncation_psi
-                    )
+                    x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
         return x
 
 
@@ -301,32 +283,20 @@ class DiscriminatorBlock(torch.nn.Module):
     def forward(self, x, img, force_fp32=False):
         dtype = torch.bfloat16 if self.use_fp16 and not force_fp32 else torch.float32
         # dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
-        memory_format = (
-            torch.channels_last
-            if self.channels_last and not force_fp32
-            else torch.contiguous_format
-        )
+        memory_format = torch.channels_last if self.channels_last and not force_fp32 else torch.contiguous_format
 
         # Input.
         if x is not None:
-            misc.assert_shape(
-                x, [None, self.in_channels, self.resolution, self.resolution]
-            )
+            misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution])
             x = x.to(dtype=dtype, memory_format=memory_format)
 
         # FromRGB.
         if self.in_channels == 0 or self.architecture == "skip":
-            misc.assert_shape(
-                img, [None, self.img_channels, self.resolution, self.resolution]
-            )
+            misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
             img = img.to(dtype=dtype, memory_format=memory_format)
             y = self.fromrgb(img)
             x = x + y if x is not None else y
-            img = (
-                upfirdn2d.downsample2d(img, self.resample_filter)
-                if self.architecture == "skip"
-                else None
-            )
+            img = upfirdn2d.downsample2d(img, self.resample_filter) if self.architecture == "skip" else None
 
         # Main layers.
         if self.architecture == "resnet":
@@ -350,14 +320,8 @@ class MinibatchStdLayer(torch.nn.Module):
 
     def forward(self, x):
         N, C, H, W = x.shape
-        with (
-            misc.suppress_tracer_warnings()
-        ):  # as_tensor results are registered as constants
-            G = (
-                torch.min(torch.as_tensor(self.group_size), torch.as_tensor(N))
-                if self.group_size is not None
-                else N
-            )
+        with misc.suppress_tracer_warnings():  # as_tensor results are registered as constants
+            G = torch.min(torch.as_tensor(self.group_size), torch.as_tensor(N)) if self.group_size is not None else N
         F = self.num_channels
         c = C // F
 
@@ -396,13 +360,9 @@ class DiscriminatorEpilogue(torch.nn.Module):
         self.architecture = architecture
 
         if architecture == "skip":
-            self.fromrgb = Conv2dLayer(
-                img_channels, in_channels, kernel_size=1, activation=activation
-            )
+            self.fromrgb = Conv2dLayer(img_channels, in_channels, kernel_size=1, activation=activation)
         self.mbstd = (
-            MinibatchStdLayer(
-                group_size=mbstd_group_size, num_channels=mbstd_num_channels
-            )
+            MinibatchStdLayer(group_size=mbstd_group_size, num_channels=mbstd_num_channels)
             if mbstd_num_channels > 0
             else None
         )
@@ -413,15 +373,11 @@ class DiscriminatorEpilogue(torch.nn.Module):
             activation=activation,
             conv_clamp=conv_clamp,
         )
-        self.fc = FullyConnectedLayer(
-            in_channels * (resolution**2), in_channels, activation=activation
-        )
+        self.fc = FullyConnectedLayer(in_channels * (resolution**2), in_channels, activation=activation)
         self.out = FullyConnectedLayer(in_channels, 1 if cmap_dim == 0 else cmap_dim)
 
     def forward(self, x, img, cmap, force_fp32=False):
-        misc.assert_shape(
-            x, [None, self.in_channels, self.resolution, self.resolution]
-        )  # [NCHW]
+        misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution])  # [NCHW]
         _ = force_fp32  # unused
         dtype = torch.float32
         memory_format = torch.contiguous_format
@@ -429,9 +385,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         # FromRGB.
         x = x.to(dtype=dtype, memory_format=memory_format)
         if self.architecture == "skip":
-            misc.assert_shape(
-                img, [None, self.img_channels, self.resolution, self.resolution]
-            )
+            misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
             img = img.to(dtype=dtype, memory_format=memory_format)
             x = x + self.fromrgb(img)
 
@@ -475,10 +429,7 @@ class StyleGANDiscriminator(torch.nn.Module):
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
         self.block_resolutions = [2**i for i in range(self.img_resolution_log2, 2, -1)]
-        channels_dict = {
-            res: min(channel_base // res, channel_max)
-            for res in self.block_resolutions + [4]
-        }
+        channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
         if cmap_dim is None:
@@ -486,9 +437,7 @@ class StyleGANDiscriminator(torch.nn.Module):
         if c_dim == 0:
             cmap_dim = 0
 
-        common_kwargs = dict(
-            img_channels=img_channels, architecture=architecture, conv_clamp=conv_clamp
-        )
+        common_kwargs = dict(img_channels=img_channels, architecture=architecture, conv_clamp=conv_clamp)
         cur_layer_idx = 0
         for res in self.block_resolutions:
             in_channels = channels_dict[res] if res < img_resolution else 0

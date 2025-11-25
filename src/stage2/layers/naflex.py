@@ -35,9 +35,7 @@ class NaFlexVitCfg:
     scale_attn_inner_norm: bool = False  # Apply scaling norm to attn context
 
     # Regularization
-    init_values: Optional[float] = (
-        None  # Layer-scale init values (layer-scale enabled if not None)
-    )
+    init_values: Optional[float] = None  # Layer-scale init values (layer-scale enabled if not None)
     drop_rate: float = 0.0  # Dropout rate for classifier
     pos_drop_rate: float = 0.0  # Dropout rate for position embeddings
     patch_drop_rate: float = 0.0  # Dropout rate for patch tokens
@@ -54,38 +52,30 @@ class NaFlexVitCfg:
         16,
         16,
     )  # Grid size for position embedding initialization
-    pos_embed_interp_mode: str = (
-        "bicubic"  # Interpolation mode for position embedding resizing
-    )
+    pos_embed_interp_mode: str = "bicubic"  # Interpolation mode for position embedding resizing
     pos_embed_ar_preserving: bool = False  # Whether to preserve aspect ratio during position embedding interpolation
-    pos_embed_use_grid_sample: bool = (
-        False  # Whether to use grid_sample for naflex position embedding interpolation
-    )
+    pos_embed_use_grid_sample: bool = False  # Whether to use grid_sample for naflex position embedding interpolation
 
     # ROPE specific configuration
-    rope_type: str = "axial"  # ROPE type: '' or 'none' for no ROPE, 'axial' for standard, 'mixed' for learnable frequencies
+    rope_type: str = (
+        "axial"  # ROPE type: '' or 'none' for no ROPE, 'axial' for standard, 'mixed' for learnable frequencies
+    )
     rope_temperature: float = 10000.0  # Temperature for ROPE frequency computation
     rope_ref_feat_shape: Optional[Tuple[int, int]] = None
     rope_grid_offset: float = 0.0  # Grid offset for non-pixel ROPE mode
     rope_grid_indexing: str = "ij"  # Grid indexing mode for ROPE ('ij' or 'xy')
 
     # Image processing
-    dynamic_img_pad: bool = (
-        False  # Whether to enable dynamic padding for variable resolution
-    )
+    dynamic_img_pad: bool = False  # Whether to enable dynamic padding for variable resolution
 
     # Other architecture choices
     pre_norm: bool = True  # Whether to apply normalization before attention/MLP layers (start of blocks)
     final_norm: bool = True  # Whether to apply final normalization before pooling and classifier (end of blocks)
-    fc_norm: Optional[bool] = (
-        None  # Whether to normalize features before final classifier (after pooling)
-    )
+    fc_norm: Optional[bool] = None  # Whether to normalize features before final classifier (after pooling)
 
     # Global pooling setup
     global_pool: str = ""  # Type of global pooling for final sequence  # * no pooling
-    pool_include_prefix: bool = (
-        False  # Whether to include class/register prefix tokens in global pooling
-    )
+    pool_include_prefix: bool = False  # Whether to include class/register prefix tokens in global pooling
     attn_pool_num_heads: Optional[int] = None  # Override num_heads for attention pool
     attn_pool_mlp_ratio: Optional[float] = None  # Override mlp_ratio for attention pool
 
@@ -95,12 +85,8 @@ class NaFlexVitCfg:
 
     # Embedding configuration
     embed_proj_type: str = "linear"  # Type of embedding layer ('conv' or 'linear')
-    input_norm_layer: Optional[str] = (
-        None  # Normalization layer for embeddings input (before input projection)
-    )
-    embed_norm_layer: Optional[str] = (
-        None  # Normalization layer for embeddings (after input projection)
-    )
+    input_norm_layer: Optional[str] = None  # Normalization layer for embeddings input (before input projection)
+    embed_norm_layer: Optional[str] = None  # Normalization layer for embeddings (after input projection)
 
     # Layer implementations
     norm_layer: Optional[str] = None  # Normalization layer for transformer blocks
@@ -170,9 +156,7 @@ class NaFlexVitAdpoted(NaFlexVit):
         h = w = int(x.shape[1] ** 0.5)
         assert h * w == x.shape[1]
 
-        x = einops.rearrange(
-            x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c
-        )
+        x = einops.rearrange(x, "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c)
         return x
 
     def _forward_additional_patcher(self, ms, pan):

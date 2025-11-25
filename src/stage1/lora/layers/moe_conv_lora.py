@@ -126,9 +126,7 @@ class IA3LoRALinear(nn.Linear, LoRALayer):
     def forward(self, x: torch.Tensor):
         result = F.linear(x, self.T(self.weight), bias=self.bias)
         if self.r > 0:
-            result += (
-                self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T
-            ) * self.scaling
+            result += (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
 
         hidden = result * self.lora_b.flatten()
         return hidden
@@ -319,9 +317,7 @@ class LoRALinear(nn.Linear, LoRALayer):
         if self.r > 0 and not self.merged:
             result = F.linear(x, self.T(self.weight), bias=self.bias)
             if self.r > 0:
-                result += (
-                    self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T
-                ) * self.scaling
+                result += (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
             return result
         else:
             return F.linear(x, self.T(self.weight), bias=self.bias)
@@ -469,28 +465,20 @@ class LoRAMergedLinear(nn.Linear, LoRALayer):
             lora_dropout=lora_dropout,
             merge_weights=merge_weights,
         )
-        assert out_features % len(enable_lora) == 0, (
-            "The length of enable_lora must divide out_features"
-        )
+        assert out_features % len(enable_lora) == 0, "The length of enable_lora must divide out_features"
         self.enable_lora = enable_lora
         self.fan_in_fan_out = fan_in_fan_out
         # Actual trainable parameters
         if r > 0 and any(enable_lora):
-            self.lora_A = nn.Parameter(
-                self.weight.new_zeros((r * sum(enable_lora), in_features))
-            )
+            self.lora_A = nn.Parameter(self.weight.new_zeros((r * sum(enable_lora), in_features)))
             self.lora_B = nn.Parameter(
-                self.weight.new_zeros(
-                    (out_features // len(enable_lora) * sum(enable_lora), r)
-                )
+                self.weight.new_zeros((out_features // len(enable_lora) * sum(enable_lora), r))
             )  # weights for Conv1D with groups=sum(enable_lora)
             self.scaling = self.lora_alpha / self.r
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
             # Compute the indices
-            self.lora_ind = self.weight.new_zeros(
-                (out_features,), dtype=torch.bool
-            ).view(len(enable_lora), -1)
+            self.lora_ind = self.weight.new_zeros((out_features,), dtype=torch.bool).view(len(enable_lora), -1)
             self.lora_ind[enable_lora, :] = True
             self.lora_ind = self.lora_ind.view(-1)
         self.reset_parameters()
@@ -507,9 +495,7 @@ class LoRAMergedLinear(nn.Linear, LoRALayer):
     def zero_pad(self, x):
         result = x.new_zeros((*x.shape[:-1], self.out_features))
         result = result.view(-1, self.out_features)
-        result[:, self.lora_ind] = x.reshape(
-            -1, self.out_features // len(self.enable_lora) * sum(self.enable_lora)
-        )
+        result[:, self.lora_ind] = x.reshape(-1, self.out_features // len(self.enable_lora) * sum(self.enable_lora))
         return result.view((*x.shape[:-1], self.out_features))
 
     def train(self, mode: bool = True):
@@ -614,12 +600,8 @@ class LoRAConv2d(nn.Conv2d, LoRALayer):
         assert isinstance(kernel_size, int)
         # Actual trainable parameters
         if r > 0:
-            self.lora_A = nn.Parameter(
-                self.weight.new_zeros((r * kernel_size, in_channels * kernel_size))
-            )
-            self.lora_B = nn.Parameter(
-                self.weight.new_zeros((out_channels * kernel_size, r * kernel_size))
-            )
+            self.lora_A = nn.Parameter(self.weight.new_zeros((r * kernel_size, in_channels * kernel_size)))
+            self.lora_B = nn.Parameter(self.weight.new_zeros((out_channels * kernel_size, r * kernel_size)))
             self.scaling = self.lora_alpha / self.r
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
@@ -636,26 +618,21 @@ class LoRAConv2d(nn.Conv2d, LoRALayer):
         nn.Conv2d.train(self, mode)
         if self.merge_weights and self.merged:
             # Make sure that the weights are not merged
-            self.weight.data -= (self.lora_B @ self.lora_A).view(
-                self.weight.shape
-            ) * self.scaling
+            self.weight.data -= (self.lora_B @ self.lora_A).view(self.weight.shape) * self.scaling
             self.merged = False
 
     def eval(self):
         nn.Conv2d.eval(self)
         if self.merge_weights and not self.merged:
             # Merge the weights and mark it
-            self.weight.data += (self.lora_B @ self.lora_A).view(
-                self.weight.shape
-            ) * self.scaling
+            self.weight.data += (self.lora_B @ self.lora_A).view(self.weight.shape) * self.scaling
             self.merged = True
 
     def forward(self, x: torch.Tensor):
         if self.r > 0 and not self.merged:
             return F.conv2d(
                 x,
-                self.weight
-                + (self.lora_B @ self.lora_A).view(self.weight.shape) * self.scaling,
+                self.weight + (self.lora_B @ self.lora_A).view(self.weight.shape) * self.scaling,
                 self.bias,
                 self.stride,
                 self.padding,
@@ -795,9 +772,7 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # Calculate the gating values.
             # lora_res = lora_res.permute(0, 3, 1, 2).contiguous()  # [bs, c, h, w]
             lora_res = lora_res.flatten(1, 2)  # [bs, h*w, c]
-            hid_states_gap = (
-                F.adaptive_avg_pool2d(lora_res, 1).squeeze(-1).squeeze(-1)
-            )  # [bs, c, 1, 1] -> [bs, c]
+            hid_states_gap = F.adaptive_avg_pool2d(lora_res, 1).squeeze(-1).squeeze(-1)  # [bs, c, 1, 1] -> [bs, c]
             # topk_idx: [bs, k], topk_weight: [bs, k]
             topk_idx, topk_weight, moe_loss = self.lora_moe_gating(hid_states_gap)
             flat_topk_idx = topk_idx.flatten()  # [bs * k]
@@ -870,20 +845,14 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                 upsample_ratio = self.upsample_ratios[i]
                 cur_res = expert_inputs[i]
                 if upsample_ratio != 1:
-                    cur_res = F.interpolate(
-                        cur_res, scale_factor=upsample_ratio, mode="bicubic"
-                    )
+                    cur_res = F.interpolate(cur_res, scale_factor=upsample_ratio, mode="bicubic")
                 cur_res = self.lora_moe_experts[i](cur_res)
                 if upsample_ratio != 1:
-                    cur_res = F.interpolate(
-                        cur_res, size=(int(H), int(W)), mode="bicubic"
-                    )
+                    cur_res = F.interpolate(cur_res, size=(int(H), int(W)), mode="bicubic")
                 expert_outputs.append(cur_res)
 
             # Combine data samples after processing by each expert.
-            temp_lora_res = dispatcher.combine(
-                expert_outputs, multiply_by_gates=self.multiply_by_gates
-            )
+            temp_lora_res = dispatcher.combine(expert_outputs, multiply_by_gates=self.multiply_by_gates)
             lora_res = lora_res + temp_lora_res
 
             lora_res = lora_res.permute(0, 2, 3, 1).contiguous()
@@ -931,9 +900,7 @@ class MoEGate(nn.Module):
         if self.noisy_gating and self.training:
             raw_noise_stddev = feats_S @ self.w_noise  # [bs, m]
             noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
-            noisy_logits = clean_logits + (
-                torch.randn_like(clean_logits) * noise_stddev
-            )
+            noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
             logits = noisy_logits
         else:
             logits = clean_logits
@@ -946,11 +913,7 @@ class MoEGate(nn.Module):
         gates = zeros.scatter(1, top_k_indices, top_k_gates).to(logits.dtype)  # [bs, m]
 
         if self.noisy_gating and self.k < self.M and self.training:
-            load = (
-                self._prob_in_top_k(
-                    clean_logits, noisy_logits, noise_stddev, top_logits
-                )
-            ).sum(0)
+            load = (self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits)).sum(0)
         else:
             load = self._gates_to_load(gates)
 
@@ -986,9 +949,7 @@ class MoEGate(nn.Module):
             return torch.tensor([0], device=x.device, dtype=x.dtype)
         return x.float().var() / (x.float().mean() ** 2 + eps)
 
-    def _prob_in_top_k(
-        self, clean_values, noisy_values, noise_stddev, noisy_top_values
-    ):
+    def _prob_in_top_k(self, clean_values, noisy_values, noise_stddev, noisy_top_values):
         """Helper function to NoisyTopKGating.
         Computes the probability that value is in top k, given different random noise.
         This gives us a way of backpropagating from a loss that balances the number
@@ -1009,17 +970,11 @@ class MoEGate(nn.Module):
         m = noisy_top_values.size(1)
         top_values_flat = noisy_top_values.flatten()
 
-        threshold_positions_if_in = (
-            torch.arange(batch, device=clean_values.device) * m + self.k
-        )
-        threshold_if_in = torch.unsqueeze(
-            torch.gather(top_values_flat, 0, threshold_positions_if_in), 1
-        )
+        threshold_positions_if_in = torch.arange(batch, device=clean_values.device) * m + self.k
+        threshold_if_in = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_in), 1)
         is_in = torch.gt(noisy_values, threshold_if_in)
         threshold_positions_if_out = threshold_positions_if_in - 1
-        threshold_if_out = torch.unsqueeze(
-            torch.gather(top_values_flat, 0, threshold_positions_if_out), 1
-        )
+        threshold_if_out = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_out), 1)
         # is each value currently in the top k.
         normal = Normal(self.mean, self.std)
         prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)

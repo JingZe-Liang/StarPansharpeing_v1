@@ -48,9 +48,7 @@ if Image is not None:
     }
 
 
-def imresize(
-    img, size, return_scale=False, interpolation="bilinear", out=None, backend=None
-):
+def imresize(img, size, return_scale=False, interpolation="bilinear", out=None, backend=None):
     """Resize image to a given size.
 
     Args:
@@ -73,10 +71,7 @@ def imresize(
     if backend is None:
         backend = imread_backend
     if backend not in ["cv2", "pillow"]:
-        raise ValueError(
-            f"backend: {backend} is not supported for resize."
-            f"Supported backends are 'cv2', 'pillow'"
-        )
+        raise ValueError(f"backend: {backend} is not supported for resize.Supported backends are 'cv2', 'pillow'")
 
     if backend == "pillow":
         assert img.dtype == np.uint8, "Pillow backend only support uint8 type"
@@ -84,9 +79,7 @@ def imresize(
         pil_image = pil_image.resize(size, pillow_interp_codes[interpolation])
         resized_img = np.array(pil_image)
     else:
-        resized_img = cv2.resize(
-            img, size, dst=out, interpolation=cv2_interp_codes[interpolation]
-        )
+        resized_img = cv2.resize(img, size, dst=out, interpolation=cv2_interp_codes[interpolation])
     if not return_scale:
         return resized_img
     else:
@@ -162,9 +155,7 @@ def imresize_to_multiple(
         return resized_img
 
 
-def imresize_like(
-    img, dst_img, return_scale=False, interpolation="bilinear", backend=None
-):
+def imresize_like(img, dst_img, return_scale=False, interpolation="bilinear", backend=None):
     """Resize image to the same size of a given image.
 
     Args:
@@ -207,9 +198,7 @@ def rescale_size(old_size, scale, return_scale=False):
         max_short_edge = min(scale)
         scale_factor = min(max_long_edge / max(h, w), max_short_edge / min(h, w))
     else:
-        raise TypeError(
-            f"Scale must be a number or tuple of int, but got {type(scale)}"
-        )
+        raise TypeError(f"Scale must be a number or tuple of int, but got {type(scale)}")
 
     new_size = _scale_size((w, h), scale_factor)
 
@@ -420,16 +409,12 @@ def imcrop(img, bboxes, scale=1.0, pad_fill=None):
                 patch_shape = (_y2 - _y1 + 1, _x2 - _x1 + 1)
             else:
                 patch_shape = (_y2 - _y1 + 1, _x2 - _x1 + 1, chn)
-            patch = np.array(pad_fill, dtype=img.dtype) * np.ones(
-                patch_shape, dtype=img.dtype
-            )
+            patch = np.array(pad_fill, dtype=img.dtype) * np.ones(patch_shape, dtype=img.dtype)
             x_start = 0 if _x1 >= 0 else -_x1
             y_start = 0 if _y1 >= 0 else -_y1
             w = x2 - x1 + 1
             h = y2 - y1 + 1
-            patch[y_start : y_start + h, x_start : x_start + w, ...] = img[
-                y1 : y1 + h, x1 : x1 + w, ...
-            ]
+            patch[y_start : y_start + h, x_start : x_start + w, ...] = img[y1 : y1 + h, x1 : x1 + w, ...]
         patches.append(patch)
 
     if bboxes.ndim == 1:
@@ -481,9 +466,7 @@ def impad(img, *, shape=None, padding=None, pad_val=0, padding_mode="constant"):
     if isinstance(pad_val, tuple):
         assert len(pad_val) == img.shape[-1]
     elif not isinstance(pad_val, numbers.Number):
-        raise TypeError(
-            f"pad_val must be a int or a tuple. But received {type(pad_val)}"
-        )
+        raise TypeError(f"pad_val must be a int or a tuple. But received {type(pad_val)}")
 
     # check padding
     if isinstance(padding, tuple) and len(padding) in [2, 4]:
@@ -492,9 +475,7 @@ def impad(img, *, shape=None, padding=None, pad_val=0, padding_mode="constant"):
     elif isinstance(padding, numbers.Number):
         padding = (padding, padding, padding, padding)
     else:
-        raise ValueError(
-            f"Padding must be a int or a 2, or 4 element tuple.But received {padding}"
-        )
+        raise ValueError(f"Padding must be a int or a 2, or 4 element tuple.But received {padding}")
 
     # check padding mode
     assert padding_mode in ["constant", "edge", "reflect", "symmetric"]
@@ -553,16 +534,16 @@ def cutout(img, shape, pad_val=0):
         cut_h, cut_w = shape, shape
     else:
         assert isinstance(shape, tuple) and len(shape) == 2, (
-            f"shape must be a int or a tuple with length 2, but got type "
-            f"{type(shape)} instead."
+            f"shape must be a int or a tuple with length 2, but got type {type(shape)} instead."
         )
         cut_h, cut_w = shape
     if isinstance(pad_val, (int, float)):
         pad_val = tuple([pad_val] * channels)
     elif isinstance(pad_val, tuple):
         assert len(pad_val) == channels, (
-            "Expected the num of elements in tuple equals the channels"
-            "of input image. Found {} vs {}".format(len(pad_val), channels)
+            "Expected the num of elements in tuple equals the channelsof input image. Found {} vs {}".format(
+                len(pad_val), channels
+            )
         )
     else:
         raise TypeError(f"Invalid type {type(pad_val)} for `pad_val`")
@@ -606,9 +587,7 @@ def _get_shear_matrix(magnitude, direction="horizontal"):
     return shear_matrix
 
 
-def imshear(
-    img, magnitude, direction="horizontal", border_value=0, interpolation="bilinear"
-):
+def imshear(img, magnitude, direction="horizontal", border_value=0, interpolation="bilinear"):
     """Shear an image.
 
     Args:
@@ -634,8 +613,9 @@ def imshear(
         border_value = tuple([border_value] * channels)
     elif isinstance(border_value, tuple):
         assert len(border_value) == channels, (
-            "Expected the num of elements in tuple equals the channels"
-            "of input image. Found {} vs {}".format(len(border_value), channels)
+            "Expected the num of elements in tuple equals the channelsof input image. Found {} vs {}".format(
+                len(border_value), channels
+            )
         )
     else:
         raise ValueError(f"Invalid type {type(border_value)} for `border_value`")
@@ -672,9 +652,7 @@ def _get_translate_matrix(offset, direction="horizontal"):
     return translate_matrix
 
 
-def imtranslate(
-    img, offset, direction="horizontal", border_value=0, interpolation="bilinear"
-):
+def imtranslate(img, offset, direction="horizontal", border_value=0, interpolation="bilinear"):
     """Translate an image.
 
     Args:
@@ -700,8 +678,9 @@ def imtranslate(
         border_value = tuple([border_value] * channels)
     elif isinstance(border_value, tuple):
         assert len(border_value) == channels, (
-            "Expected the num of elements in tuple equals the channels"
-            "of input image. Found {} vs {}".format(len(border_value), channels)
+            "Expected the num of elements in tuple equals the channelsof input image. Found {} vs {}".format(
+                len(border_value), channels
+            )
         )
     else:
         raise ValueError(f"Invalid type {type(border_value)} for `border_value`.")

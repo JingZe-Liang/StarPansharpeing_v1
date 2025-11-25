@@ -56,9 +56,7 @@ class DiTOnlyAttn(DiT):
         self.cond_drop_prob = 0.1
         self.learn_x_tokens = learn_x_tokens
         if learn_x_tokens == "full_size":
-            self.x_tokens = nn.Parameter(
-                torch.randn(1, self.autoenc_dim, self.input_size, self.input_size)
-            )
+            self.x_tokens = nn.Parameter(torch.randn(1, self.autoenc_dim, self.input_size, self.input_size))
         elif learn_x_tokens == "only_channel":
             self.x_tokens = nn.Parameter(torch.randn(1, self.autoenc_dim))
         else:  # no learnt, set all zeros
@@ -80,10 +78,7 @@ class DiTOnlyAttn(DiT):
         if drop_mask is None:
             # randomly drop all conditions, for classifier-free guidance
             if self.training:
-                drop_ids = (
-                    torch.rand(batch_size, 1, 1, device=autoenc_cond.device)
-                    < self.cond_drop_prob
-                )  # [bs, 1, 1]
+                drop_ids = torch.rand(batch_size, 1, 1, device=autoenc_cond.device) < self.cond_drop_prob  # [bs, 1, 1]
                 # null_cond: [n_latents, D], [bs, n_latents, D]
                 autoenc_cond_drop = torch.where(drop_ids, self.null_cond, autoenc_cond)
             else:
@@ -91,9 +86,7 @@ class DiTOnlyAttn(DiT):
         else:
             # randomly drop some conditions according to the drop_mask (N, K)
             # True means keep
-            autoenc_cond_drop = torch.where(
-                drop_mask[:, :, None], autoenc_cond, self.null_cond
-            )  # [bs, l, 1]
+            autoenc_cond_drop = torch.where(drop_mask[:, :, None], autoenc_cond, self.null_cond)  # [bs, l, 1]
         return self.autoenc_cond_embedder(autoenc_cond_drop)
 
     def forward(self, autoenc_cond, drop_mask=None):
@@ -111,18 +104,14 @@ class DiTOnlyAttn(DiT):
             # repeat bs and hw
             x = self.x_tokens[..., None, None].repeat_interleave(autoenc_cond.shape[0])
 
-        x = (
-            self.x_embedder(x) + self.pos_embed
-        )  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         autoenc = self.embed_cond(autoenc_cond, drop_mask)
 
         num_tokens = x.shape[1]
         x = torch.cat((x, autoenc), dim=1)  # noise and condition
 
         for i, block in enumerate(self.blocks):
-            x = block(
-                x, None
-            )  # (N, T, D), None means no condition, only rely on encoded tokens
+            x = block(x, None)  # (N, T, D), None means no condition, only rely on encoded tokens
             if (i + 1) == self.encoder_depth and self.use_repa:
                 projected = self.projector(x)
                 self._repa_hook = projected[:, :num_tokens]
@@ -184,9 +173,7 @@ class DiT_with_autoenc_cond(DiT):
         if drop_mask is not None:
             # randomly drop some conditions according to the drop_mask (N, K)
             # True means keep
-            autoenc_cond_drop = torch.where(
-                drop_mask[:, :, None], autoenc_cond, self.null_cond
-            )  # [bs, l, 1]
+            autoenc_cond_drop = torch.where(drop_mask[:, :, None], autoenc_cond, self.null_cond)  # [bs, l, 1]
         return self.autoenc_cond_embedder(autoenc_cond_drop)
 
     def forward(self, x, t, autoenc_cond, drop_mask=None):
@@ -196,9 +183,7 @@ class DiT_with_autoenc_cond(DiT):
         t: (N,) tensor of diffusion timesteps
         autoenc_cond: (N, K, D) tensor of autoencoder conditions (slots)
         """
-        x = (
-            self.x_embedder(x) + self.pos_embed
-        )  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         c = self.t_embedder(t)  # (N, D)
         autoenc = self.embed_cond(autoenc_cond, drop_mask)
 
@@ -379,9 +364,7 @@ class DiffuseSlot(nn.Module):
         self.use_repa = use_repa
         self.repa_loss_weight = repa_loss_weight
         if use_repa:
-            self.repa_encoder = torch.hub.load(
-                "facebookresearch/dinov2", "dinov2_vitb14"
-            )
+            self.repa_encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
             self.repa_encoder.image_size = 224
             for param in self.repa_encoder.parameters():
                 param.requires_grad = False
@@ -446,23 +429,17 @@ class DiffuseSlot(nn.Module):
             self.dit_in_channels = img_channels
             decoder_patch_size = int(dit_model[-1])
             if decoder_patch_size < 8:
-                logger.warning(
-                    f"[Patch Size]: patch size={decoder_patch_size} is too small, may use lots of GPU mem."
-                )
+                logger.warning(f"[Patch Size]: patch size={decoder_patch_size} is too small, may use lots of GPU mem.")
 
         # double channel
         if self.diffusion_type in ("diffusion", "fm"):
-            assert (
-                quantizer_type != "kl"
-            ), "when using kl quantizer, diffusion_type should can not be any diffusion"
+            assert quantizer_type != "kl", "when using kl quantizer, diffusion_type should can not be any diffusion"
 
         self.use_diffusion = True
         if self.diffusion_type == "fm":
             double_out_channel = False
             if learn_sigma:
-                logger.warning(
-                    f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True"
-                )
+                logger.warning(f"[Diffusion]: diffusion_type={self.diffusion_type} can not use learn_sigma=True")
         elif self.diffusion_type == "diffusion":
             double_out_channel = learn_sigma
         else:  # no diffusion
@@ -512,16 +489,8 @@ class DiffuseSlot(nn.Module):
 
         # * compile models =================
         logger.info(f"[Compile]: compile models ...") if compile_model else None
-        self.decoder = (
-            torch.compile(self.decoder, mode="reduce-overhead")
-            if compile_model
-            else self.decoder
-        )
-        self.encoder = (
-            torch.compile(self.encoder, mode="reduce-overhead")
-            if compile_model
-            else self.encoder
-        )
+        self.decoder = torch.compile(self.decoder, mode="reduce-overhead") if compile_model else self.decoder
+        self.encoder = torch.compile(self.encoder, mode="reduce-overhead") if compile_model else self.encoder
 
         # * proj ================
         # vitpathch16 model from hidden dim to latent dim (e.g., 16)
@@ -536,9 +505,7 @@ class DiffuseSlot(nn.Module):
 
             if self.norm_slots:
                 self.norm_slots = quantizer_kwargs.get("pre_quant_norm", False)
-                logger.warning(
-                    f"[Quantizer]: norm_slots is True, set to False for any quantizer"
-                )
+                logger.warning(f"[Quantizer]: norm_slots is True, set to False for any quantizer")
 
             # init quantizer
             if quantizer_type == "bsq":
@@ -555,26 +522,19 @@ class DiffuseSlot(nn.Module):
                     input_format="blc",
                     group_size=slot_dim // 2,
                 )
-                kwargs = (
-                    _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
-                )
+                kwargs = _default_kwargs if len(quantizer_kwargs) == 0 else quantizer_kwargs
                 self.quantizer_kwargs = kwargs
-                self.bsq_logit_laplace = self.quantizer_kwargs.pop(
-                    "logit_laplace", False
-                )
+                self.bsq_logit_laplace = self.quantizer_kwargs.pop("logit_laplace", False)
                 if self.bsq_logit_laplace:  # no used
                     self.bsq_logt_lap_loss = LogitLaplaceLoss(logit_laplace_eps=0.1)
                     logger.warning(
-                        f"[Quantizer]: Logit Laplace Loss is not implemented yet,"
-                        "it will not take any effect"
+                        f"[Quantizer]: Logit Laplace Loss is not implemented yet,it will not take any effect"
                     )
                 self.quantizer = BinarySphericalQuantizer(**kwargs)
             elif quantizer_type == "kl":
                 self.kl_weight = quantizer_kwargs.get("kl_weight", 1e-6)
                 logvar_init = quantizer_kwargs.get("logvar_init", 0.0)
-                self.logvar = nn.Parameter(
-                    torch.ones(size=()) * logvar_init, requires_grad=False
-                )
+                self.logvar = nn.Parameter(torch.ones(size=()) * logvar_init, requires_grad=False)
                 self.quantizer_kwargs = {}
                 self.quantizer = DiagonalGaussianDistribution
             elif quantizer_type is None:
@@ -585,9 +545,7 @@ class DiffuseSlot(nn.Module):
                 raise ValueError("quantizer_type must be bsq, kl, or None")
         else:
             if self.quantizer_type is not None:
-                logger.warning(
-                    f"[Quantizer]: distill from pretrained vae, ignore quantizer_type={self.quantizer_type}"
-                )
+                logger.warning(f"[Quantizer]: distill from pretrained vae, ignore quantizer_type={self.quantizer_type}")
             self.quantizer = None
 
         # * token sampler ==========
@@ -628,27 +586,13 @@ class DiffuseSlot(nn.Module):
 
     @torch.no_grad()
     def repa_encode(self, x):
-        mean = (
-            torch.Tensor(IMAGENET_DEFAULT_MEAN)
-            .to(x.device)
-            .unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
-        std = (
-            torch.Tensor(IMAGENET_DEFAULT_STD)
-            .to(x.device)
-            .unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        mean = torch.Tensor(IMAGENET_DEFAULT_MEAN).to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        std = torch.Tensor(IMAGENET_DEFAULT_STD).to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         x = (x - mean) / std
 
         # interpolate to image size
         if self.repa_encoder.image_size != self.enc_img_size:
-            x = torch.nn.functional.interpolate(
-                x, self.repa_encoder.image_size, mode="bicubic"
-            )
+            x = torch.nn.functional.interpolate(x, self.repa_encoder.image_size, mode="bicubic")
 
         # get dino features
         x = self.repa_encoder.forward_features(x)["x_norm_patchtokens"]
@@ -705,11 +649,7 @@ class DiffuseSlot(nn.Module):
         batch_size = x_vae.shape[0]
         device = x_vae.device
 
-        if (
-            epoch is not None
-            and epoch >= self.enable_nest_after
-            and self.enable_nest_after != -1
-        ):
+        if epoch is not None and epoch >= self.enable_nest_after and self.enable_nest_after != -1:
             self.enable_nest = True
         # nest sample
         if self.enable_nest or inference_with_n_slots != -1:
@@ -876,9 +816,7 @@ class DiffuseSlot(nn.Module):
                     null_cond_mask = torch.ones_like(drop_mask)  # keep all
                     drop_mask = torch.cat([drop_mask, null_cond_mask], 0)
 
-                model_kwargs = dict(
-                    autoenc_cond=slots, drop_mask=drop_mask, cfg_scale=cfg
-                )
+                model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask, cfg_scale=cfg)
                 sample_fn = self.decoder.forward_with_cfg
             else:
                 model_kwargs = dict(autoenc_cond=slots, drop_mask=drop_mask)
@@ -1055,9 +993,7 @@ if __name__ == "__main__":
 
             # 打印显存占用信息
             print(f"Initial memory allocated: {initial_memory / 1024**2:.2f} MB")
-            print(
-                f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB"
-            )
+            print(f"Memory allocated after forward pass: {allocated_memory / 1024**2:.2f} MB")
             print(f"Peak memory allocated: {peak_memory / 1024**2:.2f} MB")
             print(f"Memory usage: {memory_usage / 1024**2:.2f} MB")
 
@@ -1102,9 +1038,7 @@ if __name__ == "__main__":
     def run_sampling():
         tokenizer.eval()
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            y = tokenizer(
-                x, sample=True, epoch=None, inference_with_n_slots=-1, cfg=2.0
-            )[0]
+            y = tokenizer(x, sample=True, epoch=None, inference_with_n_slots=-1, cfg=2.0)[0]
         print(y.shape)
 
     run_forward_backward()

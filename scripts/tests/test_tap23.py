@@ -79,9 +79,7 @@ class Interp23Tap(nn.Module):
             w_curr *= 2
 
             # Upsample by inserting zeros
-            upsampled = torch.zeros(
-                bs, c, h_curr, w_curr, device=x.device, dtype=x.dtype
-            )
+            upsampled = torch.zeros(bs, c, h_curr, w_curr, device=x.device, dtype=x.dtype)
 
             # Place original pixels according to MATLAB logic
             if k == 0:
@@ -98,9 +96,7 @@ class Interp23Tap(nn.Module):
 
             # Pad for horizontal filter (width)
             # Pad width dimension (dim 3) by self.padding on both sides
-            padded_w = F.pad(
-                upsampled, (self.padding, self.padding, 0, 0), mode="circular"
-            )
+            padded_w = F.pad(upsampled, (self.padding, self.padding, 0, 0), mode="circular")
             # Apply horizontal filter
             # Input: (bs, c, H, W_padded), Kernel: (1, 1, 1, K) -> Output: (bs, c, H, W)
             # We need kernel shape (c, 1, 1, K) for grouped convolution
@@ -109,9 +105,7 @@ class Interp23Tap(nn.Module):
 
             # Pad for vertical filter (height)
             # Pad height dimension (dim 2) by self.padding on both sides
-            padded_h = F.pad(
-                filtered_w, (0, 0, self.padding, self.padding), mode="circular"
-            )
+            padded_h = F.pad(filtered_w, (0, 0, self.padding, self.padding), mode="circular")
             # Apply vertical filter
             # Input: (bs, c, H_padded, W), Kernel: (1, 1, K, 1) -> Output: (bs, c, H, W)
             # We need kernel shape (c, 1, K, 1) for grouped convolution

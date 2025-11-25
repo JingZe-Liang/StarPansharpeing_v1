@@ -38,9 +38,7 @@ def auto_scale_lr(effective_bs, optimizer_cfg, rule="linear", base_batch_size=25
     elif rule == "linear":
         scale_ratio = effective_bs / base_batch_size
     optimizer_cfg["lr"] *= scale_ratio
-    logger.info(
-        f"Automatically adapt lr to {optimizer_cfg['lr']:.5f} (using {rule} scaling rule)."
-    )
+    logger.info(f"Automatically adapt lr to {optimizer_cfg['lr']:.5f} (using {rule} scaling rule).")
     return scale_ratio
 
 
@@ -171,11 +169,7 @@ class CAMEWrapper(torch.optim.Optimizer):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     def _approx_sq_grad(self, exp_avg_sq_row, exp_avg_sq_col):
-        r_factor = (
-            (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True))
-            .rsqrt_()
-            .unsqueeze(-1)
-        )
+        r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).rsqrt_().unsqueeze(-1)
         c_factor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
         return torch.mul(r_factor, c_factor)
 
@@ -212,18 +206,10 @@ class CAMEWrapper(torch.optim.Optimizer):
                     if factored:
                         if layer_type == "1x1_conv" or layer_type == "linear":
                             # 1x1 conv and linear layers can be handled in the same way
-                            state["exp_avg_sq_row"] = torch.zeros(
-                                grad_shape[0]
-                            ).type_as(grad)
-                            state["exp_avg_sq_col"] = torch.zeros(
-                                grad_shape[1]
-                            ).type_as(grad)
-                            state["exp_avg_res_row"] = torch.zeros(
-                                grad_shape[0]
-                            ).type_as(grad)
-                            state["exp_avg_res_col"] = torch.zeros(
-                                grad_shape[1]
-                            ).type_as(grad)
+                            state["exp_avg_sq_row"] = torch.zeros(grad_shape[0]).type_as(grad)
+                            state["exp_avg_sq_col"] = torch.zeros(grad_shape[1]).type_as(grad)
+                            state["exp_avg_res_row"] = torch.zeros(grad_shape[0]).type_as(grad)
+                            state["exp_avg_res_col"] = torch.zeros(grad_shape[1]).type_as(grad)
                         else:
                             state["exp_avg_sq"] = torch.zeros_like(grad)
 
@@ -243,9 +229,7 @@ class CAMEWrapper(torch.optim.Optimizer):
                     if layer_type == "1x1_conv" or layer_type == "linear":
                         # Handle dimensions
                         if len(grad_shape) == 4:  # 1x1 conv
-                            update_reshaped = update.squeeze(-1).squeeze(
-                                -1
-                            )  # Remove the last two dimensions
+                            update_reshaped = update.squeeze(-1).squeeze(-1)  # Remove the last two dimensions
                         else:
                             update_reshaped = update
 
@@ -265,19 +249,13 @@ class CAMEWrapper(torch.optim.Optimizer):
                 else:
                     # 3x3 conv or other cases: use standard AdamW method
                     exp_avg_sq = state["exp_avg_sq"]
-                    exp_avg_sq.mul_(group["betas"][1]).add_(
-                        update, alpha=1.0 - group["betas"][1]
-                    )
+                    exp_avg_sq.mul_(group["betas"][1]).add_(update, alpha=1.0 - group["betas"][1])
                     update = exp_avg_sq.rsqrt().mul_(grad)
 
-                update.div_(
-                    (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0)
-                )
+                update.div_((self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
 
                 exp_avg = state["exp_avg"]
-                exp_avg.mul_(group["betas"][0]).add_(
-                    update, alpha=1 - group["betas"][0]
-                )
+                exp_avg.mul_(group["betas"][0]).add_(update, alpha=1 - group["betas"][0])
 
                 # Confidence-guided strategy
                 # Calculation of instability
@@ -290,9 +268,7 @@ class CAMEWrapper(torch.optim.Optimizer):
                     if layer_type == "1x1_conv" or layer_type == "linear":
                         # Handle dimensions
                         if len(grad_shape) == 4:  # 1x1 conv
-                            res_reshaped = res.squeeze(-1).squeeze(
-                                -1
-                            )  # Remove last two dimensions
+                            res_reshaped = res.squeeze(-1).squeeze(-1)  # Remove last two dimensions
                         else:
                             res_reshaped = res
 
@@ -357,9 +333,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
         assert all([0.0 <= beta <= 1.0 for beta in betas])
 
         # logger = get_root_logger()
-        logger.info(
-            f"Initializing CAME8bit with block_size={block_size}, min_8bit_size={min_8bit_size}"
-        )
+        logger.info(f"Initializing CAME8bit with block_size={block_size}, min_8bit_size={min_8bit_size}")
 
         defaults = dict(
             lr=lr,
@@ -392,9 +366,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
                 layer_type = "Conv"
 
         status = "8bit" if use_8bit else "32bit"
-        print(
-            f"{layer_type} layer with shape {param_shape}: {size:,} params -> using {status}"
-        )
+        print(f"{layer_type} layer with shape {param_shape}: {size:,} params -> using {status}")
 
     def _should_use_8bit(self, param_shape):
         """Determines whether parameters should be quantized to 8-bit
@@ -406,9 +378,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
         """
         if len(param_shape) == 2:  # Linear layers
             return param_shape[0] * param_shape[1] > self.defaults["min_8bit_size"]
-        elif (
-            len(param_shape) == 4 and param_shape[2] == 1 and param_shape[3] == 1
-        ):  # Only quantize 1x1 conv
+        elif len(param_shape) == 4 and param_shape[2] == 1 and param_shape[3] == 1:  # Only quantize 1x1 conv
             return param_shape[0] * param_shape[1] > self.defaults["min_8bit_size"]
         return False  # Other layers are not quantized
 
@@ -437,9 +407,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
 
             # Quantize to 0-255 range
             quantized_chunk = ((chunk - chunk_min) / scale).round().byte()
-            quantized_chunks.append(
-                {"data": quantized_chunk, "scale": scale, "min": chunk_min}
-            )
+            quantized_chunks.append({"data": quantized_chunk, "scale": scale, "min": chunk_min})
         return quantized_chunks
 
     def _dequantize_state(self, quantized_chunks):
@@ -498,11 +466,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     def _approx_sq_grad(self, exp_avg_sq_row, exp_avg_sq_col):
-        r_factor = (
-            (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True))
-            .rsqrt_()
-            .unsqueeze(-1)
-        )
+        r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).rsqrt_().unsqueeze(-1)
         c_factor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
         return torch.mul(r_factor, c_factor)
 
@@ -544,39 +508,25 @@ class CAME8BitWrapper(torch.optim.Optimizer):
                     state["step"] = 0
                     # Only use 8-bit quantization for large matrices
                     if use_8bit:
-                        state["exp_avg"] = self._quantize_state(
-                            torch.zeros_like(grad), group["block_size"]
-                        )
+                        state["exp_avg"] = self._quantize_state(torch.zeros_like(grad), group["block_size"])
                     else:
                         state["exp_avg"] = torch.zeros_like(grad)
 
                     if factored:
                         if layer_type == "1x1_conv" or layer_type == "linear":
                             # Row and column statistics remain in 32-bit
-                            state["exp_avg_sq_row"] = torch.zeros(
-                                grad_shape[0]
-                            ).type_as(grad)
-                            state["exp_avg_sq_col"] = torch.zeros(
-                                grad_shape[1]
-                            ).type_as(grad)
-                            state["exp_avg_res_row"] = torch.zeros(
-                                grad_shape[0]
-                            ).type_as(grad)
-                            state["exp_avg_res_col"] = torch.zeros(
-                                grad_shape[1]
-                            ).type_as(grad)
+                            state["exp_avg_sq_row"] = torch.zeros(grad_shape[0]).type_as(grad)
+                            state["exp_avg_sq_col"] = torch.zeros(grad_shape[1]).type_as(grad)
+                            state["exp_avg_res_row"] = torch.zeros(grad_shape[0]).type_as(grad)
+                            state["exp_avg_res_col"] = torch.zeros(grad_shape[1]).type_as(grad)
                         else:
                             if use_8bit:
-                                state["exp_avg_sq"] = self._quantize_state(
-                                    torch.zeros_like(grad), group["block_size"]
-                                )
+                                state["exp_avg_sq"] = self._quantize_state(torch.zeros_like(grad), group["block_size"])
                             else:
                                 state["exp_avg_sq"] = torch.zeros_like(grad)
                     else:
                         if use_8bit:
-                            state["exp_avg_sq"] = self._quantize_state(
-                                torch.zeros_like(grad), group["block_size"]
-                            )
+                            state["exp_avg_sq"] = self._quantize_state(torch.zeros_like(grad), group["block_size"])
                         else:
                             state["exp_avg_sq"] = torch.zeros_like(grad)
                     state["RMS"] = 0
@@ -584,11 +534,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
                 state["step"] += 1
                 state["RMS"] = self._rms(p.data)
 
-                exp_avg = (
-                    self._dequantize_state(state["exp_avg"])
-                    if use_8bit
-                    else state["exp_avg"]
-                )
+                exp_avg = self._dequantize_state(state["exp_avg"]) if use_8bit else state["exp_avg"]
 
                 update = (grad**2) + group["eps"][0]
                 if factored:
@@ -616,37 +562,23 @@ class CAME8BitWrapper(torch.optim.Optimizer):
                     update.mul_(grad)
                 else:
                     # Non-decomposition case
-                    exp_avg_sq = (
-                        self._dequantize_state(state["exp_avg_sq"])
-                        if use_8bit
-                        else state["exp_avg_sq"]
-                    )
-                    exp_avg_sq.mul_(group["betas"][1]).add_(
-                        update, alpha=1.0 - group["betas"][1]
-                    )
+                    exp_avg_sq = self._dequantize_state(state["exp_avg_sq"]) if use_8bit else state["exp_avg_sq"]
+                    exp_avg_sq.mul_(group["betas"][1]).add_(update, alpha=1.0 - group["betas"][1])
                     if use_8bit:
-                        state["exp_avg_sq"] = self._quantize_state(
-                            exp_avg_sq, group["block_size"]
-                        )
+                        state["exp_avg_sq"] = self._quantize_state(exp_avg_sq, group["block_size"])
                     else:
                         state["exp_avg_sq"] = exp_avg_sq
                     update = exp_avg_sq.rsqrt().mul_(grad)
 
                 # Gradient clipping
-                update.div_(
-                    (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0)
-                )
+                update.div_((self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
 
                 # Update first moment
-                exp_avg.mul_(group["betas"][0]).add_(
-                    update, alpha=1 - group["betas"][0]
-                )
+                exp_avg.mul_(group["betas"][0]).add_(update, alpha=1 - group["betas"][0])
 
                 # Re-quantize (if needed)
                 if use_8bit:
-                    state["exp_avg"] = self._quantize_state(
-                        exp_avg, group["block_size"]
-                    )
+                    state["exp_avg"] = self._quantize_state(exp_avg, group["block_size"])
                 else:
                     state["exp_avg"] = exp_avg
 
@@ -705,9 +637,7 @@ class CAME8BitWrapper(torch.optim.Optimizer):
                     if isinstance(state[key], list):
                         state[key] = [
                             {
-                                "data": exp[
-                                    "data"
-                                ].byte(),  # Directly convert data to 8-bit
+                                "data": exp["data"].byte(),  # Directly convert data to 8-bit
                                 "scale": exp["scale"],  # Keep scale unchanged
                                 "min": exp["min"],  # Keep min unchanged
                             }
@@ -754,9 +684,7 @@ if __use_mmcv_build_optimizer:
             bypass_duplicate = self.paramwise_cfg.get("bypass_duplicate", False)
 
             # special rules for norm layers and depth-wise conv layers
-            is_norm = isinstance(
-                module, (_BatchNorm, _InstanceNorm, GroupNorm, LayerNorm)
-            )
+            is_norm = isinstance(module, (_BatchNorm, _InstanceNorm, GroupNorm, LayerNorm))
 
             for name, param in module.named_parameters(recurse=False):
                 base_lr = self.base_lr
@@ -780,10 +708,7 @@ if __use_mmcv_build_optimizer:
                     params.append(param_group)
                     continue
                 if bypass_duplicate and self._is_in(param_group, params):
-                    logger.warning(
-                        f"{prefix} is duplicate. It is skipped since "
-                        f"bypass_duplicate={bypass_duplicate}"
-                    )
+                    logger.warning(f"{prefix} is duplicate. It is skipped since bypass_duplicate={bypass_duplicate}")
                     continue
                 # if the parameter match one of the custom keys, ignore other rules
                 is_custom = False
@@ -800,16 +725,12 @@ if __use_mmcv_build_optimizer:
                             # if 'base_classes' in f'{prefix}.{name}' or 'attn_base' in f'{prefix}.{name}':
                             #     param_group['lr'] = self.base_lr
                             # else:
-                            param_group["lr"] = (
-                                self.base_lr * custom_keys[key]["lr_mult"]
-                            )
+                            param_group["lr"] = self.base_lr * custom_keys[key]["lr_mult"]
                         elif "lr" not in param_group:
                             param_group["lr"] = base_lr
                         if self.base_wd is not None:
                             if "decay_mult" in custom_keys[key]:
-                                param_group["weight_decay"] = (
-                                    self.base_wd * custom_keys[key]["decay_mult"]
-                                )
+                                param_group["weight_decay"] = self.base_wd * custom_keys[key]["decay_mult"]
                             elif "weight_decay" not in param_group:
                                 param_group["weight_decay"] = base_wd
 
@@ -824,9 +745,7 @@ if __use_mmcv_build_optimizer:
 
             for child_name, child_mod in module.named_children():
                 child_prefix = f"{prefix}.{child_name}" if prefix else child_name
-                self.add_params(
-                    params, child_mod, prefix=child_prefix, is_dcn_module=is_dcn_module
-                )
+                self.add_params(params, child_mod, prefix=child_prefix, is_dcn_module=is_dcn_module)
 
     def build_optimizer(model, optimizer_cfg):
         # default parameter-wise config
@@ -840,12 +759,7 @@ if __use_mmcv_build_optimizer:
         custom_keys = dict()
         for name, module in model.named_modules():
             if hasattr(module, "zero_weight_decay"):
-                custom_keys.update(
-                    {
-                        (name, key): dict(decay_mult=0)
-                        for key in module.zero_weight_decay
-                    }
-                )
+                custom_keys.update({(name, key): dict(decay_mult=0) for key in module.zero_weight_decay})
 
         paramwise_cfg = Config(dict(cfg=dict(custom_keys=custom_keys)))
         given_cfg = optimizer_cfg.get("paramwise_cfg")
@@ -869,17 +783,10 @@ if __use_mmcv_build_optimizer:
                 learnable_count += 1
             else:
                 fix_count += 1
-        fix_info = colored(
-            f"{learnable_count} are learnable, {fix_count} are fix", "green"
-        )
-        lr_info = "Lr group: " + ", ".join(
-            [f"{len(group)} params with lr {lr:.5f}" for lr, group in lr_groups.items()]
-        )
+        fix_info = colored(f"{learnable_count} are learnable, {fix_count} are fix", "green")
+        lr_info = "Lr group: " + ", ".join([f"{len(group)} params with lr {lr:.5f}" for lr, group in lr_groups.items()])
         wd_info = "Weight decay group: " + ", ".join(
-            [
-                f"{len(group)} params with weight decay {wd}"
-                for wd, group in weight_decay_groups.items()
-            ]
+            [f"{len(group)} params with weight decay {wd}" for wd, group in weight_decay_groups.items()]
         )
         opt_info = f"{optimizer.__class__.__name__} Optimizer: total {len(optimizer.param_groups)} param groups, {fix_info}. {lr_info}; {wd_info}."
         logger.info(opt_info)

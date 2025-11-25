@@ -32,9 +32,7 @@ def tar_captions():
     caption_tar_writer = TarFile(name=caption_tar_save_path, mode="w")
 
     with TarFile(img_ds_path, mode="r") as ds_reader:
-        for member in tqdm(
-            get_tar_member_iter(ds_reader, sort=False), desc="Tar-ing captions ..."
-        ):
+        for member in tqdm(get_tar_member_iter(ds_reader, sort=False), desc="Tar-ing captions ..."):
             img_name = member.name
             caption_file = (Path(caption_dir) / img_name).with_suffix(caption_ext)
             if not caption_file.exists():
@@ -83,9 +81,7 @@ def filter_only_captions(
         new_caption_tar_writer.close()
 
     if any_error:
-        logger.error(
-            f"Error occurred during filtering captions, processed {is_caption_n} captions."
-        )
+        logger.error(f"Error occurred during filtering captions, processed {is_caption_n} captions.")
     else:
         logger.success(f"New caption tar file saved to {new_caption_tar_path}.")
 

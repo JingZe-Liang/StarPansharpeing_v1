@@ -41,9 +41,7 @@ class HyperSegmentationLoss(torch.nn.Module):
         super().__init__()
         ce_weight = torch.as_tensor(ce_weight).cuda() if ce_weight is not None else None
 
-        self.cross_entropy = torch.nn.CrossEntropyLoss(
-            weight=ce_weight, ignore_index=ignore_index
-        )
+        self.cross_entropy = torch.nn.CrossEntropyLoss(weight=ce_weight, ignore_index=ignore_index)
         self.dice_loss = smp.losses.DiceLoss(
             mode=mode,
             classes=dice_cal_classes,

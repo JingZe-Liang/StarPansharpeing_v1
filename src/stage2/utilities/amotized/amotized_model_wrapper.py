@@ -18,11 +18,7 @@ def amotizing_call_model(
     amotize_fn: Callable | str,
 ):
     def wrapper(lrms_latent, pan_latent, lrms, pan):
-        amotize_call = (
-            amotize_fn
-            if isinstance(amotize_fn, Callable)
-            else getattr(pansp_model, amotize_fn)
-        )
+        amotize_call = amotize_fn if isinstance(amotize_fn, Callable) else getattr(pansp_model, amotize_fn)
         assert callable(amotize_call), "amotize_fn must be callable"
 
         latent_sr, pixel_amot = pansp_model(lrms_latent, pan_latent, lrms, pan)
@@ -92,8 +88,7 @@ class AmotizedModelMixin(nn.Module):
         amotized_model: Module,
         # take latent and size of orignal pixels
         decoder_fn: Module | Callable[[Tensor, torch.Size], Tensor],
-        amotize_type: AmotizedForwardType
-        | str = AmotizedForwardType.LATENT_TO_PIXEL_FUSION,
+        amotize_type: AmotizedForwardType | str = AmotizedForwardType.LATENT_TO_PIXEL_FUSION,
         backward_decoder: bool = False,
         learn_decoder: bool = False,
     ):
@@ -106,9 +101,7 @@ class AmotizedModelMixin(nn.Module):
         self.backward_decoder = backward_decoder
         self.learn_decoder = learn_decoder
         if self.learn_decoder:
-            assert isinstance(self.decoder, nn.Module), (
-                "decoder_fn must be a nn.Module if learn_decoder is True"
-            )
+            assert isinstance(self.decoder, nn.Module), "decoder_fn must be a nn.Module if learn_decoder is True"
 
         # amotizing type check
         if not (
@@ -121,18 +114,14 @@ class AmotizedModelMixin(nn.Module):
             )
             or self.amotize_type[:11] == "simple_merge"
         ):
-            raise ValueError(
-                f"amotize_type {self.amotize_type} is not supported for AmotizedModel"
-            )
+            raise ValueError(f"amotize_type {self.amotize_type} is not supported for AmotizedModel")
         if self.amotize_type == AmotizedForwardType.NO_AMOTIZED:
             logger.info(
                 "[AmotizedModelMixin] Using NO_AMOTIZED mode, "
                 "the pixel model is only used for decoding if backward_decoder or learn_decoder is True."
             )
             # self.amotizing_pixels = False
-            assert self.pixel_model is None, (
-                "pixel_model must be None if amotize_type is NO_AMOTIZED"
-            )
+            assert self.pixel_model is None, "pixel_model must be None if amotize_type is NO_AMOTIZED"
 
     def _single_tensor_to_tuple(self, x: Tensor | tuple) -> tuple[Tensor | Any, ...]:
         if torch.is_tensor(x):
@@ -152,9 +141,7 @@ class AmotizedModelMixin(nn.Module):
         # to (0, 1)
         return (pixel * 0.5 + 0.5).clamp(0.0, 1.0)
 
-    def simple_merge_forward(
-        self, pixel_in: tuple, latent_in: tuple, amotize_type: str
-    ):
+    def simple_merge_forward(self, pixel_in: tuple, latent_in: tuple, amotize_type: str):
         latent_out = self.amotized_model(*latent_in)
         shape = self._get_pixel_shape(pixel_in)
         # latent loss ? (if use, the pixel branch is just residual)
@@ -236,9 +223,7 @@ class AmotizedModelMixin(nn.Module):
         """no pixel model, just worked in latent space
         Same to the VAE-diffusion setting.
         """
-        assert self.pixel_model is None, (
-            "pixel_model must be None if amotize_type is NO_AMOTIZED"
-        )
+        assert self.pixel_model is None, "pixel_model must be None if amotize_type is NO_AMOTIZED"
         latent_out = self.amotized_model(*latent_in)  # -> latent loss
 
         pixel_out = None
@@ -254,21 +239,14 @@ class AmotizedModelMixin(nn.Module):
         }
 
     @no_type_check
-    def forward_all_amotized_types(
-        self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple
-    ) -> ModelOutput:
+    def forward_all_amotized_types(self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple) -> ModelOutput:
         """forward all amotized types"""
 
         pixel_in = self._single_tensor_to_tuple(pixel_in)
         latent_in = self._single_tensor_to_tuple(latent_in)
 
-        if (
-            self.amotize_type[:11] == "simple_merge"
-            or self.amotize_type == AmotizedForwardType.SIMPLE_MERGE_ADD
-        ):
-            return self.simple_merge_forward(
-                pixel_in, latent_in, self.amotize_type.rsplit("_")[-1]
-            )
+        if self.amotize_type[:11] == "simple_merge" or self.amotize_type == AmotizedForwardType.SIMPLE_MERGE_ADD:
+            return self.simple_merge_forward(pixel_in, latent_in, self.amotize_type.rsplit("_")[-1])
 
         elif self.amotize_type == AmotizedForwardType.PIXEL_TO_PIXEL_FUSION:
             return self.pixel_to_pixel_fusion_forward(pixel_in, latent_in)
@@ -323,9 +301,7 @@ class AmotizedModelMixin(nn.Module):
         for module in self.modules():
             if hasattr(module, "grad_checkpointing"):
                 module.grad_checkpointing = mode
-                logger.info(
-                    f"Set grad_checkpointing={mode} for {module.__class__.__name__}"
-                )
+                logger.info(f"Set grad_checkpointing={mode} for {module.__class__.__name__}")
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         if self.learn_decoder:
@@ -337,24 +313,16 @@ class AmotizedModelMixin(nn.Module):
                 "amotized_model": self.amotized_model.state_dict(),
             }
         else:
-            state = super().state_dict(
-                destination=destination, prefix=prefix, keep_vars=keep_vars
-            )
+            state = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
         return state
 
     def load_state_dict(self, state_dict, strict=True):
         if self.learn_decoder:
             assert hasattr(self.decoder, "load_state_dict")
             rets = {}
-            rets["decoder"] = self.decoder.load_state_dict(
-                state_dict["decoder"], strict=strict
-            )
-            rets["pixel_model"] = self.pixel_model.load_state_dict(
-                state_dict["pixel_model"], strict=strict
-            )
-            rets["amotized_model"] = self.amotized_model.load_state_dict(
-                state_dict["amotized_model"], strict=strict
-            )
+            rets["decoder"] = self.decoder.load_state_dict(state_dict["decoder"], strict=strict)
+            rets["pixel_model"] = self.pixel_model.load_state_dict(state_dict["pixel_model"], strict=strict)
+            rets["amotized_model"] = self.amotized_model.load_state_dict(state_dict["amotized_model"], strict=strict)
             return rets
         else:
             rets = super().load_state_dict(state_dict, strict)

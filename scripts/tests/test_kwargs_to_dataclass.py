@@ -123,9 +123,7 @@ class TestKwargsToDataclass(unittest.TestCase):
         self.assertIsNone(result.optional_field)
 
         # Optional field provided should have the provided value
-        result_with_value = kwargs_to_dataclass(
-            TestConfig, host="localhost", port=8080, optional_field="test_value"
-        )
+        result_with_value = kwargs_to_dataclass(TestConfig, host="localhost", port=8080, optional_field="test_value")
         self.assertEqual(result_with_value.optional_field, "test_value")
 
     def test_nested_dataclass_fields(self):
@@ -142,9 +140,7 @@ class TestKwargsToDataclass(unittest.TestCase):
 
         # We can also provide a custom nested object
         custom_nested = NestedConfig(name="custom", value=100)
-        result_with_custom = kwargs_to_dataclass(
-            TestConfig, host="localhost", port=8080, nested=custom_nested
-        )
+        result_with_custom = kwargs_to_dataclass(TestConfig, host="localhost", port=8080, nested=custom_nested)
         self.assertEqual(result_with_custom.nested.name, "custom")
         self.assertEqual(result_with_custom.nested.value, 100)
 

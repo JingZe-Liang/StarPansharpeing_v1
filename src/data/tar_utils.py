@@ -80,9 +80,7 @@ def remove_key_in_tar(tar_path: str, key: str):
     with tarfile.open(tar_path, "r") as tar, tarfile.open(tmp_path, "w") as out_tar:
         for member in (tbar := tqdm(tar, desc="Filtering tar members")):
             if not pattern.search(member.name):
-                out_tar.addfile(
-                    member, tar.extractfile(member) if member.isfile() else None
-                )
+                out_tar.addfile(member, tar.extractfile(member) if member.isfile() else None)
             else:
                 tbar.set_description(f"Skipping {member.name}")
     # Replace original tar file
@@ -161,8 +159,7 @@ def read_tar_filenames_safe(
                 if progress:
                     tbar.clear()
                 log_print(
-                    f"Failed to next file (head, index, or format error) from tar: "
-                    f"{e}\n Break reading.",
+                    f"Failed to next file (head, index, or format error) from tar: {e}\n Break reading.",
                     "warning",
                 )
                 break
@@ -312,9 +309,7 @@ def flatten_dir_into_one_tar(
                 elif "rgb" in img_ext:
                     buf = rgb_codec_io(img, format="jpeg", quality=85)
                 else:
-                    raise ValueError(
-                        f"Unsupported image extension: {img_ext}. Supported: tif, rgb."
-                    )
+                    raise ValueError(f"Unsupported image extension: {img_ext}. Supported: tif, rgb.")
 
                 tarinfo = tarfile.TarInfo(name=name)
                 tarinfo.size = len(buf)
@@ -367,15 +362,11 @@ def concate_tars(*src_tars, output_tar: str, repeat_find=True):
                     n_total += 1
                     tbar.set_description(f"Extract {member.name}")
                 except Exception as e:
-                    log_print(
-                        f"Failed to add {member.name} to output tar: {e}", "error"
-                    )
+                    log_print(f"Failed to add {member.name} to output tar: {e}", "error")
                     continue
             tar.close()
 
-    log_print(
-        f"Concatenated {len(src_tars)} tar files into {output_tar}, total {n_total} files."
-    )
+    log_print(f"Concatenated {len(src_tars)} tar files into {output_tar}, total {n_total} files.")
 
 
 # * --- Basic TAR utilities --- #
@@ -478,9 +469,7 @@ def write_tar_file(
     content: bytes | None = None,
     arcname: str | None = None,
 ):
-    assert file is not None or content is not None, (
-        "Either file or content must be provided."
-    )
+    assert file is not None or content is not None, "Either file or content must be provided."
     if isinstance(file, tarfile.TarInfo):
         if arcname is not None:
             file.name = arcname
@@ -513,9 +502,7 @@ def extract_tar_files_into(
         for member in get_tar_member_iter(tar_reader):
             extract_path = None if isinstance(dest, tarfile.TarFile) else dest
             content = extract_member_from_tar(tar_reader, member, extract_path)
-            assert isinstance(content, bytes) or content is None, (
-                "Content should be bytes or None"
-            )
+            assert isinstance(content, bytes) or content is None, "Content should be bytes or None"
 
             if content is None:
                 continue

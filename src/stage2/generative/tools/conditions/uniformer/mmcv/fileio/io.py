@@ -143,9 +143,7 @@ def _register_handler(handler, file_formats):
             handler.
     """
     if not isinstance(handler, BaseFileHandler):
-        raise TypeError(
-            f"handler must be a child of BaseFileHandler, not {type(handler)}"
-        )
+        raise TypeError(f"handler must be a child of BaseFileHandler, not {type(handler)}")
     if isinstance(file_formats, str):
         file_formats = [file_formats]
     if not is_list_of(file_formats, str):

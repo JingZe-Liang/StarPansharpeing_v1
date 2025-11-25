@@ -65,8 +65,6 @@ def build_mlp(
     elif proj_type == "norm_first":
         return build_mlp_norm_first_(hidden_size, projector_dim, z_dim, is_1d=is_1d)
     elif proj_type == "norm_first_timm":
-        return build_mlp_norm_first_timm_(
-            hidden_size, projector_dim, z_dim, is_1d=is_1d
-        )
+        return build_mlp_norm_first_timm_(hidden_size, projector_dim, z_dim, is_1d=is_1d)
     else:
         raise ValueError(f"Unknown proj_type: {proj_type}")

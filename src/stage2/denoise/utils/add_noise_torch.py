@@ -22,9 +22,7 @@ class AddNoiseImpulseTorch(object):
     """Add impulse noise to the given torch tensor (B,1,H,W)"""
 
     def __init__(self, amounts, s_vs_p=0.5):
-        self.amounts = (
-            amounts if isinstance(amounts, torch.Tensor) else torch.tensor(amounts)
-        )
+        self.amounts = amounts if isinstance(amounts, torch.Tensor) else torch.tensor(amounts)
         self.s_vs_p = s_vs_p
 
     def __call__(self, img):
@@ -163,9 +161,7 @@ class AddNoiseNoniidTorch(object):
 
     def __call__(self, img):
         if img.dim() != 4:
-            raise ValueError(
-                "Input must be a 4D tensor (BCHW), but got {}D".format(img.dim())
-            )
+            raise ValueError("Input must be a 4D tensor (BCHW), but got {}D".format(img.dim()))
 
         batch_size = img.shape[0]
 
@@ -238,9 +234,7 @@ class TransformationMixedTorch(object):
     ):
         """Create an instance from a configuration dictionary."""
 
-        assert len(noise_bank) == len(noise_bank_cfg), (
-            "noise_bank and noise_bank_cfg must have the same length"
-        )
+        assert len(noise_bank) == len(noise_bank_cfg), "noise_bank and noise_bank_cfg must have the same length"
         # noisers
         transf_s = []
         for transf_cls, transf_cfg in zip(noise_bank, noise_bank_cfg):
@@ -276,9 +270,7 @@ class TransformationMixedTorch(object):
         return img
 
     def __repr__(self) -> str:
-        noise_adder_repr = ",".join(
-            [noise_adder.__class__.__name__ for noise_adder in self.noise_bank]
-        )
+        noise_adder_repr = ",".join([noise_adder.__class__.__name__ for noise_adder in self.noise_bank])
 
         return f"TransformationMixedTorch(noise_bank={noise_adder_repr}, num_channels={self.num_channels})"
 
@@ -350,9 +342,7 @@ import pytest
     "device",
     ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"],
 )
-@pytest.mark.parametrize(
-    "shape", [(1, 1, 256, 256), (8, 32, 256, 256), (4, 64, 128, 128), (32, 128, 64, 64)]
-)
+@pytest.mark.parametrize("shape", [(1, 1, 256, 256), (8, 32, 256, 256), (4, 64, 128, 128), (32, 128, 64, 64)])
 def test_noisers(device, shape):
     """Test the noise adder"""
 
@@ -370,9 +360,7 @@ def test_noisers(device, shape):
         noise_adder = get_default_noise_transformation(noiser)
         print(f"Testing noise adder: {noise_adder} on device {device}")
         # Example usage
-        img = torch.rand(*shape).to(
-            device
-        )  # Example image with 8 samples, 32 channels, 256x256 pixels
+        img = torch.rand(*shape).to(device)  # Example image with 8 samples, 32 channels, 256x256 pixels
         noisy_img = noise_adder(img)
         print(noisy_img.shape)  # Should be the same shape as input image
 

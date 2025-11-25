@@ -88,9 +88,7 @@ def redirect_stdout_stderr_to_file(
 
 
 @contextmanager
-def redirect_stderr_to_file(
-    output_file: str = "tmp/stderr.txt", filter_patterns: list[str] | None = None
-) -> Any:
+def redirect_stderr_to_file(output_file: str = "tmp/stderr.txt", filter_patterns: list[str] | None = None) -> Any:
     """
     Context manager for redirecting stderr to a file with optional filtering.
 

@@ -93,9 +93,7 @@ class VCA(BaseExtractor):
         if snr_input == 0:
             y_m = np.mean(Y, axis=1, keepdims=True)
             Y_o = Y - y_m  # data with zero-mean
-            Ud = LA.svd(np.dot(Y_o, Y_o.T) / float(N))[0][
-                :, :p
-            ]  # computes the R-projection matrix
+            Ud = LA.svd(np.dot(Y_o, Y_o.T) / float(N))[0][:, :p]  # computes the R-projection matrix
             x_p = np.dot(Ud.T, Y_o)  # project the zero-mean data onto p-subspace
 
             SNR = self.estimate_snr(Y, y_m, x_p)
@@ -121,9 +119,7 @@ class VCA(BaseExtractor):
                 y_m = np.mean(Y, axis=1, keepdims=True)
                 Y_o = Y - y_m  # data with zero-mean
 
-                Ud = LA.svd(np.dot(Y_o, Y_o.T) / float(N))[0][
-                    :, :d
-                ]  # computes the p-projection matrix
+                Ud = LA.svd(np.dot(Y_o, Y_o.T) / float(N))[0][:, :d]  # computes the p-projection matrix
                 x_p = np.dot(Ud.T, Y_o)  # project thezeros mean data onto p-subspace
 
             Yp = np.dot(Ud, x_p[:d, :]) + y_m  # again in dimension L
@@ -135,14 +131,10 @@ class VCA(BaseExtractor):
             logger.info("... Select the projective proj.")
 
             d = p
-            Ud = LA.svd(np.dot(Y, Y.T) / float(N))[0][
-                :, :d
-            ]  # computes the p-projection matrix
+            Ud = LA.svd(np.dot(Y, Y.T) / float(N))[0][:, :d]  # computes the p-projection matrix
 
             x_p = np.dot(Ud.T, Y)
-            Yp = np.dot(
-                Ud, x_p[:d, :]
-            )  # again in dimension L (note that x_p has no null mean)
+            Yp = np.dot(Ud, x_p[:d, :])  # again in dimension L (note that x_p has no null mean)
 
             x = np.dot(Ud.T, Y)
             u = np.mean(x, axis=1, keepdims=True)  # equivalent to  u = Ud.T * r_m
@@ -215,9 +207,7 @@ class SiVM(BaseExtractor):
             d[0, i] = self.Eucli_dist(x[:, i].reshape(D, 1), x[:, index].reshape(D, 1))
 
         for v in range(1, p):
-            D1 = np.concatenate(
-                (d[0:v, index].reshape((v, index.size)), np.ones((v, 1))), axis=1
-            )
+            D1 = np.concatenate((d[0:v, index].reshape((v, index.size)), np.ones((v, 1))), axis=1)
             D2 = np.concatenate((np.ones((1, v)), Z1), axis=1)
             D4 = np.concatenate((D1, D2), axis=0)
             D4 = np.linalg.inv(D4)
@@ -228,9 +218,7 @@ class SiVM(BaseExtractor):
 
             index = np.append(index, np.argmax(V))
             for i in range(N):
-                d[v, i] = self.Eucli_dist(
-                    x[:, i].reshape(D, 1), x[:, index[v]].reshape(D, 1)
-                )
+                d[v, i] = self.Eucli_dist(x[:, i].reshape(D, 1), x[:, index[v]].reshape(D, 1))
 
         per = np.argsort(index)
         index = np.sort(index)
@@ -530,9 +518,7 @@ class SISAL(BaseExtractor):
         #            Build constant matrices
         # ---------------------------------------------
         YYT = Y @ Y.T
-        YYT_cond = YYT + 1e-3 * np.eye(
-            p
-        )  # NOTE better conditioning when solving linear system
+        YYT_cond = YYT + 1e-3 * np.eye(p)  # NOTE better conditioning when solving linear system
 
         AAT = np.kron(YYT, np.eye(p))  # size p^2xp^2
         B = np.kron(np.eye(p), np.ones((1, p)))  # size pxp^2
@@ -544,9 +530,7 @@ class SISAL(BaseExtractor):
         IF = lin.inv(F)
 
         # auxiliar constant matrices
-        G = (
-            IF @ B.T @ lin.inv(B @ IF @ B.T + lam_quad * np.eye(p))
-        )  # NOTE better conditioning when inverting
+        G = IF @ B.T @ lin.inv(B @ IF @ B.T + lam_quad * np.eye(p))  # NOTE better conditioning when inverting
         qm_aux = G.dot(qm)
         G = IF - G @ B @ IF
 
@@ -589,11 +573,7 @@ class SISAL(BaseExtractor):
                 else:
                     M = IQ
 
-                logger.debug(
-                    "iter = {0}, simplex volume = {1:.4e}  \n".format(
-                        k, 1 / np.abs(lin.det(M))
-                    )
-                )
+                logger.debug("iter = {0}, simplex volume = {1:.4e}  \n".format(k, 1 / np.abs(lin.det(M))))
 
             if k == MMiters - 1:  # NOTE Fixed where this condition was never met
                 AL_iters = 100
@@ -603,11 +583,7 @@ class SISAL(BaseExtractor):
                 q = Q.flatten(order="F")
                 # initial function values (true and quadratic)
                 f0_val = -np.log(np.abs(lin.det(Q))) + tau * np.sum(hinge(Q @ Y))
-                f0_quad = (
-                    (q - q0).T.dot(g)
-                    + 0.5 * (q - q0).T.dot(H).dot(q - q0)
-                    + tau * np.sum(hinge(Q.dot(Y)))
-                )
+                f0_quad = (q - q0).T.dot(g) + 0.5 * (q - q0).T.dot(H).dot(q - q0) + tau * np.sum(hinge(Q.dot(Y)))
                 for i in range(AL_iters - 1):
                     # -------------------------------------------
                     # solve quadratic problem with constraints
@@ -631,15 +607,9 @@ class SISAL(BaseExtractor):
 
                     Bk = Bk - (Q @ Y - Z)
                     if verbose == 3 or verbose == 4:
-                        logger.trace(
-                            "||Q*Y-Z|| = {0:.4e}".format(lin.norm(Q.dot(Y) - Z))
-                        )
+                        logger.trace("||Q*Y-Z|| = {0:.4e}".format(lin.norm(Q.dot(Y) - Z)))
 
-                f_quad = (
-                    (q - q0).T.dot(g)
-                    + 0.5 * (q - q0).T.dot(H).dot(q - q0)
-                    + tau * np.sum(hinge(Q @ Y))
-                )
+                f_quad = (q - q0).T.dot(g) + 0.5 * (q - q0).T.dot(H).dot(q - q0) + tau * np.sum(hinge(Q @ Y))
                 if verbose == 3 or verbose == 4:
                     logger.trace(
                         "MMiter = {0}, AL_iter, = {1},  f0_quad = {2:.4e}, f_quad = {3:.4e},".format(
@@ -660,9 +630,7 @@ class SISAL(BaseExtractor):
 
                         # do line search
                         Q = (Q + Q0) / 2
-                        f_val = (
-                            -np.log(np.abs(lin.det(Q))) + tau * hinge(Q @ Y).sum()
-                        )  # NOTE Fixed sum computation
+                        f_val = -np.log(np.abs(lin.det(Q))) + tau * hinge(Q @ Y).sum()  # NOTE Fixed sum computation
 
                     break
 

@@ -166,9 +166,7 @@ class SyncBatchNormFunction(Function):
 
         batch_size = grad_input3d.size(0)
         if batch_size > 0:
-            ext_module.sync_bn_backward_param(
-                grad_output3d, norm, grad_weight, grad_bias
-            )
+            ext_module.sync_bn_backward_param(grad_output3d, norm, grad_weight, grad_bias)
 
         # all reduce
         if self.group_size > 1:
@@ -178,9 +176,7 @@ class SyncBatchNormFunction(Function):
             grad_bias /= self.group_size
 
         if batch_size > 0:
-            ext_module.sync_bn_backward_data(
-                grad_output3d, weight, grad_weight, grad_bias, norm, std, grad_input3d
-            )
+            ext_module.sync_bn_backward_data(grad_output3d, weight, grad_weight, grad_bias, norm, std, grad_input3d)
 
         return (
             grad_input,
@@ -250,9 +246,7 @@ class SyncBatchNorm(Module):
         group = dist.group.WORLD if group is None else group
         self.group = group
         self.group_size = dist.get_world_size(group)
-        assert stats_mode in ["default", "N"], (
-            f'"stats_mode" only accepts "default" and "N", got "{stats_mode}"'
-        )
+        assert stats_mode in ["default", "N"], f'"stats_mode" only accepts "default" and "N", got "{stats_mode}"'
         self.stats_mode = stats_mode
         if self.affine:
             self.weight = Parameter(torch.Tensor(num_features))
@@ -263,9 +257,7 @@ class SyncBatchNorm(Module):
         if self.track_running_stats:
             self.register_buffer("running_mean", torch.zeros(num_features))
             self.register_buffer("running_var", torch.ones(num_features))
-            self.register_buffer(
-                "num_batches_tracked", torch.tensor(0, dtype=torch.long)
-            )
+            self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
         else:
             self.register_buffer("running_mean", None)
             self.register_buffer("running_var", None)

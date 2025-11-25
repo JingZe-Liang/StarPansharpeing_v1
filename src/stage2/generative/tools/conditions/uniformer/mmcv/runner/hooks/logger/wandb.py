@@ -16,9 +16,7 @@ class WandbLoggerHook(LoggerHook):
         by_epoch=True,
         with_step=True,
     ):
-        super(WandbLoggerHook, self).__init__(
-            interval, ignore_last, reset_flag, by_epoch
-        )
+        super(WandbLoggerHook, self).__init__(interval, ignore_last, reset_flag, by_epoch)
         self.import_wandb()
         self.init_kwargs = init_kwargs
         self.commit = commit

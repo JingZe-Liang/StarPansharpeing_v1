@@ -91,24 +91,14 @@ class DinoUNet(nn.Module):
 
         # Ensure we have 4 stages to match DINOv3_Adapter output
         if cfg.n_stages != 4:
-            print(
-                f"Warning: DINOv3_Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4."
-            )
+            print(f"Warning: DINOv3_Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4.")
             n_stages = 4
             if isinstance(self.dino_cfg.features_per_stage, int):
-                self.cfg.dino.features_per_stage = [
-                    self.dino_cfg.features_per_stage * (2**i) for i in range(4)
-                ]
+                self.cfg.dino.features_per_stage = [self.dino_cfg.features_per_stage * (2**i) for i in range(4)]
             elif len(self.dino_cfg.features_per_stage) != 4:
                 # Adjust features_per_stage to 4 stages
-                base_features = (
-                    self.dino_cfg.features_per_stage[0]
-                    if self.dino_cfg.features_per_stage
-                    else 32
-                )
-                self.cfg.dino.features_per_stage = [
-                    base_features * (2**i) for i in range(4)
-                ]
+                base_features = self.dino_cfg.features_per_stage[0] if self.dino_cfg.features_per_stage else 32
+                self.cfg.dino.features_per_stage = [base_features * (2**i) for i in range(4)]
 
         # Create DINOv3 encoder
         self.encoder = self._create_dinov3_encoder(self.cfg)
@@ -136,9 +126,7 @@ class DinoUNet(nn.Module):
         log(f"Creating DINOv3 encoder: {model_name}")
 
         # Load DINOv3 backbone
-        dinov3_backbone = load_dino_v3_model(
-            cfg.dino.pretrained_path, model_name, pretrained_on=cfg.dino.pretrained_on
-        )
+        dinov3_backbone = load_dino_v3_model(cfg.dino.pretrained_path, model_name, pretrained_on=cfg.dino.pretrained_on)
 
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = DINOv3_Adapter(
@@ -170,9 +158,7 @@ class DinoUNet(nn.Module):
 
         return encoder_adapter
 
-    def _ensure_rgb_input(
-        self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "mean"
-    ):
+    def _ensure_rgb_input(self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "mean"):
         C = x.size(1)
         if C == 1:
             x = x.repeat(1, 3, 1, 1)
@@ -197,9 +183,7 @@ class DinoUNet(nn.Module):
             elif isinstance(larger_then_3_op, (list, tuple)):
                 x = x[:, larger_then_3_op]
             else:
-                raise ValueError(
-                    f"Unknown operation for C > 3 ({C=}): {larger_then_3_op}"
-                )
+                raise ValueError(f"Unknown operation for C > 3 ({C=}): {larger_then_3_op}")
         elif C == 3:
             pass
         else:
@@ -220,9 +204,7 @@ class DinoUNet(nn.Module):
     def initialize(self, module) -> None:
         if isinstance(module, _ConvNd):
             if module.weight.requires_grad:
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu"
-                )
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -232,9 +214,7 @@ class DinoUNet(nn.Module):
         """
         Create DinoUNet instance from network configuration dictionary
         """
-        cfg = dataclass_from_dict(
-            DinoUnetConfig, {} if overrides is None else overrides
-        )
+        cfg = dataclass_from_dict(DinoUnetConfig, {} if overrides is None else overrides)
 
         return cls(cfg)
 

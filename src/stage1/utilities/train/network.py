@@ -48,10 +48,7 @@ def get_parameters_module_frozen(
         frozen_module = [frozen_module]
 
     for n, p in model.named_parameters():
-        if (
-            any(re.match(pattern, n) for pattern in frozen_module)
-            or not p.requires_grad
-        ):
+        if any(re.match(pattern, n) for pattern in frozen_module) or not p.requires_grad:
             logger.debug(f"[Params]: skip the param: <u>{n}</u>, {no_grad_required=}")
             if no_grad_required:
                 p.requires_grad_(False)
@@ -83,6 +80,4 @@ def get_model_learnable_params(model: th.nn.Module, with_name=True):
 
 import functools
 
-get_parameters_encoder_frozen = functools.partial(
-    get_parameters_module_frozen, frozen_module="encoder"
-)
+get_parameters_encoder_frozen = functools.partial(get_parameters_module_frozen, frozen_module="encoder")

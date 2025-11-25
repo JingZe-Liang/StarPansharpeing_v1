@@ -62,9 +62,7 @@ class TokenizerHyperDownstreamWrapper(TokenizerInferenceWrapper, AmotizedModelMi
     def _forward_downstream_model(self, pixel_in: tuple, latent_in: tuple):
         return self.forward_all_amotized_types(pixel_in, latent_in)
 
-    def forward(
-        self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple | None = None
-    ):
+    def forward(self, pixel_in: Tensor | tuple, latent_in: Tensor | tuple | None = None):
         pixel_in = self._single_tensor_to_tuple(pixel_in)
         if latent_in is None:
             pixel_latents = []
@@ -89,19 +87,13 @@ class TokenizerHyperDownstreamWrapper(TokenizerInferenceWrapper, AmotizedModelMi
     def load_state_dict(self, state_dict, strict=True):
         self.scale_factor.data = state_dict["scale_factor"]
         self.shift_factor.data = state_dict["shift_factor"]
-        rets_pixel = self.pixel_model.load_state_dict(
-            state_dict["pixel_model"], strict=strict
-        )
-        rets_amotize = self.amotized_model.load_state_dict(
-            state_dict["amotized_model"], strict=strict
-        )
+        rets_pixel = self.pixel_model.load_state_dict(state_dict["pixel_model"], strict=strict)
+        rets_amotize = self.amotized_model.load_state_dict(state_dict["amotized_model"], strict=strict)
         rets = {
             "pixel_model": rets_pixel,
             "amotized_model": rets_amotize,
         }
         if self.learn_decoder and "decoder" in state_dict:
-            rets_decoder = self.tokenizer.decoder.load_state_dict(
-                state_dict["decoder"], strict=strict
-            )
+            rets_decoder = self.tokenizer.decoder.load_state_dict(state_dict["decoder"], strict=strict)
             rets["decoder"] = rets_decoder
         return rets

@@ -55,9 +55,7 @@ class NaFlexVitCfg:
     scale_attn_inner_norm: bool = False  # Apply scaling norm to attn context
 
     # Regularization
-    init_values: Optional[float] = (
-        None  # Layer-scale init values (layer-scale enabled if not None)
-    )
+    init_values: Optional[float] = None  # Layer-scale init values (layer-scale enabled if not None)
     drop_rate: float = 0.0  # Dropout rate for classifier
     pos_drop_rate: float = 0.0  # Dropout rate for position embeddings
     patch_drop_rate: float = 0.0  # Dropout rate for patch tokens
@@ -74,38 +72,30 @@ class NaFlexVitCfg:
         16,
         16,
     )  # Grid size for position embedding initialization
-    pos_embed_interp_mode: str = (
-        "bicubic"  # Interpolation mode for position embedding resizing
-    )
+    pos_embed_interp_mode: str = "bicubic"  # Interpolation mode for position embedding resizing
     pos_embed_ar_preserving: bool = False  # Whether to preserve aspect ratio during position embedding interpolation
-    pos_embed_use_grid_sample: bool = (
-        False  # Whether to use grid_sample for naflex position embedding interpolation
-    )
+    pos_embed_use_grid_sample: bool = False  # Whether to use grid_sample for naflex position embedding interpolation
 
     # ROPE specific configuration
-    rope_type: str = "axial"  # ROPE type: '' or 'none' for no ROPE, 'axial' for standard, 'mixed' for learnable frequencies
+    rope_type: str = (
+        "axial"  # ROPE type: '' or 'none' for no ROPE, 'axial' for standard, 'mixed' for learnable frequencies
+    )
     rope_temperature: float = 10000.0  # Temperature for ROPE frequency computation
     rope_ref_feat_shape: Optional[Tuple[int, int]] = None
     rope_grid_offset: float = 0.0  # Grid offset for non-pixel ROPE mode
     rope_grid_indexing: str = "ij"  # Grid indexing mode for ROPE ('ij' or 'xy')
 
     # Image processing
-    dynamic_img_pad: bool = (
-        False  # Whether to enable dynamic padding for variable resolution
-    )
+    dynamic_img_pad: bool = False  # Whether to enable dynamic padding for variable resolution
 
     # Other architecture choices
     pre_norm: bool = True  # Whether to apply normalization before attention/MLP layers (start of blocks)
     final_norm: bool = True  # Whether to apply final normalization before pooling and classifier (end of blocks)
-    fc_norm: Optional[bool] = (
-        None  # Whether to normalize features before final classifier (after pooling)
-    )
+    fc_norm: Optional[bool] = None  # Whether to normalize features before final classifier (after pooling)
 
     # Global pooling setup
     global_pool: str = ""  # Type of global pooling for final sequence  # * no pooling
-    pool_include_prefix: bool = (
-        False  # Whether to include class/register prefix tokens in global pooling
-    )
+    pool_include_prefix: bool = False  # Whether to include class/register prefix tokens in global pooling
     attn_pool_num_heads: Optional[int] = None  # Override num_heads for attention pool
     attn_pool_mlp_ratio: Optional[float] = None  # Override mlp_ratio for attention pool
 
@@ -115,12 +105,8 @@ class NaFlexVitCfg:
 
     # Embedding configuration
     embed_proj_type: str = "linear"  # Type of embedding layer ('conv' or 'linear')
-    input_norm_layer: Optional[str] = (
-        None  # Normalization layer for embeddings input (before input projection)
-    )
-    embed_norm_layer: Optional[str] = (
-        None  # Normalization layer for embeddings (after input projection)
-    )
+    input_norm_layer: Optional[str] = None  # Normalization layer for embeddings input (before input projection)
+    embed_norm_layer: Optional[str] = None  # Normalization layer for embeddings (after input projection)
 
     # Layer implementations
     norm_layer: Optional[str] = "rmsnorm"  # Normalization layer for transformer blocks
@@ -157,7 +143,7 @@ class NaFlexVitCfg:
     # enable_jepa: bool = False  # enable jepa training
     # enable_lejepa: bool = False  # enable lejepa training
     # 'ijepa', 'lejepa', None for no pretrained task
-    pretrained_type: Optional[Union[str, list[str]]] = None
+    pretrained_type: Any = None
 
 
 class Transformer(NaFlexVit):
@@ -234,7 +220,7 @@ class Transformer(NaFlexVit):
         # Features
         x = self.forward_features(x)
         x = cast(torch.Tensor, x)
-        x = x[:, self.cfg.reg_tokens :]
+        x = x[:, self.num_prefix_tokens :]
 
         # Head
         x = self._forward_after_backbone(x, out_hw)
@@ -248,8 +234,8 @@ class Transformer(NaFlexVit):
         model = cls(cfg)
         return model
 
-    def init_weights(self):
-        super().init_weights(mode="jax")
+    def init_weights(self, mode="jax"):
+        super().init_weights(mode=mode)
 
         def rescale(p, layer_id):
             p.div_(math.sqrt(2.0 * layer_id))
@@ -335,18 +321,14 @@ class IJEPANaFlexViT(Transformer):
             if rope_embeds is not None and not self.rope_is_mixed:
                 # Update ROPE embeddings to match dropped tokens (only for axial mode)
                 # Batch dim already present in NaFlex mode, but will be added in standard mode.
-                rope_embeds = apply_keep_indices_nlc(
-                    x, rope_embeds, keep_indices, pos_embed_has_batch=naflex_mode
-                )
+                rope_embeds = apply_keep_indices_nlc(x, rope_embeds, keep_indices, pos_embed_has_batch=naflex_mode)
                 if not naflex_mode:
                     # B, N, dim -> B, 1, N, dim. Need head dim added for standard mode, already added in NaFlex.
                     rope_embeds = rope_embeds.unsqueeze(1)
 
         # Create attention mask from patch_valid after patch dropout applied
         if attn_mask is None:
-            attn_mask = create_attention_mask(
-                patch_valid, num_prefix_tokens=self.num_prefix_tokens, dtype=x.dtype
-            )
+            attn_mask = create_attention_mask(patch_valid, num_prefix_tokens=self.num_prefix_tokens, dtype=x.dtype)
 
         ########## Apply JEPA masks
         if masks is not None:
@@ -356,9 +338,7 @@ class IJEPANaFlexViT(Transformer):
                 rope_masked = []
                 for m in masks:
                     # m: [B, S_masked] indices
-                    assert not self.rope_is_mixed, (
-                        "mixed rope is not supported in JEPA training"
-                    )
+                    assert not self.rope_is_mixed, "mixed rope is not supported in JEPA training"
                     """
                     Equals at
                     # axial rope: [S, headD * 2]
@@ -419,11 +399,7 @@ class IJEPANaFlexViT(Transformer):
         if self.rope_is_mixed and rope_embeds is not None:
             # Mixed mode with per-layer embeddings (list or iterator)
             for i, (blk, rope_embed) in enumerate(zip(self.blocks, rope_embeds)):
-                if (
-                    self.training
-                    and self.patch_drop is not None
-                    and keep_indices is not None
-                ):
+                if self.training and self.patch_drop is not None and keep_indices is not None:
                     # Apply patch dropout to rope_embed if needed (batch dim already present in naflex mode)
                     rope_embed = apply_keep_indices_nlc(
                         x,
@@ -509,16 +485,14 @@ class IJEPANaFlexViT(Transformer):
             # Features
             x = self.forward_features(x, jepa_masks=jepa_masks)
             x = cast(torch.Tensor, x)
-            x = x[:, self.cfg.reg_tokens :]
+            x = x[:, self.num_prefix_tokens :]
 
             # Head
             x = self._forward_after_backbone(x, out_hw)
 
         return x
 
-    def _forward_after_backbone(
-        self, x, hw: list | None
-    ) -> tuple[Tensor, Optional[Dict[str, Tensor]]] | Tensor:
+    def _forward_after_backbone(self, x, hw: list | None) -> tuple[Tensor, Optional[Dict[str, Tensor]]] | Tensor:
         head_out = self.head(x)
         if self.cfg.out_2d_latent and hw is not None:
             out = self.unpatchify(head_out, hw)
@@ -547,18 +521,20 @@ class IJEPANaFlexViT(Transformer):
         # Features
         x = self.forward_features(x, jepa_masks=jepa_masks)
         x = cast(torch.Tensor, x)
-        x = x[:, self.cfg.reg_tokens :]
 
         ######### IJepa features ########
-        if self.cfg.pretrained_type == "ijepa":
+        if "ijepa" in self.cfg.pretrained_type:
             # x is the backbone's out
             others = edict({"ijepa_feat": x})
 
         ######### Lejepa projector #########
-        if hasattr(self, "lejepa_projector") and self.cfg.pretrained_type == "lejepa":
+        elif hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
             x = self._pool(x)
             lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
             others = edict({"lejepa_proj": lejepa_proj})
+
+        else:
+            x = x[:, self.num_prefix_tokens :]  # spatial tokens only
 
         # Return the 1d features as the backbone output
         # not forward by the head
@@ -601,9 +577,7 @@ class IJEPANaFlexViT(Transformer):
         # Prepare JEPA masks
         if jepa_masks is not None:
             # jepa_masks = self._prepare_masks(masks=jepa_masks)
-            raise ValueError(
-                f"Input masks are not supported for getting the intermidate features"
-            )
+            raise ValueError(f"Input masks are not supported for getting the intermidate features")
             jepa_masks = None
 
         return super().forward_intermediates(
@@ -623,6 +597,9 @@ class IJEPANaFlexViT(Transformer):
 
 class MAENaFlexViT(Transformer):
     def __init__(self): ...
+
+
+class DINONaFlexVit(Transformer): ...
 
 
 def mode_support_jepa(model):

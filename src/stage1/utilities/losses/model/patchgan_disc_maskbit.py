@@ -51,9 +51,7 @@ class RMSNorm2d(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = (
-            x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
-        ).to(x.dtype)
+        x = (x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)).to(x.dtype)
         if self.elementwise_affine:
             x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
         return x
@@ -121,17 +119,11 @@ class Conv2dSame(nn.Conv2d):
         """
         ih, iw = x.size()[-2:]
 
-        pad_h = self.calc_same_pad(
-            i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0]
-        )
-        pad_w = self.calc_same_pad(
-            i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1]
-        )
+        pad_h = self.calc_same_pad(i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0])
+        pad_w = self.calc_same_pad(i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1])
 
         if pad_h > 0 or pad_w > 0:
-            x = F.pad(
-                x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
-            )
+            x = F.pad(x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2])
         return super().forward(x)
 
 
@@ -178,9 +170,7 @@ class BlurBlock(torch.nn.Module):
         pad_h = self.calc_same_pad(i=ih, k=self.kernel_size, s=2)
         pad_w = self.calc_same_pad(i=iw, k=self.kernel_size, s=2)
         if pad_h > 0 or pad_w > 0:
-            x = F.pad(
-                x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
-            )
+            x = F.pad(x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2])
 
         weight = self.kernel.repeat_interleave(ic, dim=0)
 
@@ -248,9 +238,7 @@ class DiffBandsInputConvIn(nn.Module):
             basic_module_fn = nn.Conv2d  # Conv2dSame
         elif basic_module == "conv_norm_act":
 
-            def basic_module_fn(
-                in_channels, out_channels, kernel_size, stride, padding
-            ):
+            def basic_module_fn(in_channels, out_channels, kernel_size, stride, padding):
                 return nn.Sequential(
                     # Conv2dSame(
                     #     in_channels,
@@ -296,9 +284,7 @@ class DiffBandsInputConvIn(nn.Module):
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[Disc] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[Disc] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training:
@@ -334,9 +320,9 @@ class NLayerDiscriminatorv2(nn.Module):
         """
         super().__init__()
         assert num_stages > 0, "Discriminator cannot have 0 stages"
-        assert (not blur_resample) or (
-            blur_kernel_size >= 3 and blur_kernel_size <= 5
-        ), "Blur kernel size must be in [3,5] when sampling]"
+        assert (not blur_resample) or (blur_kernel_size >= 3 and blur_kernel_size <= 5), (
+            "Blur kernel size must be in [3,5] when sampling]"
+        )
 
         log_print(
             f"[Maskbit Discriminator] Config: num_channels={num_channels}, hidden_channels={hidden_channels}, "
@@ -475,9 +461,7 @@ class OriginalNLayerDiscriminator(torch.nn.Module):
         norm_layer = torch.nn.BatchNorm2d
 
         sequence = [
-            torch.nn.Conv2d(
-                num_channels, hidden_channels, kernel_size=4, stride=2, padding=1
-            ),
+            torch.nn.Conv2d(num_channels, hidden_channels, kernel_size=4, stride=2, padding=1),
             torch.nn.LeakyReLU(0.2, True),
         ]
         nf_mult = 1
@@ -514,9 +498,7 @@ class OriginalNLayerDiscriminator(torch.nn.Module):
         ]
 
         sequence += [
-            torch.nn.Conv2d(
-                hidden_channels * nf_mult, 1, kernel_size=4, stride=1, padding=1
-            )
+            torch.nn.Conv2d(hidden_channels * nf_mult, 1, kernel_size=4, stride=1, padding=1)
         ]  # output 1 channel prediction map
         self.main = torch.nn.Sequential(*sequence)
 

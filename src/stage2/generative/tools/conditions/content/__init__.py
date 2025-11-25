@@ -12,18 +12,10 @@ class ContentDetector:
         if annotator_ckpts_path is None:
             from ..condition_utils import annotator_ckpts_path
         model_name = os.path.join(annotator_ckpts_path, "clip/checkpoint-2500")
-        model_name_un = os.path.join(
-            annotator_ckpts_path, "clip/clip-vit-large-patch14"
-        )
+        model_name_un = os.path.join(annotator_ckpts_path, "clip/clip-vit-large-patch14")
 
-        model = (
-            CLIPModel.from_pretrained(model_name, cache_dir=annotator_ckpts_path)
-            .cuda()
-            .eval()
-        )
-        self.processor = AutoProcessor.from_pretrained(
-            model_name_un, cache_dir=annotator_ckpts_path
-        )
+        model = CLIPModel.from_pretrained(model_name, cache_dir=annotator_ckpts_path).cuda().eval()
+        self.processor = AutoProcessor.from_pretrained(model_name_un, cache_dir=annotator_ckpts_path)
 
         # model.load_state_dict(checkpoint['state_dict'])
         self.model = model

@@ -137,9 +137,7 @@ class FCLSUSolver:
 
         # Solve for each pixel using ls_linear
         for i in range(N):
-            result = ls_linear_func(
-                M_constrained, Y_constrained[:, i], bounds=(0, np.inf)
-            )
+            result = ls_linear_func(M_constrained, Y_constrained[:, i], bounds=(0, np.inf))
             A_hat[:, i] = result.x
 
         return torch.tensor(A_hat, dtype=torch.float32)

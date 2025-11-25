@@ -42,9 +42,7 @@ class LAConv2D(nn.Module):
                 nn.Conv2d(out_planes, out_planes, 1),
             )
 
-        conv1 = nn.Conv2d(
-            in_planes, out_planes, kernel_size, stride, padding, dilation, groups
-        )
+        conv1 = nn.Conv2d(in_planes, out_planes, kernel_size, stride, padding, dilation, groups)
         self.weight = conv1.weight  # m, n, k, k
 
     def forward(self, x):
@@ -66,9 +64,7 @@ class LAConv2D(nn.Module):
         atw = atw.view(b, n_H * n_W, n * k * k)  # b,n_H*n_W,n*k*k
         atw = atw.permute([0, 2, 1])  # b,n*k*k,n_H*n_W
 
-        kx = F.unfold(
-            x, kernel_size=k, stride=self.stride, padding=self.padding
-        )  # b,n*k*k,n_H*n_W
+        kx = F.unfold(x, kernel_size=k, stride=self.stride, padding=self.padding)  # b,n*k*k,n_H*n_W
         atx = atw * kx  # b,n*k*k,n_H*n_W
 
         atx = atx.permute([0, 2, 1])  # b,n_H*n_W,n*k*k
@@ -109,9 +105,7 @@ class LACRB(nn.Module):
 class LACNET(nn.Module):
     def __init__(self):
         super(LACNET, self).__init__()
-        self.head_conv = nn.Sequential(
-            LAConv2D(9, 32, 3, 1, 1, use_bias=True), nn.ReLU(inplace=True)
-        )
+        self.head_conv = nn.Sequential(LAConv2D(9, 32, 3, 1, 1, use_bias=True), nn.ReLU(inplace=True))
 
         self.RB1 = LACRB(32)
         self.RB2 = LACRB(32)

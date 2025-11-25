@@ -80,9 +80,7 @@ def process_oscd_dataset_in_memory(input_tar_path: str, output_tar_path: str) ->
     ):
         # Get all members in original order
         members = input_tar.getmembers()
-        tiff_count = sum(
-            1 for m in members if m.name.lower().endswith((".tif", ".tiff"))
-        )
+        tiff_count = sum(1 for m in members if m.name.lower().endswith((".tif", ".tiff")))
         npy_count = sum(1 for m in members if m.name.endswith(".npy"))
 
         print(f"Found {tiff_count} TIFF files and {npy_count} NPY files to process")
@@ -103,9 +101,7 @@ def process_oscd_dataset_in_memory(input_tar_path: str, output_tar_path: str) ->
                     # Determine new name and content
                     if member.name.lower().endswith((".tif", ".tiff")):
                         # Convert TIFF to NPY
-                        new_name = member.name.replace(".tif", ".npy").replace(
-                            ".tiff", ".npy"
-                        )
+                        new_name = member.name.replace(".tif", ".npy").replace(".tiff", ".npy")
                         new_content = convert_tiff_bytes_to_npy(content)
                         file_type = "TIFF->NPY"
                     elif member.name.endswith(".npy"):
@@ -162,9 +158,7 @@ def verify_output_tar(output_tar_path: str) -> None:
 
                         # Try to load as numpy array
                         arr = np.load(io.BytesIO(content))
-                        print(
-                            f"  ✓ {member_name}: shape={arr.shape}, dtype={arr.dtype}"
-                        )
+                        print(f"  ✓ {member_name}: shape={arr.shape}, dtype={arr.dtype}")
                     else:
                         print(f"  ✗ {member_name}: Could not extract")
                 except Exception as e:
@@ -175,9 +169,7 @@ def main():
     """
     Main function to handle command line arguments and execute conversion.
     """
-    parser = argparse.ArgumentParser(
-        description="Convert TIFF files in OSCD dataset to NPY format (maintains order)"
-    )
+    parser = argparse.ArgumentParser(description="Convert TIFF files in OSCD dataset to NPY format (maintains order)")
     parser.add_argument(
         "--input",
         type=str,
@@ -190,9 +182,7 @@ def main():
         required=True,
         help="Path for output tar file (e.g., OSCD_13bands_train.npy.tar)",
     )
-    parser.add_argument(
-        "--verify", action="store_true", help="Verify output tar file after conversion"
-    )
+    parser.add_argument("--verify", action="store_true", help="Verify output tar file after conversion")
 
     args = parser.parse_args()
 

@@ -89,10 +89,7 @@ class BaseSegmentor(nn.Module):
 
         num_augs = len(imgs)
         if num_augs != len(img_metas):
-            raise ValueError(
-                f"num of augmentations ({len(imgs)}) != "
-                f"num of image meta ({len(img_metas)})"
-            )
+            raise ValueError(f"num of augmentations ({len(imgs)}) != num of image meta ({len(img_metas)})")
         # all images in the same aug batch all of the same ori_shape and pad
         # shape
         for img_meta in img_metas:
@@ -153,9 +150,7 @@ class BaseSegmentor(nn.Module):
         losses = self(**data_batch)
         loss, log_vars = self._parse_losses(losses)
 
-        outputs = dict(
-            loss=loss, log_vars=log_vars, num_samples=len(data_batch["img_metas"])
-        )
+        outputs = dict(loss=loss, log_vars=log_vars, num_samples=len(data_batch["img_metas"]))
 
         return outputs
 

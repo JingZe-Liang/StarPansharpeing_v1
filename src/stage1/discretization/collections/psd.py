@@ -9,9 +9,7 @@ def l2_norm(x: torch.Tensor, eps: float = 1e-7, dim=-1) -> torch.Tensor:
 
 
 class PowerSphericalDistribution:
-    def __init__(
-        self, mu: torch.Tensor, kappa: torch.Tensor, eps: float = 1e-7, dim=-1
-    ):
+    def __init__(self, mu: torch.Tensor, kappa: torch.Tensor, eps: float = 1e-7, dim=-1):
         self.eps = eps
         self.mu = l2_norm(mu, eps)  # [..., m]
         self.kappa = torch.clamp(kappa, min=0.0)
@@ -20,9 +18,7 @@ class PowerSphericalDistribution:
         self.d = self.m - 1
         beta_const = 0.5 * self.d
         self.alpha = self.kappa + beta_const  # [...,]
-        self.beta = torch.as_tensor(
-            beta_const, dtype=self.kappa.dtype, device=self.kappa.device
-        ).expand_as(self.kappa)
+        self.beta = torch.as_tensor(beta_const, dtype=self.kappa.dtype, device=self.kappa.device).expand_as(self.kappa)
         self.dim = dim
         assert dim in (-1, 1), "only support dim=-1 or dim=1"
 
@@ -43,21 +39,13 @@ class PowerSphericalDistribution:
         # H = -[ log N_X + κ ( log 2 + ψ(α) - ψ(α+β) ) ]
         return -(
             self._log_normalizer()
-            + self.kappa
-            * (
-                math.log(2.0)
-                + (torch.digamma(self.alpha) - torch.digamma(self.alpha + self.beta))
-            )
+            + self.kappa * (math.log(2.0) + (torch.digamma(self.alpha) - torch.digamma(self.alpha + self.beta)))
         )
 
     def kl_to_uniform(self) -> torch.Tensor:
         # KL(q || U(S^{d})) = -H(q) + log |S^{d}|
         d = torch.as_tensor(self.d, dtype=self.kappa.dtype, device=self.kappa.device)
-        log_area = (
-            math.log(2.0)
-            + 0.5 * (d + 1.0) * math.log(math.pi)
-            - torch.lgamma(0.5 * (d + 1.0))
-        )
+        log_area = math.log(2.0) + 0.5 * (d + 1.0) * math.log(math.pi) - torch.lgamma(0.5 * (d + 1.0))
         return -self.entropy() + log_area
 
     def rsample(self):
@@ -82,9 +70,7 @@ class PowerSphericalDistribution:
             )  # [N, m-1, H, W]
         v = l2_norm(v, self.eps, dim=self.dim)
 
-        y = torch.cat(
-            [t, torch.sqrt(torch.clamp(1 - t**2, min=0.0)) * v], dim=self.dim
-        )  # [*S, *B, m]
+        y = torch.cat([t, torch.sqrt(torch.clamp(1 - t**2, min=0.0)) * v], dim=self.dim)  # [*S, *B, m]
 
         e1 = torch.zeros_like(self.mu)
         e1[..., 0] = 1.0

@@ -118,9 +118,7 @@ class MuonFSDP(Muon):
     ):
         if use_triton:
             if force_my_triton:
-                newton_schulz_func = partial(
-                    zeropower_via_newtonschulz6_diff_abc, use_triton=True
-                )
+                newton_schulz_func = partial(zeropower_via_newtonschulz6_diff_abc, use_triton=True)
             else:
                 newton_schulz_func = None
         if newton_schulz_func is not None:
@@ -143,9 +141,7 @@ class MuonFSDP(Muon):
 
         self._init_param_groups_defaults(muon_params_defaults, oned_params_defaults)
 
-    def _init_param_groups_defaults(
-        self, muon_params_defaults: dict, oned_params_defaults: dict
-    ):
+    def _init_param_groups_defaults(self, muon_params_defaults: dict, oned_params_defaults: dict):
         for group in self.param_groups:
             if group["algorithm"] == "muon":
                 group.update(muon_params_defaults)

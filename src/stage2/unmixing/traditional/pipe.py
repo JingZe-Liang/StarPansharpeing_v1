@@ -33,20 +33,14 @@ def vca_fclsu_nnls_solver(
     fclsu_solver_kwargs: dict = {},
 ):
     h, w = hyper_img.shape[-2:]
-    hyper_img = (
-        hyper_img.float()
-        if torch.is_tensor(hyper_img)
-        else torch.tensor(hyper_img, dtype=torch.float32)
-    )
+    hyper_img = hyper_img.float() if torch.is_tensor(hyper_img) else torch.tensor(hyper_img, dtype=torch.float32)
     img_1d_vca = rearrange("bands h w -> bands (h w)", hyper_img)
     img_1d_fclsu = rearrange("bands h w -> (h w) bands", hyper_img)
 
     logger.info(f"Using {algo} for endmember extraction.")
     if algo == "vca_custom":
         if vca_backend == "torch":
-            endmembers, *_ = vca_torch(
-                img_1d_vca, n_endmembers, verbose=False, device=str(hyper_img.device)
-            )  # [c, em]
+            endmembers, *_ = vca_torch(img_1d_vca, n_endmembers, verbose=False, device=str(hyper_img.device))  # [c, em]
         elif vca_backend == "torch_batch":
             endmembers, *_ = vca_torch_batch(
                 img_1d_vca,

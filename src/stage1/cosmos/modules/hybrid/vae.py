@@ -21,9 +21,7 @@ class ResDownBlock(nn.Module):
             nn.SiLU(),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
         )
-        self.shortcut = nn.Conv2d(
-            in_ch, out_ch, kernel_size=2, stride=2, padding=0, bias=False
-        )
+        self.shortcut = nn.Conv2d(in_ch, out_ch, kernel_size=2, stride=2, padding=0, bias=False)
 
     def forward(self, x):
         return self.shortcut(x) + self.block(x)
@@ -70,16 +68,12 @@ class ResUpBlock(nn.Module):
         self.block = nn.Sequential(
             nn.GroupNorm(min(32, in_ch // 4), in_ch, eps=1e-6, affine=True),
             nn.SiLU(),
-            nn.ConvTranspose2d(
-                in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=False
-            ),
+            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=False),
             nn.GroupNorm(num_groups, out_ch, eps=1e-6, affine=True),
             nn.SiLU(),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
         )
-        self.shortcut = nn.ConvTranspose2d(
-            in_ch, out_ch, kernel_size=2, stride=2, bias=False
-        )
+        self.shortcut = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2, bias=False)
         self.block2 = nn.Sequential(
             nn.GroupNorm(num_groups, out_ch, eps=1e-6, affine=True),
             nn.SiLU(),
@@ -146,17 +140,13 @@ class ViTEncoder(nn.Module):
         raw_2d_pos = get_2d_pos(image_size, patch_size)
         self.register_buffer(
             "freqs_cis",
-            precompute_freqs_cis_2d(
-                raw_2d_pos, d_model // n_heads, cls_token_num=self.register_num_tokens
-            ).clone(),
+            precompute_freqs_cis_2d(raw_2d_pos, d_model // n_heads, cls_token_num=self.register_num_tokens).clone(),
         )
 
     def forward(self, image):
         x = self.conv_in(image)
         x = self.patchify(x)
-        x_null = self.register_token.weight.view(1, -1, x.shape[-1]).expand(
-            x.shape[0], -1, -1
-        )
+        x_null = self.register_token.weight.view(1, -1, x.shape[-1]).expand(x.shape[0], -1, -1)
         x = torch.cat([x_null, x], dim=1)
         for layer in self.layers:
             x = layer(x, self.freqs_cis)
@@ -210,17 +200,13 @@ class ViTDecoder(nn.Module):
         raw_2d_pos = get_2d_pos(image_size, patch_size)
         self.register_buffer(
             "freqs_cis",
-            precompute_freqs_cis_2d(
-                raw_2d_pos, d_model // n_heads, cls_token_num=self.register_num_tokens
-            ).clone(),
+            precompute_freqs_cis_2d(raw_2d_pos, d_model // n_heads, cls_token_num=self.register_num_tokens).clone(),
         )
 
     @torch.compile()
     def forward(self, x):
         x = self.conv_in(x)
-        x_null = self.register_token.weight.view(1, -1, x.shape[-1]).expand(
-            x.shape[0], -1, -1
-        )
+        x_null = self.register_token.weight.view(1, -1, x.shape[-1]).expand(x.shape[0], -1, -1)
         x = torch.cat([x_null, x], dim=1)
         for layer in self.layers:
             x = layer(x, self.freqs_cis)

@@ -14,9 +14,7 @@ def weights_init(m):
 
 
 class ActNorm(nn.Module):
-    def __init__(
-        self, num_features, logdet=False, affine=True, allow_reverse_init=False
-    ):
+    def __init__(self, num_features, logdet=False, affine=True, allow_reverse_init=False):
         super(ActNorm, self).__init__()
         self.num_features = num_features
         self.logdet = logdet
@@ -154,9 +152,7 @@ class PatchGANDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, True),
         ]
 
-        sequence += [
-            nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)
-        ]
+        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
         self.network = nn.Sequential(*sequence)
 
     def forward(self, input):

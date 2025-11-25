@@ -33,7 +33,5 @@ class MLSDdetector(torch.nn.Module):
             lines = pred_lines(img, self.model, [512, 512], thr_v, thr_d)
             for line in lines:
                 x_start, y_start, x_end, y_end = [int(val) for val in line]
-                cv2.line(
-                    img_output, (x_start, y_start), (x_end, y_end), (255, 255, 255), 1
-                )
+                cv2.line(img_output, (x_start, y_start), (x_end, y_end), (255, 255, 255), 1)
         return img_output

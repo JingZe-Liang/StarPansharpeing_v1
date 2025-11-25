@@ -42,15 +42,11 @@ tokenizer = ContinuousImageTokenizer(
 ).cuda()
 
 peft_cfg = json.load(
-    open(
-        "runs/stage1_cosmos_lora/2025-05-08_04-55-03_lora_fintune_f8c16p4_Houston/peft_ckpt/adapter_config.json"
-    )
+    open("runs/stage1_cosmos_lora/2025-05-08_04-55-03_lora_fintune_f8c16p4_Houston/peft_ckpt/adapter_config.json")
 )
 print(peft_cfg)
 
-LOAD_TYPE = (
-    0  # 0: load from load_from_pretrained method; 1: manually load from checkpoint
-)
+LOAD_TYPE = 0  # 0: load from load_from_pretrained method; 1: manually load from checkpoint
 if LOAD_TYPE == 0:
     print("load from load_from_pretrained method")
     peft_cfg, peft_model = load_peft_model_checkpoint(
@@ -61,9 +57,7 @@ if LOAD_TYPE == 0:
 
 elif LOAD_TYPE == 1:
     print("load from manually load from checkpoint")
-    peft_model = get_peft_model(
-        tokenizer, LoraConfig(**peft_cfg), adapter_name="default"
-    )
+    peft_model = get_peft_model(tokenizer, LoraConfig(**peft_cfg), adapter_name="default")
     peft_model.print_trainable_parameters()
     peft_model.load_adapter(
         model_id="runs/stage1_cosmos_lora/2025-05-08_04-55-03_lora_fintune_f8c16p4_Houston/peft_ckpt",
@@ -71,9 +65,7 @@ elif LOAD_TYPE == 1:
         peft_config=peft_cfg,
     )
     print("load adapter done")
-    unloaded_model = peft_model.merge_and_unload(
-        progressbar=True, adapter_names=["default"]
-    )
+    unloaded_model = peft_model.merge_and_unload(progressbar=True, adapter_names=["default"])
     print("merge and unload done")
     print("unloaded model", type(unloaded_model))
 

@@ -46,9 +46,7 @@ def img_to_base64(img: np.ndarray | str | Image.Image) -> str:
         img.save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
     img_bytes = io.BytesIO()
     Image.fromarray(img).save(img_bytes, format="PNG")
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
@@ -76,9 +74,7 @@ run the command: hf download Qwen/Qwen3-VL-30B-A3B-Instruct
 """
 
 # blob version
-local_qwen_ckpt = (
-    "src/stage2/generative/tools/conditions/caption/caption_weights/Qwen3vl-30B-A3B"
-)
+local_qwen_ckpt = "src/stage2/generative/tools/conditions/caption/caption_weights/Qwen3vl-30B-A3B"
 remote_qwen_ckpt = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
 
@@ -162,14 +158,9 @@ def get_qwen3vl_model(
             else None
         )
         with torch.inference_mode():
-            generated_ids = model.generate(
-                **inputs, max_new_tokens=max_tokens, streamer=streamer
-            )
+            generated_ids = model.generate(**inputs, max_new_tokens=max_tokens, streamer=streamer)
 
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
+        generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
         output_text = processor.batch_decode(
             generated_ids_trimmed,
             skip_special_tokens=True,
@@ -194,9 +185,7 @@ def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "
     for sample in dl:
         img = sample["img"]  # (B, H, W, C) numpy array
         assert img.ndim == 4, f"Image batch must be 4D numpy array, got {img.ndim}D."
-        assert img.shape[0] == 1, (
-            f"Only support batch size 1 for captioning, got {img.shape[0]}."
-        )
+        assert img.shape[0] == 1, f"Only support batch size 1 for captioning, got {img.shape[0]}."
         img_id = sample["__key__"]
 
         # to RGB
@@ -235,9 +224,7 @@ def main_process_dataloader_img(
     os.makedirs(save_dir, exist_ok=True)
 
     for res in tqdm(
-        captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels),
-        desc="Captioning ...",
-        disable=True
+        captioning_dataloader_img(dl, process_img, rgb_channels=rgb_channels), desc="Captioning ...", disable=True
     ):
         img_id = res["id"][0]
         caption = res["caption"]
@@ -247,9 +234,7 @@ def main_process_dataloader_img(
             with open(os.path.join(save_dir, f"{img_id}.txt"), "w") as f:
                 f.write(caption)
         elif file_type == "jsonl":
-            with jsl.open(
-                os.path.join(save_dir, f"{img_id}.jsonl"), mode="w"
-            ) as writer:
+            with jsl.open(os.path.join(save_dir, f"{img_id}.jsonl"), mode="w") as writer:
                 writer.write({"id": img_id, "caption": caption})
         else:
             raise ValueError(f"Invalid file type: {file_type}")

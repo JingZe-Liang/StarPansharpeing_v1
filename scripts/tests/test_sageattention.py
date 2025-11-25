@@ -20,9 +20,7 @@ def test_sage_attention(attn_type="sageattn"):
     q, k, v = to_fn(q), to_fn(k), to_fn(v)
 
     with torch.no_grad():
-        att_out_ref = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=0.0
-        )
+        att_out_ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0)
         # att_out = sageattn(q, k, v, attn_mask=None, dropout_p=0.0)
         # att_out = sageattn_qk_int8_pv_fp16_triton(
         #     q, k, v, attn_mask=None, dropout_p=0.0
@@ -33,9 +31,7 @@ def test_sage_attention(attn_type="sageattn"):
         # print(f"Max diff: {max_diff}")
         # print(f"Diff bf16: {diff}")
 
-        att_out_fp8 = sageattn_qk_int8_pv_fp8_cuda(
-            q, k, v, attn_mask=None, dropout_p=0.0
-        )
+        att_out_fp8 = sageattn_qk_int8_pv_fp8_cuda(q, k, v, attn_mask=None, dropout_p=0.0)
 
         diff_fp8 = torch.mean((att_out_fp8 - att_out_ref) ** 2)
         print(f"Diff fp8: {diff_fp8}")

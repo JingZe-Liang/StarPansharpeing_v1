@@ -186,9 +186,7 @@ def onions_quality(dat1, dat2, size1):
     termine4 = mod_q1m**2 + mod_q2m**2  #
     int1 = (size1 * size2) / (size1 * size2 - 1) * np.mean(mod_q1**2)
     int2 = (size1 * size2) / (size1 * size2 - 1) * np.mean(mod_q2**2)
-    termine3 = (
-        int1 + int2 - (size1 * size2) / (size1 * size2 - 1) * (mod_q1m**2 + mod_q2m**2)
-    )  # 17.8988  ** 2
+    termine3 = int1 + int2 - (size1 * size2) / (size1 * size2 - 1) * (mod_q1m**2 + mod_q2m**2)  # 17.8988  ** 2
     mean_bias = 2 * termine2 / termine4  # 1
     if termine3 == 0:
         q = np.zeros(shape=[N, 1, N3])
@@ -200,11 +198,7 @@ def onions_quality(dat1, dat2, size1):
         qm = onion_mult(m1.reshape(-1), m2.reshape(-1))
         qv = np.zeros(shape=[N, N3])
         for i in range(N3):
-            qv[..., i] = (
-                (size1 * size2)
-                / ((size1 * size2) - 1)
-                * np.mean(np.squeeze(qu[:, :, i]))
-            )
+            qv[..., i] = (size1 * size2) / ((size1 * size2) - 1) * np.mean(np.squeeze(qu[:, :, i]))
         q = qv - (size1 * size2) / ((size1 * size2) - 1) * qm
         q = q * mean_bias * cbm
     return q
@@ -226,12 +220,8 @@ def onion_mult2D(onion1, onion2):
             ris = np.concatenate([a * c - d * b, a * d + c * b], axis=-1)
         else:
             ris1 = onion_mult2D(a, c)
-            ris2 = onion_mult2D(
-                d, np.concatenate([b[..., 0, np.newaxis], -b[..., 1:]], axis=-1)
-            )
-            ris3 = onion_mult2D(
-                np.concatenate([a[..., 0, np.newaxis], -a[..., 1:]], axis=-1), d
-            )
+            ris2 = onion_mult2D(d, np.concatenate([b[..., 0, np.newaxis], -b[..., 1:]], axis=-1))
+            ris3 = onion_mult2D(np.concatenate([a[..., 0, np.newaxis], -a[..., 1:]], axis=-1), d)
             ris4 = onion_mult2D(c, b)
 
             aux1 = ris1 - ris2
@@ -385,15 +375,10 @@ def analysis_accu(img_base, img_out, ratio, flag_cut_bounds=True, dim_cut=1, cho
     if choices == 5:
         # 计算CC
         C1 = torch.sum(torch.sum(img_base * img_out, 0), 0) - h * w * (
-            torch.mean(torch.mean(img_base, 0), 0)
-            * torch.mean(torch.mean(img_out, 0), 0)
+            torch.mean(torch.mean(img_base, 0), 0) * torch.mean(torch.mean(img_out, 0), 0)
         )
-        C2 = torch.sum(torch.sum(img_out**2, 0), 0) - h * w * (
-            torch.mean(torch.mean(img_out, 0), 0) ** 2
-        )
-        C3 = torch.sum(torch.sum(img_base**2, 0), 0) - h * w * (
-            torch.mean(torch.mean(img_base, 0), 0) ** 2
-        )
+        C2 = torch.sum(torch.sum(img_out**2, 0), 0) - h * w * (torch.mean(torch.mean(img_out, 0), 0) ** 2)
+        C3 = torch.sum(torch.sum(img_base**2, 0), 0) - h * w * (torch.mean(torch.mean(img_base, 0), 0) ** 2)
         CC = C1 / ((C2 * C3) ** 0.5)
         CC = torch.mean(CC)
         return {"SAM": SAM, "ERGAS": ERGAS, "PSNR": PSNR, "CC": CC}  # , q2n_index
@@ -422,16 +407,9 @@ def _ssim(img1, img2):
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
 
-    sigma1_sq = (
-        F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
-    )
-    sigma2_sq = (
-        F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
-    )
-    sigma12 = (
-        F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
-        - mu1_mu2
-    )
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
     C1 = (0.01 * max_val) ** 2
     C2 = (0.03 * max_val) ** 2
     V1 = 2.0 * sigma12 + C2
@@ -442,21 +420,14 @@ def _ssim(img1, img2):
 
 
 def gaussian(window_size, sigma):
-    gauss = torch.Tensor(
-        [
-            math.exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2))
-            for x in range(window_size)
-        ]
-    )
+    gauss = torch.Tensor([math.exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2)) for x in range(window_size)])
     return gauss / gauss.sum()
 
 
 def create_window(window_size, sigma, channel):
     _1D_window = gaussian(window_size, sigma).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = Variable(
-        _2D_window.expand(channel, 1, window_size, window_size).contiguous()
-    )
+    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
 

@@ -184,9 +184,7 @@ def onions_quality(dat1, dat2, size1):
     termine4 = mod_q1m**2 + mod_q2m**2  #
     int1 = (size1 * size2) / (size1 * size2 - 1) * np.mean(mod_q1**2)
     int2 = (size1 * size2) / (size1 * size2 - 1) * np.mean(mod_q2**2)
-    termine3 = (
-        int1 + int2 - (size1 * size2) / (size1 * size2 - 1) * (mod_q1m**2 + mod_q2m**2)
-    )  # 17.8988  ** 2
+    termine3 = int1 + int2 - (size1 * size2) / (size1 * size2 - 1) * (mod_q1m**2 + mod_q2m**2)  # 17.8988  ** 2
     mean_bias = 2 * termine2 / termine4  # 1
     if termine3 == 0:
         q = np.zeros(shape=[1, N3])
@@ -198,11 +196,7 @@ def onions_quality(dat1, dat2, size1):
         qm = onion_mult(m1.reshape(-1), m2.reshape(-1))
         qv = np.zeros(shape=[N3])
         for i in range(N3):
-            qv[i] = (
-                (size1 * size2)
-                / ((size1 * size2) - 1)
-                * np.mean(np.squeeze(qu[:, :, i]))
-            )
+            qv[i] = (size1 * size2) / ((size1 * size2) - 1) * np.mean(np.squeeze(qu[:, :, i]))
         q = qv - (size1 * size2) / ((size1 * size2) - 1) * qm
         q = q * mean_bias * cbm
 
@@ -225,12 +219,8 @@ def onion_mult2D(onion1, onion2):
             ris = np.concatenate([a * c - d * b, a * d + c * b], axis=-1)
         else:
             ris1 = onion_mult2D(a, c)
-            ris2 = onion_mult2D(
-                d, np.concatenate([b[..., 0, np.newaxis], -b[..., 1:]], axis=-1)
-            )
-            ris3 = onion_mult2D(
-                np.concatenate([a[..., 0, np.newaxis], -a[..., 1:]], axis=-1), d
-            )
+            ris2 = onion_mult2D(d, np.concatenate([b[..., 0, np.newaxis], -b[..., 1:]], axis=-1))
+            ris3 = onion_mult2D(np.concatenate([a[..., 0, np.newaxis], -a[..., 1:]], axis=-1), d)
             ris4 = onion_mult2D(c, b)
 
             aux1 = ris1 - ris2

@@ -56,9 +56,7 @@ def _merge_latent(
             multi_tar_urls = list(braceexpand.braceexpand(multi_tar_urls))
 
         # Create tar iterators for shards of all modalities
-        tar_iters = [
-            wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls
-        ]
+        tar_iters = [wds.tarfile_samples([{"url": tar_url}]) for tar_url in multi_tar_urls]
 
         try:
             # Loop over these iterators in parallel and combine the tar files from different modalities
@@ -67,9 +65,7 @@ def _merge_latent(
                 merged_dict["__key__"] = multi_tar_files[0]["__key__"]
                 merged_dict["__url__"] = src["url"]
 
-                for modality_name, modality_dict in zip(
-                    modality_names, multi_tar_files
-                ):
+                for modality_name, modality_dict in zip(modality_names, multi_tar_files):
                     _key = modality_dict.pop("__key__")
                     _url = modality_dict.pop("__url__")
 

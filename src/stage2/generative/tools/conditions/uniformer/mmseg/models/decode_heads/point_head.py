@@ -94,9 +94,7 @@ class PointHead(BaseCascadeDecodeHead):
             self.fcs.append(fc)
             fc_in_channels = fc_channels
             fc_in_channels += self.num_classes if self.coarse_pred_each_layer else 0
-        self.fc_seg = nn.Conv1d(
-            fc_in_channels, self.num_classes, kernel_size=1, stride=1, padding=0
-        )
+        self.fc_seg = nn.Conv1d(fc_in_channels, self.num_classes, kernel_size=1, stride=1, padding=0)
         if self.dropout_ratio > 0:
             self.dropout = nn.Dropout(self.dropout_ratio)
         delattr(self, "conv_seg")
@@ -133,9 +131,7 @@ class PointHead(BaseCascadeDecodeHead):
                 shape (batch_size, sum(channels of x), num_points).
         """
 
-        fine_grained_feats_list = [
-            point_sample(_, points, align_corners=self.align_corners) for _ in x
-        ]
+        fine_grained_feats_list = [point_sample(_, points, align_corners=self.align_corners) for _ in x]
         if len(fine_grained_feats_list) > 1:
             fine_grained_feats = torch.cat(fine_grained_feats_list, dim=1)
         else:
@@ -156,9 +152,7 @@ class PointHead(BaseCascadeDecodeHead):
                 num_classes, num_points).
         """
 
-        coarse_feats = point_sample(
-            prev_output, points, align_corners=self.align_corners
-        )
+        coarse_feats = point_sample(prev_output, points, align_corners=self.align_corners)
 
         return coarse_feats
 
@@ -181,9 +175,7 @@ class PointHead(BaseCascadeDecodeHead):
         """
         x = self._transform_inputs(inputs)
         with torch.no_grad():
-            points = self.get_points_train(
-                prev_output, calculate_uncertainty, cfg=train_cfg
-            )
+            points = self.get_points_train(prev_output, calculate_uncertainty, cfg=train_cfg)
         fine_grained_point_feats = self._get_fine_grained_point_feats(x, points)
         coarse_point_feats = self._get_coarse_point_feats(prev_output, points)
         point_logits = self.forward(fine_grained_point_feats, coarse_point_feats)
@@ -226,32 +218,22 @@ class PointHead(BaseCascadeDecodeHead):
                 align_corners=self.align_corners,
             )
             batch_size, channels, height, width = refined_seg_logits.shape
-            point_indices, points = self.get_points_test(
-                refined_seg_logits, calculate_uncertainty, cfg=test_cfg
-            )
+            point_indices, points = self.get_points_test(refined_seg_logits, calculate_uncertainty, cfg=test_cfg)
             fine_grained_point_feats = self._get_fine_grained_point_feats(x, points)
             coarse_point_feats = self._get_coarse_point_feats(prev_output, points)
             point_logits = self.forward(fine_grained_point_feats, coarse_point_feats)
 
             point_indices = point_indices.unsqueeze(1).expand(-1, channels, -1)
-            refined_seg_logits = refined_seg_logits.reshape(
-                batch_size, channels, height * width
-            )
-            refined_seg_logits = refined_seg_logits.scatter_(
-                2, point_indices, point_logits
-            )
-            refined_seg_logits = refined_seg_logits.view(
-                batch_size, channels, height, width
-            )
+            refined_seg_logits = refined_seg_logits.reshape(batch_size, channels, height * width)
+            refined_seg_logits = refined_seg_logits.scatter_(2, point_indices, point_logits)
+            refined_seg_logits = refined_seg_logits.view(batch_size, channels, height, width)
 
         return refined_seg_logits
 
     def losses(self, point_logits, point_label):
         """Compute segmentation loss."""
         loss = dict()
-        loss["loss_point"] = self.loss_decode(
-            point_logits, point_label, ignore_index=self.ignore_index
-        )
+        loss["loss_point"] = self.loss_decode(point_logits, point_label, ignore_index=self.ignore_index)
         loss["acc_point"] = accuracy(point_logits, point_label)
         return loss
 
@@ -296,17 +278,11 @@ class PointHead(BaseCascadeDecodeHead):
         num_uncertain_points = int(importance_sample_ratio * num_points)
         num_random_points = num_points - num_uncertain_points
         idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]
-        shift = num_sampled * torch.arange(
-            batch_size, dtype=torch.long, device=seg_logits.device
-        )
+        shift = num_sampled * torch.arange(batch_size, dtype=torch.long, device=seg_logits.device)
         idx += shift[:, None]
-        point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(
-            batch_size, num_uncertain_points, 2
-        )
+        point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(batch_size, num_uncertain_points, 2)
         if num_random_points > 0:
-            rand_point_coords = torch.rand(
-                batch_size, num_random_points, 2, device=seg_logits.device
-            )
+            rand_point_coords = torch.rand(batch_size, num_random_points, 2, device=seg_logits.device)
             point_coords = torch.cat((point_coords, rand_point_coords), dim=1)
         return point_coords
 
@@ -339,9 +315,7 @@ class PointHead(BaseCascadeDecodeHead):
         uncertainty_map = uncertainty_map.view(batch_size, height * width)
         num_points = min(height * width, num_points)
         point_indices = uncertainty_map.topk(num_points, dim=1)[1]
-        point_coords = torch.zeros(
-            batch_size, num_points, 2, dtype=torch.float, device=seg_logits.device
-        )
+        point_coords = torch.zeros(batch_size, num_points, 2, dtype=torch.float, device=seg_logits.device)
         point_coords[:, :, 0] = w_step / 2.0 + (point_indices % width).float() * w_step
         point_coords[:, :, 1] = h_step / 2.0 + (point_indices // width).float() * h_step
         return point_indices, point_coords

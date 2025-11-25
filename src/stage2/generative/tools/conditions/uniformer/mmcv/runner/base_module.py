@@ -77,9 +77,7 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
             # initialization information
             for name, param in self.named_parameters():
                 self._params_init_info[param]["init_info"] = (
-                    f"The value is the same before and "
-                    f"after calling `init_weights` "
-                    f"of {self.__class__.__name__} "
+                    f"The value is the same before and after calling `init_weights` of {self.__class__.__name__} "
                 )
                 self._params_init_info[param]["tmp_mean_value"] = param.data.mean()
 
@@ -120,17 +118,12 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
                     # users may overload the `init_weights`
                     update_init_info(
                         m,
-                        init_info=f"Initialized by "
-                        f"user-defined `init_weights`"
-                        f" in {m.__class__.__name__} ",
+                        init_info=f"Initialized by user-defined `init_weights` in {m.__class__.__name__} ",
                     )
 
             self._is_init = True
         else:
-            warnings.warn(
-                f"init_weights of {self.__class__.__name__} has "
-                f"been called more than once."
-            )
+            warnings.warn(f"init_weights of {self.__class__.__name__} has been called more than once.")
 
         if is_top_level_module:
             self._dump_init_info(logger_name)
@@ -155,17 +148,13 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
             if isinstance(handler, FileHandler):
                 handler.stream.write("Name of parameter - Initialization information\n")
                 for name, param in self.named_parameters():
-                    handler.stream.write(
-                        f"\n{name} - {param.shape}: "
-                        f"\n{self._params_init_info[param]['init_info']} \n"
-                    )
+                    handler.stream.write(f"\n{name} - {param.shape}: \n{self._params_init_info[param]['init_info']} \n")
                 handler.stream.flush()
                 with_file_handler = True
         if not with_file_handler:
             for name, param in self.named_parameters():
                 print_log(
-                    f"\n{name} - {param.shape}: "
-                    f"\n{self._params_init_info[param]['init_info']} \n ",
+                    f"\n{name} - {param.shape}: \n{self._params_init_info[param]['init_info']} \n ",
                     logger=logger_name,
                 )
 

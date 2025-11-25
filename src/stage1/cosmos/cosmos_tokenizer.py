@@ -74,9 +74,7 @@ class NestChannelDrop(nn.Module):
                 assert args.isdigit(), "args should be an int"
                 self.sample_kwargs = {"low": int(args)}
             else:
-                raise ValueError(
-                    f"drop_type {drop_type} not supported, only exp and uniform are supported"
-                )
+                raise ValueError(f"drop_type {drop_type} not supported, only exp and uniform are supported")
         else:  # list
             self.drop_list = drop_type
             assert max(self.drop_list) < self.max_channels, (
@@ -87,18 +85,12 @@ class NestChannelDrop(nn.Module):
             f"[NestChannelDrop]: drop_type={self.drop_type}, max_channels={self.max_channels}, drop_prob={self.drop_prob}"
         )
 
-        self.channel_arange = nn.Buffer(
-            torch.arange(self.max_channels, dtype=torch.int32), persistent=False
-        )
+        self.channel_arange = nn.Buffer(torch.arange(self.max_channels, dtype=torch.int32), persistent=False)
 
     def exponential_sampling(self, lambda_val, size=1):
         u = np.random.uniform(size=size)
         k = -np.log(1 - u) / lambda_val
-        return (
-            torch.as_tensor(np.floor(k).astype(int))
-            .clip_(0, self.max_channels)
-            .unsqueeze(-1)
-        )
+        return torch.as_tensor(np.floor(k).astype(int)).clip_(0, self.max_channels).unsqueeze(-1)
 
     def uniform_sampling(self, low: int, size: int = 1):
         # (bs, 1)
@@ -110,9 +102,7 @@ class NestChannelDrop(nn.Module):
         leave_channels = np.random.choice(drop_list, size=size, replace=True)
         return torch.as_tensor(leave_channels).unsqueeze(-1)
 
-    def forward(
-        self, z, inference_channels: int | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+    def forward(self, z, inference_channels: int | None = None) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
         """
         Apply channel drop to the input tensor.
 
@@ -144,9 +134,7 @@ class NestChannelDrop(nn.Module):
         elif self.drop_type == "prefixed":
             leave_channels = self.prefixed_sampling(size=bs)
         else:
-            raise ValueError(
-                f"drop_type {self.drop_type} not supported, only exp and uniform are supported"
-            )
+            raise ValueError(f"drop_type {self.drop_type} not supported, only exp and uniform are supported")
 
         # drop channels
 
@@ -249,19 +237,14 @@ class MultiInputSequential(nn.Sequential):
         params = list(sig.parameters.values())
         # Exclude 'self'
         params = [p for p in params if p.name != "self"]
-        has_var_positional = any(
-            p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
-        )
+        has_var_positional = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
 
         # If more than one parameter or the first parameter is annotated as a tuple, treat as multi-input
         if len(params) > 1 and has_var_positional:
             return True
         if params and (
             params[0].annotation in (tuple, list)
-            or (
-                hasattr(params[0].annotation, "__origin__")
-                and params[0].annotation.__origin__ is tuple
-            )
+            or (hasattr(params[0].annotation, "__origin__") and params[0].annotation.__origin__ is tuple)
         ):
             return True
         return False
@@ -427,9 +410,7 @@ class ContinuousImageTokenizer(nn.Module):
         self.model_cfg = model_cfg = cfg.model
 
         # 1. repa or vf projectors
-        assert not (self._use_repa_loss and self._use_vf_loss), (
-            "repa and vf losses should not be used at the same time"
-        )
+        assert not (self._use_repa_loss and self._use_vf_loss), "repa and vf losses should not be used at the same time"
         self._build_feature_align_mlp()
 
         # 2. FSDP wrapper module
@@ -446,12 +427,8 @@ class ContinuousImageTokenizer(nn.Module):
         self.latent_channels = model_cfg.latent_channels
         self.norm_in_quant_conv = cfg.norm_in_quant_conv
 
-        self.in_channels_after_patcher = (
-            np.array(model_cfg.in_channels * model_cfg.patch_size**2)
-        ).tolist()
-        self.out_channels_after_patcher = (
-            np.array(model_cfg.out_channels * model_cfg.patch_size**2)
-        ).tolist()
+        self.in_channels_after_patcher = (np.array(model_cfg.in_channels * model_cfg.patch_size**2)).tolist()
+        self.out_channels_after_patcher = (np.array(model_cfg.out_channels * model_cfg.patch_size**2)).tolist()
 
         # NOTE: encoder and decoder maybe separated, e.g., NVIDIA pretrained tokenizer, or
         # trained on hyperspectral images before
@@ -481,9 +458,7 @@ class ContinuousImageTokenizer(nn.Module):
                 f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}",
                 "debug",
             )
-            enc_jit, dec_jit = self.load_pretrained(
-                enc_path=enc_path, dec_path=dec_path, tokenizer_cfg=tokenizer_cfg
-            )  # type: ignore
+            enc_jit, dec_jit = self.load_pretrained(enc_path=enc_path, dec_path=dec_path, tokenizer_cfg=tokenizer_cfg)  # type: ignore
 
             # split the encoder and decoder
             encoder, quant_conv = enc_jit[0], enc_jit[1]
@@ -495,9 +470,7 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             # encoder and decoder
             # not combine the encoder, for FSDP wrap
-            encoder, decoder = self._build_encoder_decoder(
-                cfg, model_cfg, **build_enc_dec_kwargs
-            )
+            encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, **build_enc_dec_kwargs)
             quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
 
             self.encoder = self.encoder_jit(encoder, quant_conv)
@@ -532,11 +505,7 @@ class ContinuousImageTokenizer(nn.Module):
                         uni_tokenizer_path=uni_tokenizer_path,
                     )
                 if verbose and isinstance(profiler, torch.profiler.profile):
-                    log_print(
-                        profiler.key_averages().table(
-                            sort_by="self_cpu_time_total", row_limit=10
-                        )
-                    )
+                    log_print(profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
                 logger.log("NOTE", "load pretrained model done!")
 
         # token channel drop
@@ -546,16 +515,12 @@ class ContinuousImageTokenizer(nn.Module):
             log_print(f"use channel drop: {cfg.channel_drop_config}")
 
         # register repa hook
-        if self._vf_on_z_or_module == "module" and (
-            self._use_vf_loss or self._use_repa_loss
-        ):
+        if self._vf_on_z_or_module == "module" and (self._use_vf_loss or self._use_repa_loss):
             self.register_feature_hook()
 
         num_parameters = sum(param.numel() for param in self.parameters())
         log_print(f"model={self.name}, num_parameters={num_parameters:,}")
-        log_print(
-            f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}."
-        )
+        log_print(f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}.")
 
     def _build_encoder_decoder(
         self,
@@ -582,9 +547,7 @@ class ContinuousImageTokenizer(nn.Module):
         if self.quantizer_type == "kl":
             self.quantizer = DiagonalGaussianDistribution  # not quantizer, compatible with trainer  # type: ignore
         elif self.quantizer_type == "bsq":
-            assert model_cfg.latent_channels % 2 == 0, (
-                "quantizer out channels should be even"
-            )
+            assert model_cfg.latent_channels % 2 == 0, "quantizer out channels should be even"
             self.quantizer = BSQ(
                 embed_dim=model_cfg.latent_channels,  # 18 or 36
                 beta=0.0,  # commitment loss
@@ -646,9 +609,7 @@ class ContinuousImageTokenizer(nn.Module):
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
 
         # then the quantizer will output the latent_channels h
-        post_quant_conv = torch.nn.Conv2d(
-            model_cfg.latent_channels, model_cfg.z_channels, 1
-        )
+        post_quant_conv = torch.nn.Conv2d(model_cfg.latent_channels, model_cfg.z_channels, 1)
 
         return quant_conv, post_quant_conv
 
@@ -664,9 +625,7 @@ class ContinuousImageTokenizer(nn.Module):
                 self._repa_proj = build_mlp(
                     # if is z: rely on the z channels
                     # else is the latent channel proj.
-                    self.model_cfg.z_channels
-                    if self.cfg.cache_type == "z"
-                    else self.model_cfg.latent_channels,
+                    self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
                     self._dino_feature_dim,
                     self._dino_feature_dim,
                 )
@@ -679,17 +638,13 @@ class ContinuousImageTokenizer(nn.Module):
                 )
             else:
                 self._vf_proj = build_mlp(
-                    self.model_cfg.z_channels
-                    if self.cfg.cache_type == "z"
-                    else self.model_cfg.latent_channels,
+                    self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
                     self._dino_feature_dim,
                     self._dino_feature_dim,
                 )
 
     def encoder_jit(self, encoder, quant_conv):
-        return nn.Sequential(
-            OrderedDict([("encoder", encoder), ("quant_conv", quant_conv)])
-        )
+        return nn.Sequential(OrderedDict([("encoder", encoder), ("quant_conv", quant_conv)]))
 
     def decoder_jit(self, decoder, post_quant_conv):
         return DecoderSequential(post_quant_conv, decoder)
@@ -699,9 +654,7 @@ class ContinuousImageTokenizer(nn.Module):
             self._hook_feature = output
 
         self.get_submodule(self._hook_module).register_forward_hook(hook)
-        log_print(
-            f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook"
-        )
+        log_print(f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook")
 
     # * --- model feature alignment --- #
 
@@ -717,9 +670,7 @@ class ContinuousImageTokenizer(nn.Module):
                 # proj on block out
                 return self._repa_proj(self._hook_feature)
             else:
-                raise ValueError(
-                    f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
-                )
+                raise ValueError(f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}")
 
         return None
 
@@ -734,9 +685,7 @@ class ContinuousImageTokenizer(nn.Module):
                 # proj on block out
                 return self._vf_proj(self._hook_feature)
             else:
-                raise ValueError(
-                    f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}"
-                )
+                raise ValueError(f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}")
 
         return None
 
@@ -765,9 +714,7 @@ class ContinuousImageTokenizer(nn.Module):
                 # return self.get_submodule(self._hook_module).token_mixer.conv2.weight
                 return None
             else:
-                raise ValueError(
-                    f"block_name {block_name} not supported, only res_block and res_moe are supported"
-                )
+                raise ValueError(f"block_name {block_name} not supported, only res_block and res_moe are supported")
 
     # * --- latent structure shaping --- #
 
@@ -780,9 +727,7 @@ class ContinuousImageTokenizer(nn.Module):
         bs = h.size(0)
         noise_type_cfg = getattr(self.cfg, "latent_noise_type", "uniform_max_0.3")
         # sample interpolation factor t
-        t = _sample_t_distributional(
-            bs=bs, device=h.device, noise_type_cfg=noise_type_cfg
-        )
+        t = _sample_t_distributional(bs=bs, device=h.device, noise_type_cfg=noise_type_cfg)
         t = t.to(h.dtype).view(-1, 1, 1, 1)
 
         # sample noise
@@ -790,9 +735,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # mask out the dropped channels
         if mask is not None:
-            assert mask.shape[1] == h.shape[1], (
-                "mask and h should have the same channel number"
-            )
+            assert mask.shape[1] == h.shape[1], "mask and h should have the same channel number"
             noise = torch.where(mask, noise, torch.zeros_like(noise))
         h_noise = t * noise + (1 - t) * h
 
@@ -1009,21 +952,15 @@ class ContinuousImageTokenizer(nn.Module):
         # * --- load NVIDIA Cosmos separated encoder, decoder checkpoints --- #
 
         if self.loading_type == "nvidia":
-            assert tokenizer_cfg is not None, (
-                "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
-            )
-            log_print(
-                f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model"
-            )
+            assert tokenizer_cfg is not None, "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
+            log_print(f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model")
             encoder, _enc_model_mody_keys = load_jit_model_shape_matched(
                 jit_model_path=enc_path,
                 device="cuda",
                 tokenizer_config=tokenizer_cfg,
                 part="encoder",
             )
-            log_print(
-                f"Loading pretrained decoder from {dec_path} for NVIDIA pretrained model"
-            )
+            log_print(f"Loading pretrained decoder from {dec_path} for NVIDIA pretrained model")
             decoder, _dec_model_mody_keys = load_jit_model_shape_matched(
                 jit_model_path=dec_path,
                 device="cuda",
@@ -1043,14 +980,10 @@ class ContinuousImageTokenizer(nn.Module):
 
         else:
             if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
-                log_print(
-                    f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model"
-                )
+                log_print(f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model")
                 weights = accelerate.utils.load_state_dict(uni_tokenizer_path)
                 # load_state_dict will check the shape of the model and the state dict
-                _missing_keys, _unexp_keys = load_weights_with_shape_check(
-                    self, weights
-                )
+                _missing_keys, _unexp_keys = load_weights_with_shape_check(self, weights)
                 log_print(
                     f"tokenizer: missing keys {_missing_keys}, unexpected keys {_unexp_keys}",
                     "warning",
@@ -1060,42 +993,26 @@ class ContinuousImageTokenizer(nn.Module):
                 # and if the pretrained conv_in's basic module is also conv
                 _tgt_conv_w = f"encoder.encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.weight"
                 _tgt_conv_b = f"encoder.encoder.conv_in.in_modules.conv_in_{self.in_channels_after_patcher}.bias"
-                if (
-                    isinstance(self.encoder.encoder.conv_in, nn.Conv2d)
-                    and weights.get(_tgt_conv_w, None) is not None
-                ):
+                if isinstance(self.encoder.encoder.conv_in, nn.Conv2d) and weights.get(_tgt_conv_w, None) is not None:
                     self.encoder.encoder.conv_in.weight.data.copy_(weights[_tgt_conv_w])
-                    self.encoder.encoder.conv_in.bias.data.copy_(
-                        weights.get(_tgt_conv_b, None)
-                    )
-                    log_print(
-                        f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}"
-                    )
+                    self.encoder.encoder.conv_in.bias.data.copy_(weights.get(_tgt_conv_b, None))
+                    log_print(f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}")
 
                 # if conv_out is nn.Conv2d for only one channel
                 # and if the pretrained model conv_out is diff bands module
                 _tgt_conv_w = f"decoder.decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.weight"
                 _tgt_conv_b = f"decoder.decoder.conv_out.in_modules.conv_out_{self.out_channels_after_patcher}.bias"
-                if (
-                    isinstance(self.decoder.decoder.conv_out, nn.Conv2d)
-                    and weights.get(_tgt_conv_w, None) is not None
-                ):
-                    self.decoder.decoder.conv_out.weight.data.copy_(
-                        weights[_tgt_conv_w]
-                    )
-                    self.decoder.decoder.conv_out.bias.data.copy_(
-                        weights.get(_tgt_conv_b, None)
-                    )
-                    log_print(
-                        f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}"
-                    )
+                if isinstance(self.decoder.decoder.conv_out, nn.Conv2d) and weights.get(_tgt_conv_w, None) is not None:
+                    self.decoder.decoder.conv_out.weight.data.copy_(weights[_tgt_conv_w])
+                    self.decoder.decoder.conv_out.bias.data.copy_(weights.get(_tgt_conv_b, None))
+                    log_print(f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}")
 
                 log_print("load pretrained model done.")
 
             else:
-                assert enc_path.endswith("safetensors") and dec_path.endswith(
-                    "safetensors"
-                ), "only support safetensors for now"
+                assert enc_path.endswith("safetensors") and dec_path.endswith("safetensors"), (
+                    "only support safetensors for now"
+                )
                 log_print(
                     "pretrained model is pretrained on hyperspectral images, "
                     "for now is used to finetune on the other dataset"
@@ -1109,12 +1026,8 @@ class ContinuousImageTokenizer(nn.Module):
                 # if the shape is not matched, it will not raise an error
                 # but the model will not be loaded
 
-                _enc_missing, _enc_unexp = load_weights_with_shape_check(
-                    self.encoder, enc_sd
-                )
-                _dec_missing, _dec_unexp = load_weights_with_shape_check(
-                    self.decoder, dec_sd
-                )
+                _enc_missing, _enc_unexp = load_weights_with_shape_check(self.encoder, enc_sd)
+                _dec_missing, _dec_unexp = load_weights_with_shape_check(self.decoder, dec_sd)
 
                 # * handle the input and output conv manually ===============
                 _conv_in_is_missing = any(
@@ -1124,17 +1037,13 @@ class ContinuousImageTokenizer(nn.Module):
                     _decoder_conv_out_name = "decoder.conv_out.wrap_mod"
                 else:
                     _decoder_conv_out_name = "decoder.conv_out"
-                _conv_out_is_missing = any(
-                    ["decoder.conv_out" in _key for _key in _dec_missing]
-                )
+                _conv_out_is_missing = any(["decoder.conv_out" in _key for _key in _dec_missing])
 
                 if _conv_in_is_missing:
                     if mean_init_conv_in_out:
-                        assert isinstance(
-                            self.in_channels_after_patcher, int
-                        ) and isinstance(self.out_channels_after_patcher, int), (
-                            "in_channels_after_patcher and out_channels_after_patcher should be int"
-                        )
+                        assert isinstance(self.in_channels_after_patcher, int) and isinstance(
+                            self.out_channels_after_patcher, int
+                        ), "in_channels_after_patcher and out_channels_after_patcher should be int"
 
                         _mean_conv_in: Tensor = enc_sd["encoder.conv_in.weight"].mean(
                             keepdim=True, dim=1
@@ -1144,9 +1053,7 @@ class ContinuousImageTokenizer(nn.Module):
                             dim=1,  # after patcher
                         )
                         self.encoder.encoder.conv_in.weight.data.copy_(_mean_conv_in)  # type: ignore
-                        log_print(
-                            "conv_in is missing, use the mean of the conv_in weight"
-                        )
+                        log_print("conv_in is missing, use the mean of the conv_in weight")
 
                     # if conv_in is nn.Conv2d for only one channel
                     # and if the pretrained conv_in's basic module is also conv
@@ -1156,30 +1063,20 @@ class ContinuousImageTokenizer(nn.Module):
                         isinstance(self.encoder.encoder.conv_in, nn.Conv2d)
                         and enc_sd.get(_tgt_conv_w, None) is not None
                     ):
-                        self.encoder.encoder.conv_in.weight.data.copy_(
-                            enc_sd[_tgt_conv_w]
-                        )
-                        self.encoder.encoder.conv_in.bias.data.copy_(
-                            enc_sd.get(_tgt_conv_b, None)
-                        )
-                        log_print(
-                            f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}"
-                        )
+                        self.encoder.encoder.conv_in.weight.data.copy_(enc_sd[_tgt_conv_w])
+                        self.encoder.encoder.conv_in.bias.data.copy_(enc_sd.get(_tgt_conv_b, None))
+                        log_print(f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}")
 
                 if _conv_out_is_missing:
                     if mean_init_conv_in_out:
-                        assert isinstance(
-                            self.in_channels_after_patcher, int
-                        ) and isinstance(self.out_channels_after_patcher, int), (
-                            "in_channels_after_patcher and out_channels_after_patcher should be int"
-                        )
+                        assert isinstance(self.in_channels_after_patcher, int) and isinstance(
+                            self.out_channels_after_patcher, int
+                        ), "in_channels_after_patcher and out_channels_after_patcher should be int"
 
                         _mean_conv_out_w = dec_sd["decoder.conv_out.weight"].mean(
                             keepdim=True, dim=0
                         )  # (out_c, d, k, k)
-                        _mean_conv_out_w = _mean_conv_out_w.repeat_interleave(
-                            self.out_channels_after_patcher, dim=0
-                        )
+                        _mean_conv_out_w = _mean_conv_out_w.repeat_interleave(self.out_channels_after_patcher, dim=0)
                         _mean_conv_out_bias = (
                             dec_sd["decoder.conv_out.bias"]
                             .mean(keepdim=True, dim=0)
@@ -1187,18 +1084,12 @@ class ContinuousImageTokenizer(nn.Module):
                         )  # (out_c,)
 
                         # copy in
-                        conv_out_w = self.decoder.get_submodule(
-                            _decoder_conv_out_name
-                        ).weight
-                        conv_out_b = self.decoder.get_submodule(
-                            _decoder_conv_out_name
-                        ).bias
+                        conv_out_w = self.decoder.get_submodule(_decoder_conv_out_name).weight
+                        conv_out_b = self.decoder.get_submodule(_decoder_conv_out_name).bias
                         conv_out_w.data.copy_(_mean_conv_out_w)  # type: ignore
                         conv_out_b.data.copy_(_mean_conv_out_bias)  # type: ignore
 
-                        log_print(
-                            "conv_out is missing, use the mean of the conv_out weight"
-                        )
+                        log_print("conv_out is missing, use the mean of the conv_out weight")
 
                     # if conv_out is nn.Conv2d for only one channel
                     # and if the pretrained model conv_out is diff bands module
@@ -1208,12 +1099,8 @@ class ContinuousImageTokenizer(nn.Module):
                         isinstance(self.decoder.decoder.conv_out, nn.Conv2d)
                         and dec_sd.get(_tgt_conv_w, None) is not None
                     ):
-                        self.decoder.decoder.conv_out.weight.data.copy_(
-                            enc_sd[_tgt_conv_w]
-                        )
-                        self.decoder.decoder.conv_out.bias.data.copy_(
-                            enc_sd.get(_tgt_conv_b, None)
-                        )
+                        self.decoder.decoder.conv_out.weight.data.copy_(enc_sd[_tgt_conv_w])
+                        self.decoder.decoder.conv_out.bias.data.copy_(enc_sd.get(_tgt_conv_b, None))
 
                 log_print(
                     f"load pretrained model done. \n"
@@ -1266,9 +1153,7 @@ class ContinuousImageTokenizer(nn.Module):
 
     # * --- lora-related methods --- #
 
-    def peft_fully_finetune_modules(
-        self, add_norms: bool = False, conv_stem_reinit=False
-    ) -> list[str]:
+    def peft_fully_finetune_modules(self, add_norms: bool = False, conv_stem_reinit=False) -> list[str]:
         """
         PEFT fully finetuned modules (no LoRA A and B).
         """
@@ -1290,9 +1175,7 @@ class ContinuousImageTokenizer(nn.Module):
                 _conv_out_name = "decoder.decoder.conv_out.wrap_mod"  # decrepeted
 
             module_to_save_layers.append(_conv_out_name)
-            log_print(
-                f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune"
-            )
+            log_print(f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune")
 
         # backbone normalization layers
         if add_norms:
@@ -1306,9 +1189,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return module_to_save_layers
 
-    def peft_lora_modules(
-        self, conv_stem_reinit=False, conv_stem_chan: int | None = None
-    ) -> list[str]:
+    def peft_lora_modules(self, conv_stem_reinit=False, conv_stem_chan: int | None = None) -> list[str]:
         """
         PEFT LoRA modules (with LoRA A and B)
         """
@@ -1317,9 +1198,7 @@ class ContinuousImageTokenizer(nn.Module):
         # If the Conv stem is not reinit, use the pretrained weights,
         # it should be added with the lora weights
         if not conv_stem_reinit and self._is_diffbands:
-            assert conv_stem_chan is not None, (
-                f"conv_stem_chan must be specified when conv_stem_reinit is False"
-            )
+            assert conv_stem_chan is not None, f"conv_stem_chan must be specified when conv_stem_reinit is False"
 
             # Only add the corresponding stem_channel convs when the conv_in and conv_out
             # are multi-bands conv module.
@@ -1352,9 +1231,7 @@ class ContinuousImageTokenizer(nn.Module):
     @classmethod
     def create_model(cls, config: DictConfig | None = None, **kwargs):
         if config is not None:
-            cfg = dataclass_from_dict_config(
-                ContinuousTokenizerConfig, config, strict=False
-            )
+            cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, config, strict=False)
         else:
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
         return cls(cfg)
@@ -1363,9 +1240,7 @@ class ContinuousImageTokenizer(nn.Module):
         for m in self.modules():
             if hasattr(m, "grad_checkpointing"):
                 m.grad_checkpointing = enabled
-                log_print(
-                    f"set grad_checkpointing={enabled} for {m.__class__.__name__}"
-                )
+                log_print(f"set grad_checkpointing={enabled} for {m.__class__.__name__}")
 
 
 # * --- test --- * #
@@ -1414,9 +1289,7 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    default_multi_chans = (
-        512  # [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
-    )
+    default_multi_chans = 512  # [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
     # default_nested_chans = 500  # max hyperspectral chans in the training datasets
     config = {
         "model": {
@@ -1503,13 +1376,7 @@ def test_tokenizer_forward_backward(
         if Path(real_data).exists():
             # only support RGB image
             x = Image.open(real_data).convert("RGB")
-            x = (
-                torch.from_numpy(np.array(x))
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-                .float()
-                .cuda()
-            )
+            x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
             x = x / 255.0
             x = x * 2 - 1  # normalize to [-1, 1]
             iterations = [x]
@@ -1522,9 +1389,7 @@ def test_tokenizer_forward_backward(
         iterations = [x]
 
     if not is_itered and upscale != 1:
-        x = torch.nn.functional.interpolate(
-            x, scale_factor=upscale, align_corners=True, mode="bicubic"
-        )
+        x = torch.nn.functional.interpolate(x, scale_factor=upscale, align_corners=True, mode="bicubic")
 
     if use_optim:
         opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
@@ -1568,9 +1433,7 @@ def test_tokenizer_forward_backward(
 
                 def plot_img(img, path):
                     y_grid = make_grid(img.float(), nrow=1, padding=2)
-                    y_grid = (
-                        y_grid[rgb_chans].permute(1, 2, 0).detach().cpu().numpy()
-                    )  # [h, w, 3]
+                    y_grid = y_grid[rgb_chans].permute(1, 2, 0).detach().cpu().numpy()  # [h, w, 3]
                     y_grid = (y_grid + 1) / 2
                     y_grid = (y_grid * 255.0).astype(np.uint8)
                     Image.fromarray(y_grid).save(path)

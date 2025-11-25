@@ -102,9 +102,7 @@ class MeanFlow:
         self.cfg_uncond = cfg_uncond
         self.jvp_api = jvp_api
 
-        assert jvp_api in ["funtorch", "autograd"], (
-            "jvp_api must be 'funtorch' or 'autograd'"
-        )
+        assert jvp_api in ["funtorch", "autograd"], "jvp_api must be 'funtorch' or 'autograd'"
         if jvp_api == "funtorch":
             self.jvp_fn = torch.func.jvp
             self.create_graph = False
@@ -119,9 +117,7 @@ class MeanFlow:
 
         elif self.time_dist[0] == "lognorm":
             mu, sigma = self.time_dist[-2], self.time_dist[-1]
-            normal_samples = (
-                np.random.randn(batch_size, 2).astype(np.float32) * sigma + mu
-            )
+            normal_samples = np.random.randn(batch_size, 2).astype(np.float32) * sigma + mu
             samples = 1 / (1 + np.exp(-normal_samples))  # Apply sigmoid
 
         # Assign t = max, r = min, for each pair
@@ -205,9 +201,7 @@ class MeanFlow:
         return loss, mse_val, recon
 
     @torch.no_grad()
-    def sample_each_class(
-        self, model, n_per_class, classes=None, sample_steps=5, device="cuda"
-    ):
+    def sample_each_class(self, model, n_per_class, classes=None, sample_steps=5, device="cuda"):
         model.eval()
 
         if classes is None:
@@ -215,9 +209,7 @@ class MeanFlow:
         else:
             c = torch.tensor(classes, device=device).repeat(n_per_class)
 
-        z = torch.randn(
-            c.shape[0], self.channels, self.image_size, self.image_size, device=device
-        )
+        z = torch.randn(c.shape[0], self.channels, self.image_size, self.image_size, device=device)
 
         t_vals = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
 

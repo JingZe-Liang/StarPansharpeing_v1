@@ -26,7 +26,5 @@ class LogitLaplaceLoss(nn.Module):
     def forward(self, mu, lnb, target):
         logit = torch.logit(target)
         b = torch.exp(lnb)
-        loss = torch.mean(
-            torch.abs(logit - mu) / b + lnb + torch.log(target * (1 - target))
-        )
+        loss = torch.mean(torch.abs(logit - mu) / b + lnb + torch.log(target * (1 - target)))
         return loss

@@ -23,10 +23,7 @@ ZeroDivisionError: division by zero
 
 def lt_hook():
     lt.monkey_patch()
-    logger.warning(
-        "Lovely-Tensors hook is enabled. "
-        "Make sure only call this function in trackback!"
-    )
+    logger.warning("Lovely-Tensors hook is enabled. Make sure only call this function in trackback!")
 
 
 def func_that_raised():

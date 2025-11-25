@@ -48,9 +48,7 @@ class WrappedClipVisual(nn.Module):
 # Perceptual model creation
 
 
-def create_peceptual_model(
-    model_type: str, compute_on_logits, use_lpips_vgg, **model_kwargs
-):
+def create_peceptual_model(model_type: str, compute_on_logits, use_lpips_vgg, **model_kwargs):
     if model_type in ("vgg", "lpips-vgg"):
         assert not compute_on_logits, "LPIPS-VGG does not support computing on logits"
         if use_lpips_vgg:
@@ -67,9 +65,7 @@ def create_peceptual_model(
             "fc": "logits",
         }
     elif model_type == "convnext_s":
-        model = models.convnext_small(
-            weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1
-        )
+        model = models.convnext_small(weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1)
         return_nodes = {
             "features.1": "features_1",
             "features.3": "features_2",
@@ -77,9 +73,7 @@ def create_peceptual_model(
             "classifier": "logits",
         }
     elif model_type == "remote_clip_RN50":
-        assert "clip_model_ckpt_path" in model_kwargs, (
-            "clip_model_ckpt_path must be specified for remote_clip_RN50"
-        )
+        assert "clip_model_ckpt_path" in model_kwargs, "clip_model_ckpt_path must be specified for remote_clip_RN50"
 
         # Zihan note: this is a bit nasty, because it load the
         # whole clip model (with ununsed text model) but anyway, it is simple and works fine
@@ -99,9 +93,7 @@ def create_peceptual_model(
             "final_norm": "logits",
         }
     elif model_type[:6] == "dinov3":
-        model = load_repa_dino_v3_model(
-            model_name=model_type, pretrained_on="satellite"
-        )
+        model = load_repa_dino_v3_model(model_name=model_type, pretrained_on="satellite")
     else:
         raise NotImplementedError(
             f"Unsupported model type: {model_type}. "
@@ -144,13 +136,9 @@ class HyperspectralFeatureLoss:
         # Check on grouping
         assert self.padding_mode in ["zero", "repeat"]
         if isinstance(self.num_groups_to_select, float):
-            assert 0 < self.num_groups_to_select <= 1.0, (
-                "num_groups_to_select must be between 0 and 1"
-            )
+            assert 0 < self.num_groups_to_select <= 1.0, "num_groups_to_select must be between 0 and 1"
         elif isinstance(self.num_groups_to_select, int):
-            assert self.num_groups_to_select > 0, (
-                "num_groups_to_select must be greater than 0"
-            )
+            assert self.num_groups_to_select > 0, "num_groups_to_select must be greater than 0"
         else:
             assert self.num_groups_to_select is None, (
                 f"num_groups_to_select must be either an integer, a float or None, but got {type(self.num_groups_to_select)}"
@@ -167,9 +155,7 @@ class HyperspectralFeatureLoss:
             elif isinstance(self.rgb_channels, (list, tuple)):
                 assert len(self.rgb_channels) == 3, "rgb_channels must be 3 channels"
             else:
-                raise TypeError(
-                    f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}"
-                )
+                raise TypeError(f"rgb_channels must be list or tuple or str, but got {type(rgb_channels)}")
 
     def _pad_channels(self, x: th.Tensor) -> th.Tensor:
         """Pad input tensor channels to make them divisible by group_size.
@@ -226,9 +212,7 @@ class HyperspectralFeatureLoss:
         # linestretch each group
         x_selected = x_selected.view(-1, self.group_size, h, w)
         x_selected = linstretch_torch(x_selected)
-        x_selected = einx.rearrange(
-            "(b g) c h w -> b g c h w", x_selected, b=b, c=self.group_size
-        )
+        x_selected = einx.rearrange("(b g) c h w -> b g c h w", x_selected, b=b, c=self.group_size)
 
         return x_selected
 
@@ -254,9 +238,7 @@ class HyperspectralFeatureLoss:
         return x
 
 
-type PerceptionModelChoices = Literal[
-    "vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"
-]
+type PerceptionModelChoices = Literal["vgg", "lpips-vgg", "resnet", "convnext_s", "remote_clip_RN50"]
 
 
 class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
@@ -308,9 +290,7 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
         )
 
         self.compute_on_logits = compute_on_logits
-        self.use_lpips_vgg = (
-            percep_model[:5] == "lpips" if isinstance(percep_model, str) else False
-        )
+        self.use_lpips_vgg = percep_model[:5] == "lpips" if isinstance(percep_model, str) else False
 
         # Initialize backbone model
         if isinstance(percep_model, nn.Module):
@@ -339,9 +319,7 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
         b, c, h, w = feature_maps.size()
         features = feature_maps.view(b, c, h * w)
         # Atoken: it can stabilize the training, even eliminating the need for GAN training.
-        gram = th.bmm(
-            features, features.transpose(1, 2)
-        )  # [b, c, l] x [b, l, c] -> [b, c, c]
+        gram = th.bmm(features, features.transpose(1, 2))  # [b, c, l] x [b, l, c] -> [b, c, c]
         return gram / (h * w)
 
     def _compute_percep_loss(self, input: th.Tensor, target: th.Tensor) -> th.Tensor:
@@ -371,9 +349,7 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
             return th.nn.functional.mse_loss(features_input, features_target)
         else:
             loss_layers = th.zeros(1).to(input.device)
-            for (_, inp_feat), (_, tgt_feat) in zip(
-                features_input.items(), features_target.items()
-            ):
+            for (_, inp_feat), (_, tgt_feat) in zip(features_input.items(), features_target.items()):
                 loss_layers += th.nn.functional.mse_loss(inp_feat, tgt_feat)
             return loss_layers / len(features_input)
 
@@ -394,9 +370,7 @@ class LPIPSHyperpspectralLoss(nn.Module, HyperspectralFeatureLoss):
                 )
                 feats = {str(idx): feat for idx, feat in zip(range(len(feats)), feats)}
             else:
-                raise RuntimeError(
-                    f"Dino v3 model must has method get_intermediate_layers to take features"
-                )
+                raise RuntimeError(f"Dino v3 model must has method get_intermediate_layers to take features")
             return feats
         # vgg-like model that has feature hook
         else:
@@ -511,9 +485,7 @@ def test_hyperspectral_perceptual_loss():
     ]
 
     # 合并所有测试用例
-    all_test_cases = (
-        base_test_cases + extended_test_cases + edge_cases + gram_test_cases
-    )
+    all_test_cases = base_test_cases + extended_test_cases + edge_cases + gram_test_cases
 
     for config in all_test_cases:
         print(f"\nTesting config: {config}")
@@ -555,9 +527,7 @@ def test_hyperspectral_perceptual_loss():
                 assert loss_dict["gram_loss"].item() == 0
                 print("Gram Loss inactive as expected")
 
-            print(
-                f"Test passed! Total loss: {(loss_dict['perceptual_loss'] + loss_dict['gram_loss']).item():.4f}"
-            )
+            print(f"Test passed! Total loss: {(loss_dict['perceptual_loss'] + loss_dict['gram_loss']).item():.4f}")
 
         except Exception as e:
             print(f"Test failed for config {config}: {str(e)}")

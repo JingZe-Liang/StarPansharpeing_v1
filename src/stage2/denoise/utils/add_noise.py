@@ -33,11 +33,7 @@ class BaseNormalizer:
 
     def get_id(self):
         attributes = [self.__class__.__name__]
-        attributes += [
-            k[:3] + str(v)
-            for k, v in self.__dict__.items()
-            if not isinstance(v, torch.Tensor)
-        ]
+        attributes += [k[:3] + str(v) for k, v in self.__dict__.items() if not isinstance(v, torch.Tensor)]
         return "_".join(attributes).replace(".", "")
 
     def __repr__(self):
@@ -78,9 +74,7 @@ class BandMinMaxQuantileStateful(BaseNormalizer):
         bands = x_train.shape[0]
         q_global = np.zeros((bands, 2))
         for b in range(bands):
-            q_global[b] = np.percentile(
-                x_train[b].cpu().numpy(), q=100 * np.array([self.low, self.up])
-            )
+            q_global[b] = np.percentile(x_train[b].cpu().numpy(), q=100 * np.array([self.low, self.up]))
 
         self.q = torch.tensor(q_global, dtype=torch.float32).T[..., None, None]
 
@@ -106,12 +100,7 @@ def Data2Volume(data, ksizes, strides):
     args = [range(kz) for kz in ksizes]
     for s in product(*args):
         s1 = (slice(None),) + s
-        s2 = tuple(
-            [
-                slice(key, -ksizes[i] + key + 1 or None, strides[i])
-                for i, key in enumerate(s)
-            ]
-        )
+        s2 = tuple([slice(key, -ksizes[i] + key + 1 or None, strides[i]) for i, key in enumerate(s)])
         V[s1] = np.reshape(data[s2], -1)
 
     return V
@@ -185,9 +174,7 @@ def Visualize3D(data, meta=None):
     frame = 0
     # l = plt.imshow(data[frame,:,:])
 
-    l = plt.imshow(
-        data[frame, :, :], cmap="gray"
-    )  # shows 256x256 image, i.e. 0th frame
+    l = plt.imshow(data[frame, :, :], cmap="gray")  # shows 256x256 image, i.e. 0th frame
     # plt.colorbar()
     axcolor = "lightgoldenrodyellow"
     axframe = plt.axes([0.25, 0.1, 0.65, 0.03], facecolor=axcolor)
@@ -483,9 +470,7 @@ class _AddNoiseStripe(object):
     def __call__(self, img, bands):
         B, H, W = img.shape
         # bands = np.random.permutation(range(img.shape[0]))[:len(bands)]
-        num_stripe = np.random.randint(
-            np.floor(self.min_amount * W), np.floor(self.max_amount * W), len(bands)
-        )
+        num_stripe = np.random.randint(np.floor(self.min_amount * W), np.floor(self.max_amount * W), len(bands))
         for i, n in zip(bands, num_stripe):
             loc = np.random.permutation(range(W))
             loc = loc[:n]
@@ -503,10 +488,7 @@ class AddNoiseNoniid_v2(object):
 
     def __call__(self, img):
         bwsigmas = np.reshape(
-            (
-                np.random.rand(img.shape[0]) * (self.max_sigma - self.min_sigma)
-                + self.min_sigma
-            ),
+            (np.random.rand(img.shape[0]) * (self.max_sigma - self.min_sigma) + self.min_sigma),
             (-1, 1, 1),
         )
         noise = np.random.randn(*img.shape) * bwsigmas / 255
@@ -524,9 +506,7 @@ class _AddNoiseDeadline(object):
     def __call__(self, img, bands):
         B, H, W = img.shape
         # bands = np.random.permutation(range(img.shape[0]))[:len(bands)]
-        num_deadline = np.random.randint(
-            np.ceil(self.min_amount * W), np.ceil(self.max_amount * W), len(bands)
-        )
+        num_deadline = np.random.randint(np.ceil(self.min_amount * W), np.ceil(self.max_amount * W), len(bands))
         for i, n in zip(bands, num_deadline):
             loc = np.random.permutation(range(W))
             loc = loc[:n]
@@ -547,9 +527,7 @@ class _AddNoiseinpainting(object):
         num = np.random.randint(0, self.num)
         num = self.num
         B, H, W = img.shape
-        width_deadline = np.random.randint(
-            np.ceil(self.min_amount * W), np.ceil(self.max_amount * W), num
-        )
+        width_deadline = np.random.randint(np.ceil(self.min_amount * W), np.ceil(self.max_amount * W), num)
         loc_start = np.random.randint(0, W - np.ceil(self.max_amount * W) - 1, num)
         # loc_start = [10, 50, 80, 120, 150, 190]
         # width_deadline = [10, 15, 5, 10, 20, 5]

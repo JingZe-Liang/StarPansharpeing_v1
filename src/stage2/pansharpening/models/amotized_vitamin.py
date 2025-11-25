@@ -47,9 +47,7 @@ class AmotizedPansharpeningVitamin(AmotizedModelMixin):
             norm_layer="layernorm",
             mlp_norm_layer="layernorm",
         )
-        conv_cfg = ConvCfg(
-            expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-        )
+        conv_cfg = ConvCfg(expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d")
         vitamin_cfg = VitaminCfg(
             stem_width=32,
             embed_dim=[64, 192, 192],
@@ -128,9 +126,7 @@ def test_amotized_pansharpening_model():
                 print("Output type:", type(output))
                 print(
                     "Output shape(s):",
-                    [out.shape for out in output]
-                    if isinstance(output, (tuple, list))
-                    else output.shape,
+                    [out.shape for out in output] if isinstance(output, (tuple, list)) else output.shape,
                 )
 
             print("✓ Model forward pass successful!")

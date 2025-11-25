@@ -130,12 +130,8 @@ class UnmixingTrainer:
         # dataloader
         used_dataset = self.dataset_cfg.cfgs.used
         self.log_msg(f"[Data]: using dataset {used_dataset}")
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train_loader
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val_loader
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train_loader)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val_loader)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -172,23 +168,14 @@ class UnmixingTrainer:
         torch.cuda.empty_cache()
 
     def setup_unmixing_model(self) -> Callable[..., None]:
-        self.model: DownstreamModelTokenizerWrapper = hydra.utils.instantiate(
-            self.cfg.unmixing_model
-        ).to(self.device)
+        self.model: DownstreamModelTokenizerWrapper = hydra.utils.instantiate(self.cfg.unmixing_model).to(self.device)
         self.unmixing_amotizing_pixels = self.model.downstream_model.amotizing_pixels
 
-        pansp_name = (
-            getattr(self.train_cfg, "unmixing_name", None)
-            or self.model.__class__.__name__
-        )
-        self.log_msg(
-            f"use unmixing model: {pansp_name}, amotizing pixels: {self.unmixing_amotizing_pixels}"
-        )
+        pansp_name = getattr(self.train_cfg, "unmixing_name", None) or self.model.__class__.__name__
+        self.log_msg(f"use unmixing model: {pansp_name}, amotizing pixels: {self.unmixing_amotizing_pixels}")
 
         # Set gradient checkpointing
-        if self.train_cfg.set_grad_checkpoint and hasattr(
-            self.model, "set_grad_checkpointing"
-        ):
+        if self.train_cfg.set_grad_checkpoint and hasattr(self.model, "set_grad_checkpointing"):
             self.model.set_grad_checkpoint(True)
 
         # Initialize the model endmember using VCA
@@ -217,9 +204,7 @@ class UnmixingTrainer:
                 # )
 
                 self._inited_endmember = True
-                self.log_msg(
-                    f"[Unmixing Model]: endmembers initialized with shape {endmembers.shape}"
-                )
+                self.log_msg(f"[Unmixing Model]: endmembers initialized with shape {endmembers.shape}")
         else:
             _model_init_EM_delayed = lambda endmembers: None
         return _model_init_EM_delayed
@@ -265,9 +250,7 @@ class UnmixingTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>{level} - [{file.name}:{line}]</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>{level} - [{file.name}:{line}]</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
             self.logger.add(
@@ -414,8 +397,7 @@ class UnmixingTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
@@ -423,46 +405,31 @@ class UnmixingTrainer:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
-                    params = params_getter(
-                        with_name=False if self.train_cfg.no_wd_name is None else True
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
+                    params = params_getter(with_name=False if self.train_cfg.no_wd_name is None else True)
                     # set the wd=0. param groups
                     if (no_wd_name := self.train_cfg.no_wd_name) is not None:
                         named_params = params_getter(with_name=True)
-                        self.log_msg(
-                            f"set no weight decay for params matching pattern: {no_wd_name}"
-                        )
+                        self.log_msg(f"set no weight decay for params matching pattern: {no_wd_name}")
                         # Use the existing utility function to create parameter groups
                         params = filter_no_wds_into_optim_groups(params, no_wd_name)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
             _get_model_params = (
-                lambda with_name: self.model.named_parameters()
-                if with_name
-                else self.model.parameters()
+                lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
             )
-            model_opt = _optimizer_creater(
-                self.train_cfg.unmixing_optim, _get_model_params
-            )
+            model_opt = _optimizer_creater(self.train_cfg.unmixing_optim, _get_model_params)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            model_sched = hydra.utils.instantiate(self.train_cfg.unmixing_sched)(
-                optimizer=model_opt
-            )
+            model_sched = hydra.utils.instantiate(self.train_cfg.unmixing_sched)(optimizer=model_opt)
         else:
             model_sched = DummyScheduler(model_opt)
 
@@ -526,14 +493,10 @@ class UnmixingTrainer:
 
     def get_training_sample_channels(self):
         bands: int = getattr(self, "_processed_bands", self.dataset_cfg.consts.bands)
-        assert bands is not None and bands.is_integer() and bands > 0, (
-            f"channel num: {bands}"
-        )
+        assert bands is not None and bands.is_integer() and bands > 0, f"channel num: {bands}"
         return bands
 
-    def forward_tokenizer(
-        self, x: torch.Tensor, mode: str = "encode", no_grad=True
-    ) -> dict:
+    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True) -> dict:
         """
         Forward through tokenizer using wrapper functionality.
 
@@ -586,9 +549,7 @@ class UnmixingTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -603,9 +564,7 @@ class UnmixingTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -613,9 +572,7 @@ class UnmixingTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -712,9 +669,7 @@ class UnmixingTrainer:
         abunds_fcls: torch.Tensor | None = None,
         endmember_gt: torch.Tensor | None = None,
     ):
-        out = self.forward_unmixing_model(
-            img, img_latent, abunds_gt, abunds_fcls, endmember_gt
-        )
+        out = self.forward_unmixing_model(img, img_latent, abunds_gt, abunds_fcls, endmember_gt)
 
         if self.accelerator.sync_gradients:
             # backward
@@ -815,17 +770,12 @@ class UnmixingTrainer:
     def format_log(self, log_loss: dict, sync=False) -> str:
         if sync:
             log_loss = dict_tensor_sync(log_loss)
-        strings = dict_round_to_list_str(
-            log_loss, select=list(log_loss.keys()), n_round=5
-        )
+        strings = dict_round_to_list_str(log_loss, select=list(log_loss.keys()), n_round=5)
         return " - ".join(strings)
 
     def _cast_dtype(self, x: dict | Tensor):
         if isinstance(x, dict):
-            return {
-                k: v.to(self.device, self.dtype) if torch.is_tensor(v) else v
-                for k, v in x.items()
-            }
+            return {k: v.to(self.device, self.dtype) if torch.is_tensor(v) else v for k, v in x.items()}
         elif isinstance(x, Tensor):
             return x.to(self.device, self.dtype)
         else:
@@ -836,9 +786,7 @@ class UnmixingTrainer:
             w_size = self.dataset_cfg.cfgs.window_size
             stride = self.dataset_cfg.cfgs.stride
             if w_size > 0:
-                slider = WindowSlider(
-                    slide_keys=["img", "abunds"], window_size=w_size, stride=stride
-                )
+                slider = WindowSlider(slide_keys=["img", "abunds"], window_size=w_size, stride=stride)
                 for batch in slider.create_window_generator(self.train_dataloader):
                     yield self._cast_dtype(batch)
             else:
@@ -862,9 +810,7 @@ class UnmixingTrainer:
                 self.optim.zero_grad()
                 self.val_loop()
                 self.model.train()
-                for (name, _p), (_, _p_val) in zip(
-                    __ps.items(), self.model.named_parameters()
-                ):
+                for (name, _p), (_, _p_val) in zip(__ps.items(), self.model.named_parameters()):
                     if not torch.allclose(_p, _p_val, atol=1e-7):
                         self.log_msg(
                             f"{name} changed after val loop, max diff: {(_p - _p_val).abs().max()}",
@@ -874,17 +820,12 @@ class UnmixingTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def _finite_val_loader(self):
@@ -896,9 +837,7 @@ class UnmixingTrainer:
         self._is_val_sliding_window = False
 
         if val_w_size > 0:
-            val_slider = WindowSlider(
-                slide_keys=["img", "abunds"], window_size=val_w_size, stride=val_stride
-            )
+            val_slider = WindowSlider(slide_keys=["img", "abunds"], window_size=val_w_size, stride=val_stride)
             self._is_val_sliding_window = True
             self._val_slider = val_slider
             for batch in val_slider.create_window_generator(self.val_dataloader):
@@ -912,9 +851,7 @@ class UnmixingTrainer:
         if isinstance(self.val_dataloader, Generator):
             self.log_msg("[Val]: reload the val_dataloader")
             self.val_dataloader = self.val_dataset()
-            assert isinstance(self.val_dataloader, Generator), (
-                "val_dataloader must be a generator"
-            )
+            assert isinstance(self.val_dataloader, Generator), "val_dataloader must be a generator"
 
     def val_step(self, batch: BatchInput):
         """
@@ -957,13 +894,9 @@ class UnmixingTrainer:
     def val_loop(self):
         val_iter = self._finite_val_loader()
         # Init loss dict metrics
-        loss_metrics = {
-            k: MeanMetric().to(self.device) for k in self.unmixing_loss.loss_names
-        }
+        loss_metrics = {k: MeanMetric().to(self.device) for k in self.unmixing_loss.loss_names}
         loss_metrics_update = lambda log_losses: {
-            k: v.update(log_losses[k])
-            for k, v in loss_metrics.items()
-            if k in log_losses
+            k: v.update(log_losses[k]) for k, v in loss_metrics.items() if k in log_losses
         }
 
         val_out = None
@@ -999,14 +932,10 @@ class UnmixingTrainer:
         # Print out metrics
         _log_losses = self.format_log(loss_val)
         _log_metrics = self.format_log(metrics)
-        self.log_msg(
-            "\n\n===================== Unmixing Validation ====================="
-        )
+        self.log_msg("\n\n===================== Unmixing Validation =====================")
         self.log_msg(f"[Val Unmixing Loss]: {_log_losses}")
         self.log_msg(f"[Val Unmixing Metrics]: {_log_metrics}")
-        self.log_msg(
-            "===============================================================\n\n"
-        )
+        self.log_msg("===============================================================\n\n")
 
         assert val_out is not None
         if self.accelerator.is_main_process:
@@ -1042,9 +971,7 @@ class UnmixingTrainer:
         ema_path = self.proj_dir / "ema"
         if self.accelerator.is_main_process:
             ema_path.mkdir(parents=True, exist_ok=True)
-        self.accelerator.save_model(
-            self.ema_model.ema_model, ema_path / "unmixing_ema_model"
-        )
+        self.accelerator.save_model(self.ema_model.ema_model, ema_path / "unmixing_ema_model")
 
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
@@ -1055,17 +982,13 @@ class UnmixingTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.model, ema_path / "model", strict=strict
-        )
+        accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1114,12 +1037,8 @@ class UnmixingTrainer:
 
         _only_n = only_vis_n or 16
         _n_row = min(4, int(math.sqrt(_only_n)))
-        to_img = lambda x: tensor_to_image(
-            make_grid(x[:_only_n].float(), n_row=_n_row, padding=2)
-        )
-        vis_fn = lambda x: to_img(
-            get_rgb_image(x, self.dataset_cfg.consts.rgb_channels, use_linstretch=False)
-        )
+        to_img = lambda x: tensor_to_image(make_grid(x[:_only_n].float(), n_row=_n_row, padding=2))
+        vis_fn = lambda x: to_img(get_rgb_image(x, self.dataset_cfg.consts.rgb_channels, use_linstretch=False))
 
         x_np = vis_fn(x)
 
@@ -1210,15 +1129,11 @@ class UnmixingTrainer:
 
         # Use the endmembers_visualize function to create the plot
         # This returns: sad_values, ordered_endmembers, ordered_abundances, fig, axes
-        sad_values, _, ordered_abundances, fig, _ = endmembers_visualize(
-            end_members, end_members_gt, abunds_vis
-        )
+        sad_values, _, ordered_abundances, fig, _ = endmembers_visualize(end_members, end_members_gt, abunds_vis)
 
         # Save the endmember comparison plot
         if add_step:
-            endmember_plot_name = (
-                f"{img_name}_endmembers_step_{str(self.global_step).zfill(6)}.png"
-            )
+            endmember_plot_name = f"{img_name}_endmembers_step_{str(self.global_step).zfill(6)}.png"
         else:
             endmember_plot_name = f"{img_name}_endmembers.png"
 
@@ -1292,9 +1207,7 @@ class UnmixingTrainer:
         abunds = abunds[:_only_n]
 
         # Visualize endmembers
-        self.endmembers_visualize(
-            abunds, end_members, end_members_gt, f"{img_name}_endmembers", add_step
-        )
+        self.endmembers_visualize(abunds, end_members, end_members_gt, f"{img_name}_endmembers", add_step)
 
         # Visualize abundance maps if ground truth is available
         if abunds_gt is not None:
@@ -1314,15 +1227,11 @@ class UnmixingTrainer:
             dummy_endmembers_gt = end_members.clone()
 
             # Use the abunds_visualize function to create abundance comparison plots
-            fig, axes = abunds_visualize(
-                end_members, dummy_endmembers_gt, abunds_vis, abunds_gt_vis
-            )
+            fig, axes = abunds_visualize(end_members, dummy_endmembers_gt, abunds_vis, abunds_gt_vis)
 
             # Save the abundance comparison plot
             if add_step:
-                abundance_plot_name = (
-                    f"{img_name}_abunds_step_{str(self.global_step).zfill(6)}.png"
-                )
+                abundance_plot_name = f"{img_name}_abunds_step_{str(self.global_step).zfill(6)}.png"
             else:
                 abundance_plot_name = f"{img_name}_abunds.png"
 
@@ -1334,9 +1243,7 @@ class UnmixingTrainer:
 
             self.log_msg(f"[Visualize]: save abundance comparison at {save_path}")
         else:
-            self.log_msg(
-                "[Visualize]: No ground truth abundances provided, skipping abundance comparison"
-            )
+            self.log_msg("[Visualize]: No ground truth abundances provided, skipping abundance comparison")
 
     def run(self):
         if self.train_cfg.resume_path is not None:

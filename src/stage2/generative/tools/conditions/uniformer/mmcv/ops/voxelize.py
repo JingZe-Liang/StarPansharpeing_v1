@@ -6,9 +6,7 @@ from torch.nn.modules.utils import _pair
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["dynamic_voxelize_forward", "hard_voxelize_forward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["dynamic_voxelize_forward", "hard_voxelize_forward"])
 
 
 class _Voxelization(Function):
@@ -41,9 +39,7 @@ class _Voxelization(Function):
         """
         if max_points == -1 or max_voxels == -1:
             coors = points.new_zeros(size=(points.size(0), 3), dtype=torch.int)
-            ext_module.dynamic_voxelize_forward(
-                points, coors, voxel_size, coors_range, 3
-            )
+            ext_module.dynamic_voxelize_forward(points, coors, voxel_size, coors_range, 3)
             return coors
         else:
             voxels = points.new_zeros(size=(max_voxels, max_points, points.size(1)))

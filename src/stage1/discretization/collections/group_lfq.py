@@ -130,9 +130,7 @@ def entropy_loss(
     else:
         sample_entropy = torch.mean(sample_entropy)
 
-    loss = (sample_minimization_weight * sample_entropy) - (
-        batch_maximization_weight * avg_entropy
-    )
+    loss = (sample_minimization_weight * sample_entropy) - (batch_maximization_weight * avg_entropy)
 
     return sample_entropy, avg_entropy, loss
 
@@ -153,9 +151,7 @@ class LFQ(Module):
 
         # some assert validations
 
-        assert exists(dim) or exists(codebook_size), (
-            "either dim or codebook_size must be specified for LFQ"
-        )
+        assert exists(dim) or exists(codebook_size), "either dim or codebook_size must be specified for LFQ"
         assert not exists(codebook_size) or log2(codebook_size).is_integer(), (
             f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
         )
@@ -180,17 +176,11 @@ class LFQ(Module):
         # for no auxiliary loss, during inference
         self.token_factorization = token_factorization
         if not self.token_factorization:  # for first stage model
-            self.register_buffer(
-                "mask", 2 ** torch.arange(self.codebook_dim), persistent=False
-            )
+            self.register_buffer("mask", 2 ** torch.arange(self.codebook_dim), persistent=False)
         else:
             self.factorized_bits = factorized_bits
-            self.register_buffer(
-                "pre_mask", 2 ** torch.arange(factorized_bits[0]), persistent=False
-            )
-            self.register_buffer(
-                "post_mask", 2 ** torch.arange(factorized_bits[1]), persistent=False
-            )
+            self.register_buffer("pre_mask", 2 ** torch.arange(factorized_bits[0]), persistent=False)
+            self.register_buffer("post_mask", 2 ** torch.arange(factorized_bits[1]), persistent=False)
 
         self.register_buffer("zero", torch.tensor(0.0), persistent=False)
 
@@ -219,17 +209,11 @@ class LFQ(Module):
     def get_codebook_entry(self, x, bhwc, order):  # 0610
         if self.token_factorization:
             if order == "pre":
-                mask = 2 ** torch.arange(
-                    self.factorized_bits[0], device=x.device, dtype=torch.long
-                )
+                mask = 2 ** torch.arange(self.factorized_bits[0], device=x.device, dtype=torch.long)
             else:
-                mask = 2 ** torch.arange(
-                    self.factorized_bits[1], device=x.device, dtype=torch.long
-                )
+                mask = 2 ** torch.arange(self.factorized_bits[1], device=x.device, dtype=torch.long)
         else:
-            mask = 2 ** torch.arange(
-                self.codebook_dim, device=x.device, dtype=torch.long
-            )
+            mask = 2 ** torch.arange(self.codebook_dim, device=x.device, dtype=torch.long)
 
         x = (x.unsqueeze(-1) & mask) != 0  # []
         x = x * 2.0 - 1.0  # back to the float
@@ -292,29 +276,23 @@ class LFQ(Module):
         x = rearrange(x, "b n (c d) -> b n c d", c=self.num_codebooks)
 
         codebook_value = torch.Tensor([1.0]).to(device=x.device, dtype=x.dtype)
-        quantized = torch.where(
-            x > 0, codebook_value, -codebook_value
-        )  # higher than 0 filled
+        quantized = torch.where(x > 0, codebook_value, -codebook_value)  # higher than 0 filled
 
         # calculate indices
         if self.token_factorization:
             indices_pre = reduce(
-                (quantized[..., : self.factorized_bits[0]] > 0).int()
-                * self.pre_mask.int(),
+                (quantized[..., : self.factorized_bits[0]] > 0).int() * self.pre_mask.int(),
                 "b n c d -> b n c",
                 "sum",
             )
             indices_post = reduce(
-                (quantized[..., self.factorized_bits[0] :] > 0).int()
-                * self.post_mask.int(),
+                (quantized[..., self.factorized_bits[0] :] > 0).int() * self.post_mask.int(),
                 "b n c d -> b n c",
                 "sum",
             )
         else:
             # [b, n, c, d] * [d] = [b, n, c, d] --- sum ---> [b, n, c]
-            indices = reduce(
-                (quantized > 0).int() * self.mask.int(), "b n c d -> b n c", "sum"
-            )
+            indices = reduce((quantized > 0).int() * self.mask.int(), "b n c d -> b n c", "sum")
 
         # entropy aux loss
 
@@ -379,9 +357,7 @@ class LFQ(Module):
         if not return_loss_breakdown:
             return ret
 
-        return ret, LossBreakdown(
-            per_sample_entropy, codebook_entropy, commit_loss, avg_probs
-        )
+        return ret, LossBreakdown(per_sample_entropy, codebook_entropy, commit_loss, avg_probs)
 
 
 class GFQ(Module):
@@ -400,9 +376,7 @@ class GFQ(Module):
 
         # some assert validations
 
-        assert exists(dim) or exists(codebook_size), (
-            "either dim or codebook_size must be specified for LFQ"
-        )
+        assert exists(dim) or exists(codebook_size), "either dim or codebook_size must be specified for LFQ"
         assert not exists(codebook_size) or log2(codebook_size).is_integer(), (
             f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
         )
@@ -412,9 +386,7 @@ class GFQ(Module):
 
         codebook_dims = self.codebook_dim * num_codebooks
         dim = default(dim, codebook_dims)
-        assert dim == sum(factorized_bits), (
-            f"dim ({dim}) must match ({sum(factorized_bits)=})"
-        )
+        assert dim == sum(factorized_bits), f"dim ({dim}) must match ({sum(factorized_bits)=})"
 
         has_projections = dim != codebook_dims
         self.has_projections = has_projections
@@ -430,15 +402,11 @@ class GFQ(Module):
         # for no auxiliary loss, during inference
         self.token_factorization = token_factorization
         if not self.token_factorization:  # for first stage model
-            self.register_buffer(
-                "mask", 2 ** torch.arange(self.codebook_dim), persistent=False
-            )
+            self.register_buffer("mask", 2 ** torch.arange(self.codebook_dim), persistent=False)
         else:
             self.factorized_bits = factorized_bits
             for i, factorized_bit in enumerate(factorized_bits):
-                self.register_buffer(
-                    f"mask_{i}", 2 ** torch.arange(factorized_bit), persistent=False
-                )
+                self.register_buffer(f"mask_{i}", 2 ** torch.arange(factorized_bit), persistent=False)
         self.register_buffer("zero", torch.tensor(0.0), persistent=False)
 
         # codes
@@ -465,11 +433,7 @@ class GFQ(Module):
         return x
 
     def get_codebook_entry(self, x, bhwc, index_order):  # 0610
-        mask = (
-            getattr(self, f"mask_{index_order}")
-            if self.token_factorization
-            else self.mask
-        )
+        mask = getattr(self, f"mask_{index_order}") if self.token_factorization else self.mask
         mask = mask.to(device=x.device, dtype=torch.long)
 
         x = (x.unsqueeze(-1) & mask) != 0
@@ -533,9 +497,7 @@ class GFQ(Module):
         x = rearrange(x, "b n (c d) -> b n c d", c=self.num_codebooks)
 
         codebook_value = torch.Tensor([1.0]).to(device=x.device, dtype=x.dtype)
-        quantized = torch.where(
-            x > 0, codebook_value, -codebook_value
-        )  # higher than 0 filled
+        quantized = torch.where(x > 0, codebook_value, -codebook_value)  # higher than 0 filled
 
         # calculate indices
         if self.token_factorization:
@@ -554,13 +516,9 @@ class GFQ(Module):
                 )
                 indices_list.append(indices)
                 begin += factorized_bit
-            quantized = rearrange(
-                quantized, "b n 1 (c d) -> b n c d", c=self.num_codebooks
-            )
+            quantized = rearrange(quantized, "b n 1 (c d) -> b n c d", c=self.num_codebooks)
         else:
-            indices = reduce(
-                (quantized > 0).int() * self.mask.int(), "b n c d -> b n c", "sum"
-            )
+            indices = reduce((quantized > 0).int() * self.mask.int(), "b n c d -> b n c", "sum")
 
         # entropy aux loss
         if self.training and return_loss:
@@ -621,9 +579,7 @@ class GFQ(Module):
         if not return_loss_breakdown:
             return ret
 
-        return ret, LossBreakdown(
-            per_sample_entropy, codebook_entropy, commit_loss, avg_probs
-        )
+        return ret, LossBreakdown(per_sample_entropy, codebook_entropy, commit_loss, avg_probs)
 
 
 # * --- tests --- * #
@@ -641,9 +597,7 @@ def test_lfq():
         token_factorization=False,
     )
 
-    image_feats = torch.randn(
-        2, 32, 16, 16
-    )  # 16 is dim, must be power of 2 of codebook_size
+    image_feats = torch.randn(2, 32, 16, 16)  # 16 is dim, must be power of 2 of codebook_size
 
     get_memory_info()
     quantized, entropy_aux_loss, indices = quantizer(
@@ -652,9 +606,7 @@ def test_lfq():
     get_memory_info()
 
     assert image_feats.shape == quantized.shape
-    assert (
-        quantized == quantizer.get_codebook_entry(indices, (2, 16, 16, 32), "pre")
-    ).all()
+    assert (quantized == quantizer.get_codebook_entry(indices, (2, 16, 16, 32), "pre")).all()
 
 
 def test_gfq():
@@ -667,9 +619,7 @@ def test_gfq():
     )
 
     get_memory_info()
-    image_feats = torch.randn(
-        2, 18, 16, 16
-    )  # 18 is dim, must be power of 2 of codebook_size
+    image_feats = torch.randn(2, 18, 16, 16)  # 18 is dim, must be power of 2 of codebook_size
 
     quantized, entropy, indices = quantizer(
         image_feats, inv_temperature=100.0

@@ -53,9 +53,7 @@ def pred_lines(image, model, input_shape=[512, 512], score_thr=0.10, dist_thr=20
 
     resized_image = np.concatenate(
         [
-            cv2.resize(
-                image, (input_shape[1], input_shape[0]), interpolation=cv2.INTER_AREA
-            ),
+            cv2.resize(image, (input_shape[1], input_shape[0]), interpolation=cv2.INTER_AREA),
             np.ones([input_shape[0], input_shape[1], 1]),
         ],
         axis=-1,
@@ -124,9 +122,7 @@ def pred_squares(
 
     resized_image = np.concatenate(
         [
-            cv2.resize(
-                image, (input_shape[0], input_shape[1]), interpolation=cv2.INTER_AREA
-            ),
+            cv2.resize(image, (input_shape[0], input_shape[1]), interpolation=cv2.INTER_AREA),
             np.ones([input_shape[0], input_shape[1], 1]),
         ],
         axis=-1,
@@ -275,9 +271,7 @@ def pred_squares(
     inter_y = (pre_inter_y - np.transpose(pre_inter_y)) / (det + 1e-10)
     pre_inter_x = c[:, None] * b[None, :]
     inter_x = (pre_inter_x - np.transpose(pre_inter_x)) / (det + 1e-10)
-    inter_pts = np.concatenate(
-        [inter_x[:, :, None], inter_y[:, :, None]], axis=-1
-    ).astype("int32")
+    inter_pts = np.concatenate([inter_x[:, :, None], inter_y[:, :, None]], axis=-1).astype("int32")
 
     # 3. get corner information
     # 3.1 get distance
@@ -309,28 +303,20 @@ def pred_squares(
 
     # sort ascending
     dist_inter_to_segment1 = np.sort(
-        np.concatenate(
-            [dist_inter_to_segment1_start, dist_inter_to_segment1_end], axis=-1
-        ),
+        np.concatenate([dist_inter_to_segment1_start, dist_inter_to_segment1_end], axis=-1),
         axis=-1,
     )  # [n_batch, n_batch, 2]
     dist_inter_to_segment2 = np.sort(
-        np.concatenate(
-            [dist_inter_to_segment2_start, dist_inter_to_segment2_end], axis=-1
-        ),
+        np.concatenate([dist_inter_to_segment2_start, dist_inter_to_segment2_end], axis=-1),
         axis=-1,
     )  # [n_batch, n_batch, 2]
 
     # 3.2 get degree
     inter_to_start = new_centers[:, None, :] - inter_pts
-    deg_inter_to_start = (
-        np.arctan2(inter_to_start[:, :, 1], inter_to_start[:, :, 0]) * 180 / np.pi
-    )
+    deg_inter_to_start = np.arctan2(inter_to_start[:, :, 1], inter_to_start[:, :, 0]) * 180 / np.pi
     deg_inter_to_start[deg_inter_to_start < 0.0] += 360
     inter_to_end = new_centers[None, :, :] - inter_pts
-    deg_inter_to_end = (
-        np.arctan2(inter_to_end[:, :, 1], inter_to_end[:, :, 0]) * 180 / np.pi
-    )
+    deg_inter_to_end = np.arctan2(inter_to_end[:, :, 1], inter_to_end[:, :, 0]) * 180 / np.pi
     deg_inter_to_end[deg_inter_to_end < 0.0] += 360
 
     """
@@ -346,9 +332,7 @@ def pred_squares(
     # rename variables
     deg1_map, deg2_map = deg_inter_to_start, deg_inter_to_end
     # sort deg ascending
-    deg_sort = np.sort(
-        np.concatenate([deg1_map[:, :, None], deg2_map[:, :, None]], axis=-1), axis=-1
-    )
+    deg_sort = np.sort(np.concatenate([deg1_map[:, :, None], deg2_map[:, :, None]], axis=-1), axis=-1)
 
     deg_diff_map = np.abs(deg1_map - deg2_map)
     # we only consider the smallest degree of intersect
@@ -373,24 +357,20 @@ def pred_squares(
             check_distance = (
                 (
                     dist_inter_to_segment1[i, j, 1] >= dist_segments[i]
-                    and dist_inter_to_segment1[i, j, 0]
-                    <= dist_segments[i] * outside_ratio
+                    and dist_inter_to_segment1[i, j, 0] <= dist_segments[i] * outside_ratio
                 )
                 or (
                     dist_inter_to_segment1[i, j, 1] <= dist_segments[i]
-                    and dist_inter_to_segment1[i, j, 0]
-                    <= dist_segments[i] * inside_ratio
+                    and dist_inter_to_segment1[i, j, 0] <= dist_segments[i] * inside_ratio
                 )
             ) and (
                 (
                     dist_inter_to_segment2[i, j, 1] >= dist_segments[j]
-                    and dist_inter_to_segment2[i, j, 0]
-                    <= dist_segments[j] * outside_ratio
+                    and dist_inter_to_segment2[i, j, 0] <= dist_segments[j] * outside_ratio
                 )
                 or (
                     dist_inter_to_segment2[i, j, 1] <= dist_segments[j]
-                    and dist_inter_to_segment2[i, j, 0]
-                    <= dist_segments[j] * inside_ratio
+                    and dist_inter_to_segment2[i, j, 0] <= dist_segments[j] * inside_ratio
                 )
             )
 
@@ -464,12 +444,7 @@ def pred_squares(
                                             | line_idx0_i, line_idx0_j, line_idx1_i, line_idx1_j, line_idx2_i, line_idx2_j, line_idx3_i, line_idx3_j |
                                             ...
                                         """
-                                        square_list.append(
-                                            corner0[:2]
-                                            + corner1[:2]
-                                            + corner2[:2]
-                                            + corner3[:2]
-                                        )
+                                        square_list.append(corner0[:2] + corner1[:2] + corner2[:2] + corner3[:2])
                                         connect_list.append(
                                             [
                                                 corner0_line,
@@ -478,12 +453,7 @@ def pred_squares(
                                                 corner3_line,
                                             ]
                                         )
-                                        segments_list.append(
-                                            corner0[2:]
-                                            + corner1[2:]
-                                            + corner2[2:]
-                                            + corner3[2:]
-                                        )
+                                        segments_list.append(corner0[2:] + corner1[2:] + corner2[2:] + corner3[2:])
 
     def check_outside_inside(segments_info, connect_idx):
         # return 'outside or inside', min distance, cover_param, peri_param
@@ -516,9 +486,7 @@ def pred_squares(
         normalized_vec1 = vec1 / (np.linalg.norm(vec1, axis=-1, keepdims=True) + 1e-10)
         vec2 = squares_rolldown - squares
         normalized_vec2 = vec2 / (np.linalg.norm(vec2, axis=-1, keepdims=True) + 1e-10)
-        inner_products = np.sum(
-            normalized_vec1 * normalized_vec2, axis=-1
-        )  # [n_squares, 4]
+        inner_products = np.sum(normalized_vec1 * normalized_vec2, axis=-1)  # [n_squares, 4]
         squares_degree = np.arccos(inner_products) * 180 / np.pi  # [n_squares, 4]
 
         # get square score
@@ -526,9 +494,7 @@ def pred_squares(
         degree_scores = []
         length_scores = []
 
-        for connects, segments, square, degree in zip(
-            connect_array, segments_array, squares, squares_degree
-        ):
+        for connects, segments, square, degree in zip(connect_array, segments_array, squares, squares_degree):
             """
             0 -- 1
             |    |
@@ -555,28 +521,16 @@ def pred_squares(
                 end_point = square[end_idx]
 
                 # check whether outside or inside
-                start_position, start_min, start_cover_param, start_peri_param = (
-                    check_outside_inside(start_segments, connect_idx)
+                start_position, start_min, start_cover_param, start_peri_param = check_outside_inside(
+                    start_segments, connect_idx
                 )
-                end_position, end_min, end_cover_param, end_peri_param = (
-                    check_outside_inside(end_segments, connect_idx)
-                )
+                end_position, end_min, end_cover_param, end_peri_param = check_outside_inside(end_segments, connect_idx)
 
-                cover += (
-                    dist_segments[connect_idx]
-                    + start_cover_param * start_min
-                    + end_cover_param * end_min
-                )
-                perimeter += (
-                    dist_segments[connect_idx]
-                    + start_peri_param * start_min
-                    + end_peri_param * end_min
-                )
+                cover += dist_segments[connect_idx] + start_cover_param * start_min + end_cover_param * end_min
+                perimeter += dist_segments[connect_idx] + start_peri_param * start_min + end_peri_param * end_min
 
                 square_length.append(
-                    dist_segments[connect_idx]
-                    + start_peri_param * start_min
-                    + end_peri_param * end_min
+                    dist_segments[connect_idx] + start_peri_param * start_min + end_peri_param * end_min
                 )
 
             overlap_scores.append(cover / perimeter)
@@ -620,9 +574,7 @@ def pred_squares(
         area_x = area_scores[:, :, 0]
         area_y = area_scores[:, :, 1]
         correction = area_x[:, -1] * area_y[:, 0] - area_y[:, -1] * area_x[:, 0]
-        area_scores = np.sum(area_x[:, :-1] * area_y[:, 1:], axis=-1) - np.sum(
-            area_y[:, :-1] * area_x[:, 1:], axis=-1
-        )
+        area_scores = np.sum(area_x[:, :-1] * area_y[:, 1:], axis=-1) - np.sum(area_y[:, :-1] * area_x[:, 1:], axis=-1)
         area_scores = 0.5 * np.abs(area_scores + correction)
         area_scores /= map_size * map_size  # np.max(area_scores)
         ######################################

@@ -35,9 +35,7 @@ def hyper_image_choose_any_bands(channel, data, band_choose="order"):
             selected_band_indices = np.argsort(band_variances)[:channel]
             x = data[:, :, selected_band_indices]
         elif band_choose == "entropy":
-            band_entropies = np.array(
-                [calculate_entropy(data[:, :, i]) for i in range(b)]
-            )
+            band_entropies = np.array([calculate_entropy(data[:, :, i]) for i in range(b)])
             selected_band_indices = np.argsort(band_entropies)[:channel]
             x = data[:, :, selected_band_indices]
         elif band_choose == "low_correlation":

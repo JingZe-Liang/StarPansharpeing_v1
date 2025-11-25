@@ -134,11 +134,7 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = (
             qkv[0],
             qkv[1],
@@ -211,9 +207,7 @@ def window_partition(x, window_size):
     """
     B, H, W, C = x.shape
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    windows = (
-        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    )
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
 
 
@@ -228,9 +222,7 @@ def window_reverse(windows, window_size, H, W):
         x: (B, H, W, C)
     """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(
-        B, H // window_size, W // window_size, window_size, window_size, -1
-    )
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
@@ -286,12 +278,8 @@ class SABlock_Windows(nn.Module):
         x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
         _, Hp, Wp, _ = x.shape
 
-        x_windows = window_partition(
-            x, self.window_size
-        )  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(
-            -1, self.window_size * self.window_size, C
-        )  # nW*B, window_size*window_size, C
+        x_windows = window_partition(x, self.window_size)  # nW*B, window_size, window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
         attn_windows = self.attn(x_windows)  # nW*B, window_size*window_size, C
@@ -322,9 +310,7 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.num_patches = num_patches
         self.norm = nn.LayerNorm(embed_dim)
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         B, _, H, W = x.shape
@@ -396,14 +382,10 @@ class UniFormer(nn.Module):
         self.windows = windows
         print(f"Use Checkpoint: {self.use_checkpoint}")
         print(f"Checkpoint Number: {self.checkpoint_num}")
-        self.num_features = self.embed_dim = (
-            embed_dim  # num_features for consistency with other models
-        )
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
-        self.patch_embed1 = PatchEmbed(
-            img_size=img_size, patch_size=4, in_chans=in_chans, embed_dim=embed_dim[0]
-        )
+        self.patch_embed1 = PatchEmbed(img_size=img_size, patch_size=4, in_chans=in_chans, embed_dim=embed_dim[0])
         self.patch_embed2 = PatchEmbed(
             img_size=img_size // 4,
             patch_size=2,
@@ -424,9 +406,7 @@ class UniFormer(nn.Module):
         )
 
         self.pos_drop = nn.Dropout(p=drop_rate)
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, sum(layers))
-        ]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(layers))]  # stochastic depth decay rule
         num_heads = [dim // head_dim for dim in embed_dim]
         self.blocks1 = nn.ModuleList(
             [
@@ -572,9 +552,7 @@ class UniFormer(nn.Module):
     def init_weights(self, pretrained):
         if isinstance(pretrained, str):
             logger = get_root_logger()
-            load_checkpoint(
-                self, pretrained, map_location="cpu", strict=False, logger=logger
-            )
+            load_checkpoint(self, pretrained, map_location="cpu", strict=False, logger=logger)
             print(f"Load pretrained model from {pretrained}")
 
     def _init_weights(self, m):
@@ -595,9 +573,7 @@ class UniFormer(nn.Module):
 
     def reset_classifier(self, num_classes, global_pool=""):
         self.num_classes = num_classes
-        self.head = (
-            nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        )
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
         out = []

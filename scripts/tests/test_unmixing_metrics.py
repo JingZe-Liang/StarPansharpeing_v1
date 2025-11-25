@@ -20,9 +20,7 @@ def _load_module_from_path(path: str, name: str) -> Any:
 
 def test_unmixing_metrics_agree():
     # Prepare paths to modules
-    base = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "src", "stage2")
-    )
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "stage2"))
     func_path = os.path.join(base, "HyperSIGMA", "HyperspectralUnmixing", "func.py")
     basic_path = os.path.join(base, "unmixing", "metrics", "basic.py")
 
@@ -49,18 +47,14 @@ def test_unmixing_metrics_agree():
 
     # Compute reference results using func (numpy)
     # Use order_endmembers to get mapping, then compute ordered arrays like plotEndmembersAndGT
-    mapping, sad_list, avg_sad = func.order_endmembers(
-        endmembers_pred.copy(), endmembers_gt.copy()
-    )
+    mapping, sad_list, avg_sad = func.order_endmembers(endmembers_pred.copy(), endmembers_gt.copy())
 
     # Build ordered predicted endmembers/abundances following func.plotEndmembersAndGT
     endmember_sordered = np.array([endmembers_pred[mapping[i]] for i in range(num_em)])
     abundance_sordered = np.array([abundances_pred[mapping[i]] for i in range(num_em)])
 
     # Compute SAD_ordered (per-endmember) consistent with plotEndmembersAndGT
-    SAD_ordered = np.array(
-        [func.numpy_SAD(endmember_sordered[i], endmembers_gt[i]) for i in range(num_em)]
-    )
+    SAD_ordered = np.array([func.numpy_SAD(endmember_sordered[i], endmembers_gt[i]) for i in range(num_em)])
     SAD_ordered = np.append(SAD_ordered, avg_sad)
 
     # Compute MSE reference
@@ -73,24 +67,16 @@ def test_unmixing_metrics_agree():
 
     # Extract SAD vector from UnmixingMetrics result in same order: sad_0..sad_{n-1}, sad_avg
     sad_dict = res["sad"]
-    sad_vec = np.array(
-        [sad_dict[f"sad_{i}"] for i in range(num_em)] + [sad_dict["sad_avg"]]
-    )
+    sad_vec = np.array([sad_dict[f"sad_{i}"] for i in range(num_em)] + [sad_dict["sad_avg"]])
 
     # Extract MSE vector
     mse_dict = res["mse"]
-    mse_vec = np.array(
-        [mse_dict[f"mse_{i}"] for i in range(num_em)] + [mse_dict["mse_avg"]]
-    )
+    mse_vec = np.array([mse_dict[f"mse_{i}"] for i in range(num_em)] + [mse_dict["mse_avg"]])
 
     # Compare numeric equality (allow small tolerance)
     # Allow small numerical differences between numpy and torch implementations
-    assert np.allclose(SAD_ordered, sad_vec, atol=1e-4), (
-        f"SAD mismatch: ref={SAD_ordered}, um={sad_vec}"
-    )
-    assert np.allclose(mse_ref, mse_vec, atol=1e-5), (
-        f"MSE mismatch: ref={mse_ref}, um={mse_vec}"
-    )
+    assert np.allclose(SAD_ordered, sad_vec, atol=1e-4), f"SAD mismatch: ref={SAD_ordered}, um={sad_vec}"
+    assert np.allclose(mse_ref, mse_vec, atol=1e-5), f"MSE mismatch: ref={mse_ref}, um={mse_vec}"
 
     # Also check that ordering mapping is consistent: mapping from func should equal internal mapping
     # We can re-run func.order_endmembers and basic._order_endmembers and compare keys -> predicted idx
@@ -100,17 +86,13 @@ def test_unmixing_metrics_agree():
         torch.tensor(endmembers_gt, dtype=torch.float32),
     )
     # Convert func mapping dict to same format: func returns dict[gt]=pred
-    assert mapping_basic == mapping, (
-        f"Mapping mismatch: func={mapping}, basic={mapping_basic}"
-    )
+    assert mapping_basic == mapping, f"Mapping mismatch: func={mapping}, basic={mapping_basic}"
 
 
 def test_unmixing_metrics_with_plot():
     """Test unmixing metrics with real data and plotting functionality."""
     # Prepare paths to modules
-    base = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "src", "stage2")
-    )
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "stage2"))
     basic_path = os.path.join(base, "unmixing", "metrics", "basic.py")
     basic = _load_module_from_path(basic_path, "basic_mod")
 
@@ -137,9 +119,7 @@ def test_unmixing_metrics_with_plot():
     # Transpose to match expected format [num_em, bands]
     endmembers_gt = endmembers_gt.T  # [4, 162]
 
-    print(
-        f"Loaded data - Endmembers shape: {endmembers_gt.shape}, Abundances shape: {abundances_gt.shape}"
-    )
+    print(f"Loaded data - Endmembers shape: {endmembers_gt.shape}, Abundances shape: {abundances_gt.shape}")
 
     # Create synthetic predictions with some noise
     np.random.seed(42)
@@ -166,9 +146,7 @@ def test_unmixing_metrics_with_plot():
 
     # Compute results using UnmixingMetrics with plotting
     um = basic.UnmixingMetrics()
-    res, fig, axes = um(
-        endmembers_pred, endmembers_gt, abundances_pred, abundances_gt, plot=True
-    )
+    res, fig, axes = um(endmembers_pred, endmembers_gt, abundances_pred, abundances_gt, plot=True)
 
     # Print results
     print("SAD Results:")

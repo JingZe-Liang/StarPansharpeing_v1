@@ -22,9 +22,7 @@ class ACM(nn.Module):
         act_cfg (dict): Config of activation layers.
     """
 
-    def __init__(
-        self, pool_scale, fusion, in_channels, channels, conv_cfg, norm_cfg, act_cfg
-    ):
+    def __init__(self, pool_scale, fusion, in_channels, channels, conv_cfg, norm_cfg, act_cfg):
         super(ACM, self).__init__()
         self.pool_scale = pool_scale
         self.fusion = fusion
@@ -90,17 +88,10 @@ class ACM(nn.Module):
         pooled_x = self.pooled_redu_conv(pooled_x)
         batch_size = x.size(0)
         # [batch_size, pool_scale * pool_scale, channels]
-        pooled_x = (
-            pooled_x.view(batch_size, self.channels, -1).permute(0, 2, 1).contiguous()
-        )
+        pooled_x = pooled_x.view(batch_size, self.channels, -1).permute(0, 2, 1).contiguous()
         # [batch_size, h * w, pool_scale * pool_scale]
         affinity_matrix = (
-            self.gla(
-                x
-                + resize(
-                    self.global_info(F.adaptive_avg_pool2d(x, 1)), size=x.shape[2:]
-                )
-            )
+            self.gla(x + resize(self.global_info(F.adaptive_avg_pool2d(x, 1)), size=x.shape[2:]))
             .permute(0, 2, 3, 1)
             .reshape(batch_size, -1, self.pool_scale**2)
         )

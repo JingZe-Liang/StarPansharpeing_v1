@@ -7,9 +7,7 @@ class ValueWarmups:
 
     def __call__(self, step: int):
         if step < self.steps:
-            self.current_value = self.start_value + (
-                self.end_value - self.start_value
-            ) * (step / self.steps)
+            self.current_value = self.start_value + (self.end_value - self.start_value) * (step / self.steps)
         else:
             self.current_value = self.end_value
         return self.current_value

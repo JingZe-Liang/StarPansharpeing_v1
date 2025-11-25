@@ -51,9 +51,7 @@ REGISTERED_DCAE_MODEL: dict[str, tuple[Callable, Optional[str]]] = {
 }
 
 
-def create_dc_ae_model_cfg(
-    name: str, pretrained_path: Optional[str] = None
-) -> DCAEConfig:
+def create_dc_ae_model_cfg(name: str, pretrained_path: Optional[str] = None) -> DCAEConfig:
     assert name in REGISTERED_DCAE_MODEL, f"{name} is not supported"
     dc_ae_cls, default_pt_path = REGISTERED_DCAE_MODEL[name]
     pretrained_path = default_pt_path if pretrained_path is None else pretrained_path
@@ -77,12 +75,8 @@ class AutoencoderKL(nn.Module):
         elif self.model_name == "flux-vae":
             from diffusers import FluxPipeline
 
-            pipe = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16
-            )
-            self.model = diffusers.models.AutoencoderKL.from_pretrained(
-                pipe.vae.config._name_or_path
-            )
+            pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16)
+            self.model = diffusers.models.AutoencoderKL.from_pretrained(pipe.vae.config._name_or_path)
             self.spatial_compression_ratio = 8
         else:
             raise ValueError(f"{self.model_name} is not supported for AutoencoderKL")

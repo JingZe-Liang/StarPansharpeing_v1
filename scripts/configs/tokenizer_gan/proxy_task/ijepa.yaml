@@ -36,13 +36,24 @@ optimizer:
   # mars: false
   # foreach: true
   # eps: 1.0e-9
-  _target_: torch.optim.AdamW
+  # _target_: torch.optim.AdamW
+  # _partial_: true
+  # lr: 4.0e-4
+  # weight_decay: 1.0e-5
+  # eps: 1.0e-8
+  # betas: [0.99, 0.995]
+  # foreach: true
+  _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
   _partial_: true
-  lr: 4.0e-4
-  weight_decay: 1.0e-5
-  eps: 1.0e-8
-  betas: [0.99, 0.995]
-  foreach: true
+  betas: [0.95, 0.99]
+  oned_param_algo: lion
+  use_triton: true
+  muon_params_defaults:
+    lr: 4.0e-4
+    weight_decay: 0.01
+  oned_params_defaults:
+    lr: 4.0e-4
+    weight_decay: 0.0
 
 scheduler:
   _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

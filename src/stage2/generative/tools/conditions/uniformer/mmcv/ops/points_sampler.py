@@ -105,9 +105,7 @@ class PointsSampler(nn.Module):
         indices = []
         last_fps_end_index = 0
 
-        for fps_sample_range, sampler, npoint in zip(
-            self.fps_sample_range_list, self.samplers, self.num_point
-        ):
+        for fps_sample_range, sampler, npoint in zip(self.fps_sample_range_list, self.samplers, self.num_point):
             assert fps_sample_range < points_xyz.shape[1]
 
             if fps_sample_range == -1:
@@ -119,9 +117,7 @@ class PointsSampler(nn.Module):
             else:
                 sample_points_xyz = points_xyz[:, last_fps_end_index:fps_sample_range]
                 if features is not None:
-                    sample_features = features[
-                        :, :, last_fps_end_index:fps_sample_range
-                    ]
+                    sample_features = features[:, :, last_fps_end_index:fps_sample_range]
                 else:
                     sample_features = None
 

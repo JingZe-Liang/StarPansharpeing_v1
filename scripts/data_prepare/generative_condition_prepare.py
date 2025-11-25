@@ -63,9 +63,7 @@ def prepare_fn(
             total=num,
         )
 
-        rel_data_dir = (
-            relative_data_dir if resume_from is None else f"{relative_data_dir}_resumed"
-        )
+        rel_data_dir = relative_data_dir if resume_from is None else f"{relative_data_dir}_resumed"
         for sample_idx, (sample, condition_data) in enumerate(progress_bar):
             if condition_data is None:
                 continue
@@ -78,12 +76,8 @@ def prepare_fn(
                 tar_rel_path = f"{rel_data_dir}/{tar_name}"
                 sink = sink_man.get_sink(tar_name, tar_rel_path)
 
-                assert url is not None, (
-                    "Sample does not have a URL which should not be happened."
-                )
-                assert sample_key is not None, (
-                    "Sample does not have a key which should not be happened."
-                )
+                assert url is not None, "Sample does not have a URL which should not be happened."
+                assert sample_key is not None, "Sample does not have a key which should not be happened."
                 # Prepare the output dictionary for webdataset
                 assert len(sample_key) == 1, "Sample key must be a single string."
                 output_sample = {"__key__": sample_key[0]}
@@ -106,9 +100,7 @@ def prepare_fn(
                         img = img[rgb_channels]
                     elif rgb_channels == "mean":
                         c_3 = img.shape[0] // 3
-                        bands = [
-                            img[i * c_3 : (i + 1) * c_3, :, :].mean(0) for i in range(3)
-                        ]
+                        bands = [img[i * c_3 : (i + 1) * c_3, :, :].mean(0) for i in range(3)]
                         img = np.stack(bands, axis=0)
                     else:
                         img = img[:3]  # Take first 3 channels as RGB
@@ -133,9 +125,7 @@ def prepare_fn(
 
                     # Handle caption separately
                     if caption_save_format == "txt":
-                        output_sample[f"{condition_name}.txt"] = str(
-                            condition_output["caption"]
-                        ).encode("utf-8")
+                        output_sample[f"{condition_name}.txt"] = str(condition_output["caption"]).encode("utf-8")
                     elif caption_save_format == "json":
                         output_sample[f"{condition_name}.json"] = json.dumps(
                             {
@@ -144,9 +134,7 @@ def prepare_fn(
                             }
                         ).encode("utf-8")
                     else:
-                        raise ValueError(
-                            f"Unsupported condition type: {condition_name}"
-                        )
+                        raise ValueError(f"Unsupported condition type: {condition_name}")
 
                     embeds, mask = (
                         condition_output["caption_feature"],
@@ -158,9 +146,7 @@ def prepare_fn(
                         saved = {"caption_feature": embeds.to(torch.bfloat16)}
                         if save_attn_mask:
                             saved_name = "features_and_mask.safetensors"
-                            saved["attention_mask"] = torch.as_tensor(mask).to(
-                                torch.uint8
-                            )
+                            saved["attention_mask"] = torch.as_tensor(mask).to(torch.uint8)
                         output_sample[saved_name] = safetensors_codec_io(saved)
 
                 # * image conditions
@@ -173,9 +159,7 @@ def prepare_fn(
                         if to_pil:
                             condition_output = condition_output.convert("L")
                         else:
-                            condition_output = Image.fromarray(
-                                condition_output
-                            ).convert("L")
+                            condition_output = Image.fromarray(condition_output).convert("L")
                             condition_output = np.array(condition_output)
 
                     if condition_save_format == "png":
@@ -233,9 +217,7 @@ def prepare_fn(
                 # Update progress bar description periodically
                 progress_bar.set_postfix({"samples_processed": total_n})
             else:
-                log_print(
-                    f"Empty output for sample {sample_key}, skipping.", level="warning"
-                )
+                log_print(f"Empty output for sample {sample_key}, skipping.", level="warning")
 
         progress_bar.close()
         if dataset_type == "litdata":
@@ -433,9 +415,7 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
         dataset_type=cfg.processor.get("dataset_type", "webdataset"),
     )
 
-    log_print(
-        f"Condition preparation completed. Total samples processed: {total_samples}"
-    )
+    log_print(f"Condition preparation completed. Total samples processed: {total_samples}")
 
 
 def main_with_args():
@@ -458,9 +438,7 @@ def main_with_args():
         required=True,
         help="Output directory for condition files",
     )
-    parser.add_argument(
-        "--tar_name", type=str, required=True, help="Output tar file name"
-    )
+    parser.add_argument("--tar_name", type=str, required=True, help="Output tar file name")
     parser.add_argument(
         "--conditions",
         type=str,
@@ -474,9 +452,7 @@ def main_with_args():
         default=None,
         help="RGB channels to extract (3 integers)",
     )
-    parser.add_argument(
-        "--device", type=str, default="cuda", help="Device for processing"
-    )
+    parser.add_argument("--device", type=str, default="cuda", help="Device for processing")
     parser.add_argument(
         "--condition_save_format",
         type=str,
@@ -491,9 +467,7 @@ def main_with_args():
         choices=["txt", "json", "safetensors"],
         help="Format for saving captions",
     )
-    parser.add_argument(
-        "--no_original_rgb", action="store_true", help="Don't save original RGB images"
-    )
+    parser.add_argument("--no_original_rgb", action="store_true", help="Don't save original RGB images")
 
     args = parser.parse_args()
 
@@ -522,9 +496,7 @@ def main_with_args():
         caption_save_format=args.caption_save_format,
     )
 
-    log_print(
-        f"Condition preparation completed. Total samples processed: {total_samples}"
-    )
+    log_print(f"Condition preparation completed. Total samples processed: {total_samples}")
 
 
 # * --- utilities --- #
@@ -547,18 +519,14 @@ def list_conditions_grouped(
     if file_dir is not None:
         file_list = [p.stem for p in Path(file_dir).glob("*")]
     elif file_tar is not None:
-        file_list = read_tar_filenames_safe(
-            file_tar, close_tar=True, check_file=check_file
-        )
+        file_list = read_tar_filenames_safe(file_tar, close_tar=True, check_file=check_file)
         assert isinstance(file_list, list), "Expected a list of file names from tar."
     else:
         raise ValueError("Either file_dir or file_tar must be provided.")
 
     # sort
     if file_dir is not None:
-        print(
-            f"file dir is provided, not tar file, the list of files should be sorted."
-        )
+        print(f"file dir is provided, not tar file, the list of files should be sorted.")
         file_list = natsort.natsorted(file_list)
         print("sorted done.")
 
@@ -680,10 +648,7 @@ def re_tar_from_dir(
     condition_names=["hed", "segmentation", "sketch", "mlsd"],
 ):
     assert output_file.endswith(".tar"), "Output file must be a .tar file"
-    stems = [
-        p.split(".")[0]
-        for p in read_tar_filenames_safe(src_img_tar, close_tar=True, progress=True)
-    ]
+    stems = [p.split(".")[0] for p in read_tar_filenames_safe(src_img_tar, close_tar=True, progress=True)]
 
     output_tar = TarFile(output_file, "w")
     for stem in (tbar := tqdm(stems, desc="Re-tarring conditions")):
@@ -739,15 +704,11 @@ def concate_tars(*src_tars, output_tar: str, repeat_find=True):
                     n_total += 1
                     tbar.set_description(f"Extract {member.name}")
                 except Exception as e:
-                    log_print(
-                        f"Failed to add {member.name} to output tar: {e}", "error"
-                    )
+                    log_print(f"Failed to add {member.name} to output tar: {e}", "error")
                     continue
             tar.close()
 
-    log_print(
-        f"Concatenated {len(src_tars)} tar files into {output_tar}, total {n_total} files."
-    )
+    log_print(f"Concatenated {len(src_tars)} tar files into {output_tar}, total {n_total} files.")
 
 
 if __name__ == "__main__":

@@ -76,13 +76,9 @@ def make_block(channels, kernel_size, norm_type, norm_eps, use_specnorm) -> nn.M
     elif norm_type == "sbn":
         norm = nn.SyncBatchNorm(channels, eps=norm_eps, process_group=None)
     elif norm_type in {"lbn", "hbn"}:
-        norm = nn.SyncBatchNorm(
-            channels, eps=norm_eps, process_group=new_local_machine_group()
-        )
+        norm = nn.SyncBatchNorm(channels, eps=norm_eps, process_group=new_local_machine_group())
     elif norm_type == "gn":
-        norm = nn.GroupNorm(
-            num_groups=32, num_channels=channels, eps=norm_eps, affine=True
-        )
+        norm = nn.GroupNorm(num_groups=32, num_channels=channels, eps=norm_eps, affine=True)
     else:
         raise NotImplementedError
 
@@ -150,9 +146,7 @@ class DinoDiscV2(nn.Module):
             num_register_tokens=4,
             in_chans=3,
         )
-        missing_keys, unexpected_keys = dino.load_state_dict(
-            torch.load(dino_ckpt), strict=False
-        )
+        missing_keys, unexpected_keys = dino.load_state_dict(torch.load(dino_ckpt), strict=False)
         if len(missing_keys) > 0:
             logger.warning(f"[DinoDiscV2] Missing keys: {missing_keys}")
         if len(unexpected_keys) > 0:
@@ -205,9 +199,7 @@ class DinoDiscV2(nn.Module):
                             use_specnorm=use_specnorm,
                         )
                     ),
-                    (SpectralConv1d if use_specnorm else nn.Conv1d)(
-                        dino_C, 1, kernel_size=1, padding=0
-                    ),
+                    (SpectralConv1d if use_specnorm else nn.Conv1d)(dino_C, 1, kernel_size=1, padding=0),
                 )
                 for _ in range(len(key_depths))  # +1: before all attention blocks
             ]
@@ -232,9 +224,7 @@ class DinoDiscV2(nn.Module):
                 x = F.interpolate(x, size=(near_H, near_W), mode="bicubic")
 
         activations: list[torch.Tensor] = []
-        feature_maps = self.dino[0].get_intermediate_layers(
-            x, n=self.key_depths, return_class_token=True, norm=False
-        )
+        feature_maps = self.dino[0].get_intermediate_layers(x, n=self.key_depths, return_class_token=True, norm=False)
         for patch_tokens, class_token in feature_maps:
             class_token = class_token.unsqueeze(dim=1)
             middle_act = (patch_tokens.float() + class_token.float()).transpose_(1, 2)
@@ -246,11 +236,7 @@ class DinoDiscV2(nn.Module):
             if not grad_ckpt:
                 predictions.append(h(act).view(B, -1))
             else:
-                predictions.append(
-                    torch.utils.checkpoint.checkpoint(h, act, use_reentrant=False).view(
-                        B, -1
-                    )
-                )
+                predictions.append(torch.utils.checkpoint.checkpoint(h, act, use_reentrant=False).view(B, -1))
         return torch.cat(predictions, dim=1)  # cat 5 BL => B, 5L
 
     def parameters(self):
@@ -334,13 +320,9 @@ if __name__ == "__main__":
 
         # dd.eval()
         # dd.heads.load_state_dict(heads.state_dict())
-        print(
-            f"{sum(p.numel() for p in dd.parameters() if p.requires_grad) / 1e6:.2f}M parameters"
-        )
+        print(f"{sum(p.numel() for p in dd.parameters() if p.requires_grad) / 1e6:.2f}M parameters")
 
-        inp = (
-            torch.linspace(-2, 2, 2 * 8 * 512 * 512).reshape(2, 8, 512, 512).to(device)
-        )
+        inp = torch.linspace(-2, 2, 2 * 8 * 512 * 512).reshape(2, 8, 512, 512).to(device)
 
         # Print CUDA memory after input creation
         if torch.cuda.is_available():

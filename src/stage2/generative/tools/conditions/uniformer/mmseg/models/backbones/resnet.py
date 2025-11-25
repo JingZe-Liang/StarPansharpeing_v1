@@ -52,9 +52,7 @@ class BasicBlock(nn.Module):
             bias=False,
         )
         self.add_module(self.norm1_name, norm1)
-        self.conv2 = build_conv_layer(
-            conv_cfg, planes, planes, 3, padding=1, bias=False
-        )
+        self.conv2 = build_conv_layer(conv_cfg, planes, planes, 3, padding=1, bias=False)
         self.add_module(self.norm2_name, norm2)
 
         self.relu = nn.ReLU(inplace=True)
@@ -149,21 +147,9 @@ class Bottleneck(nn.Module):
 
         if self.with_plugins:
             # collect plugins for conv1/conv2/conv3
-            self.after_conv1_plugins = [
-                plugin["cfg"]
-                for plugin in plugins
-                if plugin["position"] == "after_conv1"
-            ]
-            self.after_conv2_plugins = [
-                plugin["cfg"]
-                for plugin in plugins
-                if plugin["position"] == "after_conv2"
-            ]
-            self.after_conv3_plugins = [
-                plugin["cfg"]
-                for plugin in plugins
-                if plugin["position"] == "after_conv3"
-            ]
+            self.after_conv1_plugins = [plugin["cfg"] for plugin in plugins if plugin["position"] == "after_conv1"]
+            self.after_conv2_plugins = [plugin["cfg"] for plugin in plugins if plugin["position"] == "after_conv2"]
+            self.after_conv3_plugins = [plugin["cfg"] for plugin in plugins if plugin["position"] == "after_conv3"]
 
         if self.style == "pytorch":
             self.conv1_stride = 1
@@ -174,9 +160,7 @@ class Bottleneck(nn.Module):
 
         self.norm1_name, norm1 = build_norm_layer(norm_cfg, planes, postfix=1)
         self.norm2_name, norm2 = build_norm_layer(norm_cfg, planes, postfix=2)
-        self.norm3_name, norm3 = build_norm_layer(
-            norm_cfg, planes * self.expansion, postfix=3
-        )
+        self.norm3_name, norm3 = build_norm_layer(norm_cfg, planes * self.expansion, postfix=3)
 
         self.conv1 = build_conv_layer(
             conv_cfg,
@@ -215,24 +199,16 @@ class Bottleneck(nn.Module):
             )
 
         self.add_module(self.norm2_name, norm2)
-        self.conv3 = build_conv_layer(
-            conv_cfg, planes, planes * self.expansion, kernel_size=1, bias=False
-        )
+        self.conv3 = build_conv_layer(conv_cfg, planes, planes * self.expansion, kernel_size=1, bias=False)
         self.add_module(self.norm3_name, norm3)
 
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
 
         if self.with_plugins:
-            self.after_conv1_plugin_names = self.make_block_plugins(
-                planes, self.after_conv1_plugins
-            )
-            self.after_conv2_plugin_names = self.make_block_plugins(
-                planes, self.after_conv2_plugins
-            )
-            self.after_conv3_plugin_names = self.make_block_plugins(
-                planes * self.expansion, self.after_conv3_plugins
-            )
+            self.after_conv1_plugin_names = self.make_block_plugins(planes, self.after_conv1_plugins)
+            self.after_conv2_plugin_names = self.make_block_plugins(planes, self.after_conv2_plugins)
+            self.after_conv3_plugin_names = self.make_block_plugins(planes * self.expansion, self.after_conv3_plugins)
 
     def make_block_plugins(self, in_channels, plugins):
         """make plugins for block.
@@ -248,9 +224,7 @@ class Bottleneck(nn.Module):
         plugin_names = []
         for plugin in plugins:
             plugin = plugin.copy()
-            name, layer = build_plugin_layer(
-                plugin, in_channels=in_channels, postfix=plugin.pop("postfix", "")
-            )
+            name, layer = build_plugin_layer(plugin, in_channels=in_channels, postfix=plugin.pop("postfix", ""))
             assert not hasattr(self, name), f"duplicate plugin {name}"
             self.add_module(name, layer)
             plugin_names.append(name)
@@ -499,9 +473,7 @@ class ResNet(nn.Module):
 
         self._freeze_stages()
 
-        self.feat_dim = (
-            self.block.expansion * base_channels * 2 ** (len(self.stage_blocks) - 1)
-        )
+        self.feat_dim = self.block.expansion * base_channels * 2 ** (len(self.stage_blocks) - 1)
 
     def make_stage_plugins(self, plugins, stage_idx):
         """make plugins for ResNet 'stage_idx'th stage .
@@ -661,9 +633,7 @@ class ResNet(nn.Module):
                 padding=3,
                 bias=False,
             )
-            self.norm1_name, norm1 = build_norm_layer(
-                self.norm_cfg, stem_channels, postfix=1
-            )
+            self.norm1_name, norm1 = build_norm_layer(self.norm_cfg, stem_channels, postfix=1)
             self.add_module(self.norm1_name, norm1)
             self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)

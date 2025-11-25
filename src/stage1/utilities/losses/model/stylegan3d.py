@@ -68,11 +68,7 @@ class ScaledConv3d(nn.Conv3d):
             padding=padding,
             bias=bias,
         )
-        ksize = (
-            kernel_size
-            if isinstance(kernel_size, tuple)
-            else (kernel_size, kernel_size, kernel_size)
-        )
+        ksize = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size, kernel_size)
         self.weight_gain = gain / math.sqrt(in_channels * math.prod(ksize))
         nn.init.normal_(self.weight)
         if bias:
@@ -93,11 +89,7 @@ class ResBlock(nn.Module):
         downsample_layer: Callable = nn.AvgPool3d,
     ):
         super().__init__()
-        ksize = (
-            kernel_sizes
-            if isinstance(kernel_sizes, tuple)
-            else (kernel_sizes, kernel_sizes, kernel_sizes)
-        )
+        ksize = kernel_sizes if isinstance(kernel_sizes, tuple) else (kernel_sizes, kernel_sizes, kernel_sizes)
 
         self.function_path = nn.Sequential(
             ScaledConv3d(in_channels, out_channels, ksize, stride, padding),
@@ -107,9 +99,7 @@ class ResBlock(nn.Module):
             ScaledLeakyReLU(),
         )
 
-        self.skip_path = nn.Sequential(
-            downsample_layer(), ScaledConv3d(in_channels, out_channels, 1, bias=False)
-        )
+        self.skip_path = nn.Sequential(downsample_layer(), ScaledConv3d(in_channels, out_channels, 1, bias=False))
 
     def forward(self, x):
         residual = self.skip_path(x)
@@ -156,9 +146,7 @@ class StyleGAN3DDiscriminator(nn.Module):
         current_duration = self.num_frames
         current_res = input_res
         for out_channel, t_ds in zip(channel_list[1:], temporal_downsample_list):
-            assert current_duration // t_ds > 0, (
-                "Inssufficient duration for temporal downsampling."
-            )
+            assert current_duration // t_ds > 0, "Inssufficient duration for temporal downsampling."
             ds_kernel = (t_ds, spatial_downsample_factor, spatial_downsample_factor)
             self.conv_blocks.append(
                 ResBlock(
@@ -198,17 +186,9 @@ class StyleGAN3DDiscriminator(nn.Module):
     def forward(self, x):
         inspect = False
         if x.requires_grad:
-            x.register_hook(
-                functools.partial(
-                    grad_inspect_hook, name="input", enabled=inspect, terminate=True
-                )
-            )
+            x.register_hook(functools.partial(grad_inspect_hook, name="input", enabled=inspect, terminate=True))
         x = self.input_conv(x)
-        x.register_hook(
-            functools.partial(
-                grad_inspect_hook, name="input-conv", enabled=inspect, terminate=False
-            )
-        )
+        x.register_hook(functools.partial(grad_inspect_hook, name="input-conv", enabled=inspect, terminate=False))
         cnt = 0
         for block in self.conv_blocks:
             x = block(x)
@@ -226,10 +206,6 @@ class StyleGAN3DDiscriminator(nn.Module):
         x = self.mbstd(x)
         x = rearrange(x, "b c (t h) w -> b c t h w", t=t)
         x = self.output_conv(x)
-        x.register_hook(
-            functools.partial(
-                grad_inspect_hook, name="output-conv", enabled=inspect, terminate=False
-            )
-        )
+        x.register_hook(functools.partial(grad_inspect_hook, name="output-conv", enabled=inspect, terminate=False))
         x = self.output_mlp(x)
         return x

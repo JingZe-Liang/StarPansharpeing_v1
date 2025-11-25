@@ -44,9 +44,7 @@ def argsparse_cli_args(
     return hydra_config_path, cli_args
 
 
-def get_cli_cfg_isolate_with_hydra_cfg(
-    exp_config_dict: dict[str, str], cli_default_dict: dict = CLI_DEFAUTL_DICT
-):
+def get_cli_cfg_isolate_with_hydra_cfg(exp_config_dict: dict[str, str], cli_default_dict: dict = CLI_DEFAUTL_DICT):
     """Parse and isolate CLI arguments from Hydra configuration, providing help information.
 
     This function handles two types of arguments:
@@ -106,9 +104,7 @@ def get_cli_cfg_isolate_with_hydra_cfg(
         console.print(Panel(title, expand=False))
 
         # CLI 参数表格
-        cli_table = Table(
-            title="📋 CLI Arguments", show_header=True, header_style="bold cyan"
-        )
+        cli_table = Table(title="📋 CLI Arguments", show_header=True, header_style="bold cyan")
         cli_table.add_column("Parameter", style="green", width=20)
         cli_table.add_column("Type", style="yellow", width=10)
         cli_table.add_column("Default", style="blue", width=15)
@@ -116,13 +112,9 @@ def get_cli_cfg_isolate_with_hydra_cfg(
 
         if list(cli_default_dict.keys()) != list(CLI_DEFAUTL_DICT.keys()):
             for key, value in cli_default_dict.items():
-                cli_table.add_row(
-                    key, type(value).__name__, str(value), "Custom CLI parameter"
-                )
+                cli_table.add_row(key, type(value).__name__, str(value), "Custom CLI parameter")
         else:
-            cli_table.add_row(
-                "config_name", "str", "None", "Name of the config file to use"
-            )
+            cli_table.add_row("config_name", "str", "None", "Name of the config file to use")
             cli_table.add_row(
                 "only_rank_zero_catch",
                 "bool",
@@ -130,9 +122,7 @@ def get_cli_cfg_isolate_with_hydra_cfg(
                 "Whether to only catch exceptions on rank 0",
             )
 
-        cli_table.add_row(
-            "help", "bool", "False", "Show this help information (h, -h, --help)"
-        )
+        cli_table.add_row("help", "bool", "False", "Show this help information (h, -h, --help)")
 
         console.print(cli_table)
         console.print()

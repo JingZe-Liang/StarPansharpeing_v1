@@ -20,19 +20,7 @@ if is_ftfy_available():
 
 
 bad_punct_regex = re.compile(
-    r"["
-    + "#®•©™&@·º½¾¿¡§~"
-    + r"\)"
-    + r"\("
-    + r"\]"
-    + r"\["
-    + r"\}"
-    + r"\{"
-    + r"\|"
-    + "\\"
-    + r"\/"
-    + r"\*"
-    + r"]{1,}"
+    r"[" + "#®•©™&@·º½¾¿¡§~" + r"\)" + r"\(" + r"\]" + r"\[" + r"\}" + r"\{" + r"\|" + "\\" + r"\/" + r"\*" + r"]{1,}"
 )
 
 
@@ -130,14 +118,10 @@ def _clean_caption(caption):
     caption = re.sub(r"(worldwide\s+)?(free\s+)?shipping", "", caption)
     caption = re.sub(r"(free\s)?download(\sfree)?", "", caption)
     caption = re.sub(r"\bclick\b\s(?:for|on)\s\w+", "", caption)
-    caption = re.sub(
-        r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption
-    )
+    caption = re.sub(r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption)
     caption = re.sub(r"\bpage\s+\d+\b", "", caption)
 
-    caption = re.sub(
-        r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption
-    )  # j2d1a2a...
+    caption = re.sub(r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption)  # j2d1a2a...
 
     caption = re.sub(r"\b\d+\.?\d*[xх×]\d+\.?\d*\b", "", caption)
 
@@ -157,16 +141,12 @@ def _clean_caption(caption):
 
 def _text_preprocessing(text: str, clean_caption=False):
     if clean_caption and not is_bs4_available():
-        logger.warning(
-            BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`")
-        )
+        logger.warning(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
         logger.warning("Setting `clean_caption` to False...")
         clean_caption = False
 
     if clean_caption and not is_ftfy_available():
-        logger.warning(
-            BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`")
-        )
+        logger.warning(BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`"))
         logger.warning("Setting `clean_caption` to False...")
         clean_caption = False
 
@@ -198,9 +178,7 @@ from transformers import AutoModelForCausalLM
 from transformers.models import AutoTokenizer, Gemma2Model, T5EncoderModel, T5Tokenizer
 
 
-def get_tokenizer_and_text_encoder(
-    tokenizer_path=None, model_path=None, name="T5", device="cuda"
-):
+def get_tokenizer_and_text_encoder(tokenizer_path=None, model_path=None, name="T5", device="cuda"):
     text_encoder_dict = {
         "T5": "DeepFloyd/t5-v1_1-xxl",
         "T5-small": "google/t5-v1_1-small",
@@ -217,9 +195,7 @@ def get_tokenizer_and_text_encoder(
         "Qwen2-0.5B-Instruct": "Qwen/Qwen2-0.5B-Instruct",
         "Qwen2-1.5B-Instruct": "Qwen/Qwen2-1.5B-Instruct",
     }
-    assert name in list(
-        text_encoder_dict.keys()
-    ), f"not support this text encoder: {name}"
+    assert name in list(text_encoder_dict.keys()), f"not support this text encoder: {name}"
 
     tokenizer_name = encoder_name = text_encoder_dict[name]
     if tokenizer_path is not None and model_path is not None:
@@ -228,18 +204,12 @@ def get_tokenizer_and_text_encoder(
 
     if "T5" in name:
         tokenizer = T5Tokenizer.from_pretrained(tokenizer_name)
-        text_encoder = T5EncoderModel.from_pretrained(
-            encoder_name, torch_dtype=torch.float16
-        ).to(device)
+        text_encoder = T5EncoderModel.from_pretrained(encoder_name, torch_dtype=torch.float16).to(device)
     elif "gemma" in name or "Qwen" in name:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         tokenizer.padding_side = "right"
         text_encoder = (
-            AutoModelForCausalLM.from_pretrained(
-                encoder_name, torch_dtype=torch.bfloat16
-            )
-            .get_decoder()
-            .to(device)
+            AutoModelForCausalLM.from_pretrained(encoder_name, torch_dtype=torch.bfloat16).get_decoder().to(device)
         )
     else:
         print("error load text encoder")
@@ -258,16 +228,10 @@ def gemma2_caption_encode(
     device="cuda",
     return_truncated=True,
 ):
-    if (
-        tokenizer_path is not None
-        and model_path is not None
-        and not load_from_auto_model
-    ):
+    if tokenizer_path is not None and model_path is not None and not load_from_auto_model:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         tokenizer.padding_side = "right"
-        text_encoder = Gemma2Model.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16
-        ).to(device)
+        text_encoder = Gemma2Model.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(device)
     else:
         tokenizer, text_encoder = get_tokenizer_and_text_encoder(
             name=model_name,
@@ -293,9 +257,7 @@ def gemma2_caption_encode(
 
         prompt_attention_mask = text_inputs.attention_mask
         prompt_attention_mask = prompt_attention_mask.to(device)
-        prompt_embeds = text_encoder(
-            text_input_ids, attention_mask=prompt_attention_mask
-        )
+        prompt_embeds = text_encoder(text_input_ids, attention_mask=prompt_attention_mask)
 
         # keep the last N tokens of the embedding
         prompt_embeds = prompt_embeds[0][:, select_index]

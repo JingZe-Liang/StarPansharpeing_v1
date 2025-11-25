@@ -25,7 +25,9 @@ class CosmosContinuousConfig:
     decoder: str = "Default"
     act_checkpoint: bool = True
     norm_in_quant_conv: bool = False
-    uni_tokenizer_path: str = "runs/stage1_cosmos/2025-05-22_23-21-47_cosmos_pretrained_f8c16p4_MMSeg_YREB/ema/tokenizer/model.safetensors"
+    uni_tokenizer_path: str = (
+        "runs/stage1_cosmos/2025-05-22_23-21-47_cosmos_pretrained_f8c16p4_MMSeg_YREB/ema/tokenizer/model.safetensors"
+    )
     wrap_fsdp_last_layer: bool = False
     quantizer_type: Optional[str] = None
     loading_type: str = "pretrained"

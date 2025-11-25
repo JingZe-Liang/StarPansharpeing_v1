@@ -199,10 +199,7 @@ class FPN(nn.Module):
         assert len(inputs) == len(self.in_channels)
 
         # build laterals
-        laterals = [
-            lateral_conv(inputs[i + self.start_level])
-            for i, lateral_conv in enumerate(self.lateral_convs)
-        ]
+        laterals = [lateral_conv(inputs[i + self.start_level]) for i, lateral_conv in enumerate(self.lateral_convs)]
 
         # build top-down path
         used_backbone_levels = len(laterals)
@@ -213,9 +210,7 @@ class FPN(nn.Module):
                 laterals[i - 1] += F.interpolate(laterals[i], **self.upsample_cfg)
             else:
                 prev_shape = laterals[i - 1].shape[2:]
-                laterals[i - 1] += F.interpolate(
-                    laterals[i], size=prev_shape, **self.upsample_cfg
-                )
+                laterals[i - 1] += F.interpolate(laterals[i], size=prev_shape, **self.upsample_cfg)
 
         # build outputs
         # part 1: from original levels

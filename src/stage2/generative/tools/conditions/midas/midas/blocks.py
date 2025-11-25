@@ -21,9 +21,7 @@ def _make_encoder(
     use_readout="ignore",
 ):
     if backbone == "vitl16_384":
-        pretrained = _make_pretrained_vitl16_384(
-            use_pretrained, hooks=hooks, use_readout=use_readout
-        )
+        pretrained = _make_pretrained_vitl16_384(use_pretrained, hooks=hooks, use_readout=use_readout)
         scratch = _make_scratch(
             [256, 512, 1024, 1024], features, groups=groups, expand=expand
         )  # ViT-L/16 - 85.0% Top1 (backbone)
@@ -38,24 +36,16 @@ def _make_encoder(
             [256, 512, 768, 768], features, groups=groups, expand=expand
         )  # ViT-H/16 - 85.0% Top1 (backbone)
     elif backbone == "vitb16_384":
-        pretrained = _make_pretrained_vitb16_384(
-            use_pretrained, hooks=hooks, use_readout=use_readout
-        )
+        pretrained = _make_pretrained_vitb16_384(use_pretrained, hooks=hooks, use_readout=use_readout)
         scratch = _make_scratch(
             [96, 192, 384, 768], features, groups=groups, expand=expand
         )  # ViT-B/16 - 84.6% Top1 (backbone)
     elif backbone == "resnext101_wsl":
         pretrained = _make_pretrained_resnext101_wsl(use_pretrained)
-        scratch = _make_scratch(
-            [256, 512, 1024, 2048], features, groups=groups, expand=expand
-        )  # efficientnet_lite3
+        scratch = _make_scratch([256, 512, 1024, 2048], features, groups=groups, expand=expand)  # efficientnet_lite3
     elif backbone == "efficientnet_lite3":
-        pretrained = _make_pretrained_efficientnet_lite3(
-            use_pretrained, exportable=exportable
-        )
-        scratch = _make_scratch(
-            [32, 48, 136, 384], features, groups=groups, expand=expand
-        )  # efficientnet_lite3
+        pretrained = _make_pretrained_efficientnet_lite3(use_pretrained, exportable=exportable)
+        scratch = _make_scratch([32, 48, 136, 384], features, groups=groups, expand=expand)  # efficientnet_lite3
     else:
         print(f"Backbone '{backbone}' not implemented")
         assert False
@@ -129,9 +119,7 @@ def _make_pretrained_efficientnet_lite3(use_pretrained, exportable=False):
 def _make_efficientnet_backbone(effnet):
     pretrained = nn.Module()
 
-    pretrained.layer1 = nn.Sequential(
-        effnet.conv_stem, effnet.bn1, effnet.act1, *effnet.blocks[0:2]
-    )
+    pretrained.layer1 = nn.Sequential(effnet.conv_stem, effnet.bn1, effnet.act1, *effnet.blocks[0:2])
     pretrained.layer2 = nn.Sequential(*effnet.blocks[2:3])
     pretrained.layer3 = nn.Sequential(*effnet.blocks[3:5])
     pretrained.layer4 = nn.Sequential(*effnet.blocks[5:9])
@@ -141,9 +129,7 @@ def _make_efficientnet_backbone(effnet):
 
 def _make_resnet_backbone(resnet):
     pretrained = nn.Module()
-    pretrained.layer1 = nn.Sequential(
-        resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1
-    )
+    pretrained.layer1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1)
 
     pretrained.layer2 = resnet.layer2
     pretrained.layer3 = resnet.layer3
@@ -205,13 +191,9 @@ class ResidualConvUnit(nn.Module):
         """
         super().__init__()
 
-        self.conv1 = nn.Conv2d(
-            features, features, kernel_size=3, stride=1, padding=1, bias=True
-        )
+        self.conv1 = nn.Conv2d(features, features, kernel_size=3, stride=1, padding=1, bias=True)
 
-        self.conv2 = nn.Conv2d(
-            features, features, kernel_size=3, stride=1, padding=1, bias=True
-        )
+        self.conv2 = nn.Conv2d(features, features, kernel_size=3, stride=1, padding=1, bias=True)
 
         self.relu = nn.ReLU(inplace=True)
 
@@ -259,9 +241,7 @@ class FeatureFusionBlock(nn.Module):
 
         output = self.resConfUnit2(output)
 
-        output = nn.functional.interpolate(
-            output, scale_factor=2, mode="bilinear", align_corners=True
-        )
+        output = nn.functional.interpolate(output, scale_factor=2, mode="bilinear", align_corners=True)
 
         return output
 
@@ -396,9 +376,7 @@ class FeatureFusionBlock_custom(nn.Module):
 
         output = self.resConfUnit2(output)
 
-        output = nn.functional.interpolate(
-            output, scale_factor=2, mode="bilinear", align_corners=self.align_corners
-        )
+        output = nn.functional.interpolate(output, scale_factor=2, mode="bilinear", align_corners=self.align_corners)
 
         output = self.out_conv(output)
 

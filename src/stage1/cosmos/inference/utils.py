@@ -69,9 +69,7 @@ def load_encoder_model(
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
     encoder_model = full_model.encoder_jit()
-    missing_keys, unexp_keys = encoder_model.load_state_dict(
-        ckpts.state_dict(), strict=False
-    )
+    missing_keys, unexp_keys = encoder_model.load_state_dict(ckpts.state_dict(), strict=False)
     print(f"missin keys: {missing_keys}, unexp keys: {unexp_keys}")
     return encoder_model.eval().to(device)
 
@@ -93,9 +91,7 @@ def load_decoder_model(
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
     decoder_model = full_model.decoder_jit()
-    missing_keys, unexp_keys = decoder_model.load_state_dict(
-        ckpts.state_dict(), strict=False
-    )
+    missing_keys, unexp_keys = decoder_model.load_state_dict(ckpts.state_dict(), strict=False)
     print(f"missing keys: {missing_keys}, unexp keys: {unexp_keys}")
     return decoder_model.eval().to(device)
 
@@ -117,9 +113,7 @@ def _load_pytorch_model(
     return model, ckpts
 
 
-def load_jit_model(
-    jit_filepath: str = None, device: str = "cuda"
-) -> torch.jit.ScriptModule:
+def load_jit_model(jit_filepath: str = None, device: str = "cuda") -> torch.jit.ScriptModule:
     """Loads a torch.jit.ScriptModule from a filepath.
 
     Args:
@@ -214,9 +208,7 @@ def load_jit_model_shape_matched(
                 logger.warning(f"missing key: {name}")
                 not_in_ckpt_keys.append(name)
             elif model_state_dict[name].shape != state_dict[name].shape:
-                logger.warning(
-                    f"shape mismatch: {name} - {model_state_dict[name].shape} != {state_dict[name].shape}"
-                )
+                logger.warning(f"shape mismatch: {name} - {model_state_dict[name].shape} != {state_dict[name].shape}")
                 mismatch_keys.append(name)
             elif model_state_dict[name].shape == state_dict[name].shape:
                 # load in
@@ -232,9 +224,7 @@ def load_jit_model_shape_matched(
         logger.info(f"not in checkpoint keys: {not_in_ckpt_keys}")
 
         # load model
-        missing_keys, unexp_keys = model.load_state_dict(
-            loaded_state_dict, strict=False
-        )
+        missing_keys, unexp_keys = model.load_state_dict(loaded_state_dict, strict=False)
 
         # learnable keys and other keys
         not_pretrained_keys = [*missing_keys, *unexp_keys]
@@ -398,9 +388,7 @@ def tensor2numpy(input_tensor: torch.Tensor, range_min: int = -1) -> np.ndarray:
     return (output_image * _UINT8_MAX_F + 0.5).astype(np.uint8)
 
 
-def pad_image_batch(
-    batch: np.ndarray, spatial_align: int = _SPATIAL_ALIGN
-) -> tuple[np.ndarray, list[int]]:
+def pad_image_batch(batch: np.ndarray, spatial_align: int = _SPATIAL_ALIGN) -> tuple[np.ndarray, list[int]]:
     """Pads a batch of images to be divisible by `spatial_align`.
 
     Args:
@@ -453,9 +441,7 @@ def pad_video_batch(
     width_to_pad = (align - width % align) if width % align != 0 else 0
 
     align = temporal_align
-    frames_to_pad = (
-        (align - (num_frames - 1) % align) if (num_frames - 1) % align != 0 else 0
-    )
+    frames_to_pad = (align - (num_frames - 1) % align) if (num_frames - 1) % align != 0 else 0
 
     crop_region = [
         frames_to_pad >> 1,

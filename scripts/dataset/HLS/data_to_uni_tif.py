@@ -113,9 +113,7 @@ if __name__ == "__main__":
 
         img = bands_reading_and_filter(uni_tif_paths)
         # save
-        path_to_save = Path(
-            uni_tif_paths[0].as_posix().replace(".B01.tif", ".tif")
-        ).name
+        path_to_save = Path(uni_tif_paths[0].as_posix().replace(".B01.tif", ".tif")).name
         path_to_save = Path("data/HLS/tiff") / path_to_save
         path_to_save.parent.mkdir(parents=True, exist_ok=True)
 

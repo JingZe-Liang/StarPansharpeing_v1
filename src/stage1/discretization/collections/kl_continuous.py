@@ -15,23 +15,17 @@ class DiagonalGaussianDistribution(object):
                 is purely based on mean (i.e., std = 0).
         """
         self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(
-            parameters.float(), 2, dim=mean_std_split_dim
-        )
+        self.mean, self.logvar = torch.chunk(parameters.float(), 2, dim=mean_std_split_dim)
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
         if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device
-            )
+            self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
 
     @autocast("cuda", enabled=False)
     def sample(self):
-        x = self.mean.float() + self.std.float() * torch.randn(self.mean.shape).to(
-            device=self.parameters.device
-        )
+        x = self.mean.float() + self.std.float() * torch.randn(self.mean.shape).to(device=self.parameters.device)
         return x
 
     @autocast("cuda", enabled=False)
@@ -44,10 +38,7 @@ class DiagonalGaussianDistribution(object):
             return torch.Tensor([0.0])
         else:
             return 0.5 * torch.sum(
-                torch.pow(self.mean.float(), 2)
-                + self.var.float()
-                - 1.0
-                - self.logvar.float(),
+                torch.pow(self.mean.float(), 2) + self.var.float() - 1.0 - self.logvar.float(),
                 dim=[1, 2],
             )
 
@@ -61,14 +52,10 @@ class DiagonalGaussianDistributionV2(object):
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
         if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.mean.device
-            )
+            self.var = self.std = torch.zeros_like(self.mean).to(device=self.mean.device)
 
     def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(
-            device=self.mean.device
-        )
+        x = self.mean + self.std * torch.randn(self.mean.shape).to(device=self.mean.device)
         return x
 
     def kl(self, other=None):
@@ -85,9 +72,7 @@ class DiagonalGaussianDistributionV2(object):
                         torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
                         dim=[1, 2, 3],
                     )
-                    / torch.prod(
-                        torch.as_tensor(self.mean.shape[1:])
-                    )  # zihan: add mean over channel, pixel dims
+                    / torch.prod(torch.as_tensor(self.mean.shape[1:]))  # zihan: add mean over channel, pixel dims
                 )
             else:
                 return (
@@ -132,15 +117,8 @@ def normal_kl(mean1, logvar1, mean2, logvar2):
 
     # Force variances to be Tensors. Broadcasting helps convert scalars to
     # Tensors, but it does not work for torch.exp().
-    logvar1, logvar2 = [
-        x if isinstance(x, torch.Tensor) else torch.tensor(x).to(tensor)
-        for x in (logvar1, logvar2)
-    ]
+    logvar1, logvar2 = [x if isinstance(x, torch.Tensor) else torch.tensor(x).to(tensor) for x in (logvar1, logvar2)]
 
     return 0.5 * (
-        -1.0
-        + logvar2
-        - logvar1
-        + torch.exp(logvar1 - logvar2)
-        + ((mean1 - mean2) ** 2) * torch.exp(-logvar2)
+        -1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2) + ((mean1 - mean2) ** 2) * torch.exp(-logvar2)
     )

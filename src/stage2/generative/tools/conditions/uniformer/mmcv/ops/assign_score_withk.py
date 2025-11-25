@@ -2,9 +2,7 @@ from torch.autograd import Function
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["assign_score_withk_forward", "assign_score_withk_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["assign_score_withk_forward", "assign_score_withk_backward"])
 
 
 class AssignScoreWithK(Function):

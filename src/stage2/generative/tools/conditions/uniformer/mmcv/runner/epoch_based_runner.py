@@ -23,18 +23,13 @@ class EpochBasedRunner(BaseRunner):
 
     def run_iter(self, data_batch, train_mode, **kwargs):
         if self.batch_processor is not None:
-            outputs = self.batch_processor(
-                self.model, data_batch, train_mode=train_mode, **kwargs
-            )
+            outputs = self.batch_processor(self.model, data_batch, train_mode=train_mode, **kwargs)
         elif train_mode:
             outputs = self.model.train_step(data_batch, self.optimizer, **kwargs)
         else:
             outputs = self.model.val_step(data_batch, self.optimizer, **kwargs)
         if not isinstance(outputs, dict):
-            raise TypeError(
-                '"batch_processor()" or "model.train_step()"'
-                'and "model.val_step()" must return a dict'
-            )
+            raise TypeError('"batch_processor()" or "model.train_step()"and "model.val_step()" must return a dict')
         if "log_vars" in outputs:
             self.log_buffer.update(outputs["log_vars"], outputs["num_samples"])
         self.outputs = outputs
@@ -87,15 +82,12 @@ class EpochBasedRunner(BaseRunner):
         assert len(data_loaders) == len(workflow)
         if max_epochs is not None:
             warnings.warn(
-                "setting max_epochs in run is deprecated, "
-                "please set max_epochs in runner_config",
+                "setting max_epochs in run is deprecated, please set max_epochs in runner_config",
                 DeprecationWarning,
             )
             self._max_epochs = max_epochs
 
-        assert self._max_epochs is not None, (
-            "max_epochs must be specified during instantiation"
-        )
+        assert self._max_epochs is not None, "max_epochs must be specified during instantiation"
 
         for i, flow in enumerate(workflow):
             mode, epochs = flow
@@ -104,12 +96,8 @@ class EpochBasedRunner(BaseRunner):
                 break
 
         work_dir = self.work_dir if self.work_dir is not None else "NONE"
-        self.logger.info(
-            "Start running, host: %s, work_dir: %s", get_host_info(), work_dir
-        )
-        self.logger.info(
-            "Hooks will be executed in the following order:\n%s", self.get_hook_info()
-        )
+        self.logger.info("Start running, host: %s, work_dir: %s", get_host_info(), work_dir)
+        self.logger.info("Hooks will be executed in the following order:\n%s", self.get_hook_info())
         self.logger.info("workflow: %s, max: %d epochs", workflow, self._max_epochs)
         self.call_hook("before_run")
 
@@ -118,14 +106,10 @@ class EpochBasedRunner(BaseRunner):
                 mode, epochs = flow
                 if isinstance(mode, str):  # self.train()
                     if not hasattr(self, mode):
-                        raise ValueError(
-                            f'runner has no method named "{mode}" to run an epoch'
-                        )
+                        raise ValueError(f'runner has no method named "{mode}" to run an epoch')
                     epoch_runner = getattr(self, mode)
                 else:
-                    raise TypeError(
-                        "mode in workflow must be a str, but got {}".format(type(mode))
-                    )
+                    raise TypeError("mode in workflow must be a str, but got {}".format(type(mode)))
 
                 for _ in range(epochs):
                     if mode == "train" and self.epoch >= self._max_epochs:

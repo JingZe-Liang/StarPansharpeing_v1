@@ -37,9 +37,7 @@ class _BasicStages(nn.Module):
     def forward(self, x, cond=None):
         # interpolate the condition
         if cond is not None:
-            cond = th.nn.functional.interpolate(
-                cond, size=x.shape[2:], mode="bilinear", align_corners=False
-            )
+            cond = th.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
         # stages
         for stage in self.stages:
@@ -145,9 +143,7 @@ class MbConvStagesCond(_BasicStages):
             ]
             stages.append(nn.ModuleList(blocks))
         self.stages = nn.ModuleList(stages)
-        self.out_conv = (
-            nn.Identity()
-        )  # Add output conv to match parent class expectation
+        self.out_conv = nn.Identity()  # Add output conv to match parent class expectation
 
     def forward(self, x, cond):
         x = self.stem(x)
@@ -192,11 +188,7 @@ class Spatial2DNatStage(_BasicStages):
                 norm_eps=norm_eps,
                 drop_path=drop_path,
             )
-            block_cls = (
-                Spatial2DNATBlockConditional
-                if self._use_condition
-                else Spatial2DNATBlock
-            )
+            block_cls = Spatial2DNATBlockConditional if self._use_condition else Spatial2DNATBlock
             blocks = [
                 block_cls(
                     dim=stage_in_chs if i == 0 else dim,

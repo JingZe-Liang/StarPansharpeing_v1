@@ -66,9 +66,7 @@ class UniHSINoiseAdder:
                 _squeezed = True
             img = img.float().cpu().numpy()
         else:
-            img = img.astype(np.float32).transpose(
-                2, 0, 1
-            )  # Convert to (c, h, w) format
+            img = img.astype(np.float32).transpose(2, 0, 1)  # Convert to (c, h, w) format
 
         # img: (c, h, w), 0 .. 1
         img_noisy_np = img.copy()  # copy it
@@ -115,10 +113,7 @@ class UniHSINoiseAdder:
             return imgs
 
     def __repr__(self):
-        return (
-            f"{self.__class__.__name__}(noise_types={self._noise_type}, "
-            f"use_torch={self.use_torch})"
-        )
+        return f"{self.__class__.__name__}(noise_types={self._noise_type}, use_torch={self.use_torch})"
 
 
 # * --- Kornia compatible --- #
@@ -200,9 +195,7 @@ if __name__ == "__main__":
 
     # Example usage
     # noise_adder = UniHSINoiseAdder(noise_type=["noniid"])
-    noise_adder = UniHSINoiseAdderKornia(
-        noise_type=["complex"], keepdim=True, is_neg_1_1=False, use_torch=True
-    )
+    noise_adder = UniHSINoiseAdderKornia(noise_type=["complex"], keepdim=True, is_neg_1_1=False, use_torch=True)
     # img = np.random.rand(150, 128, 128)  # Example image with 150 bands
     import tifffile
 

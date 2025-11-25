@@ -10,10 +10,7 @@ def scatter(input, devices, streams=None):
 
     if isinstance(input, list):
         chunk_size = (len(input) - 1) // len(devices) + 1
-        outputs = [
-            scatter(input[i], [devices[i // chunk_size]], [streams[i // chunk_size]])
-            for i in range(len(input))
-        ]
+        outputs = [scatter(input[i], [devices[i // chunk_size]], [streams[i // chunk_size]]) for i in range(len(input))]
         return outputs
     elif isinstance(input, torch.Tensor):
         output = input.contiguous()
@@ -36,9 +33,7 @@ def synchronize_stream(output, devices, streams):
         chunk_size = len(output) // len(devices)
         for i in range(len(devices)):
             for j in range(chunk_size):
-                synchronize_stream(
-                    output[i * chunk_size + j], [devices[i]], [streams[i]]
-                )
+                synchronize_stream(output[i * chunk_size + j], [devices[i]], [streams[i]])
     elif isinstance(output, torch.Tensor):
         if output.numel() != 0:
             with torch.cuda.device(devices[0]):

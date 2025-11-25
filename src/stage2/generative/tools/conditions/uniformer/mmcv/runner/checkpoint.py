@@ -91,13 +91,9 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
     missing_keys = [key for key in all_missing_keys if "num_batches_tracked" not in key]
 
     if unexpected_keys:
-        err_msg.append(
-            f"unexpected key in source state_dict: {', '.join(unexpected_keys)}\n"
-        )
+        err_msg.append(f"unexpected key in source state_dict: {', '.join(unexpected_keys)}\n")
     if missing_keys:
-        err_msg.append(
-            f"missing keys in source state_dict: {', '.join(missing_keys)}\n"
-        )
+        err_msg.append(f"missing keys in source state_dict: {', '.join(missing_keys)}\n")
 
     rank, _ = get_dist_info()
     if len(err_msg) > 0 and rank == 0:
@@ -179,13 +175,10 @@ class CheckpointLoader:
                 cls._schemes[prefix] = loader
             else:
                 raise KeyError(
-                    f"{prefix} is already registered as a loader backend, "
-                    'add "force=True" if you want to override it'
+                    f'{prefix} is already registered as a loader backend, add "force=True" if you want to override it'
                 )
         # sort, longer prefixes take priority
-        cls._schemes = OrderedDict(
-            sorted(cls._schemes.items(), key=lambda t: t[0], reverse=True)
-        )
+        cls._schemes = OrderedDict(sorted(cls._schemes.items(), key=lambda t: t[0], reverse=True))
 
     @classmethod
     def register_scheme(cls, prefixes, loader=None, force=False):
@@ -246,9 +239,7 @@ class CheckpointLoader:
 
         checkpoint_loader = cls._get_checkpoint_loader(filename)
         class_name = checkpoint_loader.__name__
-        mmcv.print_log(
-            f"load checkpoint from {class_name[10:]} path: {filename}", logger
-        )
+        mmcv.print_log(f"load checkpoint from {class_name[10:]} path: {filename}", logger)
         return checkpoint_loader(filename, map_location)
 
 
@@ -288,15 +279,11 @@ def load_from_http(filename, map_location=None, model_dir=None):
     rank, world_size = get_dist_info()
     rank = int(os.environ.get("LOCAL_RANK", rank))
     if rank == 0:
-        checkpoint = model_zoo.load_url(
-            filename, model_dir=model_dir, map_location=map_location
-        )
+        checkpoint = model_zoo.load_url(filename, model_dir=model_dir, map_location=map_location)
     if world_size > 1:
         torch.distributed.barrier()
         if rank > 0:
-            checkpoint = model_zoo.load_url(
-                filename, model_dir=model_dir, map_location=map_location
-            )
+            checkpoint = model_zoo.load_url(filename, model_dir=model_dir, map_location=map_location)
     return checkpoint
 
 
@@ -314,9 +301,7 @@ def load_from_pavi(filename, map_location=None):
     Returns:
         dict or OrderedDict: The loaded checkpoint.
     """
-    assert filename.startswith("pavi://"), (
-        f"Expected filename startswith `pavi://`, but get {filename}"
-    )
+    assert filename.startswith("pavi://"), f"Expected filename startswith `pavi://`, but get {filename}"
     model_path = filename[7:]
 
     try:
@@ -356,9 +341,7 @@ def load_from_ceph(filename, map_location=None, backend="petrel"):
         raise ValueError(f"Load from Backend {backend} is not supported.")
 
     if backend == "ceph":
-        warnings.warn(
-            "CephBackend will be deprecated, please use PetrelBackend instead"
-        )
+        warnings.warn("CephBackend will be deprecated, please use PetrelBackend instead")
 
     # CephClient and PetrelBackend have the same prefix 's3://' and the latter
     # will be chosen as default. If PetrelBackend can not be instantiated
@@ -389,10 +372,7 @@ def load_from_torchvision(filename, map_location=None):
     """
     model_urls = get_torchvision_models()
     if filename.startswith("modelzoo://"):
-        warnings.warn(
-            'The URL scheme of "modelzoo://" is deprecated, please '
-            'use "torchvision://" instead'
-        )
+        warnings.warn('The URL scheme of "modelzoo://" is deprecated, please use "torchvision://" instead')
         model_name = filename[11:]
     else:
         model_name = filename[14:]
@@ -424,10 +404,7 @@ def load_from_openmmlab(filename, map_location=None):
 
     deprecated_urls = get_deprecated_model_names()
     if model_name in deprecated_urls:
-        warnings.warn(
-            f"{prefix_str}{model_name} is deprecated in favor "
-            f"of {prefix_str}{deprecated_urls[model_name]}"
-        )
+        warnings.warn(f"{prefix_str}{model_name} is deprecated in favor of {prefix_str}{deprecated_urls[model_name]}")
         model_name = deprecated_urls[model_name]
     model_url = model_urls[model_name]
     # check if is url
@@ -504,9 +481,7 @@ def _load_checkpoint_with_prefix(prefix, filename, map_location=None):
         prefix += "."
     prefix_len = len(prefix)
 
-    state_dict = {
-        k[prefix_len:]: v for k, v in state_dict.items() if k.startswith(prefix)
-    }
+    state_dict = {k[prefix_len:]: v for k, v in state_dict.items() if k.startswith(prefix)}
 
     assert state_dict, f"{prefix} is not in the pretrained model"
     return state_dict
@@ -681,8 +656,7 @@ def save_checkpoint(model, filename, optimizer=None, meta=None, file_client_args
     if filename.startswith("pavi://"):
         if file_client_args is not None:
             raise ValueError(
-                'file_client_args should be "None" if filename starts with'
-                f'"pavi://", but got {file_client_args}'
+                f'file_client_args should be "None" if filename starts with"pavi://", but got {file_client_args}'
             )
         try:
             from pavi import modelcloud

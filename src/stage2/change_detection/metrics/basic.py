@@ -13,9 +13,7 @@ class ChangeDetectionMetric(nn.Module):
         super().__init__()
         self.n_classes = n_classes
         self.ignore_index = ignore_index
-        self.confusion_matrix = ConfusionMatrix(
-            task="multiclass", num_classes=n_classes, ignore_index=ignore_index
-        )
+        self.confusion_matrix = ConfusionMatrix(task="multiclass", num_classes=n_classes, ignore_index=ignore_index)
         self._last_pred = None
         self._last_gt = None
 
@@ -78,9 +76,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
         )
 
         # Keep original confusion matrix for direct access
-        self.confusion_matrix = ConfusionMatrix(
-            task="multiclass", num_classes=n_classes, ignore_index=ignore_index
-        )
+        self.confusion_matrix = ConfusionMatrix(task="multiclass", num_classes=n_classes, ignore_index=ignore_index)
         self._all_metric_fns.update(dict(confusion_matrix=self.confusion_matrix))
 
     def _compute_custom_metric(self, metric_func, pred, gt):
@@ -95,9 +91,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
         assert torch.is_tensor(metric), "Metric must be a tensor"
         return metric
 
-    def _get_confusion_matrix(
-        self, pred: torch.Tensor, gt: torch.Tensor
-    ) -> torch.Tensor:
+    def _get_confusion_matrix(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         """Get confusion matrix tensor"""
         # Update confusion matrix
         self.confusion_matrix.update(pred, gt)
@@ -105,9 +99,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
         self.confusion_matrix.reset()
         return cm
 
-    def compute_mean_accuracy(
-        self, pred: torch.Tensor, gt: torch.Tensor
-    ) -> torch.Tensor:
+    def compute_mean_accuracy(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         """Compute mean accuracy (average of per-class accuracy)"""
 
         def _compute_mean_accuracy(cm):
@@ -148,9 +140,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
 
         return self._compute_custom_metric(_compute_iou, pred, gt)
 
-    def compute_frequency_weighted_iou(
-        self, pred: torch.Tensor, gt: torch.Tensor
-    ) -> torch.Tensor:
+    def compute_frequency_weighted_iou(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         """Compute frequency weighted IoU"""
 
         def _compute_fwiou(cm):
@@ -244,9 +234,7 @@ if __name__ == "__main__":
     metrics = cd_score(perfect_pred_labels, perfect_gt)
 
     # Verify confusion_matrix is not in the returned metrics
-    assert "confusion_matrix" not in metrics, (
-        "confusion_matrix should not be in returned metrics"
-    )
+    assert "confusion_matrix" not in metrics, "confusion_matrix should not be in returned metrics"
 
     print("\nMetrics for perfect prediction:")
     for metric_name, value in metrics.items():
@@ -273,9 +261,7 @@ if __name__ == "__main__":
     random_metrics = cd_score(random_pred, random_gt)
 
     # Verify confusion_matrix is not in the returned metrics
-    assert "confusion_matrix" not in random_metrics, (
-        "confusion_matrix should not be in returned metrics"
-    )
+    assert "confusion_matrix" not in random_metrics, "confusion_matrix should not be in returned metrics"
 
     print("\nMetrics for random prediction:")
     for metric_name, value in random_metrics.items():
@@ -305,9 +291,7 @@ if __name__ == "__main__":
     edge_metrics = cd_score(all_zero_pred, all_zero_gt)
 
     # Verify confusion_matrix is not in the returned metrics
-    assert "confusion_matrix" not in edge_metrics, (
-        "confusion_matrix should not be in returned metrics"
-    )
+    assert "confusion_matrix" not in edge_metrics, "confusion_matrix should not be in returned metrics"
 
     print("\nMetrics for edge case:")
     for metric_name, value in edge_metrics.items():
@@ -336,16 +320,12 @@ if __name__ == "__main__":
     print(f"Ignore pixels: {(ignore_gt == 255).sum().item()}")
 
     # Compute metrics with ignore index
-    cd_score_ignore = ChangeDetectionScore(
-        n_classes=2, ignore_index=255, include_bg=False
-    )
+    cd_score_ignore = ChangeDetectionScore(n_classes=2, ignore_index=255, include_bg=False)
 
     ignore_metrics = cd_score_ignore(ignore_pred, ignore_gt)
 
     # Verify confusion_matrix is not in the returned metrics
-    assert "confusion_matrix" not in ignore_metrics, (
-        "confusion_matrix should not be in returned metrics"
-    )
+    assert "confusion_matrix" not in ignore_metrics, "confusion_matrix should not be in returned metrics"
 
     print("\nMetrics with ignore index:")
     for metric_name, value in ignore_metrics.items():
@@ -362,12 +342,8 @@ if __name__ == "__main__":
     print("Test Summary:")
     print("- ChangeDetectionScore successfully initialized")
     print("- All metric computations completed without errors")
-    print(
-        "- Tested perfect predictions, random predictions, edge cases, and ignore index"
-    )
-    print(
-        "- Custom metrics (mean_accuracy, precision, iou, fwiou) are working correctly"
-    )
+    print("- Tested perfect predictions, random predictions, edge cases, and ignore index")
+    print("- Custom metrics (mean_accuracy, precision, iou, fwiou) are working correctly")
     print("=" * 50)
 
     # Additional test: verify compute() method also excludes confusion_matrix
@@ -383,7 +359,5 @@ if __name__ == "__main__":
     compute_metrics = test_cd_score.compute()
 
     # Verify confusion_matrix is not in the returned metrics
-    assert "confusion_matrix" not in compute_metrics, (
-        "compute() should not return confusion_matrix"
-    )
+    assert "confusion_matrix" not in compute_metrics, "compute() should not return confusion_matrix"
     print("✓ compute() method properly excludes confusion_matrix")

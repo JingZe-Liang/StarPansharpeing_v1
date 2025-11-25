@@ -36,9 +36,7 @@ class EncModule(nn.Module):
             if encoding_norm_cfg["type"] in ["BN", "IN"]:
                 encoding_norm_cfg["type"] += "1d"
             else:
-                encoding_norm_cfg["type"] = encoding_norm_cfg["type"].replace(
-                    "2d", "1d"
-                )
+                encoding_norm_cfg["type"] = encoding_norm_cfg["type"].replace("2d", "1d")
         else:
             # fallback to BN1d
             encoding_norm_cfg = dict(type="BN1d")
@@ -176,9 +174,7 @@ class EncHead(BaseDecodeHead):
         batch_size = seg_label.size(0)
         onehot_labels = seg_label.new_zeros((batch_size, num_classes))
         for i in range(batch_size):
-            hist = (
-                seg_label[i].float().histc(bins=num_classes, min=0, max=num_classes - 1)
-            )
+            hist = seg_label[i].float().histc(bins=num_classes, min=0, max=num_classes - 1)
             onehot_labels[i] = hist > 0
         return onehot_labels
 
@@ -187,8 +183,6 @@ class EncHead(BaseDecodeHead):
         seg_logit, se_seg_logit = seg_logit
         loss = dict()
         loss.update(super(EncHead, self).losses(seg_logit, seg_label))
-        se_loss = self.loss_se_decode(
-            se_seg_logit, self._convert_to_onehot_labels(seg_label, self.num_classes)
-        )
+        se_loss = self.loss_se_decode(se_seg_logit, self._convert_to_onehot_labels(seg_label, self.num_classes))
         loss["loss_se"] = se_loss
         return loss

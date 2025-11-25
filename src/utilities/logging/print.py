@@ -123,9 +123,7 @@ def print_custom_markup(text: str):
     processed_text = processed_text.replace(">", "]")
 
     global _console
-    assert _console is not None, (
-        "Console is not initialized. Call setup_console() first."
-    )
+    assert _console is not None, "Console is not initialized. Call setup_console() first."
     _console.print(processed_text, markup=True, highlight=False, end="")
 
 
@@ -169,10 +167,7 @@ def print_once_filter(record: Record):
         global __warn_once_pattern_set, __warn_once_set
 
         if once_pattern is not None:
-            if any(
-                re.search(stored_pattern, msg)
-                for stored_pattern in __warn_once_pattern_set
-            ):
+            if any(re.search(stored_pattern, msg) for stored_pattern in __warn_once_pattern_set):
                 # matched in stored patterns or in __once_pattern_set
                 # filter out
                 return False
@@ -216,11 +211,7 @@ def log_level_range_filters(
     max_level_value = level_order.get(level_range[1].upper(), 60)
 
     def level_filter(record: Record) -> bool:
-        level_name = (
-            record["level"].name
-            if hasattr(record["level"], "name")
-            else record["level"]
-        )
+        level_name = record["level"].name if hasattr(record["level"], "name") else record["level"]
         record_level_value = level_order.get(level_name.upper(), 0)
         return min_level_value <= record_level_value <= max_level_value
 
@@ -326,8 +317,7 @@ def _loguru_log_func(
         __self._log(level, False, __self.options, message, *args, **kwargs)
     else:
         logger.error(
-            f"Loguru log call error. "
-            f'Either "level" and "message" or "__level" and "__message" must be provided.'
+            f'Loguru log call error. Either "level" and "message" or "__level" and "__message" must be provided.'
         )
 
 
@@ -570,10 +560,7 @@ def log_print(
         level = "warning" if warn_once else level
 
         if warn_once_pattern is not None:
-            if any(
-                re.search(stored_pattern, msg)
-                for stored_pattern in __warn_once_pattern_set
-            ):
+            if any(re.search(stored_pattern, msg) for stored_pattern in __warn_once_pattern_set):
                 return
             __warn_once_pattern_set.add(warn_once_pattern)
         else:
@@ -683,9 +670,7 @@ class catch_any(ContextDecorator):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is not None:
-            logger.opt(exception=(exc_type, exc_val, exc_tb)).error(
-                "Exception occurred"
-            )
+            logger.opt(exception=(exc_type, exc_val, exc_tb)).error("Exception occurred")
         return True  # Suppress the exception
 
     def __call__(self, func=None):
@@ -739,16 +724,12 @@ def print_info_if_raise(ret_all_stacks_info=False):
                     frame = trace[0]
 
                     # Trace to the current frame
-                    if trace.code_context[0] == _code_ctx or (
-                        not ret_all_stacks_info and stack_i > 0
-                    ):
+                    if trace.code_context[0] == _code_ctx or (not ret_all_stacks_info and stack_i > 0):
                         break
 
                     # Print all variables
                     local_vars = frame.f_locals
-                    use_vars = {
-                        k: v for k, v in local_vars.items() if not k.startswith("__")
-                    }
+                    use_vars = {k: v for k, v in local_vars.items() if not k.startswith("__")}
 
                     log_print("=" * 30 + f" [stack index: {stack_i} ] " + "=" * 30)
                     log_print(

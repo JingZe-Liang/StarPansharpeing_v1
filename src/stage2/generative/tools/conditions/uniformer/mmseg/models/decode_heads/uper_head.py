@@ -93,9 +93,7 @@ class UPerHead(BaseDecodeHead):
         inputs = self._transform_inputs(inputs)
 
         # build laterals
-        laterals = [
-            lateral_conv(inputs[i]) for i, lateral_conv in enumerate(self.lateral_convs)
-        ]
+        laterals = [lateral_conv(inputs[i]) for i, lateral_conv in enumerate(self.lateral_convs)]
 
         laterals.append(self.psp_forward(inputs))
 
@@ -111,9 +109,7 @@ class UPerHead(BaseDecodeHead):
             )
 
         # build outputs
-        fpn_outs = [
-            self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels - 1)
-        ]
+        fpn_outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels - 1)]
         # append psp feature
         fpn_outs.append(laterals[-1])
 

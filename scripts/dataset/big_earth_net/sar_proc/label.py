@@ -161,14 +161,9 @@ def stitch_images(
 
     if idx_refs is not None:
         if len(idx_refs) != im_arr.shape[0]:
-            raise ValueError(
-                "len(idx_refs) must be equal to the number of images being stitched."
-            )
+            raise ValueError("len(idx_refs) must be equal to the number of images being stitched.")
     if idx_refs is not None and (out_width is None or out_height is None):
-        raise ValueError(
-            "If idx_refs are provided, the desired "
-            "out_height and out_width must be provided as well."
-        )
+        raise ValueError("If idx_refs are provided, the desired out_height and out_width must be provided as well.")
     if len(im_arr.shape) == 4:
         has_channels = True
     elif len(im_arr.shape) == 3:
@@ -176,9 +171,7 @@ def stitch_images(
 
     if idx_refs is not None:  # proxy for whether dims were provided as args
         if has_channels:
-            stitching_arr = np.empty(
-                shape=(im_arr.shape[0], out_height, out_width, im_arr.shape[3])
-            )
+            stitching_arr = np.empty(shape=(im_arr.shape[0], out_height, out_width, im_arr.shape[3]))
         else:
             stitching_arr = np.empty(shape=(im_arr.shape[0], out_height, out_width))
         stitching_arr[:] = np.nan
@@ -206,9 +199,9 @@ def stitch_images(
         # get index along 1st axis of the first non-NaN value
         first_non_nan = np.invert(np.isnan(stitching_arr)).argmax(axis=0)
         # subset along 1st axis for only the first non-NaN value
-        output_arr = np.take_along_axis(
-            stitching_arr, np.expand_dims(first_non_nan, axis=0), axis=0
-        )[0, :, :, :]  # drop extra axis
+        output_arr = np.take_along_axis(stitching_arr, np.expand_dims(first_non_nan, axis=0), axis=0)[
+            0, :, :, :
+        ]  # drop extra axis
 
     elif method == "confidence":
         # convert from 0-1 to 0-0.5, values originally 0.5 become 0
@@ -218,9 +211,9 @@ def stitch_images(
         # get highest conf slice at each [Y, X, C] position
         max_conf_ind = conf_scale.argmax(axis=0)
         # subset to take only the highest-conf value
-        output_arr = np.take_along_axis(
-            stitching_arr, np.expand_dims(max_conf_ind, axis=0), axis=0
-        )[0, :, :, :]  # drop extra axis
+        output_arr = np.take_along_axis(stitching_arr, np.expand_dims(max_conf_ind, axis=0), axis=0)[
+            0, :, :, :
+        ]  # drop extra axis
     output_arr = output_arr.astype(im_arr.dtype)
 
     return output_arr
@@ -254,9 +247,7 @@ def _reduce_geom_precision(geom, precision=2):
     return shape(geojson)
 
 
-def convert_poly_coords(
-    geom, raster_src=None, affine_obj=None, inverse=False, precision=None
-):
+def convert_poly_coords(geom, raster_src=None, affine_obj=None, inverse=False, precision=None):
     """Georegister geometry objects currently in pixel coords or vice versa.
 
     Arguments
@@ -395,9 +386,7 @@ class LoadDataFrame(LoadSegment):
     def load(self):
         if self.pathstring.lower()[-4:] == ".csv":
             df = pd.read_csv(self.pathstring)
-            geometry = df.apply(
-                lambda row: shapely.wkt.loads(row[self.geom_col]), axis=1
-            )
+            geometry = df.apply(lambda row: shapely.wkt.loads(row[self.geom_col]), axis=1)
             df.drop(columns=[self.geom_col])
             gdf = gpd.GeoDataFrame(df, geometry=geometry)
             if self.projection is not None:

@@ -5,9 +5,7 @@ from torch.autograd import Function
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["dynamic_point_to_voxel_forward", "dynamic_point_to_voxel_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["dynamic_point_to_voxel_forward", "dynamic_point_to_voxel_backward"])
 
 
 class _DynamicScatter(Function):
@@ -116,12 +114,8 @@ class DynamicScatter(nn.Module):
             voxels, voxel_coors = [], []
             for i in range(batch_size):
                 inds = torch.where(coors[:, 0] == i)
-                voxel, voxel_coor = self.forward_single(
-                    points[inds], coors[inds][:, 1:]
-                )
-                coor_pad = nn.functional.pad(
-                    voxel_coor, (1, 0), mode="constant", value=i
-                )
+                voxel, voxel_coor = self.forward_single(points[inds], coors[inds][:, 1:])
+                coor_pad = nn.functional.pad(voxel_coor, (1, 0), mode="constant", value=i)
                 voxel_coors.append(coor_pad)
                 voxels.append(voxel)
             features = torch.cat(voxels, dim=0)

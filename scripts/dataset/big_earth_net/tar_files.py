@@ -3,9 +3,7 @@ import tarfile
 from pathlib import Path
 
 
-def tar_files(
-    input_paths, output_file="tarfile_%04d.tar", max_size: int = 4 * 1024 * 1024 * 1024
-):
+def tar_files(input_paths, output_file="tarfile_%04d.tar", max_size: int = 4 * 1024 * 1024 * 1024):
     """
     Create tar files from all .tif files in the input paths.
 
@@ -54,9 +52,7 @@ def tar_files(
                 # 关闭当前 tar 文件
                 if current_tar is not None:
                     current_tar.close()
-                    print(
-                        f"Completed {output_file % tar_index} (size: {current_size / (1024 * 1024 * 1024):.2f} GB)"
-                    )
+                    print(f"Completed {output_file % tar_index} (size: {current_size / (1024 * 1024 * 1024):.2f} GB)")
 
                 # 创建新的 tar 文件
                 tar_index += 1
@@ -66,9 +62,7 @@ def tar_files(
                 print(f"Creating {current_tar_name}...")
 
             # 添加文件到当前 tar
-            arcname = str(tif_file.relative_to(tif_file.parent.parent)).replace(
-                "/", "_"
-            )
+            arcname = str(tif_file.relative_to(tif_file.parent.parent)).replace("/", "_")
 
             # 在扩展名前添加 .img
             if arcname.endswith((".tif", ".tiff")):
@@ -86,9 +80,7 @@ def tar_files(
         # 关闭最后一个 tar 文件
         if current_tar is not None:
             current_tar.close()
-            print(
-                f"Completed {output_file % (tar_index - 1)} (size: {current_size / (1024 * 1024 * 1024):.2f} GB)"
-            )
+            print(f"Completed {output_file % (tar_index - 1)} (size: {current_size / (1024 * 1024 * 1024):.2f} GB)")
 
     print(f"Archive process completed. Created {tar_index} tar file(s).")
 

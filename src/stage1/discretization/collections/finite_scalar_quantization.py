@@ -117,14 +117,10 @@ class FSQ(Module):
 
         has_projections = self.dim != effective_codebook_dim
         self.project_in = (
-            nn.Linear(self.dim, effective_codebook_dim, bias=projection_has_bias)
-            if has_projections
-            else nn.Identity()
+            nn.Linear(self.dim, effective_codebook_dim, bias=projection_has_bias) if has_projections else nn.Identity()
         )
         self.project_out = (
-            nn.Linear(effective_codebook_dim, self.dim, bias=projection_has_bias)
-            if has_projections
-            else nn.Identity()
+            nn.Linear(effective_codebook_dim, self.dim, bias=projection_has_bias) if has_projections else nn.Identity()
         )
 
         self.has_projections = has_projections
@@ -134,9 +130,7 @@ class FSQ(Module):
         if return_indices:
             self.codebook_size = self._levels.prod().item()
             implicit_codebook = self._indices_to_codes(torch.arange(self.codebook_size))
-            self.register_buffer(
-                "implicit_codebook", implicit_codebook, persistent=False
-            )
+            self.register_buffer("implicit_codebook", implicit_codebook, persistent=False)
 
         self.allowed_dtypes = allowed_dtypes
         self.force_quantization_f32 = force_quantization_f32
@@ -252,9 +246,7 @@ class FSQ(Module):
             z = rearrange(z, "b d ... -> b ... d")
             z, ps = pack_one(z, "b * d")
 
-        assert z.shape[-1] == self.dim, (
-            f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
-        )
+        assert z.shape[-1] == self.dim, f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
 
         z = self.project_in(z)
 
@@ -263,9 +255,7 @@ class FSQ(Module):
         # whether to force quantization step to be full precision or not
 
         force_f32 = self.force_quantization_f32
-        quantization_context = (
-            partial(autocast, "cuda", enabled=False) if force_f32 else nullcontext
-        )
+        quantization_context = partial(autocast, "cuda", enabled=False) if force_f32 else nullcontext
 
         with quantization_context():
             orig_dtype = z.dtype

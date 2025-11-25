@@ -37,7 +37,7 @@ class KoLeoLoss(nn.Module):
         """
         with torch.autocast("cuda", enabled=False):
             student_output = F.normalize(student_output, eps=eps, p=2, dim=-1)
-            indices = self.pairwise_NNs_inner(student_output) # (B, 1)
+            indices = self.pairwise_NNs_inner(student_output)  # (B, 1)
             distances = self.pdist(student_output, student_output[indices])  # BxD, BxD -> B
             loss = -torch.log(distances + eps).mean()
         return loss

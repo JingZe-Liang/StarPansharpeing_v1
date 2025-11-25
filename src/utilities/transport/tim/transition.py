@@ -76,9 +76,7 @@ class TransitionSchedule:
 
     def prepare_input(self, batch_size, x, z):
         # sample timestep according to log-normal distribution of sigmas following EDM
-        t, r, n_diffusion = self.sample_t_and_r(
-            batch_size=batch_size, dtype=x.dtype, device=x.device
-        )
+        t, r, n_diffusion = self.sample_t_and_r(batch_size=batch_size, dtype=x.dtype, device=x.device)
         # reshape (B, ) -> (B, 1, 1, 1)
         t, r = expand_t_like_x(t, x), expand_t_like_x(r, x)
         # prepere inputs
@@ -97,9 +95,7 @@ class TransitionSchedule:
         return model_output
 
     @torch.no_grad()
-    def jvp_derivative(
-        self, model, x_t, v_t, t, r, model_kwargs, rng_state, n_diffusion
-    ):
+    def jvp_derivative(self, model, x_t, v_t, t, r, model_kwargs, rng_state, n_diffusion):
         if n_diffusion == x_t.size(0):
             return 0
         _dF_dv_dt = torch.zeros_like(x_t)
@@ -161,15 +157,11 @@ class TransitionSchedule:
             t_input = self.transport.c_noise(t.flatten())
             if self.transport.w_cond > 0:
                 # with conditions
-                F_t_cond = self.model_forward(
-                    model, x_t, t_input, t_input, model_kwargs, rng_state
-                )
+                F_t_cond = self.model_forward(model, x_t, t_input, t_input, model_kwargs, rng_state)
             else:
                 F_t_cond = 0
             # without conditions
-            F_t_uncond = self.model_forward(
-                model, x_t, t_input, t_input, null_kwargs, rng_state
-            )
+            F_t_uncond = self.model_forward(model, x_t, t_input, t_input, null_kwargs, rng_state)
         return F_t_cond, F_t_uncond
 
     def time_weighting(self, t, r, n_diffusion):
@@ -227,18 +219,12 @@ class TransitionSchedule:
 
         # get target
         if self.derivative_type == "jvp":
-            dF_dv_dt = self.jvp_derivative(
-                unwrapped_model, x_t, v_t, t, r, model_kwargs, rng_state, n_diffusion
-            )
+            dF_dv_dt = self.jvp_derivative(unwrapped_model, x_t, v_t, t, r, model_kwargs, rng_state, n_diffusion)
         else:
-            dF_dv_dt = self.dde_derivative(
-                unwrapped_model, x, z, t, r, model_kwargs, rng_state, n_diffusion
-            )
+            dF_dv_dt = self.dde_derivative(unwrapped_model, x, z, t, r, model_kwargs, rng_state, n_diffusion)
 
         if self.transport.enhance_target:
-            F_t_cond, F_t_uncond = self.get_enhanced_target(
-                ema_model, x_t, t, ema_kwargs, null_kwargs, rng_state
-            )
+            F_t_cond, F_t_uncond = self.get_enhanced_target(ema_model, x_t, t, ema_kwargs, null_kwargs, rng_state)
             enhance_target = True
         else:
             F_t_cond, F_t_uncond, enhance_target = 0, 0, False
@@ -246,18 +232,14 @@ class TransitionSchedule:
         # loss target
         # :: v_t = eps - x; or v_t = w1 * v_t + w2 * F_t_cond + (1 - w1 - w2) * F_t_uncond
         # :: tgt = v_t - delta_t * dF_dv_dt
-        tgt = self.transport.target(
-            x_t, v_t, x, z, t, r, dF_dv_dt, F_t_cond, F_t_uncond, enhance_target
-        )
+        tgt = self.transport.target(x_t, v_t, x, z, t, r, dF_dv_dt, F_t_cond, F_t_uncond, enhance_target)
         if isinstance(tgt, (list, tuple)):
             v_t, F_target = tgt
         else:
             F_target = tgt
 
         denoising_loss = mean_flat((F_pred - F_target) ** 2)
-        denoising_loss = torch.nan_to_num(
-            denoising_loss, nan=0, posinf=1e5, neginf=-1e5
-        )
+        denoising_loss = torch.nan_to_num(denoising_loss, nan=0, posinf=1e5, neginf=-1e5)
 
         # back to x0
         v_t_pred = F_pred + (t - r) * dF_dv_dt
@@ -273,17 +255,11 @@ class TransitionSchedule:
         }
 
         if use_dir_loss:
-            directional_loss = mean_flat(
-                1 - F.cosine_similarity(F_pred, F_target, dim=1)
-            )
-            directional_loss = torch.nan_to_num(
-                directional_loss, nan=0, posinf=1e5, neginf=-1e5
-            )
+            directional_loss = mean_flat(1 - F.cosine_similarity(F_pred, F_target, dim=1))
+            directional_loss = torch.nan_to_num(directional_loss, nan=0, posinf=1e5, neginf=-1e5)
             denoising_loss += directional_loss
 
-        weight = self.time_weighting(t, r, n_diffusion) * self.adaptive_weighting(
-            denoising_loss
-        )
+        weight = self.time_weighting(t, r, n_diffusion) * self.adaptive_weighting(denoising_loss)
         weighted_loss = weight * denoising_loss
         weighted_loss = weighted_loss.mean()
 
@@ -302,9 +278,7 @@ class TransitionSchedule:
 
         return weighted_loss, proj_loss, loss_dict, breakdowns
 
-    def forward_with_cfg(
-        self, model, x_t, t, r, y, y_null, cfg_scale, cfg_low, cfg_high
-    ):
+    def forward_with_cfg(self, model, x_t, t, r, y, y_null, cfg_scale, cfg_low, cfg_high):
         apply_cfg = cfg_scale > 1.0 and t > cfg_low and t < cfg_high
         if apply_cfg:
             x_cur = torch.cat([x_t] * 2, dim=0)
@@ -372,9 +346,7 @@ class TransitionSchedule:
                 s_ratio = stochasticity_ratio
             else:
                 s_ratio = 0.0
-            x_next = self.transport.from_x_t_to_x_r(
-                x_cur, t_cur, t_next, F_pred, s_ratio
-            )
+            x_next = self.transport.from_x_t_to_x_r(x_cur, t_cur, t_next, F_pred, s_ratio)
             samples.append(x_next)
             x_cur = x_next
 
@@ -419,9 +391,7 @@ def get_delta_time_embed(
         elif time_cond_type == "t,r,t-r":
             delta_embed = t_emb + (r) + delta_t_embedder(t - r)
         else:
-            raise NotImplementedError(
-                f"Time cond type {time_cond_type} not implemented"
-            )
+            raise NotImplementedError(f"Time cond type {time_cond_type} not implemented")
 
     main_t_emb = (t_emb + delta_embed) if delta_embed is not None else t_emb
     return main_t_emb, delta_embed

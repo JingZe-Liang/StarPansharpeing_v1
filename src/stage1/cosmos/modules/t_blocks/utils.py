@@ -62,9 +62,7 @@ class TaskState:
                 obj[i] = self._load_state_dict(v, state_dict[i])
         elif isinstance(obj, tuple):
             assert len(obj) == len(state_dict)
-            return type(obj)(
-                [self._load_state_dict(v, state_dict[i]) for i, v in enumerate(obj)]
-            )
+            return type(obj)([self._load_state_dict(v, state_dict[i]) for i, v in enumerate(obj)])
         elif hasattr(obj, "load_state_dict"):
             obj.load_state_dict(state_dict)
         else:
@@ -75,11 +73,7 @@ class TaskState:
 
     def state_dict(self):
         # Won't save any field in CKPT_IGNORE or starting with '_'
-        save_fields = {
-            k: v
-            for k, v in self.__dict__.items()
-            if k not in self.CKPT_IGNORE and not k.startswith("_")
-        }
+        save_fields = {k: v for k, v in self.__dict__.items() if k not in self.CKPT_IGNORE and not k.startswith("_")}
         sd = self._make_state_dict(save_fields)
         return sd
 
@@ -104,12 +98,7 @@ def load_submodule(
     if len(Path(weights_path).parts) == 1:
         ckpt_path = TaskState().cfg.ckpt_dir
         weights_path = (
-            Path(ckpt_path)
-            / "jobs"
-            / str(weights_path)
-            / "checkpoints"
-            / "best"
-            / f"model_{default_load}.safetensors"
+            Path(ckpt_path) / "jobs" / str(weights_path) / "checkpoints" / "best" / f"model_{default_load}.safetensors"
         )
 
     weights = safe_load_file(weights_path)
@@ -117,11 +106,7 @@ def load_submodule(
     if module_name:
         if not module_name.endswith("."):
             module_name += "."
-        weights = {
-            k.replace(module_name, ""): v
-            for k, v in weights.items()
-            if k.startswith(module_name)
-        }
+        weights = {k.replace(module_name, ""): v for k, v in weights.items() if k.startswith(module_name)}
         if map_fn is not None:
             weights, unmaped_weight = {}, weights
             for k, v in unmaped_weight.items():
@@ -136,9 +121,7 @@ def load_submodule(
                 del weights[k]
                 warn(f"{k} not found in model state_dict, skipping loading.")
             elif weights[k].shape != cur_weights[k].shape:
-                warn(
-                    f"Shape mismatch for {k}: {weights[k].shape} != {cur_weights[k].shape}, skipping loading."
-                )
+                warn(f"Shape mismatch for {k}: {weights[k].shape} != {cur_weights[k].shape}, skipping loading.")
                 del weights[k]
 
     model.load_state_dict(weights, strict=strict)
@@ -189,9 +172,7 @@ def init_weights(
 
     # If checkpoint is provided, load weights from the checkpoint
     if checkpoint is not None:
-        n_mod = load_submodule(
-            model, checkpoint, ckpt_module or "", **(ckpt_args or {})
-        )
+        n_mod = load_submodule(model, checkpoint, ckpt_module or "", **(ckpt_args or {}))
         mark_init_state(model, True)
         return n_mod
 
@@ -262,9 +243,7 @@ def init_weights(
         elif isinstance(m, nn.Embedding):
             if init_embeds:
                 nn.init.normal_(m.weight, mean=0)
-                m.weight.data = (
-                    nn.functional.normalize(m.weight.data, p=2, dim=-1) * scale
-                )
+                m.weight.data = nn.functional.normalize(m.weight.data, p=2, dim=-1) * scale
                 if m.padding_idx is not None:
                     m.weight.data[m.padding_idx].zero_()
         elif isinstance(m, nn.LayerNorm):

@@ -67,9 +67,7 @@ def get_timestep_embedding(
     assert len(timesteps.shape) == 1, "Timesteps should be a 1d-array"
 
     half_dim = embedding_dim // 2
-    exponent = -math.log(max_period) * torch.arange(
-        start=0, end=half_dim, dtype=torch.float32, device=timesteps.device
-    )
+    exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=timesteps.device)
     exponent = exponent / (half_dim - downscale_freq_shift)
 
     emb = torch.exp(exponent)
@@ -171,9 +169,7 @@ class TimestepEmbedder(nn.Module):
     Embeds scalar timesteps into vector representations.
     """
 
-    def __init__(
-        self, hidden_size, frequency_embedding_size=256, t_factor: float = 1.0
-    ):
+    def __init__(self, hidden_size, frequency_embedding_size=256, t_factor: float = 1.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -195,23 +191,17 @@ class TimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
-            / half
-        ).to(device=t.device)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, t):
-        t_freq = self.positional_embedding(
-            t * self.t_factor, dim=self.frequency_embedding_size
-        ).to(t.dtype)
+        t_freq = self.positional_embedding(t * self.t_factor, dim=self.frequency_embedding_size).to(t.dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -237,13 +227,9 @@ class RelativePositionBias(nn.Module):
 
         # Learnable bias table
         if compatibility:
-            self.relative_bias_table = nn.Parameter(
-                torch.zeros(win_H * win_W, num_heads)
-            )
+            self.relative_bias_table = nn.Parameter(torch.zeros(win_H * win_W, num_heads))
         else:
-            self.relative_bias_table = nn.Parameter(
-                torch.zeros(win_H, win_W, num_heads)
-            )
+            self.relative_bias_table = nn.Parameter(torch.zeros(win_H, win_W, num_heads))
 
         self._cached_mask = None
 
@@ -251,17 +237,11 @@ class RelativePositionBias(nn.Module):
         if window_size not in self.relative_position_index_cache:
             coords_h = torch.arange(window_size[0])
             coords_w = torch.arange(window_size[1])
-            coords = torch.stack(
-                torch.meshgrid([coords_h, coords_w], indexing="ij")
-            )  # (2, H, W)
+            coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # (2, H, W)
             coords_flatten = coords.view(2, -1)  # (2, H*W)
 
-            relative_coords = (
-                coords_flatten[:, :, None] - coords_flatten[:, None, :]
-            )  # (2, HW, HW)
-            relative_coords = relative_coords.permute(
-                1, 2, 0
-            ).contiguous()  # (HW, HW, 2)
+            relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # (2, HW, HW)
+            relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # (HW, HW, 2)
             relative_coords[:, :, 0] += window_size[0] - 1  # shift to >= 0
             relative_coords[:, :, 1] += window_size[1] - 1
             relative_coords[:, :, 0] *= 2 * window_size[1] - 1
@@ -272,13 +252,9 @@ class RelativePositionBias(nn.Module):
     @weak_method_lru()
     def get_full_relative_bias_table(self, window_size):
         H, W = window_size
-        relative_bias_table = self.relative_bias_table.reshape(
-            (self.win_H, self.win_W, self.num_heads)
-        )
+        relative_bias_table = self.relative_bias_table.reshape((self.win_H, self.win_W, self.num_heads))
 
-        assert H >= self.window_size[0] and W >= self.window_size[1], (
-            "Not supported yet"
-        )
+        assert H >= self.window_size[0] and W >= self.window_size[1], "Not supported yet"
         pad_H = H - self.window_size[0]
         pad_W = W - self.window_size[1]
         relative_bias_table = torch.nn.functional.pad(
@@ -300,21 +276,13 @@ class RelativePositionBias(nn.Module):
         # Get the relative position index and (padded) bias table
         relative_position_index = self.compute_relative_position_index((H, W))
         relative_bias_table = self.get_full_relative_bias_table((H, W))
-        relative_bias_table = relative_bias_table.reshape(
-            -1, relative_bias_table.shape[-1]
-        )  # (H*W, num_heads)
+        relative_bias_table = relative_bias_table.reshape(-1, relative_bias_table.shape[-1])  # (H*W, num_heads)
 
         # Get the relative bias for the current grid size
-        relative_bias = relative_bias_table[
-            relative_position_index.view(-1)
-        ]  # (HW*HW, num_heads)
+        relative_bias = relative_bias_table[relative_position_index.view(-1)]  # (HW*HW, num_heads)
         relative_bias = relative_bias.view(H * W, H * W, self.num_heads)
-        relative_bias = rearrange(
-            relative_bias, "N M H -> H N M"
-        )  # (num_heads, HW, HW)
-        mask = repeat(
-            relative_bias, "H N M -> (B H) N M", B=B
-        )  # (batch_size*num_heads, HW, HW)
+        relative_bias = rearrange(relative_bias, "N M H -> H N M")  # (num_heads, HW, HW)
+        mask = repeat(relative_bias, "H N M -> (B H) N M", B=B)  # (batch_size*num_heads, HW, HW)
         return mask
 
 
@@ -340,17 +308,13 @@ class RelativeBiasAttentionWrapper(nn.Module):
         assert attention_mask is None
         B, N, D = hidden_states.shape
         grid_size = int(N**0.5)
-        attention_mask = self.relative_position_bias(
-            (hidden_states.shape[0], grid_size, grid_size)
-        )
+        attention_mask = self.relative_position_bias((hidden_states.shape[0], grid_size, grid_size))
 
         assert attention_mask.shape == (
             B * self.num_heads,
             N,
             N,
-        ), (
-            f"Expected attention_mask shape {(B * self.num_heads, N, N)}, got {attention_mask.shape}"
-        )
+        ), f"Expected attention_mask shape {(B * self.num_heads, N, N)}, got {attention_mask.shape}"
 
         return self.processor(
             attn,

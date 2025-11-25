@@ -94,9 +94,7 @@ def hyper_transform(
         cutmix=lambda p: RandomCutMixV2(num_mix=1, p=p, cut_size=(0.4, 0.6)),
         blur=lambda p: RandomBoxBlur((3, 3), p=p),
         center_crop=lambda p: CenterCrop(_default_size, p=p),
-        resized_crop=lambda p: RandomResizedCrop(
-            _default_size, scale=(0.5, 1.0), ratio=(0.75, 1.333), p=p
-        ),
+        resized_crop=lambda p: RandomResizedCrop(_default_size, scale=(0.5, 1.0), ratio=(0.75, 1.333), p=p),
     )
 
     ops = []
@@ -107,8 +105,8 @@ def hyper_transform(
     op_seq = AugmentationSequential(
         *ops,
         data_keys=["input"],
-        random_apply=( # type: ignore
-            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply 
+        random_apply=(  # type: ignore
+            tuple(random_apply) if isinstance(random_apply, Sequence) else random_apply
         ),
         same_on_batch=False,
         keepdim=True,

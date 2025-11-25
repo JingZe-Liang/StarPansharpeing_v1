@@ -7,9 +7,7 @@ import tifffile
 from tqdm import tqdm
 
 
-def create_metadata_only_parquet(
-    folder_path: str, output_file: str, extra_metadata: Dict[str, List] = None
-) -> None:
+def create_metadata_only_parquet(folder_path: str, output_file: str, extra_metadata: Dict[str, List] = None) -> None:
     """仅存储TIFF文件元信息到Parquet
 
     Args:
@@ -17,9 +15,7 @@ def create_metadata_only_parquet(
         output_file: 输出Parquet路径
         extra_metadata: 额外需要存储的元数据 {列名: 值列表}
     """
-    tiff_files = [
-        f for f in os.listdir(folder_path) if f.lower().endswith((".tiff", ".tif"))
-    ]
+    tiff_files = [f for f in os.listdir(folder_path) if f.lower().endswith((".tiff", ".tif"))]
 
     # 基础元数据结构
     data = {

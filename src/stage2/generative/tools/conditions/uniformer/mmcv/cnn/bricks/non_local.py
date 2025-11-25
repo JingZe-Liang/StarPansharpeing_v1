@@ -215,11 +215,7 @@ class _NonLocalNd(nn.Module, metaclass=ABCMeta):
         # NonLocal1d y: [N, C, H]
         # NonLocal2d y: [N, C, H, W]
         # NonLocal3d y: [N, C, T, H, W]
-        y = (
-            y.permute(0, 2, 1)
-            .contiguous()
-            .reshape(n, self.inter_channels, *x.size()[2:])
-        )
+        y = y.permute(0, 2, 1).contiguous().reshape(n, self.inter_channels, *x.size()[2:])
 
         output = x + self.conv_out(y)
 
@@ -238,9 +234,7 @@ class NonLocal1d(_NonLocalNd):
             Default: dict(type='Conv1d').
     """
 
-    def __init__(
-        self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv1d"), **kwargs
-    ):
+    def __init__(self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv1d"), **kwargs):
         super(NonLocal1d, self).__init__(in_channels, conv_cfg=conv_cfg, **kwargs)
 
         self.sub_sample = sub_sample
@@ -269,9 +263,7 @@ class NonLocal2d(_NonLocalNd):
 
     _abbr_ = "nonlocal_block"
 
-    def __init__(
-        self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv2d"), **kwargs
-    ):
+    def __init__(self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv2d"), **kwargs):
         super(NonLocal2d, self).__init__(in_channels, conv_cfg=conv_cfg, **kwargs)
 
         self.sub_sample = sub_sample
@@ -297,9 +289,7 @@ class NonLocal3d(_NonLocalNd):
             Default: dict(type='Conv3d').
     """
 
-    def __init__(
-        self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv3d"), **kwargs
-    ):
+    def __init__(self, in_channels, sub_sample=False, conv_cfg=dict(type="Conv3d"), **kwargs):
         super(NonLocal3d, self).__init__(in_channels, conv_cfg=conv_cfg, **kwargs)
         self.sub_sample = sub_sample
 

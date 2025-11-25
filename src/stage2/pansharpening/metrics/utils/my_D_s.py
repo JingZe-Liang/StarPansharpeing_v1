@@ -120,13 +120,9 @@ def uqi_ssim(x, y, Nb, win_size):
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2  # 点乘产生误差
 
-    sigma1_sq = (
-        F.conv2d(x * x, window_ms, groups=Nb, stride=win_size) - mu1_sq
-    )  # 点乘产生误差
+    sigma1_sq = F.conv2d(x * x, window_ms, groups=Nb, stride=win_size) - mu1_sq  # 点乘产生误差
     sigma2_sq = F.conv2d(y * y, window_pan, stride=win_size) - mu2_sq
-    sigma12 = (
-        F.conv2d(x * y, window_ms, groups=Nb, stride=win_size) - mu1_mu2
-    )  # 点乘产生误差
+    sigma12 = F.conv2d(x * y, window_ms, groups=Nb, stride=win_size) - mu1_mu2  # 点乘产生误差
 
     V1 = 2.0 * sigma12  # * cov_norm
     V2 = sigma1_sq + sigma2_sq

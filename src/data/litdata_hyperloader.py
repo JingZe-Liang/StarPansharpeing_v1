@@ -20,6 +20,7 @@ from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import to_tensor
 from typing_extensions import Any, Optional, Union, cast
 
+import src.data.codecs  # register serializers and deserializers
 from src.stage2.denoise.utils.noise_adder import (
     UniHSINoiseAdderKornia,
     get_tokenizer_trainer_noise_adder,
@@ -88,9 +89,7 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
     def __check_can_be_indexed(self) -> None:
         """Check if the dataset can be indexed."""
         if not self._iterate_over_all:
-            raise ValueError(
-                "IndexedCombinedStreamingDataset only supports iterate_over_all=True"
-            )
+            raise ValueError("IndexedCombinedStreamingDataset only supports iterate_over_all=True")
 
     def _check_datasets(self, datasets: list[StreamingDataset]) -> None:
         # if any(not isinstance(d, StreamingDataset) for d in datasets):
@@ -110,17 +109,14 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
     def __getitem__(self, idx: int) -> dict:
         if self.combined_is_cycled:
             logger.error(
-                "The combined dataset is cycled, not supported for indexing. "
-                "Return using __iter__ method to sample."
+                "The combined dataset is cycled, not supported for indexing. Return using __iter__ method to sample."
             )
             raise IndexError(f"Index {idx} not supported for cycled combined dataset.")
 
         # Check bounds
         total_length = self.accum_lens[-1]
         if idx < 0 or idx >= total_length:
-            raise IndexError(
-                f"Index {idx} out of range for dataset of length {total_length}"
-            )
+            raise IndexError(f"Index {idx} out of range for dataset of length {total_length}")
 
         # find the dataset containing this index
         ds_idx = int(np.searchsorted(self.accum_lens, idx, side="right") - 1)
@@ -129,9 +125,7 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
 
         # Ensure sample_idx is within bounds
         if sample_idx < 0 or sample_idx >= len(self._datasets[ds_idx]):
-            raise IndexError(
-                f"Index {idx} resulted in invalid sample_idx {sample_idx} for dataset {ds_idx}"
-            )
+            raise IndexError(f"Index {idx} resulted in invalid sample_idx {sample_idx} for dataset {ds_idx}")
 
         return self._datasets[ds_idx][sample_idx]
 
@@ -145,9 +139,7 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
         **kwargs,
     ):
         kwargs.setdefault("seed", 2025)
-        super().__init__(
-            [dataset], length=length, transform=self.transform, *args, **kwargs
-        )
+        super().__init__([dataset], length=length, transform=self.transform, *args, **kwargs)
 
     def _check_datasets(self, dataset):
         # do nothing check
@@ -172,9 +164,7 @@ class _BaseStreamingDataset(StreamingDataset):
             index_file_name = input_dir.stem
             input_dir = input_dir.parent
         else:
-            raise ValueError(
-                f"input_dir must be a directory or a index json file, got: {input_dir}"
-            )
+            raise ValueError(f"input_dir must be a directory or a index json file, got: {input_dir}")
 
         # FIXME: I don't know why the 'index_path' args does not work
         index_file_name = kwargs.pop("index_file_name", index_file_name)
@@ -224,8 +214,7 @@ class _BaseStreamingDataset(StreamingDataset):
 
         if other_ds is not None:
             ds = IndexedCombinedStreamingDataset(
-                datasets=[ds]
-                + ([other_ds] if not isinstance(other_ds, list) else other_ds),
+                datasets=[ds] + ([other_ds] if not isinstance(other_ds, list) else other_ds),
                 **combined_kwargs,
             )
 
@@ -243,9 +232,7 @@ class _BaseStreamingDataset(StreamingDataset):
         combined_kwargs: dict = {"batching_method": "per_stream"},
         loader_kwargs: dict = {},
     ):
-        ds = cls.create_dataset(
-            input_dir=input_dir, combined_kwargs=combined_kwargs, **stream_ds_kwargs
-        )
+        ds = cls.create_dataset(input_dir=input_dir, combined_kwargs=combined_kwargs, **stream_ds_kwargs)
         dl = StreamingDataLoader(ds, **loader_kwargs)
         return ds, dl
 
@@ -303,11 +290,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             )
 
         # Augmentations
-        self.use_aug = (
-            hyper_transforms_lst is not None
-            and len(hyper_transforms_lst) > 0
-            and transform_prob > 0.0
-        )
+        self.use_aug = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0.0
         if self.use_aug:
             self.augmentation: Callable = hyper_transform(
                 op_list=hyper_transforms_lst,
@@ -329,9 +312,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
                     is_neg_1_1=True,
                 )
             else:
-                raise ValueError(
-                    f"hyper_degradation_lst: {hyper_degradation_lst} is not supported"
-                )
+                raise ValueError(f"hyper_degradation_lst: {hyper_degradation_lst} is not supported")
             self.deg_pipe = deg_pipe
 
     def _pil_to_tensor(self, sample):
@@ -366,9 +347,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
     def _norm_img(self, sample):
         """Normalize the image in the sample."""
-        sample = norm_img(
-            sample, permute=False, to_neg_1_1=self.to_neg_1_1, **self.norm_options
-        )
+        sample = norm_img(sample, permute=False, to_neg_1_1=self.to_neg_1_1, **self.norm_options)
         return sample
 
     def _filter_only_img(self, sample):
@@ -401,10 +380,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
     def _skip_undecode(self, d):
         # skip the none or undecoded value
         if self._img_key not in d:
-            logger.error(
-                f"Image key {self._img_key} not found in sample: {d['__key__']} "
-                f"existing keys are {d.keys()}"
-            )
+            logger.error(f"Image key {self._img_key} not found in sample: {d['__key__']} existing keys are {d.keys()}")
             return None
         if d[self._img_key] is None or isinstance(d[self._img_key], bytes):
             logger.warning(f"Skip the {type(d[self._img_key])} value: {d['__key__']}")
@@ -453,16 +429,12 @@ class ConditionsStreamingDataset(_BaseStreamingDataset):
 
     def __getitem__(self, idx):
         d = super().__getitem__(idx)
-        assert len(d) == len(self._condition_keys) + 1, (
-            f"Condition keys missing in the data: {d.keys()}"
-        )
+        assert len(d) == len(self._condition_keys) + 1, f"Condition keys missing in the data: {d.keys()}"
 
         for k in self._condition_keys:
             d[k] = to_tensor_img(d[k], is_permuted=True)
 
-        d = norm_img(
-            d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1
-        )
+        d = norm_img(d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1)
 
         return d
 
@@ -477,9 +449,7 @@ class CaptionStreamingDataset(_BaseStreamingDataset):
 
         if isinstance(d["caption"], dict):
             caption = d["caption"]["caption"]
-            assert isinstance(caption, str), (
-                f"Caption must be a string, got {type(caption)}"
-            )
+            assert isinstance(caption, str), f"Caption must be a string, got {type(caption)}"
             d["caption"] = caption
         return d  # {caption: str, __key__: str}
 
@@ -525,9 +495,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
             Resize(size=1024, p=1.0),
             # then the img, conditions are crop at the same place
             RandomResizedCrop(
-                size=(self.resize, self.resize)
-                if isinstance(self.resize, int)
-                else self.resize,
+                size=(self.resize, self.resize) if isinstance(self.resize, int) else self.resize,
                 p=1.0,
                 scale=(0.6, 1.0),
                 ratio=(0.75, 1.33),
@@ -594,9 +562,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         img_d, cond_d, caption_d = samples
         # Check is paired
         if not self.__check_is_paired(img_d, cond_d, caption_d):
-            raise ValueError(
-                f"Not paired: {img_d['__key__']}, {cond_d['__key__']}, {caption_d['__key__']}"
-            )
+            raise ValueError(f"Not paired: {img_d['__key__']}, {cond_d['__key__']}, {caption_d['__key__']}")
 
         # img, cond_imgs, cond_texts
         sample_d = {
@@ -626,19 +592,11 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         gen_kwargs: int = 512,
     ):
         # Pairs: img, conditions, captions
-        img_ds = ImageStreamingDataset.create_dataset(
-            input_dir=img_input_dir, **img_kwargs
-        )
-        cond_ds = ConditionsStreamingDataset.create_dataset(
-            input_dir=condition_input_dir, **cond_kwargs
-        )
-        caption_ds = CaptionStreamingDataset.create_dataset(
-            input_dir=caption_input_dir, **caption_kwargs
-        )
+        img_ds = ImageStreamingDataset.create_dataset(input_dir=img_input_dir, **img_kwargs)
+        cond_ds = ConditionsStreamingDataset.create_dataset(input_dir=condition_input_dir, **cond_kwargs)
+        caption_ds = CaptionStreamingDataset.create_dataset(input_dir=caption_input_dir, **caption_kwargs)
 
-        return cls(
-            img_ds=img_ds, condition_ds=cond_ds, caption_ds=caption_ds, **gen_kwargs
-        )
+        return cls(img_ds=img_ds, condition_ds=cond_ds, caption_ds=caption_ds, **gen_kwargs)
 
     @classmethod
     def create_dataloader(
@@ -737,9 +695,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
 
         total_samples = sum(batch["img"].shape[0] for batch in cache)
         if total_samples > 64:
-            logger.warning(
-                f"Cache for {cache_key} is too large, total samples: {total_samples}"
-            )
+            logger.warning(f"Cache for {cache_key} is too large, total samples: {total_samples}")
 
         while total_samples >= target_bs:
             collected_samples = []
@@ -775,9 +731,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
                     if torch.is_tensor(collected_samples[k][0]):
                         final_batch[k] = torch.cat(collected_samples[k], dim=0)
                     else:
-                        final_batch[k] = [
-                            item for sublist in collected_samples[k] for item in sublist
-                        ]
+                        final_batch[k] = [item for sublist in collected_samples[k] for item in sublist]
 
                 yield final_batch
 
@@ -795,13 +749,9 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
                 for key in _keys:
                     if torch.is_tensor(batches[0][key]):
                         final_batch[key] = torch.cat([b[key] for b in batches], dim=0)
-                        logger.debug(
-                            f"Yielding batch of size {final_batch['img'].shape}"
-                        )
+                        logger.debug(f"Yielding batch of size {final_batch['img'].shape}")
                     else:
-                        final_batch[key] = [
-                            item for sublist in batches for item in sublist[key]
-                        ]
+                        final_batch[key] = [item for sublist in batches for item in sublist[key]]
 
                 yield final_batch
 
@@ -878,9 +828,7 @@ def collate_fn_skip_none(
         if len(batch) == 0:
             return None
         elif len(batch) < _orig_len:
-            logger.warning(
-                f"Skip {(_orig_len - len(batch))} samples in the batch due to None values."
-            )
+            logger.warning(f"Skip {(_orig_len - len(batch))} samples in the batch due to None values.")
 
         # Check shapes are matched
         if checked_n < check_only_first_n:
@@ -899,16 +847,12 @@ def collate_fn_skip_none(
                         batch.pop(i)
 
                 if _shape_mismatch:
-                    logger.error(
-                        f"sample {i}: shape is {b['img'].shape}, key: {b['__key__']}"
-                    )
+                    logger.error(f"sample {i}: shape is {b['img'].shape}, key: {b['__key__']}")
 
             if _shape_mismatch and raise_if_shape_mismatch:
                 # Total batch shapes
                 for b in batch:
-                    logger.error(
-                        f"sample {i}: shape is {b['img'].shape}, key: {b['__key__']}"
-                    )
+                    logger.error(f"sample {i}: shape is {b['img'].shape}, key: {b['__key__']}")
                 raise ValueError("Different channel size in the batch.")
             checked_n += 1
 
@@ -1075,9 +1019,7 @@ def __test_create_hyper_image_litdata_loader():
         iterate_over_all=False,
         batching_method="per_stream",
     )
-    dl = SizeBasedBatchsizeStreamingDataloader(
-        ds, size_based_batch_sizes={128: 16, 256: 12, 512: 6}, **loader_kwargs
-    )
+    dl = SizeBasedBatchsizeStreamingDataloader(ds, size_based_batch_sizes={128: 16, 256: 12, 512: 6}, **loader_kwargs)
 
     # from src.utilities.logging import configure_logger
 
@@ -1195,8 +1137,11 @@ if __name__ == "__main__":
     )
 
     logger.info(cfg.train_loader.paths)
-    create_hyper_image_litdata_flatten_paths_loader(
+    ds, dl = create_hyper_image_litdata_flatten_paths_loader(
         paths=cfg.train_loader.paths,
         weights=cfg.train_loader.weights,
         loader_kwargs=cfg.train_loader.loader_kwargs,
     )
+
+    for sample in dl:
+        print(sample["img"].shape)

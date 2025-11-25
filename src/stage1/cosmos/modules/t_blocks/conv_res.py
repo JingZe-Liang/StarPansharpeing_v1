@@ -79,9 +79,7 @@ class Downsample2D(nn.Module):
         assert hidden_states.shape[1] == self.channels
 
         if self.norm is not None:
-            hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1)).permute(
-                0, 3, 1, 2
-            )
+            hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
         if self.use_conv and self.padding == 0:
             pad = (0, 1, 0, 1)
@@ -160,15 +158,11 @@ class Upsample2D(nn.Module):
                 bias=bias,
             )
 
-    def forward(
-        self, hidden_states: torch.Tensor, output_size: Optional[int] = None
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, output_size: Optional[int] = None) -> torch.Tensor:
         assert hidden_states.shape[1] == self.channels
 
         if self.norm is not None:
-            hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1)).permute(
-                0, 3, 1, 2
-            )
+            hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
         if self.use_conv_transpose:
             return self.conv(hidden_states)
@@ -183,21 +177,15 @@ class Upsample2D(nn.Module):
             # upsample_nearest_nhwc also fails when the number of output elements is large
             # https://github.com/pytorch/pytorch/issues/141831
             scale_factor = (
-                2
-                if output_size is None
-                else max([f / s for f, s in zip(output_size, hidden_states.shape[-2:])])
+                2 if output_size is None else max([f / s for f, s in zip(output_size, hidden_states.shape[-2:])])
             )
             if hidden_states.numel() * scale_factor > pow(2, 31):
                 hidden_states = hidden_states.contiguous()
 
             if output_size is None:
-                hidden_states = F.interpolate(
-                    hidden_states, scale_factor=2.0, mode="nearest"
-                )
+                hidden_states = F.interpolate(hidden_states, scale_factor=2.0, mode="nearest")
             else:
-                hidden_states = F.interpolate(
-                    hidden_states, size=output_size, mode="nearest"
-                )
+                hidden_states = F.interpolate(hidden_states, size=output_size, mode="nearest")
 
         if self.use_conv:
             hidden_states = self.conv(hidden_states)
@@ -334,9 +322,7 @@ class UpBlock2D(nn.Module):
         self.resnets = nn.ModuleList(resnets)
 
         if add_upsample:
-            self.upsamplers = nn.ModuleList(
-                [Upsample2D(out_channels, use_conv=True, out_channels=out_channels)]
-            )
+            self.upsamplers = nn.ModuleList([Upsample2D(out_channels, use_conv=True, out_channels=out_channels)])
         else:
             self.upsamplers = None
 
@@ -436,20 +422,12 @@ class ResnetBlock2D(nn.Module):
 
         self.ada_norm = ada_norm
         if ada_norm:
-            assert ada_emb_dim is not None, (
-                "ada_emb_dim must be provided when ada_norm is True"
-            )
-            self.norm1 = AdaGroupNorm2D(
-                ada_emb_dim, out_dim=in_channels, num_groups=groups
-            )
+            assert ada_emb_dim is not None, "ada_emb_dim must be provided when ada_norm is True"
+            self.norm1 = AdaGroupNorm2D(ada_emb_dim, out_dim=in_channels, num_groups=groups)
         else:
-            self.norm1 = torch.nn.GroupNorm(
-                num_groups=groups, num_channels=in_channels, eps=eps, affine=True
-            )
+            self.norm1 = torch.nn.GroupNorm(num_groups=groups, num_channels=in_channels, eps=eps, affine=True)
 
-        self.conv1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
 
         if temb_channels is None:
             self.time_emb_proj = None
@@ -458,15 +436,11 @@ class ResnetBlock2D(nn.Module):
         else:
             self.time_emb_proj = nn.Linear(temb_channels, out_channels)
 
-        self.norm2 = torch.nn.GroupNorm(
-            num_groups=groups_out, num_channels=out_channels, eps=eps, affine=True
-        )
+        self.norm2 = torch.nn.GroupNorm(num_groups=groups_out, num_channels=out_channels, eps=eps, affine=True)
 
         self.dropout = torch.nn.Dropout(dropout)
         conv_2d_out_channels = conv_2d_out_channels or out_channels
-        self.conv2 = nn.Conv2d(
-            out_channels, conv_2d_out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv2 = nn.Conv2d(out_channels, conv_2d_out_channels, kernel_size=3, stride=1, padding=1)
 
         self.nonlinearity = create_act_layer(non_linearity)
 
@@ -476,11 +450,7 @@ class ResnetBlock2D(nn.Module):
         elif self.down:
             self.downsample = Downsample2D(in_channels, use_conv=False, padding=1)
 
-        self.use_in_shortcut = (
-            in_channels != conv_2d_out_channels
-            if use_in_shortcut is None
-            else use_in_shortcut
-        )
+        self.use_in_shortcut = in_channels != conv_2d_out_channels if use_in_shortcut is None else use_in_shortcut
 
         self.conv_shortcut = None
         if self.use_in_shortcut:

@@ -31,9 +31,7 @@ def np2tmp(array, temp_file_name=None):
     return temp_file_name
 
 
-def single_gpu_test(
-    model, data_loader, show=False, out_dir=None, efficient_test=False, opacity=0.5
-):
+def single_gpu_test(model, data_loader, show=False, out_dir=None, efficient_test=False, opacity=0.5):
     """Test with single GPU.
 
     Args:
@@ -101,9 +99,7 @@ def single_gpu_test(
     return results
 
 
-def multi_gpu_test(
-    model, data_loader, tmpdir=None, gpu_collect=False, efficient_test=False
-):
+def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, efficient_test=False):
     """Test model with multiple gpus.
 
     This method tests model with multiple gpus and collects the results
@@ -167,9 +163,7 @@ def collect_results_cpu(result_part, size, tmpdir=None):
         dir_tensor = torch.full((MAX_LEN,), 32, dtype=torch.uint8, device="cuda")
         if rank == 0:
             tmpdir = tempfile.mkdtemp()
-            tmpdir = torch.tensor(
-                bytearray(tmpdir.encode()), dtype=torch.uint8, device="cuda"
-            )
+            tmpdir = torch.tensor(bytearray(tmpdir.encode()), dtype=torch.uint8, device="cuda")
             dir_tensor[: len(tmpdir)] = tmpdir
         dist.broadcast(dir_tensor, 0)
         tmpdir = dir_tensor.cpu().numpy().tobytes().decode().rstrip()
@@ -202,9 +196,7 @@ def collect_results_gpu(result_part, size):
     """Collect results with GPU."""
     rank, world_size = get_dist_info()
     # dump result part to tensor with pickle
-    part_tensor = torch.tensor(
-        bytearray(pickle.dumps(result_part)), dtype=torch.uint8, device="cuda"
-    )
+    part_tensor = torch.tensor(bytearray(pickle.dumps(result_part)), dtype=torch.uint8, device="cuda")
     # gather all result part tensor shape
     shape_tensor = torch.tensor(part_tensor.shape, device="cuda")
     shape_list = [shape_tensor.clone() for _ in range(world_size)]

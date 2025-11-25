@@ -60,9 +60,7 @@ def _kernel_norm(
 
 
 class ActNorm(nn.Module):
-    def __init__(
-        self, num_features, logdet=False, affine=True, allow_reverse_init=False
-    ):
+    def __init__(self, num_features, logdet=False, affine=True, allow_reverse_init=False):
         assert affine
         super().__init__()
         self.logdet = logdet
@@ -75,20 +73,8 @@ class ActNorm(nn.Module):
     def initialize(self, input):
         with torch.no_grad():
             flatten = input.permute(1, 0, 2, 3).contiguous().view(input.shape[1], -1)
-            mean = (
-                flatten.mean(1)
-                .unsqueeze(1)
-                .unsqueeze(2)
-                .unsqueeze(3)
-                .permute(1, 0, 2, 3)
-            )
-            std = (
-                flatten.std(1)
-                .unsqueeze(1)
-                .unsqueeze(2)
-                .unsqueeze(3)
-                .permute(1, 0, 2, 3)
-            )
+            mean = flatten.mean(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
+            std = flatten.std(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
 
             self.loc.data = -mean.to(input.device)
             self.scale.data = 1 / (std + 1e-6).to(input.device)
@@ -190,9 +176,7 @@ class DiffBandsInputConvIn(nn.Module):
             basic_module_fn = nn.Conv2d
         elif basic_module == "conv_norm_act":
 
-            def basic_module_fn(
-                in_channels, out_channels, kernel_size, stride, padding
-            ):
+            def basic_module_fn(in_channels, out_channels, kernel_size, stride, padding):
                 if use_timm:
                     norm_act = create_norm_act_layer(
                         "layernorm2d",
@@ -232,18 +216,14 @@ class DiffBandsInputConvIn(nn.Module):
                 padding=padw,
             )
 
-            logger.info(
-                f"[Disc] set conv to hidden module and buffer for channel {c}", "debug"
-            )
+            logger.info(f"[Disc] set conv to hidden module and buffer for channel {c}", "debug")
         # logger.info(f"[Disc] diffbands input convs: {self.in_modules}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[Disc] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[Disc] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training:
@@ -331,9 +311,7 @@ class AdaptiveInputConvLayer(nn.Module):
         c_out, c_in, k1, k2 = w.shape
         # c_in -> in_channels
         w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
-        w = torch.nn.functional.interpolate(
-            w, size=(c_out, in_channels), mode="bicubic", align_corners=False
-        )
+        w = torch.nn.functional.interpolate(w, size=(c_out, in_channels), mode="bicubic", align_corners=False)
         w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
         # Conv
         w = _kernel_norm(w, self.kernel_norm, "c_in")
@@ -406,17 +384,13 @@ class NLayerDiscriminator(nn.Module):
                     "rmsnorm2d": "rmsnorm2d",
                 }
                 norm_type = _mapping.get(norm_type, norm_type)
-                norm_layer = lambda c: create_norm_layer(
-                    layer_name=norm_type, num_features=c
-                )
+                norm_layer = lambda c: create_norm_layer(layer_name=norm_type, num_features=c)
             else:
                 norm_layer = lambda c: nn.GroupNorm(32, c)
         else:
             norm_layer = ActNorm
 
-        if isinstance(
-            norm_layer, functools.partial
-        ):  # no need to use bias as BatchNorm2d has affine parameters
+        if isinstance(norm_layer, functools.partial):  # no need to use bias as BatchNorm2d has affine parameters
             use_bias = norm_layer.func != nn.BatchNorm2d
         else:
             use_bias = norm_layer != nn.BatchNorm2d
@@ -526,9 +500,7 @@ class NLayerDiscriminator(nn.Module):
 
 if __name__ == "__main__":
     ## patch gan
-    net = NLayerDiscriminator(
-        input_nc=3, ndf=128, n_layers=3, use_actnorm=False, use_bn=False
-    )
+    net = NLayerDiscriminator(input_nc=3, ndf=128, n_layers=3, use_actnorm=False, use_bn=False)
     print(net)
 
     # total params

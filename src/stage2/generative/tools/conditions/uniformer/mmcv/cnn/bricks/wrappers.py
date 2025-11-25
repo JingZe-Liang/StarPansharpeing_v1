@@ -43,9 +43,7 @@ class Conv2d(nn.Conv2d):
     def forward(self, x):
         if x.numel() == 0 and obsolete_torch_version(TORCH_VERSION, (1, 4)):
             out_shape = [x.shape[0], self.out_channels]
-            for i, k, p, s, d in zip(
-                x.shape[-2:], self.kernel_size, self.padding, self.stride, self.dilation
-            ):
+            for i, k, p, s, d in zip(x.shape[-2:], self.kernel_size, self.padding, self.stride, self.dilation):
                 o = (i + 2 * p - (d * (k - 1) + 1)) // s + 1
                 out_shape.append(o)
             empty = NewEmptyTensorOp.apply(x, out_shape)
@@ -64,9 +62,7 @@ class Conv3d(nn.Conv3d):
     def forward(self, x):
         if x.numel() == 0 and obsolete_torch_version(TORCH_VERSION, (1, 4)):
             out_shape = [x.shape[0], self.out_channels]
-            for i, k, p, s, d in zip(
-                x.shape[-3:], self.kernel_size, self.padding, self.stride, self.dilation
-            ):
+            for i, k, p, s, d in zip(x.shape[-3:], self.kernel_size, self.padding, self.stride, self.dilation):
                 o = (i + 2 * p - (d * (k - 1) + 1)) // s + 1
                 out_shape.append(o)
             empty = NewEmptyTensorOp.apply(x, out_shape)

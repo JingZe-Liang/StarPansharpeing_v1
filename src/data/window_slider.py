@@ -40,9 +40,7 @@ class WindowSlider:
         else:
             self.stride = window_size  # no overlap by default
 
-    def slide_windows(
-        self, sample: dict[str, Any]
-    ) -> Generator[dict[str, Any], None, None]:
+    def slide_windows(self, sample: dict[str, Any]) -> Generator[dict[str, Any], None, None]:
         """
         Generate sliding windows from a full image sample.
 
@@ -54,9 +52,7 @@ class WindowSlider:
         """
         # Get image dimensions from the first slide key
         if not self.slide_keys or self.slide_keys[0] not in sample:
-            raise ValueError(
-                f"None of the slide keys {self.slide_keys} found in sample"
-            )
+            raise ValueError(f"None of the slide keys {self.slide_keys} found in sample")
 
         # Convert first image to tensor to get dimensions
         img = sample[self.slide_keys[0]]
@@ -132,9 +128,7 @@ class WindowSlider:
                 w_end = min(w, w_start + self.window_size)
 
                 # Extract window for the entire batch at once
-                window_sample = self._extract_window_batch(
-                    sample, h_start, h_end, w_start, w_end, i, j, original_info
-                )
+                window_sample = self._extract_window_batch(sample, h_start, h_end, w_start, w_end, i, j, original_info)
                 yield window_sample
 
     def _extract_window_batch(
@@ -171,9 +165,7 @@ class WindowSlider:
             # Only process slide keys with window sliding
             if key in self.slide_keys:
                 # Convert to tensor for uniform processing
-                value_tensor = (
-                    torch.as_tensor(value) if not torch.is_tensor(value) else value
-                )
+                value_tensor = torch.as_tensor(value) if not torch.is_tensor(value) else value
                 original_type = type(value)
 
                 # Extract window based on dimensions, preserving batch
@@ -181,14 +173,10 @@ class WindowSlider:
                     window = value_tensor[:, :, h_start:h_end, w_start:w_end]
                 elif value_tensor.ndim == 3:  # (C, H, W)
                     # Add batch dimension to maintain consistency
-                    window = value_tensor.unsqueeze(0)[
-                        :, :, h_start:h_end, w_start:w_end
-                    ]
+                    window = value_tensor.unsqueeze(0)[:, :, h_start:h_end, w_start:w_end]
                 elif value_tensor.ndim == 2:  # (H, W)
                     # Add batch and channel dimensions to maintain consistency
-                    window = value_tensor.unsqueeze(0).unsqueeze(0)[
-                        :, :, h_start:h_end, w_start:w_end
-                    ]
+                    window = value_tensor.unsqueeze(0).unsqueeze(0)[:, :, h_start:h_end, w_start:w_end]
                 else:
                     # For other dimensions, keep as is but add batch dimension if needed
                     window = value_tensor
@@ -274,11 +262,7 @@ class WindowSlider:
 
         # Get all data keys (excluding metadata)
         if merged_keys is None:
-            data_keys = [
-                k
-                for k in first_window.keys()
-                if k not in ["window_info", "__key__", "__url__"]
-            ]
+            data_keys = [k for k in first_window.keys() if k not in ["window_info", "__key__", "__url__"]]
         else:
             data_keys = merged_keys
 
@@ -290,18 +274,12 @@ class WindowSlider:
             first_data = first_window[key]
 
             # Skip keys that are not tensor or numpy (keep original value)
-            if not torch.is_tensor(first_data) and not isinstance(
-                first_data, np.ndarray
-            ):
+            if not torch.is_tensor(first_data) and not isinstance(first_data, np.ndarray):
                 merged_results[key] = first_data
                 continue
 
             # Convert to tensor for uniform processing
-            first_tensor = (
-                torch.as_tensor(first_data)
-                if not torch.is_tensor(first_data)
-                else first_data
-            )
+            first_tensor = torch.as_tensor(first_data) if not torch.is_tensor(first_data) else first_data
             original_type = type(first_data)
 
             # Determine if this key should be merged spatially
@@ -368,9 +346,7 @@ class WindowSlider:
                     )
             else:
                 output_shape = first_tensor.shape
-                merged_tensor = torch.zeros(
-                    output_shape, dtype=first_tensor.dtype, device=first_tensor.device
-                )
+                merged_tensor = torch.zeros(output_shape, dtype=first_tensor.dtype, device=first_tensor.device)
 
             # Initialize count tensor for averaging if needed
             count_tensor = None
@@ -382,9 +358,7 @@ class WindowSlider:
                         device=first_tensor.device,
                     )
                 else:
-                    count_tensor = torch.zeros(
-                        original_shape, dtype=torch.float32, device=first_tensor.device
-                    )
+                    count_tensor = torch.zeros(original_shape, dtype=torch.float32, device=first_tensor.device)
 
             # Merge all windows
             for window_data in window_results:
@@ -392,11 +366,7 @@ class WindowSlider:
                     continue
 
                 # Convert to tensor for uniform processing
-                data = (
-                    torch.as_tensor(window_data[key])
-                    if not torch.is_tensor(window_data[key])
-                    else window_data[key]
-                )
+                data = torch.as_tensor(window_data[key]) if not torch.is_tensor(window_data[key]) else window_data[key]
                 info = window_data["window_info"]
                 h_start, h_end = info["h_start"], info["h_end"]
                 w_start, w_end = info["w_start"], info["w_end"]
@@ -411,9 +381,7 @@ class WindowSlider:
                     elif data.dim() == 3:  # (C, H, W)
                         if has_batch:
                             # This should not happen with the new format
-                            merged_tensor[:, :, h_start:h_end, w_start:w_end] += (
-                                data.unsqueeze(0)
-                            )
+                            merged_tensor[:, :, h_start:h_end, w_start:w_end] += data.unsqueeze(0)
                             count_tensor[:, h_start:h_end, w_start:w_end] += 1
                         else:
                             merged_tensor[:, h_start:h_end, w_start:w_end] += data
@@ -427,62 +395,35 @@ class WindowSlider:
                             count_tensor[h_start:h_end, w_start:w_end] += 1
                 elif merge_method == "first":
                     if data.dim() == 4:  # (B, C, H, W)
-                        mask = (
-                            merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(
-                                dim=(0, 1)
-                            )
-                            == 0
-                        )
+                        mask = merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(dim=(0, 1)) == 0
                         if mask.any():
-                            merged_tensor[:, :, h_start:h_end, w_start:w_end][
-                                :, :, mask
-                            ] = data[:, :, mask]
+                            merged_tensor[:, :, h_start:h_end, w_start:w_end][:, :, mask] = data[:, :, mask]
                     elif data.dim() == 3:  # (C, H, W)
                         if has_batch:
-                            mask = (
-                                merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(
-                                    dim=(0, 1)
-                                )
-                                == 0
-                            )
+                            mask = merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(dim=(0, 1)) == 0
                             if mask.any():
-                                merged_tensor[:, :, h_start:h_end, w_start:w_end][
+                                merged_tensor[:, :, h_start:h_end, w_start:w_end][:, :, mask] = data.unsqueeze(0)[
                                     :, :, mask
-                                ] = data.unsqueeze(0)[:, :, mask]
+                                ]
                         else:
-                            mask = (
-                                merged_tensor[:, h_start:h_end, w_start:w_end].sum(
-                                    dim=0
-                                )
-                                == 0
-                            )
+                            mask = merged_tensor[:, h_start:h_end, w_start:w_end].sum(dim=0) == 0
                             if mask.any():
-                                merged_tensor[:, h_start:h_end, w_start:w_end][
-                                    :, mask
-                                ] = data[:, mask]
+                                merged_tensor[:, h_start:h_end, w_start:w_end][:, mask] = data[:, mask]
                     elif data.dim() == 2:  # (H, W)
                         if has_batch:
-                            mask = (
-                                merged_tensor[:, 0, h_start:h_end, w_start:w_end] == 0
-                            )
+                            mask = merged_tensor[:, 0, h_start:h_end, w_start:w_end] == 0
                             if mask.any():
-                                merged_tensor[:, 0, h_start:h_end, w_start:w_end][
-                                    :, mask
-                                ] = data[mask]
+                                merged_tensor[:, 0, h_start:h_end, w_start:w_end][:, mask] = data[mask]
                         else:
                             mask = merged_tensor[h_start:h_end, w_start:w_end] == 0
                             if mask.any():
-                                merged_tensor[h_start:h_end, w_start:w_end][mask] = (
-                                    data[mask]
-                                )
+                                merged_tensor[h_start:h_end, w_start:w_end][mask] = data[mask]
                 elif merge_method == "last":
                     if data.dim() == 4:  # (B, C, H, W)
                         merged_tensor[:, :, h_start:h_end, w_start:w_end] = data
                     elif data.dim() == 3:  # (C, H, W)
                         if has_batch:
-                            merged_tensor[:, :, h_start:h_end, w_start:w_end] = (
-                                data.unsqueeze(0)
-                            )
+                            merged_tensor[:, :, h_start:h_end, w_start:w_end] = data.unsqueeze(0)
                         else:
                             merged_tensor[:, h_start:h_end, w_start:w_end] = data
                     elif data.dim() == 2:  # (H, W)
@@ -539,9 +480,7 @@ def create_windowed_dataloader(
     Yields:
         Dictionary containing windowed data
     """
-    slider = WindowSlider(
-        slide_keys=slide_keys, window_size=window_size, stride=stride, overlap=overlap
-    )
+    slider = WindowSlider(slide_keys=slide_keys, window_size=window_size, stride=stride, overlap=overlap)
     return slider.create_window_generator(dataloader)
 
 
@@ -560,9 +499,7 @@ def model_predict_patcher(
     assert callable(postprocess_model_out) or postprocess_model_out is None, (
         "postprocess_model_out must be callable or None"
     )
-    slider = WindowSlider(
-        slide_keys=patch_keys, window_size=patch_size, stride=stride, overlap=overlap
-    )
+    slider = WindowSlider(slide_keys=patch_keys, window_size=patch_size, stride=stride, overlap=overlap)
     windowed_samples = slider.slide_windows(model_in)
     model_outs: list[dict] = []
     for sample in windowed_samples:
@@ -572,7 +509,5 @@ def model_predict_patcher(
         # Combine model output with window info
         model_out_combined = {**model_out, "window_info": sample["window_info"]}
         model_outs.append(model_out_combined)
-    merged_output = slider.merge_windows(
-        model_outs, merge_method=merge_method, merged_keys=merge_keys
-    )
+    merged_output = slider.merge_windows(model_outs, merge_method=merge_method, merged_keys=merge_keys)
     return merged_output

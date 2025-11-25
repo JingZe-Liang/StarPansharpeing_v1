@@ -21,9 +21,7 @@ class MaskDetector:
             # print(start_width,start_height,width)
 
             # 在掩码中将对应区域置为1
-            mask[
-                start_width : start_width + width, start_height : start_height + width
-            ] = 1
+            mask[start_width : start_width + width, start_height : start_height + width] = 1
 
             # 将原始图像中对应掩码区域的像素值置为0
             masked_image = np.copy(image)

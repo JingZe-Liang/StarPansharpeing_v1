@@ -28,9 +28,7 @@ type LatentScaleShiftType = tuple[float, float] | tuple[list[float], list[float]
 
 
 def _not_lora_not_implemented_raise(self, *args, **kwargs):
-    raise AttributeError(
-        f"This method is only available for LoRA tokenizer of class {self.__class__.__name__}."
-    )
+    raise AttributeError(f"This method is only available for LoRA tokenizer of class {self.__class__.__name__}.")
 
 
 def _partial_amotized_model_decode_fn(tokenizer):
@@ -47,10 +45,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     @function_config_to_basic_types
     def __init__(
         self,
-        tokenizer: ContinuousImageTokenizer
-        | TokenizerLoRAMixin
-        | PeftModel
-        | PeftMixedModel,
+        tokenizer: ContinuousImageTokenizer | TokenizerLoRAMixin | PeftModel | PeftMixedModel,
         downstream_model: nn.Module | AmotizedModelMixin | partial,
         froze_tokenizer: bool = True,
         n_img_encoded: int = 1,
@@ -80,20 +75,14 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # Image processors
         self.tokenizer_img_processor = tokenizer_img_processor
         if tokenizer_img_processor is not None:
-            assert callable(tokenizer_img_processor), (
-                "tokenizer_img_processor must be callable"
-            )
+            assert callable(tokenizer_img_processor), "tokenizer_img_processor must be callable"
 
         self.detokenizer_img_processor = detokenizer_img_processor
         if detokenizer_img_processor is not None:
-            assert callable(detokenizer_img_processor), (
-                "detokenizer_img_processor must be callable"
-            )
+            assert callable(detokenizer_img_processor), "detokenizer_img_processor must be callable"
 
         # low-level tasks wrapper
-        self.is_downstream_amotized = isinstance(
-            self.downstream_model, AmotizedModelMixin
-        )
+        self.is_downstream_amotized = isinstance(self.downstream_model, AmotizedModelMixin)
         # is a partial inited class
         if isinstance(self.downstream_model, partial):
             decoder_fn = _partial_amotized_model_decode_fn(self.tokenizer)
@@ -112,16 +101,12 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             self._base_peft_model: BaseTuner = self.tokenizer.base_model
 
         # Freeze tokenizer by default
-        self.tokenizer_decoder_learnt = getattr(
-            self.downstream_model, "learn_decoder", False
-        )
+        self.tokenizer_decoder_learnt = getattr(self.downstream_model, "learn_decoder", False)
         if froze_tokenizer:
             self.tokenizer.eval()
             self.tokenizer.requires_grad_(False)
             if self.is_downstream_amotized and self.tokenizer_decoder_learnt:
-                assert not self.is_tokenizer_lora, (
-                    'When using LoRA tokenizer, "learn_decoder" must be false.'
-                )
+                assert not self.is_tokenizer_lora, 'When using LoRA tokenizer, "learn_decoder" must be false.'
                 self.tokenizer.decoder.requires_grad_(True)
             logger.info(f"TokenizerWrapper: froze_tokenizer={froze_tokenizer}")
 
@@ -158,15 +143,11 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             if merge:
                 self._base_peft_model.merge_and_unload()
         else:
-            raise ValueError(
-                f"Tokenizer type {type(self.tokenizer)} not supported change LoRA weights."
-            )
+            raise ValueError(f"Tokenizer type {type(self.tokenizer)} not supported change LoRA weights.")
 
     def load_lora(self, path_to_adapter: str, adapter_name: str):
         if self.is_tokenizer_lora:
-            raise ValueError(
-                f"The LoraMixin tokenizer should load LoRA adapters in __init__"
-            )
+            raise ValueError(f"The LoraMixin tokenizer should load LoRA adapters in __init__")
             # TODO: add the tokenizer.lora_weights may work? since it's online adapter loading.
         elif isinstance(self.tokenizer, PeftModel):
             self.tokenizer.load_adapter(
@@ -185,21 +166,14 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             )
             logger.debug(f"Load the PeftMixed adapter: {adapter_name}")
         else:
-            raise ValueError(
-                f"Unsupported tokenizer type: {type(self.tokenizer)} for LoRA loading."
-            )
+            raise ValueError(f"Unsupported tokenizer type: {type(self.tokenizer)} for LoRA loading.")
 
     def _check_downstream_model_args(self):
         # Check if downstream model forward has two args, ignore **kwargs
         sig = inspect.signature(self.downstream_model.forward)
         params = sig.parameters
         n_params = len(
-            [
-                p
-                for p in params.values()
-                if p.kind
-                in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
-            ]
+            [p for p in params.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
         )
         assert n_params >= 2, (
             "downstream_model.forward must have more than two positional args "
@@ -260,9 +234,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
     @property
     def img_fifo_channel(self):
         if len(self._img_chans_cache) == 0:
-            raise ValueError(
-                "No image channels cached. Please run forward at least once."
-            )
+            raise ValueError("No image channels cached. Please run forward at least once.")
         return self._img_chans_cache.pop()  # left in, right out: FIFO
 
     def _clear_cached_img_channels(self):
@@ -286,17 +258,11 @@ class DownstreamModelTokenizerWrapper(nn.Module):
 
         return latent.type_as(img)
 
-    def _forward_tokenizer_decode_single_latent(
-        self, latent: Tensor, input_shape: torch.Size | int
-    ) -> Tensor:
+    def _forward_tokenizer_decode_single_latent(self, latent: Tensor, input_shape: torch.Size | int) -> Tensor:
         # un-scale and un-shift latent
         if self.is_scale_latent:
             latent = un_scale_shift_latent(latent, self.scale, self.shift)
-        ctx = (
-            torch.no_grad()
-            if not self.downstream_model.learn_decoder
-            else torch.enable_grad()
-        )
+        ctx = torch.no_grad() if not self.downstream_model.learn_decoder else torch.enable_grad()
         with ctx:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 decoded = self._decode_fn(latent, input_shape)
@@ -337,13 +303,9 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             decoded = self._forward_tokenizer_decode_single_latent(latents, chans)
         else:
             decoded = []
-            assert isinstance(chans, (tuple, list)), (
-                "chans must be list or tuple of int"
-            )
+            assert isinstance(chans, (tuple, list)), "chans must be list or tuple of int"
             for latent_, chan_ in zip(latents, chans):
-                decoded.append(
-                    self._forward_tokenizer_decode_single_latent(latent_, chan_)
-                )
+                decoded.append(self._forward_tokenizer_decode_single_latent(latent_, chan_))
         # process image for detokenizer
         if self.detokenizer_img_processor is not None:
             decoded = self.detokenizer_img_processor(decoded)
@@ -375,9 +337,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             # if isinstance(chans, int) and torch.is_tensor(latents):
             #     chans = [chans] * len(latents)
             if isinstance(chans, list):
-                assert len(chans) == len(latents), (
-                    "Channels should be a list of length equal to the number of latents"
-                )
+                assert len(chans) == len(latents), "Channels should be a list of length equal to the number of latents"
 
         return self._forward_tokenizer_decode(latents, chans)
 
@@ -417,9 +377,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             only_load_downstream = True
             if only_load_downstream:
                 d = {
-                    k[len("downstream_model.") :]: v
-                    for k, v in state_dict.items()
-                    if k.startswith("downstream_model")
+                    k[len("downstream_model.") :]: v for k, v in state_dict.items() if k.startswith("downstream_model")
                 }
                 load_weights_with_shape_check(self.downstream_model, d)
 
@@ -441,9 +399,7 @@ class DownstreamModelTokenizerWrapper(nn.Module):
             raise NotImplementedError("Not implemented yet")
         else:
             # return only downstream model parameters
-            named_ps_downstream = self.downstream_model.named_parameters(
-                *args, **kwargs
-            )
+            named_ps_downstream = self.downstream_model.named_parameters(*args, **kwargs)
             # add the prefix
             # named_ps = [(f"downstream_model.{n}", p) for n, p in named_ps_downstream]
             # return named_ps

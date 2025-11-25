@@ -84,9 +84,7 @@ def resize_video(
         if not keep_ar:
             options["vf"] = f"scale={size[0]}:{size[1]}"
         else:
-            options["vf"] = (
-                f"scale=w={size[0]}:h={size[1]}:force_original_aspect_ratio=decrease"
-            )
+            options["vf"] = f"scale=w={size[0]}:h={size[1]}:force_original_aspect_ratio=decrease"
     else:
         if not isinstance(ratio, tuple):
             ratio = (ratio, ratio)
@@ -132,9 +130,7 @@ def cut_video(
 
 
 @requires_executable("ffmpeg")
-def concat_video(
-    video_list, out_file, vcodec=None, acodec=None, log_level="info", print_cmd=False
-):
+def concat_video(video_list, out_file, vcodec=None, acodec=None, log_level="info", print_cmd=False):
     """Concatenate multiple videos into a single one.
 
     Args:
@@ -154,8 +150,6 @@ def concat_video(
         options["vcodec"] = "copy"
     if acodec is None:
         options["acodec"] = "copy"
-    convert_video(
-        tmp_filename, out_file, print_cmd, pre_options="-f concat -safe 0", **options
-    )
+    convert_video(tmp_filename, out_file, print_cmd, pre_options="-f concat -safe 0", **options)
     os.close(tmp_filehandler)
     os.remove(tmp_filename)

@@ -96,15 +96,11 @@ class Transformer(nn.Module):
         self.num_heads = cfg.num_heads
         self.feature_layer_ids = cfg.feature_layer_ids
         if cfg.feature_layer_ids:
-            assert max(cfg.feature_layer_ids) < cfg.depth, (
-                "max feature_layer_id must be less than depth"
-            )
+            assert max(cfg.feature_layer_ids) < cfg.depth, "max feature_layer_id must be less than depth"
 
         # layers
         layers = []
-        drop_path_rates = [
-            x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)
-        ]  # stochastic depth decay rule
+        drop_path_rates = [x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)]  # stochastic depth decay rule
         for i in range(cfg.depth):
             layers.append(
                 AttentionBlock(
@@ -117,11 +113,7 @@ class Transformer(nn.Module):
                     mlp_ratio=cfg.mlp_ratio,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
-                    drop_path=(
-                        drop_path_rates[i]
-                        if isinstance(drop_path_rates, list)
-                        else cfg.drop_path
-                    ),
+                    drop_path=(drop_path_rates[i] if isinstance(drop_path_rates, list) else cfg.drop_path),
                     act_layer=act_layer,
                     use_layerscale=cfg.use_layerscale,
                 )
@@ -151,9 +143,7 @@ class Transformer(nn.Module):
 
         if self.pos_embed_type == "sincos":
             self.pos_embed_latent: nn.Buffer
-            self.register_buffer(
-                "pos_embed_latent", torch.zeros(1, self.num_patches, dim)
-            )
+            self.register_buffer("pos_embed_latent", torch.zeros(1, self.num_patches, dim))
             # sincos
             pos_embed = get_2d_sincos_pos_embed(
                 self.pos_embed_latent.shape[-1],
@@ -161,9 +151,7 @@ class Transformer(nn.Module):
                 pe_interpolation=self.pe_interpolation,
                 base_size=self.base_size,
             )
-            self.pos_embed_latent.data.copy_(
-                torch.from_numpy(pos_embed).float().unsqueeze(0)
-            )
+            self.pos_embed_latent.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
             if self.with_raw_img:
                 pos_embed_raw = get_2d_sincos_pos_embed(
                     dim,
@@ -172,9 +160,7 @@ class Transformer(nn.Module):
                     base_size=self.raw_img_size // self.patch_size,
                 )
                 self.pos_embed_raw: nn.Buffer
-                self.register_buffer(
-                    "pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0)
-                )
+                self.register_buffer("pos_embed_raw", torch.as_tensor(pos_embed_raw).float().unsqueeze(0))
 
         elif self.pos_embed_type == "rope_te":
             if rope_options is None:
@@ -203,9 +189,7 @@ class Transformer(nn.Module):
                 "ref_feat_shape": [self.base_size, self.base_size],
             }
             # create the rope emb at forward
-            self.rope = RotaryEmbeddingCat(
-                dim=dim // self.num_heads, **self.rope_options
-            )
+            self.rope = RotaryEmbeddingCat(dim=dim // self.num_heads, **self.rope_options)
         else:
             raise ValueError(
                 f"Unsupported pos_embed_type: {self.pos_embed_type}. "

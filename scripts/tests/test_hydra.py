@@ -11,9 +11,7 @@ OmegaConf.register_new_resolver("function", lambda x: hydra.utils.get_method(x))
 OmegaConf.register_new_resolver("class", lambda x: hydra.utils.get_class(x))
 OmegaConf.register_new_resolver("list", lambda x: list(x))
 OmegaConf.register_new_resolver("tuple", lambda x: tuple(x))
-OmegaConf.register_new_resolver(
-    "glob", lambda x: ListConfig([str(p) for p in Path().glob(x)])
-)
+OmegaConf.register_new_resolver("glob", lambda x: ListConfig([str(p) for p in Path().glob(x)]))
 
 
 @hydra.main(

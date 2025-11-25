@@ -125,9 +125,7 @@ class DeconvModule(nn.Module):
     ):
         super(DeconvModule, self).__init__()
 
-        assert (kernel_size - scale_factor >= 0) and (
-            kernel_size - scale_factor
-        ) % 2 == 0, (
+        assert (kernel_size - scale_factor >= 0) and (kernel_size - scale_factor) % 2 == 0, (
             f"kernel_size should be greater than or equal to scale_factor "
             f"and (kernel_size - scale_factor) should be even numbers, "
             f"while the kernel size is {kernel_size} and scale_factor is "

@@ -110,9 +110,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         )
         # We don't need to store fpr, tpr, thresholds arrays since they vary in length
         # Instead, we'll compute AUC5 metrics directly in each batch
-        self.auc5 = nn.ModuleDict(
-            {f"auc{i}": torchmetrics.MeanMetric() for i in range(1, 6)}
-        )
+        self.auc5 = nn.ModuleDict({f"auc{i}": torchmetrics.MeanMetric() for i in range(1, 6)})
 
         # For accumulation of predictions and targets
         self.reset()
@@ -162,17 +160,13 @@ class AnomalyDetectionMetricsBase(nn.Module):
 
         # Check shapes consistency
         if anomaly_scores_flat.shape != target_flat.shape:
-            raise ValueError(
-                f"Shape mismatch after flattening: {anomaly_scores_flat.shape} vs {target_flat.shape}"
-            )
+            raise ValueError(f"Shape mismatch after flattening: {anomaly_scores_flat.shape} vs {target_flat.shape}")
 
         # Metrics
         self.auc.update(anomaly_scores_flat, target_flat)
         target_flat = target_flat.cpu().numpy()
         anomaly_scores_flat = anomaly_scores_flat.cpu().numpy()
-        f1_eer_metrics = self._compute_pr_auc_f1_score_eer_metrics(
-            anomaly_scores_flat, target_flat
-        )
+        f1_eer_metrics = self._compute_pr_auc_f1_score_eer_metrics(anomaly_scores_flat, target_flat)
         fpr, tpr, thresholds = roc_curve(target_flat, anomaly_scores_flat)
         auc5 = self._compute_auc5(fpr, tpr, thresholds)
 
@@ -182,9 +176,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
 
     def _format_result(self):
         results = {}
-        results[f"{self.prefix}_pr_auc_f1_metrics"] = self._compute_any(
-            self.pr_auc_f1_metrics
-        )
+        results[f"{self.prefix}_pr_auc_f1_metrics"] = self._compute_any(self.pr_auc_f1_metrics)
         results[f"{self.prefix}_auc5"] = self._compute_any(self.auc5)
         results[f"{self.prefix}_torchmetrics_auc"] = self.auc.compute().item()
         return results
@@ -205,9 +197,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         for key, value in numpy_metrics.items():
             metrics[key].update(torch.as_tensor(value, self.device))
 
-    def _compute_auc5(
-        self, fpr: np.ndarray, tpr: np.ndarray, thresholds: np.ndarray
-    ) -> AUC5_TypedDict:
+    def _compute_auc5(self, fpr: np.ndarray, tpr: np.ndarray, thresholds: np.ndarray) -> AUC5_TypedDict:
         """
         Compute various AUC variants as defined in HyperSIGMA.
 
@@ -295,9 +285,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         elif isinstance(metrics, nn.ModuleDict):
             return {k: v.compute() for k, v in metrics.items()}
         else:
-            raise ValueError(
-                f"Metrics type {type(metrics)} are not supported to compute"
-            )
+            raise ValueError(f"Metrics type {type(metrics)} are not supported to compute")
 
     def compute(self) -> Dict[str, Any]:
         """
@@ -342,18 +330,14 @@ class AnomalyDetectionMetricsBase(nn.Module):
         }
 
         # Compute additional metrics
-        additional_metrics = self._compute_pr_auc_f1_score_eer_metrics(
-            all_preds, all_targets
-        )
+        additional_metrics = self._compute_pr_auc_f1_score_eer_metrics(all_preds, all_targets)
         for key, value in additional_metrics.items():
             results[f"{self.prefix}{key}"] = value
 
         # Add statistics
         results[f"{self.prefix}num_samples"] = len(all_preds)
         results[f"{self.prefix}num_anomalies"] = int(all_targets.sum().item())
-        results[f"{self.prefix}anomaly_ratio"] = round(
-            float(all_targets.mean().item()), 4
-        )
+        results[f"{self.prefix}anomaly_ratio"] = round(float(all_targets.mean().item()), 4)
 
         return results
 

@@ -86,9 +86,7 @@ def main(args, resume_preempt=False):
     # --
 
     # -- MASK
-    allow_overlap = args["mask"][
-        "allow_overlap"
-    ]  # whether to allow overlap b/w context and target blocks
+    allow_overlap = args["mask"]["allow_overlap"]  # whether to allow overlap b/w context and target blocks
     patch_size = args["mask"]["patch_size"]  # patch-size for model training
     num_enc_masks = args["mask"]["num_enc_masks"]  # number of context blocks
     min_keep = args["mask"]["min_keep"]  # min number of patches in context block
@@ -228,16 +226,14 @@ def main(args, resume_preempt=False):
     start_epoch = 0
     # -- load training checkpoint
     if load_model:
-        encoder, predictor, target_encoder, optimizer, scaler, start_epoch = (
-            load_checkpoint(
-                device=device,
-                r_path=load_path,
-                encoder=encoder,
-                predictor=predictor,
-                target_encoder=target_encoder,
-                opt=optimizer,
-                scaler=scaler,
-            )
+        encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
+            device=device,
+            r_path=load_path,
+            encoder=encoder,
+            predictor=predictor,
+            target_encoder=target_encoder,
+            opt=optimizer,
+            scaler=scaler,
         )
         for _ in range(start_epoch * ipe):
             scheduler.step()
@@ -314,9 +310,7 @@ def main(args, resume_preempt=False):
                     return loss
 
                 # Step 1. Forward
-                with torch.cuda.amp.autocast(
-                    dtype=torch.bfloat16, enabled=use_bfloat16
-                ):
+                with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
                     h = forward_target()
                     z = forward_context()
                     loss = loss_fn(z, h)
@@ -335,9 +329,7 @@ def main(args, resume_preempt=False):
                 # Step 3. momentum update of target encoder
                 with torch.no_grad():
                     m = next(momentum_scheduler)
-                    for param_q, param_k in zip(
-                        encoder.parameters(), target_encoder.parameters()
-                    ):
+                    for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1.0 - m) * param_q.detach().data)
 
                 return (float(loss), _new_lr, _new_wd, grad_stats)
@@ -348,9 +340,7 @@ def main(args, resume_preempt=False):
 
             # -- Logging
             def log_stats():
-                csv_logger.log(
-                    epoch + 1, itr, loss, maskA_meter.val, maskB_meter.val, etime
-                )
+                csv_logger.log(epoch + 1, itr, loss, maskA_meter.val, maskB_meter.val, etime)
                 if (itr % log_freq == 0) or np.isnan(loss) or np.isinf(loss):
                     logger.info(
                         "[%d, %5d] loss: %.3f "

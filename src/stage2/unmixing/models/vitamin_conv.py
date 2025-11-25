@@ -12,9 +12,7 @@ from ...layers import MbConvStages
 @dataclass
 class ConvCfg:
     expand_ratio: float = 4.0
-    expand_output: bool = (
-        True  # calculate expansion channels from output (vs input chs)
-    )
+    expand_output: bool = True  # calculate expansion channels from output (vs input chs)
     kernel_size: int = 3
     group_size: int = 1  # 1 == depthwise
     pre_norm_act: bool = False  # activation after pre-norm
@@ -103,9 +101,7 @@ if __name__ == "__main__":
     import torch
 
     # Example usage of ConvCfg dataclass
-    conv_cfg = ConvCfg(
-        expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d"
-    )
+    conv_cfg = ConvCfg(expand_ratio=2.0, kernel_size=3, act_layer="gelu", norm_layer="layernorm2d")
     print("ConvCfg example:", conv_cfg)
 
     # Example usage of VitaminCfg dataclass

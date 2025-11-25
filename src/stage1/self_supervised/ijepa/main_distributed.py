@@ -34,12 +34,8 @@ parser.add_argument(
     default="configs.yaml",
 )
 parser.add_argument("--partition", type=str, help="cluster partition to submit jobs on")
-parser.add_argument(
-    "--nodes", type=int, default=1, help="num. nodes to request for job"
-)
-parser.add_argument(
-    "--tasks-per-node", type=int, default=1, help="num. procs to per node"
-)
+parser.add_argument("--nodes", type=int, default=1, help="num. nodes to request for job")
+parser.add_argument("--tasks-per-node", type=int, default=1, help="num. procs to per node")
 parser.add_argument("--time", type=int, default=4300, help="time in minutes to run job")
 
 
@@ -72,9 +68,7 @@ class Trainer:
 
 
 def launch():
-    executor = submitit.AutoExecutor(
-        folder=os.path.join(args.folder, "job_%j"), slurm_max_num_timeout=20
-    )
+    executor = submitit.AutoExecutor(folder=os.path.join(args.folder, "job_%j"), slurm_max_num_timeout=20)
     executor.update_parameters(
         slurm_partition=args.partition,
         slurm_mem_per_gpu="55G",

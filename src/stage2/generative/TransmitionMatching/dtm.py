@@ -11,9 +11,7 @@ class DTM:
         self.backbone_disc_T = backbone_disc_T
         self.fm_head_N = fm_head_N
 
-        assert self.backbone_disc_T > 0 and self.fm_head_N > 0, (
-            "backbone_disc_T and fm_head_N must be positive"
-        )
+        assert self.backbone_disc_T > 0 and self.fm_head_N > 0, "backbone_disc_T and fm_head_N must be positive"
 
     def loss(
         self,
@@ -143,9 +141,7 @@ class DTM:
             X_ts = []
 
             # Sample one step
-            X_t = self.sample_one_backbone_step(
-                backbone, head, X_t, t, conditions, solver=solver
-            )
+            X_t = self.sample_one_backbone_step(backbone, head, X_t, t, conditions, solver=solver)
 
             if ret_sample_process:
                 X_ts.append(X_t)

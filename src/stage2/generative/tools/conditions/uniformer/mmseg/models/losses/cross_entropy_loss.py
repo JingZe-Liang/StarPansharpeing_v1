@@ -18,16 +18,12 @@ def cross_entropy(
     """The wrapper function for :func:`F.cross_entropy`"""
     # class_weight is a manual rescaling weight given to each class.
     # If given, has to be a Tensor of size C element-wise losses
-    loss = F.cross_entropy(
-        pred, label, weight=class_weight, reduction="none", ignore_index=ignore_index
-    )
+    loss = F.cross_entropy(pred, label, weight=class_weight, reduction="none", ignore_index=ignore_index)
 
     # apply weights and do the reduction
     if weight is not None:
         weight = weight.float()
-    loss = weight_reduce_loss(
-        loss, weight=weight, reduction=reduction, avg_factor=avg_factor
-    )
+    loss = weight_reduce_loss(loss, weight=weight, reduction=reduction, avg_factor=avg_factor)
 
     return loss
 
@@ -80,20 +76,15 @@ def binary_cross_entropy(
         torch.Tensor: The calculated loss
     """
     if pred.dim() != label.dim():
-        assert (pred.dim() == 2 and label.dim() == 1) or (
-            pred.dim() == 4 and label.dim() == 3
-        ), (
-            "Only pred shape [N, C], label shape [N] or pred shape [N, C, "
-            "H, W], label shape [N, H, W] are supported"
+        assert (pred.dim() == 2 and label.dim() == 1) or (pred.dim() == 4 and label.dim() == 3), (
+            "Only pred shape [N, C], label shape [N] or pred shape [N, C, H, W], label shape [N, H, W] are supported"
         )
         label, weight = _expand_onehot_labels(label, weight, pred.shape, ignore_index)
 
     # weighted element-wise losses
     if weight is not None:
         weight = weight.float()
-    loss = F.binary_cross_entropy_with_logits(
-        pred, label.float(), pos_weight=class_weight, reduction="none"
-    )
+    loss = F.binary_cross_entropy_with_logits(pred, label.float(), pos_weight=class_weight, reduction="none")
     # do the reduction for the weighted loss
     loss = weight_reduce_loss(loss, weight, reduction=reduction, avg_factor=avg_factor)
 
@@ -136,9 +127,7 @@ def mask_cross_entropy(
     num_rois = pred.size()[0]
     inds = torch.arange(0, num_rois, dtype=torch.long, device=pred.device)
     pred_slice = pred[inds, label].squeeze(1)
-    return F.binary_cross_entropy_with_logits(
-        pred_slice, target, weight=class_weight, reduction="mean"
-    )[None]
+    return F.binary_cross_entropy_with_logits(pred_slice, target, weight=class_weight, reduction="mean")[None]
 
 
 @LOSSES.register_module()

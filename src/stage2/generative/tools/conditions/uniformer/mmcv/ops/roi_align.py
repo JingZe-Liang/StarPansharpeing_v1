@@ -12,9 +12,7 @@ ext_module = ext_loader.load_ext("_ext", ["roi_align_forward", "roi_align_backwa
 
 class RoIAlignFunction(Function):
     @staticmethod
-    def symbolic(
-        g, input, rois, output_size, spatial_scale, sampling_ratio, pool_mode, aligned
-    ):
+    def symbolic(g, input, rois, output_size, spatial_scale, sampling_ratio, pool_mode, aligned):
         from ..onnx import is_custom_op_loaded
 
         has_custom_op = is_custom_op_loaded()
@@ -176,9 +174,7 @@ class RoIAlign(nn.Module):
         performance if ROIAlign is used together with conv layers.
     """
 
-    @deprecated_api_warning(
-        {"out_size": "output_size", "sample_num": "sampling_ratio"}, cls_name="RoIAlign"
-    )
+    @deprecated_api_warning({"out_size": "output_size", "sample_num": "sampling_ratio"}, cls_name="RoIAlign")
     def __init__(
         self,
         output_size,

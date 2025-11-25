@@ -11,9 +11,7 @@ ext_module = ext_loader.load_ext("_ext", ["psamask_forward", "psamask_backward"]
 class PSAMaskFunction(Function):
     @staticmethod
     def symbolic(g, input, psa_type, mask_size):
-        return g.op(
-            "mmcv::MMCVPSAMask", input, psa_type_i=psa_type, mask_size_i=mask_size
-        )
+        return g.op("mmcv::MMCVPSAMask", input, psa_type_i=psa_type, mask_size_i=mask_size)
 
     @staticmethod
     def forward(ctx, input, psa_type, mask_size):
@@ -24,9 +22,7 @@ class PSAMaskFunction(Function):
         h_mask, w_mask = ctx.mask_size
         batch_size, channels, h_feature, w_feature = input.size()
         assert channels == h_mask * w_mask
-        output = input.new_zeros(
-            (batch_size, h_feature * w_feature, h_feature, w_feature)
-        )
+        output = input.new_zeros((batch_size, h_feature * w_feature, h_feature, w_feature))
 
         ext_module.psamask_forward(
             input,

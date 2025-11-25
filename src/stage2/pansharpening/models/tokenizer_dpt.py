@@ -24,9 +24,7 @@ class DPTHeadConfig:
 
 @dataclass
 class CosmosTokenizerDPTConfig:
-    tokenizer_cfg: ContinuousTokenizerConfig = field(
-        default_factory=lambda: ContinuousTokenizerConfig()
-    )
+    tokenizer_cfg: ContinuousTokenizerConfig = field(default_factory=lambda: ContinuousTokenizerConfig())
     dpt_head_cfg: DPTHeadConfig = field(default_factory=lambda: DPTHeadConfig())
     encoder_dtype: str = "bfloat16"
     decoder_dtype: str = "bfloat16"

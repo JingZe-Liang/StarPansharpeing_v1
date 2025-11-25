@@ -81,9 +81,7 @@ class LatentQuantize(Module):
         )
         self.register_buffer("_levels", _levels, persistent=False)
 
-        _basis = torch.cumprod(
-            torch.concat([torch.tensor([1], dtype=int32), _levels[:-1]], dim=0), dim=0
-        )
+        _basis = torch.cumprod(torch.concat([torch.tensor([1], dtype=int32), _levels[:-1]], dim=0), dim=0)
         self.register_buffer("_basis", _basis, persistent=False)
 
         self.codebook_dim = codebook_dim if codebook_dim > 0 else len(_levels)
@@ -92,50 +90,34 @@ class LatentQuantize(Module):
         self.num_codebooks = num_codebooks
         self.effective_codebook_dim = effective_codebook_dim
 
-        keep_num_codebooks_dim = (
-            keep_num_codebooks_dim if keep_num_codebooks_dim else num_codebooks > 1
-        )
+        keep_num_codebooks_dim = keep_num_codebooks_dim if keep_num_codebooks_dim else num_codebooks > 1
         assert not (num_codebooks > 1 and not keep_num_codebooks_dim)
         self.keep_num_codebooks_dim = keep_num_codebooks_dim
 
         has_projections = self.dim != effective_codebook_dim
-        self.project_in = (
-            nn.Linear(self.dim, effective_codebook_dim)
-            if has_projections
-            else nn.Identity()
-        )
-        self.project_out = (
-            nn.Linear(effective_codebook_dim, self.dim)
-            if has_projections
-            else nn.Identity()
-        )
+        self.project_in = nn.Linear(self.dim, effective_codebook_dim) if has_projections else nn.Identity()
+        self.project_out = nn.Linear(effective_codebook_dim, self.dim) if has_projections else nn.Identity()
         self.has_projections = has_projections
 
         self.codebook_size = self._levels.prod().item()
 
-        implicit_codebook = self.indices_to_codes(
-            torch.arange(self.codebook_size), project_out=False
-        )
+        implicit_codebook = self.indices_to_codes(torch.arange(self.codebook_size), project_out=False)
         self.register_buffer("implicit_codebook", implicit_codebook, persistent=False)
 
         values_per_latent = [
-            torch.linspace(-0.5, 0.5, level)
-            if level % 2 == 1
-            else torch.arange(level) / level - 0.5
+            torch.linspace(-0.5, 0.5, level) if level % 2 == 1 else torch.arange(level) / level - 0.5
             for level in _levels
         ]  # ensure zero is in the middle and start is always -0.5
 
         # test, and check whether it would be in the parameters of the model or not
         if optimize_values:
-            self.values_per_latent = nn.ParameterList(
-                [nn.Parameter(values) for values in values_per_latent]
-            )
+            self.values_per_latent = nn.ParameterList([nn.Parameter(values) for values in values_per_latent])
             if in_place_codebook_optimizer is not None:
-                self.in_place_codebook_optimizer = in_place_codebook_optimizer(
-                    self.values_per_latent
-                )
+                self.in_place_codebook_optimizer = in_place_codebook_optimizer(self.values_per_latent)
         else:
-            self.values_per_latent = values_per_latent  # are there any scenarios where this would have its gradients updated?
+            self.values_per_latent = (
+                values_per_latent  # are there any scenarios where this would have its gradients updated?
+            )
 
     def quantization_loss(self, z: Tensor, zhat: Tensor, reduce="mean") -> Tensor:
         """Computes the quantization loss."""
@@ -156,18 +138,13 @@ class LatentQuantize(Module):
 
         index = torch.stack(
             [
-                torch.argmin(
-                    distance(z[..., i, None], self.values_per_latent[i]), dim=-1
-                )
+                torch.argmin(distance(z[..., i, None], self.values_per_latent[i]), dim=-1)
                 for i in range(self.codebook_dim)
             ],
             dim=-1,
         )
         quantize = torch.stack(
-            [
-                self.values_per_latent[i][index[..., i]]
-                for i in range(self.codebook_dim)
-            ],
+            [self.values_per_latent[i][index[..., i]] for i in range(self.codebook_dim)],
             dim=-1,
         )
 
@@ -239,9 +216,7 @@ class LatentQuantize(Module):
         z = rearrange(z, "b d ... -> b ... d")
         z, ps = pack_one(z, "b * d")
 
-        assert z.shape[-1] == self.dim, (
-            f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
-        )
+        assert z.shape[-1] == self.dim, f"expected dimension of {self.dim} but found dimension of {z.shape[-1]}"
 
         # project in
         z = self.project_in(z)
@@ -263,16 +238,8 @@ class LatentQuantize(Module):
 
         if should_inplace_optimize and self.training and not self.optimize_values:
             # update codebook
-            loss = (
-                self.commitment_loss(z, out)
-                if self.commitment_loss_weight != 0
-                else torch.tensor(0.0)
-            )
-            loss += (
-                self.quantization_loss(z, out)
-                if self.quantization_loss_weight != 0
-                else torch.tensor(0.0)
-            )
+            loss = self.commitment_loss(z, out) if self.commitment_loss_weight != 0 else torch.tensor(0.0)
+            loss += self.quantization_loss(z, out) if self.quantization_loss_weight != 0 else torch.tensor(0.0)
             loss.backward()
             self.in_place_codebook_optimizer.step()
             self.in_place_codebook_optimizer.zero_grad()
@@ -302,9 +269,6 @@ class LatentQuantize(Module):
             else torch.tensor(0.0)
         )
 
-        loss = (
-            self.commitment_loss_weight * commitment_loss
-            + self.quantization_loss_weight * quantization_loss
-        )
+        loss = self.commitment_loss_weight * commitment_loss + self.quantization_loss_weight * quantization_loss
 
         return out, indices, loss

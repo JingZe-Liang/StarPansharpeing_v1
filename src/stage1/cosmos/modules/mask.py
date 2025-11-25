@@ -39,9 +39,7 @@ def random_masking_mae(x: torch.Tensor, mask_ratio: float):
     return x_masked, mask, ids_restore
 
 
-def random_masking_no_drop(
-    x: torch.Tensor, mask_ratio: float, mask_token: Float[torch.Tensor, "1 1 D"]
-):
+def random_masking_no_drop(x: torch.Tensor, mask_ratio: float, mask_token: Float[torch.Tensor, "1 1 D"]):
     N, L, D = x.shape  # batch, length, dim
     len_keep = int(L * (1 - mask_ratio))
 

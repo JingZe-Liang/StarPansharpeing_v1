@@ -72,9 +72,7 @@ class FeaturesToDepth(torch.nn.Module):
         n_bins = x.shape[1]  # N n_bins H W
         if n_bins > 1:
             if self.bins_strategy == "linear":
-                bins = torch.linspace(
-                    self.min_depth, self.max_depth, n_bins, device=x.device
-                )
+                bins = torch.linspace(self.min_depth, self.max_depth, n_bins, device=x.device)
             elif self.bins_strategy == "log":
                 bins = torch.linspace(
                     torch.log(torch.tensor(self.min_depth)),
@@ -148,9 +146,7 @@ class EncoderDecoder(torch.nn.Module):
         self.is_cuda = torch.cuda.is_available()
 
     def forward(self, x):
-        with torch.autocast(
-            "cuda" if torch.cuda.is_available() else "cpu", enabled=False
-        ):
+        with torch.autocast("cuda" if torch.cuda.is_available() else "cpu", enabled=False):
             x = x.to(self.encoder_dtype)
 
             # Tokenizer specific forward

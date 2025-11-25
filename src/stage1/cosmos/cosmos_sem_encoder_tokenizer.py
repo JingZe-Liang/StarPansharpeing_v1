@@ -24,9 +24,7 @@ from .modules.transformer import (
 )
 
 
-def init_weights_vit_jax_custom(
-    module: nn.Module, name: str = "", head_bias: float = 0.0
-) -> None:
+def init_weights_vit_jax_custom(module: nn.Module, name: str = "", head_bias: float = 0.0) -> None:
     """ViT weight initialization, matching JAX (Flax) impl.
 
     Args:
@@ -41,9 +39,7 @@ def init_weights_vit_jax_custom(
         else:
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
-                nn.init.normal_(
-                    module.bias, std=1e-6
-                ) if "mlp" in name else nn.init.zeros_(module.bias)
+                nn.init.normal_(module.bias, std=1e-6) if "mlp" in name else nn.init.zeros_(module.bias)
     elif isinstance(module, nn.Conv2d):
         # lecun_normal_(module.weight)
         nn.init.xavier_normal_(module.weight)
@@ -123,21 +119,15 @@ def load_repa_dino_v3_model(
             if search_name in p.stem:
                 weight_path = str(p)
                 break
-        assert weight_path is not None, (
-            f"can not find weight {model_name=} at {weight_dir}"
-        )
+        assert weight_path is not None, f"can not find weight {model_name=} at {weight_dir}"
     elif weight_path is None and model_name is None:
         raise ValueError("Either model_name or weight_path must be specified.")
 
     assert weight_path is not None, f"{weight_path=} does not exists"
-    logger.info(
-        f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}."
-    )
+    logger.info(f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}.")
     assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
     sys.path.append(str(repo_dir))
-    dino_model = torch.hub.load(
-        repo_dir, model_name, source="local", weights=weight_path
-    )
+    dino_model = torch.hub.load(repo_dir, model_name, source="local", weights=weight_path)
     dino_model = cast(nn.Module, dino_model)
     if compile:
         dino_model = torch.compile(dino_model, mode="reduce-overhead")
@@ -247,26 +237,18 @@ class Dinov3RAE(nn.Module):
         embed_dim = epw.shape[0]
 
         # assert no norm
-        assert isinstance(encoder_patcher.norm, nn.Identity), (
-            "encoder_patcher.norm must be nn.Identity"
-        )
+        assert isinstance(encoder_patcher.norm, nn.Identity), "encoder_patcher.norm must be nn.Identity"
 
         # set to adaptive conv
-        adaptive_patcher = AdaptivePatchEmbedding(
-            cfg.in_chan, embed_dim, patch_size=ep, output_fmt="NHWC"
-        )
+        adaptive_patcher = AdaptivePatchEmbedding(cfg.in_chan, embed_dim, patch_size=ep, output_fmt="NHWC")
 
         # set the weights and bias
         # repeats the original weights
-        assert cfg.in_chan > 3, (
-            f"the input channels must be larger than 3, but got {cfg.in_chan}"
-        )
+        assert cfg.in_chan > 3, f"the input channels must be larger than 3, but got {cfg.in_chan}"
         repeat_times = math.ceil(cfg.in_chan / 3)
         in_chans_l = repeat_times * 3
         adaptive_w = adaptive_patcher.proj.conv.weight  # (embed_dim, in_chan, k, k)
-        adaptive_w.data.copy_(
-            epw.repeat(1, repeat_times, 1, 1)[:, : cfg.in_chan]
-        )  # (embed_dim, in_chan, k, k)
+        adaptive_w.data.copy_(epw.repeat(1, repeat_times, 1, 1)[:, : cfg.in_chan])  # (embed_dim, in_chan, k, k)
         adaptive_patcher.proj.conv.bias.data.copy_(epb)  # (embed_dim,)
         self.encoder.patch_embed = adaptive_patcher  # replace
 
@@ -278,9 +260,7 @@ class Dinov3RAE(nn.Module):
 
     def encode(self, x):
         h = self.encoder(x, is_training=True)["x_norm_patchtokens"]
-        assert h.ndim == 3, (
-            f"the encoder output should be (bs, n_patches, dim), but got {h.shape}"
-        )
+        assert h.ndim == 3, f"the encoder output should be (bs, n_patches, dim), but got {h.shape}"
         if self.training and self.noise_tau > 0:
             h = self.noising(h)
         return h
@@ -297,9 +277,7 @@ class Dinov3RAE(nn.Module):
         return h + noise
 
     def decode(self, h, inp_shape, clamp=False):
-        out_chan = (
-            inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
-        )
+        out_chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
         dec_hidden = self.decoder(h, ret_2d_tokens=True, ret_all=False)
         dec = self.light_upsampler(dec_hidden, out_chan)
         return dec.clamp(-1.0, 1.0) if clamp else dec
@@ -339,9 +317,7 @@ def test_dinov3_encoder_tokenizer():
     cfg_str_basic = "in_chan=256 out_chan=256 noise_tau=0.8 img_size=512"
     cfg_basic = OmegaConf.from_dotlist(cfg_str_basic.split(" "))
 
-    cfg_str_dino = (
-        "model_name=dinov3_vitb16 weight_path=null pretrained_on='web' compile=False"
-    )
+    cfg_str_dino = "model_name=dinov3_vitb16 weight_path=null pretrained_on='web' compile=False"
     cfg_dino = OmegaConf.from_dotlist(cfg_str_dino.split(" "))
 
     cfg_str_dec = (
@@ -351,10 +327,7 @@ def test_dinov3_encoder_tokenizer():
     )
     cfg_dec = OmegaConf.from_dotlist(cfg_str_dec.split(" "))
 
-    cfg_str_upsampler = (
-        "out_chan=256 channels=512 channels_mult=[1,1,1,1] num_res_blocks=1 "
-        "patch_size=1"
-    )
+    cfg_str_upsampler = "out_chan=256 channels=512 channels_mult=[1,1,1,1] num_res_blocks=1 patch_size=1"
     cfg_upsampler = OmegaConf.from_dotlist(cfg_str_upsampler.split(" "))
 
     cfg = OmegaConf.merge(

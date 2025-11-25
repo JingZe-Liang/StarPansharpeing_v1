@@ -70,14 +70,10 @@ class MobileNetV2(nn.Module):
         self.out_indices = out_indices
         for index in out_indices:
             if index not in range(0, 7):
-                raise ValueError(
-                    f"the item in out_indices must in range(0, 8). But received {index}"
-                )
+                raise ValueError(f"the item in out_indices must in range(0, 8). But received {index}")
 
         if frozen_stages not in range(-1, 7):
-            raise ValueError(
-                f"frozen_stages must be in range(-1, 7). But received {frozen_stages}"
-            )
+            raise ValueError(f"frozen_stages must be in range(-1, 7). But received {frozen_stages}")
         self.out_indices = out_indices
         self.frozen_stages = frozen_stages
         self.conv_cfg = conv_cfg

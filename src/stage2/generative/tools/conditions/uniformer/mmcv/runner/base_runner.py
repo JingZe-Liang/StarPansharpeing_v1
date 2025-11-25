@@ -61,12 +61,9 @@ class BaseRunner(metaclass=ABCMeta):
     ):
         if batch_processor is not None:
             if not callable(batch_processor):
-                raise TypeError(
-                    f"batch_processor must be callable, but got {type(batch_processor)}"
-                )
+                raise TypeError(f"batch_processor must be callable, but got {type(batch_processor)}")
             warnings.warn(
-                "batch_processor is deprecated, please implement "
-                "train_step() and val_step() in the model instead."
+                "batch_processor is deprecated, please implement train_step() and val_step() in the model instead."
             )
             # raise an error is `batch_processor` is not None and
             # `model.train_step()` exists.
@@ -75,10 +72,7 @@ class BaseRunner(metaclass=ABCMeta):
             else:
                 _model = model
             if hasattr(_model, "train_step") or hasattr(_model, "val_step"):
-                raise RuntimeError(
-                    "batch_processor and model.train_step()/model.val_step() "
-                    "cannot be both available."
-                )
+                raise RuntimeError("batch_processor and model.train_step()/model.val_step() cannot be both available.")
         else:
             assert hasattr(model, "train_step")
 
@@ -92,15 +86,12 @@ class BaseRunner(metaclass=ABCMeta):
                     )
         elif not isinstance(optimizer, Optimizer) and optimizer is not None:
             raise TypeError(
-                f"optimizer must be a torch.optim.Optimizer object "
-                f"or dict or None, but got {type(optimizer)}"
+                f"optimizer must be a torch.optim.Optimizer object or dict or None, but got {type(optimizer)}"
             )
 
         # check the type of `logger`
         if not isinstance(logger, logging.Logger):
-            raise TypeError(
-                f"logger must be a logging.Logger object, but got {type(logger)}"
-            )
+            raise TypeError(f"logger must be a logging.Logger object, but got {type(logger)}")
 
         # check the type of `meta`
         if meta is not None and not isinstance(meta, dict):
@@ -250,9 +241,7 @@ class BaseRunner(metaclass=ABCMeta):
             return momentums
 
         if self.optimizer is None:
-            raise RuntimeError(
-                "momentum is not applicable because optimizer does not exist."
-            )
+            raise RuntimeError("momentum is not applicable because optimizer does not exist.")
         elif isinstance(self.optimizer, torch.optim.Optimizer):
             momentums = _get_momentum(self.optimizer)
         elif isinstance(self.optimizer, dict):
@@ -378,19 +367,11 @@ class BaseRunner(metaclass=ABCMeta):
         # Re-calculate the number of iterations when resuming
         # models with different number of GPUs
         if "config" in checkpoint["meta"]:
-            config = mmcv.Config.fromstring(
-                checkpoint["meta"]["config"], file_format=".py"
-            )
+            config = mmcv.Config.fromstring(checkpoint["meta"]["config"], file_format=".py")
             previous_gpu_ids = config.get("gpu_ids", None)
-            if (
-                previous_gpu_ids
-                and len(previous_gpu_ids) > 0
-                and len(previous_gpu_ids) != self.world_size
-            ):
+            if previous_gpu_ids and len(previous_gpu_ids) > 0 and len(previous_gpu_ids) != self.world_size:
                 self._iter = int(self._iter * len(previous_gpu_ids) / self.world_size)
-                self.logger.info(
-                    "the iteration number is changed due to change of GPU number"
-                )
+                self.logger.info("the iteration number is changed due to change of GPU number")
 
         # resume meta information meta
         self.meta = checkpoint["meta"]
@@ -402,10 +383,7 @@ class BaseRunner(metaclass=ABCMeta):
                 for k in self.optimizer.keys():
                     self.optimizer[k].load_state_dict(checkpoint["optimizer"][k])
             else:
-                raise TypeError(
-                    "Optimizer should be dict or torch.optim.Optimizer "
-                    f"but got {type(self.optimizer)}"
-                )
+                raise TypeError(f"Optimizer should be dict or torch.optim.Optimizer but got {type(self.optimizer)}")
 
         self.logger.info("resumed epoch %d, iter %d", self.epoch, self.iter)
 
@@ -476,9 +454,7 @@ class BaseRunner(metaclass=ABCMeta):
             return
         log_interval = log_config["interval"]
         for info in log_config["hooks"]:
-            logger_hook = mmcv.build_from_cfg(
-                info, HOOKS, default_args=dict(interval=log_interval)
-            )
+            logger_hook = mmcv.build_from_cfg(info, HOOKS, default_args=dict(interval=log_interval))
             self.register_hook(logger_hook, priority="VERY_LOW")
 
     def register_timer_hook(self, timer_config):

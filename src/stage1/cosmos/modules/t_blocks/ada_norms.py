@@ -36,18 +36,14 @@ def get_norm_layer(
     elif norm_type == "l2":
         return LpNorm(p=2, dim=-1, eps=eps)
     elif norm_type == "group_norm":
-        return nn.GroupNorm(
-            num_channels=dim, num_groups=num_groups, eps=eps, affine=elementwise_affine
-        )
+        return nn.GroupNorm(num_channels=dim, num_groups=num_groups, eps=eps, affine=elementwise_affine)
     else:
         raise ValueError(f"unknown norm_type: {norm_type}.")
 
 
 class RMSNorm(nn.Module):
     # From https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/normalization.py
-    def __init__(
-        self, dim, eps: float, elementwise_affine: bool = True, bias: bool = False
-    ):
+    def __init__(self, dim, eps: float, elementwise_affine: bool = True, bias: bool = False):
         super().__init__()
 
         self.eps = eps
@@ -142,25 +138,19 @@ class AdaGroupNorm2D(nn.Module):
         eps (`float`, *optional*, defaults to `1e-5`): The epsilon value to use for numerical stability.
     """
 
-    def __init__(
-        self, embedding_dim: int, out_dim: int, num_groups: int, eps: float = 1e-5
-    ):
+    def __init__(self, embedding_dim: int, out_dim: int, num_groups: int, eps: float = 1e-5):
         super().__init__()
         self.num_groups = num_groups
         self.eps = eps
 
-        self.ctx_proj = nn.Conv2d(
-            embedding_dim, out_dim * 2, kernel_size=1, stride=1, padding=0
-        )
+        self.ctx_proj = nn.Conv2d(embedding_dim, out_dim * 2, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x: torch.Tensor, ctx_emb: torch.Tensor) -> torch.Tensor:
         assert ctx_emb is not None
         ctx_emb = self.ctx_proj(ctx_emb)
         if ctx_emb.shape[0] > 32:
             ctx_emb = ctx_emb.contiguous()
-        ctx_emb = torch.nn.functional.interpolate(
-            ctx_emb, size=(x.shape[-2], x.shape[-1]), mode="nearest"
-        )
+        ctx_emb = torch.nn.functional.interpolate(ctx_emb, size=(x.shape[-2], x.shape[-1]), mode="nearest")
         scale, shift = ctx_emb.chunk(2, dim=1)
 
         x = F.group_norm(x, self.num_groups, eps=self.eps)
@@ -211,9 +201,7 @@ class AdaLayerNorm(nn.Module):
             ctx_emb = repeat(ctx_emb, "B W H C -> B (W R1 H R2) C", R1=r, R2=r)
         elif ctx_emb.dim() == 3:  # 3D tensor (B, L, C)
             ctx_emb = self.linear(self.silu(ctx_emb))
-            ctx_emb = repeat(
-                ctx_emb, "B L C -> B (L R) C", R=max(1, x_L // ctx_emb.shape[1])
-            )
+            ctx_emb = repeat(ctx_emb, "B L C -> B (L R) C", R=max(1, x_L // ctx_emb.shape[1]))
         elif ctx_emb.dim() == 2:  # 2D tensor (B, C)
             ctx_emb = self.linear(self.silu(ctx_emb))
             ctx_emb = repeat(ctx_emb, "B C -> B L C", L=x_L)

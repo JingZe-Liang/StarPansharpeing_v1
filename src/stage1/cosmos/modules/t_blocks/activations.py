@@ -27,9 +27,7 @@ def get_linear_activation(activation_fn: str, dim: int, *, inner_dim=None, bias=
         assert inner_dim is not None, "inner_dim must be provided for SwiGLU activation"
         return SwiGLU(dim, inner_dim, bias=bias)
     elif activation_fn == "linear-silu":
-        assert inner_dim is not None, (
-            "inner_dim must be provided for LinearActivation activation"
-        )
+        assert inner_dim is not None, "inner_dim must be provided for LinearActivation activation"
         return LinearActivation(dim, inner_dim, bias=bias, activation="silu")
     else:
         raise ValueError(f"Unknown activation function: {activation_fn}.")
@@ -47,9 +45,7 @@ class GELU(nn.Module):
         bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
     """
 
-    def __init__(
-        self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True
-    ):
+    def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True):
         super().__init__()
         self.proj = nn.Linear(dim_in, dim_out, bias=bias)
         self.approximate = approximate
@@ -134,9 +130,7 @@ class ApproximateGELU(nn.Module):
 
 class LinearActivation(nn.Module):
     # From https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/activations.py
-    def __init__(
-        self, dim_in: int, dim_out: int, bias: bool = True, activation: str = "silu"
-    ):
+    def __init__(self, dim_in: int, dim_out: int, bias: bool = True, activation: str = "silu"):
         super().__init__()
 
         self.proj = nn.Linear(dim_in, dim_out, bias=bias)

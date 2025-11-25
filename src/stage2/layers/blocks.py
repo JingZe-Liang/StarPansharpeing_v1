@@ -102,11 +102,7 @@ class AttentionBlock(nn.Module):
             )
         elif attn_type == "nat_1d":
             # NatAttention expects norm layer object, not boolean
-            nat_qk_norm = (
-                qk_norm
-                if isinstance(qk_norm, (type, nn.Module))
-                else (norm_layer if qk_norm else None)
-            )
+            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
             self.attn = NatAttention1d(
                 dim,
                 num_heads=num_heads,
@@ -121,11 +117,7 @@ class AttentionBlock(nn.Module):
             )
         elif attn_type == "nat_2d":
             # NatAttention expects norm layer object, not boolean
-            nat_qk_norm = (
-                qk_norm
-                if isinstance(qk_norm, (type, nn.Module))
-                else (norm_layer if qk_norm else None)
-            )
+            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
             self.attn = NatAttention2d(
                 dim,
                 kernel_size=kernel_size,
@@ -182,12 +174,8 @@ class AttentionBlock(nn.Module):
         else:
             raise ValueError(f"mlp_type {mlp_type} is not supported")
 
-        self.ls1 = (
-            LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
-        )
-        self.ls2 = (
-            LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
-        )
+        self.ls1 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
+        self.ls2 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
 
         self.drop_path = DropPath(drop_path)
 
@@ -253,9 +241,7 @@ class MbConvStages(nn.Module):
 
         # interpolate the condition
         if cond is not None:
-            cond = torch.nn.functional.interpolate(
-                cond, size=x.shape[2:], mode="bilinear", align_corners=False
-            )
+            cond = torch.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
         # stages
         for stage in self.stages.values():
@@ -378,14 +364,10 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
 
         mod_factor = 2
         self.latent_cond_type = latent_cond_type
-        assert latent_cond_type in ("adaln3", "adaln6"), (
-            "latent_cond_type must be adaln3 or adaln6"
-        )
+        assert latent_cond_type in ("adaln3", "adaln6"), "latent_cond_type must be adaln3 or adaln6"
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, dim // mod_factor, 1, bias=True),
-            create_norm_act_layer(
-                norm_layer, dim // mod_factor, act_layer="silu", eps=1e-6
-            ),
+            create_norm_act_layer(norm_layer, dim // mod_factor, act_layer="silu", eps=1e-6),
             create_conv2d(
                 dim // mod_factor,
                 dim * 3 if latent_cond_type == "adaln3" else dim * 6,
@@ -413,14 +395,10 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
                 sh_a, sc_a, g_a = self.modulation(latent_cond).chunk(3, dim=1)
                 sh_f, sc_f, g_f = 0.0, 0.0, 1.0
             else:
-                sh_a, sc_a, g_a, sh_f, sc_f, g_f = self.modulation(latent_cond).chunk(
-                    6, dim=1
-                )
+                sh_a, sc_a, g_a, sh_f, sc_f, g_f = self.modulation(latent_cond).chunk(6, dim=1)
 
             # NAT attention
-            y_attn = (
-                self.ls1(self.attn(self._modulate(self.norm1(x), sc_a, sh_a))) * g_a
-            )
+            y_attn = self.ls1(self.attn(self._modulate(self.norm1(x), sc_a, sh_a))) * g_a
             x = x + self.drop_path(y_attn)
             # ConvFFN
             y_ffn = self.ls2(self.cffn(self._modulate(self.norm2(x), sc_f, sh_f))) * g_f
@@ -488,14 +466,10 @@ class CrossAttentionBlock(nn.Module):
             proj_drop,
             gate_type=ca_gate_type,
         )
-        self.ffn = ClipSwiGLUMlp(
-            dim, int(ffn_ratio * dim), proj_drop, norm_layer=get_norm_layer(norm_layer)
-        )
+        self.ffn = ClipSwiGLUMlp(dim, int(ffn_ratio * dim), proj_drop, norm_layer=get_norm_layer(norm_layer))
 
         self.prenorm_q = create_norm_layer(norm_layer, dim)
-        self.prenorm_kv = (
-            create_norm_layer(norm_layer, dim) if use_mem_prenorm else nn.Identity()
-        )
+        self.prenorm_kv = create_norm_layer(norm_layer, dim) if use_mem_prenorm else nn.Identity()
 
         self.ls_sa = LayerScale(dim, init_values=init_values)
         self.ls_ca = LayerScale(dim, init_values=0.8)
@@ -555,9 +529,7 @@ class LiteLA_GLUMB_Block(nn.Module):
         self.hidden_size = hidden_size
         self.norm1 = create_norm_layer(norm_type, hidden_size, eps=1e-6)
         self_num_heads = hidden_size // linear_head_dim
-        self.attn = LiteLA(
-            hidden_size, hidden_size, heads=self_num_heads, eps=1e-8, qk_norm=qk_norm
-        )
+        self.attn = LiteLA(hidden_size, hidden_size, heads=self_num_heads, eps=1e-8, qk_norm=qk_norm)
         self.norm2 = create_norm_layer(norm_type, hidden_size, eps=1e-6)
         if mlp_type == "glu_mb":
             self.mlp = GLUMBConvMlp(
@@ -587,9 +559,7 @@ class LiteLA_GLUMB_Block(nn.Module):
                 use_conv=False,
             )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
     def forward(self, x, mask=None, HW=None, pe=None, **kwargs):
         def _closure(x, HW):

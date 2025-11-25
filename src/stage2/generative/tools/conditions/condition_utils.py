@@ -6,9 +6,9 @@ import numpy as np
 # Global Checkpoint Path for condition generation
 ckpt_dir = Path(__file__).parent
 annotator_ckpts_path = (ckpt_dir / "ckpts").as_posix()
-assert (
-    Path(annotator_ckpts_path).exists()
-), "Please download the checkpoints by following the instructions in the README.md"
+assert Path(annotator_ckpts_path).exists(), (
+    "Please download the checkpoints by following the instructions in the README.md"
+)
 
 
 def HWC3(x):

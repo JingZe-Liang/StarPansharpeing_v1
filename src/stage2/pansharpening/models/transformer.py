@@ -71,24 +71,18 @@ class Transformer(nn.Module):
             # input is latent, norm it first
             norm_layer=norm_layer,
         )
-        self.fuse_stem = nn.Linear(
-            cfg.dim // self._n_modalities * self._n_modalities, cfg.dim
-        )
+        self.fuse_stem = nn.Linear(cfg.dim // self._n_modalities * self._n_modalities, cfg.dim)
         self.base_size = cfg.input_size // self.patch_size
         self.pe_interpolation = 1.0
         self.out_channels = cfg.out_channels
         self.num_heads = cfg.num_heads
         self.feature_layer_ids = cfg.feature_layer_ids
         if cfg.feature_layer_ids:
-            assert max(cfg.feature_layer_ids) < cfg.depth, (
-                "max feature_layer_id must be less than depth"
-            )
+            assert max(cfg.feature_layer_ids) < cfg.depth, "max feature_layer_id must be less than depth"
 
         # layers
         layers = []
-        drop_path_rates = [
-            x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)
-        ]  # stochastic depth decay rule
+        drop_path_rates = [x.item() for x in torch.linspace(0, cfg.drop_path, cfg.depth)]  # stochastic depth decay rule
 
         for i in range(cfg.depth):
             layers.append(
@@ -102,11 +96,7 @@ class Transformer(nn.Module):
                     mlp_ratio=cfg.mlp_ratio,
                     drop=cfg.drop,
                     attn_drop=cfg.drop,
-                    drop_path=(
-                        drop_path_rates[i]
-                        if isinstance(drop_path_rates, list)
-                        else cfg.drop_path
-                    ),
+                    drop_path=(drop_path_rates[i] if isinstance(drop_path_rates, list) else cfg.drop_path),
                     act_layer=act_layer,
                     use_layerscale=cfg.use_layerscale,
                 )
@@ -172,13 +162,10 @@ class Transformer(nn.Module):
                 "ref_feat_shape": [self.base_size, self.base_size],
             }
             # create the rope emb at forward
-            self.rope = RotaryEmbeddingCat(
-                dim=dim // self.num_heads, **self.rope_options
-            )
+            self.rope = RotaryEmbeddingCat(dim=dim // self.num_heads, **self.rope_options)
         else:
             raise ValueError(
-                f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                f"Unsupported pos_embed_type: {self.pos_embed_type}. Supported types are 'sincos' and 'rope'."
             )
 
     def get_pe(self, hw: tuple | torch.Size):
@@ -212,8 +199,7 @@ class Transformer(nn.Module):
             return pe
         else:
             raise ValueError(
-                f"Unsupported pos_embed_type: {self.pos_embed_type}. "
-                "Supported types are 'sincos' and 'rope'."
+                f"Unsupported pos_embed_type: {self.pos_embed_type}. Supported types are 'sincos' and 'rope'."
             )
 
     def unpatchify(self, x: torch.Tensor):

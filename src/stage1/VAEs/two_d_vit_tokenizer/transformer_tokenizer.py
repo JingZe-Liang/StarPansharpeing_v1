@@ -23,16 +23,10 @@ def _block_caulsal_mask_impl(sequence_length, device, block_size=16, **kwargs):
     """
     Create a block-causal mask
     """
-    assert sequence_length % block_size == 0, (
-        "for block causal masks sequence length must be divisible by block size"
-    )
-    blocks = torch.ones(
-        sequence_length // block_size, block_size, block_size, device=device
-    )
+    assert sequence_length % block_size == 0, "for block causal masks sequence length must be divisible by block size"
+    blocks = torch.ones(sequence_length // block_size, block_size, block_size, device=device)
     block_diag_enable_mask = torch.block_diag(*blocks)
-    causal_enable_mask = torch.ones(
-        sequence_length, sequence_length, device=device
-    ).tril_(0)
+    causal_enable_mask = torch.ones(sequence_length, sequence_length, device=device).tril_(0)
     disable_mask = (block_diag_enable_mask + causal_enable_mask) < 0.5
     return disable_mask
 
@@ -81,11 +75,7 @@ class ResidualAttentionBlock(nn.Module):
 
         self.ln_1 = norm_layer(d_model)
         self.attn = nn.MultiheadAttention(d_model, n_head, dropout=attn_drop)
-        self.ls_1 = (
-            LayerScale(d_model, ls_init_value)
-            if ls_init_value is not None
-            else nn.Identity()
-        )
+        self.ls_1 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
 
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
@@ -102,11 +92,7 @@ class ResidualAttentionBlock(nn.Module):
                 ]
             )
         )
-        self.ls_2 = (
-            LayerScale(d_model, ls_init_value)
-            if ls_init_value is not None
-            else nn.Identity()
-        )
+        self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -119,9 +105,7 @@ class ResidualAttentionBlock(nn.Module):
         is_causal: bool = False,
     ):
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
-        return self.attn(
-            x, x, x, need_weights=False, attn_mask=attn_mask, is_causal=is_causal
-        )[0]
+        return self.attn(x, x, x, need_weights=False, attn_mask=attn_mask, is_causal=is_causal)[0]
 
     def checkpoint_forward(
         self,
@@ -158,18 +142,10 @@ class ResidualAttentionBlock(nn.Module):
         if selective_checkpointing:
             return self.checkpoint_forward(x, attn_mask, is_causal=is_causal)
         if self.use_preln:
-            x = x + self.drop_path(
-                self.ls_1(
-                    self.attention(
-                        self.ln_1(x), attn_mask=attn_mask, is_causal=is_causal
-                    )
-                )
-            )
+            x = x + self.drop_path(self.ls_1(self.attention(self.ln_1(x), attn_mask=attn_mask, is_causal=is_causal)))
             x = x + self.drop_path(self.ls_2(self.mlp(self.ln_2(x))))
         else:
-            x = x + self.drop_path(
-                self.attention(x, attn_mask=attn_mask, is_causal=is_causal)
-            )
+            x = x + self.drop_path(self.attention(x, attn_mask=attn_mask, is_causal=is_causal))
             x = self.ln_1(x)
             x = x + self.drop_path(self.mlp(x))
             x = self.ln_2(x)
@@ -227,11 +203,7 @@ class Transformer(nn.Module):
         is_causal: bool = False,
     ):
         for r in self.resblocks:
-            if (
-                self.training
-                and self.grad_checkpointing
-                and not torch.jit.is_scripting()
-            ):
+            if self.training and self.grad_checkpointing and not torch.jit.is_scripting():
                 if not self.selective_checkpointing:
                     x = checkpoint(
                         r,
@@ -302,16 +274,12 @@ class TransformerEncoder(nn.Module):
         )
 
         scale = width**-0.5
-        self.positional_embedding = nn.Parameter(
-            scale * torch.randn(self.grid_size[0] * self.grid_size[1], width)
-        )
+        self.positional_embedding = nn.Parameter(scale * torch.randn(self.grid_size[0] * self.grid_size[1], width))
         assert num_frames >= 1
         self.num_frames = num_frames
         self.cross_frames = cross_frames
         if num_frames > 1 and cross_frames:
-            self.temporal_positional_embedding = nn.Parameter(
-                torch.zeros(num_frames, width)
-            )
+            self.temporal_positional_embedding = nn.Parameter(torch.zeros(num_frames, width))
         else:
             self.temporal_positional_embedding = None
 
@@ -365,9 +333,7 @@ class TransformerEncoder(nn.Module):
             x = x + self.positional_embedding.to(x.dtype)
         elif self.cross_frames:
             num_frames = x.shape[2]
-            assert num_frames <= self.num_frames, (
-                "Number of frames should be less or equal to the model setting"
-            )
+            assert num_frames <= self.num_frames, "Number of frames should be less or equal to the model setting"
             x = rearrange(
                 x,
                 "b c t (hh sh) (ww sw) -> b (t hh ww) (c sh sw)",
@@ -376,9 +342,9 @@ class TransformerEncoder(nn.Module):
             )
             x = self.conv1(x)
             tile_pos_embed = self.positional_embedding.repeat(num_frames, 1)
-            tile_tem_embed = self.temporal_positional_embedding[
-                :num_frames
-            ].repeat_interleave(self.patches_per_frame, 0)
+            tile_tem_embed = self.temporal_positional_embedding[:num_frames].repeat_interleave(
+                self.patches_per_frame, 0
+            )
             total_pos_embed = tile_pos_embed + tile_tem_embed
             x = x + total_pos_embed.to(x.dtype).squeeze(0)
         else:
@@ -393,14 +359,8 @@ class TransformerEncoder(nn.Module):
 
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)
-        block_size = (
-            self.grid_size[0] * self.grid_size[1]
-            if self.mask_block_size <= 0
-            else self.mask_block_size
-        )
-        attn_mask = get_attention_mask(
-            x.size(0), x.device, mask_type=self.mask_type, block_size=block_size
-        )
+        block_size = self.grid_size[0] * self.grid_size[1] if self.mask_block_size <= 0 else self.mask_block_size
+        attn_mask = get_attention_mask(x.size(0), x.device, mask_type=self.mask_type, block_size=block_size)
         x = self.transformer(x, attn_mask, is_causal=self.mask_type == "causal")
         x = x.permute(1, 0, 2)
         x = self.ln_post(x)
@@ -462,32 +422,22 @@ class TransformerDecoder(nn.Module):
             )
             self.conv_out = nn.Linear(
                 in_features=dim_ffn_output,
-                out_features=out_channels
-                * self.patch_size[0]
-                * self.patch_size[1]
-                * (1 + logit_laplace),
+                out_features=out_channels * self.patch_size[0] * self.patch_size[1] * (1 + logit_laplace),
             )
         else:
             self.ffn = nn.Identity()
             self.conv_out = nn.Linear(
                 in_features=width,
-                out_features=out_channels
-                * self.patch_size[0]
-                * self.patch_size[1]
-                * (1 + logit_laplace),
+                out_features=out_channels * self.patch_size[0] * self.patch_size[1] * (1 + logit_laplace),
             )
 
         scale = width**-0.5
-        self.positional_embedding = nn.Parameter(
-            scale * torch.randn(self.grid_size[0] * self.grid_size[1], width)
-        )
+        self.positional_embedding = nn.Parameter(scale * torch.randn(self.grid_size[0] * self.grid_size[1], width))
         assert num_frames >= 1
         self.num_frames = num_frames
         self.cross_frames = cross_frames
         if num_frames > 1 and cross_frames:
-            self.temporal_positional_embedding = nn.Parameter(
-                torch.zeros(num_frames, width)
-            )
+            self.temporal_positional_embedding = nn.Parameter(torch.zeros(num_frames, width))
         else:
             self.temporal_positional_embedding = None
 
@@ -537,25 +487,17 @@ class TransformerDecoder(nn.Module):
             x = x + self.positional_embedding.to(x.dtype)
         else:
             num_frames = x.shape[1] // self.patches_per_frame
-            assert num_frames <= self.num_frames, (
-                "Number of frames should be less or equal to the model setting"
-            )
+            assert num_frames <= self.num_frames, "Number of frames should be less or equal to the model setting"
             tile_pos_embed = self.positional_embedding.repeat(num_frames, 1)
-            tile_tem_embed = self.temporal_positional_embedding[
-                :num_frames
-            ].repeat_interleave(self.patches_per_frame, 0)
+            tile_tem_embed = self.temporal_positional_embedding[:num_frames].repeat_interleave(
+                self.patches_per_frame, 0
+            )
             total_pos_embed = tile_pos_embed + tile_tem_embed
             x = x + total_pos_embed.to(x.dtype).squeeze(0)
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)
-        block_size = (
-            self.grid_size[0] * self.grid_size[1]
-            if self.mask_block_size <= 0
-            else self.mask_block_size
-        )
-        attn_mask = get_attention_mask(
-            x.size(0), x.device, mask_type=self.mask_type, block_size=block_size
-        )
+        block_size = self.grid_size[0] * self.grid_size[1] if self.mask_block_size <= 0 else self.mask_block_size
+        attn_mask = get_attention_mask(x.size(0), x.device, mask_type=self.mask_type, block_size=block_size)
         x = self.transformer(x, attn_mask, is_causal=self.mask_type == "causal")
 
         x = x.permute(1, 0, 2)
@@ -644,9 +586,7 @@ if __name__ == "__main__":
     ).to(device)
 
     # Create optimizer and loss function
-    optimizer = torch.optim.Adam(
-        list(encoder.parameters()) + list(decoder.parameters()), lr=learning_rate
-    )
+    optimizer = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=learning_rate)
     criterion = torch.nn.MSELoss()
 
     # Training loop

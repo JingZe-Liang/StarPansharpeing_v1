@@ -61,9 +61,7 @@ class LoggerHook(Hook):
         elif runner.mode == "val":
             mode = "val"
         else:
-            raise ValueError(
-                f"runner mode should be 'train' or 'val', but got {runner.mode}"
-            )
+            raise ValueError(f"runner mode should be 'train' or 'val', but got {runner.mode}")
         return mode
 
     def get_epoch(self, runner):
@@ -74,9 +72,7 @@ class LoggerHook(Hook):
             # runner.epoch += 1 has been done before val workflow
             epoch = runner.epoch
         else:
-            raise ValueError(
-                f"runner mode should be 'train' or 'val', but got {runner.mode}"
-            )
+            raise ValueError(f"runner mode should be 'train' or 'val', but got {runner.mode}")
         return epoch
 
     def get_iter(self, runner, inner_iter=False):

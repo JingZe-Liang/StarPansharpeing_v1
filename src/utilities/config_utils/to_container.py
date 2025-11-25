@@ -158,9 +158,7 @@ def function_config_to_basic_types_hint_check(func):
 
 if __name__ == "__main__":
     # Example usage
-    config = DictConfig(
-        {"key": "value", "list": [1, 2, 3], "anydict": {"a": 1, "b": 2}}
-    )
+    config = DictConfig({"key": "value", "list": [1, 2, 3], "anydict": {"a": 1, "b": 2}})
     # print(type(to_object(config)["list"]))  # <class 'list'>
     # print(to_object_recursive(config))  # {'key': 'value', 'list': [1, 2, 3]}
 

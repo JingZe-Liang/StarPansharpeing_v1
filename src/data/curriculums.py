@@ -115,9 +115,7 @@ def get_curriculum_fn(
         )
         return partial(linear_transition_curriculum, total_steps=total_steps, **kwargs)
     elif c_type == "staged":
-        log_print(
-            f"[Dataset curriculum] Using staged curriculum with {kwargs}", level="info"
-        )
+        log_print(f"[Dataset curriculum] Using staged curriculum with {kwargs}", level="info")
         return partial(staged_curriculum, total_steps=total_steps, **kwargs)
     else:
         raise ValueError(f"Unknown curriculum type: {c_type}")

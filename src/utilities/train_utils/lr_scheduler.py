@@ -31,17 +31,13 @@ def get_cosine_schedule_reduced_restart_with_warmup(
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
 
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         cycle_num = int(progress * num_cycles)
         cycle_progress = (progress * num_cycles) % 1.0
 
         max_lr = 1.0 / (reduced_factor**cycle_num)
         # Modified to decay to min_lr
-        return min_lr + (max_lr - min_lr) * (
-            0.5 * (1.0 + math.cos(math.pi * cycle_progress))
-        )
+        return min_lr + (max_lr - min_lr) * (0.5 * (1.0 + math.cos(math.pi * cycle_progress)))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
@@ -74,9 +70,7 @@ def get_cosine_schedule_reduced_with_warmup(
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
 
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         cycle_num = int(progress * num_cycles)
         cycle_progress = (progress * num_cycles) % 1.0
 
@@ -84,19 +78,13 @@ def get_cosine_schedule_reduced_with_warmup(
 
         if cycle_num == 0:
             # 第一个周期直接从max_lr开始余弦下降
-            return min_lr + (max_lr - min_lr) * (
-                0.5 * (1.0 + math.cos(math.pi * cycle_progress))
-            )
+            return min_lr + (max_lr - min_lr) * (0.5 * (1.0 + math.cos(math.pi * cycle_progress)))
         else:
             # 后续周期从max_lr/2缓慢上升到max_lr再下降
             if cycle_progress < 0.5:
-                return min_lr + (max_lr - min_lr) * (
-                    0.5 + 0.5 * math.cos(math.pi * (1 - 2 * cycle_progress))
-                )
+                return min_lr + (max_lr - min_lr) * (0.5 + 0.5 * math.cos(math.pi * (1 - 2 * cycle_progress)))
             else:
-                return min_lr + (max_lr - min_lr) * (
-                    0.5 * (1 + math.cos(math.pi * (2 * cycle_progress - 1)))
-                )
+                return min_lr + (max_lr - min_lr) * (0.5 * (1 + math.cos(math.pi * (2 * cycle_progress - 1))))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
@@ -135,9 +123,7 @@ def __plot_lr_schedule():
 
     # 绘制曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(
-        lrs, label=f"Cosine with Warmup (cycles={num_cycles}, factor={reduced_factor})"
-    )
+    plt.plot(lrs, label=f"Cosine with Warmup (cycles={num_cycles}, factor={reduced_factor})")
     plt.xlabel("Training Steps")
     plt.ylabel("Learning Rate")
     plt.title("Learning Rate Schedule")

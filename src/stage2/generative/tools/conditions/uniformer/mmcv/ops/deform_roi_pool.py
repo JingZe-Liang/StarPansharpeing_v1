@@ -6,16 +6,12 @@ from torch.nn.modules.utils import _pair
 
 from ..utils import ext_loader
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["deform_roi_pool_forward", "deform_roi_pool_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["deform_roi_pool_forward", "deform_roi_pool_backward"])
 
 
 class DeformRoIPoolFunction(Function):
     @staticmethod
-    def symbolic(
-        g, input, rois, offset, output_size, spatial_scale, sampling_ratio, gamma
-    ):
+    def symbolic(g, input, rois, offset, output_size, spatial_scale, sampling_ratio, gamma):
         return g.op(
             "mmcv::MMCVDeformRoIPool",
             input,
@@ -129,9 +125,7 @@ class DeformRoIPoolPack(DeformRoIPool):
         sampling_ratio=0,
         gamma=0.1,
     ):
-        super(DeformRoIPoolPack, self).__init__(
-            output_size, spatial_scale, sampling_ratio, gamma
-        )
+        super(DeformRoIPoolPack, self).__init__(output_size, spatial_scale, sampling_ratio, gamma)
 
         self.output_channels = output_channels
         self.deform_fc_channels = deform_fc_channels
@@ -144,9 +138,7 @@ class DeformRoIPoolPack(DeformRoIPool):
             nn.ReLU(inplace=True),
             nn.Linear(self.deform_fc_channels, self.deform_fc_channels),
             nn.ReLU(inplace=True),
-            nn.Linear(
-                self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 2
-            ),
+            nn.Linear(self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 2),
         )
         self.offset_fc[-1].weight.data.zero_()
         self.offset_fc[-1].bias.data.zero_()
@@ -186,9 +178,7 @@ class ModulatedDeformRoIPoolPack(DeformRoIPool):
         sampling_ratio=0,
         gamma=0.1,
     ):
-        super(ModulatedDeformRoIPoolPack, self).__init__(
-            output_size, spatial_scale, sampling_ratio, gamma
-        )
+        super(ModulatedDeformRoIPoolPack, self).__init__(output_size, spatial_scale, sampling_ratio, gamma)
 
         self.output_channels = output_channels
         self.deform_fc_channels = deform_fc_channels
@@ -201,9 +191,7 @@ class ModulatedDeformRoIPoolPack(DeformRoIPool):
             nn.ReLU(inplace=True),
             nn.Linear(self.deform_fc_channels, self.deform_fc_channels),
             nn.ReLU(inplace=True),
-            nn.Linear(
-                self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 2
-            ),
+            nn.Linear(self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 2),
         )
         self.offset_fc[-1].weight.data.zero_()
         self.offset_fc[-1].bias.data.zero_()
@@ -214,9 +202,7 @@ class ModulatedDeformRoIPoolPack(DeformRoIPool):
                 self.deform_fc_channels,
             ),
             nn.ReLU(inplace=True),
-            nn.Linear(
-                self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 1
-            ),
+            nn.Linear(self.deform_fc_channels, self.output_size[0] * self.output_size[1] * 1),
             nn.Sigmoid(),
         )
         self.mask_fc[2].weight.data.zero_()

@@ -76,15 +76,9 @@ def intersect_and_union(
     label = label[mask]
 
     intersect = pred_label[pred_label == label]
-    area_intersect = torch.histc(
-        intersect.float(), bins=(num_classes), min=0, max=num_classes - 1
-    )
-    area_pred_label = torch.histc(
-        pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1
-    )
-    area_label = torch.histc(
-        label.float(), bins=(num_classes), min=0, max=num_classes - 1
-    )
+    area_intersect = torch.histc(intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
+    area_pred_label = torch.histc(pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+    area_label = torch.histc(label.float(), bins=(num_classes), min=0, max=num_classes - 1)
     area_union = area_pred_label + area_label - area_intersect
     return area_intersect, area_union, area_pred_label, area_label
 
@@ -312,15 +306,13 @@ def eval_metrics(
     if not set(metrics).issubset(set(allowed_metrics)):
         raise KeyError("metrics {} is not supported".format(metrics))
 
-    total_area_intersect, total_area_union, total_area_pred_label, total_area_label = (
-        total_intersect_and_union(
-            results,
-            gt_seg_maps,
-            num_classes,
-            ignore_index,
-            label_map,
-            reduce_zero_label,
-        )
+    total_area_intersect, total_area_union, total_area_pred_label, total_area_label = total_intersect_and_union(
+        results,
+        gt_seg_maps,
+        num_classes,
+        ignore_index,
+        label_map,
+        reduce_zero_label,
     )
     all_acc = total_area_intersect.sum() / total_area_label.sum()
     ret_metrics = OrderedDict({"aAcc": all_acc})
@@ -338,9 +330,7 @@ def eval_metrics(
         elif metric == "mFscore":
             precision = total_area_intersect / total_area_pred_label
             recall = total_area_intersect / total_area_label
-            f_value = torch.tensor(
-                [f_score(x[0], x[1], beta) for x in zip(precision, recall)]
-            )
+            f_value = torch.tensor([f_score(x[0], x[1], beta) for x in zip(precision, recall)])
             ret_metrics["Fscore"] = f_value
             ret_metrics["Precision"] = precision
             ret_metrics["Recall"] = recall
@@ -348,9 +338,6 @@ def eval_metrics(
     ret_metrics = {metric: value.numpy() for metric, value in ret_metrics.items()}
     if nan_to_num is not None:
         ret_metrics = OrderedDict(
-            {
-                metric: np.nan_to_num(metric_value, nan=nan_to_num)
-                for metric, metric_value in ret_metrics.items()
-            }
+            {metric: np.nan_to_num(metric_value, nan=nan_to_num) for metric, metric_value in ret_metrics.items()}
         )
     return ret_metrics

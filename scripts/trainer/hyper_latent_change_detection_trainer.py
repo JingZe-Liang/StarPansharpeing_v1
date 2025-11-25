@@ -96,9 +96,7 @@ class HyperCDTrainer:
         self.log_msg("Training is configured and ready to start.")
 
         # Initialize indexing mode
-        self._use_single_img_indexing = getattr(
-            self.train_cfg, "use_single_img_indexing", False
-        )
+        self._use_single_img_indexing = getattr(self.train_cfg, "use_single_img_indexing", False)
         if self._use_single_img_indexing:
             self.log_msg("Using HyperSIGMA-style indexing for loss computation")
             # Initialize accumulation buffers for HyperSIGMA mode
@@ -135,12 +133,8 @@ class HyperCDTrainer:
             self.no_ema = True
 
         # dataloader
-        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.train
-        )
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(
-            self.dataset_cfg.val
-        )
+        self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
+        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -175,16 +169,11 @@ class HyperCDTrainer:
         self.model = hydra.utils.instantiate(self.cfg.segment_model)
         # self.model.to(device=self.device, dtype=self.dtype)
 
-        if self.train_cfg.act_checkpoint and hasattr(
-            self.model, "set_grad_checkpointing"
-        ):
+        if self.train_cfg.act_checkpoint and hasattr(self.model, "set_grad_checkpointing"):
             self.log_msg("Using activation checkpointing to save memory")
             self.model.set_grad_checkpointing(True)
 
-        segment_name = (
-            getattr(self.train_cfg, "segment_name", None)
-            or self.model.__class__.__name__
-        )
+        segment_name = getattr(self.train_cfg, "segment_name", None) or self.model.__class__.__name__
         self.log_msg(f"use change detection model: {segment_name}")
 
     def prepare_ema_models(self):
@@ -193,9 +182,9 @@ class HyperCDTrainer:
 
         buffer_name = [name for name, _ in self.model.named_buffers()]
         self.log_msg(f"EMA ignore buffers: {buffer_name}")
-        self.ema_model: EMA = hydra.utils.instantiate(self.cfg.ema)(
-            model=self.model, ignore_names=set(buffer_name)
-        ).to(self.device)
+        self.ema_model: EMA = hydra.utils.instantiate(self.cfg.ema)(model=self.model, ignore_names=set(buffer_name)).to(
+            self.device
+        )
         self.log_msg(f"create EMA model for change detection")
 
     def configure_logger(self):
@@ -222,9 +211,7 @@ class HyperCDTrainer:
             "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
         )
         log_format_in_cmd = (
-            "{time:HH:mm:ss} "
-            "- {level.icon} <level>[{level}] {file.name}:{line}</level>"
-            "- <level>{message}</level>"
+            "{time:HH:mm:ss} - {level.icon} <level>[{level}] {file.name}:{line}</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
             self.logger.add(
@@ -389,26 +376,17 @@ class HyperCDTrainer:
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "optimizer"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
 
             def _optimizer_creater(optimizer_cfg):
                 if "get_muon_optimizer" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
-                    named_params = {
-                        k: v
-                        for k, v in self.model.named_parameters()
-                        if v.requires_grad
-                    }
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )
+                    named_params = {k: v for k, v in self.model.named_parameters() if v.requires_grad}
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=named_params)
                 else:
-                    self.log_msg(
-                        f"[Optimizer]: using optimizer: {optimizer_cfg._target_}"
-                    )
+                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                     params = [p for p in self.model.parameters() if p.requires_grad]
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
@@ -419,12 +397,9 @@ class HyperCDTrainer:
         # schedulers
         if (
             self.accelerator.state.deepspeed_plugin is None
-            or "scheduler"
-            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
-            model_sched = hydra.utils.instantiate(self.train_cfg.segment_sched)(
-                optimizer=model_opt
-            )
+            model_sched = hydra.utils.instantiate(self.train_cfg.segment_sched)(optimizer=model_opt)
         else:
             model_sched = DummyScheduler(model_opt)
 
@@ -563,9 +538,7 @@ class HyperCDTrainer:
 
     def gradient_check(self, model: nn.Module):
         # check nan gradient
-        if self.accelerator.sync_gradients and getattr(
-            self.train_cfg, "grad_check", True
-        ):
+        if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", True):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
@@ -580,9 +553,7 @@ class HyperCDTrainer:
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                        torch.nan_to_num(
-                            param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad
-                        )
+                        torch.nan_to_num(param.grad, nan=0.0, posinf=1e5, neginf=-1e5, out=param.grad)
 
         # clip gradient by norm
         _max_grad_norm = self.train_cfg.max_grad_norm
@@ -590,9 +561,7 @@ class HyperCDTrainer:
             if self.dtype != torch.float16 and not self.accelerator.is_fsdp2:
                 self.accelerator.clip_grad_norm_(model.parameters(), _max_grad_norm)
             elif (
-                self.accelerator.distributed_type
-                == accelerate.utils.DistributedType.FSDP
-                or self.accelerator.is_fsdp2
+                self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
@@ -651,16 +620,12 @@ class HyperCDTrainer:
 
         # Reconstruct complete image from patches
         pred_2d, pred_indexed_1d, gt_indexed_1d = self._reconstruct_hypersigma_image()
-        loss, log_losses = self.compute_segmentation_loss(
-            pred_indexed_1d, gt_indexed_1d
-        )
+        loss, log_losses = self.compute_segmentation_loss(pred_indexed_1d, gt_indexed_1d)
         self._accumulated_preds.clear()
 
         return CDModelStepOutput(pred_2d, loss, log_losses)
 
-    def _reconstruct_hypersigma_image(
-        self, accumulated_preds: list[Tensor] | None = None, mode="train"
-    ):
+    def _reconstruct_hypersigma_image(self, accumulated_preds: list[Tensor] | None = None, mode="train"):
         """Reconstruct complete hyperspectral image from accumulated patches."""
 
         # Stack all predictions
@@ -669,16 +634,12 @@ class HyperCDTrainer:
             accumulated_preds = self._accumulated_preds
         all_preds = torch.cat(accumulated_preds, dim=0)
 
-        ds: SingleImageHyperspectralSegmentationDataset = (
-            self.train_dataset if mode == "train" else self.val_dataset
-        )
+        ds: SingleImageHyperspectralSegmentationDataset = self.train_dataset if mode == "train" else self.val_dataset
         index = ds._sampled_index
         gt_indexed_1d = ds.gt_for_loss  # (indices,)
         n_row, n_cols = ds.n_rows, ds.n_cols
         hp, wp = all_preds[0].shape[-2:]
-        assert ds.total_patches == all_preds.shape[0], (
-            f"{all_preds.shape[0]=} should equal to {ds.total_patches=}"
-        )
+        assert ds.total_patches == all_preds.shape[0], f"{all_preds.shape[0]=} should equal to {ds.total_patches=}"
 
         # Revert back to a full image
         pred_1d = rearrange(
@@ -718,12 +679,8 @@ class HyperCDTrainer:
         # For change detection, we need to handle both img1 and img2
         total_img1_patches: Tensor = batch["img1"]
         total_img2_patches: Tensor = batch["img2"]
-        img1_macro_batches: tuple[Tensor, ...] = total_img1_patches.chunk(
-            macro_batch_size, dim=0
-        )
-        img2_macro_batches: tuple[Tensor, ...] = total_img2_patches.chunk(
-            macro_batch_size, dim=0
-        )
+        img1_macro_batches: tuple[Tensor, ...] = total_img1_patches.chunk(macro_batch_size, dim=0)
+        img2_macro_batches: tuple[Tensor, ...] = total_img2_patches.chunk(macro_batch_size, dim=0)
         macro_outputs: list[Tensor] = []
         with self.accelerator.autocast():
             for img1_batch, img2_batch in zip(img1_macro_batches, img2_macro_batches):
@@ -781,9 +738,7 @@ class HyperCDTrainer:
 
     def _get_metric_fn(self, clear=False):
         if not hasattr(self, "_seg_metrics") or clear:
-            self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(
-                self.metric_cfg
-            )
+            self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(self.metric_cfg)
         # Return the segmentation metrics object
         self._seg_metrics.to(self.device)
         return self._seg_metrics
@@ -820,16 +775,12 @@ class HyperCDTrainer:
         if self._use_single_img_indexing:
             # HyperSIGMA mode: accumulate predictions
             with self.accelerator.accumulate(self.model):  # use gradient accmulation ?
-                train_out = self.train_single_img_accum_step(
-                    batch, self.macro_batch_size
-                )
+                train_out = self.train_single_img_accum_step(batch, self.macro_batch_size)
         else:
             # Standard mode: process immediately
             with self.accelerator.accumulate(self.model):
                 # train segmentation model with pixel data
-                train_out = self.train_segment_step(
-                    batch["img1"], batch["img2"], batch["gt"]
-                )
+                train_out = self.train_segment_step(batch["img1"], batch["img2"], batch["gt"])
 
         # update training state
         self.step_train_state()
@@ -916,17 +867,12 @@ class HyperCDTrainer:
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
 
-            if (
-                self.global_step % self.train_cfg.save_every == 0
-                or _stop_train_and_save
-            ):
+            if self.global_step % self.train_cfg.save_every == 0 or _stop_train_and_save:
                 self.save_state()
                 self.save_ema()
 
             if _stop_train_and_save:
-                self.log_msg(
-                    "[Train]: max training step budget reached, stop training and save"
-                )
+                self.log_msg("[Train]: max training step budget reached, stop training and save")
                 break
 
     def get_val_loader_iter(self):
@@ -967,9 +913,7 @@ class HyperCDTrainer:
                 ):
                     yield batch
 
-            self.log_msg(
-                f"[Val]: start validating with the whole val set", only_rank_zero=False
-            )
+            self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
 
         tbar = _tbar_loader()
         return tbar
@@ -982,16 +926,12 @@ class HyperCDTrainer:
                 self._current_sample_index = batch.get("sample_index", None)
             macro_outputs = self._macro_forward_seg_model(batch, self.macro_batch_size)
             # revert back to a full image
-            pred_seg, *_ = (
-                self._reconstruct_hypersigma_image(macro_outputs, mode="val")
-            ).values()
+            pred_seg, *_ = (self._reconstruct_hypersigma_image(macro_outputs, mode="val")).values()
         else:
 
             def _val_model_closure(batch):
                 # forward the segmentation network with pixel data
-                pred_seg, *_ = self.forward_segment_model(
-                    batch["img1"], batch["img2"], batch["gt"]
-                )
+                pred_seg, *_ = self.forward_segment_model(batch["img1"], batch["img2"], batch["gt"])
                 return {"pred_logits": pred_seg}
 
             # slide windows
@@ -1080,17 +1020,13 @@ class HyperCDTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(
-            self.model, ema_path / "model", strict=strict
-        )
+        accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg(
-            f"[Load EMA]: clear the accelerator registrations and re-prepare training"
-        )
+        self.log_msg(f"[Load EMA]: clear the accelerator registrations and re-prepare training")
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -1135,12 +1071,8 @@ class HyperCDTrainer:
             gt_map = gt_map.squeeze(1)  # (B, H, W)
 
         # Only visualize the first few samples
-        assert pred_map.ndim == 3 and gt_map.ndim == 3, (
-            f"{pred_map.shape=}, {gt_map.shape=}"
-        )
-        assert pred_map.shape[-2:] == gt_map.shape[-2:], (
-            f"{pred_map.shape=}, {gt_map.shape=}"
-        )
+        assert pred_map.ndim == 3 and gt_map.ndim == 3, f"{pred_map.shape=}, {gt_map.shape=}"
+        assert pred_map.shape[-2:] == gt_map.shape[-2:], f"{pred_map.shape=}, {gt_map.shape=}"
         assert img1.shape == img2.shape, f"{img1.shape=}, {img2.shape=}"
 
         pred_map = pred_map[:_only_n]
@@ -1149,12 +1081,8 @@ class HyperCDTrainer:
         img2 = img2[:_only_n]
 
         # Visualize input images
-        img1_rgb = get_rgb_image(
-            self.to_rgb(img1), rgb_channels=[2, 1, 0], use_linstretch=True
-        )
-        img2_rgb = get_rgb_image(
-            self.to_rgb(img2), rgb_channels=[2, 1, 0], use_linstretch=True
-        )
+        img1_rgb = get_rgb_image(self.to_rgb(img1), rgb_channels=[2, 1, 0], use_linstretch=True)
+        img2_rgb = get_rgb_image(self.to_rgb(img2), rgb_channels=[2, 1, 0], use_linstretch=True)
 
         # Convert RGB images to numpy arrays and ensure correct format
         def convert_to_hwc_format(img_tensor):
@@ -1167,13 +1095,9 @@ class HyperCDTrainer:
                 img_tensor = img_tensor.detach().cpu()
                 if img_tensor.dim() == 4:  # (B, C, H, W) -> (H, W, C)
                     img_tensor = img_tensor[0]  # Take first sample for now
-                if (
-                    img_tensor.dim() == 3 and img_tensor.shape[0] == 3
-                ):  # (C, H, W) -> (H, W, C)
+                if img_tensor.dim() == 3 and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
                     img_tensor = img_tensor.permute(1, 2, 0)
-            elif (
-                isinstance(img_tensor, np.ndarray) and img_tensor.shape[0] == 3
-            ):  # (C, H, W) -> (H, W, C)
+            elif isinstance(img_tensor, np.ndarray) and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
                 img_tensor = np.transpose(img_tensor, (1, 2, 0))
 
             return img_tensor.numpy() if torch.is_tensor(img_tensor) else img_tensor
@@ -1214,13 +1138,9 @@ class HyperCDTrainer:
         h, w = pred_vis.shape[1:3] if pred_vis.ndim == 4 else pred_vis.shape[:2]
 
         if img1_rgb.shape[:2] != (h, w):
-            img1_rgb = np.array(
-                Image.fromarray(img1_rgb).resize((w, h), Image.Resampling.BILINEAR)
-            )
+            img1_rgb = np.array(Image.fromarray(img1_rgb).resize((w, h), Image.Resampling.BILINEAR))
         if img2_rgb.shape[:2] != (h, w):
-            img2_rgb = np.array(
-                Image.fromarray(img2_rgb).resize((w, h), Image.Resampling.BILINEAR)
-            )
+            img2_rgb = np.array(Image.fromarray(img2_rgb).resize((w, h), Image.Resampling.BILINEAR))
 
         # Handle batch dimension and concatenate images
         if pred_vis.ndim == 4:  # Batch processing
@@ -1236,15 +1156,11 @@ class HyperCDTrainer:
                 gt_sample = gt_vis[i]
 
                 # Concatenate horizontally: [img1, img2, pred_map, gt_map]
-                combined_vis = np.concatenate(
-                    [img1_sample, img2_sample, pred_sample, gt_sample], axis=1
-                )
+                combined_vis = np.concatenate([img1_sample, img2_sample, pred_sample, gt_sample], axis=1)
                 vis_images.append(combined_vis)
         else:  # Single sample
             # Concatenate horizontally: [img1, img2, pred_map, gt_map]
-            vis_images = [
-                np.concatenate([img1_rgb, img2_rgb, pred_vis, gt_vis], axis=1)
-            ]
+            vis_images = [np.concatenate([img1_rgb, img2_rgb, pred_vis, gt_vis], axis=1)]
 
         # Stack all visualizations vertically by batch
         if len(vis_images) > 1:
@@ -1268,9 +1184,7 @@ class HyperCDTrainer:
         if self.accelerator.is_main_process:
             img_to_save.save(save_path, quality=95)
 
-        self.log_msg(
-            "[Visualize]: save segmentation visualization at {}".format(save_path)
-        )
+        self.log_msg("[Visualize]: save segmentation visualization at {}".format(save_path))
 
     def run(self):
         if self.train_cfg.resume_path is not None:

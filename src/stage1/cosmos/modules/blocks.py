@@ -172,9 +172,7 @@ class MPConv(nn.Conv2d):
         w = self.weight.to(torch.float32)
         if self.training:
             with torch.no_grad():
-                self.weight.copy_(
-                    unit_magnitude_normalize(w)
-                )  # forced weight normalization
+                self.weight.copy_(unit_magnitude_normalize(w))  # forced weight normalization
         w = unit_magnitude_normalize(w)  # traditional weight normalization
         w = w * (gain / np.sqrt(w[0].numel()))  # magnitude-preserving scaling
         w = w.to(x.dtype)
@@ -243,9 +241,7 @@ class GLUMBConv(nn.Module):
         norm = val2tuple(norm, 3)
         act_func = val2tuple(act_func, 3)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         # self.glu_act = build_act(act_func[1], inplace=False)
         self.glu_act = create_act_layer(act_func[1], inplace=False)
@@ -309,9 +305,7 @@ class AttnBlock(nn.Module):
         self.q = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.k = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.v = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.proj_out = nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.proj_out = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
         self.act_checkpoint = act_checkpoint
         self.use_residual_factor = use_residual_factor
@@ -387,15 +381,11 @@ class LinearAttention(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
-        q, k, v = rearrange(
-            qkv, "b (qkv heads c) h w -> qkv b heads c (h w)", heads=self.heads, qkv=3
-        )
+        q, k, v = rearrange(qkv, "b (qkv heads c) h w -> qkv b heads c (h w)", heads=self.heads, qkv=3)
         k = k.softmax(dim=-1)
         context = torch.einsum("bhdn,bhen->bhde", k, v)
         out = torch.einsum("bhde,bhdn->bhen", context, q)
-        out = rearrange(
-            out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w
-        )
+        out = rearrange(out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w)
         return self.to_out(out)
 
 
@@ -525,9 +515,7 @@ class LiteMLA(nn.Module):
         original_dtype = att_map.dtype
         if original_dtype in [torch.float16, torch.bfloat16]:
             att_map = att_map.float()
-        att_map = att_map / (
-            torch.sum(att_map, dim=2, keepdim=True) + self.eps
-        )  # b h n n
+        att_map = att_map / (torch.sum(att_map, dim=2, keepdim=True) + self.eps)  # b h n n
         att_map = att_map.to(original_dtype)
         out = torch.matmul(v, att_map)  # b h d n
 
@@ -567,12 +555,8 @@ class NattenAttention(nn.Module):
     ):
         super().__init__()
         self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
-        self.qkv = nn.Conv2d(
-            in_channels, in_channels * 3, kernel_size=1, stride=1, padding=0
-        )
-        self.proj_out = nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.qkv = nn.Conv2d(in_channels, in_channels * 3, kernel_size=1, stride=1, padding=0)
+        self.proj_out = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
         self.heads = heads
         self.ksize = ksize
@@ -625,8 +609,7 @@ def make_attn(in_channels, attn_type="vanilla", act_checkpoint=False):
         return LinAttnBlock(in_channels)
     else:
         raise ValueError(
-            f"attn_type {attn_type} is not supported, "
-            "supported types are: ['vanilla', 'linear', 'lite_mla', 'none']"
+            f"attn_type {attn_type} is not supported, supported types are: ['vanilla', 'linear', 'lite_mla', 'none']"
         )
 
 
@@ -648,9 +631,7 @@ class GLUFeedForward(nn.Module):
         self.gate_proj = conv_cls(self.hidden_size, self.intermediate_size, 1, 1, 0)
         self.up_proj = conv_cls(self.hidden_size, self.intermediate_size, 1, 1, 0)
         self.down_proj = conv_cls(self.intermediate_size, self.hidden_size, 1, 1, 0)
-        self.act_fn = (
-            ACT2FN[hidden_act] if isinstance(hidden_act, str) else hidden_act()
-        )
+        self.act_fn = ACT2FN[hidden_act] if isinstance(hidden_act, str) else hidden_act()
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -694,15 +675,9 @@ class Mlp(nn.Module):
         linear_layer = partial(nn.Conv2d, kernel_size=1)
 
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
-        self.act = (
-            act_layer()
-            if isclass(act_layer) or isinstance(act_layer, partial)
-            else act_layer
-        )
+        self.act = act_layer() if isclass(act_layer) or isinstance(act_layer, partial) else act_layer
         self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = (
-            norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
-        )
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
         self.drop2 = nn.Dropout(drop_probs[1])
 
@@ -898,13 +873,9 @@ class DiffBandsInputConvIn(nn.Module):
         for c in band_lst:
             module = _create_conv_in_module(c=c, **self._in_module_partial_kwargs)
             self.in_modules["conv_in_{}".format(c)] = module
-            log_print(
-                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
-            )
+            log_print(f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}")
 
-    def add_or_drop_modules(
-        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
-    ):
+    def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
         Add or remove convolution modules for specific channels.
 
@@ -928,9 +899,7 @@ class DiffBandsInputConvIn(nn.Module):
                 if add_chan not in self.band_lst:
                     # Add module using saved kwargs
                     conv_key = f"conv_in_{add_chan}"
-                    self.in_modules[conv_key] = _create_conv_in_module(
-                        c=add_chan, **self._in_module_partial_kwargs
-                    )
+                    self.in_modules[conv_key] = _create_conv_in_module(c=add_chan, **self._in_module_partial_kwargs)
 
                     # Update band list
                     self.band_lst.append(add_chan)
@@ -940,9 +909,7 @@ class DiffBandsInputConvIn(nn.Module):
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training and self.is_ddp:
@@ -990,15 +957,11 @@ class DiffBandsInputConvOut(nn.Module):
         for c in band_lst:
             module = _create_conv_out_module(c=c, **self._out_module_partial_kwargs)
             self.in_modules["conv_out_{}".format(c)] = module
-            log_print(
-                f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}"
-            )
+            log_print(f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}")
 
         self.out_channel = None
 
-    def add_or_drop_modules(
-        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
-    ):
+    def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
         Add or remove convolution modules for specific channels.
 
@@ -1022,9 +985,7 @@ class DiffBandsInputConvOut(nn.Module):
                 if add_chan not in self.band_lst:
                     # Add module using saved kwargs
                     conv_key = f"conv_out_{add_chan}"
-                    self.in_modules[conv_key] = _create_conv_out_module(
-                        c=add_chan, **self._out_module_partial_kwargs
-                    )
+                    self.in_modules[conv_key] = _create_conv_out_module(c=add_chan, **self._out_module_partial_kwargs)
 
                     # Update band list
                     self.band_lst.append(add_chan)
@@ -1052,9 +1013,7 @@ class DiffBandsInputConvOut(nn.Module):
     @property
     def weight(self):
         # used to get the weight of the conv_out module for GAN loss
-        assert self.out_channel is not None, (
-            "out_channel is not set, please call forward first"
-        )
+        assert self.out_channel is not None, "out_channel is not set, please call forward first"
         module = getattr(self.in_modules, f"conv_out_{self.out_channel}", None)
         if module is None:
             raise ValueError(
@@ -1143,9 +1102,7 @@ class AdaptiveInputConvLayer(nn.Module):
         kernel_norm: str | None = None,
     ):
         super().__init__()
-        conv_kwargs = dict(
-            stride=stride, groups=groups, dilation=dilation, bias=use_bias
-        )
+        conv_kwargs = dict(stride=stride, groups=groups, dilation=dilation, bias=use_bias)
         if padding is not None:
             # if padding not set, the create_conv2d will use same padding
             conv_kwargs["padding"] = padding
@@ -1197,9 +1154,7 @@ class AdaptiveInputConvLayer(nn.Module):
         c_out, c_in, k1, k2 = w.shape
         # c_in -> in_channels
         w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
-        w = torch.nn.functional.interpolate(
-            w, size=(c_out, in_channels), mode="bicubic", align_corners=False
-        )
+        w = torch.nn.functional.interpolate(w, size=(c_out, in_channels), mode="bicubic", align_corners=False)
         w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
         # Conv
         w = _kernel_norm(w, self.kernel_norm, "c_in")
@@ -1343,9 +1298,7 @@ class AdaptiveOutputConvLayer(nn.Module):
 
         # Interpolate weights from c_out to out_channels
         w = rearrange(w, "c_out c_in k1 k2 -> k1 k2 c_out c_in")
-        w = torch.nn.functional.interpolate(
-            w, size=(out_channels, c_in), mode="bicubic", align_corners=False
-        )
+        w = torch.nn.functional.interpolate(w, size=(out_channels, c_in), mode="bicubic", align_corners=False)
         w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
 
         # Interpolate bias if present
@@ -1375,9 +1328,7 @@ class AdaptiveOutputConvLayer(nn.Module):
         w = rearrange(w, "c_in (k1 k2) c_out -> k1 k2 c_out c_in", k1=k1, k2=k2)
 
         # Interpolate from c_out to out_channels
-        w = torch.nn.functional.interpolate(
-            w, size=(out_channels, c_in), mode="bicubic", align_corners=False
-        )
+        w = torch.nn.functional.interpolate(w, size=(out_channels, c_in), mode="bicubic", align_corners=False)
         w = rearrange(w, "k1 k2 c_out c_in -> c_out c_in k1 k2")
 
         # Interpolate bias if present
@@ -1395,9 +1346,7 @@ class AdaptiveOutputConvLayer(nn.Module):
 
         return self._forward_conv_with_wb(x, w, b)
 
-    def forward(
-        self, x: torch.Tensor, out_channels: Optional[int] = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out_channels: Optional[int] = None) -> torch.Tensor:
         if out_channels is None:
             out_channels = self.conv.out_channels
 
@@ -1432,9 +1381,7 @@ class AdaptiveOutputConvLayer(nn.Module):
 
 
 class AdaptiveInputLinearLayer(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, bias: bool = True, mode="slice"
-    ):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, mode="slice"):
         super().__init__()
         self.linear = nn.Linear(in_features, out_features, bias=bias)
         self.mode = mode
@@ -1449,9 +1396,7 @@ class AdaptiveInputLinearLayer(nn.Module):
         elif self.mode == "interp":
             out_f, in_f = (w := self.linear.weight).shape
             w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
-            w_i = torch.nn.functional.interpolate(
-                w_i, size=(out_f, in_features), mode="bicubic", align_corners=False
-            )
+            w_i = torch.nn.functional.interpolate(w_i, size=(out_f, in_features), mode="bicubic", align_corners=False)
             w = w_i.squeeze(0, 1)
         else:
             raise ValueError(f"Unknown mode {self.mode}")
@@ -1498,9 +1443,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
             # Interpolate weights to desired output size
             out_f, in_f = w.shape
             w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
-            w_i = torch.nn.functional.interpolate(
-                w_i, size=(out_features, in_f), mode="bicubic", align_corners=False
-            )
+            w_i = torch.nn.functional.interpolate(w_i, size=(out_features, in_f), mode="bicubic", align_corners=False)
             w = w_i.squeeze(0, 1)
 
             # Interpolate bias if present
@@ -1670,9 +1613,7 @@ class ResnetBlockMoE2D(nn.Module):
                 f"[ResnetBlockMoE2D] Unknown token_mixer_type={token_mixer_type}, "
                 "supported types are: ['res_block', 'dico_block', 'convnext']"
             )
-        self.moe_prenorm = Normalize(
-            self.out_channels, norm_type=norm_type, num_groups=norm_groups
-        )
+        self.moe_prenorm = Normalize(self.out_channels, norm_type=norm_type, num_groups=norm_groups)
         self.moe = MoE2DBlock(
             in_channels=self.out_channels,
             hidden_channels=int(hidden_factor * self.out_channels),
@@ -1739,18 +1680,13 @@ class DiCoBlock(nn.Module):
             out_channels = in_channels
 
         log_print(
-            f"[Dico block]: in: {in_channels} "
-            f"out: {out_channels} "
-            f"hidden: {hidden_channels} "
-            f"conv type: {conv_type} ",
+            f"[Dico block]: in: {in_channels} out: {out_channels} hidden: {hidden_channels} conv type: {conv_type} ",
             "debug",
         )
 
         self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
         # self.dropout = nn.Dropout(dropout)
-        conv_cls = (
-            MPConv if conv_type == "mpconv" else nn.Conv2d
-        )  # mpconv cannot support the torch.compile
+        conv_cls = MPConv if conv_type == "mpconv" else nn.Conv2d  # mpconv cannot support the torch.compile
 
         self.body = nn.Sequential(
             # point conv
@@ -1799,9 +1735,7 @@ class DiCoBlock(nn.Module):
                 )
             else:
                 raise ValueError(f"Unknown ffn_type: {ffn_type}")
-            self.norm_ffn = Normalize(
-                out_channels, norm_type=norm_type, num_groups=norm_groups
-            )
+            self.norm_ffn = Normalize(out_channels, norm_type=norm_type, num_groups=norm_groups)
 
         self.nin_shortcut = (
             conv_cls(in_channels, out_channels, kernel_size=1, stride=1)
@@ -1869,9 +1803,7 @@ class ResnetBlock(nn.Module):
         gn_norm_groups = kwargs.get("num_groups", 32)
         self.use_dico_cca = kwargs.get("use_dico_cca", False)
 
-        self.norm1 = Normalize(
-            in_channels, num_groups=gn_norm_groups, norm_type=norm_type
-        )
+        self.norm1 = Normalize(in_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act1 = ACT2FN[act_type[0]]
         self.conv1 = nn.Conv2d(
             in_channels,
@@ -1881,9 +1813,7 @@ class ResnetBlock(nn.Module):
             padding=1,
             padding_mode=padding_mode,
         )
-        self.norm2 = Normalize(
-            out_channels, num_groups=gn_norm_groups, norm_type=norm_type
-        )
+        self.norm2 = Normalize(out_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act2 = ACT2FN[act_type[1]]
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(
@@ -1900,14 +1830,10 @@ class ResnetBlock(nn.Module):
                     Normalize(  # type: ignore
                         in_channels, num_groups=gn_norm_groups, norm_type=norm_type
                     ),
-                    nn.Conv2d(
-                        in_channels, out_channels, kernel_size=1, stride=1, padding=0
-                    ),
+                    nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
                 )
             else:
-                self.nin_shortcut = nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=1, padding=0
-                )
+                self.nin_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
         else:
             self.nin_shortcut = nn.Identity()
 
@@ -2026,9 +1952,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
 
         return x + h
 
-    def forward(
-        self, x: torch.Tensor, slots: torch.Tensor, t: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, slots: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, slots, t, use_reentrant=False)  # type: ignore
         return self.forward_fn(x, slots, t)
@@ -2052,9 +1976,7 @@ class ConvNeXtBlock(nn.Module):
     ):
         super().__init__()
 
-        self.dwconv = nn.Conv2d(
-            dim, dim, kernel_size=7, padding=3, groups=dim, padding_mode=padding_mode
-        )
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim, padding_mode=padding_mode)
         self.norm = Normalize(dim, norm_type=norm_type, num_groups=num_groups)
 
         self.pwconv1 = nn.Conv2d(dim, hidden_dim, kernel_size=1)
@@ -2063,9 +1985,7 @@ class ConvNeXtBlock(nn.Module):
 
         # Layer Scaling
         self.gamma = (
-            nn.Parameter(
-                layer_scale_init_value * torch.ones((out_dim)), requires_grad=True
-            )
+            nn.Parameter(layer_scale_init_value * torch.ones((out_dim)), requires_grad=True)
             if layer_scale_init_value > 0
             else None
         )
@@ -2111,9 +2031,7 @@ class TimestepEmbedder(nn.Module):
     Embeds scalar timesteps into vector representations.
     """
 
-    def __init__(
-        self, hidden_size, frequency_embedding_size=256, time_scale: float = 1.0
-    ):
+    def __init__(self, hidden_size, frequency_embedding_size=256, time_scale: float = 1.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -2138,23 +2056,17 @@ class TimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
-            / half
-        ).to(device=t.device)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(
-            t * self.time_scale, self.frequency_embedding_size
-        )
+        t_freq = self.timestep_embedding(t * self.time_scale, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
 
@@ -2174,20 +2086,13 @@ class FinalLayer(nn.Module):
     ):
         super().__init__()
         self.norm_final = Normalize(hidden_size)
-        self.conv = nn.Conv2d(
-            hidden_size, patch_size * patch_size * out_channels, 3, 1, 1
-        )
+        self.conv = nn.Conv2d(hidden_size, patch_size * patch_size * out_channels, 3, 1, 1)
         self.t_embd = nn.Linear(t_channels, hidden_size, bias=True)
         self.z_embd = nn.Conv2d(z_channels, hidden_size, 1, 1)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Conv2d(hidden_size, 2 * hidden_size, 1, 1)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Conv2d(hidden_size, 2 * hidden_size, 1, 1))
 
     def forward(self, x, z, t):
-        c = (
-            self.z_embd(F.interpolate(z, size=x.shape[-2:], mode="nearest"))
-            + self.t_embd(t)[..., None, None]
-        )
+        c = self.z_embd(F.interpolate(z, size=x.shape[-2:], mode="nearest")) + self.t_embd(t)[..., None, None]
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = self.norm_final(x) * (1 + scale) + shift
         x = self.conv(x)

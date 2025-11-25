@@ -61,8 +61,7 @@ class GeneralNoisyLoader:
         self,
         loader_kwargs: dict,
         # list of list noisers means accumulated the noise on the second noisers' effects
-        noise_types: list[PredefinedNoiseType]
-        | list[list[PredefinedNoiseType]] = CASES_NOISE_TYPES,  # type: ignore
+        noise_types: list[PredefinedNoiseType] | list[list[PredefinedNoiseType]] = CASES_NOISE_TYPES,  # type: ignore
         noise_adder_kwargs: dict = {},
         get_loader_type: str = "wds",
         cache: bool = True,  # when the dataset is small
@@ -74,9 +73,7 @@ class GeneralNoisyLoader:
                 self.cache_resample = loader_kwargs.get("resample", True)
                 loader_kwargs["resample"] = False
                 loader_kwargs["num_workers"] = 1
-            self.dataset, self.dataloader = get_hyperspectral_dataloaders(
-                **loader_kwargs
-            )
+            self.dataset, self.dataloader = get_hyperspectral_dataloaders(**loader_kwargs)
         elif get_loader_type == "litdata":
             raise
 
@@ -96,9 +93,7 @@ class GeneralNoisyLoader:
             noise_kwargs_.update(noise_type=nt, is_neg_1_1=self.is_neg_1_1)
             noiser = UniHSINoiseAdderKornia(**noise_kwargs_)
             self.noisers.append(noiser)
-            log(
-                f"Initialized noise adder with types: {nt} with kwargs: {noise_kwargs_}"
-            )
+            log(f"Initialized noise adder with types: {nt} with kwargs: {noise_kwargs_}")
         log(f"Initialized {len(self.noisers)} noise adders")
 
         # Transformations
@@ -160,9 +155,7 @@ class GeneralNoisyLoader:
                 # Resample mode: infinite loop
                 while True:
                     for batch in self._cache_loader:
-                        batch["gt"], batch["noisy"] = self._add_noise_to_batch(
-                            batch["gt"]
-                        )
+                        batch["gt"], batch["noisy"] = self._add_noise_to_batch(batch["gt"])
                         yield batch
             else:
                 # Single pass mode: iterate once

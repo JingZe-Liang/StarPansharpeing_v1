@@ -45,9 +45,7 @@ class Mask(object):
                         if 0 <= i + move[0] <= m - 1 and 0 <= j + move[1] <= n - 1:
                             if img[i + move[0], j + move[1]] == 0:
                                 if (i + move[0], j + move[1]) not in adj_point_list:
-                                    adj_point_list = adj_point_list + [
-                                        (i + move[0], j + move[1])
-                                    ]
+                                    adj_point_list = adj_point_list + [(i + move[0], j + move[1])]
         return adj_point_list
 
     def single_random_shape(self, area):
@@ -68,9 +66,7 @@ class Mask(object):
     def single_mask(self, target_num=None):
         if target_num is None:
             # self.target_num = random.randint(1, self.target_num_max)
-            self.target_num = random.randint(
-                self.target_num_range[0], self.target_num_range[1]
-            )
+            self.target_num = random.randint(self.target_num_range[0], self.target_num_range[1])
         else:
             self.target_num = target_num
         self.dense = True if random.random() < self.dense_rate else False
@@ -81,14 +77,8 @@ class Mask(object):
         random.shuffle(pos_id_list)
         for i in range(self.target_num):
             w_id, h_id = divmod(pos_id_list[i], self.sub_w_num)
-            x_pos = (
-                random.randint(0, int(self.w / self.sub_w_num - 1))
-                + w_id * self.w / self.sub_w_num
-            )
-            y_pos = (
-                random.randint(0, int(self.h / self.sub_h_num - 1))
-                + h_id * self.h / self.sub_h_num
-            )
+            x_pos = random.randint(0, int(self.w / self.sub_w_num - 1)) + w_id * self.w / self.sub_w_num
+            y_pos = random.randint(0, int(self.h / self.sub_h_num - 1)) + h_id * self.h / self.sub_h_num
             pos_list = pos_list + [(x_pos, y_pos)]
         self.pos_list = np.array(pos_list)
 
@@ -102,14 +92,9 @@ class Mask(object):
             single_target_shape[:, 0] = single_target_shape[:, 0] + self.pos_list[i, 0]
             single_target_shape[:, 1] = single_target_shape[:, 1] + self.pos_list[i, 1]
             for j in range(single_target_shape.shape[0]):
-                if (
-                    -1 < single_target_shape[j, 0] < self.w
-                    and -1 < single_target_shape[j, 1] < self.h
-                ):
+                if -1 < single_target_shape[j, 0] < self.w and -1 < single_target_shape[j, 1] < self.h:
                     mask_image[single_target_shape[j, 0], single_target_shape[j, 1]] = 0
-        mask_image = sk_transform.resize(
-            mask_image, (self.resize, self.resize), order=0
-        )
+        mask_image = sk_transform.resize(mask_image, (self.resize, self.resize), order=0)
         return mask_image
 
     def __call__(self, n, target_num=None, dense=None):
@@ -164,9 +149,7 @@ class HADDataset(Dataset):
             else:
                 x = (x - x.min()) / diviser
         else:  # per-channel
-            diviser = x.max(axis=(0, 1), keepdims=True) - x.min(
-                axis=(0, 1), keepdims=True
-            )
+            diviser = x.max(axis=(0, 1), keepdims=True) - x.min(axis=(0, 1), keepdims=True)
             if _divided_zero(diviser):
                 return np.zeros_like(x)
             else:
@@ -226,9 +209,7 @@ class HADDataset(Dataset):
                 if paste_HSI_name != HSI_name:
                     break
             paste = np.load(paste_path)
-            paste = paste[
-                :, :, self.start_channel : (self.channel + self.start_channel)
-            ]
+            paste = paste[:, :, self.start_channel : (self.channel + self.start_channel)]
             # paste = (paste - np.min(paste)) / (np.max(paste) - np.min(paste)) * 2 - 1
             # paste = paste * 0.1
             paste = self.normalize(paste)
@@ -242,11 +223,7 @@ class HADDataset(Dataset):
         elif self.mask_class == "sin":
             sin_head = np.pi * np.random.rand(1)
             sin = np.sin(np.linspace(sin_head, sin_head + 2 * np.pi, self.channel))
-            paste = (
-                sin.reshape(self.channel, 1, 1)
-                .repeat(self.resize, axis=1)
-                .repeat(self.resize, axis=2)
-            )
+            paste = sin.reshape(self.channel, 1, 1).repeat(self.resize, axis=1).repeat(self.resize, axis=2)
             paste = paste * self.scale
             x_m = mask * x + (1 - mask) * paste
         elif self.mask_class == "invimage":
@@ -261,9 +238,7 @@ class HADDataset(Dataset):
                     break
                 _n += 1
             paste = np.load(paste_path)
-            paste = paste[
-                :, :, self.start_channel : (self.channel + self.start_channel)
-            ]
+            paste = paste[:, :, self.start_channel : (self.channel + self.start_channel)]
             paste = paste[:, :, ::-1]
             # paste = (paste - np.min(paste)) / (np.max(paste) - np.min(paste)) * 2 - 1
             # paste = paste * 0.1
@@ -312,26 +287,14 @@ class HADDataset(Dataset):
             print(f"Warning: Paste image directory does not exist: {paste_img_dir}")
             return [], []
 
-        train_list = sorted(
-            [
-                os.path.join(train_img_dir, f)
-                for f in os.listdir(train_img_dir)
-                if f.endswith(".npy")
-            ]
-        )
+        train_list = sorted([os.path.join(train_img_dir, f) for f in os.listdir(train_img_dir) if f.endswith(".npy")])
 
         print(f"Found {len(train_list)} training files")
         # train_list = sorted(
         #     [os.path.join(train_img_dir, f) for f in os.listdir(train_img_dir) if f.endswith('.npy') and
         #                                       'ang20170821t183707' in f])
         train_list = train_list[: int(len(train_list) * self.train_ratio)]
-        paste_list = sorted(
-            [
-                os.path.join(paste_img_dir, f)
-                for f in os.listdir(paste_img_dir)
-                if f.endswith(".npy")
-            ]
-        )
+        paste_list = sorted([os.path.join(paste_img_dir, f) for f in os.listdir(paste_img_dir) if f.endswith(".npy")])
         if self.sensor == "all":
             train_list = train_list + paste_list
 
@@ -438,22 +401,14 @@ class HADTestDataset(Dataset):
     def load_dataset_folder(self):
         test_img_dir = os.path.join(self.dataset_path, "test", self.sensor)
         gt_dir = os.path.join(self.dataset_path, "ground_truth", self.sensor)
-        test_img = sorted(
-            [
-                os.path.join(test_img_dir, f)
-                for f in os.listdir(test_img_dir)
-                if f.endswith(".npy")
-            ]
-        )
+        test_img = sorted([os.path.join(test_img_dir, f) for f in os.listdir(test_img_dir) if f.endswith(".npy")])
         img_name_list = [os.path.splitext(os.path.basename(f))[0] for f in test_img]
         gt_img = [os.path.join(gt_dir, img_name + ".png") for img_name in img_name_list]
         assert len(test_img) == len(gt_img), "number of test img and gt should be same"
         return test_img, gt_img
 
     @classmethod
-    def create_loader(
-        cls, dataset_path="./", resize=64, start_channel=0, channel=100, **loader_kwargs
-    ):
+    def create_loader(cls, dataset_path="./", resize=64, start_channel=0, channel=100, **loader_kwargs):
         """
         Create a complete dataset and dataloader for HAD100 anomaly detection testing.
 
@@ -553,9 +508,7 @@ def test_loader():
             # Show original image (first 3 channels as RGB)
             if original_np.shape[0] >= 3:
                 rgb_original = np.transpose(original_np[:3], (1, 2, 0))
-                rgb_original = (rgb_original - rgb_original.min()) / (
-                    rgb_original.max() - rgb_original.min()
-                )
+                rgb_original = (rgb_original - rgb_original.min()) / (rgb_original.max() - rgb_original.min())
                 axes[0, 0].imshow(rgb_original)
                 axes[0, 0].set_title("Original (RGB)")
             else:
@@ -565,9 +518,7 @@ def test_loader():
             # Show masked image (first 3 channels as RGB)
             if masked_np.shape[0] >= 3:
                 rgb_masked = np.transpose(masked_np[:3], (1, 2, 0))
-                rgb_masked = (rgb_masked - rgb_masked.min()) / (
-                    rgb_masked.max() - rgb_masked.min()
-                )
+                rgb_masked = (rgb_masked - rgb_masked.min()) / (rgb_masked.max() - rgb_masked.min())
                 axes[0, 1].imshow(rgb_masked)
                 axes[0, 1].set_title("Masked (RGB)")
             else:
@@ -623,9 +574,7 @@ def test_loader():
             plt.tight_layout()
 
             # Save the plot
-            output_path = os.path.join(
-                output_dir, f"had100_{mask_type}_visualization.png"
-            )
+            output_path = os.path.join(output_dir, f"had100_{mask_type}_visualization.png")
             plt.savefig(output_path, dpi=150, bbox_inches="tight")
             plt.close()
 

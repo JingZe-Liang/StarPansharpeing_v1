@@ -116,9 +116,7 @@ class MultiheadAttention(BaseModule):
         self.attn = nn.MultiheadAttention(embed_dims, num_heads, attn_drop, **kwargs)
 
         self.proj_drop = nn.Dropout(proj_drop)
-        self.dropout_layer = (
-            build_dropout(dropout_layer) if dropout_layer else nn.Identity()
-        )
+        self.dropout_layer = build_dropout(dropout_layer) if dropout_layer else nn.Identity()
 
     @deprecated_api_warning({"residual": "identity"}, cls_name="MultiheadAttention")
     def forward(
@@ -185,10 +183,7 @@ class MultiheadAttention(BaseModule):
                 if query_pos.shape == key.shape:
                     key_pos = query_pos
                 else:
-                    warnings.warn(
-                        f"position encoding of key is"
-                        f"missing in {self.__class__.__name__}."
-                    )
+                    warnings.warn(f"position encoding of key ismissing in {self.__class__.__name__}.")
         if query_pos is not None:
             query = query + query_pos
         if key_pos is not None:
@@ -242,9 +237,7 @@ class FFN(BaseModule):
             Default: None.
     """
 
-    @deprecated_api_warning(
-        {"dropout": "ffn_drop", "add_residual": "add_identity"}, cls_name="FFN"
-    )
+    @deprecated_api_warning({"dropout": "ffn_drop", "add_residual": "add_identity"}, cls_name="FFN")
     def __init__(
         self,
         embed_dims=256,
@@ -279,9 +272,7 @@ class FFN(BaseModule):
         layers.append(Linear(feedforward_channels, embed_dims))
         layers.append(nn.Dropout(ffn_drop))
         self.layers = Sequential(*layers)
-        self.dropout_layer = (
-            build_dropout(dropout_layer) if dropout_layer else torch.nn.Identity()
-        )
+        self.dropout_layer = build_dropout(dropout_layer) if dropout_layer else torch.nn.Identity()
         self.add_identity = add_identity
 
     @deprecated_api_warning({"residual": "identity"}, cls_name="FFN")
@@ -371,18 +362,14 @@ class BaseTransformerLayer(BaseModule):
 
         self.batch_first = batch_first
 
-        assert set(operation_order) & set(
-            ["self_attn", "norm", "ffn", "cross_attn"]
-        ) == set(operation_order), (
+        assert set(operation_order) & set(["self_attn", "norm", "ffn", "cross_attn"]) == set(operation_order), (
             f"The operation_order of"
             f" {self.__class__.__name__} should "
             f"contains all four operation type "
             f"{['self_attn', 'norm', 'ffn', 'cross_attn']}"
         )
 
-        num_attn = operation_order.count("self_attn") + operation_order.count(
-            "cross_attn"
-        )
+        num_attn = operation_order.count("self_attn") + operation_order.count("cross_attn")
         if isinstance(attn_cfgs, dict):
             attn_cfgs = [copy.deepcopy(attn_cfgs) for _ in range(num_attn)]
         else:
@@ -427,9 +414,7 @@ class BaseTransformerLayer(BaseModule):
                 ffn_cfgs["embed_dims"] = self.embed_dims
             else:
                 assert ffn_cfgs[ffn_index]["embed_dims"] == self.embed_dims
-            self.ffns.append(
-                build_feedforward_network(ffn_cfgs[ffn_index], dict(type="FFN"))
-            )
+            self.ffns.append(build_feedforward_network(ffn_cfgs[ffn_index], dict(type="FFN")))
 
         self.norms = ModuleList()
         num_norms = operation_order.count("norm")
@@ -487,9 +472,7 @@ class BaseTransformerLayer(BaseModule):
             attn_masks = [None for _ in range(self.num_attn)]
         elif isinstance(attn_masks, torch.Tensor):
             attn_masks = [copy.deepcopy(attn_masks) for _ in range(self.num_attn)]
-            warnings.warn(
-                f"Use same attn_mask in all attentions in {self.__class__.__name__} "
-            )
+            warnings.warn(f"Use same attn_mask in all attentions in {self.__class__.__name__} ")
         else:
             assert len(attn_masks) == self.num_attn, (
                 f"The length of "
@@ -564,14 +547,9 @@ class TransformerLayerSequence(BaseModule):
     def __init__(self, transformerlayers=None, num_layers=None, init_cfg=None):
         super(TransformerLayerSequence, self).__init__(init_cfg)
         if isinstance(transformerlayers, dict):
-            transformerlayers = [
-                copy.deepcopy(transformerlayers) for _ in range(num_layers)
-            ]
+            transformerlayers = [copy.deepcopy(transformerlayers) for _ in range(num_layers)]
         else:
-            assert (
-                isinstance(transformerlayers, list)
-                and len(transformerlayers) == num_layers
-            )
+            assert isinstance(transformerlayers, list) and len(transformerlayers) == num_layers
         self.num_layers = num_layers
         self.layers = ModuleList()
         for i in range(num_layers):

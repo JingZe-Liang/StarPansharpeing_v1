@@ -23,9 +23,7 @@ def update_init_info(module, init_info):
             information.
         init_info (str): The string that describes the initialization.
     """
-    assert hasattr(module, "_params_init_info"), (
-        f"Can not find `_params_init_info` in {module}"
-    )
+    assert hasattr(module, "_params_init_info"), f"Can not find `_params_init_info` in {module}"
     for name, param in module.named_parameters():
         assert param in module._params_init_info, (
             f"Find a new :obj:`Parameter` "
@@ -91,19 +89,13 @@ def uniform_init(module, a=0, b=1, bias=0):
         nn.init.constant_(module.bias, bias)
 
 
-def kaiming_init(
-    module, a=0, mode="fan_out", nonlinearity="relu", bias=0, distribution="normal"
-):
+def kaiming_init(module, a=0, mode="fan_out", nonlinearity="relu", bias=0, distribution="normal"):
     assert distribution in ["uniform", "normal"]
     if hasattr(module, "weight") and module.weight is not None:
         if distribution == "uniform":
-            nn.init.kaiming_uniform_(
-                module.weight, a=a, mode=mode, nonlinearity=nonlinearity
-            )
+            nn.init.kaiming_uniform_(module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
         else:
-            nn.init.kaiming_normal_(
-                module.weight, a=a, mode=mode, nonlinearity=nonlinearity
-            )
+            nn.init.kaiming_normal_(module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
     if hasattr(module, "bias") and module.bias is not None:
         nn.init.constant_(module.bias, bias)
 
@@ -238,10 +230,7 @@ class XavierInit(BaseInit):
             update_init_info(module, init_info=self._get_init_info())
 
     def _get_init_info(self):
-        info = (
-            f"{self.__class__.__name__}: gain={self.gain}, "
-            f"distribution={self.distribution}, bias={self.bias}"
-        )
+        info = f"{self.__class__.__name__}: gain={self.gain}, distribution={self.distribution}, bias={self.bias}"
         return info
 
 
@@ -282,10 +271,7 @@ class NormalInit(BaseInit):
             update_init_info(module, init_info=self._get_init_info())
 
     def _get_init_info(self):
-        info = (
-            f"{self.__class__.__name__}: mean={self.mean},"
-            f" std={self.std}, bias={self.bias}"
-        )
+        info = f"{self.__class__.__name__}: mean={self.mean}, std={self.std}, bias={self.bias}"
         return info
 
 
@@ -309,9 +295,7 @@ class TruncNormalInit(BaseInit):
 
     """
 
-    def __init__(
-        self, mean: float = 0, std: float = 1, a: float = -2, b: float = 2, **kwargs
-    ) -> None:
+    def __init__(self, mean: float = 0, std: float = 1, a: float = -2, b: float = 2, **kwargs) -> None:
         super().__init__(**kwargs)
         self.mean = mean
         self.std = std
@@ -333,10 +317,7 @@ class TruncNormalInit(BaseInit):
             update_init_info(module, init_info=self._get_init_info())
 
     def _get_init_info(self):
-        info = (
-            f"{self.__class__.__name__}: a={self.a}, b={self.b},"
-            f" mean={self.mean}, std={self.std}, bias={self.bias}"
-        )
+        info = f"{self.__class__.__name__}: a={self.a}, b={self.b}, mean={self.mean}, std={self.std}, bias={self.bias}"
         return info
 
 
@@ -408,9 +389,7 @@ class KaimingInit(BaseInit):
             Defaults to None.
     """
 
-    def __init__(
-        self, a=0, mode="fan_out", nonlinearity="relu", distribution="normal", **kwargs
-    ):
+    def __init__(self, a=0, mode="fan_out", nonlinearity="relu", distribution="normal", **kwargs):
         super().__init__(**kwargs)
         self.a = a
         self.mode = mode
@@ -509,12 +488,8 @@ class PretrainedInit(object):
                 logger=logger,
             )
         else:
-            print_log(
-                f"load {self.prefix} in model from: {self.checkpoint}", logger=logger
-            )
-            state_dict = _load_checkpoint_with_prefix(
-                self.prefix, self.checkpoint, map_location=self.map_location
-            )
+            print_log(f"load {self.prefix} in model from: {self.checkpoint}", logger=logger)
+            state_dict = _load_checkpoint_with_prefix(self.prefix, self.checkpoint, map_location=self.map_location)
             load_state_dict(module, state_dict, strict=False, logger=logger)
 
         if hasattr(module, "_params_init_info"):
@@ -547,9 +522,7 @@ def _initialize_override(module, override, cfg):
         cp_override = copy.deepcopy(override_)
         name = cp_override.pop("name", None)
         if name is None:
-            raise ValueError(
-                f'`override` must contain the key "name",but got {cp_override}'
-            )
+            raise ValueError(f'`override` must contain the key "name",but got {cp_override}')
         # if override only has name key, it means use args in init_cfg
         if not cp_override:
             cp_override.update(cfg)
@@ -561,9 +534,7 @@ def _initialize_override(module, override, cfg):
         if hasattr(module, name):
             _initialize(getattr(module, name), cp_override, wholemodule=True)
         else:
-            raise RuntimeError(
-                f"module did not have attribute {name}, but init_cfg is {cp_override}."
-            )
+            raise RuntimeError(f"module did not have attribute {name}, but init_cfg is {cp_override}.")
 
 
 def initialize(module, init_cfg):
@@ -640,9 +611,7 @@ def initialize(module, init_cfg):
             pass
 
 
-def _no_grad_trunc_normal_(
-    tensor: Tensor, mean: float, std: float, a: float, b: float
-) -> Tensor:
+def _no_grad_trunc_normal_(tensor: Tensor, mean: float, std: float, a: float, b: float) -> Tensor:
     # Method based on
     # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
     # Modified from
@@ -682,9 +651,7 @@ def _no_grad_trunc_normal_(
         return tensor
 
 
-def trunc_normal_(
-    tensor: Tensor, mean: float = 0.0, std: float = 1.0, a: float = -2.0, b: float = 2.0
-) -> Tensor:
+def trunc_normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0, a: float = -2.0, b: float = 2.0) -> Tensor:
     r"""Fills the input Tensor with values drawn from a truncated
     normal distribution. The values are effectively drawn from the
     normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`

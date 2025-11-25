@@ -110,9 +110,7 @@ class DefaultOptimizerConstructor:
 
     def __init__(self, optimizer_cfg, paramwise_cfg=None):
         if not isinstance(optimizer_cfg, dict):
-            raise TypeError(
-                "optimizer_cfg should be a dict", f"but got {type(optimizer_cfg)}"
-            )
+            raise TypeError("optimizer_cfg should be a dict", f"but got {type(optimizer_cfg)}")
         self.optimizer_cfg = optimizer_cfg
         self.paramwise_cfg = {} if paramwise_cfg is None else paramwise_cfg
         self.base_lr = optimizer_cfg.get("lr", None)
@@ -121,16 +119,12 @@ class DefaultOptimizerConstructor:
 
     def _validate_cfg(self):
         if not isinstance(self.paramwise_cfg, dict):
-            raise TypeError(
-                "paramwise_cfg should be None or a dict, "
-                f"but got {type(self.paramwise_cfg)}"
-            )
+            raise TypeError(f"paramwise_cfg should be None or a dict, but got {type(self.paramwise_cfg)}")
 
         if "custom_keys" in self.paramwise_cfg:
             if not isinstance(self.paramwise_cfg["custom_keys"], dict):
                 raise TypeError(
-                    "If specified, custom_keys must be a dict, "
-                    f"but got {type(self.paramwise_cfg['custom_keys'])}"
+                    f"If specified, custom_keys must be a dict, but got {type(self.paramwise_cfg['custom_keys'])}"
                 )
             if self.base_wd is None:
                 for key in self.paramwise_cfg["custom_keys"]:
@@ -185,9 +179,7 @@ class DefaultOptimizerConstructor:
 
         # special rules for norm layers and depth-wise conv layers
         is_norm = isinstance(module, (_BatchNorm, _InstanceNorm, GroupNorm, LayerNorm))
-        is_dwconv = (
-            isinstance(module, torch.nn.Conv2d) and module.in_channels == module.groups
-        )
+        is_dwconv = isinstance(module, torch.nn.Conv2d) and module.in_channels == module.groups
 
         for name, param in module.named_parameters(recurse=False):
             param_group = {"params": [param]}
@@ -195,10 +187,7 @@ class DefaultOptimizerConstructor:
                 params.append(param_group)
                 continue
             if bypass_duplicate and self._is_in(param_group, params):
-                warnings.warn(
-                    f"{prefix} is duplicate. It is skipped since "
-                    f"bypass_duplicate={bypass_duplicate}"
-                )
+                warnings.warn(f"{prefix} is duplicate. It is skipped since bypass_duplicate={bypass_duplicate}")
                 continue
             # if the parameter match one of the custom keys, ignore other rules
             is_custom = False
@@ -218,11 +207,7 @@ class DefaultOptimizerConstructor:
                 if name == "bias" and not (is_norm or is_dcn_module):
                     param_group["lr"] = self.base_lr * bias_lr_mult
 
-                if (
-                    prefix.find("conv_offset") != -1
-                    and is_dcn_module
-                    and isinstance(module, torch.nn.Conv2d)
-                ):
+                if prefix.find("conv_offset") != -1 and is_dcn_module and isinstance(module, torch.nn.Conv2d):
                     # deal with both dcn_offset's bias & weight
                     param_group["lr"] = self.base_lr * dcn_offset_lr_mult
 
@@ -248,9 +233,7 @@ class DefaultOptimizerConstructor:
             is_dcn_module = False
         for child_name, child_mod in module.named_children():
             child_prefix = f"{prefix}.{child_name}" if prefix else child_name
-            self.add_params(
-                params, child_mod, prefix=child_prefix, is_dcn_module=is_dcn_module
-            )
+            self.add_params(params, child_mod, prefix=child_prefix, is_dcn_module=is_dcn_module)
 
     def __call__(self, model):
         if hasattr(model, "module"):

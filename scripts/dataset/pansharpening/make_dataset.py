@@ -133,9 +133,7 @@ def extract_tar_files_into(
         for member in get_tar_member_iter(tar_reader):
             extract_path = None if isinstance(dest, tarfile.TarFile) else dest
             content = extract_member_from_tar(tar_reader, member, extract_path)
-            assert isinstance(content, bytes) or content is None, (
-                "Content should be bytes or None"
-            )
+            assert isinstance(content, bytes) or content is None, "Content should be bytes or None"
 
             if content is None:
                 continue

@@ -40,9 +40,7 @@ v = torch.randn(B, H, T, D)
 tangent_q = torch.ones_like(q)
 
 # 对手动实现版本使用 JVP -> 正常工作
-primal_out, tangent_out = jvp(
-    lambda q_in: manual_attention(q_in, k, v), (q,), (tangent_q,)
-)
+primal_out, tangent_out = jvp(lambda q_in: manual_attention(q_in, k, v), (q,), (tangent_q,))
 
 print("手动实现版本 JVP 成功，输出维度:", tangent_out.shape)
 
@@ -120,9 +118,7 @@ class MySDPAWithJVP(torch.autograd.Function):
         scale = query.size(-1) ** -0.5
 
         # 2. JVP for the score matrix: d(Q @ K^T) = dQ @ K^T + Q @ dK^T
-        tangent_scores = (
-            tq @ key.transpose(-2, -1) + query @ tk.transpose(-2, -1)
-        ) * scale
+        tangent_scores = (tq @ key.transpose(-2, -1) + query @ tk.transpose(-2, -1)) * scale
 
         # 3. JVP for softmax: J_softmax(x) @ v = softmax(x) * (v - sum(softmax(x) * v))
         dp = p * (tangent_scores - (p * tangent_scores).sum(dim=-1, keepdim=True))
@@ -165,9 +161,7 @@ def manual_attention(query, key, value):
     return attn @ value
 
 
-_primal_manual, tangent_manual = jvp(
-    manual_attention, (q, k, v), (tangent_q, tangent_k, tangent_v)
-)
+_primal_manual, tangent_manual = jvp(manual_attention, (q, k, v), (tangent_q, tangent_k, tangent_v))
 
 print("\n结果验证:")
 print(

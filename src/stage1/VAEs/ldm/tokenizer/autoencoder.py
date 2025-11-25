@@ -42,15 +42,11 @@ class LinearAttention(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
-        q, k, v = rearrange(
-            qkv, "b (qkv heads c) h w -> qkv b heads c (h w)", heads=self.heads, qkv=3
-        )
+        q, k, v = rearrange(qkv, "b (qkv heads c) h w -> qkv b heads c (h w)", heads=self.heads, qkv=3)
         k = k.softmax(dim=-1)
         context = torch.einsum("bhdn,bhen->bhde", k, v)
         out = torch.einsum("bhde,bhdn->bhen", context, q)
-        out = rearrange(
-            out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w
-        )
+        out = rearrange(out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w)
         return self.to_out(out)
 
 
@@ -60,9 +56,7 @@ def nonlinearity(x):
 
 
 def Normalize(in_channels, num_groups=32):
-    return torch.nn.GroupNorm(
-        num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True
-    )
+    return torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
 
 
 class Upsample(nn.Module):
@@ -70,9 +64,7 @@ class Upsample(nn.Module):
         super().__init__()
         self.with_conv = with_conv
         if self.with_conv:
-            self.conv = torch.nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1
-            )
+            self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
@@ -87,9 +79,7 @@ class Downsample(nn.Module):
         self.with_conv = with_conv
         if self.with_conv:
             # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = torch.nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=2, padding=0
-            )
+            self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
 
     def forward(self, x):
         if self.with_conv:
@@ -119,25 +109,17 @@ class ResnetBlock(nn.Module):
         self.use_conv_shortcut = conv_shortcut
 
         self.norm1 = Normalize(in_channels)
-        self.conv1 = torch.nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if temb_channels > 0:
             self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
         self.norm2 = Normalize(out_channels)
         self.dropout = torch.nn.Dropout(dropout)
-        self.conv2 = torch.nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv2 = torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
-                self.conv_shortcut = torch.nn.Conv2d(
-                    in_channels, out_channels, kernel_size=3, stride=1, padding=1
-                )
+                self.conv_shortcut = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
             else:
-                self.nin_shortcut = torch.nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=1, padding=0
-                )
+                self.nin_shortcut = torch.nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
         self.act_checkpoint = act_checkpoint
 
@@ -185,18 +167,10 @@ class AttnBlock(nn.Module):
         self.act_checkpoint = act_checkpoint
 
         self.norm = Normalize(in_channels)
-        self.q = torch.nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
-        self.k = torch.nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
-        self.v = torch.nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
-        self.proj_out = torch.nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.q = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.k = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.v = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.proj_out = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
     @_compile_decorator
     def forward_fn(self, x):
@@ -303,9 +277,7 @@ class Mlp(nn.Module):
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer() if isclass(act_layer) else act_layer
         self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = (
-            norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
-        )
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
         self.drop2 = nn.Dropout(drop_probs[1])
 
@@ -337,10 +309,7 @@ class DiCoBlock(nn.Module):
             out_channels = in_channels
 
         log_print(
-            f"[Dico block]: in: {in_channels} "
-            f"out: {out_channels} "
-            f"hidden: {hidden_channels} "
-            f"conv type: {conv_type} ",
+            f"[Dico block]: in: {in_channels} out: {out_channels} hidden: {hidden_channels} conv type: {conv_type} ",
             "debug",
         )
 
@@ -403,9 +372,7 @@ class DiCoBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, *args) -> torch.Tensor:
         if self.act_checkpoint and self.training:
-            return torch.utils.checkpoint.checkpoint(
-                self.forward_fn, x, use_reentrant=True
-            )
+            return torch.utils.checkpoint.checkpoint(self.forward_fn, x, use_reentrant=True)
 
         return self.forward_fn(x)
 
@@ -454,9 +421,7 @@ def make_block_fn(
             )
 
     else:
-        raise ValueError(
-            f"block_name {block_name} is not supported. Supported: 'res_block', 'dico_block'"
-        )
+        raise ValueError(f"block_name {block_name} is not supported. Supported: 'res_block', 'dico_block'")
 
     return block_fn
 
@@ -512,22 +477,16 @@ class DiffBandsInputConvIn(nn.Module):
                     norm_type="gn",
                 )
             else:
-                raise ValueError(
-                    f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}"
-                )
+                raise ValueError(f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}")
 
             self.in_modules["conv_in_{}".format(c)] = module
-            log_print(
-                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
-            )
+            log_print(f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training:
@@ -585,9 +544,7 @@ class DiffBandsInputConvOut(nn.Module):
                     act_checkpoint=False,
                 )
             else:
-                raise ValueError(
-                    f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}"
-                )
+                raise ValueError(f"[DiffBandsInputConvIn] Unknown basic_module={basic_module}")
 
             self.in_modules["conv_out_{}".format(c)] = module
 
@@ -617,9 +574,7 @@ class DiffBandsInputConvOut(nn.Module):
     @property
     def weight(self):
         # used to get the weight of the conv_out module for GAN loss
-        assert self.out_channel is not None, (
-            "out_channel is not set, please call forward first"
-        )
+        assert self.out_channel is not None, "out_channel is not set, please call forward first"
         module = getattr(self.in_modules, f"conv_out_{self.out_channel}", None)
         if module is None:
             raise ValueError(
@@ -676,13 +631,9 @@ class Encoder(nn.Module):
 
         # downsampling
         if isinstance(in_channels, int):
-            self.conv_in = torch.nn.Conv2d(
-                in_channels, self.ch, kernel_size=3, stride=1, padding=1
-            )
+            self.conv_in = torch.nn.Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
         else:
-            assert isinstance(in_channels, Sequence), (
-                "in_channels must be int or Sequence"
-            )
+            assert isinstance(in_channels, Sequence), "in_channels must be int or Sequence"
             self.conv_in = DiffBandsInputConvIn(
                 band_lst=in_channels,
                 hidden_dim=ch,
@@ -703,11 +654,7 @@ class Encoder(nn.Module):
                 block.append(block_fn(block_in, block_out, dropout))
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(
-                        make_attn(
-                            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-                        )
-                    )
+                    attn.append(make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -719,9 +666,7 @@ class Encoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = block_fn(block_in, block_in, dropout)
-        self.mid.attn_1 = make_attn(
-            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-        )
+        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
         self.mid.block_2 = block_fn(block_in, block_in, dropout)
         # end
         self.norm_out = Normalize(block_in)
@@ -802,27 +747,17 @@ class Decoder(nn.Module):
         block_in = ch * ch_mult[self.num_resolutions - 1]
         curr_res = resolution // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        print(
-            "Working with z of shape {} = {} dimensions.".format(
-                self.z_shape, np.prod(self.z_shape)
-            )
-        )
+        print("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
 
         # z to block_in
-        self.conv_in = torch.nn.Conv2d(
-            z_channels, block_in, kernel_size=3, stride=1, padding=1
-        )
+        self.conv_in = torch.nn.Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
 
         log_print(f"[Decoder] - {block_type=}, {attn_type=}", "debug")
-        block_fn = make_block_fn(
-            block_type, act_checkpoint=act_checkpoint, hidden_factor=hidden_factor
-        )
+        block_fn = make_block_fn(block_type, act_checkpoint=act_checkpoint, hidden_factor=hidden_factor)
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = block_fn(block_in, block_in, dropout)
-        self.mid.attn_1 = make_attn(
-            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-        )
+        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
         self.mid.block_2 = block_fn(block_in, block_in, dropout)
 
         # upsampling
@@ -835,11 +770,7 @@ class Decoder(nn.Module):
                 block.append(block_fn(block_in, block_out, dropout))
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(
-                        make_attn(
-                            block_in, attn_type=attn_type, act_checkpoint=act_checkpoint
-                        )
-                    )
+                    attn.append(make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint))
             up = nn.Module()
             up.block = block
             up.attn = attn
@@ -851,9 +782,7 @@ class Decoder(nn.Module):
         # end
         self.norm_out = Normalize(block_in)
         if isinstance(out_ch, int):
-            self.conv_out = torch.nn.Conv2d(
-                block_in, out_ch, kernel_size=3, stride=1, padding=1
-            )
+            self.conv_out = torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
             self.use_diffbands = False
         else:
             assert isinstance(out_ch, Sequence), "out_ch must be Sequence"
@@ -913,14 +842,10 @@ class DiagonalGaussianDistribution(object):
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
         if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device
-            )
+            self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
 
     def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(
-            device=self.parameters.device
-        )
+        x = self.mean + self.std * torch.randn(self.mean.shape).to(device=self.parameters.device)
         return x
 
     def kl(self, other=None):
@@ -964,9 +889,7 @@ class AutoencoderKL(nn.Module):
         self.use_variation = ddconfig["double_z"]
         ch_mul = 2 if self.use_variation else 1
 
-        self.quant_conv = torch.nn.Conv2d(
-            ch_mul * ddconfig["z_channels"], ch_mul * embed_dim, 1
-        )
+        self.quant_conv = torch.nn.Conv2d(ch_mul * ddconfig["z_channels"], ch_mul * embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
 
     def encode(self, x):
@@ -1046,10 +969,7 @@ if __name__ == "__main__":
     for step in range(num_steps):
         # Create random input
         # x = torch.randn(batch_size, 3, 256, 256).cuda().clip(-1,1)
-        x = (
-            torch.randint(0, 255, (batch_size, 3, 256, 256), dtype=torch.float32).cuda()
-            / 255.0
-        )
+        x = torch.randint(0, 255, (batch_size, 3, 256, 256), dtype=torch.float32).cuda() / 255.0
         x = x * 2 - 1
         x = x.clip(-1, 1).to(dtype)
 

@@ -121,9 +121,7 @@ class UnmixingResNet(nn.Module):
         # Build stem layer
         self.stem = nn.Sequential(
             create_conv2d(cfg.in_channels, cfg.channels[0], kernel_size=3, padding=1),
-            create_norm_act_layer(
-                cfg.norm, cfg.channels[0], act_layer="gelu", eps=1e-6
-            ),
+            create_norm_act_layer(cfg.norm, cfg.channels[0], act_layer="gelu", eps=1e-6),
         )
         self.cond_patcher = PatchEmbed(
             img_size=32,
@@ -138,9 +136,7 @@ class UnmixingResNet(nn.Module):
         self.stages = self.build_stages(cfg.depths, cfg.channels, cfg.channels[0])
 
         # Output convolution
-        self.out_conv = create_conv2d(
-            cfg.channels[-1], cfg.out_channels, kernel_size=3, padding=1
-        )
+        self.out_conv = create_conv2d(cfg.channels[-1], cfg.out_channels, kernel_size=3, padding=1)
 
         # Abundance restriction layer
         self.abunds_restriction = self._create_abunds_restiction(cfg.abunds_restriction)
@@ -212,9 +208,7 @@ class UnmixingResNet(nn.Module):
         for _, (proj_in, stage_main) in self.stages.items():
             x = proj_in(x)
             if self.training and self.grad_checkpointing:
-                x = torch.utils.checkpoint.checkpoint(
-                    stage_main, x, cond, use_reentrant=False
-                )
+                x = torch.utils.checkpoint.checkpoint(stage_main, x, cond, use_reentrant=False)
             else:
                 x = stage_main(x, cond)
 
@@ -234,9 +228,7 @@ class UnmixingResNet(nn.Module):
         abunds_solved = []
         for i in range(bs):
             xi = x[i]
-            _, abunds = self.traditional_solver(
-                xi, self.cfg.out_channels, vca_backend="numpy"
-            )
+            _, abunds = self.traditional_solver(xi, self.cfg.out_channels, vca_backend="numpy")
             abunds_solved.append(abunds)
         abunds_solved = torch.stack(abunds_solved, dim=0)
         return abunds_solved.to(x)
@@ -311,9 +303,7 @@ if __name__ == "__main__":
     out3 = model(x, cond)
 
     for p1, p2 in zip(orig_ps, model.parameters()):
-        assert torch.isclose(p1, p2).all(), (
-            f"{p1.shape} - {p2.shape}, max diff: {(p1 - p2).abs().max()}"
-        )
+        assert torch.isclose(p1, p2).all(), f"{p1.shape} - {p2.shape}, max diff: {(p1 - p2).abs().max()}"
     print("Parameters are unchanged after eval/train switch.")
 
     assert torch.isclose(out2, out3).all(), f"max diff: {(out2 - out3).abs().max()}"

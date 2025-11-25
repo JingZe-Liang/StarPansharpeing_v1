@@ -15,9 +15,7 @@ class BinaryQuantizedSRLoss(nn.Module):
 
         b, _, c, h, w = pred.shape
         b_t, c_t, h_t, w_t = label.shape
-        assert b == b_t and c == c_t and h == h_t and w == w_t, (
-            "pred and label shape must be same"
-        )
+        assert b == b_t and c == c_t and h == h_t and w == w_t, "pred and label shape must be same"
 
         loss = nn.functional.cross_entropy(
             pred,

@@ -113,9 +113,7 @@ def _float16_clip_value(x, dtype: torch.dtype | None = None):
 
 
 class Attention(Attention_):
-    config = EasyDict(
-        _attn_implementation="flash_attention_2"
-    )  # for flash_attention_2 config
+    config = EasyDict(_attn_implementation="flash_attention_2")  # for flash_attention_2 config
 
     def __init__(
         self,
@@ -135,9 +133,7 @@ class Attention(Attention_):
         is_causal: bool = False,
         rotate_half=False,
     ):
-        norm_layer = (
-            get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
-        )
+        norm_layer = get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
         super().__init__(
             dim,
             num_heads,
@@ -223,9 +219,7 @@ class Attention(Attention_):
 
         attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
         assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
-        x, _ = attention_function_(
-            self, q, k, v, attention_mask=mask, dropout=self.attn_drop.p
-        )
+        x, _ = attention_function_(self, q, k, v, attention_mask=mask, dropout=self.attn_drop.p)
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.norm(x)
@@ -298,9 +292,7 @@ class SoftmaxAttention2D(nn.Module):
             qkv[..., 2 * self.dim :],
         )
 
-        out = F.scaled_dot_product_attention(
-            q.contiguous(), k.contiguous(), v.contiguous()
-        )
+        out = F.scaled_dot_product_attention(q.contiguous(), k.contiguous(), v.contiguous())
 
         out = torch.transpose(out, -1, -2)
         out = torch.reshape(out, (B, -1, H, W))
@@ -392,9 +384,7 @@ class Qwen3SdpaAttention(nn.Module):
                 bias=qkv_bias,
             )
         else:
-            self.q_proj = nn.Linear(
-                self.hidden_size, self.num_heads * self.head_dim, bias=qkv_bias
-            )
+            self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=qkv_bias)
 
         self.k_proj = nn.Linear(
             self.hidden_size,
@@ -406,9 +396,7 @@ class Qwen3SdpaAttention(nn.Module):
             self.num_key_value_heads * self.head_dim,
             bias=qkv_bias,
         )
-        self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias
-        )
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias)
         if self.use_qk_norm:
             self.q_norm = Qwen3RMSNorm(self.head_dim, eps=rms_norm_eps)
             self.k_norm = Qwen3RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -425,9 +413,7 @@ class Qwen3SdpaAttention(nn.Module):
         # output_attentions: bool = False,
         # use_cache: bool = False,
         # cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -453,9 +439,7 @@ class Qwen3SdpaAttention(nn.Module):
             # g: bs, l, n_kvh * n_kvg, 1 = bs, l, nh, 1
             gate_score = gate_score.reshape(bsz, q_len, -1, 1)
             # q: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
-            query_states = query_states.reshape(
-                bsz, q_len, -1, self.head_dim
-            ).transpose(1, 2)
+            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         elif self.elementwise_attn_output_gate:
             # q: bs, l, n_kvh, n_kvg * hd * 2
             query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
@@ -472,13 +456,9 @@ class Qwen3SdpaAttention(nn.Module):
             # g: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
             gate_score = gate_score.reshape(bsz, q_len, -1, self.head_dim)
             # q: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
-            query_states = query_states.reshape(
-                bsz, q_len, -1, self.head_dim
-            ).transpose(1, 2)
+            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         else:
-            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(
-                1, 2
-            )
+            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
@@ -490,16 +470,10 @@ class Qwen3SdpaAttention(nn.Module):
             # q, k: (bs, nh, s, hd)
             if isinstance(position_embeddings, tuple):
                 cos, sin = position_embeddings
-                query_states, key_states = apply_rotary_pos_emb(
-                    query_states, key_states, cos, sin
-                )
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             elif torch.is_tensor(position_embeddings):
-                query_states = apply_rot_embed_cat(
-                    query_states, position_embeddings, half=True
-                )
-                key_states = apply_rot_embed_cat(
-                    key_states, position_embeddings, half=True
-                )
+                query_states = apply_rot_embed_cat(query_states, position_embeddings, half=True)
+                key_states = apply_rot_embed_cat(key_states, position_embeddings, half=True)
 
         # if past_key_value is not None:
         #     cache_kwargs = {
@@ -605,9 +579,7 @@ class NatAttention1d(Attention_):
         k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
         v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
 
-        use_fp32_attention = getattr(
-            self, "fp32_attention", False
-        )  # necessary for NAN loss
+        use_fp32_attention = getattr(self, "fp32_attention", False)  # necessary for NAN loss
         if use_fp32_attention:
             q, k, v = q.float(), k.float(), v.float()
 
@@ -674,9 +646,7 @@ class NatAttention2d(nn.Module):
 
         self.qkv = nn.Conv2d(dim, dim * 3, 3, 1, 1, groups=dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.norm = (
-            norm_layer(dim) if scale_norm and norm_layer is not None else nn.Identity()
-        )
+        self.norm = norm_layer(dim) if scale_norm and norm_layer is not None else nn.Identity()
         self.proj = nn.Conv2d(dim, dim, 1, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -809,9 +779,7 @@ class LiteLA(Attention_):
 
         return out
 
-    def forward(
-        self, x: torch.Tensor, mask=None, HW=None, block_id=None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask=None, HW=None, block_id=None) -> torch.Tensor:
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, C)
@@ -840,9 +808,7 @@ class LiteLA(Attention_):
     def module_str(self) -> str:
         _str = type(self).__name__ + "("
         eps = f"{self.eps:.1E}"
-        _str += (
-            f"i={self.in_dim},o={self.out_dim},h={self.heads},d={self.dim},eps={eps}"
-        )
+        _str += f"i={self.in_dim},o={self.out_dim},h={self.heads},d={self.dim},eps={eps}"
         return _str
 
     def __repr__(self):
@@ -1014,9 +980,7 @@ class LiteMLA(nn.Module):
         original_dtype = att_map.dtype
         if original_dtype in [torch.float16, torch.bfloat16]:
             att_map = att_map.float()
-        att_map = att_map / (
-            torch.sum(att_map, dim=2, keepdim=True) + self.eps
-        )  # b h n n
+        att_map = att_map / (torch.sum(att_map, dim=2, keepdim=True) + self.eps)  # b h n n
         att_map = att_map.to(original_dtype)
         out = torch.matmul(v, att_map)  # b h d n
 

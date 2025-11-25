@@ -9,9 +9,7 @@ from ..utils import ext_loader
 from .ball_query import ball_query
 from .knn import knn
 
-ext_module = ext_loader.load_ext(
-    "_ext", ["group_points_forward", "group_points_backward"]
-)
+ext_module = ext_loader.load_ext("_ext", ["group_points_forward", "group_points_backward"])
 
 
 class QueryAndGroup(nn.Module):
@@ -60,14 +58,9 @@ class QueryAndGroup(nn.Module):
         self.return_unique_cnt = return_unique_cnt
         self.return_grouped_idx = return_grouped_idx
         if self.return_unique_cnt:
-            assert self.uniform_sample, (
-                "uniform_sample should be True when "
-                "returning the count of unique samples"
-            )
+            assert self.uniform_sample, "uniform_sample should be True when returning the count of unique samples"
         if self.max_radius is None:
-            assert not self.normalize_xyz, (
-                "can not normalize grouped xyz when max_radius is None"
-            )
+            assert not self.normalize_xyz, "can not normalize grouped xyz when max_radius is None"
 
     def forward(self, points_xyz, center_xyz, features=None):
         """
@@ -100,18 +93,14 @@ class QueryAndGroup(nn.Module):
                     unique_ind = torch.unique(idx[i_batch, i_region, :])
                     num_unique = unique_ind.shape[0]
                     unique_cnt[i_batch, i_region] = num_unique
-                    sample_ind = torch.randint(
-                        0, num_unique, (self.sample_num - num_unique,), dtype=torch.long
-                    )
+                    sample_ind = torch.randint(0, num_unique, (self.sample_num - num_unique,), dtype=torch.long)
                     all_ind = torch.cat((unique_ind, unique_ind[sample_ind]))
                     idx[i_batch, i_region, :] = all_ind
 
         xyz_trans = points_xyz.transpose(1, 2).contiguous()
         # (B, 3, npoint, sample_num)
         grouped_xyz = grouping_operation(xyz_trans, idx)
-        grouped_xyz_diff = grouped_xyz - center_xyz.transpose(1, 2).unsqueeze(
-            -1
-        )  # relative offsets
+        grouped_xyz_diff = grouped_xyz - center_xyz.transpose(1, 2).unsqueeze(-1)  # relative offsets
         if self.normalize_xyz:
             grouped_xyz_diff /= self.max_radius
 
@@ -123,9 +112,7 @@ class QueryAndGroup(nn.Module):
             else:
                 new_features = grouped_features
         else:
-            assert self.use_xyz, (
-                "Cannot have not features and not use xyz as a feature!"
-            )
+            assert self.use_xyz, "Cannot have not features and not use xyz as a feature!"
             new_features = grouped_xyz_diff
 
         ret = [new_features]
@@ -152,9 +139,7 @@ class GroupAll(nn.Module):
         super().__init__()
         self.use_xyz = use_xyz
 
-    def forward(
-        self, xyz: torch.Tensor, new_xyz: torch.Tensor, features: torch.Tensor = None
-    ):
+    def forward(self, xyz: torch.Tensor, new_xyz: torch.Tensor, features: torch.Tensor = None):
         """
         Args:
             xyz (Tensor): (B, N, 3) xyz coordinates of the features.
@@ -199,9 +184,7 @@ class GroupingOperation(Function):
         _, C, N = features.size()
         output = torch.cuda.FloatTensor(B, C, nfeatures, nsample)
 
-        ext_module.group_points_forward(
-            B, C, N, nfeatures, nsample, features, indices, output
-        )
+        ext_module.group_points_forward(B, C, N, nfeatures, nsample, features, indices, output)
 
         ctx.for_backwards = (indices, N)
         return output
@@ -222,9 +205,7 @@ class GroupingOperation(Function):
         grad_features = torch.cuda.FloatTensor(B, C, N).zero_()
 
         grad_out_data = grad_out.data.contiguous()
-        ext_module.group_points_backward(
-            B, C, N, npoint, nsample, grad_out_data, idx, grad_features.data
-        )
+        ext_module.group_points_backward(B, C, N, npoint, nsample, grad_out_data, idx, grad_features.data)
         return grad_features, None
 
 

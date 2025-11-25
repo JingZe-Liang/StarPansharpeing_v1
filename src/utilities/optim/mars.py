@@ -41,37 +41,22 @@ def update_fn(
         if c_t_norm > 1.0:
             c_t = c_t / c_t_norm
         exp_avg.mul_(beta1).add_(c_t, alpha=1.0 - beta1)
-        if (mars_type == "mars-adamw") or (
-            mars_type == "mars-shampoo" and not is_grad_2d
-        ):
+        if (mars_type == "mars-adamw") or (mars_type == "mars-shampoo" and not is_grad_2d):
             exp_avg_sq.mul_(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
             bias_correction1 = 1.0 - beta1**step
             bias_correction2 = 1.0 - beta2**step
             if amsgrad:
                 torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-                denom = (
-                    max_exp_avg_sq.sqrt()
-                    .mul(1 / math.sqrt(bias_correction2))
-                    .add(eps)
-                    .mul(bias_correction1)
-                )
+                denom = max_exp_avg_sq.sqrt().mul(1 / math.sqrt(bias_correction2)).add(eps).mul(bias_correction1)
             else:
-                denom = (
-                    exp_avg_sq.sqrt()
-                    .mul(1 / math.sqrt(bias_correction2))
-                    .add(eps)
-                    .mul(bias_correction1)
-                )
+                denom = exp_avg_sq.sqrt().mul(1 / math.sqrt(bias_correction2)).add(eps).mul(bias_correction1)
             real_update_tmp = -lr * torch.mul(p.data, wd).add(exp_avg.div(denom))
         elif mars_type == "mars-lion":
             real_update_tmp = -lr * torch.mul(p.data, wd).add(exp_avg.sign())
         elif mars_type == "mars-shampoo" and is_grad_2d:
             factor = max(1, grad.size(0) / grad.size(1)) ** 0.5
             real_update_tmp = (
-                NewtonSchulz(exp_avg.mul(1.0 / (1.0 - beta1)), eps=eps)
-                .mul(factor)
-                .add(wd, p.data)
-                .mul(-lr)
+                NewtonSchulz(exp_avg.mul(1.0 / (1.0 - beta1)), eps=eps).mul(factor).add(wd, p.data).mul(-lr)
             )
         p.data.add_(real_update_tmp)
     else:
@@ -82,24 +67,10 @@ def update_fn(
         bias_correction2 = 1.0 - beta2_1d**step
         if amsgrad:
             torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-            denom = (
-                max_exp_avg_sq.sqrt()
-                .mul(1 / math.sqrt(bias_correction2))
-                .add(eps)
-                .mul(bias_correction1)
-            )
+            denom = max_exp_avg_sq.sqrt().mul(1 / math.sqrt(bias_correction2)).add(eps).mul(bias_correction1)
         else:
-            denom = (
-                exp_avg_sq.sqrt()
-                .mul(1 / math.sqrt(bias_correction2))
-                .add(eps)
-                .mul(bias_correction1)
-            )
-        real_update_tmp = (
-            -lr
-            * lr_1d_factor
-            * torch.mul(p.data, weight_decay_1d).add(exp_avg.div(denom))
-        )
+            denom = exp_avg_sq.sqrt().mul(1 / math.sqrt(bias_correction2)).add(eps).mul(bias_correction1)
+        real_update_tmp = -lr * lr_1d_factor * torch.mul(p.data, weight_decay_1d).add(exp_avg.div(denom))
         p.data.add_(real_update_tmp)
     return exp_avg, exp_avg_sq
 
@@ -242,9 +213,7 @@ class MARS(Optimizer):
                     continue
                 grad = p.grad.data
                 if grad.is_sparse:
-                    raise RuntimeError(
-                        "Adam does not support sparse gradients, please consider SparseAdam instead"
-                    )
+                    raise RuntimeError("Adam does not support sparse gradients, please consider SparseAdam instead")
                 amsgrad = group["amsgrad"]
 
                 state = self.state[p]
@@ -302,9 +271,7 @@ class MARS(Optimizer):
                     optimize_1d=self.optimize_1d,
                     lr_1d_factor=self.lr_1d_factor,
                     betas_1d=self.betas_1d,
-                    weight_decay_1d=self.weight_decay
-                    if self.optimize_1d
-                    else self.weight_decay_1d,
+                    weight_decay_1d=self.weight_decay if self.optimize_1d else self.weight_decay_1d,
                 )
                 if self.is_approx:
                     state["last_grad"] = grad

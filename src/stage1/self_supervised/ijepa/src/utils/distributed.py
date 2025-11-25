@@ -34,9 +34,7 @@ def init_distributed(port=40112, rank_and_world_size=(None, None)):
 
     try:
         os.environ["MASTER_PORT"] = str(port)
-        torch.distributed.init_process_group(
-            backend="nccl", world_size=world_size, rank=rank
-        )
+        torch.distributed.init_process_group(backend="nccl", world_size=world_size, rank=rank)
     except Exception as e:
         world_size, rank = 1, 0
         logger.info(f"distributed training not available {e}")
@@ -47,11 +45,7 @@ def init_distributed(port=40112, rank_and_world_size=(None, None)):
 class AllGather(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
-        if (
-            dist.is_available()
-            and dist.is_initialized()
-            and (dist.get_world_size() > 1)
-        ):
+        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
             x = x.contiguous()
             outputs = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
             dist.all_gather(outputs, x)
@@ -60,11 +54,7 @@ class AllGather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grads):
-        if (
-            dist.is_available()
-            and dist.is_initialized()
-            and (dist.get_world_size() > 1)
-        ):
+        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
             s = (grads.shape[0] // dist.get_world_size()) * dist.get_rank()
             e = (grads.shape[0] // dist.get_world_size()) * (dist.get_rank() + 1)
             grads = grads.contiguous()
@@ -76,11 +66,7 @@ class AllGather(torch.autograd.Function):
 class AllReduceSum(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
-        if (
-            dist.is_available()
-            and dist.is_initialized()
-            and (dist.get_world_size() > 1)
-        ):
+        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
             x = x.contiguous()
             dist.all_reduce(x)
         return x
@@ -93,11 +79,7 @@ class AllReduceSum(torch.autograd.Function):
 class AllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
-        if (
-            dist.is_available()
-            and dist.is_initialized()
-            and (dist.get_world_size() > 1)
-        ):
+        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
             x = x.contiguous() / dist.get_world_size()
             dist.all_reduce(x)
         return x

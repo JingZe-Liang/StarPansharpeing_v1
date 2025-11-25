@@ -8,14 +8,10 @@ from .utils import constant_init, kaiming_init, normal_init
 
 def conv3x3(in_planes, out_planes, dilation=1):
     """3x3 convolution with padding."""
-    return nn.Conv2d(
-        in_planes, out_planes, kernel_size=3, padding=dilation, dilation=dilation
-    )
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, padding=dilation, dilation=dilation)
 
 
-def make_vgg_layer(
-    inplanes, planes, num_blocks, dilation=1, with_bn=False, ceil_mode=False
-):
+def make_vgg_layer(inplanes, planes, num_blocks, dilation=1, with_bn=False, ceil_mode=False):
     layers = []
     for _ in range(num_blocks):
         layers.append(conv3x3(inplanes, planes, dilation))

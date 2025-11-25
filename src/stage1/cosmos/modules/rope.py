@@ -74,16 +74,10 @@ class RopePosEmbed(nn.Module):
     @staticmethod
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
         latent_image_ids = torch.zeros(height, width, 3)
-        latent_image_ids[..., 1] = (
-            latent_image_ids[..., 1] + torch.arange(height)[:, None]
-        )
-        latent_image_ids[..., 2] = (
-            latent_image_ids[..., 2] + torch.arange(width)[None, :]
-        )
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
 
-        latent_image_id_height, latent_image_id_width, latent_image_id_channels = (
-            latent_image_ids.shape
-        )
+        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
         latent_image_ids = latent_image_ids.reshape(
             latent_image_id_height * latent_image_id_width, latent_image_id_channels
@@ -140,15 +134,7 @@ def get_1d_rotary_pos_embed(
     theta = theta * ntk_factor
     freqs = (
         1.0
-        / (
-            theta
-            ** (
-                torch.arange(0, dim, 2, dtype=freqs_dtype, device=pos.device)[
-                    : (dim // 2)
-                ]
-                / dim
-            )
-        )
+        / (theta ** (torch.arange(0, dim, 2, dtype=freqs_dtype, device=pos.device)[: (dim // 2)] / dim))
         / linear_factor
     )  # [D/2]
     freqs = torch.outer(pos, freqs)  # type: ignore   # [S, D/2]
@@ -164,9 +150,7 @@ def get_1d_rotary_pos_embed(
         return freqs_cos, freqs_sin
     else:
         # lumina
-        freqs_cis = torch.polar(
-            torch.ones_like(freqs), freqs
-        )  # complex64     # [S, D/2]
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64     # [S, D/2]
         return freqs_cis
 
 
@@ -198,22 +182,16 @@ def apply_rotary_emb(
 
         if use_real_unbind_dim == -1:
             # Used for flux, cogvideox, hunyuan-dit
-            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(
-                -1
-            )  # [B, S, H, D//2]
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
             x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
         elif use_real_unbind_dim == -2:
             # Used for Sana
             cos = cos.transpose(-1, -2)
             sin = sin.transpose(-1, -2)
-            x_real, x_imag = x.reshape(*x.shape[:-2], -1, 2, x.shape[-1]).unbind(
-                -2
-            )  # [B, H, D//2, S]
+            x_real, x_imag = x.reshape(*x.shape[:-2], -1, 2, x.shape[-1]).unbind(-2)  # [B, H, D//2, S]
             x_rotated = torch.stack([-x_imag, x_real], dim=-2).flatten(2, 3)
         else:
-            raise ValueError(
-                f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2."
-            )
+            raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
 
         out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
@@ -330,11 +308,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         self.latent_shape = latent_shape
         self.original_latent_shape = original_latent_shape
         self.pad_to_multiple_of = pad_to_multiple_of
-        self.device = (
-            torch.device(torch.cuda.current_device())
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
+        self.device = torch.device(torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
         self.get_inv_freq(self.device)
 
     def get_mscale(self, scale: float = 1.0) -> float:
@@ -362,9 +336,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
 
     def compute_freqs(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the spatial frequencies for the latent tensor."""
-        self.seq = torch.arange(self.max_seq_len_cached, dtype=torch.float).to(
-            self.device
-        )
+        self.seq = torch.arange(self.max_seq_len_cached, dtype=torch.float).to(self.device)
         if self.rope_dim == "1D":
             emb = torch.einsum("i,j->ij", self.seq, self.inv_freq)
 
@@ -401,9 +373,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
             raise ValueError(f"Invalid RoPE dimensionality: {self.rope_dim}")
         return emb
 
-    def get_scale_factors(
-        self, inv_freq: torch.Tensor, original_seq_len: int
-    ) -> torch.Tensor:
+    def get_scale_factors(self, inv_freq: torch.Tensor, original_seq_len: int) -> torch.Tensor:
         """Get the scale factors for YaRN."""
         # Calculate the high and low frequency cutoffs for YaRN. Note: `beta_fast` and `beta_slow` are called
         # `high_freq_factor` and `low_freq_factor` in the Llama 3.1 RoPE scaling code.
@@ -424,26 +394,16 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def get_inv_freq(self, device: torch.device) -> None:
         """Get the inverse frequency."""
         if self.rope_dim == "1D":
-            assert self.max_position_embeddings is not None, (
-                "Max position embeddings required."
-            )
+            assert self.max_position_embeddings is not None, "Max position embeddings required."
             inv_freq = 1.0 / (
-                self.rope_theta
-                ** (
-                    torch.arange(0, self.dim, 2, dtype=torch.float32, device=device)
-                    / self.dim
-                )
+                self.rope_theta ** (torch.arange(0, self.dim, 2, dtype=torch.float32, device=device) / self.dim)
             )
             if self.apply_yarn:
-                assert self.original_max_position_embeddings is not None, (
-                    "Original max position embeddings required."
-                )
+                assert self.original_max_position_embeddings is not None, "Original max position embeddings required."
                 assert self.beta_slow is not None, "Beta slow value required."
                 assert self.beta_fast is not None, "Beta fast value required."
 
-                scale_factors = self.get_scale_factors(
-                    inv_freq, self.original_max_position_embeddings
-                )
+                scale_factors = self.get_scale_factors(inv_freq, self.original_max_position_embeddings)
                 # Apply the scaling factors to inv_freq.
                 inv_freq = inv_freq * scale_factors
                 # Set the magnitude scaling factor.
@@ -455,20 +415,14 @@ class RotaryPositionEmbedding(torch.nn.Module):
             assert self.latent_shape is not None, "Latent shape required."
             dim_h = self.dim // 2
             spatial_inv_freq = 1.0 / (
-                self.rope_theta
-                ** torch.arange(0, dim_h, 2, dtype=torch.float32, device=device)
-                / dim_h
+                self.rope_theta ** torch.arange(0, dim_h, 2, dtype=torch.float32, device=device) / dim_h
             )
             if self.apply_yarn:
-                assert self.original_latent_shape is not None, (
-                    "Original latent shape required."
-                )
+                assert self.original_latent_shape is not None, "Original latent shape required."
                 assert self.beta_slow is not None, "Beta slow value required."
                 assert self.beta_fast is not None, "Beta fast value required."
 
-                scale_factors = self.get_scale_factors(
-                    spatial_inv_freq, self.original_latent_shape[0]
-                )
+                scale_factors = self.get_scale_factors(spatial_inv_freq, self.original_latent_shape[0])
                 spatial_inv_freq = spatial_inv_freq * scale_factors
                 self.mscale = float(self.get_mscale(self.scale) * self.attn_factor)
             self.spatial_inv_freq = spatial_inv_freq
@@ -478,27 +432,17 @@ class RotaryPositionEmbedding(torch.nn.Module):
             assert self.latent_shape is not None, "Latent shape required."
             dim_h = self.dim // 6 * 2
             dim_t = self.dim - 2 * dim_h
-            self.dim_spatial_range = (
-                torch.arange(0, dim_h, 2)[: (dim_h // 2)].float().to(device) / dim_h
-            )
+            self.dim_spatial_range = torch.arange(0, dim_h, 2)[: (dim_h // 2)].float().to(device) / dim_h
             spatial_inv_freq = 1.0 / (self.rope_theta**self.dim_spatial_range)
-            self.dim_temporal_range = (
-                torch.arange(0, dim_t, 2)[: (dim_t // 2)].float().to(device) / dim_t
-            )
+            self.dim_temporal_range = torch.arange(0, dim_t, 2)[: (dim_t // 2)].float().to(device) / dim_t
             temporal_inv_freq = 1.0 / (self.rope_theta**self.dim_temporal_range)
             if self.apply_yarn:
-                assert self.original_latent_shape is not None, (
-                    "Original latent shape required."
-                )
+                assert self.original_latent_shape is not None, "Original latent shape required."
                 assert self.beta_slow is not None, "Beta slow value required."
                 assert self.beta_fast is not None, "Beta fast value required."
-                scale_factors_spatial = self.get_scale_factors(
-                    spatial_inv_freq, self.original_latent_shape[1]
-                )
+                scale_factors_spatial = self.get_scale_factors(spatial_inv_freq, self.original_latent_shape[1])
                 spatial_inv_freq = spatial_inv_freq * scale_factors_spatial
-                scale_factors_temporal = self.get_scale_factors(
-                    temporal_inv_freq, self.original_latent_shape[0]
-                )
+                scale_factors_temporal = self.get_scale_factors(temporal_inv_freq, self.original_latent_shape[0])
                 temporal_inv_freq = temporal_inv_freq * scale_factors_temporal
                 self.mscale = float(self.get_mscale(self.scale) * self.attn_factor)
             self.spatial_inv_freq = spatial_inv_freq
@@ -560,9 +504,7 @@ class RotaryPositionEmbeddingPytorchV2(RotaryPositionEmbedding):
         self.register_buffer("cos_cached", torch.cos(emb), persistent=False)
         self.register_buffer("sin_cached", torch.sin(emb), persistent=False)
 
-    def create_rope_freqs(
-        self, seq_len: int, training_type: str = "2D"
-    ) -> torch.Tensor:
+    def create_rope_freqs(self, seq_len: int, training_type: str = "2D") -> torch.Tensor:
         """
         Create rotary position embedding frequencies.
 
@@ -586,15 +528,10 @@ class RotaryPositionEmbeddingPytorchV2(RotaryPositionEmbedding):
         else:
             raise ValueError(f"Invalid RoPE dimensionality: {self.rope_dim}")
 
-        if (
-            self.pad_to_multiple_of is not None
-            and emb.shape[0] % self.pad_to_multiple_of != 0
-        ):
+        if self.pad_to_multiple_of is not None and emb.shape[0] % self.pad_to_multiple_of != 0:
             # Round up to the nearest multiple of pad_to_multiple_of
             pad_len = self.pad_to_multiple_of - emb.shape[0] % self.pad_to_multiple_of
-            emb = torch.cat(
-                (emb, torch.zeros((pad_len, *emb.shape[1:]), device=emb.device)), dim=0
-            )
+            emb = torch.cat((emb, torch.zeros((pad_len, *emb.shape[1:]), device=emb.device)), dim=0)
 
         return emb
 
@@ -663,25 +600,15 @@ def get_2d_sincos_pos_embed(
         grid_size = to_2tuple(grid_size)  # type: ignore[assignment]
     grid_size = cast(tuple[int, int], grid_size)
 
-    grid_h = (
-        np.arange(grid_size[0], dtype=np.float32)
-        / (grid_size[0] / base_size)
-        / pe_interpolation
-    )
-    grid_w = (
-        np.arange(grid_size[1], dtype=np.float32)
-        / (grid_size[1] / base_size)
-        / pe_interpolation
-    )
+    grid_h = np.arange(grid_size[0], dtype=np.float32) / (grid_size[0] / base_size) / pe_interpolation
+    grid_w = np.arange(grid_size[1], dtype=np.float32) / (grid_size[1] / base_size) / pe_interpolation
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
     grid = grid.reshape([2, 1, grid_size[1], grid_size[0]])
 
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate(
-            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
-        )
+        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
     return pos_embed
 
 
@@ -742,9 +669,7 @@ from einops import repeat
 from torch.nn.init import trunc_normal_
 
 
-def normalize(
-    x: torch.Tensor, dim: Optional[list[int]] = None, eps: float = 0
-) -> torch.Tensor:
+def normalize(x: torch.Tensor, dim: Optional[list[int]] = None, eps: float = 0) -> torch.Tensor:
     """
     Normalizes the input tensor along specified dimensions such that the average square norm of elements is adjusted.
 
@@ -793,9 +718,7 @@ class LearnablePosAxisEmbedding(nn.Module):
         super().__init__()
         self.interpolation = interpolation
         self.ndim = len(seq_len)
-        self.pos_embed_n_dims = nn.ParameterList(
-            [nn.Parameter(torch.zeros(seq_len[i], dim)) for i in range(self.ndim)]
-        )
+        self.pos_embed_n_dims = nn.ParameterList([nn.Parameter(torch.zeros(seq_len[i], dim)) for i in range(self.ndim)])
         self.eps = eps
 
         # trunc normal init
@@ -822,9 +745,7 @@ class LearnablePosAxisEmbedding(nn.Module):
                 embed_i = repeat_at_rest_dims(embed_i, i, axials.pop(i))
                 pos_embed = pos_embed + embed_i
         elif self.interpolation == "downsample":
-            pos_embed = [
-                self.pos_embed_n_dims[i][:: x.shape[i + 1]] for i in range(ndim_context)
-            ]
+            pos_embed = [self.pos_embed_n_dims[i][:: x.shape[i + 1]] for i in range(ndim_context)]
         else:
             raise ValueError(f"Unknown interpolation method: {self.interpolation}")
 
@@ -867,9 +788,7 @@ class AxialPositionalEmbedding(nn.Module):
             ax_shape = [1] * len(self.shape)
             ax_shape[ind] = shape
             ax_shape = (1, *ax_shape, axial_dim)  # [1, h, w, d]
-            ax_emb = nn.Parameter(
-                torch.zeros(ax_shape)
-            )  # in the original implementation, they use normal_(0, 1)
+            ax_emb = nn.Parameter(torch.zeros(ax_shape))  # in the original implementation, they use normal_(0, 1)
             ax_emb = nn.init.trunc_normal_(ax_emb, std=0.02)
             self.weights.append(ax_emb)
 
@@ -884,9 +803,7 @@ class AxialPositionalEmbedding(nn.Module):
         for ax_emb in self.weights:
             axial_dim = ax_emb.shape[-1]
             expand_shape = (batch, *self.shape, axial_dim)
-            emb = ax_emb.expand(expand_shape).reshape(
-                batch, self.max_seq_len, axial_dim
-            )
+            emb = ax_emb.expand(expand_shape).reshape(batch, self.max_seq_len, axial_dim)
             embs.append(emb)
 
         pos_emb = sum(embs) if self.summed else torch.cat(embs, dim=-1)
@@ -963,16 +880,12 @@ class LearnablePosAxisEmbedding2D(nn.Module):
             pos_embed_h = self.pos_embed_h[:, :h]
             pos_embed_w = self.pos_embed_w[:, :w]
             # repeat
-            embed = repeat(pos_embed_h, "d h -> b d h w", b=1, w=w) + repeat(
-                pos_embed_w, "d w -> b d h w", b=1, h=h
-            )
+            embed = repeat(pos_embed_h, "d h -> b d h w", b=1, w=w) + repeat(pos_embed_w, "d w -> b d h w", b=1, h=h)
         elif self.interpolation == "interpolate" or _force_to_interp:
-            _interp_fn = lambda x: torch.nn.functional.interpolate(
-                x, size=(h, w), mode="bilinear", align_corners=True
+            _interp_fn = lambda x: torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear", align_corners=True)
+            embed = _interp_fn(repeat(self.pos_embed_h, "d h -> b d h w", b=1, w=w)) + _interp_fn(
+                repeat(self.pos_embed_w, "d w -> b d h w", b=1, h=h)
             )
-            embed = _interp_fn(
-                repeat(self.pos_embed_h, "d h -> b d h w", b=1, w=w)
-            ) + _interp_fn(repeat(self.pos_embed_w, "d w -> b d h w", b=1, h=h))
         else:
             raise ValueError(
                 f"Unknown interpolation method: {self.interpolation}, "
@@ -991,9 +904,7 @@ class LearnablePosAxisEmbedding2D(nn.Module):
             pos_embed = self.pos_embed[:, :h, :w]
         elif self.interpolation == "interpolate":
             self.pos_embed
-            pos_embed = torch.nn.functional.interpolate(
-                self.pos_embed, size=(h, w), mode="bilinear"
-            )
+            pos_embed = torch.nn.functional.interpolate(self.pos_embed, size=(h, w), mode="bilinear")
 
         return normalize(pos_embed, dim=-1)
 
@@ -1075,16 +986,11 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
         elif exists(num_axial_dims):
             self.num_axial_dims = num_axial_dims
         else:
-            raise ValueError(
-                "either axials or num_axial_dims can not be None at the same time"
-            )
+            raise ValueError("either axials or num_axial_dims can not be None at the same time")
 
         # mlps for each axial dimension
         self.mlps = ModuleList(
-            [
-                MLP(1, dim, depth=mlp_depth, expansion=mlp_expansion)
-                for _ in range(self.num_axial_dims)
-            ]
+            [MLP(1, dim, depth=mlp_depth, expansion=mlp_expansion) for _ in range(self.num_axial_dims)]
         )
         # dummy buffer for device and dtype
         self.register_buffer("dummy", tensor(0), persistent=False)
@@ -1096,9 +1002,7 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
             assert len(max_seq_len) == self.num_axial_dims, (
                 "max_seq_len must have the same length as the number of axial dimensions"
             )
-            self.register_buffer(
-                "max_seq_len", torch.tensor(max_seq_len)
-            )  # may affect EMA
+            self.register_buffer("max_seq_len", torch.tensor(max_seq_len))  # may affect EMA
             # self.max_seq_len = max_seq_len
         else:
             self.max_seq_len = None
@@ -1122,10 +1026,7 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
 
         assert len(axial_dims) == len(axial_embeds)
 
-        axial_embeds = [
-            axial_embed[:axial_dim]
-            for axial_embed, axial_dim in zip(axial_embeds, axial_dims)
-        ]
+        axial_embeds = [axial_embed[:axial_dim] for axial_embed, axial_dim in zip(axial_embeds, axial_dims)]
 
         axial_embed, *rest_axial_embeds = axial_embeds
 
@@ -1139,9 +1040,7 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
 
         return axial_embed
 
-    def maybe_derive_outer_dim(
-        self, max_seq_len, axial_dims: Tensor | Size | tuple[int, ...]
-    ):
+    def maybe_derive_outer_dim(self, max_seq_len, axial_dims: Tensor | Size | tuple[int, ...]):
         ndims = self.num_axial_dims
         assert len(axial_dims) in (ndims, ndims - 1)
 
@@ -1196,11 +1095,7 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
     def make_seq_len_for_mlp(self, axial_dim: int, dim_i: int):
         max_seq_len = self.max_seq_len[dim_i] if self.max_seq_len is not None else None
 
-        if (
-            max_seq_len is None
-            or self.interp_type == "unchange"
-            or axial_dim <= max_seq_len
-        ):
+        if max_seq_len is None or self.interp_type == "unchange" or axial_dim <= max_seq_len:
             embed = torch.arange(axial_dim, device=self.device, dtype=self.dtype)
         elif axial_dim > max_seq_len:
             if self.interp_type == "linear":
@@ -1212,15 +1107,9 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
                     dtype=self.dtype,
                 )
             else:
-                raise ValueError(
-                    f"Unknown interpolation type: {self.interp_type}, only support `linear`"
-                )
+                raise ValueError(f"Unknown interpolation type: {self.interp_type}, only support `linear`")
         else:
-            raise NotImplementedError(
-                "max_seq_len = {} and interp_type = {}".format(
-                    max_seq_len, self.interp_type
-                )
-            )
+            raise NotImplementedError("max_seq_len = {} and interp_type = {}".format(max_seq_len, self.interp_type))
 
         assert embed.shape[0] == axial_dim, (
             "axial dim must be equal to the length of the embedding, not got {} and {}".format(

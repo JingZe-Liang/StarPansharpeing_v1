@@ -111,9 +111,7 @@ class UpSampleLayer(nn.Module):
 
     @torch.autocast(device_type="cuda", enabled=False)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if (
-            self.size is not None and tuple(x.shape[-2:]) == self.size
-        ) or self.factor == 1:
+        if (self.size is not None and tuple(x.shape[-2:]) == self.size) or self.factor == 1:
             return x
         if x.dtype in [torch.float16, torch.bfloat16]:
             x = x.float()
@@ -123,9 +121,7 @@ class UpSampleLayer(nn.Module):
 class DownsamplePadConv(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=2, padding=0
-        )
+        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pad = (0, 1, 0, 1)
@@ -136,9 +132,7 @@ class DownsamplePadConv(nn.Module):
 class UpsampleRepeatConv(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
@@ -371,9 +365,7 @@ class MBConv(nn.Module):
         use_bias = val2tuple(use_bias, 3)
         norm = val2tuple(norm, 3)
         act_func = val2tuple(act_func, 3)
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.inverted_conv = ConvLayer(
             in_channels,
@@ -429,9 +421,7 @@ class FusedMBConv(nn.Module):
         norm = val2tuple(norm, 2)
         act_func = val2tuple(act_func, 2)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.spatial_conv = ConvLayer(
             in_channels,
@@ -476,9 +466,7 @@ class GLUMBConv(nn.Module):
         norm = val2tuple(norm, 3)
         act_func = val2tuple(act_func, 3)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.glu_act = build_act(act_func[1], inplace=False)
         self.inverted_conv = ConvLayer(
@@ -538,9 +526,7 @@ class ResBlock(nn.Module):
         norm = val2tuple(norm, 2)
         act_func = val2tuple(act_func, 2)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.conv1 = ConvLayer(
             in_channels,
@@ -701,9 +687,7 @@ class LiteMLA(nn.Module):
         original_dtype = att_map.dtype
         if original_dtype in [torch.float16, torch.bfloat16]:
             att_map = att_map.float()
-        att_map = att_map / (
-            torch.sum(att_map, dim=2, keepdim=True) + self.eps
-        )  # b h n n
+        att_map = att_map / (torch.sum(att_map, dim=2, keepdim=True) + self.eps)  # b h n n
         att_map = att_map.to(original_dtype)
         out = torch.matmul(v, att_map)  # b h d n
 
@@ -849,9 +833,7 @@ class DAGBlock(nn.Module):
         self.output_ops = nn.ModuleList(list(outputs.values()))
 
     def forward(self, feature_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        feat = [
-            op(feature_dict[key]) for key, op in zip(self.input_keys, self.input_ops)
-        ]
+        feat = [op(feature_dict[key]) for key, op in zip(self.input_keys, self.input_ops)]
         if self.merge == "add":
             feat = list_sum(feat)
         elif self.merge == "cat":

@@ -24,9 +24,7 @@ def test_numpy_torch_consistency():
     test_img_numpy = np.random.rand(256, 256, 10).astype(np.float32)
 
     # Convert to PyTorch format (B, C, H, W)
-    test_img_torch = (
-        torch.from_numpy(test_img_numpy.transpose(2, 0, 1)).unsqueeze(0).float()
-    )
+    test_img_torch = torch.from_numpy(test_img_numpy.transpose(2, 0, 1)).unsqueeze(0).float()
 
     # Run both implementations
     score_numpy = RX_numpy(test_img_numpy)
@@ -64,12 +62,8 @@ def test_wrapper_function():
     score_from_torch_4d = RX(test_img_torch_4d)
 
     # All should produce the same result (within numerical precision)
-    assert np.allclose(
-        score_from_numpy, score_from_torch_3d.cpu().numpy(), rtol=1e-4, atol=1e-4
-    )
-    assert np.allclose(
-        score_from_numpy, score_from_torch_4d[0].cpu().numpy(), rtol=1e-4, atol=1e-4
-    )
+    assert np.allclose(score_from_numpy, score_from_torch_3d.cpu().numpy(), rtol=1e-4, atol=1e-4)
+    assert np.allclose(score_from_numpy, score_from_torch_4d[0].cpu().numpy(), rtol=1e-4, atol=1e-4)
 
     print("✓ Wrapper function works correctly with all input types!")
 
@@ -108,9 +102,7 @@ def test_batch_processing():
     for i in range(batch_size):
         individual_score = individual_scores[i]
         batch_score = batch_scores[i].cpu().numpy()
-        print(
-            f"Sample {i}: Individual score shape: {individual_score.shape}, Batch score shape: {batch_score.shape}"
-        )
+        print(f"Sample {i}: Individual score shape: {individual_score.shape}, Batch score shape: {batch_score.shape}")
 
         assert np.allclose(individual_score, batch_score, rtol=1e-4, atol=1e-4), (
             f"Batch processing differs from individual processing for sample {i}"

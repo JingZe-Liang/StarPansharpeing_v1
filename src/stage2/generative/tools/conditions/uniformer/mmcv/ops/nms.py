@@ -19,9 +19,7 @@ class NMSop(torch.autograd.Function):
             bboxes, scores = bboxes[valid_mask], scores[valid_mask]
             valid_inds = torch.nonzero(valid_mask, as_tuple=False).squeeze(dim=1)
 
-        inds = ext_module.nms(
-            bboxes, scores, iou_threshold=float(iou_threshold), offset=offset
-        )
+        inds = ext_module.nms(bboxes, scores, iou_threshold=float(iou_threshold), offset=offset)
 
         if max_num > 0:
             inds = inds[:max_num]
@@ -53,19 +51,13 @@ class NMSop(torch.autograd.Function):
             scores = unsqueeze(g, unsqueeze(g, scores, 0), 0)
 
             if max_num > 0:
-                max_num = g.op(
-                    "Constant", value_t=torch.tensor(max_num, dtype=torch.long)
-                )
+                max_num = g.op("Constant", value_t=torch.tensor(max_num, dtype=torch.long))
             else:
                 dim = g.op("Constant", value_t=torch.tensor(0))
                 max_num = _size_helper(g, bboxes, dim)
             max_output_per_class = max_num
-            iou_threshold = g.op(
-                "Constant", value_t=torch.tensor([iou_threshold], dtype=torch.float)
-            )
-            score_threshold = g.op(
-                "Constant", value_t=torch.tensor([score_threshold], dtype=torch.float)
-            )
+            iou_threshold = g.op("Constant", value_t=torch.tensor([iou_threshold], dtype=torch.float))
+            score_threshold = g.op("Constant", value_t=torch.tensor([score_threshold], dtype=torch.float))
             nms_out = g.op(
                 "NonMaxSuppression",
                 boxes,
@@ -172,9 +164,7 @@ def nms(boxes, scores, iou_threshold, offset=0, score_threshold=0, max_num=-1):
         indata_dict = {"iou_threshold": float(iou_threshold), "offset": int(offset)}
         inds = ext_module.nms(*indata_list, **indata_dict)
     else:
-        inds = NMSop.apply(
-            boxes, scores, iou_threshold, offset, score_threshold, max_num
-        )
+        inds = NMSop.apply(boxes, scores, iou_threshold, offset, score_threshold, max_num)
     dets = torch.cat((boxes[inds], scores[inds].reshape(-1, 1)), dim=1)
     if is_numpy:
         dets = dets.cpu().numpy()
@@ -367,9 +357,7 @@ def nms_match(dets, iou_threshold):
     if dets.shape[0] == 0:
         matched = []
     else:
-        assert dets.shape[-1] == 5, (
-            f"inputs dets.shape should be (N, 5), but get {dets.shape}"
-        )
+        assert dets.shape[-1] == 5, f"inputs dets.shape should be (N, 5), but get {dets.shape}"
         if isinstance(dets, torch.Tensor):
             dets_t = dets.detach().cpu()
         else:
@@ -424,8 +412,6 @@ def nms_rotated(dets, scores, iou_threshold, labels=None):
             multi_label=multi_label,
         )
     else:
-        keep_inds = ext_module.nms_rotated(
-            dets_wl, scores, order, dets_sorted, iou_threshold, multi_label
-        )
+        keep_inds = ext_module.nms_rotated(dets_wl, scores, order, dets_sorted, iou_threshold, multi_label)
     dets = torch.cat((dets[keep_inds], scores[keep_inds].reshape(-1, 1)), dim=1)
     return dets, keep_inds

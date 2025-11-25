@@ -12,11 +12,7 @@ def is_rocm_pytorch() -> bool:
         try:
             from torch.utils.cpp_extension import ROCM_HOME
 
-            is_rocm = (
-                True
-                if ((torch.version.hip is not None) and (ROCM_HOME is not None))
-                else False
-            )
+            is_rocm = True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
         except ImportError:
             pass
     return is_rocm
@@ -119,8 +115,6 @@ class SyncBatchNorm(SyncBatchNorm_):
     def _check_input_dim(self, input):
         if TORCH_VERSION == "parrots":
             if input.dim() < 2:
-                raise ValueError(
-                    f"expected at least 2D input (got {input.dim()}D input)"
-                )
+                raise ValueError(f"expected at least 2D input (got {input.dim()}D input)")
         else:
             super()._check_input_dim(input)

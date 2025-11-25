@@ -51,9 +51,7 @@ def rotate_half(x):
 
 
 @autocast("cuda", enabled=False)
-def apply_rotary_emb(
-    freqs, t, start_index=0, scale=1.0, seq_dim=-2, freqs_seq_dim=None
-):
+def apply_rotary_emb(freqs, t, start_index=0, scale=1.0, seq_dim=-2, freqs_seq_dim=None):
     dtype = t.dtype
 
     if not exists(freqs_seq_dim):
@@ -77,9 +75,7 @@ def apply_rotary_emb(
     t_right = t[..., end_index:]
 
     # Apply rotary embeddings without modifying t in place
-    t_transformed = (t_middle * freqs.cos() * scale) + (
-        rotate_half(t_middle) * freqs.sin() * scale
-    )
+    t_transformed = (t_middle * freqs.cos() * scale) + (rotate_half(t_middle) * freqs.sin() * scale)
 
     out = torch.cat((t_left, t_transformed, t_right), dim=-1)
 
@@ -131,9 +127,7 @@ class RotaryEmbedding(Module):
         if exists(custom_freqs):
             freqs = custom_freqs
         elif freqs_for == "lang":
-            freqs = 1.0 / (
-                theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-            )
+            freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
         elif freqs_for == "pixel":
             freqs = torch.linspace(1.0, max_freq / 2, dim // 2) * pi
         elif freqs_for == "constant":
@@ -142,9 +136,7 @@ class RotaryEmbedding(Module):
         self.cache_if_possible = cache_if_possible
         self.cache_max_seq_len = cache_max_seq_len
 
-        self.register_buffer(
-            "cached_freqs", torch.zeros(cache_max_seq_len, dim), persistent=False
-        )
+        self.register_buffer("cached_freqs", torch.zeros(cache_max_seq_len, dim), persistent=False)
         self.cached_freqs_seq_len = 0
 
         self.freqs = nn.Parameter(freqs, requires_grad=learned_freq)
@@ -176,9 +168,7 @@ class RotaryEmbedding(Module):
         self.scale_base = xpos_scale_base
 
         self.register_buffer("scale", scale, persistent=False)
-        self.register_buffer(
-            "cached_scales", torch.zeros(cache_max_seq_len, dim), persistent=False
-        )
+        self.register_buffer("cached_scales", torch.zeros(cache_max_seq_len, dim), persistent=False)
         self.cached_scales_seq_len = 0
 
         # add apply_rotary_emb as static method
@@ -193,9 +183,7 @@ class RotaryEmbedding(Module):
         device = default(device, self.device)
         dtype = default(dtype, self.cached_freqs.dtype)
 
-        return (
-            torch.arange(seq_len, device=device, dtype=dtype) + offset
-        ) / self.interpolate_factor
+        return (torch.arange(seq_len, device=device, dtype=dtype) + offset) / self.interpolate_factor
 
     def rotate_queries_or_keys(self, t, seq_dim=None, offset=0, scale=None):
         seq_dim = default(seq_dim, self.default_seq_dim)
@@ -233,9 +221,7 @@ class RotaryEmbedding(Module):
             q_scale = self.get_scale(seq[-q_len:]).type(dtype)
             k_scale = self.get_scale(seq).type(dtype)
 
-        rotated_q = self.rotate_queries_or_keys(
-            q, seq_dim=seq_dim, scale=q_scale, offset=k_len - q_len + offset
-        )
+        rotated_q = self.rotate_queries_or_keys(q, seq_dim=seq_dim, scale=q_scale, offset=k_len - q_len + offset)
         rotated_k = self.rotate_queries_or_keys(k, seq_dim=seq_dim, scale=k_scale**-1)
 
         rotated_q = rotated_q.type(q.dtype)
@@ -269,17 +255,9 @@ class RotaryEmbedding(Module):
     def get_scale(self, t: Tensor, seq_len: int | None = None, offset=0):
         assert self.use_xpos
 
-        should_cache = (
-            self.cache_if_possible
-            and exists(seq_len)
-            and (offset + seq_len) <= self.cache_max_seq_len
-        )
+        should_cache = self.cache_if_possible and exists(seq_len) and (offset + seq_len) <= self.cache_max_seq_len
 
-        if (
-            should_cache
-            and exists(self.cached_scales)
-            and (seq_len + offset) <= self.cached_scales_seq_len
-        ):
+        if should_cache and exists(self.cached_scales) and (seq_len + offset) <= self.cached_scales_seq_len:
             return self.cached_scales[offset : (offset + seq_len)]
 
         scale = 1.0
@@ -294,9 +272,7 @@ class RotaryEmbedding(Module):
 
         return scale
 
-    def get_axial_freqs(
-        self, *dims, offsets: (tuple[int | float, ...] | Tensor | None) = None
-    ):
+    def get_axial_freqs(self, *dims, offsets: (tuple[int | float, ...] | Tensor | None) = None):
         Colon = slice(None)
         all_freqs = []
 
@@ -345,11 +321,7 @@ class RotaryEmbedding(Module):
             and (offset + seq_len) <= self.cache_max_seq_len
         )
 
-        if (
-            should_cache
-            and exists(self.cached_freqs)
-            and (offset + seq_len) <= self.cached_freqs_seq_len
-        ):
+        if should_cache and exists(self.cached_freqs) and (offset + seq_len) <= self.cached_freqs_seq_len:
             return self.cached_freqs[offset : (offset + seq_len)].detach()
 
         freqs = self.freqs

@@ -95,12 +95,8 @@ class MultiSpectralCDStageSkipsConfig:
 class DinoUnetConfig:
     dino: DinoConfig = field(default_factory=lambda: DinoConfig())
     adapter: AdapterConfig = field(default_factory=lambda: AdapterConfig())
-    cd_stage: MultiscaleMBConvStageConfig = field(
-        default_factory=lambda: MultiscaleMBConvStageConfig()
-    )
-    ms_cd_stage: MultiSpectralCDStageSkipsConfig = field(
-        default_factory=lambda: MultiSpectralCDStageSkipsConfig()
-    )
+    cd_stage: MultiscaleMBConvStageConfig = field(default_factory=lambda: MultiscaleMBConvStageConfig())
+    ms_cd_stage: MultiSpectralCDStageSkipsConfig = field(default_factory=lambda: MultiSpectralCDStageSkipsConfig())
     input_channels: int = 3
     num_classes: int = 3  # 0: unknown, 1: changed, 2: unchanged
     deep_supervision: bool = False
@@ -157,9 +153,7 @@ class MultiscaleMBConvSkipsStage(nn.Module):
                     ]
                 )
             else:
-                raise ValueError(
-                    f"Unknown block type: {cfg.block_type}, supported: ('mbconv', 'conv')"
-                )
+                raise ValueError(f"Unknown block type: {cfg.block_type}, supported: ('mbconv', 'conv')")
 
     def forward(self, skip1, skip2):
         def _closure(skip1, skip2):
@@ -192,12 +186,8 @@ class LatentSpectralStage(nn.Module):
 
     def forward(self, skips: list[Tensor], latent: Float[Tensor, "b latent_dim h w"]):
         """Modulation of skips with latent"""
-        assert len(skips) == self.stages, (
-            f"Expected {self.stages} skips, got {len(skips)}"
-        )
-        latent = (
-            F.adaptive_avg_pool2d(latent, 1).squeeze(-1).squeeze(-1)
-        )  # b latent_dim
+        assert len(skips) == self.stages, f"Expected {self.stages} skips, got {len(skips)}"
+        latent = F.adaptive_avg_pool2d(latent, 1).squeeze(-1).squeeze(-1)  # b latent_dim
 
         outs = []
         for skip, block in zip(skips, self.blocks):
@@ -248,9 +238,7 @@ class MultiSpectralCDStageWithDinoSkips(nn.Module):
             # stage and downsample
             block = nn.Sequential(
                 *[
-                    Spatial2DNATBlock(
-                        dim, norm_layer=norm_layer, **block_kwargs_per_layers[i]
-                    )
+                    Spatial2DNATBlock(dim, norm_layer=norm_layer, **block_kwargs_per_layers[i])
                     for _ in range(depth_per_stage)
                 ]
             )
@@ -320,52 +308,34 @@ class DinoUNet(nn.Module):
 
         # Ensure we have 4 stages to match DINOv3_Adapter output
         if cfg.n_stages != 4:
-            print(
-                f"Warning: DINOv3_Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4."
-            )
+            print(f"Warning: DINOv3_Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4.")
             n_stages = 4
             if isinstance(self.dino_cfg.features_per_stage, int):
-                self.cfg.dino.features_per_stage = [
-                    self.dino_cfg.features_per_stage * (2**i) for i in range(4)
-                ]
+                self.cfg.dino.features_per_stage = [self.dino_cfg.features_per_stage * (2**i) for i in range(4)]
             elif len(self.dino_cfg.features_per_stage) != 4:
                 # Adjust features_per_stage to 4 stages
-                base_features = (
-                    self.dino_cfg.features_per_stage[0]
-                    if self.dino_cfg.features_per_stage
-                    else 32
-                )
-                self.cfg.dino.features_per_stage = [
-                    base_features * (2**i) for i in range(4)
-                ]
+                base_features = self.dino_cfg.features_per_stage[0] if self.dino_cfg.features_per_stage else 32
+                self.cfg.dino.features_per_stage = [base_features * (2**i) for i in range(4)]
 
         # Create DINOv3 encoder
         self.encoder = self._create_dinov3_encoder(self.cfg)
 
         self.use_ms_cd_stage = self.cfg.use_ms_stage
         if self.use_ms_cd_stage:
-            self.ms_cd_stage = MultiSpectralCDStageWithDinoSkips(
-                in_chans=cfg.input_channels, **asdict(cfg.ms_cd_stage)
-            )
+            self.ms_cd_stage = MultiSpectralCDStageWithDinoSkips(in_chans=cfg.input_channels, **asdict(cfg.ms_cd_stage))
 
         # Create DINOv3 skips stage for change detection
         # works like a priori to obtain the different areas
         self.cd_stage = MultiscaleMBConvSkipsStage(self.cfg.cd_stage)
 
         if self.use_latent:
-            latent_dim = (
-                self.adapter_cfg.latent_width
-                if self.adapter_cfg.latent_width is not None
-                else 16
-            )
+            latent_dim = self.adapter_cfg.latent_width if self.adapter_cfg.latent_width is not None else 16
             self.latent_modulator = LatentSpectralStage(
                 latent_dim=latent_dim,
                 hidden_dim=cfg.dino.features_per_stage,
                 stages=n_stages,
             )
-            self.fuse_conv = nn.Conv2d(
-                latent_dim * 2, latent_dim, kernel_size=1, bias=True
-            )
+            self.fuse_conv = nn.Conv2d(latent_dim * 2, latent_dim, kernel_size=1, bias=True)
 
         # Create decoder
         self.decoder = UNetDecoder(
@@ -494,17 +464,13 @@ class DinoUNet(nn.Module):
         """
         Create DinoUNet instance from network configuration dictionary
         """
-        cfg = dataclass_from_dict(
-            DinoUnetConfig, {} if overrides is None else overrides
-        )
+        cfg = dataclass_from_dict(DinoUnetConfig, {} if overrides is None else overrides)
 
         return cls(cfg)
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
-        filtered_state_dict = {
-            k: v for k, v in state_dict.items() if "backbone." not in k
-        }
+        filtered_state_dict = {k: v for k, v in state_dict.items() if "backbone." not in k}
         return filtered_state_dict
 
     def load_state_dict(self, state_dict, strict=False):
@@ -536,9 +502,7 @@ def test_model():
     from fvcore.nn import parameter_count_table
 
     # Test with latent enabled
-    model = DinoUNet.create_model(
-        {"adapter": {"latent_width": 16}, "use_latent": True}
-    ).cuda()
+    model = DinoUNet.create_model({"adapter": {"latent_width": 16}, "use_latent": True}).cuda()
 
     print("=== Model Parameters ===")
     print(parameter_count_table(model))
@@ -549,11 +513,7 @@ def test_model():
     # x2 = torch.randn(1, 3, 256, 256).cuda()  # Second temporal image
 
     cat_meme = Image.open("scripts/tests/imgs/cat_memes.jpg")
-    cat_meme = (
-        torch.tensor(np.array(cat_meme.resize((256, 256))))
-        .permute(2, 0, 1)[None]
-        .cuda()
-    )
+    cat_meme = torch.tensor(np.array(cat_meme.resize((256, 256)))).permute(2, 0, 1)[None].cuda()
     x1 = x2 = cat_meme / 255.0
     cond1 = torch.randn(1, 16, 32, 32).cuda()  # Condition for first image
     cond2 = torch.randn(1, 16, 32, 32).cuda()  # Condition for second image
@@ -585,9 +545,7 @@ def test_model():
 
 def test_model_without_latent():
     """Test DinoUNet without latent conditions"""
-    model = DinoUNet.create_model(
-        {"adapter": {"latent_width": 16}, "use_latent": False, "num_classes": 3}
-    )
+    model = DinoUNet.create_model({"adapter": {"latent_width": 16}, "use_latent": False, "num_classes": 3})
 
     # Create test data without conditions
     x1 = torch.randn(1, 3, 256, 256)
@@ -612,9 +570,7 @@ def test_model_without_latent():
 
 def test_model_with_multichannel_input():
     """Test DinoUNet with multi-channel hyperspectral input"""
-    model = DinoUNet.create_model(
-        {"adapter": {"latent_width": 16}, "use_latent": False}
-    )
+    model = DinoUNet.create_model({"adapter": {"latent_width": 16}, "use_latent": False})
 
     # Test with different input channel configurations
     test_cases = [
@@ -639,21 +595,15 @@ def test_model_with_multichannel_input():
             h,
             w,
         ), f"Expected (1, 3, {h}, {w}), got {output.shape}"
-        assert not torch.isnan(output).any(), (
-            f"Output contains NaN for {channels} channels"
-        )
-        assert torch.isfinite(output).all(), (
-            f"Output contains infinite values for {channels} channels"
-        )
+        assert not torch.isnan(output).any(), f"Output contains NaN for {channels} channels"
+        assert torch.isfinite(output).all(), f"Output contains infinite values for {channels} channels"
 
     print("✓ Multi-channel input test passed")
 
 
 def test_model_different_input_sizes():
     """Test DinoUNet with different input sizes"""
-    model = DinoUNet.create_model(
-        {"adapter": {"latent_width": 16}, "use_latent": False}
-    )
+    model = DinoUNet.create_model({"adapter": {"latent_width": 16}, "use_latent": False})
 
     # Test with different input sizes
     test_sizes = [(128, 128), (256, 256), (512, 512)]
@@ -674,9 +624,7 @@ def test_model_different_input_sizes():
             w,
         ), f"Expected (1, 3, {h}, {w}), got {output.shape}"
         assert not torch.isnan(output).any(), f"Output contains NaN for size ({h}, {w})"
-        assert torch.isfinite(output).all(), (
-            f"Output contains infinite values for size ({h}, {w})"
-        )
+        assert torch.isfinite(output).all(), f"Output contains infinite values for size ({h}, {w})"
 
     print("✓ Different input sizes test passed")
 

@@ -69,15 +69,11 @@ class TiffEncoding(Encoding):
 def _nvimg_encode(
     img: np.ndarray | Image.Image | torch.Tensor,
     nv_encoder: "nvimgcodec.Encoder",
-    codec: Literal[
-        "png", "bmp", "tiff", "jpeg", "jpeg2k", "pnm", "tiff", "webp"
-    ] = "jpeg",
+    codec: Literal["png", "bmp", "tiff", "jpeg", "jpeg2k", "pnm", "tiff", "webp"] = "jpeg",
     quality: int = 95,
 ) -> bytes:
     if quality == 100:
-        encode_params = nvimgcodec.EncoderParams(
-            quality_type=nvimgcodec.QualityType.LOSSLESS
-        )
+        encode_params = nvimgcodec.EncoderParams(quality_type=nvimgcodec.QualityType.LOSSLESS)
     else:
         encode_params = nvimgcodec.EncodeParams(
             quality_type=nvimgcodec.QualityType.QUALITY,
@@ -247,9 +243,7 @@ class JPEGGeneralSerializer(serializers.JPEGSerializer):
     def _force_to_rgb(self, arr: np.ndarray | torch.Tensor):
         if arr.shape[0] == 4:
             # png with alpha channel
-            logger.debug(
-                f"Warning: 4 channels, shape {arr.shape} -> change to 3 RGB channels."
-            )
+            logger.debug(f"Warning: 4 channels, shape {arr.shape} -> change to 3 RGB channels.")
             arr = arr[:3]
         return arr
 
@@ -361,9 +355,7 @@ def tiff_codec_io(
         return buffer.getvalue()
 
 
-def npz_codec_io(
-    data_dict: Dict[str, np.ndarray], do_compression: bool = True
-) -> bytes:
+def npz_codec_io(data_dict: Dict[str, np.ndarray], do_compression: bool = True) -> bytes:
     """Encodes a dictionary of NumPy arrays into NPZ file formatted bytes."""
     with io.BytesIO() as buffer:
         # Saves the dictionary. Keys become variable names in the NPZ file.
@@ -375,9 +367,7 @@ def npz_codec_io(
         return buffer.getvalue()
 
 
-def mat_codec_io(
-    data_dict: Dict[str, np.ndarray], do_compression: bool = True
-) -> bytes:
+def mat_codec_io(data_dict: Dict[str, np.ndarray], do_compression: bool = True) -> bytes:
     """Encodes a dictionary of NumPy arrays into MAT file formatted bytes."""
     with io.BytesIO() as buffer:
         # Saves the dictionary. Keys become variable names in the MAT file.
@@ -471,19 +461,13 @@ def tiff_decode_io(
                 with io.BytesIO(tiff_bytes) as metadata_buffer:
                     with tifffile.TiffFile(metadata_buffer) as tif:
                         if not tif.series or not tif.series[0]:
-                            raise ValueError(
-                                "TIFF file contains no series or series[0] is invalid."
-                            )
+                            raise ValueError("TIFF file contains no series or series[0] is invalid.")
                         current_series: tifffile.TiffPageSeries = tif.series[0]
                         expected_shape = current_series.shape
-                        expected_dtype = np.dtype(
-                            current_series.dtype
-                        )  # Ensure it's a numpy.dtype
+                        expected_dtype = np.dtype(current_series.dtype)  # Ensure it's a numpy.dtype
 
                 # Step 2: Pre-allocate the output array
-                output_array: np.ndarray = np.empty(
-                    expected_shape, dtype=expected_dtype
-                )
+                output_array: np.ndarray = np.empty(expected_shape, dtype=expected_dtype)
 
                 # Step 3: Read image data into the pre-allocated array
                 # Use a new BytesIO object for imread to ensure the stream is at the beginning
@@ -524,8 +508,7 @@ def tiff_decode_io(
         # img = decoder.decode(data)
 
         raise NotImplementedError(
-            f"TIFF decoding with backend '{backend}' is not implemented. "
-            "Please use 'tifffile' backend."
+            f"TIFF decoding with backend '{backend}' is not implemented. Please use 'tifffile' backend."
         )
 
 
@@ -538,9 +521,7 @@ def mat_decode_io(mat_bytes: bytes) -> Dict[str, np.ndarray]:
     data_dict: Dict[str, np.ndarray] = {
         k: v
         for k, v in mat_dict.items()
-        if not k.startswith(
-            "__"
-        )  # Remove keys like __header__, __version__, __globals__
+        if not k.startswith("__")  # Remove keys like __header__, __version__, __globals__
     }
     return data_dict
 
@@ -597,9 +578,7 @@ def npy_decode_io(npy_bytes: bytes) -> np.ndarray:
     return np.load(io.BytesIO(npy_bytes))
 
 
-def extract_keys_from_data(
-    data_dict: dict, ret_keys: list[str] | str | bool | None = None
-):
+def extract_keys_from_data(data_dict: dict, ret_keys: list[str] | str | bool | None = None):
     if isinstance(ret_keys, str):
         return data_dict[ret_keys]
     elif isinstance(ret_keys, list):
@@ -644,9 +623,7 @@ def is_rgb_file(file_path: str) -> bool:
 
 
 def is_text_file(file_path: str) -> bool:
-    return file_path.lower().endswith(
-        (".caption", ".txt", ".img_name", ".caption.json")
-    )
+    return file_path.lower().endswith((".caption", ".txt", ".img_name", ".caption.json"))
 
 
 def is_encoded_file(file_path: str) -> bool:
@@ -784,9 +761,7 @@ def wids_image_decode(
             img = sample[key]
             sample[key] = img_process_fn(img, key)
     else:
-        assert process_img_keys is None, (
-            "process_img_keys should be None when there is no image modality"
-        )
+        assert process_img_keys is None, "process_img_keys should be None when there is no image modality"
 
     return sample
 
@@ -804,9 +779,7 @@ def wids_latent_decode(sample: dict[str, Any], return_dict=False):
     for k in keys:
         if is_encoded_file(k):
             name_ck = k.split(".")
-            assert len(name_ck) == 2, (
-                f"Invalid key format: {k}, should be name.extension"
-            )
+            assert len(name_ck) == 2, f"Invalid key format: {k}, should be name.extension"
             name, ck = name_ck
             latent = call_fns[ck](sample.pop(k).getvalue())  # may raise KeyError
             sample[name] = latent
@@ -814,9 +787,7 @@ def wids_latent_decode(sample: dict[str, Any], return_dict=False):
     return sample
 
 
-def wids_caption_embed_decode(
-    sample: dict[str, Any], max_length=300
-) -> dict[str, torch.Tensor | str]:
+def wids_caption_embed_decode(sample: dict[str, Any], max_length=300) -> dict[str, torch.Tensor | str]:
     # decode caption (str), valid_length (int), and caption_feature (torch.Tensor), and
     # attention_mask (torch.Tensor, optional)
 
@@ -840,24 +811,18 @@ def wids_caption_embed_decode(
         caption = json_decode_io(sample.pop(caption_json_key).getvalue())
         assert caption is not None, "Caption JSON decoding failed."
         sample["caption"] = caption["caption"]
-        sample["valid_length"] = int(
-            caption.get("valid_length", len(sample["caption"]))
-        )
+        sample["valid_length"] = int(caption.get("valid_length", len(sample["caption"])))
     else:
         raise ValueError("Captions not found.")
 
     # features
     embeds: dict[str, torch.Tensor] = {}
     if features_key is not None:
-        embeds = safetensors_decode_io(
-            sample.pop(features_key).getvalue(), return_dict=True
-        )
+        embeds = safetensors_decode_io(sample.pop(features_key).getvalue(), return_dict=True)
         # pad right
         cap_f = embeds["caption_feature"].squeeze(0)  # [n, d]
         if cap_f.shape[0] < max_length:
-            cap_f_pad = torch.nn.functional.pad(
-                cap_f, (0, 0, 0, max_length - cap_f.shape[0]), value=0.0
-            )
+            cap_f_pad = torch.nn.functional.pad(cap_f, (0, 0, 0, max_length - cap_f.shape[0]), value=0.0)
         else:
             cap_f_pad = cap_f[:, :max_length]
         sample["caption_feature"] = cap_f_pad  # bfloat16

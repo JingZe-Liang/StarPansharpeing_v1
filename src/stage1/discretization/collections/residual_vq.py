@@ -78,11 +78,7 @@ class MLP(Module):
         layers = ModuleList([])
 
         for _ in range(depth):
-            layers.append(
-                nn.Sequential(
-                    nn.Linear(dim, dim_hidden), nn.SiLU(), nn.Linear(dim_hidden, dim)
-                )
-            )
+            layers.append(nn.Sequential(nn.Linear(dim, dim_hidden), nn.SiLU(), nn.Linear(dim_hidden, dim)))
 
         self.layers = layers
         self.l2norm_output = l2norm_output
@@ -149,12 +145,8 @@ class ResidualVQ(Module):
         codebook_input_dim = codebook_dim * heads
 
         requires_projection = codebook_input_dim != dim
-        self.project_in = (
-            nn.Linear(dim, codebook_input_dim) if requires_projection else nn.Identity()
-        )
-        self.project_out = (
-            nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
-        )
+        self.project_in = nn.Linear(dim, codebook_input_dim) if requires_projection else nn.Identity()
+        self.project_out = nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
         self.has_projections = requires_projection
 
         self.accept_image_fmap = accept_image_fmap
@@ -165,9 +157,7 @@ class ResidualVQ(Module):
             vq_kwargs.update(learnable_codebook=True, ema_update=False)
 
         if shared_codebook:
-            vq_kwargs.update(
-                manual_ema_update=True, manual_in_place_optimizer_update=True
-            )
+            vq_kwargs.update(manual_ema_update=True, manual_in_place_optimizer_update=True)
 
         # take care of maybe different codebook sizes across depth
 
@@ -203,7 +193,9 @@ class ResidualVQ(Module):
         assert quantize_dropout_cutoff_index >= 0
 
         self.quantize_dropout_cutoff_index = quantize_dropout_cutoff_index
-        self.quantize_dropout_multiple_of = quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        self.quantize_dropout_multiple_of = (
+            quantize_dropout_multiple_of  # encodec paper proposes structured dropout, believe this was set to 4
+        )
 
         # setting up the MLPs for implicit neural codebooks
 
@@ -277,9 +269,7 @@ class ResidualVQ(Module):
         # take care of quantizer dropout
 
         mask = indices == -1.0
-        indices = indices.masked_fill(
-            mask, 0
-        )  # have it fetch a dummy code to be masked out later
+        indices = indices.masked_fill(mask, 0)  # have it fetch a dummy code to be masked out later
 
         if not self.implicit_neural_codebook and self.uniform_codebook_size:
             all_codes = get_at("q [c] d, b n q -> q b n d", self.codebooks, indices)
@@ -292,9 +282,7 @@ class ResidualVQ(Module):
             all_codes = []
             quantized_out = 0.0
 
-            for codes, indices, maybe_transform_mlp in zip(
-                self.codebooks, indices.unbind(dim=-1), code_transform_mlps
-            ):
+            for codes, indices, maybe_transform_mlp in zip(self.codebooks, indices.unbind(dim=-1), code_transform_mlps):
                 if exists(maybe_transform_mlp):
                     codes = maybe_transform_mlp(codes, condition=quantized_out)
                     layer_codes = get_at("b n [c] d, b n -> b n d", codes, indices)
@@ -357,9 +345,7 @@ class ResidualVQ(Module):
             )
             ce_losses = []
 
-        should_quantize_dropout = (
-            self.training and self.quantize_dropout and not return_loss
-        )
+        should_quantize_dropout = self.training and self.quantize_dropout and not return_loss
 
         # sample a layer index at which to dropout further residual quantization
         # also prepare null indices and loss
@@ -372,26 +358,15 @@ class ResidualVQ(Module):
 
             rand = random.Random(rand_quantize_dropout_fixed_seed)
 
-            rand_quantize_dropout_index = rand.randrange(
-                self.quantize_dropout_cutoff_index, num_quant
-            )
+            rand_quantize_dropout_index = rand.randrange(self.quantize_dropout_cutoff_index, num_quant)
 
             if quant_dropout_multiple_of != 1:
                 rand_quantize_dropout_index = (
-                    round_up_multiple(
-                        rand_quantize_dropout_index + 1, quant_dropout_multiple_of
-                    )
-                    - 1
+                    round_up_multiple(rand_quantize_dropout_index + 1, quant_dropout_multiple_of) - 1
                 )
 
-            null_indices_shape = (
-                (x.shape[0], *x.shape[-2:])
-                if self.accept_image_fmap
-                else tuple(x.shape[:2])
-            )
-            null_indices = torch.full(
-                null_indices_shape, -1.0, device=device, dtype=torch.long
-            )
+            null_indices_shape = (x.shape[0], *x.shape[-2:]) if self.accept_image_fmap else tuple(x.shape[:2])
+            null_indices = torch.full(null_indices_shape, -1.0, device=device, dtype=torch.long)
             null_loss = torch.full((1,), 0.0, device=device, dtype=x.dtype)
 
         # setup the mlps for implicit neural codebook
@@ -407,13 +382,8 @@ class ResidualVQ(Module):
 
         # go through the layers
 
-        for quantizer_index, (vq, maybe_mlp) in enumerate(
-            zip(self.layers, maybe_code_transforms)
-        ):
-            if (
-                should_quantize_dropout
-                and quantizer_index > rand_quantize_dropout_index
-            ):
+        for quantizer_index, (vq, maybe_mlp) in enumerate(zip(self.layers, maybe_code_transforms)):
+            if should_quantize_dropout and quantizer_index > rand_quantize_dropout_index:
                 all_indices.append(null_indices)
                 all_losses.append(null_loss)
                 continue
@@ -474,9 +444,7 @@ class ResidualVQ(Module):
 
         # stack all losses and indices
 
-        all_losses, all_indices = map(
-            partial(torch.stack, dim=-1), (all_losses, all_indices)
-        )
+        all_losses, all_indices = map(partial(torch.stack, dim=-1), (all_losses, all_indices))
 
         ret = (quantized_out, all_indices, all_losses)
 
@@ -506,11 +474,7 @@ class GroupedResidualVQ(Module):
         self.rvqs = ModuleList([])
 
         for _ in range(groups):
-            self.rvqs.append(
-                ResidualVQ(
-                    dim=dim_per_group, accept_image_fmap=accept_image_fmap, **kwargs
-                )
-            )
+            self.rvqs.append(ResidualVQ(dim=dim_per_group, accept_image_fmap=accept_image_fmap, **kwargs))
 
     @property
     def codebooks(self):
@@ -521,17 +485,11 @@ class GroupedResidualVQ(Module):
         return 1 if self.accept_image_fmap else -1
 
     def get_codes_from_indices(self, indices):
-        codes = tuple(
-            rvq.get_codes_from_indices(chunk_indices)
-            for rvq, chunk_indices in zip(self.rvqs, indices)
-        )
+        codes = tuple(rvq.get_codes_from_indices(chunk_indices) for rvq, chunk_indices in zip(self.rvqs, indices))
         return torch.stack(codes)
 
     def get_output_from_indices(self, indices):
-        outputs = tuple(
-            rvq.get_output_from_indices(chunk_indices)
-            for rvq, chunk_indices in zip(self.rvqs, indices)
-        )
+        outputs = tuple(rvq.get_output_from_indices(chunk_indices) for rvq, chunk_indices in zip(self.rvqs, indices))
         return torch.cat(outputs, dim=self.split_dim)
 
     def forward(
@@ -559,9 +517,7 @@ class GroupedResidualVQ(Module):
             sample_codebook_temp=sample_codebook_temp,
             mask=mask,
             freeze_codebook=freeze_codebook,
-            rand_quantize_dropout_fixed_seed=get_maybe_sync_seed(device)
-            if self.training
-            else None,
+            rand_quantize_dropout_fixed_seed=get_maybe_sync_seed(device) if self.training else None,
         )
 
         # invoke residual vq on each group

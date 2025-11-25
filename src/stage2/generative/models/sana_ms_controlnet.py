@@ -3,9 +3,7 @@
 # Filter timm and mmcv warnings
 import warnings
 
-warnings.filterwarnings(
-    "ignore", message="On January 1, 2023, MMCV will release v2.0.0"
-)
+warnings.filterwarnings("ignore", message="On January 1, 2023, MMCV will release v2.0.0")
 warnings.filterwarnings(
     "ignore",
     message="Importing from timm.models.layers is deprecated",

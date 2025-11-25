@@ -204,9 +204,7 @@ for _ in trange(20):
                 # print(n + " has grad")
                 p.grad = None
 
-    print(
-        f"==> {_n} parameters has None or NaN grad, total {len(list(ae.parameters()))} parameters"
-    )
+    print(f"==> {_n} parameters has None or NaN grad, total {len(list(ae.parameters()))} parameters")
     optimizer.step()
 
 

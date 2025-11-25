@@ -52,9 +52,7 @@ def extract_keys(samples: dict, keys: list[str]):
 # * --- WebDataset --- #
 
 
-@deprecated(
-    "get_generative_dataloaders is deprecated, please use GenerativeMMDataloader instead"
-)
+@deprecated("get_generative_dataloaders is deprecated, please use GenerativeMMDataloader instead")
 def get_generative_dataloaders(
     wds_paths: str | list[str],
     batch_size: int,
@@ -141,9 +139,7 @@ class GenerativeMMDataloader(MultimodalityDataloader):
             )
 
     def before_init_datasets(self):
-        assert self.getitem_type == "structured", (
-            "GenerativeMMDataloader requires getitem_type to be 'structured'"
-        )
+        assert self.getitem_type == "structured", "GenerativeMMDataloader requires getitem_type to be 'structured'"
 
     def get_y_mask(self, sample: dict) -> Tensor:
         valid_length = sample["valid_length"]  # (1,)
@@ -162,9 +158,7 @@ class GenerativeMMDataloader(MultimodalityDataloader):
 
         return imgs[0] if len(imgs) == 1 else imgs, self.img_post_processor._params
 
-    def after_getitem(
-        self, sample: dict
-    ) -> tuple[Tensor, Tensor, Tensor, dict[str, str | Tensor | int]]:
+    def after_getitem(self, sample: dict) -> tuple[Tensor, Tensor, Tensor, dict[str, str | Tensor | int]]:
         """
         sana train loader compatibility
         [latent or images, encoded text, text mask, data_info: control_signal]
@@ -208,18 +202,14 @@ class GenerativeMMDataloader(MultimodalityDataloader):
             cond_latent_chw = cast(Tensor | list[Tensor], cond_latent_chw)
             if torch.is_tensor(cond_latent_chw):
                 cond_latent_chw = (cond_latent_chw,)
-            cond_latent_chw, _params = self._post_process_img_conditions(
-                *cond_latent_chw, params=_params
-            )
+            cond_latent_chw, _params = self._post_process_img_conditions(*cond_latent_chw, params=_params)
             data_info["control_signal"] = cond_latent_chw  # list of Tensor
         elif "condition_image" in sample:
             cond_img_chw_dict = sample["condition_image"]
             cond_img_chw = [
                 x
                 for n, x in cond_img_chw_dict.items()
-                if not n.startswith("__")
-                and isinstance(x, (np.ndarray, torch.Tensor))
-                and x.ndim == 3
+                if not n.startswith("__") and isinstance(x, (np.ndarray, torch.Tensor)) and x.ndim == 3
             ]
             if self.other_kwargs.get("stack_cond_imgs", False):
                 cond_img_chw = torch.stack(
@@ -229,14 +219,10 @@ class GenerativeMMDataloader(MultimodalityDataloader):
             cond_img_chw = cast(Tensor | list[Tensor], cond_img_chw)
             if torch.is_tensor(cond_img_chw):
                 cond_img_chw = (cond_img_chw,)
-            cond_img_chw, _params = self._post_process_img_conditions(
-                *cond_img_chw, params=_params
-            )
+            cond_img_chw, _params = self._post_process_img_conditions(*cond_img_chw, params=_params)
             data_info["control_signal"] = cond_img_chw  # list of Tensor
         else:
-            raise ValueError(
-                f"No condition image or latent provided, got keys: {sample.keys()}"
-            )
+            raise ValueError(f"No condition image or latent provided, got keys: {sample.keys()}")
 
         return latent_chw, y_lc, y_mask_l, data_info
 
@@ -300,17 +286,14 @@ def get_multimodal_loaders_with_different_backends_v2(
     loader_types: list[str] = []
     if loader_type is not None:
         log_print(
-            f"loader_type is provided: {loader_type}, "
-            f"input all paths should be {loader_type} loader",
+            f"loader_type is provided: {loader_type}, input all paths should be {loader_type} loader",
             "debug",
         )
 
     # clear the kwargs
     # 1. paths is a list of list of string
     if isinstance(paths, list) and isinstance(paths[0], (Sequence, dict)):
-        log_print(
-            "input paths contains list of lists or dicts, we will chain the dataloader with each loader"
-        )
+        log_print("input paths contains list of lists or dicts, we will chain the dataloader with each loader")
 
         # < preprare loader kwargs
         if rep_loader_kwargs is not None:  # every loader kwargs
@@ -328,9 +311,7 @@ def get_multimodal_loaders_with_different_backends_v2(
                 changed_kwargs_by_loader = [{}] * len(paths)
 
             # assertions
-            assert isinstance(basic_kwargs, dict), (
-                f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
-            )
+            assert isinstance(basic_kwargs, dict), f"basic_kwargs should be a dict, but got {type(basic_kwargs)}"
             assert isinstance(changed_kwargs_by_loader, list), (
                 f"changed_kwargs_by_loader should be a list, but got {type(changed_kwargs_by_loader)}"
             )
@@ -339,9 +320,7 @@ def get_multimodal_loaders_with_different_backends_v2(
                 f"but got {len(changed_kwargs_by_loader)} and {len(paths)}"
             )
 
-            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(
-                basic_kwargs, changed_kwargs_by_loader
-            )
+            rep_loader_kwargs = generate_wds_config_modify_only_some_kwgs(basic_kwargs, changed_kwargs_by_loader)
         else:
             log_print("rep_loader_kwargs is None, use the loader_kwargs", "debug")
             rep_loader_kwargs = [loader_kwargs] * len(paths)
@@ -351,9 +330,7 @@ def get_multimodal_loaders_with_different_backends_v2(
             loader_types.append(kwg_ldt if loader_type is None else loader_type)
 
     # 2. paths is a list of strings
-    elif isinstance(paths, (list, tuple)) and any(
-        isinstance(p, (str, dict)) for p in paths
-    ):
+    elif isinstance(paths, (list, tuple)) and any(isinstance(p, (str, dict)) for p in paths):
         raise NotImplementedError(
             "paths is a list of strings, please use a list of lists of strings instead. For example: "
             "paths=[data1/{0000..0002}.tar, [data2/{0000..0002}.tar, data2/0003.tar], {'c1': wids_path1}] should be "
@@ -390,9 +367,7 @@ def get_multimodal_loaders_with_different_backends_v2(
     dataloaders = []
 
     # for-loop over the paths and rep_loader_kwargs
-    for i, (p_lst, loader_kwargs, loader_type) in enumerate(
-        zip(paths, rep_loader_kwargs, loader_types)
-    ):
+    for i, (p_lst, loader_kwargs, loader_type) in enumerate(zip(paths, rep_loader_kwargs, loader_types)):
         p_lst: str | list[str] | dict[str, str]
         # webdataset or wids loader
         if loader_type in ("webdataset", "wids"):
@@ -415,12 +390,8 @@ def get_multimodal_loaders_with_different_backends_v2(
                 loader_kwargs["resample"] = False
             loader_kwargs["epoch_len"] = -1
 
-            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs_mm(
-                p_lst, loader_kwargs
-            )
-            log_print(
-                f"dataset group {i} gets paths: \n<cyan>[{p_lst}]</>\n" + "-" * 30
-            )
+            p_lst, loader_kwargs = expand_paths_and_correct_loader_kwargs_mm(p_lst, loader_kwargs)
+            log_print(f"dataset group {i} gets paths: \n<cyan>[{p_lst}]</>\n" + "-" * 30)
 
             if loader_type == "webdataset":
                 p_lst = cast(str | list[str], p_lst)
@@ -438,9 +409,7 @@ def get_multimodal_loaders_with_different_backends_v2(
 
     # prepare for curriculum
     if curriculum_type is not None:
-        assert curriculum_kwargs is not None, (
-            f"curriculum_kwargs must be provided if {curriculum_type=}."
-        )
+        assert curriculum_kwargs is not None, f"curriculum_kwargs must be provided if {curriculum_type=}."
         curriculum_fn = get_curriculum_fn(c_type=curriculum_type, **curriculum_kwargs)  # type: ignore
     else:
         curriculum_fn = None
@@ -454,9 +423,7 @@ def get_multimodal_loaders_with_different_backends_v2(
         )
 
     # prepare chained unified dataloader
-    dataloader = chained_dataloaders(
-        dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn
-    )
+    dataloader = chained_dataloaders(dataloaders, chain_loader_infinit, shuffle_loaders, curriculum_fn)
 
     return datasets, dataloader
 

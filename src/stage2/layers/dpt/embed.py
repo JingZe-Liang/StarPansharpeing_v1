@@ -24,9 +24,7 @@ class CenterPadding(torch.nn.Module):
     # @torch.inference_mode()
     def forward(self, x):
         # expected shapes are ... x H x W, usually B x C x H x W
-        pads = list(
-            itertools.chain.from_iterable(self._get_pad(m) for m in x.shape[:-3:-1])
-        )
+        pads = list(itertools.chain.from_iterable(self._get_pad(m) for m in x.shape[:-3:-1]))
         output = torch.nn.functional.pad(x, pads)
         return output
 

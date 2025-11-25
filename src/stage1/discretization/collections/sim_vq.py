@@ -58,9 +58,7 @@ class SimVQ(Module):
         self.channel_first = channel_first
 
         frozen_codebook_dim = default(frozen_codebook_dim, dim)
-        codebook = torch.randn(codebook_size, frozen_codebook_dim) * (
-            frozen_codebook_dim**-0.5
-        )
+        codebook = torch.randn(codebook_size, frozen_codebook_dim) * (frozen_codebook_dim**-0.5)
         codebook = init_fn(codebook)
 
         # the codebook is actually implicit from a linear layer from frozen gaussian or uniform
@@ -120,8 +118,7 @@ class SimVQ(Module):
 
         commit_loss = (
             F.mse_loss(x.detach(), quantized)
-            + F.mse_loss(x, quantized.detach())
-            * self.input_to_quantize_commit_loss_weight
+            + F.mse_loss(x, quantized.detach()) * self.input_to_quantize_commit_loss_weight
         )
 
         if self.rotation_trick:
@@ -146,9 +143,7 @@ if __name__ == "__main__":
 
     sim_vq = SimVQ(
         dim=512,
-        codebook_transform=nn.Sequential(
-            nn.Linear(512, 1024), nn.ReLU(), nn.Linear(1024, 512)
-        ),
+        codebook_transform=nn.Sequential(nn.Linear(512, 1024), nn.ReLU(), nn.Linear(1024, 512)),
         codebook_size=1024,
         channel_first=True,
     )

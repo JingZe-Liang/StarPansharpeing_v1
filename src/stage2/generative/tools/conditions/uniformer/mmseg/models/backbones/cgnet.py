@@ -141,9 +141,7 @@ class ContextGuidedBlock(nn.Module):
         self.activate = nn.PReLU(2 * channels)
 
         if downsample:
-            self.bottleneck = build_conv_layer(
-                conv_cfg, 2 * channels, out_channels, kernel_size=1, bias=False
-            )
+            self.bottleneck = build_conv_layer(conv_cfg, 2 * channels, out_channels, kernel_size=1, bias=False)
 
         self.skip_connect = skip_connect and not downsample
         self.f_glo = GlobalContextExtractor(out_channels, reduction, with_cp)
@@ -272,9 +270,7 @@ class CGNet(nn.Module):
         self.inject_4x = InputInjection(2)  # down-sample for Input, factor=4
 
         cur_channels += in_channels
-        self.norm_prelu_0 = nn.Sequential(
-            build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels)
-        )
+        self.norm_prelu_0 = nn.Sequential(build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels))
 
         # stage 1
         self.level1 = nn.ModuleList()
@@ -294,9 +290,7 @@ class CGNet(nn.Module):
             )  # CG block
 
         cur_channels = 2 * num_channels[1] + in_channels
-        self.norm_prelu_1 = nn.Sequential(
-            build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels)
-        )
+        self.norm_prelu_1 = nn.Sequential(build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels))
 
         # stage 2
         self.level2 = nn.ModuleList()
@@ -316,9 +310,7 @@ class CGNet(nn.Module):
             )  # CG block
 
         cur_channels = 2 * num_channels[2]
-        self.norm_prelu_2 = nn.Sequential(
-            build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels)
-        )
+        self.norm_prelu_2 = nn.Sequential(build_norm_layer(norm_cfg, cur_channels)[1], nn.PReLU(cur_channels))
 
     def forward(self, x):
         output = []

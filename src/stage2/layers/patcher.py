@@ -39,14 +39,10 @@ def create_unpatcher(
     if is_lora:
         unpatcher_conv = nn.Sequential(
             create_conv2d(chan, chan // lora_rank_ratio, 1),
-            create_conv2d(
-                chan // lora_rank_ratio, out_patch_chan, kernel_size, **conv_kwargs
-            ),
+            create_conv2d(chan // lora_rank_ratio, out_patch_chan, kernel_size, **conv_kwargs),
         )
     else:
         unpatcher_conv = create_conv2d(chan, out_patch_chan, kernel_size, **conv_kwargs)
-    rearranger = Rearrange(
-        "bs (c p1 p2) h w -> bs c (h p1) (w p2)", p1=patch_size, p2=patch_size
-    )
+    rearranger = Rearrange("bs (c p1 p2) h w -> bs c (h p1) (w p2)", p1=patch_size, p2=patch_size)
     patcher = nn.Sequential(unpatcher_conv, rearranger)
     return patcher

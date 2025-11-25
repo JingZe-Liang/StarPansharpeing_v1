@@ -181,12 +181,8 @@ def upfirdn2d(x, f, up=1, down=1, padding=0, flip_filter=False, gain=1, impl="cu
     assert isinstance(x, torch.Tensor)
     assert impl in ["ref", "cuda"]
     if impl == "cuda" and x.device.type == "cuda" and _init():
-        return _upfirdn2d_cuda(
-            up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain
-        ).apply(x, f)
-    return _upfirdn2d_ref(
-        x, f, up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain
-    )
+        return _upfirdn2d_cuda(up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain).apply(x, f)
+    return _upfirdn2d_ref(x, f, up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain)
 
 
 # ----------------------------------------------------------------------------
@@ -211,9 +207,7 @@ def _upfirdn2d_ref(x, f, up=1, down=1, padding=0, flip_filter=False, gain=1):
     x = x.reshape([batch_size, num_channels, in_height * upy, in_width * upx])
 
     # Pad or crop.
-    x = torch.nn.functional.pad(
-        x, [max(padx0, 0), max(padx1, 0), max(pady0, 0), max(pady1, 0)]
-    )
+    x = torch.nn.functional.pad(x, [max(padx0, 0), max(padx1, 0), max(pady0, 0), max(pady1, 0)])
     x = x[
         :,
         :,
@@ -471,9 +465,7 @@ def downsample2d(x, f, down=2, padding=0, flip_filter=False, gain=1, impl="cuda"
         pady0 + (fh - downy + 1) // 2,
         pady1 + (fh - downy) // 2,
     ]
-    return upfirdn2d(
-        x, f, down=down, padding=p, flip_filter=flip_filter, gain=gain, impl=impl
-    )
+    return upfirdn2d(x, f, down=down, padding=p, flip_filter=flip_filter, gain=gain, impl=impl)
 
 
 # ----------------------------------------------------------------------------

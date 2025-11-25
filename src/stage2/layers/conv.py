@@ -43,9 +43,7 @@ class MBStem(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        norm_act_layer = partial(
-            get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
-        )
+        norm_act_layer = partial(get_norm_act_layer(norm_layer, act_layer), eps=norm_eps)
         self.out_chs = out_chs
 
         self.conv1 = create_conv2d(in_chs, out_chs, 3, stride=1, bias=bias)
@@ -83,9 +81,7 @@ class MbConvLNBlock(nn.Module):
 
         self.stride, self.in_chs, self.out_chs = stride, in_chs, out_chs
         mid_chs = make_divisible(out_chs * expand_ratio)
-        prenorm_act_layer = partial(
-            get_norm_act_layer(norm_layer, act_layer), eps=norm_eps
-        )
+        prenorm_act_layer = partial(get_norm_act_layer(norm_layer, act_layer), eps=norm_eps)
 
         if stride == 2:
             self.shortcut = Downsample2d(in_chs, out_chs, pool_type="avg", bias=True)
@@ -154,9 +150,7 @@ class MbConvLNBlock(nn.Module):
 
     def forward(self, x, cond=None):
         if self.grad_checkpointing:
-            return torch.utils.checkpoint.checkpoint(
-                self.forward_, x, cond, use_reentrant=False
-            )
+            return torch.utils.checkpoint.checkpoint(self.forward_, x, cond, use_reentrant=False)
         else:
             return self.forward_(x, cond)
 
@@ -334,9 +328,7 @@ class MBConv(nn.Module):
         use_bias = to_2tuple(use_bias)
         norm = to_2tuple(norm)
         act_func = to_2tuple(act_func)
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.inverted_conv = ConvLayer(
             in_channels,
@@ -393,9 +385,7 @@ class FusedMBConv(nn.Module):
         norm = to_2tuple(norm)
         act_func = to_2tuple(act_func)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.spatial_conv = ConvLayer(
             in_channels,
@@ -441,9 +431,7 @@ class GLUMBConv(nn.Module):
         norm = to_2tuple(norm)
         act_func = to_2tuple(act_func)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.glu_act = create_act_layer(act_func[1])
         self.inverted_conv = ConvLayer(
@@ -488,9 +476,7 @@ class GLUMBConv(nn.Module):
 
 class GLUMBConv1D(GLUMBConv):
     @_compile_decorator
-    def forward(
-        self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None) -> torch.Tensor:
         B, N, C = x.shape
         if HW is None:
             H = W = int(N**0.5)
@@ -589,9 +575,7 @@ class ResBlock(nn.Module):
         norm = to_2tuple(norm)
         act_func = to_2tuple(act_func)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.conv1 = ConvLayer(
             in_channels,
@@ -644,17 +628,11 @@ class ResBlockCondition(ResBlock):
             norm,
             act_func,
         )
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
         cond_layer = nn.Sequential(
             create_conv2d(cond_channels, mid_channels, kernel_size=1),
-            create_norm_act_layer(
-                "layernorm2d", mid_channels, act_layer="silu", eps=1e-6
-            ),
-            create_conv2d(
-                mid_channels, mid_channels * 2, kernel_size=3, groups=mid_channels
-            ),
+            create_norm_act_layer("layernorm2d", mid_channels, act_layer="silu", eps=1e-6),
+            create_conv2d(mid_channels, mid_channels * 2, kernel_size=3, groups=mid_channels),
         )
         self.conv2 = ConditionalBlock(
             self.conv2,
@@ -688,9 +666,7 @@ class GLUResBlock(nn.Module):
         norm = to_3tuple(norm)
         act_func = to_3tuple(act_func)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.conv1 = ConvLayer(
             in_channels,
@@ -747,9 +723,7 @@ class ChannelAttentionResBlock(nn.Module):
         norm = to_2tuple(norm)
         act_func = to_2tuple(act_func)
 
-        mid_channels = (
-            round(in_channels * expand_ratio) if mid_channels is None else mid_channels
-        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
 
         self.conv1 = ConvLayer(
             in_channels,
@@ -772,13 +746,9 @@ class ChannelAttentionResBlock(nn.Module):
         if channel_attention_operation == "SEModule":
             self.channel_attention = SEModule_(out_channels, reduction=4)
         elif channel_attention_operation == "CoordAttnModule":
-            self.channel_attention = CoordAttnModule_(
-                out_channels, out_channels, groups=4
-            )
+            self.channel_attention = CoordAttnModule_(out_channels, out_channels, groups=4)
         else:
-            raise ValueError(
-                f"channel_attention_operation {channel_attention_operation} is not supported"
-            )
+            raise ValueError(f"channel_attention_operation {channel_attention_operation} is not supported")
         self.channel_attention_position = channel_attention_position
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

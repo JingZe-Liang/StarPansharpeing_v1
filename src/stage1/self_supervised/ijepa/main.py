@@ -16,9 +16,7 @@ from src.utils.distributed import init_distributed
 from src.train import main as app_main
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--fname", type=str, help="name of config file to load", default="configs.yaml"
-)
+parser.add_argument("--fname", type=str, help="name of config file to load", default="configs.yaml")
 parser.add_argument(
     "--devices",
     type=str,
@@ -64,6 +62,4 @@ if __name__ == "__main__":
     mp.set_start_method("spawn")
 
     for rank in range(num_gpus):
-        mp.Process(
-            target=process_main, args=(rank, args.fname, num_gpus, args.devices)
-        ).start()
+        mp.Process(target=process_main, args=(rank, args.fname, num_gpus, args.devices)).start()

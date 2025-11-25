@@ -17,9 +17,7 @@ class EncoderDecoderGenerativeConfig(EncoderDecoderConfig):
 
 @dataclass
 class CosmosGenerativeConfig(ContinuousTokenizerConfig):
-    model: EncoderDecoderGenerativeConfig = field(
-        default_factory=lambda: EncoderDecoderGenerativeConfig()
-    )
+    model: EncoderDecoderGenerativeConfig = field(default_factory=lambda: EncoderDecoderGenerativeConfig())
 
 
 class CosmosGenerativeTokenizer(ContinuousImageTokenizer):

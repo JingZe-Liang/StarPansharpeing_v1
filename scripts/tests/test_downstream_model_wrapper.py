@@ -303,9 +303,7 @@ def test_cd_dino_adapted_model():
 
     # Verify output shape - should be change detection map
     expected_shape = (batch_size, dino_cfg.num_classes, height, width)
-    assert output.shape == expected_shape, (
-        f"Expected output shape {expected_shape}, got {output.shape}"
-    )
+    assert output.shape == expected_shape, f"Expected output shape {expected_shape}, got {output.shape}"
 
     print("✓ DinoV3 adapted model test passed!")
     print(f"Input image 1 shape: {img1.shape}")
@@ -343,9 +341,9 @@ def test_cd_dino_adapted_model():
 
     if torch.cuda.is_available():
         output_probs = F.softmax(output, dim=1)
-        assert torch.allclose(
-            output_probs.sum(dim=1), torch.ones_like(output_probs.sum(dim=1)), atol=1e-6
-        ), "Output probabilities should sum to 1"
+        assert torch.allclose(output_probs.sum(dim=1), torch.ones_like(output_probs.sum(dim=1)), atol=1e-6), (
+            "Output probabilities should sum to 1"
+        )
         print("✓ Output probability validation passed!")
 
     return wrapped_model

@@ -108,26 +108,18 @@ class ConditionTokenizeProcessor(nn.Module):
             if self.latent_save_backend == "safetensors":
                 latent_dict = {}
                 for condition_key, latents in condition_latents.items():
-                    latent_dict[f"{condition_key}_latent"] = (
-                        latents[i].to(torch.bfloat16).cpu()
-                    )
+                    latent_dict[f"{condition_key}_latent"] = latents[i].to(torch.bfloat16).cpu()
 
                 if latent_dict:
-                    sample_data["condition_latents.safetensors"] = safetensors_codec_io(
-                        latent_dict
-                    )
+                    sample_data["condition_latents.safetensors"] = safetensors_codec_io(latent_dict)
 
             elif self.latent_save_backend == "npz":
                 latent_dict = {}
                 for condition_key, latents in condition_latents.items():
-                    latent_dict[f"{condition_key}_latent"] = (
-                        latents[i].float().cpu().numpy()
-                    )
+                    latent_dict[f"{condition_key}_latent"] = latents[i].float().cpu().numpy()
 
                 if latent_dict:
-                    sample_data["condition_latents.npz"] = npz_codec_io(
-                        latent_dict, do_compression=True
-                    )
+                    sample_data["condition_latents.npz"] = npz_codec_io(latent_dict, do_compression=True)
 
             elif self.latent_save_backend == "npy":
                 latent_dict = {}
@@ -139,9 +131,7 @@ class ConditionTokenizeProcessor(nn.Module):
                     sample_data.update(latent_dict)
 
             else:
-                raise ValueError(
-                    f"Unsupported latent_save_backend: {self.latent_save_backend}"
-                )
+                raise ValueError(f"Unsupported latent_save_backend: {self.latent_save_backend}")
 
             output_list.append(sample_data)
 
@@ -231,19 +221,13 @@ def tokenize_conditions_from_wids(
                 tar_name = "condition_latents.tar"  # Default name
                 if "__shard__" in batch:
                     # Extract original shard name
-                    shard_info = (
-                        batch["__shard__"][0]
-                        if isinstance(batch["__shard__"], list)
-                        else batch["__shard__"]
-                    )
+                    shard_info = batch["__shard__"][0] if isinstance(batch["__shard__"], list) else batch["__shard__"]
                     if isinstance(shard_info, str):
                         original_tar_name = Path(shard_info).name
                         tar_name = original_tar_name
 
                 # Get sink for this tar in condition_latents folder
-                sink = sink_manager.get_sink(
-                    tar_name.replace(".tar", ""), f"condition_latents/{tar_name}"
-                )
+                sink = sink_manager.get_sink(tar_name.replace(".tar", ""), f"condition_latents/{tar_name}")
 
                 # Create clean sample with only latents and key
                 clean_sample = {"__key__": sample_data["__key__"]}
@@ -281,16 +265,12 @@ def main(cfg: DictConfig) -> None:
     log_print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Determine device
-    device = torch.device(
-        f"cuda:{cfg.consts.run_device}" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device(f"cuda:{cfg.consts.run_device}" if torch.cuda.is_available() else "cpu")
     log_print(f"Using device: {device}")
 
     # Load tokenizer
     log_print("Loading tokenizer...")
-    tokenizer: Union[tuple[PeftConfig, nn.Module], nn.Module] = hydra.utils.instantiate(
-        cfg.tokenizer
-    )
+    tokenizer: Union[tuple[PeftConfig, nn.Module], nn.Module] = hydra.utils.instantiate(cfg.tokenizer)
 
     if isinstance(tokenizer, tuple):
         assert len(tokenizer) == 2, (
@@ -302,9 +282,7 @@ def main(cfg: DictConfig) -> None:
 
     # Load state dict if provided
     if cfg.consts.tokenizer_checkpoint_path is not None:
-        checkpoint = torch.load(
-            cfg.consts.tokenizer_checkpoint_path, map_location=device
-        )
+        checkpoint = torch.load(cfg.consts.tokenizer_checkpoint_path, map_location=device)
         incompatible_keys = tokenizer.load_state_dict(checkpoint, strict=False)
         log_print(f"Loaded checkpoint with incompatible keys: {incompatible_keys}")
     else:
@@ -345,9 +323,7 @@ def main(cfg: DictConfig) -> None:
         device=str(device),
     )
 
-    log_print(
-        f"Condition tokenization completed. Total samples processed: {total_samples}"
-    )
+    log_print(f"Condition tokenization completed. Total samples processed: {total_samples}")
 
 
 if __name__ == "__main__":

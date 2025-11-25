@@ -171,9 +171,7 @@ class UnmixingLoss(torch.nn.Module):
             ret_loss_parts=True,
         )
 
-        return total_loss, dict(
-            sad_loss=sad_loss, abunds_loss=abds_loss, endmember_loss=endmember_loss
-        )
+        return total_loss, dict(sad_loss=sad_loss, abunds_loss=abds_loss, endmember_loss=endmember_loss)
 
 
 class StagedUnmixingLoss(torch.nn.Module):
@@ -217,9 +215,7 @@ class StagedUnmixingLoss(torch.nn.Module):
         loss = reconstruction_loss(hyper_in, hyper_recon, recon_type=self.recon_type)
         return loss
 
-    def _abundance_constraint_loss(
-        self, abunds: Abunds, abunds_fcls: Abunds | None = None
-    ) -> Tensor:
+    def _abundance_constraint_loss(self, abunds: Abunds, abunds_fcls: Abunds | None = None) -> Tensor:
         if abunds_fcls is not None:
             # Compare with FCLS results (SSAF-Net's stage 1 approach)
             loss = torch.nn.functional.mse_loss(abunds, abunds_fcls)
@@ -265,9 +261,7 @@ class StagedUnmixingLoss(torch.nn.Module):
         abunds_fcls: Abunds | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         # Reconstruction loss
-        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon) * self.weights.get(
-            "rec_loss", 1.0
-        )
+        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon) * self.weights.get("rec_loss", 1.0)
 
         # Abundance constraint loss
         if (w := self.weights.get("ab_sparse", 0.0)) > 0.0 and abunds_fcls is not None:
@@ -287,9 +281,7 @@ class StagedUnmixingLoss(torch.nn.Module):
         hyper_recon: Image,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         # Reconstruction loss
-        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon) * self.weights.get(
-            "rec_loss", 1.0
-        )
+        rec_loss = self._reconstruction_loss(hyper_in, hyper_recon) * self.weights.get("rec_loss", 1.0)
         loss_dict = {"rec_loss": rec_loss.detach().clone()}
 
         # Endmember losses
@@ -343,14 +335,10 @@ class StagedUnmixingLoss(torch.nn.Module):
 
         # Stage 1: Reconstruction and abundance constraints
         if current_step < self.switch_step:
-            total_loss, loss_dict = self._stage1_loss(
-                hyper_in, abunds_pred, hyper_recon, abunds_fcls
-            )
+            total_loss, loss_dict = self._stage1_loss(hyper_in, abunds_pred, hyper_recon, abunds_fcls)
         # Stage 2: Add endmember property constraints
         else:
-            total_loss, loss_dict = self._stage2_loss(
-                hyper_in, abunds_pred, endmembers, hyper_recon
-            )
+            total_loss, loss_dict = self._stage2_loss(hyper_in, abunds_pred, endmembers, hyper_recon)
 
         return total_loss, loss_dict
 

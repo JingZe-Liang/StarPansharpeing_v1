@@ -80,9 +80,7 @@ def main():
     fsdp_model: FSDP
 
     # * ones
-    shard_ones = ones(
-        (4, 4), dtype=torch.float, device_mesh=device_mesh, placements=(Shard(0),)
-    )
+    shard_ones = ones((4, 4), dtype=torch.float, device_mesh=device_mesh, placements=(Shard(0),))
     print(f"rank {rank} - shard_ones: {shard_ones}")
 
     # all parameters
@@ -116,9 +114,7 @@ def main():
 
     # 4. 获取最后一层权重并计算梯度
     last_layer_weight: DTensor = accelerator.unwrap_model(fsdp_model).get_last_layer()
-    print(
-        f"rank {rank} - get last layer weight in FSDP typed as {type(last_layer_weight)}, {last_layer_weight}"
-    )
+    print(f"rank {rank} - get last layer weight in FSDP typed as {type(last_layer_weight)}, {last_layer_weight}")
     rep_last_w = last_layer_weight.redistribute(
         placements=[Replicate()],
     )

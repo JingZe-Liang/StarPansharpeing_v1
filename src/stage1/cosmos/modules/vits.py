@@ -55,9 +55,9 @@ class AttentionCustom(nn.Module):
         # flash attention can be switched to normal attention for inference
         # rasie error only when training and use_flash_attn is True and
         # flash attention is not installed
-        assert (
-            HAS_FLASH_ATTENTION_V2 or (not self.use_flash_attn) or (not self.training)
-        ), "Flash attention is not installed and cannot be used when training"
+        assert HAS_FLASH_ATTENTION_V2 or (not self.use_flash_attn) or (not self.training), (
+            "Flash attention is not installed and cannot be used when training"
+        )
         assert dim % n_head == 0
         self.dim = dim
         self.head_dim = dim // n_head
@@ -261,9 +261,7 @@ class SelfAttentionCustom(nn.Module):
 
 
 class AttnProjection(nn.Module):
-    def __init__(
-        self, in_dim, out_dim, num_heads, norm_layer=nn.LayerNorm, mlp_ratio=2
-    ):
+    def __init__(self, in_dim, out_dim, num_heads, norm_layer=nn.LayerNorm, mlp_ratio=2):
         super().__init__()
         assert out_dim % in_dim == 0 or in_dim % out_dim == 0
         self.in_dim = in_dim

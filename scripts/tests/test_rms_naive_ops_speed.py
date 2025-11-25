@@ -28,9 +28,7 @@ class RMSNorm2dNative(torch.nn.Module):
 
     @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = (
-            x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)
-        ).to(x.dtype)
+        x = (x / torch.sqrt(torch.square(x.float()).mean(dim=1, keepdim=True) + self.eps)).to(x.dtype)
         if self.elementwise_affine:
             x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
         return x

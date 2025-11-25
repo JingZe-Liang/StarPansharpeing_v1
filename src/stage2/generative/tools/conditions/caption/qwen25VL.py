@@ -50,9 +50,7 @@ def img_to_base64(img: np.ndarray | str | Image.Image) -> str:
         img.save(img_bytes, format="PNG")
         return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
     img_bytes = io.BytesIO()
     Image.fromarray(img).save(img_bytes, format="PNG")
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
@@ -68,9 +66,7 @@ def array_img_to_pil(img: np.ndarray, denorm=False) -> Image.Image:
     if denorm:
         img = (img * 255).astype(np.uint8)
 
-    assert img.ndim == 3 and img.dtype == np.uint8, (
-        "Image must be a 3D numpy array with dtype uint8."
-    )
+    assert img.ndim == 3 and img.dtype == np.uint8, "Image must be a 3D numpy array with dtype uint8."
 
     return Image.fromarray(img).convert("RGB")
 
@@ -141,9 +137,7 @@ def get_qwen25vl_model(
         ]
 
         # Preparation for inference
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         vision_info = process_vision_info(messages)
         image_inputs = vision_info[0] if len(vision_info) > 0 else None
         video_inputs = vision_info[1] if len(vision_info) > 1 else None
@@ -168,14 +162,9 @@ def get_qwen25vl_model(
             else None
         )
         with torch.inference_mode():
-            generated_ids = model.generate(
-                **inputs, max_new_tokens=max_tokens, streamer=streamer
-            )
+            generated_ids = model.generate(**inputs, max_new_tokens=max_tokens, streamer=streamer)
 
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
+        generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
         output_text = processor.batch_decode(
             generated_ids_trimmed,
             skip_special_tokens=True,
@@ -212,18 +201,14 @@ def captioning_dataloader_img(dl, process_img, rgb_channels: list[int] | str = "
     for sample in dl:
         img = sample["img"]
         assert img.ndim == 4, f"Image batch must be 4D numpy array, got {img.ndim}D."
-        assert img.shape[0] == 1, (
-            f"Only support batch size 1 for captioning, got {img.shape[0]}."
-        )
+        assert img.shape[0] == 1, f"Only support batch size 1 for captioning, got {img.shape[0]}."
         img_id = sample["__key__"]
 
         # to RGB
         if img.ndim == 4 and img.shape[1] == 3:
             img_rgb = img
         else:
-            img_rgb = get_rgb_image(
-                img, rgb_channels=rgb_channels, use_linstretch=True
-            )  # (bs, c, h, w)
+            img_rgb = get_rgb_image(img, rgb_channels=rgb_channels, use_linstretch=True)  # (bs, c, h, w)
         img = img_rgb[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3) numpy array
 
         results = process_img(img)
@@ -260,9 +245,7 @@ def main_process_dataloader_img(
     try:
         import jsonlines as jsl
     except ImportError:
-        raise ImportError(
-            "jsonlines package is required for saving captions in jsonl format"
-        )
+        raise ImportError("jsonlines package is required for saving captions in jsonl format")
 
     from loguru import logger
     from tqdm import tqdm
@@ -319,9 +302,7 @@ def get_qwen25vl_max_api(max_current_tasks=5):
                         "content": [
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                },
+                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                             },
                             {"type": "text", "text": default_prompt},
                         ],
@@ -356,9 +337,7 @@ def get_qwen25vl_max_api(max_current_tasks=5):
                 if isinstance(single_img, np.ndarray):
                     img_list.append(array_img_to_pil(single_img))
                 elif isinstance(single_img, str):
-                    assert os.path.exists(single_img), (
-                        f"Image path {single_img} does not exist."
-                    )
+                    assert os.path.exists(single_img), f"Image path {single_img} does not exist."
                     img_list.append(single_img)
                 elif isinstance(single_img, Image.Image):
                     img_list.append(single_img)
@@ -396,11 +375,7 @@ if __name__ == "__main__":
 
     # Test with a sample dataloader
     print("\nTesting dataloader functionality...")
-    tar_file = list(
-        braceexpand(
-            "data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0003..0006}.tar"
-        )
-    )
+    tar_file = list(braceexpand("data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0003..0006}.tar"))
     _, dl = get_hyperspectral_dataloaders(
         wds_paths=tar_file,
         batch_size=1,

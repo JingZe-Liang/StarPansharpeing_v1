@@ -79,12 +79,10 @@ class PansharpeningNAFNet(nn.Module):
 
         # Validate configuration
         assert len(cfg.enc_blk_nums) == len(cfg.enc_blk_type), (
-            f"enc_blk_nums length ({len(cfg.enc_blk_nums)}) must match "
-            f"enc_blk_type length ({len(cfg.enc_blk_type)})"
+            f"enc_blk_nums length ({len(cfg.enc_blk_nums)}) must match enc_blk_type length ({len(cfg.enc_blk_type)})"
         )
         assert len(cfg.dec_blk_nums) == len(cfg.dec_blk_type), (
-            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match "
-            f"dec_blk_type length ({len(cfg.dec_blk_type)})"
+            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match dec_blk_type length ({len(cfg.dec_blk_type)})"
         )
         assert cfg.middle_blk_type in [
             "naf",
@@ -97,28 +95,18 @@ class PansharpeningNAFNet(nn.Module):
 
         # Patch embedding layers for different input modalities
         patchers = nn.ModuleDict()
-        patchers["pan_conv"] = create_patcher(
-            cfg.pan_channel, cfg.width, cfg.patch_size
-        )  # PAN image patch embedding
-        patchers["ms_conv"] = create_patcher(
-            cfg.ms_channel, cfg.width, cfg.patch_size
-        )  # MS image patch embedding
-        patchers["fused_conv"] = create_patcher(
-            cfg.width * 2, cfg.width, 1
-        )  # Fused feature processing
+        patchers["pan_conv"] = create_patcher(cfg.pan_channel, cfg.width, cfg.patch_size)  # PAN image patch embedding
+        patchers["ms_conv"] = create_patcher(cfg.ms_channel, cfg.width, cfg.patch_size)  # MS image patch embedding
+        patchers["fused_conv"] = create_patcher(cfg.width * 2, cfg.width, 1)  # Fused feature processing
         patchers["latent_conv"] = nn.Sequential(
             create_norm_layer("layernorm2d", cfg.condition_channel),
             create_conv2d(cfg.condition_channel, cfg.width, 3, bias=True),
         )  # Latent condition processing
-        patchers["ms_cond_conv"] = create_conv2d(
-            cfg.width * 2, cfg.width, 1
-        )  # MS condition processing
+        patchers["ms_cond_conv"] = create_conv2d(cfg.width * 2, cfg.width, 1)  # MS condition processing
 
         self.cfg = cfg
         self.patchers = patchers
-        self.unpatcher = create_unpatcher(
-            cfg.width, cfg.width, cfg.patch_size
-        )  # Output unpatching
+        self.unpatcher = create_unpatcher(cfg.width, cfg.width, cfg.patch_size)  # Output unpatching
         self.head = self._create_head()  # Output head
 
         # =====================================================================
@@ -127,12 +115,8 @@ class PansharpeningNAFNet(nn.Module):
 
         # Add output rescaling layer for value range normalization
         if cfg.output_rescale:
-            out_val_range = (
-                ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
-            )
-            self.output_rescale = RescaleOutput(
-                rescale=True, out_val_range=out_val_range
-            )
+            out_val_range = ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
+            self.output_rescale = RescaleOutput(rescale=True, out_val_range=out_val_range)
         else:
             self.output_rescale = nn.Identity()  # do nothing
 
@@ -219,9 +203,7 @@ class PansharpeningNAFNet(nn.Module):
             log(f"[NAFNet Encoder Block {i}] Type: {enc_fn.func}, Num: {num}")
             enc_fn = self._replace_nat_defaults(enc_fn, cfg.nat_enc_kwargs, i)
             self.encoders.append(nn.ModuleList([enc_fn(chan) for _ in range(num)]))
-            self.downs.append(
-                nn.Conv2d(chan, 2 * chan, 2, 2)
-            )  # Downsampling with stride 2
+            self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))  # Downsampling with stride 2
             chan = chan * 2  # Double channels after downsampling
 
         # =====================================================================
@@ -236,9 +218,7 @@ class PansharpeningNAFNet(nn.Module):
         middle_fn = middle_mapping[cfg.middle_blk_type]
         middle_fn = self._replace_nat_defaults(middle_fn, cfg.nat_mid_kwargs, None)
         log(f"[NAFNet Middile Block] Type: {middle_fn.func}, Num: {cfg.middle_blk_num}")
-        self.middle_blks = nn.ModuleList(
-            [middle_fn(chan) for _ in range(cfg.middle_blk_num)]
-        )
+        self.middle_blks = nn.ModuleList([middle_fn(chan) for _ in range(cfg.middle_blk_num)])
 
         # =====================================================================
         # Decoder Path (Upsampling)
@@ -296,9 +276,7 @@ class PansharpeningNAFNet(nn.Module):
         if nat_kwgs is None:
             return nat_partial
 
-        assert isinstance(nat_kwgs, NATBlockConfig), (
-            f"{nat_kwgs=} is not a NATBlockConfig"
-        )
+        assert isinstance(nat_kwgs, NATBlockConfig), f"{nat_kwgs=} is not a NATBlockConfig"
         # Get existing partial arguments
         existing_kwargs = nat_partial.keywords.copy()
         # Update with NATBlockConfig parameters, but preserve existing ones
@@ -323,9 +301,7 @@ class PansharpeningNAFNet(nn.Module):
         )
         head_out = nn.Conv2d(embed_dim, out_chan, 1)
         # ms_shortcut = create_conv2d(embed_dim, embed_dim, 1)
-        ms_shortcut = create_unpatcher(
-            embed_dim, embed_dim, patch_size=self.cfg.patch_size
-        )
+        ms_shortcut = create_unpatcher(embed_dim, embed_dim, patch_size=self.cfg.patch_size)
 
         head = nn.ModuleDict()
         head["head_conv"] = head_conv
@@ -418,9 +394,7 @@ class PansharpeningNAFNet(nn.Module):
         # =====================================================================
         # Decoder Path (Upsampling with skip connections)
         # =====================================================================
-        for i, (decoder, up, enc_skip) in enumerate(
-            zip(self.decoders, self.ups, encs[::-1])
-        ):
+        for i, (decoder, up, enc_skip) in enumerate(zip(self.decoders, self.ups, encs[::-1])):
             x = up(x)  # Upsample to higher resolution
             x = x + enc_skip  # Add skip connection from encoder
             for block in decoder:
@@ -483,10 +457,7 @@ class PansharpeningNAFNet(nn.Module):
         - LayerNorm: Ones for weights, zeros for bias
         - Output head: Zero initialization for stable training start
         """
-        norms = [
-            get_norm_layer(n)
-            for n in ["layernorm2d", "rmsnorm2d", "layernorm", "rmsnorm"]
-        ]
+        norms = [get_norm_layer(n) for n in ["layernorm2d", "rmsnorm2d", "layernorm", "rmsnorm"]]
 
         @torch.no_grad()
         def _apply(module, name):
@@ -569,8 +540,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
 
         # Validate configuration
         assert len(cfg.dec_blk_nums) == len(cfg.dec_blk_type), (
-            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match "
-            f"dec_blk_type length ({len(cfg.dec_blk_type)})"
+            f"dec_blk_nums length ({len(cfg.dec_blk_nums)}) must match dec_blk_type length ({len(cfg.dec_blk_type)})"
         )
         assert cfg.middle_blk_type in [
             "naf",
@@ -578,15 +548,11 @@ class PansharpeningNAFDecoderNet(nn.Module):
         ], f"middle_blk_type must be 'naf' or 'nat', got {cfg.middle_blk_type}"
 
         patchers = nn.ModuleDict()
-        patchers["pan_conv"] = create_patcher(
-            cfg.pan_channel, cfg.width, cfg.patch_size
-        )
+        patchers["pan_conv"] = create_patcher(cfg.pan_channel, cfg.width, cfg.patch_size)
         patchers["ms_conv"] = create_patcher(cfg.ms_channel, cfg.width, cfg.patch_size)
         patchers["condition_conv"] = nn.Sequential(
             create_norm_layer("layernorm2d", cfg.condition_channel),
-            create_conv2d(
-                cfg.condition_channel, cfg.width, 3, stride=1, padding=1, bias=True
-            ),
+            create_conv2d(cfg.condition_channel, cfg.width, 3, stride=1, padding=1, bias=True),
         )
         self.cfg = cfg
         self.n_up_most = math.log2(cfg.up_ratio)
@@ -597,12 +563,8 @@ class PansharpeningNAFDecoderNet(nn.Module):
 
         # Add output rescaling layer
         if cfg.output_rescale:
-            out_val_range = (
-                ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
-            )
-            self.output_rescale = RescaleOutput(
-                rescale=True, out_val_range=out_val_range
-            )
+            out_val_range = ValueRange.MINUS_ONE_ONE if cfg.is_neg_1_1 else ValueRange.ZERO_ONE
+            self.output_rescale = RescaleOutput(rescale=True, out_val_range=out_val_range)
         else:
             self.output_rescale = nn.Identity()  # do nothing
 
@@ -627,9 +589,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
         )
 
         nat_block_partial = partial(
-            Spatial2DNATBlockConditional
-            if cfg.condition_on_decoder
-            else Spatial2DNATBlock,
+            Spatial2DNATBlockConditional if cfg.condition_on_decoder else Spatial2DNATBlock,
             cond_chs=cfg.width if cfg.condition_on_decoder else None,
             ms_cond_chans=cfg.width if cfg.condition_on_decoder else None,
             ffn_ratio=cfg.ffn_expand,
@@ -656,15 +616,9 @@ class PansharpeningNAFDecoderNet(nn.Module):
         # Middle Bottleneck Blocks
         # =====================================================================
         middle_fn = middle_mapping[cfg.middle_blk_type]
-        middle_fn = self._replace_nat_defaults_decoder(
-            middle_fn, cfg.nat_mid_kwargs, None
-        )
-        log(
-            f"[NAFDecoderNet Middle Block] Type: {middle_fn.func}, Num: {cfg.middle_blk_num}"
-        )
-        self.middle_blks = nn.ModuleList(
-            [middle_fn(chan) for _ in range(cfg.middle_blk_num)]
-        )
+        middle_fn = self._replace_nat_defaults_decoder(middle_fn, cfg.nat_mid_kwargs, None)
+        log(f"[NAFDecoderNet Middle Block] Type: {middle_fn.func}, Num: {cfg.middle_blk_num}")
+        self.middle_blks = nn.ModuleList([middle_fn(chan) for _ in range(cfg.middle_blk_num)])
 
         # =====================================================================
         # Decoder Path (Upsampling)
@@ -702,8 +656,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
             ms_in_ups = nn.Sequential(
                 nn.Conv2d(self.cfg.width, embed_dim, 1),
                 *[
-                    nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2, groups=embed_dim)
-                    for _ in range(int(n_ups))
+                    nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2, groups=embed_dim) for _ in range(int(n_ups))
                 ],  # fmt: skip
             )
         elif self.cfg.head_interp == "upsample":
@@ -747,9 +700,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
     def _to_out(self, x, ms, pan, cond):
         res_type = self.cfg.residual_type
         if res_type == "condition":
-            assert cond.shape == x.shape, (
-                f"Condition channel {cond.shape} must match output channel {x.shape}"
-            )
+            assert cond.shape == x.shape, f"Condition channel {cond.shape} must match output channel {x.shape}"
             x = x + cond
         elif res_type == "ms":
             assert ms.shape[-2:] == x.shape[-2:]
@@ -773,8 +724,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
                 antialias=True,
             )
         assert ms.shape[-1] == pan.shape[-1] // self.cfg.up_ratio, (
-            f"MS width {ms.shape[-1]} must be {self.cfg.up_ratio} times smaller "
-            "than PAN width {pan.shape[-1]}"
+            f"MS width {ms.shape[-1]} must be {self.cfg.up_ratio} times smaller than PAN width {{pan.shape[-1]}}"
         )
 
         x_ms = self.patchers["ms_conv"](ms)
@@ -844,9 +794,7 @@ class PansharpeningNAFDecoderNet(nn.Module):
         if nat_kwgs is None:
             return nat_partial
 
-        assert isinstance(nat_kwgs, NATBlockConfig), (
-            f"{nat_kwgs=} is not a NATBlockConfig"
-        )
+        assert isinstance(nat_kwgs, NATBlockConfig), f"{nat_kwgs=} is not a NATBlockConfig"
         # Get existing partial arguments
         existing_kwargs = nat_partial.keywords.copy()
         # Update with NATBlockConfig parameters, but preserve existing ones
@@ -985,9 +933,7 @@ def test_pansharpening_nafnet():
             output = model(ms, pan, cond)
 
         # Verify output shape
-        assert output.shape == ms.shape, (
-            f"Expected output shape {ms.shape}, got {output.shape}"
-        )
+        assert output.shape == ms.shape, f"Expected output shape {ms.shape}, got {output.shape}"
 
         optimizer.zero_grad()
         ng = {}
@@ -1004,12 +950,7 @@ def test_pansharpening_nafnet():
         # sort the dict grad
         if i == 0:
             print("------------------")
-            ng = {
-                k: v
-                for k, v in sorted(
-                    ng.items(), key=lambda item: item[1].norm().item(), reverse=True
-                )
-            }
+            ng = {k: v for k, v in sorted(ng.items(), key=lambda item: item[1].norm().item(), reverse=True)}
             # print the max first 10 grads
             for i, (k, v) in enumerate(ng.items()):
                 if i < 10:
@@ -1148,9 +1089,7 @@ def test_nat_blocks_only():
     print(f"  - Output shape: {output.shape}")
 
     # Verify output shape
-    assert output.shape == ms.shape, (
-        f"Expected output shape {ms.shape}, got {output.shape}"
-    )
+    assert output.shape == ms.shape, f"Expected output shape {ms.shape}, got {output.shape}"
     print("✓ Output shape correct")
 
     # Test inference mode

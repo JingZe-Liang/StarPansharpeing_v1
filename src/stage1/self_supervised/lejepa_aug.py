@@ -57,6 +57,8 @@ from torch import distributed as dist
 from torch.distributed.nn import ReduceOp
 from torch.distributed.nn import all_reduce as functional_all_reduce
 
+from src.utilities.train_utils.visualization import get_rgb_image
+
 
 class HyperRandomGrayScale(IntensityAugmentationBase2D):
     def __init__(self, p=0.5):
@@ -157,9 +159,7 @@ class HyperspectralColorJitter(IntensityAugmentationBase2D):
             # Ensure contrast factor can broadcast to input shape
             while len(contrast_factor.shape) < len(input.shape):
                 contrast_factor = contrast_factor.unsqueeze(-1)
-            input = spectral_mean + (input - spectral_mean) * contrast_factor.to(
-                input.device
-            )
+            input = spectral_mean + (input - spectral_mean) * contrast_factor.to(input.device)
 
         # 3. Noise injection
         if torch.rand(1) < self.probs.noise:
@@ -197,9 +197,7 @@ class HyperspectralColorJitter(IntensityAugmentationBase2D):
 
             # Reshape to (B*H*W, C) for 1D convolution
             input_flat = input.permute(0, 2, 3, 1).reshape(-1, C)
-            input_smoothed = F.conv1d(
-                input_flat.unsqueeze(1), kernel, padding=padding
-            ).squeeze(1)
+            input_smoothed = F.conv1d(input_flat.unsqueeze(1), kernel, padding=padding).squeeze(1)
 
             # Reshape back to original shape
             return input_smoothed.reshape(B, H, W, C).permute(0, 3, 1, 2)
@@ -234,9 +232,7 @@ class SafeColorJitterWrapper(IntensityAugmentationBase2D):
             # For hyperspectral images, use the hyperspectral color jitter
             return self.hp_color_jitter(input)
         else:
-            raise ValueError(
-                f"Unsupported input shape: {input.shape}. Expected 1, 3 or >3 channels."
-            )
+            raise ValueError(f"Unsupported input shape: {input.shape}. Expected 1, 3 or >3 channels.")
 
 
 class SafeNotApply(IntensityAugmentationBase2D):
@@ -374,16 +370,8 @@ class LeJEPAAugmentation:
         self.stack = stack
         self.is_neg_1_1 = is_neg_1_1
 
-        self.global_view_pipe = (
-            global_view_pipe
-            if global_view_pipe is not None
-            else create_global_view_augmentations()
-        )
-        self.local_view_pipe = (
-            local_view_pipe
-            if local_view_pipe is not None
-            else create_local_view_augmentations()
-        )
+        self.global_view_pipe = global_view_pipe if global_view_pipe is not None else create_global_view_augmentations()
+        self.local_view_pipe = local_view_pipe if local_view_pipe is not None else create_local_view_augmentations()
 
     def __call__(self, x: torch.Tensor):
         if self.is_neg_1_1:
@@ -404,12 +392,8 @@ class LeJEPAAugmentation:
                 global_views = global_views * 2 - 1
                 local_views = local_views * 2 - 1
         else:
-            global_views = (
-                [gv * 2 - 1 for gv in global_views] if self.is_neg_1_1 else global_views
-            )
-            local_views = (
-                [lv * 2 - 1 for lv in local_views] if self.is_neg_1_1 else local_views
-            )
+            global_views = [gv * 2 - 1 for gv in global_views] if self.is_neg_1_1 else global_views
+            local_views = [lv * 2 - 1 for lv in local_views] if self.is_neg_1_1 else local_views
 
         return global_views, local_views
 
@@ -442,9 +426,7 @@ class SIGReg(torch.nn.Module):
 
         # Random projection
         if self.rnd_proj_dim is not None:
-            A = torch.randn(
-                proj.size(-1), self.rnd_proj_dim, device=proj.device
-            )  # [D, projD]
+            A = torch.randn(proj.size(-1), self.rnd_proj_dim, device=proj.device)  # [D, projD]
             A = A.div_(A.norm(p=2, dim=0))
             x_t = (proj @ A).unsqueeze(-1) * self.t
         # No projection
@@ -488,9 +470,7 @@ def create_lejepa_projector(
 ):
     from torchvision.ops import MLP
 
-    mlp_projector = MLP(
-        input_dim, [*mid_hiddens, proj_dim], norm_layer=get_norm_layer(norm_type)
-    )
+    mlp_projector = MLP(input_dim, [*mid_hiddens, proj_dim], norm_layer=get_norm_layer(norm_type))
     if mean_out_hw:
         return torch.nn.Sequential(_MeanOutHW(), mlp_projector)
     return mlp_projector
@@ -527,7 +507,7 @@ def lejepa_loss(
     inv_loss = (centers - embeddings).square().mean()
 
     # Total loss and loss breakdowns
-    loss = inv_loss * (1 - lam) + lam * sigreg_loss
+    loss = inv_loss * (1 - lam) + sigreg_loss * lam
     breakdowns = edict(
         {
             "inv_loss": inv_loss,
@@ -580,12 +560,8 @@ def __test_aug_pipe():
     aug = LeJEPAAugmentation(n_locals=2, n_globals=1)
 
     global_views, local_views = aug(x)
-    print(
-        f"Global view count: {len(global_views)}, shapes: {[v.shape for v in global_views]}"
-    )
-    print(
-        f"Local view count: {len(local_views)}, shapes: {[v.shape for v in local_views]}"
-    )
+    print(f"Global view count: {len(global_views)}, shapes: {[v.shape for v in global_views]}")
+    print(f"Local view count: {len(local_views)}, shapes: {[v.shape for v in local_views]}")
 
     # network = torch.nn.Conv2d(3, 384, 3, 1, 1)
 
@@ -709,9 +685,7 @@ def __test_augmentation_pipelines():
 
     print("Testing complete augmentation pipelines...")
 
-    ds = ImageStreamingDataset(
-        input_dir="data/hyspecnet11k/LitData_hyper_images", to_neg_1_1=False
-    )
+    ds = ImageStreamingDataset(input_dir="data/hyspecnet11k/LitData_hyper_images", to_neg_1_1=False)
     hp_image = ds[3022]["img"][None]
     print(f"Sample hyperspectral image shape from dataset: {hp_image.shape}")
 
@@ -723,9 +697,7 @@ def __test_augmentation_pipelines():
     aug = LeJEPAAugmentation(n_locals=6, n_globals=2, is_neg_1_1=False)
     global_views, local_views = aug(hp_image)
 
-    print(
-        f"Global views: {len(global_views)}, shapes: {[v.shape for v in global_views]}"
-    )
+    print(f"Global views: {len(global_views)}, shapes: {[v.shape for v in global_views]}")
     print(f"Local views: {len(local_views)}, shapes: {[v.shape for v in local_views]}")
 
     # Test with RGB image
@@ -734,12 +706,8 @@ def __test_augmentation_pipelines():
     print(f"Input shape: {rgb_image.shape}")
 
     global_views_rgb, local_views_rgb = aug(rgb_image)
-    print(
-        f"Global views: {len(global_views_rgb)}, shapes: {[v.shape for v in global_views_rgb]}"
-    )
-    print(
-        f"Local views: {len(local_views_rgb)}, shapes: {[v.shape for v in local_views_rgb]}"
-    )
+    print(f"Global views: {len(global_views_rgb)}, shapes: {[v.shape for v in global_views_rgb]}")
+    print(f"Local views: {len(local_views_rgb)}, shapes: {[v.shape for v in local_views_rgb]}")
 
     # Test with grayscale image
     print("\n3. Testing with grayscale image...")
@@ -747,12 +715,8 @@ def __test_augmentation_pipelines():
     print(f"Input shape: {gray_image.shape}")
 
     global_views_gray, local_views_gray = aug(gray_image)
-    print(
-        f"Global views: {len(global_views_gray)}, shapes: {[v.shape for v in global_views_gray]}"
-    )
-    print(
-        f"Local views: {len(local_views_gray)}, shapes: {[v.shape for v in local_views_gray]}"
-    )
+    print(f"Global views: {len(global_views_gray)}, shapes: {[v.shape for v in global_views_gray]}")
+    print(f"Local views: {len(local_views_gray)}, shapes: {[v.shape for v in local_views_gray]}")
 
     print("\n✅ All augmentation pipelines working correctly!")
     print("✅ SafeColorJitterWrapper integrated successfully!")

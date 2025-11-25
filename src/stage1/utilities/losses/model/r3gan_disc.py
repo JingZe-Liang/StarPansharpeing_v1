@@ -24,9 +24,7 @@ def MSRInitializer(Layer, ActivationGain=1.0):
 class Convolution(nn.Module):
     """自定义卷积层"""
 
-    def __init__(
-        self, InputChannels, OutputChannels, KernelSize, Groups=1, ActivationGain=1.0
-    ):
+    def __init__(self, InputChannels, OutputChannels, KernelSize, Groups=1, ActivationGain=1.0):
         super(Convolution, self).__init__()
         self.Layer = MSRInitializer(
             nn.Conv2d(
@@ -65,14 +63,10 @@ class ResidualBlock(nn.Module):
 
         NumberOfLinearLayers = 3
         ExpandedChannels = InputChannels * ExpansionFactor
-        ActivationGain = BiasedActivation.Gain * VarianceScalingParameter ** (
-            -1 / (2 * NumberOfLinearLayers - 2)
-        )
+        ActivationGain = BiasedActivation.Gain * VarianceScalingParameter ** (-1 / (2 * NumberOfLinearLayers - 2))
 
         # 三层卷积：扩展 -> 组卷积 -> 压缩
-        self.LinearLayer1 = Convolution(
-            InputChannels, ExpandedChannels, KernelSize=1, ActivationGain=ActivationGain
-        )
+        self.LinearLayer1 = Convolution(InputChannels, ExpandedChannels, KernelSize=1, ActivationGain=ActivationGain)
         self.LinearLayer2 = Convolution(
             ExpandedChannels,
             ExpandedChannels,
@@ -80,9 +74,7 @@ class ResidualBlock(nn.Module):
             Groups=Cardinality,
             ActivationGain=ActivationGain,
         )
-        self.LinearLayer3 = Convolution(
-            ExpandedChannels, InputChannels, KernelSize=1, ActivationGain=0
-        )
+        self.LinearLayer3 = Convolution(ExpandedChannels, InputChannels, KernelSize=1, ActivationGain=0)
 
         # 激活函数
         self.NonLinearity1 = BiasedActivation(ExpandedChannels)
@@ -132,9 +124,7 @@ class DiscriminativeBasis(nn.Module):
         )
         if OutputNonSpatial:
             self.AdaptivePool = nn.AdaptiveAvgPool2d((4, 4))  # 确保输入是4x4
-            self.LinearLayer = MSRInitializer(
-                nn.Linear(InputChannels, OutputDimension, bias=False)
-            )
+            self.LinearLayer = MSRInitializer(nn.Linear(InputChannels, OutputDimension, bias=False))
         else:
             self.OutputWithSpatial = MSRInitializer(
                 nn.Conv2d(
@@ -150,9 +140,7 @@ class DiscriminativeBasis(nn.Module):
             # 先池化到4x4，然后4x4卷积得到1x1
             x = self.AdaptivePool(x)  # (B, C, H, W) -> (B, C, 4, 4)
             x = self.Basis(x)  # (B, C, 4, 4) -> (B, C, 1, 1)
-            return self.LinearLayer(
-                x.view(x.shape[0], -1)
-            )  # (B, C, 1, 1) -> (B, C) -> (B, OutputDim)
+            return self.LinearLayer(x.view(x.shape[0], -1))  # (B, C, 1, 1) -> (B, C) -> (B, OutputDim)
         else:
             # has spatial output
             x = self.OutputWithSpatial(self.Basis(x))
@@ -179,13 +167,9 @@ class DiscriminatorStage(nn.Module):
 
         # 选择过渡层类型
         if ResamplingFilter is None:
-            TransitionLayer = DiscriminativeBasis(
-                InputChannels, OutputChannels, OutputNonSpatial
-            )
+            TransitionLayer = DiscriminativeBasis(InputChannels, OutputChannels, OutputNonSpatial)
         else:
-            TransitionLayer = DownsampleLayer(
-                InputChannels, OutputChannels, ResamplingFilter
-            )
+            TransitionLayer = DownsampleLayer(InputChannels, OutputChannels, ResamplingFilter)
 
         # 先堆叠残差块，再接过渡层
         self.Layers = nn.ModuleList(
@@ -226,9 +210,7 @@ class DiffBandsInputConvIn(nn.Module):
             basic_module_fn = nn.Conv2d
         elif basic_module == "conv_norm_act":
 
-            def basic_module_fn(
-                in_channels, out_channels, kernel_size, stride, padding
-            ):
+            def basic_module_fn(in_channels, out_channels, kernel_size, stride, padding):
                 return nn.Sequential(
                     nn.Conv2d(
                         in_channels,
@@ -261,9 +243,7 @@ class DiffBandsInputConvIn(nn.Module):
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[Disc] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[Disc] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training:
@@ -332,13 +312,9 @@ class Discriminator(nn.Module):
 
         # 输入特征提取层：RGB -> 特征
         if isinstance(InputChannels, (list, tuple)):
-            self.ExtractionLayer = DiffBandsInputConvIn(
-                InputChannels, WidthPerStage[0], basic_module="conv_norm_act"
-            )
+            self.ExtractionLayer = DiffBandsInputConvIn(InputChannels, WidthPerStage[0], basic_module="conv_norm_act")
         else:
-            self.ExtractionLayer = Convolution(
-                InputChannels, WidthPerStage[0], KernelSize=1
-            )
+            self.ExtractionLayer = Convolution(InputChannels, WidthPerStage[0], KernelSize=1)
         self.MainLayers = nn.ModuleList(MainLayers)
 
         # 条件嵌入层（可选）

@@ -131,9 +131,7 @@ class GlobalFeatureExtractor(nn.Module):
         self.norm_cfg = norm_cfg
         self.act_cfg = act_cfg
         assert len(block_channels) == len(num_blocks) == 3
-        self.bottleneck1 = self._make_layer(
-            in_channels, block_channels[0], num_blocks[0], strides[0], expand_ratio
-        )
+        self.bottleneck1 = self._make_layer(in_channels, block_channels[0], num_blocks[0], strides[0], expand_ratio)
         self.bottleneck2 = self._make_layer(
             block_channels[0],
             block_channels[1],
@@ -167,17 +165,9 @@ class GlobalFeatureExtractor(nn.Module):
         )
 
     def _make_layer(self, in_channels, out_channels, blocks, stride=1, expand_ratio=6):
-        layers = [
-            InvertedResidual(
-                in_channels, out_channels, stride, expand_ratio, norm_cfg=self.norm_cfg
-            )
-        ]
+        layers = [InvertedResidual(in_channels, out_channels, stride, expand_ratio, norm_cfg=self.norm_cfg)]
         for i in range(1, blocks):
-            layers.append(
-                InvertedResidual(
-                    out_channels, out_channels, 1, expand_ratio, norm_cfg=self.norm_cfg
-                )
-            )
+            layers.append(InvertedResidual(out_channels, out_channels, 1, expand_ratio, norm_cfg=self.norm_cfg))
         return nn.Sequential(*layers)
 
     def forward(self, x):

@@ -84,16 +84,12 @@ KEYS_MAPPING = {
 class UnmixingMatDataset(Dataset):
     def __init__(self, dataset_dir: str, dataset_name: str):
         self.ds_dir = dataset_dir
-        self.ds_name = (
-            dataset_name if dataset_name.endswith(".mat") else dataset_name + ".mat"
-        )
+        self.ds_name = dataset_name if dataset_name.endswith(".mat") else dataset_name + ".mat"
 
         self.mat_d = self._load_mat_dict(Path(self.ds_dir) / self.ds_name)
 
         # pipeline init
-        logger.debug(
-            f"Image {self.ds_name} loaded with shape {self.mat_d['img'].shape}."
-        )
+        logger.debug(f"Image {self.ds_name} loaded with shape {self.mat_d['img'].shape}.")
         self.n_endmembers = self.mat_d["endmembers"].shape[0]
         edm, abunds = self._vca_solve(self.mat_d["img"], self.n_endmembers)
         self.mat_d["init_vca_endmembers"] = edm
@@ -113,9 +109,7 @@ class UnmixingMatDataset(Dataset):
         recon = recon.reshape(img.shape)
         psnr = peak_signal_noise_ratio(img, recon, data_range=1.0)
         mse_error = np.mean((img - recon) ** 2)
-        logger.info(
-            f"VCA+FCLSU reconstruction PSNR: {psnr:.2f}dB, MSE: {mse_error:.5f}"
-        )
+        logger.info(f"VCA+FCLSU reconstruction PSNR: {psnr:.2f}dB, MSE: {mse_error:.5f}")
 
         return endmembers, abunds
 

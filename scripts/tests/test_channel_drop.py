@@ -38,9 +38,7 @@ class NestChannelDrop(nn.Module):
             assert args.isdigit(), "args should be an int"
             self.sample_kwargs = {"low": int(args)}
         else:
-            raise ValueError(
-                f"drop_type {drop_type} not supported, only exp and uniform are supported"
-            )
+            raise ValueError(f"drop_type {drop_type} not supported, only exp and uniform are supported")
 
         if self.learnable:
             self.dropped_x = nn.Parameter(torch.zeros(1, 1, *self.img_size))
@@ -53,11 +51,7 @@ class NestChannelDrop(nn.Module):
     def exponential_sampling(self, lambda_val, size=1):
         u = np.random.uniform(size=size)
         k = -np.log(1 - u) / lambda_val
-        return (
-            torch.as_tensor(np.floor(k).astype(int))
-            .clip_(0, self.max_channels)
-            .unsqueeze(-1)
-        )
+        return torch.as_tensor(np.floor(k).astype(int)).clip_(0, self.max_channels).unsqueeze(-1)
 
     def uniform_sampling(self, low: int, size=1):
         # (bs, 1)
@@ -93,9 +87,7 @@ class NestChannelDrop(nn.Module):
 
 if __name__ == "__main__":
     z = torch.randn(2, 12, 256, 256)
-    drop = NestChannelDrop(
-        0.5, drop_dim=1, learnable=False, drop_type="uniform_3", max_channels=12
-    )
+    drop = NestChannelDrop(0.5, drop_dim=1, learnable=False, drop_type="uniform_3", max_channels=12)
     drop.train()
 
     z = drop(z)

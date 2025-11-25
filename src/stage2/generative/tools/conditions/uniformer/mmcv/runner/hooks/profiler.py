@@ -82,18 +82,13 @@ class ProfilerHook(Hook):
         try:
             from torch import profiler  # torch version >= 1.8.1
         except ImportError:
-            raise ImportError(
-                "profiler is the new feature of torch1.8.1, "
-                f"but your version is {torch.__version__}"
-            )
+            raise ImportError(f"profiler is the new feature of torch1.8.1, but your version is {torch.__version__}")
 
         assert isinstance(by_epoch, bool), "``by_epoch`` should be a boolean."
         self.by_epoch = by_epoch
 
         if profile_iters < 1:
-            raise ValueError(
-                f"profile_iters should be greater than 0, but got {profile_iters}"
-            )
+            raise ValueError(f"profile_iters should be greater than 0, but got {profile_iters}")
         self.profile_iters = profile_iters
 
         if not isinstance(activities, list):
@@ -106,9 +101,7 @@ class ProfilerHook(Hook):
             elif activity == "cuda":
                 self.activities.append(profiler.ProfilerActivity.CUDA)
             else:
-                raise ValueError(
-                    f'activity should be "cpu" or "cuda", but got {activity}'
-                )
+                raise ValueError(f'activity should be "cpu" or "cuda", but got {activity}')
 
         if schedule is not None:
             self.schedule = profiler.schedule(**schedule)
@@ -125,14 +118,10 @@ class ProfilerHook(Hook):
     @master_only
     def before_run(self, runner):
         if self.by_epoch and runner.max_epochs < self.profile_iters:
-            raise ValueError(
-                f"self.profile_iters should not be greater than {runner.max_epochs}"
-            )
+            raise ValueError(f"self.profile_iters should not be greater than {runner.max_epochs}")
 
         if not self.by_epoch and runner.max_iters < self.profile_iters:
-            raise ValueError(
-                f"self.profile_iters should not be greater than {runner.max_iters}"
-            )
+            raise ValueError(f"self.profile_iters should not be greater than {runner.max_iters}")
 
         if callable(self.on_trace_ready):  # handler
             _on_trace_ready = self.on_trace_ready
@@ -149,24 +138,14 @@ class ProfilerHook(Hook):
                 try:
                     import torch_tb_profiler  # noqa: F401
                 except ImportError:
-                    raise ImportError(
-                        'please run "pip install '
-                        'torch-tb-profiler" to install '
-                        "torch_tb_profiler"
-                    )
+                    raise ImportError('please run "pip install torch-tb-profiler" to install torch_tb_profiler')
                 _on_trace_ready = torch.profiler.tensorboard_trace_handler(**trace_cfg)
             else:
-                raise ValueError(
-                    'trace_type should be "log_trace" or '
-                    f'"tb_trace", but got {trace_type}'
-                )
+                raise ValueError(f'trace_type should be "log_trace" or "tb_trace", but got {trace_type}')
         elif self.on_trace_ready is None:
             _on_trace_ready = None  # type: ignore
         else:
-            raise ValueError(
-                "on_trace_ready should be handler, dict or None, "
-                f"but got {type(self.on_trace_ready)}"
-            )
+            raise ValueError(f"on_trace_ready should be handler, dict or None, but got {type(self.on_trace_ready)}")
 
         if runner.max_epochs > 1:
             warnings.warn(

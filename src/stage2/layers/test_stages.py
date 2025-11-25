@@ -40,9 +40,7 @@ def sample_data(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
 
     # Test input tensors
     x = torch.randn(batch_size, in_channels, height, width, device=device)
-    cond = torch.randn(
-        batch_size, 128, height // 2, width // 2, device=device
-    )  # Different spatial size
+    cond = torch.randn(batch_size, 128, height // 2, width // 2, device=device)  # Different spatial size
 
     return x, cond
 
@@ -135,9 +133,7 @@ class TestMbConvSequentialCond:
     ) -> None:
         """Test that gradients flow properly through the stage."""
         x, cond = sample_data
-        stage = MbConvSequentialCond(
-            in_chans=64, embed_dim=[64], depths=[1], cond_width=128, out_chans=64
-        )
+        stage = MbConvSequentialCond(in_chans=64, embed_dim=[64], depths=[1], cond_width=128, out_chans=64)
         stage = stage.to(device)
         stage.train()
 
@@ -146,9 +142,7 @@ class TestMbConvSequentialCond:
         loss.backward()
 
         # Check that some parameters have gradients
-        param_with_grad = any(
-            p.grad is not None and p.grad.abs().sum() > 0 for p in stage.parameters()
-        )
+        param_with_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in stage.parameters())
         assert param_with_grad, "Some parameters should have gradients"
 
     def test_mbconv_sequential_cond_gradient_checkpointing(
@@ -156,9 +150,7 @@ class TestMbConvSequentialCond:
     ) -> None:
         """Test gradient checkpointing functionality."""
         x, cond = sample_data
-        stage = MbConvSequentialCond(
-            in_chans=64, embed_dim=[64], depths=[1], cond_width=128, out_chans=64
-        )
+        stage = MbConvSequentialCond(in_chans=64, embed_dim=[64], depths=[1], cond_width=128, out_chans=64)
         stage = stage.to(device)
         stage.set_grad_checkpointing(True)
         stage.train()
@@ -324,9 +316,7 @@ class TestEdgeCases:
         stage = stage.to(device)
 
         small_x = torch.randn(1, 16, 16, 16, device=device)
-        large_cond = torch.randn(
-            1, 64, 32, 32, device=device
-        )  # Condition larger than input
+        large_cond = torch.randn(1, 64, 32, 32, device=device)  # Condition larger than input
 
         stage.eval()
         with torch.no_grad():
@@ -334,9 +324,7 @@ class TestEdgeCases:
 
         assert output.shape == (1, 32, 16, 16)
 
-    def test_different_spatial_sizes(
-        self, spatial_size: tuple[int, int], device: torch.device
-    ) -> None:
+    def test_different_spatial_sizes(self, spatial_size: tuple[int, int], device: torch.device) -> None:
         """Test stages with different input spatial sizes."""
         h, w = spatial_size
         x = torch.randn(1, 32, h, w, device=device)

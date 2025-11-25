@@ -44,7 +44,5 @@ def contour_expand(kernel_mask, internal_kernel_label, min_kernel_area, kernel_n
             )
             label = label.tolist()
     else:
-        label = ext_module.contour_expand(
-            kernel_mask, internal_kernel_label, min_kernel_area, kernel_num
-        )
+        label = ext_module.contour_expand(kernel_mask, internal_kernel_label, min_kernel_area, kernel_num)
     return label

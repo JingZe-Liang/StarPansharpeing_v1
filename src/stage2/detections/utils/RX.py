@@ -76,9 +76,7 @@ def RX_torch(hsi_img_batch):
     constant_mask = (img_max == img_min).squeeze()
     if constant_mask.any():
         # For constant images, return zero scores
-        result = torch.zeros(
-            B, H, W, device=hsi_img_batch.device, dtype=hsi_img_batch.dtype
-        )
+        result = torch.zeros(B, H, W, device=hsi_img_batch.device, dtype=hsi_img_batch.dtype)
         return result
     hsi_normalized = (hsi_img_batch - img_min) / (img_max - img_min)
 

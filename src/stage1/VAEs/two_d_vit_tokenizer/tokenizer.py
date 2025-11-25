@@ -40,12 +40,8 @@ class VITVQModel(nn.Module):
         self.l2_norm = l2_norm
         self.setup_quantizer()
 
-        self.quant_embed = nn.Linear(
-            in_features=vitconfig["width"], out_features=embed_dim
-        )
-        self.post_quant_embed = nn.Linear(
-            in_features=embed_dim, out_features=dvitconfig["width"]
-        )
+        self.quant_embed = nn.Linear(in_features=vitconfig["width"], out_features=embed_dim)
+        self.post_quant_embed = nn.Linear(in_features=embed_dim, out_features=dvitconfig["width"])
         self.l2_norm = l2_norm
         self.logit_laplace = logit_laplace
         self.clamp_range = clamp_range
@@ -68,27 +64,13 @@ class VITVQModel(nn.Module):
         try:
             logger.info(f"Try EMA state_dict first...")
             state_dict = torch.load(ckpt_path, map_location="cpu")["ema_state_dict"]
-            state_dict = {
-                k[14:]: v
-                for k, v in state_dict.items()
-                if k.startswith("module.module.")
-            }
+            state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("module.module.")}
         except (KeyError, AttributeError):
-            logger.info(
-                f"Failed to find EMA state_dict, try vanilla state_dict instead"
-            )
+            logger.info(f"Failed to find EMA state_dict, try vanilla state_dict instead")
             state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-            state_dict = {
-                k[7:]: v for k, v in state_dict.items() if k.startswith("module.")
-            }
-        filtered_state_dict = {
-            k: v
-            for k, v in state_dict.items()
-            if all([not k.startswith(ig) for ig in ignore_keys])
-        }
-        missing_keys, unexpected_keys = self.load_state_dict(
-            filtered_state_dict, strict=False
-        )
+            state_dict = {k[7:]: v for k, v in state_dict.items() if k.startswith("module.")}
+        filtered_state_dict = {k: v for k, v in state_dict.items() if all([not k.startswith(ig) for ig in ignore_keys])}
+        missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
         logger.info(f"Restored from {ckpt_path}")
         logger.info(f"missing_keys: {missing_keys}")
         logger.info(f"unexpected_keys: {unexpected_keys}")
@@ -248,9 +230,7 @@ if __name__ == "__main__":
     model.eval()
     quant, _, _ = model.encode(x, skip_quantize=True)
     reconstructed = model.decode(quant)
-    print(
-        f"Reconstruction difference: {torch.abs(x - reconstructed).mean().item():.4f}"
-    )
+    print(f"Reconstruction difference: {torch.abs(x - reconstructed).mean().item():.4f}")
 
     # Test clamping
     test_values = torch.tensor([[-1.0, 0.5, 2.0]])

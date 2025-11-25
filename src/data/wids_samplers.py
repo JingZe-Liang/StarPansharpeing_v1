@@ -24,17 +24,14 @@ class IndexFilteredSampler(wids.ChunkedSampler):
         self.chunksize = chunksize
 
         # 将有效索引转换为set以提高查找效率
-        self.valid_indices = (
-            set(valid_indices) if isinstance(valid_indices, list) else valid_indices
-        )
+        self.valid_indices = set(valid_indices) if isinstance(valid_indices, list) else valid_indices
 
         # 计算实际长度
         actual_length = len(self.valid_indices)
 
         # assertion
         assert max(self.valid_indices) <= len(dataset), (
-            f"Max index in valid_indices ({max(self.valid_indices)}) "
-            f"exceeds dataset length ({len(dataset)})."
+            f"Max index in valid_indices ({max(self.valid_indices)}) exceeds dataset length ({len(dataset)})."
         )
 
         effective_dslength = dslength_per_replica
@@ -51,9 +48,7 @@ class IndexFilteredSampler(wids.ChunkedSampler):
         # Ensure effective_dslength is not negative if actual_length is 0
         if actual_length == 0:
             effective_dslength = 0
-            raise ValueError(
-                "No valid indices provided. Please check the valid_indices parameter."
-            )
+            raise ValueError("No valid indices provided. Please check the valid_indices parameter.")
 
         super().__init__(
             dataset,
@@ -84,9 +79,7 @@ class IndexFilteredSampler(wids.ChunkedSampler):
         # If wids.ChunkedSampler doesn't store it as self.chunksize,
         # you might need to retrieve it from self.init_kwargs or store it manually in __init__.
         # For this example, we assume self.chunksize is available and is the intended one.
-        iter_chunksize = getattr(
-            self, "chunksize", 2000
-        )  # Fallback if not set by parent
+        iter_chunksize = getattr(self, "chunksize", 2000)  # Fallback if not set by parent
 
         for i in range(0, len(indices_to_yield), iter_chunksize):
             chunk = indices_to_yield[i : i + iter_chunksize]
@@ -127,20 +120,14 @@ class IndexFilteredDistributedSampler(IndexFilteredSampler):
 
         # 将有效索引分配到各个replica
         if sorted:
-            valid_indices = (
-                list(valid_indices) if isinstance(valid_indices, set) else valid_indices
-            )
+            valid_indices = list(valid_indices) if isinstance(valid_indices, set) else valid_indices
             valid_indices.sort()  # 确保顺序一致
         else:
             valid_indices = list(valid_indices)
 
         # 计算每个replica的索引范围
         num_valid_samples = len(valid_indices)
-        dslength_per_replica = (
-            math.ceil(num_valid_samples / num_replicas)
-            if num_replicas > 1
-            else num_valid_samples
-        )
+        dslength_per_replica = math.ceil(num_valid_samples / num_replicas) if num_replicas > 1 else num_valid_samples
 
         worker_chunk = (num_valid_samples + num_replicas - 1) // num_replicas
         worker_start = rank * worker_chunk

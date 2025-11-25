@@ -212,13 +212,9 @@ class DiffBandsInputConvIn(nn.Module):
         for c in band_lst:
             module = _create_conv_in_module(c=c, **self._in_module_partial_kwargs)
             self.in_modules["conv_in_{}".format(c)] = module
-            log_print(
-                f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}"
-            )
+            log_print(f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}")
 
-    def add_or_drop_modules(
-        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
-    ):
+    def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
         Add or remove convolution modules for specific channels.
 
@@ -242,9 +238,7 @@ class DiffBandsInputConvIn(nn.Module):
                 if add_chan not in self.band_lst:
                     # Add module using saved kwargs
                     conv_key = f"conv_in_{add_chan}"
-                    self.in_modules[conv_key] = _create_conv_in_module(
-                        c=add_chan, **self._in_module_partial_kwargs
-                    )
+                    self.in_modules[conv_key] = _create_conv_in_module(c=add_chan, **self._in_module_partial_kwargs)
 
                     # Update band list
                     self.band_lst.append(add_chan)
@@ -254,9 +248,7 @@ class DiffBandsInputConvIn(nn.Module):
         c_ = x.shape[1]
         module = getattr(self.in_modules, "conv_in_{}".format(c_))
         if module is None:
-            raise ValueError(
-                f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list"
-            )
+            raise ValueError(f"[DiffBandsInputConvIn] no module for channel {c_}, please check the channel list")
         h = module(x)
 
         if self.training and self.is_ddp:
@@ -294,15 +286,11 @@ class DiffBandsInputConvOut(nn.Module):
         for c in band_lst:
             module = _create_conv_out_module(c=c, **self._out_module_partial_kwargs)
             self.in_modules["conv_out_{}".format(c)] = module
-            log_print(
-                f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}"
-            )
+            log_print(f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}")
 
         self.out_channel = None
 
-    def add_or_drop_modules(
-        self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None
-    ):
+    def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
         Add or remove convolution modules for specific channels.
 
@@ -326,9 +314,7 @@ class DiffBandsInputConvOut(nn.Module):
                 if add_chan not in self.band_lst:
                     # Add module using saved kwargs
                     conv_key = f"conv_out_{add_chan}"
-                    self.in_modules[conv_key] = _create_conv_out_module(
-                        c=add_chan, **self._out_module_partial_kwargs
-                    )
+                    self.in_modules[conv_key] = _create_conv_out_module(c=add_chan, **self._out_module_partial_kwargs)
 
                     # Update band list
                     self.band_lst.append(add_chan)
@@ -356,9 +342,7 @@ class DiffBandsInputConvOut(nn.Module):
     @property
     def weight(self):
         # used to get the weight of the conv_out module for GAN loss
-        assert self.out_channel is not None, (
-            "out_channel is not set, please call forward first"
-        )
+        assert self.out_channel is not None, "out_channel is not set, please call forward first"
         module = getattr(self.in_modules, f"conv_out_{self.out_channel}", None)
         if module is None:
             raise ValueError(
@@ -445,9 +429,7 @@ class AdaptiveOutputConvLayer(nn.Module):
         )
 
     @no_type_check
-    def forward(
-        self, x: torch.Tensor, out_channels: Optional[int] = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out_channels: Optional[int] = None) -> torch.Tensor:
         if out_channels is None:
             out_channels = self.conv.out_channels
         x = nn.functional.conv2d(
@@ -474,9 +456,7 @@ def dinov3_patchembeding_to_diffbands(
     check_grads: bool = True,
 ):
     pe_weights = backbone.patch_embed.proj.weight  # (c, 3, 16, 16)
-    assert isinstance(backbone.patch_embed.norm, nn.Identity), (
-        "backbone.patch_embed.norm must be nn.Identity"
-    )
+    assert isinstance(backbone.patch_embed.norm, nn.Identity), "backbone.patch_embed.norm must be nn.Identity"
     assert basic_module == "conv", "only conv is supported for dinov3 compatibility"
     assert 3 in band_lst, "3 must be in band_lst for dinov3 compatibility"
 
@@ -506,9 +486,7 @@ def dinov3_patchembeding_to_nested_bands(
     hidden_dim: int,
 ):
     pe_weights = backbone.patch_embed.proj.weight  # (c, 3, 16, 16)
-    assert isinstance(backbone.patch_embed.norm, nn.Identity), (
-        "backbone.patch_embed.norm must be nn.Identity"
-    )
+    assert isinstance(backbone.patch_embed.norm, nn.Identity), "backbone.patch_embed.norm must be nn.Identity"
 
     conv_in = AdaptiveInputConvLayer(
         nested_max_chan,
@@ -519,9 +497,7 @@ def dinov3_patchembeding_to_nested_bands(
     with torch.no_grad():
         nested_c_pad_n = math.ceil(nested_max_chan / 3)
         # repeat the orignal weights
-        pe_weights_repeated = pe_weights.repeat(1, nested_c_pad_n, 1, 1)[
-            :, :nested_max_chan
-        ]
+        pe_weights_repeated = pe_weights.repeat(1, nested_c_pad_n, 1, 1)[:, :nested_max_chan]
         conv_in.conv.weight.data.copy_(pe_weights_repeated.data)  # type: ignore
     log_print("[Dinov3 Diffbands]: set patch embedding to hidden module for channel 3")
 
