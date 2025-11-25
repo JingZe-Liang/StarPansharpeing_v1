@@ -49,7 +49,12 @@ data:
   # ${eval:"[str(p) for p in Path('data/MMOT').glob('**/*.tar')]"}
   # ${eval:"[str(p) for p in Path('data/miniFrance/hyper_images').glob('*.tar')]"}
   # data/DOTA_v1/hyper_images/DOTA_v1-3_bands-px_1024-{0000..0001}.tar
-  data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar
+  # data/RemoteSAM270k/RemoteSAM-270K/RemoteSAM270K.tar
+  _target_: src.data.litdata_hyperloader.ImageStreamingDataset
+  input_dir: data2/RemoteSAM270k/LitData_hyper_images
+  to_neg_1_1: false
+  force_to_rgb: true
+  # resize_before_transform: 768
 
 output:
   output_dir: "data/RemoteSAM270k/RemoteSAM-270K"
@@ -69,8 +74,9 @@ processor:
   save_original_rgb: false # 保存原始RGB图像用于对比
   condition_save_format: "jpg" # 条件图像保存为PNG格式
   caption_save_format: "json" # 描述保存为文本文件
-  resume_from: JPEGImages/FAST_train_6862_0001 #JPEGImages/loveDAPoca_2348_1_0
+  resume_from: 346140 #JPEGImages/FAST_train_6862_0001 #JPEGImages/loveDAPoca_2348_1_0
   relative_data_dir: conditions_3
   count_tar_num: false
   save_attn_mask: false
   use_linstretch: false
+  dataset_type: "dir"

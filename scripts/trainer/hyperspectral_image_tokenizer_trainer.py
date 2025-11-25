@@ -251,7 +251,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # Optimizer and scheduler
         if self.proxy_model is not None:
-            _params_need_name = "muon" not in cfg.optimizer._target_
+            _params_need_name = "muon" in cfg.optimizer._target_
             if _params_need_name:
                 ps = self.proxy_model.named_parameters()
             else:
@@ -1027,7 +1027,7 @@ class CosmosHyperspectralTokenizerTrainer:
             return x
 
         cfg = self.cfg.proxy_task
-        if "ijepa" in cfg.task:
+        if "ijepa" == cfg.task:
             assert self.proxy_model is not None
 
             # Resize to
@@ -1062,7 +1062,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
             return EasyDict({"proxy_loss": loss, "proxy_loss_breakdowns": {"ijepa_loss": loss}})
 
-        if "lejepa" in cfg.task:
+        if "lejepa" == cfg.task:
             # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
 
             # Resize to
@@ -2098,7 +2098,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "hybrid_pure_cnn_decoder_f16c64p1"
+_key = "ijepa_cosmos_f16c64"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

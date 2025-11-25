@@ -254,7 +254,7 @@ class IJEPANaFlexViT(Transformer):
         super().__init__(cfg)
 
         # Build the LeJEPA head
-        if "lejepa" in cfg.pretrained_type:
+        if "lejepa" == cfg.pretrained_type:
             self._build_jepa_head(cfg)
 
     def _build_jepa_head(self, cfg):
@@ -333,7 +333,11 @@ class IJEPANaFlexViT(Transformer):
 
         ########## Apply JEPA masks
         if masks is not None:
+            # Apply masks
+            prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
             x = self._jepa_apply_masks(x, masks=masks)
+            x = torch.cat([prefixed_tokens, x], dim=1)
+
             # Rope related, rope is applied in attention module
             if rope_embeds is not None:
                 rope_masked = []
@@ -512,7 +516,7 @@ class IJEPANaFlexViT(Transformer):
         output_type: str = "1d",  # fixed it.
         jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
     ):
-        others = None
+        others = {}
 
         if output_type in (None, "2d"):
             out_hw = self._get_output_shape(x)
@@ -524,22 +528,23 @@ class IJEPANaFlexViT(Transformer):
         x = cast(torch.Tensor, x)
 
         ######### IJepa features ########
-        if "ijepa" in self.cfg.pretrained_type:
+        if "ijepa" == self.cfg.pretrained_type:
             # x is the backbone's out
-            others = edict({"ijepa_feat": x})
+            others["ijepa_feat"] = x
 
         ######### Lejepa projector #########
-        elif hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
+        elif hasattr(self, "lejepa_projector") and "lejepa" == self.cfg.pretrained_type:
             x = self._pool(x)
             lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
-            others = edict({"lejepa_proj": lejepa_proj})
+            others["lejepa_proj"] = lejepa_proj
 
-        else:
-            x = x[:, self.num_prefix_tokens :]  # spatial tokens only
+        # spatial tokens only
+        x = x[:, self.num_prefix_tokens :]
+        others["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
         # Return the 1d features as the backbone output
         # not forward by the head
-        return x, others
+        return x, edict(others)
 
     def forward_intermediates(
         self,
@@ -648,6 +653,7 @@ def __test_jepa_naflex():
         in_chans=3,
         out_chans=768,
         unpatch_size=1,
+        reg_tokens=4,
     )
     model = IJEPANaFlexViT(cfg).to("cuda", torch.bfloat16)
 
@@ -664,7 +670,7 @@ def __test_jepa_naflex():
     with torch.autocast("cuda", torch.bfloat16):
         # Target
         with torch.no_grad():
-            h = model(x)
+            h = model._forward_pretrained_backbone(x)[0]
             h = torch.layer_norm(h, (h.size(-1),))
             B = len(h)
             h = apply_masks(h, mask_pred)
@@ -672,7 +678,7 @@ def __test_jepa_naflex():
             print(h_tgt.shape)
 
         # Context
-        h_ctx = model(x, jepa_masks=mask_enc)
+        h_ctx = model._forward_pretrained_backbone(x, jepa_masks=mask_enc)[0]
         print(h_ctx.shape)
         h_pred = predictor(h_ctx, mask_enc, mask_pred)
         print(h_pred.shape)

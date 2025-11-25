@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import json
 import math
 import os
@@ -161,7 +162,7 @@ def prepare_condition_from_webdataset(
     rgb_channels: list[int] | Literal["mean"] | None = None,
     device="cuda",
     to_pil: bool = True,
-    resume_from: str | None = None,
+    resume_from: str | int | None = None,
     use_linstretch: bool = False,
 ):
     if conditions == "all":
@@ -175,22 +176,59 @@ def prepare_condition_from_webdataset(
         else:
             log_print("annotator already loaded: {}".format(cond))
 
-    _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
-    for sample in ds:
-        assert len(sample["__key__"]) == 1, "WebDataset sample key must be a single string."
+    # _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
+    _has_resumed = resume_from is None
+    _is_loader = isinstance(ds, torch.utils.data.DataLoader)
+    _ds_support_getitem = False
+    try:
+        _ = ds[0]
+        _ds_support_getitem = True
+    except:
+        log_print("Dataset type {} does not support indexing, will use iterator.".format(type(ds)), "debug")
 
-        key = sample["__key__"][0]
-        if resume_from is not None and not _resumed_flag:
-            if key != resume_from:
-                # log_print(f"Skipping {key} until resume point {resume_from}.", "debug")
-                yield sample, None
-                continue
-            else:
-                _resumed_flag = True
-                log_print(f"Resuming from {key}.", "info")
+    # Resuming iters
+    if _ds_support_getitem and isinstance(resume_from, int):
+        log_print(f"Resuming from index {resume_from}.", "info")
+
+        def iterator_generator():
+            for i in range(int(resume_from), len(ds)):
+                sample = ds[i]
+                if not _is_loader:
+                    sample["img"] = sample["img"].unsqueeze(0)  # add batch dim
+                    sample["__key__"] = [sample["__key__"]]  # make it a list
+                yield sample
+
+        iterator_ = iterator_generator()
+    elif isinstance(resume_from, str):
+        log_print(f"Resuming from {resume_from}.", "info")
+
+        def iterator_generator():
+            nonlocal _has_resumed
+
+            for sample in ds:
+                key = sample["__key__"][0] if _is_loader else sample["__key__"]
+                if resume_from is not None and not _has_resumed:
+                    if key != resume_from:
+                        # log_print(f"Skipping {key} until resume point {resume_from}.", "debug")
+                        # yield sample, None
+                        continue
+                    else:
+                        _has_resumed = True
+                        log_print(f"Resuming from {key}.", "info")
+                if not _is_loader:
+                    sample["img"] = sample["img"].unsqueeze(0)  # add batch dim
+                    sample["__key__"] = [sample["__key__"]]  # make it a list
+                yield sample
+
+        iterator_ = iterator_generator()
+    else:
+        iterator_ = iter(ds)
+
+    ######### Condtion generation loop
+    for sample in iterator_:
+        assert len(sample["__key__"]) == 1, "Dataset sample key must be a single string."
 
         img = sample["img"]
-
         # if the image is too large, we need to resize it
         if math.prod(tuple(_orig_size := img.shape[-2:])) > 1024 * 1024:
             _orig_size = np.array(tuple(_orig_size))
@@ -218,6 +256,7 @@ def prepare_condition_from_webdataset(
         img = (img * 255.0).astype(np.uint8)
         assert img.ndim == 3 and img.shape[2] == 3, "Image must be RGB format."
 
+        ##### Generate conditions
         ret: dict[str, np.ndarray | Image.Image | str] = {}
         for cond in conditions:
             with torch.inference_mode():

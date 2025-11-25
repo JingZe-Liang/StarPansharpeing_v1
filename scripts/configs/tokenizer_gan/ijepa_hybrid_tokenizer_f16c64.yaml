@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: cosmos_hybrid_f16c32
+  - tokenizer: cosmos_hybrid_f16c64_large
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
@@ -23,10 +23,18 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
+dataset:
+  train_loader:
+    macro_sampled_batch_size:
+      128: 20
+      256: 14
+      512: 5
+
+  weights: [18, 18, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 18, 10, 10, 11, 18]
+
 tokenizer:
   cnn_cfg:
     model:
-      z_channels: 512
       latent_channels: 64
     quantizer_type: null
     use_channel_drop: false
@@ -37,7 +45,7 @@ tokenizer:
   trans_enc_cfg:
     #   in_chans: 1024
     #   out_chans: 1024
-    enable_jepa: true
+    pretrained_type: "ijepa"
   # trans_dec_cfg:
   #   in_chans: 1024
   #   out_chans: 1024
@@ -53,8 +61,11 @@ vq_loss:
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
-    repa_model_type: dinov3
-    repa_model_name: "dinov3_vitl16"
+    # repa_model_type: dinov3
+    # repa_model_name: "dinov3_vitl16"
+    repa_model_type: pe
+    repa_model_name: "PE-Spatial-L14-448"
+    repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
     feature_normalize: false
