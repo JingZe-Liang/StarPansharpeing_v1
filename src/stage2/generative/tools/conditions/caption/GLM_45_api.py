@@ -36,7 +36,7 @@ The image provided to you is a remote sensing image from a satellite. NOT a norm
 Do not use the markdown format.
 Do not use the bullet points or numbered lists.
 All reponse and answers must be in English, NO other languages.
-Do not include any personal opinions or subjective views. 
+Do not include any personal opinions or subjective views.
 """
 
 

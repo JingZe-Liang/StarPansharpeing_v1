@@ -502,12 +502,12 @@ def set_logger_file(
 # *==============================================================
 
 """
-Usages: 
+Usages:
     calling the log_print function or it's alias log function
 
 Or directly calling logger._log or trace, debug, info, warning, error, critical methods,
 with record['extra'] values:
-    extras: 
+    extras:
         - tqdm: used when in a tqdm context, prevent loguru from breaking the progress bar
         - not_rank0_print: used as filter indicator, print all processes even not rank 0
         - once, warn_once, log_once: used to indicate only log once

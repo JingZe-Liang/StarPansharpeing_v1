@@ -240,6 +240,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 if i not in (0, n_res - 1):
                     prev_out_chan = basic_chan * chan_mults[i - 1]
                     # Upsample previous feature and add to current
+                    # Norm + act + conv + upsample
                     prev_out_proj = nn.Sequential(
                         create_norm_act_layer("layernorm2d", prev_out_chan, "silu"),
                         create_conv2d(prev_out_chan, out_chan, kernel_size=3),

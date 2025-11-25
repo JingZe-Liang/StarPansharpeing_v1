@@ -514,7 +514,12 @@ class UNetDecoder(nn.Module):
             # deep supervision is not needed. It's just a convenience thing
             if self.deep_supervision or s == (n_stages_encoder - 1):  # Zihan NOTE: add this
                 # add segmentation layer each layer or only at the last layer
-                seg_layers.append(encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True))
+                seg_layers.append(
+                    nn.Sequential(
+                        create_norm_act_layer("layernorm2d", input_features_skip, "gelu"),
+                        encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
+                    )
+                )
                 logger.debug(f"Make segmentation layer at layer {s}")
 
         self.stages = nn.ModuleList(stages)

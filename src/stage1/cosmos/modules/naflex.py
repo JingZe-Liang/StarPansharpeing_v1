@@ -143,7 +143,7 @@ class NaFlexVitCfg:
     # enable_jepa: bool = False  # enable jepa training
     # enable_lejepa: bool = False  # enable lejepa training
     # 'ijepa', 'lejepa', None for no pretrained task
-    pretrained_type: Any = None
+    pretrained_type: Any = None  # Union[str, list[str]]
 
 
 class Transformer(NaFlexVit):
@@ -246,6 +246,7 @@ class Transformer(NaFlexVit):
             for layer_id, blk in enumerate(self.blocks, 1):
                 rescale(blk.attn.proj.weight.data, layer_id)
                 rescale(blk.mlp.fc2.weight.data, layer_id)
+            logger.info("Rescale the layers initialization for more stable training")
 
 
 class IJEPANaFlexViT(Transformer):

@@ -149,11 +149,6 @@ class PansharpeningTrainer:
 
     def setup_pansharpening_model(self):
         self.pansp_model = hydra.utils.instantiate(self.cfg.pansharp_model)
-        # cast to dtype
-        self.pansp_model = self.pansp_model.to(dtype=self.dtype)
-
-        # cast to dtype
-        # self.pansp_model = self.pansp_model.to(dtype=self.dtype)
 
         # cast to dtype
         # self.pansp_model = self.pansp_model.to(dtype=self.dtype)

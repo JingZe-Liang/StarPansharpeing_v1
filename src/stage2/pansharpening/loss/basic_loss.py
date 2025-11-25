@@ -1309,7 +1309,7 @@ class DRMFFusionLoss(nn.Module):
 
         # split boundary gt
         no_batch_ndim = img_fusion.ndim - 1
-        broadcast_fn = lambda x: x.reshape(-1, *[1] * no_batch_ndim)  # noqa: py3.11 supported
+        broadcast_fn = lambda x: x.reshape(-1, *[1] * no_batch_ndim)  # noqa: E731
 
         # img_A: ir/under/MRI, img_B: vi/over/spect
         if isinstance(boundary_gt, (tuple, list)):

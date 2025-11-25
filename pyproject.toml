@@ -158,6 +158,7 @@ ignore = [
     "E731",    # lambda assigned to variable
     "E741",    # multiple statements on one line (semicolon)
     "E701",    # multiple statements on one line (colon)
+    "E721",    # do not compare types directly
     "E731",    # lambda
     "E501",    # line too long
     "E722",    # do not use bare except
