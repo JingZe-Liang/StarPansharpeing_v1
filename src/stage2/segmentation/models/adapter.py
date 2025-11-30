@@ -1,20 +1,59 @@
-from typing import List, Tuple, Type, Union
+import sys
+from typing import List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
-from timm.layers.create_conv2d import create_conv2d
-from timm.layers.create_norm_act import create_norm_act_layer, get_norm_act_layer
-from timm.layers.squeeze_excite import SqueezeExcite
-from torch import Tensor
-
-from src.stage1.utilities.losses.dinov3.dinov3.models.vision_transformer import (
-    DinoVisionTransformer,
+from loguru import logger
+from timm.layers import (
+    create_conv2d,
+    create_norm_act_layer,
+    get_act_layer,
+    get_norm_act_layer,
+    get_norm_layer,
 )
+from timm.layers.norm import LayerNorm2d
+from timm.layers.squeeze_excite import SqueezeExcite
+from timm.layers.weight_init import lecun_normal_
+from torch import Tensor
+from torch.nn.modules.conv import _ConvNd
 
-from ...layers import DINOv3_Adapter
-from .vitamin_conv import MbConvSeqentialCond
+from ...layers.dinov3_adapter import DINOv3_Adapter
+from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage
+
+# sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
+# from dinov3.eval.segmentation.models.backbone.dinov3_adapter import (  # type: ignore
+#     DINOv3_Adapter,
+# )
+# from dinov3.models.vision_transformer import (  # type: ignore
+#     DinoVisionTransformer,
+# )
+
+
+def initialize(module) -> None:
+    if isinstance(module, _ConvNd):
+        if module.weight.requires_grad:
+            nn.init.xavier_normal_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    norm_cls = (
+        nn.LayerNorm,
+        nn.RMSNorm,
+        *[get_norm_layer(n) for n in ["layernorm", "layernorm2d", "rmsnorm", "rmsnorm2d"]],
+    )
+    if isinstance(module, norm_cls):
+        if module.weight.requires_grad:
+            nn.init.ones_(module.weight)
+            if hasattr(module, "bias") and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    if isinstance(module, nn.Linear):
+        if module.weight.requires_grad:
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
 
 class GatedChannelSelection(nn.Module):
@@ -98,7 +137,7 @@ class DepthwiseSeparableConv(nn.Module):
         stride: int = 1,
         padding: int = 1,
         bias: bool = False,
-        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        norm: type[nn.Module] | str = LayerNorm2d,
         act: type[nn.Module] | str = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -129,7 +168,7 @@ class SharedBasisProjector(nn.Module):
         in_ch: int,
         rank: int,
         out_ch_list: List[int],
-        norm: Type[nn.Module] = nn.BatchNorm2d,
+        norm: Type[nn.Module] = LayerNorm2d,
         act: Type[nn.Module] = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -167,7 +206,7 @@ class FAPM(nn.Module):
         in_ch: int,
         inner_ch: int,
         out_ch_list: list[int],
-        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        norm: type[nn.Module] | str = LayerNorm2d,
         act: type[nn.Module] | str = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -279,7 +318,7 @@ class DINOv3EncoderAdapter(nn.Module):
         adapter_type: str = "default",
         rank: int = 256,
         conv_op=nn.Conv2d,
-        norm_op: Union[None, Type[nn.Module], str] = nn.BatchNorm2d,
+        norm_op: Union[None, Type[nn.Module], str] = LayerNorm2d,
         norm_op_kwargs: dict | None = None,
         dropout_op=None,
         dropout_op_kwargs: dict | None = None,
@@ -300,6 +339,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.dropout_op = dropout_op
         self.dropout_op_kwargs = dropout_op_kwargs
 
+        # in_ch = self.dinov3_adapter.backbone.embed_dim
         in_ch = int(self.dinov3_adapter.embed_dim)
 
         self.fapm = FAPM(
@@ -362,14 +402,17 @@ class UNetDecoder(nn.Module):
         n_conv_per_stage: int | list[int] = 2,
         depths_per_stage: int | list[int] = 2,
         nonlin_first: bool = False,
-        norm_op: Union[Type[nn.Module], str, None] = None,
-        norm_op_kwargs: Union[dict, None] = None,
+        norm_op: str = "layernorm2d",
+        norm_op_kwargs: dict | None = None,
         dropout_op=None,
         dropout_op_kwargs: dict | None = None,
         nonlin: Union[Type[torch.nn.Module], None] = None,
         nonlin_kwargs: dict | None = None,
         conv_bias: Union[bool, None] = None,
         deep_supervision: bool = False,
+        has_latent_condition: bool = False,
+        block_types: list[str] = ["mbconv", "mbconv", "mbconv", "mbconv"],
+        block_kwargs: dict = {},
     ):
         """
         This class needs the skips of the encoder as input in its forward.
@@ -388,9 +431,10 @@ class UNetDecoder(nn.Module):
         """
         super().__init__()
         self.deep_supervision = deep_supervision
-        self.encoder = encoder
         self.num_classes = num_classes
+        conv_op = encoder.conv_op
         n_stages_encoder = len(encoder.output_channels)
+
         if isinstance(n_conv_per_stage, int):
             n_conv_per_stage = [n_conv_per_stage] * (n_stages_encoder - 1)
         if isinstance(depths_per_stage, int):
@@ -398,7 +442,7 @@ class UNetDecoder(nn.Module):
         assert len(n_conv_per_stage) == len(depths_per_stage) == n_stages_encoder - 1, (
             "n_conv_per_stage must have as many entries as we have "
             "resolution stages - 1 (n_stages in encoder - 1), "
-            "here: %d" % n_stages_encoder
+            "here: {}".format(n_stages_encoder)
         )
 
         # transpconv_op = get_matching_convtransp(conv_op=encoder.conv_op)
@@ -408,7 +452,8 @@ class UNetDecoder(nn.Module):
         dropout_op = encoder.dropout_op if dropout_op is None else dropout_op
         dropout_op_kwargs = encoder.dropout_op_kwargs if dropout_op_kwargs is None else dropout_op_kwargs
         nonlin = encoder.nonlin if nonlin is None else nonlin
-        nonlin_kwargs = encoder.nonlin_kwargs if nonlin_kwargs is None else nonlin_kwargs
+        if isinstance(nonlin, str):
+            nonlin = get_act_layer(nonlin)
 
         # we start with the bottleneck and work out way up
         stages = []
@@ -418,6 +463,7 @@ class UNetDecoder(nn.Module):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
+            block_type = block_types[s - 1]
             transpconvs.append(
                 nn.ConvTranspose2d(
                     input_features_below,
@@ -427,25 +473,55 @@ class UNetDecoder(nn.Module):
                     bias=conv_bias,
                 )
             )
+
             # input features to conv is 2x input_features_skip (concat input_features_skip with transpconv output)
-            stages.append(
-                MbConvSeqentialCond(
+            embed_dim = [2 * input_features_skip] * depths_per_stage[s - 1]
+            depths = [n_conv_per_stage[s - 1]] * depths_per_stage[s - 1]
+
+            ###### Build blocks ######
+            if block_type == "mbconv":
+                stage = MbConvSequentialCond(
                     in_chans=2 * input_features_skip,
                     cond_width=latent_width,
                     out_chans=input_features_skip,
                     # only 1 stage
-                    embed_dim=[2 * input_features_skip] * depths_per_stage[s - 1],
-                    depths=[n_conv_per_stage[s - 1]] * depths_per_stage[s - 1],
+                    embed_dim=embed_dim,
+                    depths=depths,
                     norm_layer=norm_op,
                     act_layer=nonlin,
                     expand_ratio=1,
                 )
+            elif block_type == "nat":
+                stage = Spatial2DNatStage(
+                    in_chans=2 * input_features_skip,
+                    embed_dim=embed_dim,
+                    depths=depths,
+                    cond_width=latent_width,
+                    out_chans=input_features_skip,
+                    norm_layer=norm_op,
+                    drop_path=0.0,
+                    **block_kwargs,
+                )
+            else:
+                raise ValueError(f"Unsupported block_type: {block_type}")
+            stages.append(stage)
+            logger.debug(
+                f"Build stage {s}: {block_type}, inp_chans={2 * input_features_skip},"
+                f"out_chans={input_features_skip}, depths={depths}, embed_dim={embed_dim}"
             )
 
             # we always build the deep supervision outputs so that we can always load parameters. If we don't do this
             # then a model trained with deep_supervision=True could not easily be loaded at inference time where
             # deep supervision is not needed. It's just a convenience thing
-            seg_layers.append(encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True))
+            if self.deep_supervision or s == (n_stages_encoder - 1):  # Zihan NOTE: add this
+                # add segmentation layer each layer or only at the last layer
+                seg_layers.append(
+                    nn.Sequential(
+                        create_norm_act_layer("layernorm2d", input_features_skip, "gelu"),
+                        conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
+                    )
+                )
+                logger.debug(f"Make segmentation layer at layer {s}")
 
         self.stages = nn.ModuleList(stages)
         self.transpconvs = nn.ModuleList(transpconvs)

@@ -17,6 +17,7 @@ tokenizer_feature:
   model_name: hybrid_tokenizer_b16
   # encoder settings
   pretrained_size: 512
+  in_channels: ${dataset.consts.bands}
   conv_inplane: 64
   drop_path_rate: 0.2
   with_cffn: true
@@ -38,6 +39,7 @@ adapter:
   drop: 0.0
   act_first: false
   conv_bias: false
+  block_types: ["nat", "nat", "mbconv", "mbconv"]
 
 # Change Detection Stage Configuration
 cd_stage:
@@ -51,8 +53,8 @@ cd_stage:
   depth: 1
 
 # UNet Configuration
-input_channels: 3
-num_classes: 7
+input_channels: ${dataset.consts.bands}
+num_classes: ${dataset.consts.num_classes}
 deep_supervision: false
 n_stages: 4
 use_latent: true

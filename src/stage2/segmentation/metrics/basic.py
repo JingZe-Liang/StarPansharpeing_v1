@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from jaxtyping import Int
 from torch import Tensor
-from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Recall
+from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Precision, Recall
 from torchmetrics.segmentation import GeneralizedDiceScore, MeanIoU
 
 
@@ -18,10 +18,18 @@ class HyperSegmentationScore(nn.Module):
         reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
         per_class: bool = False,
         include_bg: bool = False,
+        input_format: Literal["one-hot", "index", "mixed"] = "index",
         use_aggregation: bool = False,
     ):
         super().__init__()
         self.accuracy = Accuracy(
+            task=task,
+            num_classes=n_classes,
+            ignore_index=ignore_index,
+            top_k=top_k,
+            average=reduction,
+        )
+        self.precision = Precision(
             task=task,
             num_classes=n_classes,
             ignore_index=ignore_index,
@@ -37,11 +45,11 @@ class HyperSegmentationScore(nn.Module):
         )
         self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
         self.dice_score = GeneralizedDiceScore(
-            include_background=include_bg,
-            num_classes=n_classes,
-            per_class=per_class,
+            include_background=include_bg, num_classes=n_classes, per_class=per_class, input_format=input_format
         )
-        self.mean_iou = MeanIoU(num_classes=n_classes, per_class=per_class, include_background=include_bg)
+        self.mean_iou = MeanIoU(
+            num_classes=n_classes, per_class=per_class, include_background=include_bg, input_format=input_format
+        )
         self.f1_score = F1Score(
             task=task,
             num_classes=n_classes,
@@ -52,6 +60,7 @@ class HyperSegmentationScore(nn.Module):
 
         self._all_metric_fns = dict(
             accuracy=self.accuracy,
+            precision=self.precision,
             recall=self.recall,
             kappa=self.cohen_kappa,
             dice=self.dice_score,
@@ -81,7 +90,21 @@ class HyperSegmentationScore(nn.Module):
     def reset(self):
         self._reset_all_metrics()
 
-    def forward(self, pred: Int[Tensor, "... h w"], gt: Int[Tensor, "... h w"]):
+    def forward(
+        self,
+        pred: Int[Tensor, "... h w"],
+        gt: Int[Tensor, "... h w"],
+        mask: Int[Tensor, "... h w"] | None = None,
+    ):
+        """
+        Forward metrics
+            pred: Predicted labels (batch_size, height, width)
+            gt: Ground truth labels (batch_size, height, width)
+            mask: Optional mask to ignore certain pixels (batch_size, height, width)
+        """
+        if mask is not None:
+            pred = torch.masked_select(pred, mask)  # 1d image
+            gt = torch.masked_select(gt, mask)  # 1d gt map
         self._update_all_metrics(pred, gt)
         metrics = self._compute_all_metrics()
         return metrics
@@ -93,8 +116,9 @@ class HyperSegmentationScore(nn.Module):
 def test_metrics():
     """Test basic functionality of HyperSegmentationScore with random data"""
     # Create test data
-    pred = torch.randint(0, 5, (2, 32, 32))  # 2 images, 32x32, 5 classes
-    gt = torch.randint(0, 5, (2, 32, 32))  # 2 images, 32x32, 5 classes
+    generator = torch.Generator()
+    pred = torch.randint(0, 5, (2, 32, 32), generator=generator.manual_seed(42))  # 2 images, 32x32, 5 classes
+    gt = torch.randint(0, 5, (2, 32, 32), generator=generator.manual_seed(43))  # 2 images, 32x32, 5 classes
 
     # Initialize metrics
     metrics = HyperSegmentationScore(

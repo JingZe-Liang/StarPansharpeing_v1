@@ -8,24 +8,46 @@ Author: Zihan Cao
 Date: 2025/09/05
 """
 
+import math
 import os
 import warnings
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import torch
+from easydict import EasyDict as edict
 from einops import rearrange
+from kornia.augmentation import (
+    AugmentationSequential,
+    RandomHorizontalFlip,
+    RandomRotation,
+    RandomSolarize,
+    RandomVerticalFlip,
+)
+from loguru import logger
 from scipy import io as sio
+from skimage.transform import rescale, resize
 from torch.utils.data import DataLoader, Dataset
 
 from src.data.window_slider import WindowSlider
-from src.utilities.logging import log
 
 from .label_centric_patcher import label_centrical_patcher
 
 # Suppress warnings from scipy.io
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+def get_default_transform():
+    """Get default augmentation transform for hyperspectral images."""
+    transform = AugmentationSequential(
+        RandomHorizontalFlip(p=0.5),
+        RandomVerticalFlip(p=0.5),
+        RandomRotation(degrees=90, p=0.5),
+        data_keys=["input", "input", "mask"],
+        same_on_batch=False,
+    )
+    return transform
 
 
 class HyperspectralChangeDetectionDataset(Dataset):
@@ -80,6 +102,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
             "image2_key": "imghl",
             "gt_key": "label",
             "shape": (450, 140, 155),
+            "num_classes": 3,
             "class_names": ["unknown", "unchanged", "changed"],
         },
     }
@@ -89,46 +112,60 @@ class HyperspectralChangeDetectionDataset(Dataset):
         data_root: str,
         dataset_name: str,
         patch_size: Optional[int] = None,
+        patch_mode: str = "random_0.2",
         stride: int = 1,
-        transform: Optional[Any] = None,
+        transform: Optional[Any] | Literal["default"] = None,
         normalize: bool = True,
+        to_neg_1_1: bool = False,
     ):
         self.data_root = data_root
         self.dataset_name = dataset_name
         self.patch_size = patch_size
+        self.patch_mode = patch_mode
         self.stride = stride
+        if transform == "default":
+            transform = get_default_transform()
+        if transform is not None:
+            logger.info(f"[CD Dataset]: use transform: {transform}")
         self.transform = transform
         self.normalize = normalize
+        self.to_neg_1_1 = to_neg_1_1
 
         if dataset_name not in self.DATASET_CONFIGS:
             raise ValueError(
                 f"Unknown dataset: {dataset_name}. Available datasets: {list(self.DATASET_CONFIGS.keys())}"
             )
 
-        self.config = self.DATASET_CONFIGS[dataset_name]
+        self.config = edict(self.DATASET_CONFIGS[dataset_name])
 
         # Load data
         self.image1, self.image2, self.gt = self._load_data()
 
         # Generate patches or use full image mode
         if patch_size is not None:
-            self.patches = self._generate_patches()
+            if patch_mode == "slide":
+                self.patches = self._generate_patches_slide_windows()
+            elif patch_mode.startswith("random"):
+                ratio = float(patch_mode.split("_")[1])
+                self.patches = self._generate_patches_rnd_splits(train_splits=ratio)
+            else:
+                raise ValueError(f"Unknown patch mode: {patch_mode}")
             self.full_image_mode = False
-            log(f"Loaded {dataset_name} dataset in patch mode:", level="debug")
-            log(f"  Image1 shape: {self.image1.shape}", level="debug")
-            log(f"  Image2 shape: {self.image2.shape}", level="debug")
-            log(f"  GT shape: {self.gt.shape}", level="debug")
-            log(f"  Number of patches: {len(self.patches)}", level="debug")
-            log(f"  Classes: {np.unique(self.gt)}", level="debug")
+            logger.debug(f"Loaded {dataset_name} dataset in patch mode:")
+            logger.debug(f"  Image1 shape: {self.image1.shape}")
+            logger.debug(f"  Image2 shape: {self.image2.shape}")
+            logger.debug(f"  GT shape: {self.gt.shape}")
+            logger.debug(f"  Number of patches: {len(self.patches)}")
+            logger.debug(f"  Classes: {np.unique(self.gt)}")
         else:
             self.full_image_mode = True
-            log(f"Loaded {dataset_name} dataset in full image mode:", level="debug")
-            log(f"  Image1 shape: {self.image1.shape}", level="debug")
-            log(f"  Image2 shape: {self.image2.shape}", level="debug")
-            log(f"  GT shape: {self.gt.shape}", level="debug")
-            log(f"  Classes: {np.unique(self.gt)}", level="debug")
+            logger.debug(f"Loaded {dataset_name} dataset in full image mode:")
+            logger.debug(f"  Image1 shape: {self.image1.shape}")
+            logger.debug(f"  Image2 shape: {self.image2.shape}")
+            logger.debug(f"  GT shape: {self.gt.shape}")
+            logger.debug(f"  Classes: {np.unique(self.gt)}")
 
-    def _load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _load_data(self, remap_unknown_to: int | None = 255) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Load hyperspectral images and ground truth."""
         # Load first image (t1)
         image1_path = os.path.join(self.data_root, self.config["image1_path"])
@@ -151,9 +188,18 @@ class HyperspectralChangeDetectionDataset(Dataset):
             gt_index_2 = gt == 2
             gt[gt_index_1] = 2
             gt[gt_index_2] = 1
+            # 0 to unchanged ?
+            gt[gt == 0] = 2
         elif self.dataset_name == "Hermiston":
             gt[gt > 0] = 1
             gt[gt == 0] = 2
+
+        # All mapped to 1-changed, 0-unchanged
+        if remap_unknown_to is not None:
+            gt[gt == 0] = remap_unknown_to
+            gt[gt == 2] = 0  # unchanged
+            # gt[gt == 1] = 1  # changed
+        gt = gt.astype(np.int32)
 
         # Ensure consistent shapes
         if image1.shape != image2.shape:
@@ -164,7 +210,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
 
         # Normalize if requested
         if self.normalize:
-            image1, image2 = self._normalize_image(image1, image2)
+            image1, image2 = self._normalize_image(image1, image2, to_neg_1_1=self.to_neg_1_1)
 
         return image1, image2, gt
 
@@ -172,7 +218,8 @@ class HyperspectralChangeDetectionDataset(Dataset):
         self,
         image1: np.ndarray,
         image2: np.ndarray,
-        quantile_q: float = 0.99,
+        quantile_q: float = 1.0,
+        to_neg_1_1: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Normalize image to [0, 1] range using shared min-max normalization across both images."""
         # Convert to torch tensors
@@ -210,9 +257,123 @@ class HyperspectralChangeDetectionDataset(Dataset):
         img1 = img1.clamp_(0.0, 1.0)
         img2 = img2.clamp_(0.0, 1.0)
 
+        if to_neg_1_1:
+            img1.mul_(2.0).sub_(1.0)
+            img2.mul_(2.0).sub_(1.0)
+
         return img1.numpy(), img2.numpy()
 
-    def _generate_patches(self) -> List[Dict]:
+    def _generate_patches_rnd_splits(self, train_splits: float = 0.2):
+        """Splits images into patches in one training-split ratio.
+
+        Generate random patch positions ensuring all patches stay within image boundaries.
+        Samples patches separately for changed and unchanged pixels to maintain class balance.
+
+        Parameters
+        ----------
+        train_splits : float
+            Ratio of valid patch positions to sample (0.0 to 1.0)
+
+        Returns
+        -------
+        List[Dict]
+            List of patch dictionaries with keys 'i', 'j', 'center_i', 'center_j'
+            representing patch top-left corner and center coordinates
+        """
+        h, w = self.gt.shape[-2:]
+        ps = self.patch_size
+        assert ps is not None
+
+        # Calculate valid patch top-left corner ranges
+        # Patch covers [i:i+ps, j:j+ps], so i can be 0 to h-ps, j can be 0 to w-ps
+        max_i = h - ps
+        max_j = w - ps
+
+        if max_i < 0 or max_j < 0:
+            raise ValueError(f"Image size ({h}, {w}) is smaller than patch size {ps}")
+
+        # Get all valid patch positions and their center labels
+        # Ignore invalid labels (e.g., 255)
+        INVALID_LABELS = [255, -1]  # Labels to ignore
+
+        # Group positions by their center pixel label
+        positions_by_label = {}  # Dict to store positions for each label
+
+        for i in range(max_i + 1):
+            for j in range(max_j + 1):
+                center_i = i + ps // 2
+                center_j = j + ps // 2
+                center_label = self.gt[center_i, center_j]
+
+                # Skip invalid labels
+                if center_label in INVALID_LABELS:
+                    continue
+
+                position = {
+                    "i": i,
+                    "j": j,
+                    "center_i": center_i,
+                    "center_j": center_j,
+                }
+
+                # Group positions by label
+                if center_label not in positions_by_label:
+                    positions_by_label[center_label] = []
+                positions_by_label[center_label].append(position)
+
+        # Get unique valid classes
+        valid_classes = sorted(positions_by_label.keys())
+        n_classes = len(valid_classes)
+
+        if n_classes == 0:
+            logger.warning("No valid positions found for sampling")
+            return []
+
+        # Log class distribution
+        class_info = {label: len(positions_by_label[label]) for label in valid_classes}
+        logger.info(f"Found {n_classes} classes with distribution: {class_info}")
+
+        # Calculate total target patches
+        total_valid_positions = sum(len(positions) for positions in positions_by_label.values())
+        total_target_patches = int(total_valid_positions * train_splits)
+
+        # For balanced sampling, take equal numbers from each class
+        # If some classes have fewer samples, sample all from those classes
+        min_class_size = min(len(positions) for positions in positions_by_label.values())
+
+        if min_class_size == 0:
+            logger.warning("Some classes have no valid positions")
+            return []
+
+        # Calculate patches per class for balanced sampling
+        patches_per_class = min(min_class_size, total_target_patches // n_classes)
+
+        logger.info(
+            f"Sampling {patches_per_class} patches from each of {n_classes} classes (total: {patches_per_class * n_classes})"
+        )
+
+        generator = torch.Generator().manual_seed(2025)
+        patches = []
+
+        # Sample from each class
+        for class_label in valid_classes:
+            class_positions = positions_by_label[class_label]
+
+            if len(class_positions) <= patches_per_class:
+                # Take all positions if fewer than requested
+                selected_positions = class_positions
+                logger.info(f"Selected all {len(selected_positions)} patches from class {class_label}")
+            else:
+                # Randomly sample positions
+                indices = torch.randperm(len(class_positions), generator=generator)[:patches_per_class]
+                selected_positions = [class_positions[idx] for idx in indices]
+                logger.info(f"Selected {len(selected_positions)} patches from class {class_label}")
+
+            patches.extend(selected_positions)
+
+        return patches
+
+    def _generate_patches_slide_windows(self) -> List[Dict]:
         """Generate patch coordinates for training/testing."""
         height, width = self.gt.shape
         patches = []
@@ -221,15 +382,23 @@ class HyperspectralChangeDetectionDataset(Dataset):
         if self.patch_size is None:
             raise ValueError("patch_size must be specified for patch generation")
 
+        # If not divisible, adjust the image using resize
+        # if (height - self.patch_size) % self.stride != 0 or (width - self.patch_size) % self.stride != 0:
+        #     # resize larger
+        #     lh, lw = (
+        #         math.ceil(height / self.patch_size) * self.patch_size,
+        #         math.ceil(width / self.patch_size) * self.patch_size,
+        #     )
+        #     self.image1 = resize(self.image1, (lh, lw), order=2, mode="constant", cval=0)
+        #     self.image2 = resize(self.image2, (lh, lw), order=2, mode="constant", cval=0)
+        #     self.gt = resize(self.gt, (lh, lw), order=0, mode="constant", cval=255)  # 255 is ignored label
+        #     logger.info(f"Resize images from ({height}, {width}) to ({lh}, {lw}) for patch extraction.")
+
         for i in range(0, height - self.patch_size + 1, self.stride):
             for j in range(0, width - self.patch_size + 1, self.stride):
                 # Get center pixel label (for classification)
                 center_i = i + self.patch_size // 2
                 center_j = j + self.patch_size // 2
-
-                # Skip unknown pixels (label 0 typically means unknown/no data)
-                # if self.gt[center_i, center_j] == 0:
-                #     continue
 
                 patches.append(
                     {
@@ -250,7 +419,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
         else:
             return len(self.patches)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a patch pair or full images and their labels."""
         if self.full_image_mode:
             # Return full images
@@ -263,7 +432,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
                 image1 = self.transform(image1)
                 image2 = self.transform(image2)
 
-            return image1, image2, gt
+            return {"img1": image1, "img2": image2, "gt": gt}
         else:
             # Return patch
             patch_info = self.patches[idx]
@@ -285,7 +454,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
                 patch1 = self.transform(patch1)
                 patch2 = self.transform(patch2)
 
-            return patch1, patch2, label
+            return {"img1": patch1, "img2": patch2, "gt": label}
 
 
 class FullImageChangeDetectionDataset(Dataset):
@@ -306,6 +475,7 @@ class FullImageChangeDetectionDataset(Dataset):
         dataset_name: str,
         transform: Optional[Any] = None,
         normalize: bool = True,
+        to_neg_1_1: bool = False,
     ):
         # Use the base dataset with patch_size=None for full image mode
         self.base_dataset = HyperspectralChangeDetectionDataset(
@@ -314,12 +484,13 @@ class FullImageChangeDetectionDataset(Dataset):
             patch_size=None,
             transform=transform,
             normalize=normalize,
+            to_neg_1_1=to_neg_1_1,
         )
 
     def __len__(self) -> int:
         return len(self.base_dataset)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         return self.base_dataset[idx]
 
 
@@ -333,6 +504,7 @@ def create_change_detection_dataloader(
     num_workers: int = 4,
     transform: Optional[Any] = None,
     normalize: bool = True,
+    to_neg_1_1: bool = False,
 ):
     """
     Create a DataLoader for hyperspectral change detection dataset.
@@ -358,6 +530,7 @@ def create_change_detection_dataloader(
         stride=stride,
         transform=transform,
         normalize=normalize,
+        to_neg_1_1=to_neg_1_1,
     )
 
     dataloader = DataLoader(
@@ -375,6 +548,7 @@ def create_changed_detection_patch_loader(
     data_root: str,
     dataset_name: str,
     patch_size: int = 32,
+    patch_mode: str = "random_0.2",
     stride: int = 1,
     batch_size: int = 16,
     micro_batch_size: int = 16,
@@ -383,25 +557,29 @@ def create_changed_detection_patch_loader(
     transform: Optional[Any] = None,
     normalize: bool = True,
     changed_label=1,
-    unchanged_label=2,
+    unchanged_label=0,
+    to_neg_1_1=False,
+    patch_outside=False,
 ):
     dataset = HyperspectralChangeDetectionDataset(
         data_root=data_root,
         dataset_name=dataset_name,
-        patch_size=None,
+        patch_size=patch_size,
+        patch_mode=patch_mode,
         stride=stride,
         transform=transform,
+        to_neg_1_1=to_neg_1_1,
     )
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-    )
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
     def yield_fn():
-        for img1, img2, label in dataloader:
+        """
+        Dataloader return pre-clipped patches or full images,
+        and in this function, clip another patches that around the changed labels.
+        """
+        for batch in dataloader:
+            img1, img2, label = batch["img1"], batch["img2"], batch["gt"]
             for img1_p, img2_p, label_p in label_centrical_patcher(
                 img1,
                 img2,
@@ -413,8 +591,11 @@ def create_changed_detection_patch_loader(
             ):
                 yield img1_p, img2_p, label_p
 
-    yield_gen_loader = yield_fn()
-    return dataset, yield_gen_loader
+    if patch_outside:
+        yield_gen_loader = yield_fn()
+        return dataset, yield_gen_loader
+    else:
+        return dataset, dataloader
 
 
 def create_full_image_dataloader(
@@ -425,6 +606,7 @@ def create_full_image_dataloader(
     num_workers: int = 4,
     transform: Optional[Any] = None,
     normalize: bool = True,
+    to_neg_1_1=False,
 ):
     """
     Create a DataLoader for full image hyperspectral change detection.
@@ -446,6 +628,7 @@ def create_full_image_dataloader(
         dataset_name=dataset_name,
         transform=transform,
         normalize=normalize,
+        to_neg_1_1=to_neg_1_1,
     )
 
     dataloader = DataLoader(
@@ -460,6 +643,23 @@ def create_full_image_dataloader(
 
 
 # * --- Test --- #
+
+
+def test_change_detection_dataloader():
+    ds, dl = create_changed_detection_patch_loader(
+        "data/Downstreams/ChangeDetection/mat_2",
+        dataset_name="Hermiston",
+        patch_size=128,
+        stride=1,
+        batch_size=16,
+        shuffle=False,
+        patch_mode="random_0.2",
+    )
+    print(f"Dataset has {len(ds)} samples.")
+    for batch in dl:
+        img1, img2, label = batch["img1"], batch["img2"], batch["gt"]
+        print(img1.shape, img2.shape, label.shape)
+        # break  # 只测试第一个batch
 
 
 def test_full_patcher_dataloader():
@@ -489,4 +689,8 @@ def test_full_patcher_dataloader():
 
 # Example usage
 if __name__ == "__main__":
-    test_full_patcher_dataloader()
+    """
+    python -m src.stage2.change_detection.data.mat_cd_loader
+    """
+    test_change_detection_dataloader()
+    # test_full_patcher_dataloader()

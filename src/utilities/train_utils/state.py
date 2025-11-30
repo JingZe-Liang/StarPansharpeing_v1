@@ -6,6 +6,7 @@ import accelerate
 import numpy as np
 import torch
 import torch.distributed as dist
+from loguru import logger
 from torch import Tensor
 from torchmetrics.aggregation import (
     MaxMetric,
@@ -15,8 +16,6 @@ from torchmetrics.aggregation import (
     RunningSum,
 )
 from torchmetrics.metric import Metric
-
-from src.utilities.logging.print import log_print
 
 
 class SingletonMeta(type):
@@ -51,10 +50,9 @@ class MultiObjectMeta(type):
             # if no instances, create the first instance
             instance = super().__call__(*args, **call_kwargs)
             if instance_name is not None:
-                log_print(
+                logger.warning(
                     f"Given {instance_name=} as the instance key, but not initialized yet, "
                     "using class as the default key.",
-                    "warning",
                 )
             new_instance_key = cls  # default instance uses cls as the key
             cls._instances[new_instance_key] = instance
@@ -94,7 +92,7 @@ class StepsCounter(metaclass=SingletonMeta):
         **__meta_kwargs,  # This is to allow for future extensions without breaking the interface
     ):
         if StepsCounter._initialized:
-            log_print(
+            logger.warning(
                 "StepsCounter is a singleton. Attempting to re-initialize. "
                 "New step_names will be added to the existing instance.",
                 warn_once=True,
@@ -335,7 +333,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                     self.round_value(tracked_oped, round_decimals) if round_decimals is not None else tracked_oped
                 )
             elif none_if_not_found:
-                log_print(f"Tracked values for {n} not found", "warning")
+                logger.warning(f"Tracked values for {n} not found")
                 tracked_values_oped[n] = None
 
         return tracked_values_oped
@@ -356,7 +354,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         loss_metrics_values_ret = {}
         for n in name:
             if n not in loss_metrics_values and none_if_not_found:
-                log_print(f"Loss metric value for {n} not found", "warning")
+                logger.warning(f"Loss metric value for {n} not found")
                 loss_metrics_values_ret[n] = None
             else:
                 loss_metrics_values_ret[n] = loss_metrics_values[n]
@@ -514,12 +512,12 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
                 # overwrite the instance with the synchronized instance
                 instance_key = instance_name if instance_name is not None else cls
                 cls._instances[instance_key] = instance_cp
-                log_print(
+                logger.info(
                     f"LossMetricTracker instance {instance_name} synchronized and overwritten.",
                 )
             return instance_cp
         else:
-            log_print("Torch distributed is not initialized. Skipping sync_state.", "debug")
+            logger.debug("Torch distributed is not initialized. Skipping sync_state.")
             return instance
 
     @classmethod
@@ -533,9 +531,9 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
 
         if instance_name in cls._instances:
             del cls._instances[instance_name]
-            log_print(f"Instance {instance_name} removed from {cls.__name__}.", "info")
+            logger.info(f"Instance {instance_name} removed from {cls.__name__}.")
         else:
-            log_print(f"Instance {instance_name} not found in {cls.__name__}.", "warning")
+            logger.warning(f"Instance {instance_name} not found in {cls.__name__}.")
 
 
 # * --- Utilities --- * #

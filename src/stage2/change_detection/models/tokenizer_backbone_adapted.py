@@ -9,6 +9,7 @@ from timm.layers import create_conv2d, get_act_layer, get_norm_layer
 from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
+from torch.nn.modules.module import _IncompatibleKeys
 
 from src.stage1.cosmos.cosmos_hybrid import CosmosHybridTokenizer
 from src.utilities.config_utils import (
@@ -70,10 +71,10 @@ def _create_default_cfg():
     # * ----------------------------------------------
 
     _tokenizer_feature_str = (
-        "pretrained_path=null features_per_stage=[256,256,256,256] "
+        "pretrained_path=null features_per_stage=[512,512,512,512] "
         "model_name=hybrid_tokenizer_b16 "
         # encoder
-        "pretrained_size=512 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
+        "pretrained_size=512 in_channels=155 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
         "cffn_ratio=0.25 deform_num_heads=16 deform_ratio=0.5 add_vit_feature=true "
         "use_extra_extractor=true with_cp=true "
     )
@@ -84,20 +85,20 @@ def _create_default_cfg():
     _adapter_str = (
         "adapter_type=default latent_width=64 n_conv_per_stage=1 "
         "depth_per_stage=1 norm=layernorm2d act=gelu drop=0.0 "
-        "act_first=false conv_bias=false"
+        "act_first=false conv_bias=false block_types=[nat,nat,mbconv,mbconv]"
     )
     adapter_cfg = OmegaConf.from_dotlist(_adapter_str.split(" "))
 
     # * ----------------------------------------------
 
     _cd_stage_str = (
-        "channels=[256,256,256,256] stride=1 kernel_size=3 norm_layer=layernorm2d "
+        "channels=[512,512,512,512] stride=1 kernel_size=3 norm_layer=layernorm2d "
         "act_layer=gelu expand_ratio=2.0 block_type=mbconv depth=1"
     )
     cd_stage_cfg = OmegaConf.from_dotlist(_cd_stage_str.split(" "))
 
     _unet_str = (
-        "input_channels=3 num_classes=7 deep_supervision=false n_stages=4 "
+        "input_channels=155 num_classes=2 deep_supervision=false n_stages=4 "
         "use_latent=true ensure_rgb_type=null _debug=false"
     )
     unet_cfg = OmegaConf.from_dotlist(_unet_str.split(" "))
@@ -120,27 +121,6 @@ def _create_default_cfg():
 
 
 class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
-    # def __init__(
-    #     self,
-    #     backbone: CosmosHybridTokenizer,  # Dinov3 backbone original
-    #     interaction_indexes=[9, 19, 29, 39],
-    #     pretrain_size=512,
-    #     conv_inplane=64,
-    #     n_points=4,
-    #     deform_num_heads=16,
-    #     drop_path_rate=0.3,
-    #     init_values=0.0,
-    #     with_cffn=True,
-    #     cffn_ratio=0.25,
-    #     deform_ratio=0.5,
-    #     add_vit_feature=True,
-    #     use_extra_extractor=True,
-    #     dw_ratios=[2, 1, 0.5],
-    #     with_cp=True,
-    #     use_bn=True,
-    # ):
-    #     ...
-
     def _setup_backbone(
         self,
         backbone: CosmosHybridTokenizer,
@@ -171,6 +151,9 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
     def _forward_backbone_intermediate_features(self, x):
         """Get the intermediate features from the backbone."""
 
+        # TODO: If the image (x) is [0, 1], normalize to [-1, 1]
+        ...
+
         # NOTE: cls feature is None
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
         with torch.autocast("cuda", torch.bfloat16):
@@ -185,6 +168,8 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         )
 
         # None stands for cls feature
+        # Hybrid model now do no use cls token
+        # TODO: training an SSL model will use it.
         all_layers = [
             [rearrange(all_layers[i], "b c h w -> b (h w) c"), None] for i in range(len(self.interaction_indexes))
         ]
@@ -258,7 +243,7 @@ class TokenizerHybridUNet(nn.Module):
             self.adapter_cfg.depth_per_stage,
             nonlin_first=self.adapter_cfg.act_first,
             deep_supervision=cfg.deep_supervision,
-            block_types=["nat", "nat", "mbconv", "mbconv"],
+            block_types=cfg.adapter.block_types,
         )
         logger.info(f"Created Unet decoder with 4 stages")
 
@@ -295,19 +280,21 @@ class TokenizerHybridUNet(nn.Module):
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
             backbone=tok_backbone,
-            interaction_indexes=interaction_indexes,
-            pretrain_size=512,
+            in_channels=f_cfg.in_channels,
             conv_inplane=f_cfg.conv_inplane,
-            n_points=4,
+            interaction_indexes=interaction_indexes,
             deform_num_heads=f_cfg.deform_num_heads,
             drop_path_rate=f_cfg.drop_path_rate,
-            init_values=0.0,
             with_cffn=f_cfg.with_cffn,
             cffn_ratio=f_cfg.cffn_ratio,
             deform_ratio=f_cfg.deform_ratio,
             add_vit_feature=f_cfg.add_vit_feature,
             use_extra_extractor=f_cfg.use_extra_extractor,
             with_cp=f_cfg.with_cp,
+            pretrain_size=512,
+            n_points=4,
+            init_values=0.0,
+            use_bn=False,
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -322,15 +309,12 @@ class TokenizerHybridUNet(nn.Module):
 
         return encoder_adapter
 
-    def forward(
-        self,
-        x1: Float[Tensor, "b c h w"],
-        x2: Float[Tensor, "b c h w"],
-        # cond: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
-    ):
+    def forward(self, x: tuple[Tensor, Tensor]):
         """Two time-series images for change detection"""
 
         # Encode two images
+        assert len(x) == 2, "Input must be a tuple of two tensors (x1, x2)"
+        x1, x2 = x
         skips1, final_h1 = self.encoder(x1)
         skips2, final_h2 = self.encoder(x2)
 
@@ -362,8 +346,10 @@ class TokenizerHybridUNet(nn.Module):
                     nn.init.ones_(module.weight)
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
-            # else:
-            #     logger.debug(f"Skipping initialization for {name}")
+
+            bn_types = (nn.BatchNorm2d, nn.SyncBatchNorm)
+            if isinstance(module, bn_types):
+                logger.warning(f"Found BN in model: {name}.")
 
         named_apply(_apply, self)
         logger.info(f"[TokenizerHybridUNet]: Initialized weights (except backbone).")
@@ -383,28 +369,45 @@ class TokenizerHybridUNet(nn.Module):
         for name, param in self.named_parameters(*args, **kwargs):
             if "backbone" in name:
                 param.requires_grad = False
+                continue
             yield param
 
     def named_parameters(self, *args, **kwargs):
         for name, param in super().named_parameters(*args, **kwargs):
             if "backbone" in name:
                 param.requires_grad = False
+                continue
             yield name, param
+
+    def _filter_backbone_params(self, k: str):
+        return "backbone" in k
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
         # Remove backbone parameters from state dict
-        backbone_keys = [k for k in state_dict.keys() if "backbone" in k]
+        backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
+        logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
         return state_dict
 
-    def load_state_dict(self, state_dict, strict: bool = False):
+    def load_state_dict(self, state_dict, strict: bool = False, return_not_loaded_keys=False, *args, **kwargs):
         # Filter out backbone parameters from state dict
-        backbone_keys = [k for k in state_dict.keys() if "backbone" in k]
+        backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
-        super().load_state_dict(state_dict, strict=strict)
+        missing_ks, unexpected_ks = super().load_state_dict(state_dict, strict=strict)
+
+        # remove the pretrained backbone keys from missing/unexpected keys
+        missing_ks = [k for k in missing_ks if not self._filter_backbone_params(k)]
+        unexpected_ks = [k for k in unexpected_ks if not self._filter_backbone_params(k)]
+
+        if len(missing_ks) > 0:
+            logger.warning(f"Missing Keys: {missing_ks}")
+        if len(unexpected_ks) > 0:
+            logger.warning(f"Unexpected Keys: {unexpected_ks}")
+
+        return _IncompatibleKeys(missing_ks, unexpected_ks) if return_not_loaded_keys else _IncompatibleKeys([], [])
 
 
 def __test_model():
@@ -423,13 +426,35 @@ def __test_model():
     cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors"
     unet = TokenizerHybridUNet(cfg).cuda()
     print(parameter_count_table(unet))
+    # sd = unet.state_dict()
 
-    unet.eval()
-    with torch.autocast("cuda", torch.bfloat16):
-        with torch.no_grad():
-            y = unet(x1, x2)
-            # y_recon = unet.encoder.dinov3_adapter.backbone(x1)
-    print(y.shape)
+    # Test save and load
+    print("Testing save and load...")
+
+    # First, save the current model state
+    sd = unet.state_dict()
+    print(f"Saved state dict with {len(sd)} parameters")
+
+    # Try to load the state dict back into the same model (this should work without missing keys)
+    print("Loading state dict back into model...")
+    incompatible_keys = unet.load_state_dict(sd, strict=False)
+
+    print(f"Missing keys: {len(incompatible_keys.missing_keys)}")
+    print(f"Unexpected keys: {len(incompatible_keys.unexpected_keys)}")
+
+    if incompatible_keys.missing_keys:
+        print(f"Missing keys: {incompatible_keys.missing_keys}")
+    if incompatible_keys.unexpected_keys:
+        print(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
+
+    print("Save and load test completed!")
+
+    # unet.eval()
+    # with torch.autocast("cuda", torch.bfloat16):
+    #     with torch.no_grad():
+    #         y = unet(x1, x2)
+    #         # y_recon = unet.encoder.dinov3_adapter.backbone(x1)
+    # print(y.shape)
 
     # from torchmetrics import PeakSignalNoiseRatio
 

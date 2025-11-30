@@ -2,9 +2,9 @@
 Window sliding utilities for processing large images in patches.
 """
 
+import math
 from collections.abc import Generator, Iterable
 from typing import Any, Callable
-import math
 
 import numpy as np
 import torch
@@ -234,6 +234,7 @@ class WindowSlider:
         window_results: list[dict[str, Any]],
         merge_method: str = "average",
         merged_keys: list[str] | None = None,
+        merged_out_processor: Callable[[Any, str], Any] | None = None,
     ) -> dict[str, Any]:
         """
         Merge windowed results back to full image size.
@@ -456,6 +457,10 @@ class WindowSlider:
                 merged_tensor = merged_tensor.cpu().numpy()
 
             merged_results[key] = merged_tensor
+
+        if merged_out_processor is not None:
+            for key in merged_results:
+                merged_results[key] = merged_out_processor(merged_results[key], key)
 
         return merged_results
 

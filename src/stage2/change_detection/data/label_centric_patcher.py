@@ -12,7 +12,7 @@ def neighbor(
     img: Tensor,
     center: Tensor | list,
     patch_size: int = 32,
-    padding_mode: str = "reflect",
+    padding_mode: str = "constant",
 ):
     """
     Extract a patch from image centered at the given coordinates.

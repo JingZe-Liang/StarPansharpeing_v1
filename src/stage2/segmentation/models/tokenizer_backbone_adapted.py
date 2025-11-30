@@ -9,6 +9,7 @@ from timm.layers import get_act_layer, get_norm_layer
 from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
+from torch.nn.modules.module import _IncompatibleKeys
 
 from src.stage1.cosmos.cosmos_hybrid import CosmosHybridTokenizer
 from src.utilities.config_utils import (
@@ -45,7 +46,7 @@ def _create_default_cfg():
     # h16d12c1024
     _trans_enc_str = (
         "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=2 norm_layer=rmsnorm pos_embed=learned rope_type=axial "
+        "patch_size=2 norm_layer=layernorm pos_embed=learned rope_type=axial "
         "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
         "out_chans=512 unpatch_size=1 reg_tokens=0"
     )
@@ -55,7 +56,7 @@ def _create_default_cfg():
     # h16d12c1024
     _trans_dec_str = (
         "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=1 norm_layer=rmsnorm pos_embed=learned rope_type=axial "
+        "patch_size=1 norm_layer=layernorm pos_embed=learned rope_type=axial "
         "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
         "out_chans=512 unpatch_size=2 reg_tokens=0"
     )
@@ -69,10 +70,10 @@ def _create_default_cfg():
     # * ----------------------------------------------
 
     _tokenizer_feature_str = (
-        "pretrained_path=null features_per_stage=[256,256,256,256] "
+        "pretrained_path=null features_per_stage=[512,512,512,512] "
         "model_name=hybrid_tokenizer_b16 "
         # encoder
-        "pretrained_size=512 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
+        "pretrained_size=512 in_channels=155 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
         "cffn_ratio=0.25 deform_num_heads=16 deform_ratio=0.5 add_vit_feature=true "
         "use_extra_extractor=true with_cp=true "
     )
@@ -83,14 +84,14 @@ def _create_default_cfg():
     _adapter_str = (
         "adapter_type=default latent_width=64 n_conv_per_stage=1 "
         "depth_per_stage=1 norm=layernorm2d act=gelu drop=0.0 "
-        "act_first=false conv_bias=false"
+        "act_first=false conv_bias=false block_types=[nat,nat,mbconv,mbconv]"
     )
     adapter_cfg = OmegaConf.from_dotlist(_adapter_str.split(" "))
 
     # * ----------------------------------------------
 
     _unet_str = (
-        "input_channels=3 num_classes=7 deep_supervision=false n_stages=4 "
+        "input_channels=155 num_classes=2 deep_supervision=false n_stages=4 "
         "use_latent=true ensure_rgb_type=null _debug=false"
     )
     unet_cfg = OmegaConf.from_dotlist(_unet_str.split(" "))
@@ -242,7 +243,7 @@ class TokenizerHybridUNet(nn.Module):
         logger.info(f"Created Unet decoder with 4 stages")
 
         # Init weights
-        self.initialize()
+        self.init_weights()
 
     def _create_tok_encoder(self):
         """Create DINOv3 encoder"""
@@ -301,54 +302,17 @@ class TokenizerHybridUNet(nn.Module):
 
         return encoder_adapter
 
-    def _ensure_rgb_input(self, x: Float[Tensor, "b c h w"], larger_then_3_op: str | list[int] = "mean"):
-        if not self.force_rgb_input:
-            return x
-
-        C = x.size(1)
-        if C == 1:
-            x = x.repeat(1, 3, 1, 1)
-        elif C != 3:
-            if C < 3:
-                x = x.repeat(1, 3 // C + (1 if 3 % C != 0 else 0), 1, 1)[:, :3, :, :]
-            elif larger_then_3_op == "first_3":
-                x = x[:, :3, :, :]
-            elif larger_then_3_op == "mean":
-                channels_per_group = C // 3
-                remainder = C % 3
-                groups = []
-                start = 0
-                for i in range(3):
-                    group_size = channels_per_group + (1 if i < remainder else 0)
-                    end = start + group_size
-                    groups.append(x[:, start:end].mean(dim=1, keepdim=True))
-                    start = end
-                x = torch.cat(groups, dim=1)
-            elif isinstance(larger_then_3_op, (list, tuple)):
-                x = x[:, larger_then_3_op]
-            else:
-                raise ValueError(f"Unknown operation for C > 3 ({C=}): {larger_then_3_op}")
-        elif C == 3:
-            pass
-        else:
-            raise ValueError(f"Unexpected number of channels: {C}")
-
-        return x
-
-    def forward(
-        self,
-        x: Float[Tensor, "b c h w"],
-        # cond: Float[Tensor, "b latent_c latent_h latent_w"] | None = None,
-    ):
-        x = self._ensure_rgb_input(x)
+    def forward(self, x: Float[Tensor, "b c h w"]):
         skips, final_h = self.encoder(x)
         output = self.decoder(skips, final_h)
         return output
 
-    def initialize(self) -> None:
+    def init_weights(self) -> None:
         def _apply(module, name: str):
             if "backbone" not in name:  # skip the pretrained weights
-                if isinstance(module, _ConvNd):
+                if hasattr(module, "init_weights"):
+                    module.init_weights()
+                elif isinstance(module, _ConvNd):
                     nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
@@ -360,14 +324,17 @@ class TokenizerHybridUNet(nn.Module):
                     nn.init.ones_(module.weight)
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
-            # else:
-            #     logger.debug(f"Skipping initialization for {name}")
+
+            bn_types = (nn.BatchNorm2d, nn.SyncBatchNorm)
+            if isinstance(module, bn_types):
+                logger.warning(f"Found BN in model: {name}.")
 
         named_apply(_apply, self)
         logger.info(f"[TokenizerHybridUNet]: Initialized weights (except backbone).")
 
     @classmethod
-    def create_model(cls, cfg=_create_default_cfg(), overrides: dict | None = None):
+    @function_config_to_basic_types
+    def create_model(cls, cfg=_create_default_cfg(), **overrides):
         """
         Create DinoUNet instance from network configuration dictionary
         """
@@ -388,20 +355,36 @@ class TokenizerHybridUNet(nn.Module):
                 param.requires_grad = False
             yield name, param
 
+    def _filter_backbone_params(self, k: str):
+        return "backbone" in k
+
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
         # Remove backbone parameters from state dict
-        backbone_keys = [k for k in state_dict.keys() if "backbone" in k]
+        backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
+        logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
         return state_dict
 
-    def load_state_dict(self, state_dict, strict: bool = False):
+    def load_state_dict(self, state_dict, strict: bool = False, return_not_loaded_keys=False, *args, **kwargs):
         # Filter out backbone parameters from state dict
-        backbone_keys = [k for k in state_dict.keys() if "backbone" in k]
+        backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
-        super().load_state_dict(state_dict, strict=strict)
+        missing_ks, unexpected_ks = super().load_state_dict(state_dict, strict=strict)
+
+        # remove the pretrained backbone keys from missing/unexpected keys
+        missing_ks = [k for k in missing_ks if not self._filter_backbone_params(k)]
+        unexpected_ks = [k for k in unexpected_ks if not self._filter_backbone_params(k)]
+
+        if len(missing_ks) > 0:
+            logger.warning(f"Missing Keys: {missing_ks}")
+        if len(unexpected_ks) > 0:
+            logger.warning(f"Unexpected Keys: {unexpected_ks}")
+
+        # Ensure accelerate state loading
+        return _IncompatibleKeys(missing_ks, unexpected_ks) if return_not_loaded_keys else _IncompatibleKeys([], [])
 
 
 def __test_model():
@@ -413,7 +396,7 @@ def __test_model():
 
     cfg = _create_default_cfg()
     cfg._debug = True
-    cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizer.safetensors"
+    cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors"
     unet = TokenizerHybridUNet(cfg).cuda()
     unet.eval()
     with torch.autocast("cuda", torch.bfloat16):

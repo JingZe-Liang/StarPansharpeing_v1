@@ -15,7 +15,7 @@ from torchvision.io import video_reader
 from ..logging import log
 
 
-class ExtractMode(Enum):
+class ExtractMode(str, Enum):
     LAST = "last"
     ALL = "all"
     NOT_META = "not_meta"
