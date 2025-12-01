@@ -61,16 +61,35 @@ def sample_img_with_gt_indices(
         indices = cast(np.ndarray, indices)
         for idx in indices:
             center_x, center_y = idx  # Use coordinates as center points
+
+            # Ensure the patch is completely within original image bounds
+            # Calculate valid range for center points
+            min_center = margin
+            max_center_x = shape_gt[0] - margin
+            max_center_y = shape_gt[1] - margin
+
+            # Skip invalid center points that would produce incomplete patches
+            if center_x < min_center or center_x >= max_center_x or center_y < min_center or center_y >= max_center_y:
+                continue
+
             # Convert to padded image coordinates
             padded_x = center_x + margin
             padded_y = center_y + margin
             slices = slice(padded_x, padded_x + patch_size), slice(padded_y, padded_y + patch_size)
 
-            # Extract patch from padded images
+            # Extract patch from padded images (now guaranteed to be correct size)
             patch = padded_img[slices[0], slices[1], :]
             label = padded_gt[slices[0], slices[1]]
 
-            # Mask the selected patch for test
+            # Verify patch size is correct
+            assert patch.shape[:2] == (patch_size, patch_size), (
+                f"Unexpected patch shape: {patch.shape[:2]}, expected: ({patch_size}, {patch_size})"
+            )
+            assert label.shape == (patch_size, patch_size), (
+                f"Unexpected label shape: {label.shape}, expected: ({patch_size}, {patch_size})"
+            )
+
+            # Mask the selected patch for test (in padded coordinates)
             unsampled_area[slices[0], slices[1]] = 1
 
             patches_dict[class_id].append(patch)
@@ -81,6 +100,8 @@ def sample_img_with_gt_indices(
     assert gt_map.shape == unsampled_area.shape, (
         f"Shape mismatch after clipping: {gt_map.shape} != {unsampled_area.shape}"
     )
+    unsampled_area = unsampled_area.astype(np.bool_)
+    unsampled_area = np.logical_not(unsampled_area)  # True means unsampled area
 
     return patches_dict, labels_dict, unsampled_area
 
@@ -143,6 +164,7 @@ class RobustHyperspectralSampler:
         gt_2d: np.ndarray,
         balance_strategy: str = "stratified_robust",
         min_per_class: int = 1,
+        skip_bg: int | None = None,
         target_samples_per_class: Optional[int] = None,
         random_seed: Optional[int] = None,
         verbose: bool = True,
@@ -170,6 +192,7 @@ class RobustHyperspectralSampler:
         self.target_samples_per_class = target_samples_per_class
         self.verbose = verbose
         self.random_seed = random_seed
+        self.skip_bg = skip_bg
 
         if random_seed is not None:
             np.random.seed(random_seed)
@@ -211,8 +234,8 @@ class RobustHyperspectralSampler:
         # Collect all non-zero (non-background) labels
         unique_classes = np.unique(self.gt_2d)
         for class_id in unique_classes:
-            # if class_id == 0:  # skip background class
-            #     continue
+            if self.skip_bg is not None and class_id == self.skip_bg:  # skip background class
+                continue
 
             # Get all pixel positions for this class
             class_pixels = np.where(self.gt_2d == class_id)

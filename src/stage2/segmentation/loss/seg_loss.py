@@ -62,12 +62,12 @@ class HyperSegmentationLoss(torch.nn.Module):
 
     def _forward_loss(self, pred: Tensor, gt: Tensor, mask: Tensor | None = None):
         if pred.shape[-2:] != gt.shape[-2:]:
-            gt = torch.nn.functional.interpolate(gt, size=pred.shape[-2:], mode="nearest", align_corners=False)
+            gt = torch.nn.functional.interpolate(gt[:, None], size=pred.shape[-2:], mode="nearest").squeeze(1)
 
         if mask is not None:
             assert pred.shape[0] == 1, f"Support only single-image predictions, got {pred.shape[0]} images."
             if mask.shape[-2:] != pred.shape[-2:]:
-                mask = torch.nn.functional.interpolate(mask, size=pred.shape[-2:], mode="nearest", align_corners=False)
+                mask = torch.nn.functional.interpolate(mask, size=pred.shape[-2:], mode="nearest")
             mask_nonzero = torch.nonzero(mask, as_tuple=False)  # [n, 3]
             pred = get_at("[b h w] c, n [3] -> n 3", pred.permute(0, -2, -1, 1), mask_nonzero)  # 1d image
             gt = get_at("[b h w], n [3] -> n 3", gt, mask_nonzero)  # 1d gt map

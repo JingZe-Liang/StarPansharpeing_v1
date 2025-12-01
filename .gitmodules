@@ -146,3 +146,6 @@
 [submodule "src/stage1/featups/loftup"]
 	path = src/stage1/featups/loftup
 	url = git@github.com:294coder/loftup-mod.git
+[submodule "src/stage2/Hyperspectral-Classification"]
+	path = src/stage2/Hyperspectral-Classification
+	url = https://github.com/eecn/Hyperspectral-Classification.git

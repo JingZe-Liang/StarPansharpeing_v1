@@ -73,7 +73,7 @@ def _create_default_cfg():
         "pretrained_path=null features_per_stage=[512,512,512,512] "
         "model_name=hybrid_tokenizer_b16 "
         # encoder
-        "pretrained_size=512 in_channels=155 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
+        "pretrained_size=512 in_channels=3 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
         "cffn_ratio=0.25 deform_num_heads=16 deform_ratio=0.5 add_vit_feature=true "
         "use_extra_extractor=true with_cp=true "
     )
@@ -154,10 +154,8 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         self.freeze_backbone = freeze_backbone
         self.patch_size = 16  # TODO: in config
 
-        # fmt: off
         logger.info(f"[Tokenizer backbone adapted]: embed dim={self.embed_dim}")
         logger.info(f"[Tokenizer backbone adapted]: interaction_indexes={self.interaction_indexes}")
-        # fmt: on
 
         return self.embed_dim
 
@@ -166,8 +164,7 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
-                final_latent = self.backbone.encode(x)
-        all_layers = self.backbone.sem_z  # get from semantic encoder
+                final_latent, _, all_layers = self.backbone.encode(x, get_intermediate_features=True)
 
         # reorg all_layers
         assert all_layers is not None, "all_layers is None"
@@ -239,6 +236,7 @@ class TokenizerHybridUNet(nn.Module):
             self.adapter_cfg.depth_per_stage,
             nonlin_first=self.adapter_cfg.act_first,
             deep_supervision=cfg.deep_supervision,
+            block_types=self.adapter_cfg.block_types,
         )
         logger.info(f"Created Unet decoder with 4 stages")
 
@@ -275,6 +273,7 @@ class TokenizerHybridUNet(nn.Module):
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
             backbone=tok_backbone,
+            in_channels=f_cfg.in_channels,
             interaction_indexes=interaction_indexes,
             pretrain_size=512,
             conv_inplane=f_cfg.conv_inplane,
@@ -339,7 +338,9 @@ class TokenizerHybridUNet(nn.Module):
         Create DinoUNet instance from network configuration dictionary
         """
         if overrides is not None:
-            cfg = cfg.merge_with(overrides)
+            cfg.merge_with(overrides)
+        if cfg.tokenizer_pretrained_path is None:
+            logger.warning(f"[TokenizerHybridUNet]: No pretrained weights provided. Using random initialization.")
 
         return cls(cfg)
 
@@ -393,6 +394,7 @@ def __test_model():
     dl = get_fast_test_hyperspectral_data("fmow_RGB")
     sample = next(iter(dl))
     x = sample["img"].cuda()
+    x = F.interpolate(x, size=(256, 256), mode="bilinear", align_corners=False)
 
     cfg = _create_default_cfg()
     cfg._debug = True
@@ -401,16 +403,18 @@ def __test_model():
     unet.eval()
     with torch.autocast("cuda", torch.bfloat16):
         with torch.no_grad():
-            # y = unet(x)
-            y_recon = unet.encoder.dinov3_adapter.backbone(x)
-    from torchmetrics import PeakSignalNoiseRatio
+            y = unet(x)
+    print(y.shape)
 
-    logger.info(f"Input shape: {x.shape}")
-    logger.info(f"Output shape: {y_recon.shape}")
+    #         y_recon = unet.encoder.dinov3_adapter.backbone(x)
+    # from torchmetrics import PeakSignalNoiseRatio
 
-    psnr_fn = PeakSignalNoiseRatio(data_range=1.0).cuda()
-    psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
-    logger.info(f"Reconstruction PSNR: {psnr}")
+    # logger.info(f"Input shape: {x.shape}")
+    # logger.info(f"Output shape: {y_recon.shape}")
+
+    # psnr_fn = PeakSignalNoiseRatio(data_range=1.0).cuda()
+    # psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
+    # logger.info(f"Reconstruction PSNR: {psnr}")
 
 
 if __name__ == "__main__":

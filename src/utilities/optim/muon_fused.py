@@ -176,8 +176,8 @@ class MuonFSDP(Muon):
                     # logger.debug(
                     #     f"{oned_param_algo} params: {name} - shaped: {tuple(p.shape)}"
                     # )
-            else:
-                logger.debug(f"{name} is not requires_grad")
+            # else:
+            #     logger.debug(f"{name} is not requires_grad")
 
         muon_params_g = {"params": muon_params, "algorithm": "muon"}
         oned_params_g = {"params": oned_params, "algorithm": oned_param_algo}
@@ -200,10 +200,7 @@ class MuonFSDP(Muon):
         muon_params_g, oned_params_g = cls.clear_muon_adamw_params(
             named_parameters, ignored_keys_for_muon, oned_param_algo
         )
-        optimizer = cls(
-            params=(muon_params_g, oned_params_g),
-            **kwargs,
-        )
+        optimizer = cls(params=(muon_params_g, oned_params_g), **kwargs)
         return optimizer
 
     def __repr__(self) -> str:

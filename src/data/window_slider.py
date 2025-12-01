@@ -516,3 +516,30 @@ def model_predict_patcher(
         model_outs.append(model_out_combined)
     merged_output = slider.merge_windows(model_outs, merge_method=merge_method, merged_keys=merge_keys)
     return merged_output
+
+
+def __test_model_predict_patcher():
+    # model = lambda x: {"model_pred_logits": x["x"]}
+
+    def model(batch):
+        x, gt = batch["x"], batch["gt"]
+        print(x.shape, gt.shape)
+        return {"model_pred_logits": x}
+
+    model_outputs = model_predict_patcher(
+        model,
+        {
+            "x": torch.randn(2, 3, 224, 224),
+            "gt": torch.randint(0, 20, (2, 224, 224)),
+        },
+        patch_keys=["x", "gt"],
+        merge_keys=["model_pred_logits"],
+        patch_size=128,
+        stride=32,
+        label_mode="seg",
+    )
+    print("--", model_outputs["model_pred_logits"].shape)
+
+
+if __name__ == "__main__":
+    __test_model_predict_patcher()

@@ -1,0 +1,60 @@
+train_bs: 3
+val_bs: 1
+
+# Configs
+data_type: null
+label_mode: seg
+patch_size: 128
+stride: 32
+dataset_name: Indian_pines
+
+infos:
+  # here, num_classes contains the unknown class (background class)
+  Houston13:
+    shape: [954, 210, 48]
+    num_classes: 7 #8
+  Houston18:
+    shape: [954, 210, 48]
+    num_classes: 7 #8
+  Indian_pines:
+    shape: [145, 145, 200]
+    num_classes: 16 #17
+  Pavia:
+    shape: [1096, 715, 102]
+    num_classes: 9 #10
+  PaviaU:
+    shape: [610, 340, 103]
+    num_classes: 9 #10
+  WHU_Hi_HanChuan:
+    shape: [1217, 303, 274]
+    num_classes: 9 #10
+  WHU_Hi_HongHu:
+    shape: [940, 475, 270]
+    num_classes: 22 #23
+  WHU_Hi_LongKou:
+    shape: [550, 440, 270]
+    num_classes: 9 #10
+
+consts:
+  is_single_image: true
+  # Dynamically injected from infos based on dataset_name
+  num_classes: ${dataset.infos.${dataset.dataset_name}.num_classes}
+  shape: ${dataset.infos.${dataset.dataset_name}.shape}
+  bands: ${dataset.infos.${dataset.dataset_name}.shape.2}
+  unchanged_label: 0
+  changed_label: 1
+
+train:
+  _target_: src.stage2.segmentation.data.single_mat_loader.SingleMatDataset.from_config
+  cfg:
+    dataset_kwargs:
+      dataset_name: ${dataset.dataset_name}
+      data_dir: data/Downstreams/ClassificationCollection/cls
+      train_ratio: 0.3
+      samples_per_cls: 5
+      patch_size: 64
+    dataloader_kwargs:
+      batch_size: 8
+      num_workers: 2
+      shuffle: true
+      pin_memory: true

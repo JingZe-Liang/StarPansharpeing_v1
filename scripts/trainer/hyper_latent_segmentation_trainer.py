@@ -24,26 +24,25 @@ from jaxtyping import Float, Int
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from safetensors.torch import load_file
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from tqdm import trange
+from tqdm import tqdm, trange
 
 from src.data.window_slider import WindowSlider, model_predict_patcher
-from src.stage2.segmentation.data.data_split import (
-    SingleImageHyperspectralSegmentationDataset,
-)
+from src.stage2.segmentation.data.data_split import SingleImageHyperspectralSegmentationDataset
+from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset
 from src.stage2.segmentation.metrics import HyperSegmentationScore
 from src.stage2.utilities.loss import HyperSegmentationLoss
-from src.utilities.config_utils import (
-    to_easydict_recursive,
-)
+from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import dict_round_to_list_str, log
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import visualize_segmentation_map
 
@@ -143,10 +142,24 @@ class HyperSegmentationTrainer:
             self.no_ema = True
 
         # dataloader
-        used_dataset = self.dataset_cfg.cfgs.used
-        self.log_msg(f"[Data]: using dataset {used_dataset}")
+        dataset_name = self.dataset_cfg.dataset_name
+        self.log_msg(f"[Data]: using dataset {dataset_name}")
+
+        self.train_dataset: SingleMatDataset
+        self.val_dataset: SingleMatDataset
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
+        if hasattr(self.train_dataset, "val"):
+            logger.info(f"[Data]: get independent validation dataset.")
+            self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
+        else:
+            logger.info(f"[Data]: use single image dataset.")
+            self.val_dataset, self.val_dataloader = self.train_dataset, self.train_dataloader
+
+        self.ds_is_single_image = self.dataset_cfg.consts.is_single_image
+        self._val_unsampled_mask = None  # if is single image training, sampled from one image
+        if self.ds_is_single_image:
+            self._val_unsampled_mask = self.val_dataset.get_unsampled_area().to(self.device)
+
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
@@ -364,7 +377,7 @@ class HyperSegmentationTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -377,7 +390,7 @@ class HyperSegmentationTrainer:
             _get_model_params = (
                 lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
             )
-            model_opt = _optimizer_creater(self.train_cfg.seg_optim, _get_model_params)
+            model_opt = _optimizer_creater(self.train_cfg.segment_optim, _get_model_params)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
@@ -512,10 +525,7 @@ class HyperSegmentationTrainer:
 
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
-        assert mode in (
-            "train",
-            "val",
-        ), "Only train and val modes are supported for now."
+        assert mode in ("train", "val"), "Only train and val modes are supported for now."
 
         return self.train_state[mode]
 
@@ -561,7 +571,7 @@ class HyperSegmentationTrainer:
         loss = self.segment_loss(out, gt)
         return loss
 
-    def forward_segment_model(self, img, gt):
+    def forward_segment_model(self, img, gt, is_test=False):
         """
         Forward pass through segmentation model.
 
@@ -577,10 +587,16 @@ class HyperSegmentationTrainer:
         SegmentationOutput
             Output containing loss and predictions
         """
+        if self.no_ema or not is_test:
+            model = self.model
+        else:
+            model = self.ema_model.ema_model
         with self.accelerator.autocast():
-            out = self.model(img)
+            out = model(img)
             # loss
-            loss = self.compute_segmentation_loss(out, gt)
+            loss = torch.zeros(1).to(img)
+            if not is_test:
+                loss = self.compute_segmentation_loss(out, gt)
 
         output = SegmentationOutput(loss=loss, pred_pixel=out)
         return output
@@ -797,6 +813,7 @@ class HyperSegmentationTrainer:
         self.log_msg("[Train]: start training", only_rank_zero=False)
 
         for batch in self.infinity_train_loader():
+            batch = self._cast_to_dtype(batch)
             # train step
             self.train_step(batch)
 
@@ -818,8 +835,17 @@ class HyperSegmentationTrainer:
         if self.val_dataloader is None:
             raise ValueError("No validation dataloader found")
 
-        for batch in self.val_dataloader:
-            yield batch
+        if self.ds_is_single_image:
+            # Only one image to validate
+            d = self.val_dataset._get_full_img_tensor()
+            img, gt = d["img"][None], d["gt"][None]
+            yield {
+                "img": torch.as_tensor(img, device=self.device),
+                "gt": torch.as_tensor(gt, device=self.device),
+            }
+        else:
+            for batch in self.val_dataloader:
+                yield batch
 
     def get_val_loader_iter(self):
         if self.val_cfg.max_val_iters > 0:
@@ -838,11 +864,31 @@ class HyperSegmentationTrainer:
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
+
+            def _loading():
+                for _ in iterable_:
+                    try:
+                        yield next(self._val_loader_iter)
+                    except StopIteration:
+                        # re-create the iterator
+                        self._val_loader_iter = iter(self.val_dataloader)
+                        yield next(self._val_loader_iter)
+
         else:
             iterable_ = self._finite_val_loader()
+
+            def _loading():
+                for batch in tqdm(
+                    iterable_,
+                    desc="validating ...",
+                    leave=False,
+                    disable=not self.accelerator.is_main_process,
+                ):
+                    yield batch
+
             self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
 
-        return iterable_
+        return _loading()
 
     @torch.no_grad()
     def _cast_to_dtype(self, x: torch.Tensor | list | dict[str, torch.Tensor]):
@@ -885,8 +931,8 @@ class HyperSegmentationTrainer:
 
             def _val_model_closure(batch):
                 # forward the segmentation network
-                pred_seg, *_ = self.forward_segment_model(batch["img"], batch["gt"])
-                return {"pred_logits": pred_seg}
+                pred_pixel = self.forward_segment_model(batch["img"], batch["gt"], True).pred_pixel
+                return {"pred_logits": pred_pixel}
 
             # slide windows
             if getattr(self.train_cfg, "val_slide_window", False):
@@ -939,12 +985,7 @@ class HyperSegmentationTrainer:
         loss_metrics = MeanMetric().to(device=self.device)
 
         val_iter = self.get_val_loader_iter()
-        for batch_or_idx in val_iter:  # type: ignore
-            if self.val_cfg.max_val_iters > 0:
-                batch = next(self._val_loader_iter)
-            else:
-                batch = batch_or_idx
-
+        for batch in val_iter:
             batch = self._cast_to_dtype(batch)
             batch = cast(dict[str, torch.Tensor], batch)
             gt = batch.get("gt", batch.get("gt_full", None))
@@ -954,7 +995,7 @@ class HyperSegmentationTrainer:
             def _val_model_closure(val_batch):
                 """Model closure for slide window validation."""
                 with torch.no_grad():
-                    output = self.forward_segment_model(val_batch["img"], gt)
+                    output = self.forward_segment_model(val_batch["img"], gt, True)
                     return {"pred_logits": output.pred_pixel}
 
             # Use slide window or full image validation
@@ -977,7 +1018,10 @@ class HyperSegmentationTrainer:
             pred_seg = self._resize_to(pred_seg, mode="nearest")
 
             # Update metrics directly
-            seg_metrics.update(pred_seg, gt)
+            assert self._val_unsampled_mask is None or self._val_unsampled_mask.shape == gt.shape, (
+                "val unsampled mask shape does not match gt shape"
+            )
+            seg_metrics.update(pred_seg, gt)  # self._val_unsampled_mask)
             self.step_train_state("val")
 
         # Compute metrics
@@ -1028,31 +1072,13 @@ class HyperSegmentationTrainer:
             self.log_msg(f"[Load EMA]: successfully loaded from {ema_path}")
         except Exception as e:
             self.log_msg(f"[Load EMA]: standard loading failed: {e}", level="WARNING")
-
-            # Fallback to load_weights_with_shape_check with safetensors
-            from safetensors.torch import load_file
-
-            from src.utilities.network_utils.network_loading import load_weights_with_shape_check
-
-            try:
-                # Try to load as safetensors first
-                model_path = ema_path / "model"
-                if model_path.suffix == ".safetensors":
-                    checkpoint = load_file(model_path, device="cpu")
-                else:
-                    # Fallback to regular torch.load
-                    checkpoint = torch.load(model_path, map_location="cpu")
-
-                result = load_weights_with_shape_check(
-                    self.model, checkpoint if isinstance(checkpoint, dict) else checkpoint, load_strategy="pair"
-                )
-                self.log_msg(f"[Load EMA]: fallback loading completed")
-                self.log_msg(
-                    f"[Load EMA]: Loaded {result['loaded_keys']}, Missing {result['missing_keys']}, Unexpected {result['unexpected_keys']}"
-                )
-            except Exception as fallback_error:
-                self.log_msg(f"[Load EMA]: fallback loading also failed: {fallback_error}", level="ERROR")
-                raise
+            model_path = ema_path / "model" / "model.safetensors"
+            checkpoint = load_file(model_path, device="cpu")
+            result = load_weights_with_shape_check(self.model, checkpoint)
+            self.log_msg(f"[Load EMA]: fallback loading completed")
+            self.log_msg(
+                f"[Load EMA]: Loaded {result['loaded_keys']}, Missing {result['missing_keys']}, Unexpected {result['unexpected_keys']}"
+            )
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
@@ -1215,9 +1241,9 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_segmentation"
+_key = "hybrid_tokenizer_seg"
 _configs_dict = {
-    "cosmos_f8c16p4_segmentation": "cosmos_f8c16p4_segmentation",
+    "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
 }
 
 
@@ -1246,7 +1272,7 @@ if __name__ == "__main__":
 
     # Main function
     @hydra.main(
-        config_path="configs/segmentation",
+        config_path="../configs/segmentation",
         config_name=chosen_cfg,
         version_base=None,
     )

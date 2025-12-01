@@ -158,8 +158,7 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
-                final_latent = self.backbone.encode(x, get_intermediate_features=True)
-        all_layers = self.backbone.sem_z  # get from semantic encoder
+                final_latent, _, all_layers = self.backbone.encode(x, get_intermediate_features=True)
 
         # reorganize all_layers
         assert all_layers is not None, "all_layers is None"
@@ -362,6 +361,8 @@ class TokenizerHybridUNet(nn.Module):
         """
         if overrides is not None:
             cfg.merge_with(overrides)
+        if cfg.tokenizer_pretrained_path is None:
+            logger.warning(f"[TokenizerHybridUNet]: No pretrained weights provided. Using random initialization.")
 
         return cls(cfg)
 
