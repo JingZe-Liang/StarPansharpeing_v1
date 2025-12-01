@@ -5,9 +5,9 @@ data_type: label_centrical
 label_mode: seg
 patch_size: 128
 micro_batch_size: 12
+dataset_name: OSCD
 
 consts:
-  dataset_name: OSCD
   num_classes: 2
   bands: 13
   unchanged_label: 0
@@ -19,7 +19,7 @@ train:
     - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.npy.tar
     - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.npy.tar
   batch_size: ${dataset.train_bs}
-  to_neg_1_1: false
+  to_neg_1_1: true
   num_workers: 4
   shared_norm: true
   resample: true
@@ -35,7 +35,7 @@ val:
   wds_paths:
     - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.npy.tar
   batch_size: ${dataset.val_bs}
-  to_neg_1_1: false
+  to_neg_1_1: true
   num_workers: 2
   shared_norm: true
   resample: false

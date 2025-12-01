@@ -227,14 +227,14 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Make the output heads
         self.deep_supervised_heads = nn.ModuleList()
         for i in reversed(range(n_res)):
-            to_out = nn.Module()
+            to_out = nn.ModuleDict()
             out_chan = basic_chan * chan_mults[i]
             # Create head according to supervision type
             to_out_main = nn.Sequential(
                 create_norm_act_layer("layernorm2d", out_chan, "silu"),
                 AdaptiveOutputConvLayer(out_chan, head_out_chan, mode="interp"),
             )
-            to_out.add_module("main", to_out_main)
+            to_out["main"] = to_out_main
             if deep_sup_type == "sum_previous_out":
                 # Add previous summed feature
                 if i not in (0, n_res - 1):
@@ -246,7 +246,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                         create_conv2d(prev_out_chan, out_chan, kernel_size=3),
                         nn.Upsample(scale_factor=2, mode="nearest"),
                     )
-                    to_out.add_module("prev_out_proj", prev_out_proj)
+                    to_out["prev_out_proj"] = prev_out_proj
 
             self.deep_supervised_heads.append(to_out)
         logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
@@ -415,7 +415,10 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         ##### z augmentions (noise adding or channel dropping).
         h = self.latent_aug(maybe_q_ret)
 
-        return h
+        if not get_intermediate_features:
+            return h
+        else:
+            return h, cache_low_lvl, cache_semantic
 
     def decode(
         self,

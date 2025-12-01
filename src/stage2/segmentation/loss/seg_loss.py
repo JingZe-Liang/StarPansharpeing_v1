@@ -1,7 +1,7 @@
 import segmentation_models_pytorch as smp
 import torch
-from easydict import EasyDict as edict
 from jaxtyping import Float, Int
+from loguru import logger
 from torch import Tensor
 
 
@@ -36,7 +36,7 @@ class HyperSegmentationLoss(torch.nn.Module):
         mode: str = "multiclass",
         dice_cal_classes: list[int] | None = None,
         ce_weight: list[float] | Tensor | None = None,
-        ignore_index: int = -100,
+        ignore_index: int = 255,
         loss_weights: list[float] | None = None,
     ):
         super().__init__()
@@ -58,43 +58,17 @@ class HyperSegmentationLoss(torch.nn.Module):
         self.loss_weights = loss_weights or (1.0, 1.0, 0.75)
         self.loss_weights = torch.as_tensor(self.loss_weights)
 
-    def _forward_loss(self, pred: Tensor, gt: Tensor):
-        if pred.shape[-2:] != gt.shape[-2:]:
-            gt = torch.nn.functional.interpolate(gt, size=pred.shape[-2:], mode="nearest", align_corners=False)
+    def forward(self, pred: Float[Tensor, "b c h w"], gt: Int[Tensor, "b h w"]):
         dice_loss = self.dice_loss(pred, gt)
         ce_loss = self.cross_entropy(pred, gt)
         lovasz_loss = self.lovasz_loss(pred, gt)
         loss = loss_apply_weights([dice_loss, ce_loss, lovasz_loss], self.loss_weights)
-        loss_dict = edict(
-            {
-                "dice_loss": dice_loss.detach(),
-                "ce_loss": ce_loss.detach(),
-                "lovasz_loss": lovasz_loss.detach(),
-            }
-        )
-        return loss, loss_dict
 
-    def forward(self, pred: Float[Tensor, "b c h w"] | list[Tensor], gt: Int[Tensor, "b h w"]):
-        # Multiple outputs (deep supervision)
-        if isinstance(pred, (tuple, list)):
-            total_loss = 0.0
-            loss_dict = {name: torch.tensor(0.0, device=pred.device) for name in self.loss_names}
-            for p in pred:
-                loss, l_dict = self._forward_loss(p, gt)
-                total_loss += loss
-
-                for name in self.loss_names:
-                    loss_dict[name] += l_dict[name]
-
-            total_loss = total_loss / len(pred)
-
-            for name in self.loss_names:
-                loss_dict[name] /= len(pred)
-
-            return total_loss, edict(loss_dict)
-        # Single output
-        else:
-            return self._forward_loss(pred, gt)
+        return loss, {
+            "dice_loss": dice_loss,
+            "ce_loss": ce_loss,
+            "lovasz_loss": lovasz_loss,
+        }
 
 
 # * --- Test --- #

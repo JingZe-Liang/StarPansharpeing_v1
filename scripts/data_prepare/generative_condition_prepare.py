@@ -455,6 +455,299 @@ def main_with_hydra_config(cfg: DictConfig) -> None:
     log_print(f"Condition preparation completed. Total samples processed: {total_samples}")
 
 
+def main_with_args():
+    """
+    Main function for condition preparation with command line arguments.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate conditions from webdataset")
+    parser.add_argument(
+        "--wds_paths",
+        type=str,
+        nargs="+",
+        required=True,
+        help="WebDataset tar file paths",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Output directory for condition files",
+    )
+    parser.add_argument("--tar_name", type=str, required=True, help="Output tar file name")
+    parser.add_argument(
+        "--conditions",
+        type=str,
+        default="all",
+        help="Conditions to generate (comma-separated or 'all')",
+    )
+    parser.add_argument(
+        "--rgb_channels",
+        type=int,
+        nargs=3,
+        default=None,
+        help="RGB channels to extract (3 integers)",
+    )
+    parser.add_argument("--device", type=str, default="cuda", help="Device for processing")
+    parser.add_argument(
+        "--condition_save_format",
+        type=str,
+        default="png",
+        choices=["png", "jpg", "safetensors"],
+        help="Format for saving condition images",
+    )
+    parser.add_argument(
+        "--caption_save_format",
+        type=str,
+        default="txt",
+        choices=["txt", "json", "safetensors"],
+        help="Format for saving captions",
+    )
+    parser.add_argument("--no_original_rgb", action="store_true", help="Don't save original RGB images")
+
+    args = parser.parse_args()
+
+    # Create simple webdataset
+    import webdataset as wds
+
+    ds = wds.WebDataset(args.wds_paths).decode("torch")
+
+    # Parse conditions
+    if args.conditions == "all":
+        conditions = "all"
+    else:
+        conditions = [c.strip() for c in args.conditions.split(",")]
+
+    # Run condition preparation
+    total_samples = webdataset_conditions_prepare(
+        datasets=ds,
+        base_dir=args.output_dir,
+        tar_name=args.tar_name,
+        conditions=conditions,
+        rgb_channels=args.rgb_channels,
+        device=args.device,
+        to_pil=True,
+        save_original_rgb=not args.no_original_rgb,
+        condition_save_format=args.condition_save_format,
+        caption_save_format=args.caption_save_format,
+    )
+
+    log_print(f"Condition preparation completed. Total samples processed: {total_samples}")
+
+
+# * --- utilities --- #
+
+from tarfile import TarFile
+
+import natsort
+from rich.progress import Progress
+
+from src.data.tar_utils import extract_tar_files_safe, read_tar_filenames_safe
+from src.utilities import logging
+
+
+def list_conditions_grouped(
+    file_dir: str | None = None,
+    file_tar: str | None = None,
+    condition_n=5,
+    check_file=True,
+):
+    if file_dir is not None:
+        file_list = [p.stem for p in Path(file_dir).glob("*")]
+    elif file_tar is not None:
+        file_list = read_tar_filenames_safe(file_tar, close_tar=True, check_file=check_file)
+        assert isinstance(file_list, list), "Expected a list of file names from tar."
+    else:
+        raise ValueError("Either file_dir or file_tar must be provided.")
+
+    # sort
+    if file_dir is not None:
+        print(f"file dir is provided, not tar file, the list of files should be sorted.")
+        file_list = natsort.natsorted(file_list)
+        print("sorted done.")
+
+    grouped_files: list[list[str]] = []
+    group: list[str] = []
+    _last_group_name = None
+
+    for file in (tbar := tqdm(file_list)):
+        stem_name = file.split(".")[0]
+        if _last_group_name is None or stem_name != _last_group_name:
+            if _last_group_name is not None:
+                grouped_files.append(group)
+            group = [file]
+            # print(f"new group: {stem_name}, groups found: {len(grouped_files)}")
+            tbar.set_postfix({"group": len(grouped_files)})
+            _last_group_name = stem_name
+        else:
+            group.append(file)
+
+    if len(group) == condition_n:
+        grouped_files.append(group)
+
+    # check the groups
+    need_fixed_groups = []
+    for group in grouped_files:
+        if len(group) != condition_n:
+            log_print(
+                f"Group {group[0]} has {len(group)} files, expected {condition_n}.",
+                "warning",
+            )
+            need_fixed_groups.append(group)
+
+    log_print(f"{len(need_fixed_groups)} groups need to be fixed.")
+    if len(need_fixed_groups) > 0:
+        with open("need_fixed_groups.txt", "w") as f:
+            for group in need_fixed_groups:
+                for file in group:
+                    f.write(str(file) + "\n")
+
+    return grouped_files
+
+
+def list_tar_hyper_images(
+    tar_file: str,
+    finds: list[str] | None = None,
+    sort: bool = True,
+    stop_until_find: bool = True,
+):
+    # names = tar.getnames()
+    names = read_tar_filenames_safe(tar_file, close_tar=True)
+    assert isinstance(names, list), "Expected a list of file names from tar."
+    print(f"Total files in tar: {len(names)}")
+
+    find_indices_map = {}
+    if finds is not None:
+        for i, n in enumerate(names):
+            n = n.split(".")[0]
+            if n in finds:
+                print(f"Found {n} in tar file with index {i}")
+                find_indices_map[n] = i
+
+    if stop_until_find and finds:
+        # finds_list = list(find_indices_map.keys())
+        find_indices = list(find_indices_map.values())
+        # not include min found index
+        print(
+            f"Stop until find {min(find_indices_map, key=find_indices_map.get)} "  # type: ignore
+            f"in tar file with index {min(find_indices)}"
+        )
+        names = names[: min(find_indices)] if find_indices else names
+
+    file_list = [Path(p).stem for p in names]
+
+    if sort:
+        file_list = natsort.natsorted(file_list)
+        print("sorted done.")
+
+    return file_list, names
+
+
+def comp_conditions_hyper_images_names(
+    tar_file: str,
+    condition_dir: str | None = None,
+    condition_tar: str | None = None,
+    condition_n=4,
+):
+    print(">>> listing conditions ...")
+    groups = list_conditions_grouped(
+        condition_dir,
+        condition_tar,
+        condition_n=condition_n,
+        check_file=True,  # no check condition file in tar
+    )
+
+    print(">>> listing hyper images ...")
+    tar_name, _ = list_tar_hyper_images(tar_file, sort=False)
+
+    print(f"\n\nTar file contains {len(tar_name)} images.")
+    print(f"Condition directory contains {len(groups)} groups of images.\n\n")
+
+    for i, (tname, group) in enumerate(zip_longest(tar_name, groups)):
+        tname = str(tname).split(".")[0] if tname else None
+        gname = str(group[0]).split(".")[0] if group else None
+        if tname != gname:
+            print(
+                f"Mismatch: Tar name {tname} does not match group name {gname} at index [{i}/{max(len(tar_name), len(groups))}]"
+            )
+            print("------------------")
+        # else:
+        #     print(f"Match: Tar name {tname} matches group name {gname}")
+
+    print(">>> Comparison completed.\n")
+
+
+def re_tar_from_dir(
+    src_img_tar: str,
+    conditions_dir,
+    output_file,
+    condition_names=["hed", "segmentation", "sketch", "mlsd"],
+):
+    assert output_file.endswith(".tar"), "Output file must be a .tar file"
+    stems = [p.split(".")[0] for p in read_tar_filenames_safe(src_img_tar, close_tar=True, progress=True)]
+
+    output_tar = TarFile(output_file, "w")
+    for stem in (tbar := tqdm(stems, desc="Re-tarring conditions")):
+        for c_name in condition_names:
+            condition_file = Path(conditions_dir, f"{stem}.{c_name}.png")
+
+            if not condition_file.exists():
+                tbar.clear()
+                print(f"Condition file {condition_file} does not exist, skipping.")
+                tbar.refresh()
+                continue
+
+            output_tar.add(condition_file, arcname=f"{stem}.{c_name}.png")
+            tbar.set_postfix({"file": stem})
+
+    # > compare the keys
+    output_tar.close()
+    print(f"Re-tar completed. Output file: {output_file}")
+    comp_conditions_hyper_images_names(src_img_tar, condition_tar=output_file)
+
+
+def concate_tars(*src_tars, output_tar: str, repeat_find=True):
+    from src.data.tar_utils import extract_tar_files_safe, read_tar_filenames_safe
+
+    n_total = 0
+    if repeat_find:
+        s = set()
+    with TarFile(output_tar, "w") as out_tar:
+        for tar_file in src_tars:
+            assert Path(tar_file).exists(), f"Tar file {tar_file} does not exist."
+            tar = TarFile(tar_file, "r")
+            log_print("merged tar:{}".format(tar.name))
+
+            tar_files = read_tar_filenames_safe(tar_path=tar_file, close_tar=True)
+            tbar: tqdm = tqdm(
+                enumerate(extract_tar_files_safe(tar=tar, close_tar=False)),
+                total=len(tar_files),
+                desc="Merging tar members",
+            )
+            for i, (member, file_data) in tbar:
+                if repeat_find:
+                    if member.name in s:
+                        log_print(
+                            f"Skipping duplicate member {member.name} in tar {tar.name}",
+                            "warning",
+                        )
+                        continue
+                    else:
+                        s.add(member.name)
+
+                try:
+                    out_tar.addfile(member, file_data)
+                    n_total += 1
+                    tbar.set_description(f"Extract {member.name}")
+                except Exception as e:
+                    log_print(f"Failed to add {member.name} to output tar: {e}", "error")
+                    continue
+            tar.close()
+
+    log_print(f"Concatenated {len(src_tars)} tar files into {output_tar}, total {n_total} files.")
+
+
 if __name__ == "__main__":
     # Hydra condition preparation
     from loguru import logger

@@ -15,8 +15,8 @@ OmegaConf.register_new_resolver("glob", lambda x: ListConfig([str(p) for p in Pa
 
 
 @hydra.main(
-    config_path="../configs/tokenizer_gan",
-    config_name="unicosmos_tokenizer_f8c16p4.yaml",
+    config_path="../configs/change_detection/",
+    config_name="tokenizer_hybrid_adaptor",
     version_base=None,
 )
 def main(args):
@@ -41,7 +41,14 @@ def main(args):
     # start_probs = args.dataset.train_loader.curriculum_kwargs.start_prob
     # print(scipy.special.softmax(start_probs))
 
-    print(OmegaConf.to_container(args.dataset.train_loader, resolve=True))
+    # print(OmegaConf.to_container(args.dataset.train_loader, resolve=True))
+    print(OmegaConf.to_yaml(args.dataset, resolve=True))
+
+    ds, loader = hydra.utils.instantiate(args.dataset.train)
+    print(ds)
+    for batch in loader:
+        # print(batch)
+        pass
 
 
 main()

@@ -15,8 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 from einops import rearrange
+from loguru import logger
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import create_norm_act_layer, create_norm_layer
+from timm.layers import LayerNorm2dFp32, create_norm_act_layer, create_norm_layer
+from timm.layers.weight_init import lecun_normal_
 from torchvision.transforms import Normalize
 
 sys.path.append("src/stage1/utilities/losses/dinov3")
@@ -281,7 +283,7 @@ class Extractor(nn.Module):
             return query
 
         if self.with_cp and query.requires_grad:
-            query = cp.checkpoint(_inner_forward, query, feat)
+            query = cp.checkpoint(_inner_forward, query, feat, use_reentrant=False)
         else:
             query = _inner_forward(query, feat)
 
@@ -367,7 +369,7 @@ class InteractionBlockWithCls(nn.Module):
 
 
 class SpatialPriorModule(nn.Module):
-    def __init__(self, inplanes=64, embed_dim=384, with_cp=False, final_downsample=32):
+    def __init__(self, in_channels=3, inplanes=64, embed_dim=384, with_cp=False, final_downsample=32):
         """
         Spatial Prior Module for generating multi-scale features.
 
@@ -386,24 +388,32 @@ class SpatialPriorModule(nn.Module):
         self.with_cp = with_cp
         self.final_downsample = final_downsample
 
+        _create_norm_act = lambda chans: create_norm_act_layer(
+            "layernorm2d",
+            chans,
+            "silu",
+        )
         self.stem = nn.Sequential(
             *[
                 nn.Conv2d(
-                    3,
+                    in_channels,
                     inplanes,
                     kernel_size=3,
                     stride=2,
                     padding=1,
                     bias=False,
                 ),
-                nn.SyncBatchNorm(inplanes),
-                nn.ReLU(inplace=True),
+                _create_norm_act(inplanes),
+                # nn.SyncBatchNorm(inplanes),
+                # nn.ReLU(inplace=True),
                 nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
-                nn.SyncBatchNorm(inplanes),
-                nn.ReLU(inplace=True),
+                _create_norm_act(inplanes),
+                # nn.SyncBatchNorm(inplanes),
+                # nn.ReLU(inplace=True),
                 nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
-                nn.SyncBatchNorm(inplanes),
-                nn.ReLU(inplace=True),
+                _create_norm_act(inplanes),
+                # nn.SyncBatchNorm(inplanes),
+                # nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             ]
         )
@@ -417,8 +427,9 @@ class SpatialPriorModule(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                nn.SyncBatchNorm(2 * inplanes),
-                nn.ReLU(inplace=True),
+                _create_norm_act(2 * inplanes),
+                # nn.SyncBatchNorm(2 * inplanes),
+                # nn.ReLU(inplace=True),
             ]
         )
         self.conv3 = nn.Sequential(
@@ -431,8 +442,9 @@ class SpatialPriorModule(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                nn.SyncBatchNorm(4 * inplanes),
-                nn.ReLU(inplace=True),
+                _create_norm_act(4 * inplanes),
+                # nn.SyncBatchNorm(4 * inplanes),
+                # nn.ReLU(inplace=True),
             ]
         )
 
@@ -448,8 +460,9 @@ class SpatialPriorModule(nn.Module):
                         padding=1,
                         bias=False,
                     ),
-                    nn.SyncBatchNorm(4 * inplanes),
-                    nn.ReLU(inplace=True),
+                    _create_norm_act(4 * inplanes),
+                    # nn.SyncBatchNorm(4 * inplanes),
+                    # nn.ReLU(inplace=True),
                 ]
             )
         else:
@@ -464,8 +477,9 @@ class SpatialPriorModule(nn.Module):
                         padding=1,
                         bias=False,
                     ),
-                    nn.SyncBatchNorm(4 * inplanes),
-                    nn.ReLU(inplace=True),
+                    _create_norm_act(4 * inplanes),
+                    # nn.SyncBatchNorm(4 * inplanes),
+                    # nn.ReLU(inplace=True),
                 ]
             )
 
@@ -494,7 +508,7 @@ class SpatialPriorModule(nn.Module):
             return c1, c2, c3, c4
 
         if self.with_cp and self.training:
-            outs = cp.checkpoint(_inner_forward, x)
+            outs = cp.checkpoint(_inner_forward, x, use_reentrant=False)
         else:
             outs = _inner_forward(x)
         return outs
@@ -504,6 +518,7 @@ class DINOv3_Adapter(nn.Module):
     def __init__(
         self,
         backbone,
+        in_channels=3,
         interaction_indexes=[9, 19, 29, 39],
         pretrain_size=512,
         conv_inplane=64,
@@ -518,7 +533,7 @@ class DINOv3_Adapter(nn.Module):
         use_extra_extractor=True,
         dw_ratios=[2, 1, 0.5],
         with_cp=True,
-        use_bn=True,
+        use_bn=False,
         freeze_backbone=True,
     ):
         super(DINOv3_Adapter, self).__init__()
@@ -532,6 +547,7 @@ class DINOv3_Adapter(nn.Module):
         )
 
         self._setup_interactions(
+            in_channels=in_channels,
             embed_dim=embed_dim,
             interaction_indexes=self.interaction_indexes,
             pretrain_size=pretrain_size,
@@ -576,6 +592,7 @@ class DINOv3_Adapter(nn.Module):
 
     def _setup_interactions(
         self,
+        in_channels: int,
         embed_dim: int,
         interaction_indexes=[9, 19, 29, 39],
         pretrain_size=512,
@@ -591,11 +608,13 @@ class DINOv3_Adapter(nn.Module):
         use_extra_extractor=True,
         dw_ratios=[2, 1, 0.5],
         with_cp=True,
-        use_bn=True,
-        inp_mean_std=(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        use_bn=False,
+        inp_mean_std: tuple | None = None,  # (IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ):
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
-        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False)
+        self.spm = SpatialPriorModule(
+            in_channels=in_channels, inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False
+        )
         self.interactions = nn.Sequential(
             *[
                 InteractionBlockWithCls(
@@ -622,8 +641,12 @@ class DINOv3_Adapter(nn.Module):
         self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+        print(f"[Dinov3 Adapter]: Use norm type {type(self.norm1)}")
+        if use_bn:
+            # FIXME: bn mismatch
+            logger.warning(f"Use BN in module, may cause train/test running mean/var difference.")
 
-        self._input_norm = Normalize(*inp_mean_std)
+        self._input_norm = Normalize(*inp_mean_std) if inp_mean_std is not None else nn.Identity()
 
         self.init_weights()
 
@@ -650,18 +673,13 @@ class DINOv3_Adapter(nn.Module):
             # fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
             # fan_out //= m.groups
             # m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
-            from timm.layers.weight_init import lecun_normal_
-
             lecun_normal_(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
 
     def _get_pos_embed(self, pos_embed, H, W):
         pos_embed = pos_embed.reshape(
-            1,
-            self.pretrain_size[0] // self.patch_size,
-            self.pretrain_size[1] // self.patch_size,
-            -1,
+            1, self.pretrain_size[0] // self.patch_size, self.pretrain_size[1] // self.patch_size, -1
         ).permute(0, 3, 1, 2)
         pos_embed = (
             F.interpolate(pos_embed, size=(H, W), mode="bicubic", align_corners=False)

@@ -1807,30 +1807,15 @@ class CosmosHyperspectralTokenizerTrainer:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.sep_enc_dec:
-            self.accelerator.save_model(
-                self.ema_encoder.ema_model,
-                ema_path / "encoder",
-            )
-            self.accelerator.save_model(
-                self.ema_decoder.ema_model,
-                ema_path / "decoder",
-            )
+            self.accelerator.save_model(self.ema_encoder.ema_model, ema_path / "encoder")
+            self.accelerator.save_model(self.ema_decoder.ema_model, ema_path / "decoder")
         else:
-            self.accelerator.save_model(
-                self.ema_tokenizer.ema_model,
-                ema_path / "tokenizer",
-            )
+            self.accelerator.save_model(self.ema_tokenizer.ema_model, ema_path / "tokenizer")
 
-        self.accelerator.save_model(
-            self.ema_vq_disc.ema_model,
-            ema_path / "discriminator",
-        )
+        self.accelerator.save_model(self.ema_vq_disc.ema_model, ema_path / "discriminator")
 
         if hasattr(self, "ema_proxy_model"):
-            self.accelerator.save_model(
-                self.ema_proxy_model,
-                ema_path / "proxy_model",
-            )
+            self.accelerator.save_model(self.ema_proxy_model, ema_path / "proxy_model")
 
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"

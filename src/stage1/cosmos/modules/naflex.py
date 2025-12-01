@@ -542,6 +542,9 @@ class IJEPANaFlexViT(Transformer):
         x = x[:, self.num_prefix_tokens :]
         others["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
+        else:
+            x = x[:, self.num_prefix_tokens :]  # spatial tokens only
+
         # Return the 1d features as the backbone output
         # not forward by the head
         return x, edict(others)

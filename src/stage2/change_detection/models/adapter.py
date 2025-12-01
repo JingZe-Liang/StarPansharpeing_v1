@@ -13,6 +13,7 @@ from timm.layers import (
     get_norm_act_layer,
     get_norm_layer,
 )
+from timm.layers.norm import LayerNorm2d
 from timm.layers.squeeze_excite import SqueezeExcite
 from timm.layers.weight_init import lecun_normal_
 from torch import Tensor
@@ -136,7 +137,7 @@ class DepthwiseSeparableConv(nn.Module):
         stride: int = 1,
         padding: int = 1,
         bias: bool = False,
-        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        norm: type[nn.Module] | str = LayerNorm2d,
         act: type[nn.Module] | str = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -167,7 +168,7 @@ class SharedBasisProjector(nn.Module):
         in_ch: int,
         rank: int,
         out_ch_list: List[int],
-        norm: Type[nn.Module] = nn.BatchNorm2d,
+        norm: Type[nn.Module] = LayerNorm2d,
         act: Type[nn.Module] = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -205,7 +206,7 @@ class FAPM(nn.Module):
         in_ch: int,
         inner_ch: int,
         out_ch_list: list[int],
-        norm: type[nn.Module] | str = nn.BatchNorm2d,
+        norm: type[nn.Module] | str = LayerNorm2d,
         act: type[nn.Module] | str = nn.ReLU,
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
@@ -317,7 +318,7 @@ class DINOv3EncoderAdapter(nn.Module):
         adapter_type: str = "default",
         rank: int = 256,
         conv_op=nn.Conv2d,
-        norm_op: Union[None, Type[nn.Module], str] = nn.BatchNorm2d,
+        norm_op: Union[None, Type[nn.Module], str] = LayerNorm2d,
         norm_op_kwargs: dict | None = None,
         dropout_op=None,
         dropout_op_kwargs: dict | None = None,
@@ -430,8 +431,8 @@ class UNetDecoder(nn.Module):
         """
         super().__init__()
         self.deep_supervision = deep_supervision
-        self.encoder = encoder
         self.num_classes = num_classes
+        conv_op = encoder.conv_op
         n_stages_encoder = len(encoder.output_channels)
 
         if isinstance(n_conv_per_stage, int):
@@ -517,7 +518,7 @@ class UNetDecoder(nn.Module):
                 seg_layers.append(
                     nn.Sequential(
                         create_norm_act_layer("layernorm2d", input_features_skip, "gelu"),
-                        encoder.conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
+                        conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
                     )
                 )
                 logger.debug(f"Make segmentation layer at layer {s}")

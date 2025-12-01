@@ -1,10 +1,11 @@
-from typing import Literal
+import warnings
+from typing import Any, Callable, Literal
 
 import torch
 import torch.nn as nn
 from jaxtyping import Int
 from torch import Tensor
-from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Recall
+from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Precision, Recall
 from torchmetrics.segmentation import GeneralizedDiceScore, MeanIoU
 
 
@@ -13,15 +14,46 @@ class HyperSegmentationScore(nn.Module):
         self,
         n_classes: int,
         ignore_index: int | None = None,
-        task="multiclass",
+        task: Literal["binary", "multiclass"] = "multiclass",
         top_k: int = 1,
         reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
         per_class: bool = False,
         include_bg: bool = False,
+        input_format: Literal["one-hot", "index", "mixed"] = "index",
         use_aggregation: bool = False,
     ):
         super().__init__()
+        self.n_classes = n_classes
+        self.ignore_index = ignore_index
+        self.task = task
+        self.top_k = top_k
+        self.reduction = reduction
+        self.per_class = per_class
+
+        if ignore_index is not None:
+            if include_bg:
+                warnings.warn(
+                    f"include_bg=True is automatically set to False when ignore_index={ignore_index} "
+                    f"is used. This prevents mixing ignored pixels (mapped to class 0) with "
+                    f"real background class 0 in segmentation metrics.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self.include_bg = False
+        else:
+            self.include_bg = include_bg
+
+        self.input_format = input_format
+
+        # Classification metrics support ignore_index directly
         self.accuracy = Accuracy(
+            task=task,
+            num_classes=n_classes,
+            ignore_index=ignore_index,
+            top_k=top_k,
+            average=reduction,
+        )
+        self.precision = Precision(
             task=task,
             num_classes=n_classes,
             ignore_index=ignore_index,
@@ -36,12 +68,6 @@ class HyperSegmentationScore(nn.Module):
             average=reduction,
         )
         self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
-        self.dice_score = GeneralizedDiceScore(
-            include_background=include_bg,
-            num_classes=n_classes,
-            per_class=per_class,
-        )
-        self.mean_iou = MeanIoU(num_classes=n_classes, per_class=per_class, include_background=include_bg)
         self.f1_score = F1Score(
             task=task,
             num_classes=n_classes,
@@ -50,8 +76,32 @@ class HyperSegmentationScore(nn.Module):
             ignore_index=ignore_index,
         )
 
+        # Segmentation metrics need special handling for ignore_index
+        # Adjust num_classes to include ignore_index if it exceeds valid classes
+        if ignore_index is not None:
+            if ignore_index >= n_classes:
+                seg_n_classes = ignore_index + 1
+            else:
+                raise ValueError(f"ignore_index {ignore_index} should exceed number of classes {n_classes}")
+        else:
+            seg_n_classes = n_classes
+
+        self.dice_score = GeneralizedDiceScore(
+            include_background=self.include_bg,
+            num_classes=seg_n_classes,
+            per_class=per_class,
+            input_format=input_format,
+        )
+        self.mean_iou = MeanIoU(
+            num_classes=seg_n_classes,
+            per_class=per_class,
+            include_background=self.include_bg,
+            input_format=input_format,
+        )
+
         self._all_metric_fns = dict(
             accuracy=self.accuracy,
+            precision=self.precision,
             recall=self.recall,
             kappa=self.cohen_kappa,
             dice=self.dice_score,
@@ -62,8 +112,50 @@ class HyperSegmentationScore(nn.Module):
         # self.use_aggregation = use_aggregation
 
     def _update_all_metrics(self, pred, gt):
-        for metric in self._all_metric_fns.values():
+        """
+        Update all metrics with prediction and ground truth.
+
+        Strategy for handling ignore_index:
+        - Classification metrics: Use ignore_index parameter directly
+        - Segmentation metrics: Map ignore_index to 0, with include_bg=False
+          to avoid mixing ignored pixels with real background class
+        """
+        # Classification metrics support ignore_index directly
+        classification_metrics = {
+            "accuracy": self.accuracy,
+            "precision": self.precision,
+            "recall": self.recall,
+            "kappa": self.cohen_kappa,
+            "f1_score": self.f1_score,
+        }
+
+        # Segmentation metrics need special handling
+        segmentation_metrics = {
+            "dice": self.dice_score,
+            "mean_iou": self.mean_iou,
+        }
+
+        # Update classification metrics directly
+        for metric in classification_metrics.values():
             metric.update(pred, gt)
+
+        # Update segmentation metrics with preprocessing for ignore_index
+        if self.ignore_index is not None:
+            # This ensures ignored pixels don't interfere with real background evaluation
+            pred_processed = pred.clone()
+            gt_processed = gt.clone()
+
+            # Replace ignore_index with 0 (background class)
+            ignore_mask = gt_processed == self.ignore_index
+            gt_processed[ignore_mask] = 0
+
+            # Update segmentation metrics with processed data
+            for metric in segmentation_metrics.values():
+                metric.update(pred_processed, gt_processed)
+        else:
+            # No ignore_index, use original data
+            for metric in segmentation_metrics.values():
+                metric.update(pred, gt)
 
     def _compute_all_metrics(self):
         return {name: metric.compute() for name, metric in self._all_metric_fns.items()}
@@ -72,7 +164,9 @@ class HyperSegmentationScore(nn.Module):
         for metric in self._all_metric_fns.values():
             metric.reset()
 
-    def update(self, pred, gt):
+    def update(self, pred, gt, mask=None):
+        pred = self._mask_out(pred, mask)[None, None, :]
+        gt = self._mask_out(gt, mask)[None, None, :]
         self._update_all_metrics(pred, gt)
 
     def compute(self):
@@ -81,7 +175,27 @@ class HyperSegmentationScore(nn.Module):
     def reset(self):
         self._reset_all_metrics()
 
-    def forward(self, pred: Int[Tensor, "... h w"], gt: Int[Tensor, "... h w"]):
+    def _mask_out(self, x: Tensor, mask: Tensor | None) -> Tensor:
+        if mask is not None:
+            assert mask.ndim == 3, "Mask must be 3D tensor, shaped as [bs, h, w]"
+            x = torch.masked_select(x, mask)
+        return x
+
+    def forward(
+        self,
+        pred: Int[Tensor, "... h w"],
+        gt: Int[Tensor, "... h w"],
+        mask: Int[Tensor, "... h w"] | None = None,
+    ):
+        """
+        Forward metrics
+            pred: Predicted labels (batch_size, height, width)
+            gt: Ground truth labels (batch_size, height, width)
+            mask: Optional mask to ignore certain pixels (batch_size, height, width)
+        """
+        assert pred.ndim == gt.ndim == 3, "Prediction and ground truth must be 3D tensors, shaped as [bs, h, w]"
+        pred = self._mask_out(pred, mask)
+        gt = self._mask_out(gt, mask)
         self._update_all_metrics(pred, gt)
         metrics = self._compute_all_metrics()
         return metrics
@@ -93,8 +207,9 @@ class HyperSegmentationScore(nn.Module):
 def test_metrics():
     """Test basic functionality of HyperSegmentationScore with random data"""
     # Create test data
-    pred = torch.randint(0, 5, (2, 32, 32))  # 2 images, 32x32, 5 classes
-    gt = torch.randint(0, 5, (2, 32, 32))  # 2 images, 32x32, 5 classes
+    generator = torch.Generator()
+    pred = torch.randint(0, 5, (2, 32, 32), generator=generator.manual_seed(42))  # 2 images, 32x32, 5 classes
+    gt = torch.randint(0, 5, (2, 32, 32), generator=generator.manual_seed(43))  # 2 images, 32x32, 5 classes
 
     # Initialize metrics
     metrics = HyperSegmentationScore(

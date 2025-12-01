@@ -24,29 +24,27 @@ from jaxtyping import Float, Int
 from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from safetensors.torch import load_file
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
-from tqdm import trange
+from tqdm import tqdm, trange
 
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
-from src.stage2.segmentation.data.data_split import (
-    SingleImageHyperspectralSegmentationDataset,
-)
+from src.data.window_slider import WindowSlider, model_predict_patcher
+from src.stage2.segmentation.data.data_split import SingleImageHyperspectralSegmentationDataset
+from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset
 from src.stage2.segmentation.metrics import HyperSegmentationScore
 from src.stage2.utilities.loss import HyperSegmentationLoss
-from src.utilities.config_utils import (
-    to_object as to_cont,  # register new resolvers at the same time
-)
+from src.utilities.config_utils import to_easydict_recursive
+from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import dict_round_to_list_str, log
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import visualize_segmentation_map
-
-heavyball = lazy_loader.load("heavyball")
 
 
 @dataclass
@@ -67,9 +65,20 @@ class SegmentationOutput:
 
 
 class HyperSegmentationTrainer:
+    """
+    Hyperspectral image segmentation/classification trainer.
+    For usual classification task, the dataloader takes in a single image and a single label.
+    Randomly taking some pixels from the image and label to directly input the model, or clip patches
+    around the pixels (as center) into the model. If the test set is also taken from the same image,
+    it will leak the training infomation into the test set.
+
+    Avoid this by (spatially) predefining the train/test rigorously into patches and do not mixing them
+    in training stage.
+    """
+
     def __init__(self, cfg: DictConfig):
+        cfg = to_easydict_recursive(cfg)
         self.cfg = cfg
-        self.tokenizer_cfg = cfg.tokenizer
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
@@ -100,12 +109,12 @@ class HyperSegmentationTrainer:
         if self._use_single_img_indexing:
             self.log_msg("Using HyperSIGMA-style indexing for loss computation")
             # Initialize accumulation buffers for HyperSIGMA mode
-            self._accumulated_preds = []
-            self._accumulated_gts = []
-            self._accumulated_indices = []
-            self._current_image_id = 0
-            self._patches_per_image = getattr(self.train_cfg, "patches_per_image", None)
-            self.macro_batch_size = getattr(self.train_cfg, "macro_batch_size", 32)
+            self._accumulated_preds: list[torch.Tensor] = []
+            self._accumulated_gts: list[torch.Tensor] = []
+            self._accumulated_indices: list[int] = []
+            self._current_image_id: int = 0
+            self._patches_per_image: int | None = getattr(self.train_cfg, "patches_per_image", None)
+            self.macro_batch_size: int = getattr(self.train_cfg, "macro_batch_size", 32)
             if self._patches_per_image is None:
                 self.log_msg(
                     "Warning: patches_per_image not specified, will auto-detect",
@@ -133,18 +142,30 @@ class HyperSegmentationTrainer:
             self.no_ema = True
 
         # dataloader
-        used_dataset = self.dataset_cfg.cfgs.used
-        self.log_msg(f"[Data]: using dataset {used_dataset}")
+        dataset_name = self.dataset_cfg.dataset_name
+        self.log_msg(f"[Data]: using dataset {dataset_name}")
+
+        self.train_dataset: SingleMatDataset
+        self.val_dataset: SingleMatDataset
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
-        self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
+        if hasattr(self.train_dataset, "val"):
+            logger.info(f"[Data]: get independent validation dataset.")
+            self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
+        else:
+            logger.info(f"[Data]: use single image dataset.")
+            self.val_dataset, self.val_dataloader = self.train_dataset, self.train_dataloader
+
+        self.ds_is_single_image = self.dataset_cfg.consts.is_single_image
+        self._val_unsampled_mask = None  # if is single image training, sampled from one image
+        if self.ds_is_single_image:
+            self._val_unsampled_mask = self.val_dataset.get_unsampled_area().to(self.device)
+
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
 
-        # setup the tokenizer
-        self.online_tokenize = self.train_cfg.online_tokenize
-        self.setup_tokenizer()  # must setup the tokenizer to decode the image
+        # setup the segmentation model
         self.setup_segmentation_model()  # setup the segmentation model
 
         # optimizers and lr schedulers
@@ -175,82 +196,6 @@ class HyperSegmentationTrainer:
         segment_name = getattr(self.train_cfg, "segment_name", None) or self.model.__class__.__name__
         self.log_msg(f"use segmentation model: {segment_name}")
 
-    def setup_tokenizer(self):
-        tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
-        self.quantizer_type: str | None = self.train_cfg.quantizer_type
-        self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
-        self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
-
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg("[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder")
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = load_jit_model_shape_matched(
-                self.cfg.tokenizer.enc_path,
-                tokenizer_config,
-                device=self.device,
-                part="encoder",
-            )
-            self.tokenizer_decoder, self._dec_model_mody_keys = load_jit_model_shape_matched(
-                self.cfg.tokenizer.dec_path,
-                tokenizer_config,
-                device=self.device,
-                part="decoder",
-            )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
-
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(self.device)
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
-
-            self.use_quantizer = self.quantizer is not None
-
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-
-        else:
-            self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
-            self.norm_z = False  # in the model, not in trainer
-            self.tokenizer = hydra.utils.instantiate(self.cfg.tokenizer)
-
-            if self.train_cfg.peft_pretrained_path is not None:
-                self.log_msg(f"[Tokenizer]: load peft model from {self.train_cfg.peft_pretrained_path}")
-                self.peft_cfg, self.tokenizer = load_peft_model_checkpoint(
-                    base_model=self.tokenizer,
-                    base_model_pretrained_path=getattr(self.train_cfg, "base_model_pretrained_path", None),
-                    peft_pretrained_path=self.train_cfg.peft_pretrained_path,
-                    merge_and_unload=True,
-                )
-
-            # quantizer in the tokenizer, not handled by this trainer
-            # vq, bsq, fsq, kl
-            self.use_quantizer = hasattr(self.tokenizer, "quantizer")
-            self.quantizer = None
-            self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
-            if self.use_quantizer:
-                self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
-
-        # set to eval
-        if self.sep_enc_dec:
-            self.tokenizer_encoder.eval()
-            self.tokenizer_decoder.eval()
-        else:
-            self.tokenizer.eval()
-
-        if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-            self.quantizer.eval()
-
-        self.log_msg("freeze the tokenizer and quantizer (if used).")
-
     def prepare_ema_models(self):
         if self.no_ema:
             return
@@ -258,7 +203,7 @@ class HyperSegmentationTrainer:
         self.ema_model = hydra.utils.instantiate(self.ema_cfg)(self.model)
         self.log_msg(f"create EMA model for segmentation")
 
-    def configure_logger(self):
+    def configure_logger(self) -> Path:
         self.logger = logger
 
         log_file = Path(self.train_cfg.proj_dir)
@@ -272,12 +217,12 @@ class HyperSegmentationTrainer:
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
             if self.accelerator.is_main_process:
-                input_lst = [log_file] * self.accelerator.num_processes
+                input_list: list[Path | None] = [log_file] * self.accelerator.num_processes
             else:
-                input_lst = [None] * self.accelerator.num_processes
-            output_lst = [None]
-            torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
-            log_file: Path = output_lst[0]
+                input_list: list[Path | None] = [None] * self.accelerator.num_processes
+            output_list: list[Path | None] = [None]
+            torch.distributed.scatter_object_list(output_list, input_list, src=0)
+            log_file = cast(Path, output_list[0])
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
@@ -366,7 +311,7 @@ class HyperSegmentationTrainer:
             model_cls_n = model.__class__.__name__
             norms = {}
             if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] = 0
+                norms[f"{model_cls_n}_grad_norm"] = 0.0
                 _n_params_sumed = 0
             for n, p in model.named_parameters():
                 if p.grad is not None:
@@ -432,7 +377,7 @@ class HyperSegmentationTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -445,7 +390,7 @@ class HyperSegmentationTrainer:
             _get_model_params = (
                 lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
             )
-            model_opt = _optimizer_creater(self.train_cfg.seg_optim, _get_model_params)
+            model_opt = _optimizer_creater(self.train_cfg.segment_optim, _get_model_params)
         else:
             model_opt = DummyOptim([{"params": list(self.model.parameters())}])
 
@@ -461,6 +406,8 @@ class HyperSegmentationTrainer:
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
         if is_heavyball_opt(model_opt):
+            import heavyball
+
             heavyball.utils.compile_mode = None
             self.log_msg(
                 "use heavyball optimizer, it will compile the optimizer, "
@@ -503,7 +450,7 @@ class HyperSegmentationTrainer:
             self._accumulated_indices = []
             self._current_image_id = 0
         else:
-            # Clear buffers when disabling
+            # Cclear buffers when disabling
             if hasattr(self, "_accumulated_preds"):
                 self._accumulated_preds.clear()
                 self._accumulated_gts.clear()
@@ -552,30 +499,9 @@ class HyperSegmentationTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
             self.model.dtype = torch.float
 
-        # tokenizer
-        if self.train_cfg.prepare_tokenizer_in_accelerator:
-            if self.sep_enc_dec:
-                # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-                self.tokenizer_encoder = self.accelerator.prepare(self.tokenizer_encoder)
-                self.accelerator._models.pop(-1)
-                self.tokenizer_decoder = self.accelerator.prepare(self.tokenizer_decoder)
-                self.accelerator._models.pop(-1)
-            else:
-                self.tokenizer = self.accelerator.prepare(self.tokenizer)
-                self.accelerator._models.pop(-1)
-
-        # quantizer
-        if self.quantizer is not None and self.use_quantizer:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            self.accelerator._models.pop(-1)
+        self.model = self.accelerator.prepare(self.model)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -597,45 +523,9 @@ class HyperSegmentationTrainer:
         assert bands is not None and bands.is_integer() and bands > 0, f"channel num: {bands}"
         return bands
 
-    def forward_tokenizer(self, x: torch.Tensor, mode: str = "encode", no_grad=True) -> dict:
-        assert hasattr(self, "tokenizer"), "Tokenizer not found"
-        grad_ctx = torch.no_grad() if no_grad else nullcontext()
-
-        latent_q, recon = None, None
-        with grad_ctx and self.accelerator.autocast():
-            if self.sep_enc_dec:
-                to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                to_dec = lambda x: self.tokenizer_decoder(x)
-
-                if mode == "encode":
-                    latent = to_enc(x)  # x is the image
-                    if self.quantizer is not None:
-                        latent_q, q_loss, q_info = self.quantizer(latent)
-                    else:
-                        latent_q = latent
-                elif mode == "decode":
-                    recon = to_dec(x)  # x is the latent
-            else:
-                to_enc = lambda img: self.tokenizer.encode(img)
-                to_dec = lambda latent, sz: self.tokenizer.decode(latent, sz)
-
-                if mode == "encode":
-                    latent = to_enc(x)
-                else:
-                    bands = self.get_training_sample_channels()
-                    bs_chan = [x.shape[0], bands]
-                    recon = to_dec(x, bs_chan)
-                    if isinstance(recon, tuple):
-                        recon = recon[0]  # construction is the first output
-
-        return dict(latent=latent_q, recon=recon)
-
     def get_global_step(self, mode: str = "train"):
         # TODO: add val state
-        assert mode in (
-            "train",
-            "val",
-        ), "Only train and val modes are supported for now."
+        assert mode in ("train", "val"), "Only train and val modes are supported for now."
 
         return self.train_state[mode]
 
@@ -677,33 +567,36 @@ class HyperSegmentationTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
-    def get_tokenizer_encoded(self, batch: dict) -> Tensor:
-        img_latent = None
-        # offline latents
-        if "img_latent" in batch:
-            img_latent = batch["img_latent"].to(self.device, self.dtype)
-
-        # tokenizer online
-        else:
-            assert self.online_tokenize and (
-                hasattr(self, "tokenizer")
-                or (hasattr(self, "tokenizer_encoder") and hasattr(self, "tokenizer_decoder"))
-            ), "tokenizer not found for online tokenize"
-            img_latent = self.forward_tokenizer(batch["img"])["latent"]
-
-        assert img_latent is not None, "img_latent is None"
-        return img_latent
-
     def compute_segmentation_loss(self, out, gt):
         loss = self.segment_loss(out, gt)
         return loss
 
-    def forward_segment_model(self, img, gt, img_latent):
+    def forward_segment_model(self, img, gt, is_test=False):
+        """
+        Forward pass through segmentation model.
+
+        Parameters
+        ----------
+        img : torch.Tensor
+            Input image tensor
+        gt : torch.Tensor
+            Ground truth segmentation tensor
+
+        Returns
+        -------
+        SegmentationOutput
+            Output containing loss and predictions
+        """
+        if self.no_ema or not is_test:
+            model = self.model
+        else:
+            model = self.ema_model.ema_model
         with self.accelerator.autocast():
-            # img -> model (DINOv3 backbone -> multi-scale FPN -> adapter -> Unet decoder -> prediction
-            out = self.model(img, img_latent)
+            out = model(img)
             # loss
-            loss = self.compute_segmentation_loss(out, gt)
+            loss = torch.zeros(1).to(img)
+            if not is_test:
+                loss = self.compute_segmentation_loss(out, gt)
 
         output = SegmentationOutput(loss=loss, pred_pixel=out)
         return output
@@ -790,18 +683,47 @@ class HyperSegmentationTrainer:
             self.ema_update()
 
     def _macro_forward_seg_model(self, batch: dict, macro_batch_size: int = 32):
+        """
+        Forward pass with macro batch processing.
+
+        Parameters
+        ----------
+        batch : dict
+            Batch containing image tensor
+        macro_batch_size : int
+            Size of macro batches for memory management
+
+        Returns
+        -------
+        list[Tensor]
+            List of model outputs for each macro batch
+        """
         total_img_patches: Tensor = batch["img"]
         img_macro_batches: tuple[Tensor, ...] = total_img_patches.chunk(macro_batch_size, dim=0)
         macro_outputs: list[Tensor] = []
         with self.accelerator.autocast():
             for macro_img in img_macro_batches:
-                img_latent = self.get_tokenizer_encoded(batch={"img": macro_img})
-                macro_pred = self.model(macro_img, img_latent)
+                macro_pred = self.model(macro_img)
                 macro_outputs.append(macro_pred)
         return macro_outputs
 
-    def train_segment_step(self, img, gt, img_latent):
-        out = self.forward_segment_model(img, gt, img_latent)
+    def train_segment_step(self, img, gt):
+        """
+        Single training step for segmentation.
+
+        Parameters
+        ----------
+        img : torch.Tensor
+            Input image tensor
+        gt : torch.Tensor
+            Ground truth segmentation tensor
+
+        Returns
+        -------
+        SegmentationOutput
+            Output containing loss and predictions
+        """
+        out = self.forward_segment_model(img, gt)
         self._optimize_step(out.loss)
         return out
 
@@ -835,27 +757,6 @@ class HyperSegmentationTrainer:
             raise NotImplementedError("Not implemented yet")
             return None
 
-    def _get_metric_fn(self, clear=False):
-        if not hasattr(self, "_seg_metrics"):
-            self._seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(self.metric_cfg)
-        elif clear:
-            self._seg_metrics.reset()
-
-        # Return the segmentation metrics object
-        return self._seg_metrics
-
-    def update_metrics(self, pred, gt, clear=False, only_update=True):
-        seg_metrics = self._get_metric_fn(clear)
-        assert seg_metrics is not None
-        # Update segmentation metrics with prediction and ground truth
-        seg_metrics._update_all_metrics(pred, gt)
-
-    def get_metrics(self):
-        seg_metrics = self._get_metric_fn()
-        assert seg_metrics is not None
-        metrics = seg_metrics._compute_all_metrics()
-        return {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}
-
     def train_step(self, batch: dict):
         # NOTE: in HyperSIGMA mode: the batch is a single image patches, to input
         # the segmented model, we use a 'macro-batch' to control the input-model-batch-size
@@ -872,9 +773,8 @@ class HyperSegmentationTrainer:
         else:
             # Standard mode: process immediately
             with self.accelerator.accumulate(self.model):
-                img_latent = self.get_tokenizer_encoded(batch)
                 # train segmentation model
-                train_out = self.train_segment_step(batch["img"], batch["gt"], img_latent)
+                train_out = self.train_segment_step(batch["img"], batch["gt"])
 
         # update training state
         self.step_train_state()
@@ -913,6 +813,7 @@ class HyperSegmentationTrainer:
         self.log_msg("[Train]: start training", only_rank_zero=False)
 
         for batch in self.infinity_train_loader():
+            batch = self._cast_to_dtype(batch)
             # train step
             self.train_step(batch)
 
@@ -934,8 +835,17 @@ class HyperSegmentationTrainer:
         if self.val_dataloader is None:
             raise ValueError("No validation dataloader found")
 
-        for batch in self.val_dataloader:
-            yield batch
+        if self.ds_is_single_image:
+            # Only one image to validate
+            d = self.val_dataset._get_full_img_tensor()
+            img, gt = d["img"][None], d["gt"][None]
+            yield {
+                "img": torch.as_tensor(img, device=self.device),
+                "gt": torch.as_tensor(gt, device=self.device),
+            }
+        else:
+            for batch in self.val_dataloader:
+                yield batch
 
     def get_val_loader_iter(self):
         if self.val_cfg.max_val_iters > 0:
@@ -954,14 +864,62 @@ class HyperSegmentationTrainer:
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
+
+            def _loading():
+                for _ in iterable_:
+                    try:
+                        yield next(self._val_loader_iter)
+                    except StopIteration:
+                        # re-create the iterator
+                        self._val_loader_iter = iter(self.val_dataloader)
+                        yield next(self._val_loader_iter)
+
         else:
             iterable_ = self._finite_val_loader()
+
+            def _loading():
+                for batch in tqdm(
+                    iterable_,
+                    desc="validating ...",
+                    leave=False,
+                    disable=not self.accelerator.is_main_process,
+                ):
+                    yield batch
+
             self.log_msg(f"[Val]: start validating with the whole val set", only_rank_zero=False)
 
-        return iterable_
+        return _loading()
+
+    @torch.no_grad()
+    def _cast_to_dtype(self, x: torch.Tensor | list | dict[str, torch.Tensor]):
+        """Cast data to the trainer's dtype and device."""
+        if isinstance(x, torch.Tensor):
+            return x.to(dtype=self.dtype, device=self.device)
+        elif isinstance(x, list):
+            return [self._cast_to_dtype(xx) for xx in x]
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                if "gt" != k:
+                    x[k] = self._cast_to_dtype(v)
+                else:
+                    x[k] = v.to(device=self.device)
+            return x
 
     @torch.no_grad()
     def val_step(self, batch: dict):
+        """
+        Validation step for segmentation model.
+
+        Parameters
+        ----------
+        batch : dict
+            Batch containing image and ground truth
+
+        Returns
+        -------
+        torch.Tensor
+            Predicted segmentation map
+        """
         if self._use_single_img_indexing:
             use_batch_accum = "sample_index" in batch
             if use_batch_accum:
@@ -970,32 +928,105 @@ class HyperSegmentationTrainer:
             # revert back to a full image
             pred_seg, *_ = self._reconstruct_hypersigma_image(macro_outputs, mode="val")
         else:
-            img_latent = self.get_tokenizer_encoded(batch)
-            # forward the segmentation network
-            pred_seg = self.forward_segment_model(batch["img"], batch["gt"], img_latent).pred_pixel
+
+            def _val_model_closure(batch):
+                # forward the segmentation network
+                pred_pixel = self.forward_segment_model(batch["img"], batch["gt"], True).pred_pixel
+                return {"pred_logits": pred_pixel}
+
+            # slide windows
+            if getattr(self.train_cfg, "val_slide_window", False):
+                logger.info(f"[Val]: using slide window validation")
+                model_outputs = model_predict_patcher(
+                    _val_model_closure,
+                    batch,
+                    patch_keys=["img", "gt"],
+                    merge_keys=["pred_logits"],
+                    **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
+                )
+                pred_seg = model_outputs["pred_logits"].argmax(1)
+            else:
+                logger.info(f"[Val]: using full image validation")
+                pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+
         return pred_seg
+
+    def _resize_to(self, x, mode="nearest"):
+        """
+        Resize tensor to target size if specified in dataset config.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor to resize
+        mode : str
+            Interpolation mode
+
+        Returns
+        -------
+        torch.Tensor
+            Resized tensor
+        """
+        inp_ndim = x.ndim
+        if getattr(self.dataset_cfg, "resize_to", None):
+            tgt_sz = self.dataset_cfg.consts.shape
+            if inp_ndim == 3:
+                x = x.unsqueeze(1)
+            x = torch.nn.functional.interpolate(x, size=tgt_sz, mode=mode)
+            if inp_ndim == 3:
+                x = x.squeeze(1)
+        return x
 
     def val_loop(self):
         self.model.eval()
 
+        # Initialize metrics directly
+        seg_metrics = hydra.utils.instantiate(self.metric_cfg).to(self.device)
         loss_metrics = MeanMetric().to(device=self.device)
-        val_iter = self.get_val_loader_iter()
-        for batch_or_idx in val_iter:  # type: ignore
-            if self.val_cfg.max_val_iters > 0:
-                batch = next(self._val_loader_iter)
-            else:
-                batch = batch_or_idx
 
+        val_iter = self.get_val_loader_iter()
+        for batch in val_iter:
+            batch = self._cast_to_dtype(batch)
             batch = cast(dict[str, torch.Tensor], batch)
             gt = batch.get("gt", batch.get("gt_full", None))
             assert gt is not None, "gt or gt_full not found in the val batch"
-            pred_seg = self.val_step(batch)
-            # metrics - use segmentation predictions and ground truth
-            self.update_metrics(pred_seg, gt)
+
+            # Define validation model closure for slide window
+            def _val_model_closure(val_batch):
+                """Model closure for slide window validation."""
+                with torch.no_grad():
+                    output = self.forward_segment_model(val_batch["img"], gt, True)
+                    return {"pred_logits": output.pred_pixel}
+
+            # Use slide window or full image validation
+            if getattr(self.train_cfg, "val_slide_window", False):
+                self.log_msg("[Val]: using slide window validation")
+                model_outputs = model_predict_patcher(
+                    _val_model_closure,
+                    batch,
+                    patch_keys=["img", "gt"],
+                    merge_keys=["pred_logits"],
+                    **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
+                )
+                pred_seg = model_outputs["pred_logits"].argmax(1)
+            else:
+                self.log_msg("[Val]: using full image validation")
+                pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+
+            # resize to target size if needed
+            gt = self._resize_to(gt, mode="nearest")
+            pred_seg = self._resize_to(pred_seg, mode="nearest")
+
+            # Update metrics directly
+            assert self._val_unsampled_mask is None or self._val_unsampled_mask.shape == gt.shape, (
+                "val unsampled mask shape does not match gt shape"
+            )
+            seg_metrics.update(pred_seg, gt)  # self._val_unsampled_mask)
             self.step_train_state("val")
 
-        metrics = self.get_metrics()
-        loss_val = loss_metrics.compute()
+        # Compute metrics
+        metrics = seg_metrics.compute()
+        loss_val: float = loss_metrics.compute().item()
 
         if self.accelerator.is_main_process:
             _metric_str = ""
@@ -1006,6 +1037,7 @@ class HyperSegmentationTrainer:
 
             # visualize the last val batch
             self.visualize_segmentation(
+                batch["img"],  # input image
                 pred_seg,  # prediction
                 gt,  # gt
                 add_step=True,
@@ -1035,7 +1067,18 @@ class HyperSegmentationTrainer:
     def load_from_ema(self, ema_path: str | Path, strict: bool = True):
         ema_path = Path(ema_path)
 
-        accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
+        try:
+            accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
+            self.log_msg(f"[Load EMA]: successfully loaded from {ema_path}")
+        except Exception as e:
+            self.log_msg(f"[Load EMA]: standard loading failed: {e}", level="WARNING")
+            model_path = ema_path / "model" / "model.safetensors"
+            checkpoint = load_file(model_path, device="cpu")
+            result = load_weights_with_shape_check(self.model, checkpoint)
+            self.log_msg(f"[Load EMA]: fallback loading completed")
+            self.log_msg(
+                f"[Load EMA]: Loaded {result['loaded_keys']}, Missing {result['missing_keys']}, Unexpected {result['unexpected_keys']}"
+            )
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
@@ -1056,6 +1099,7 @@ class HyperSegmentationTrainer:
 
     def visualize_segmentation(
         self,
+        img: torch.Tensor,
         pred_map: torch.Tensor,
         gt_map: torch.Tensor,
         img_name: str = "val/segmentation",
@@ -1088,78 +1132,104 @@ class HyperSegmentationTrainer:
         # Only visualize the first few samples
         pred_map = pred_map[:_only_n]
         gt_map = gt_map[:_only_n]
+        img = img[:_only_n]
 
-        # Visualize each sample and concatenate
-        vis_images = []
-        for i in range(pred_map.shape[0]):
-            # Visualize predicted segmentation map
-            pred_vis = visualize_segmentation_map(
-                pred_map[i],
-                n_class=n_class,
-                use_coco_colors=use_coco_colors,
-                to_pil=False,
-                bg_black=True,
-            )
+        # Visualize input image to RGB
+        img_rgb = self.to_rgb(img)
 
-            # Visualize ground truth segmentation map
-            gt_vis = visualize_segmentation_map(
-                gt_map[i],
-                n_class=n_class,
-                use_coco_colors=use_coco_colors,
-                to_pil=False,
-                bg_black=True,
-            )
+        def convert_to_hwc_format(img_tensor):
+            """Convert tensor to (H, W, C) numpy array format."""
+            if isinstance(img_tensor, Image.Image):
+                return np.array(img_tensor)
 
-            # Ensure both are numpy arrays
-            if isinstance(pred_vis, Image.Image):
-                pred_vis = np.array(pred_vis)
-            elif isinstance(pred_vis, list):
-                pred_vis = np.array(pred_vis[0]) if len(pred_vis) > 0 else np.zeros((100, 100, 3))
+            # Handle tensor format
+            if torch.is_tensor(img_tensor):
+                img_tensor = img_tensor.detach().cpu()
+                if img_tensor.dim() == 4:  # (B, C, H, W) -> (H, W, C)
+                    img_tensor = img_tensor[0]  # Take first sample for now
+                if img_tensor.dim() == 3 and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
+                    img_tensor = img_tensor.permute(1, 2, 0)
+            elif isinstance(img_tensor, np.ndarray) and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
+                img_tensor = np.transpose(img_tensor, (1, 2, 0))
 
-            if isinstance(gt_vis, Image.Image):
-                gt_vis = np.array(gt_vis)
-            elif isinstance(gt_vis, list):
-                gt_vis = np.array(gt_vis[0]) if len(gt_vis) > 0 else np.zeros((100, 100, 3))
+            return img_tensor.numpy() if torch.is_tensor(img_tensor) else img_tensor
 
-            # Concatenate the two visualizations side by side
-            combined_vis = np.concatenate([pred_vis, gt_vis], axis=1)
-            vis_images.append(combined_vis)
+        # Convert input image to numpy array and ensure correct format
+        img_rgb = convert_to_hwc_format(img_rgb)
 
-        # Stack all visualizations
+        # Visualize segmentation maps for entire batch
+        pred_vis = visualize_segmentation_map(
+            pred_map,
+            n_class=n_class,
+            use_coco_colors=use_coco_colors,
+            to_pil=False,
+            bg_black=True,
+        )
+
+        gt_vis = visualize_segmentation_map(
+            gt_map,
+            n_class=n_class,
+            use_coco_colors=use_coco_colors,
+            to_pil=False,
+            bg_black=True,
+        )
+
+        # Ensure segmentation maps are numpy arrays
+        if isinstance(pred_vis, Image.Image):
+            pred_vis = np.array(pred_vis)
+        elif isinstance(pred_vis, list):
+            pred_vis = np.stack([np.array(p) for p in pred_vis], axis=0)
+
+        if isinstance(gt_vis, Image.Image):
+            gt_vis = np.array(gt_vis)
+        elif isinstance(gt_vis, list):
+            gt_vis = np.stack([np.array(g) for g in gt_vis], axis=0)
+
+        # Resize input image to match segmentation map size
+        h, w = pred_vis.shape[1:3] if pred_vis.ndim == 4 else pred_vis.shape[:2]
+        if img_rgb.shape[:2] != (h, w):
+            img_rgb = np.array(Image.fromarray(img_rgb).resize((w, h), Image.Resampling.BILINEAR))
+
+        # Handle batch dimension and concatenate images
+        if pred_vis.ndim == 4:  # Batch processing
+            # Stack all images horizontally for each sample
+            batch_size = pred_vis.shape[0]
+            vis_images = []
+
+            for i in range(batch_size):
+                # Get individual samples
+                img_sample = img_rgb[i] if img_rgb.ndim == 4 else img_rgb
+                pred_sample = pred_vis[i]
+                gt_sample = gt_vis[i]
+
+                # Concatenate horizontally: [img, pred_map, gt_map]
+                combined_vis = np.concatenate([img_sample, pred_sample, gt_sample], axis=1)
+                vis_images.append(combined_vis)
+        else:  # Single sample
+            # Concatenate horizontally: [img, pred_map, gt_map]
+            vis_images = [np.concatenate([img_rgb, pred_vis, gt_vis], axis=1)]
+
+        # Stack all visualizations vertically by batch
         if len(vis_images) > 1:
-            # Create a grid of images
-            rows = int(np.ceil(len(vis_images) / 2))
-            cols = 2 if len(vis_images) > 1 else 1
-
-            # Pad with empty images if necessary
-            while len(vis_images) < rows * cols:
-                vis_images.append(np.zeros_like(vis_images[0]))
-
-            # Create grid
-            grid_images = []
-            for row in range(rows):
-                row_images = vis_images[row * cols : (row + 1) * cols]
-                grid_images.append(np.concatenate(row_images, axis=1))
-            img = np.concatenate(grid_images, axis=0)
+            # Concatenate all samples vertically along the height axis
+            img = np.concatenate(vis_images, axis=0)
         else:
             img = vis_images[0]
 
-        # Convert to PIL Image and save
+        # Convert to PIL Image and save as PNG
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
 
         if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
+            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.png"
         else:
-            img_name = f"{img_name}.jpg"
+            img_name = f"{img_name}.png"
 
         save_path = Path(self.proj_dir) / "vis" / img_name
         if self.accelerator.is_main_process:
             save_path.parent.mkdir(parents=True, exist_ok=True)
         if self.accelerator.is_main_process:
-            img_to_save.save(save_path, quality=95)
-
-        self.log_msg("[Visualize]: save segmentation visualization at {}".format(save_path))
+            img_to_save.save(save_path)
 
     def run(self):
         if self.train_cfg.resume_path is not None:
@@ -1171,9 +1241,9 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "cosmos_f8c16p4_segmentation"
+_key = "hybrid_tokenizer_seg"
 _configs_dict = {
-    "cosmos_f8c16p4_segmentation": "cosmos_f8c16p4_segmentation",
+    "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
 }
 
 
@@ -1202,7 +1272,7 @@ if __name__ == "__main__":
 
     # Main function
     @hydra.main(
-        config_path="configs/segmentation",
+        config_path="../configs/segmentation",
         config_name=chosen_cfg,
         version_base=None,
     )

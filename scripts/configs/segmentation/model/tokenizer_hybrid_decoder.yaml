@@ -1,15 +1,8 @@
-# Default configuration for TokenizerHybridUNet model
-# This configuration is extracted from the _create_default_cfg() function in tokenizer_backbone_adapted.py
-
 defaults:
   - tokenizer: hybrid
   - _self_
 
-# CNN Model Configuration
-# in defaults
-
-_target_: src.stage2.change_detection.models.tokenizer_backbone_adapted.TokenizerHybridUNet.create_model
-
+_target_: src.stage2.segmentation.models.tokenizer_backbone_adapted.TokenizerHybridUNet.create_model
 # Tokenizer Feature Configuration
 tokenizer_feature:
   pretrained_path: null
@@ -41,25 +34,8 @@ adapter:
   conv_bias: false
   block_types: ["nat", "nat", "mbconv", "mbconv"]
 
-# Change Detection Stage Configuration
-cd_stage:
-  channels: [512, 512, 512, 512]
-  stride: 1
-  kernel_size: 3
-  norm_layer: layernorm2d
-  act_layer: gelu
-  expand_ratio: 2.0
-  block_type: mbconv
-  depth: 1
-
-# UNet Configuration
-input_channels: ${dataset.consts.bands}
 num_classes: ${dataset.consts.num_classes}
-deep_supervision: false
-n_stages: 4
-use_latent: true
-ensure_rgb_type: null
-_debug: false
-
+input_channels: ${dataset.consts.bands}
+use_latent: false
 # Tokenizer pretrained path (needs to be overridden)
 tokenizer_pretrained_path: runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors

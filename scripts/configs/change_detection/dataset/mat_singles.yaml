@@ -1,0 +1,54 @@
+train_bs: 3
+val_bs: 1
+
+# Configs
+data_type: null
+label_mode: seg
+patch_size: 128
+stride: 32
+micro_batch_size: 12
+patch_mode: random_0.4
+dataset_name: FarmLand
+
+infos:
+  bayArea:
+    shape: [600, 500, 224]
+    num_classes: 2
+  Hermiston:
+    shape: [390, 200, 242]
+    num_classes: 6
+  santaBarbara:
+    shape: [984, 740, 224]
+    num_classes: 2
+  FarmLand:
+    shape: [450, 140, 155]
+    num_classes: 2
+
+consts:
+  # Dynamically injected from infos based on dataset_name
+  num_classes: ${dataset.infos.${dataset.dataset_name}.num_classes}
+  shape: ${dataset.infos.${dataset.dataset_name}.shape}
+  bands: ${dataset.infos.${dataset.dataset_name}.shape.2}
+  unchanged_label: 0
+  changed_label: 1
+
+train:
+  _target_: src.stage2.change_detection.data.mat_cd_loader.create_changed_detection_patch_loader
+  data_root: data/Downstreams/ChangeDetection/mat_2
+  dataset_name: ${dataset.dataset_name}
+  batch_size: ${dataset.train_bs}
+  to_neg_1_1: true
+  num_workers: 2
+  normalize: true
+  patch_size: ${dataset.patch_size}
+  stride: ${dataset.stride}
+  patch_mode: ${dataset.patch_mode}
+
+val:
+  _target_: src.stage2.change_detection.data.mat_cd_loader.create_full_image_dataloader
+  data_root: data/Downstreams/ChangeDetection/mat_2
+  dataset_name: ${dataset.dataset_name}
+  batch_size: ${dataset.val_bs}
+  to_neg_1_1: true
+  num_workers: 1
+  normalize: true

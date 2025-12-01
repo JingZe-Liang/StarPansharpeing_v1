@@ -25,6 +25,8 @@ def single_image_split_dataset(
     val_num: int = 5,
     samples_type: str = "ratio",
 ):
+    np.random.seed(2025)
+
     train_index = []
     test_index = []
     val_index = []
@@ -61,32 +63,33 @@ def single_image_split_dataset(
     return train_index, val_index, test_index
 
 
-def oversample_weak_classes(X, y):
+def oversample_weak_classes(x, y):
     uniq_cls, cls_count = np.unique(y, return_counts=True)
     label_inverser_r = np.max(cls_count) / cls_count
 
     # repeat for every label and concat
-    newX = X[y == uniq_cls[0], :, :, :].repeat(round(label_inverser_r[0]), axis=0)
-    newY = y[y == uniq_cls[0]].repeat(round(label_inverser_r[0]), axis=0)
+    new_x = x[y == uniq_cls[0], :, :, :].repeat(round(label_inverser_r[0]), axis=0)
+    new_y = y[y == uniq_cls[0]].repeat(round(label_inverser_r[0]), axis=0)
 
     for label, ri in zip(uniq_cls[1:], label_inverser_r[1:]):
-        cX = X[y == label, :, :, :].repeat(round(ri), axis=0)
-        cY = y[y == label].repeat(round(ri), axis=0)
-        newX = np.concatenate((newX, cX))
-        newY = np.concatenate((newY, cY))
+        c_x = x[y == label, :, :, :].repeat(round(ri), axis=0)
+        c_y = y[y == label].repeat(round(ri), axis=0)
+        new_x = np.concatenate((new_x, c_x))
+        new_y = np.concatenate((new_y, c_y))
 
     np.random.seed(seed=42)
-    rand_perm = np.random.permutation(newY.shape[0])
-    newX = newX[rand_perm, :, :, :]
-    newY = newY[rand_perm]
+    rand_perm = np.random.permutation(new_y.shape[0])
+    new_x = new_x[rand_perm, :, :, :]
+    new_y = new_y[rand_perm]
 
-    return newX, newY
+    return new_x, new_y
 
 
 # * --- Label related --- #
 
 
 def single_image_get_seg_label(gt_flatten: Float[np.ndarray, "h*w"], train_index, val_index, test_index):
+    """Get the segmentation sample pixels"""
     train_samples_gt = np.zeros(gt_flatten.shape)
     for i in range(len(train_index)):
         train_samples_gt[train_index[i]] = gt_flatten[train_index[i]]
@@ -109,7 +112,9 @@ def single_image_get_label_mask(
     data_gt: Float[np.ndarray, "h w"],
     class_num: int,
 ):
+    """Get the segmentation training label masks when computing the segmentation loss"""
     height, width = data_gt.shape
+
     # train
     train_label_mask = np.zeros([height * width, class_num], dtype=np.float32)
     temp_ones = np.ones([class_num], dtype=np.float32)

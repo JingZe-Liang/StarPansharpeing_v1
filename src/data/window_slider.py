@@ -2,9 +2,9 @@
 Window sliding utilities for processing large images in patches.
 """
 
+import math
 from collections.abc import Generator, Iterable
 from typing import Any, Callable
-import math
 
 import numpy as np
 import torch
@@ -234,6 +234,7 @@ class WindowSlider:
         window_results: list[dict[str, Any]],
         merge_method: str = "average",
         merged_keys: list[str] | None = None,
+        merged_out_processor: Callable[[Any, str], Any] | None = None,
     ) -> dict[str, Any]:
         """
         Merge windowed results back to full image size.
@@ -457,6 +458,10 @@ class WindowSlider:
 
             merged_results[key] = merged_tensor
 
+        if merged_out_processor is not None:
+            for key in merged_results:
+                merged_results[key] = merged_out_processor(merged_results[key], key)
+
         return merged_results
 
 
@@ -511,3 +516,30 @@ def model_predict_patcher(
         model_outs.append(model_out_combined)
     merged_output = slider.merge_windows(model_outs, merge_method=merge_method, merged_keys=merge_keys)
     return merged_output
+
+
+def __test_model_predict_patcher():
+    # model = lambda x: {"model_pred_logits": x["x"]}
+
+    def model(batch):
+        x, gt = batch["x"], batch["gt"]
+        print(x.shape, gt.shape)
+        return {"model_pred_logits": x}
+
+    model_outputs = model_predict_patcher(
+        model,
+        {
+            "x": torch.randn(2, 3, 224, 224),
+            "gt": torch.randint(0, 20, (2, 224, 224)),
+        },
+        patch_keys=["x", "gt"],
+        merge_keys=["model_pred_logits"],
+        patch_size=128,
+        stride=32,
+        label_mode="seg",
+    )
+    print("--", model_outputs["model_pred_logits"].shape)
+
+
+if __name__ == "__main__":
+    __test_model_predict_patcher()

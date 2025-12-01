@@ -71,7 +71,6 @@ def function_config_to_basic_types(func):
 
         # Convert kwargs
         new_kwargs = kwargs_to_basic_types(kwargs)
-
         return func(*new_args, **new_kwargs)
 
     return wrapper

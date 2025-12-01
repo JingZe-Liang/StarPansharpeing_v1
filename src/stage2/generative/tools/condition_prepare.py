@@ -176,15 +176,9 @@ def prepare_condition_from_webdataset(
         else:
             log_print("annotator already loaded: {}".format(cond))
 
-    # _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
-    _has_resumed = resume_from is None
-    _is_loader = isinstance(ds, torch.utils.data.DataLoader)
-    _ds_support_getitem = False
-    try:
-        _ = ds[0]
-        _ds_support_getitem = True
-    except:
-        log_print("Dataset type {} does not support indexing, will use iterator.".format(type(ds)), "debug")
+    _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
+    for sample in ds:
+        assert len(sample["__key__"]) == 1, "WebDataset sample key must be a single string."
 
     # Resuming iters
     if _ds_support_getitem and isinstance(resume_from, int):
