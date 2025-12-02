@@ -26,6 +26,7 @@ from src.utilities.config_utils import (
     function_config_to_easy_dict,
     set_defaults,
 )
+from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 
 from .cosmos_tokenizer import (
     ContinuousImageTokenizer,
@@ -71,7 +72,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
 
         ###### Distillation configs
-        distillation_kwargs = set_defaults(
+        self.distillation_kwargs = set_defaults(
             distillation_kwargs,
             {
                 "dino_feature_dim": 1024,
@@ -79,17 +80,18 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 "cache_layers": self.cache_layers,
             },
         )
-        self._dino_feature_dim = distillation_kwargs.dino_feature_dim
-        self._semantic_feature_dim = distillation_kwargs.semantic_feature_dim
-        self.cache_layers = distillation_kwargs.cache_layers
+        self._dino_feature_dim = self.distillation_kwargs.dino_feature_dim
+        self._semantic_feature_dim = self.distillation_kwargs.semantic_feature_dim
+        self.cache_layers = self.distillation_kwargs.cache_layers
 
         ###### Deep supervision configs
-        hybrid_tokenizer_kwargs = set_defaults(
+        self.hybrid_tokenizer_kwargs = set_defaults(
             hybrid_tokenizer_kwargs,
-            {"deep_supervision_type": None},
+            {"deep_supervision_type": None, "latent_bottleneck_type": "after_semantic"},
         )
         # deep_supervision_type: [direct_out, sum_previous_out]
-        self.deep_supervision_type = hybrid_tokenizer_kwargs.deep_supervision_type
+        self.deep_supervision_type = self.hybrid_tokenizer_kwargs.deep_supervision_type
+        self.latent_bottleneck_type = self.hybrid_tokenizer_kwargs.latent_bottleneck_type
         self._is_deep_supervision = self.deep_supervision_type is not None
         self._build_deep_supervised_heads(cnn_cfg)
 
@@ -251,54 +253,18 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.deep_supervised_heads.append(to_out)
         logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
 
-    def load_pretrained(self, uni_tokenizer_path: str, directly_load=True, **kwargs):
+    def load_pretrained(self, uni_tokenizer_path: str, **kwargs):
         """Init the model from the pretrained only CNN weights."""
-        from src.utilities.network_utils.network_loading import (
-            load_weights_with_shape_check,
-        )
-
         weights = accelerate.utils.load_state_dict(uni_tokenizer_path)
 
         # Directly load all weights if specified
-        if directly_load:
-            missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
-            if len(missing_ks) > 0 or len(unexp_ks) > 0:
-                logger.warning(f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
-            logger.info(f"Finished directly loading pretrained weights.")
-            return
-
-        # Filter out the cnn and transformer's keys
-        cnn_enc_ws, cnn_dec_ws, trans_ws = {}, {}, {}
-        for k, v in weights.items():
-            if k.startswith("encoder"):
-                cnn_enc_ws[k[8:]] = v
-            if k.startswith("decoder"):
-                cnn_dec_ws[k[8:]] = v
-            elif k.startswith("semantic_enc_transformer"):
-                trans_ws[k] = v
-
-        # Load CNN Cosmos tokenizer weights
-        logger.info(f"Loading CNN Cosmos tokenizer weights ...")
-        missing_k, unexp_k = load_weights_with_shape_check(self.encoder, cnn_enc_ws)
-        if len(missing_k) > 0 or len(unexp_k) > 0:
-            logger.warning(f"CNN Encoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
-
-        missing_k, unexp_k = load_weights_with_shape_check(self.decoder, cnn_dec_ws)
-        if len(missing_k) > 0 or len(unexp_k) > 0:
-            logger.warning(f"CNN Decoder Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
-
-        logger.info(f"Loading semantic Transformer weights ...")
-        # Load Transformer weights
-        if len(trans_ws) != 0:
-            missing_k, unexp_k = self.semantic_enc_transformer.load_state_dict(trans_ws, strict=False)
-            if len(missing_k) > 0 or len(unexp_k) > 0:
-                logger.warning(f"Transformer Missing keys: {missing_k}, Unexpected keys: {unexp_k}")
-
-        logger.info(f"Finished loading pretrained weights.")
+        missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
+        if len(missing_ks) > 0 or len(unexp_ks) > 0:
+            logger.warning(f"Directly Loading Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
+        logger.info(f"Finished directly loading pretrained weights.")
 
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
-        """"""
         max_size = torch.max(torch.tensor([f.shape[-2:] for f in feats]), dim=0).values
         max_size = tuple(max_size.tolist())
         interp_feats = []
@@ -340,20 +306,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         return others.lejepa_proj
 
-    def encode(
-        self,
-        x,
-        use_quantizer=None,
-        get_intermediate_features=False,
-    ):
-        """Encode the image into latent.
-        Output the latent tensor or latent, quantizer loss and loss breakdowns
-        if has a quantizer.
-
-        x: (B, C, H, W) - Image
-        use_quantizer:  Whether to use the quantizer. If None, use the default setting.
-        get_intermediate_features: Whether to return the intermediate features for distillation.
-        """
+    def _forward_low_level_encoder(self, x, get_intermediate_features=False):
         ############ Low-level encoder
         cache_low_lvl = None
         last_hidden_cached = self.cache_layers["low_level"] == -1
@@ -367,17 +320,20 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         else:
             z_low_lvl = self.encoder.encoder(x)
 
+        return z_low_lvl, cache_low_lvl
+
+    def _forward_semantic_encoder(self, x, get_intermediate_features=False):
         ########### Forward semantic transformer encoder
         cache_semantic = None
         if not self.training and not get_intermediate_features:  # is eval
-            z_semantic = self.semantic_enc_transformer(z_low_lvl)
+            z_semantic = self.semantic_enc_transformer(x)
         elif self.cache_layers["semantic"] == -1 and get_intermediate_features:
-            z_semantic = self.semantic_enc_transformer(z_low_lvl)
+            z_semantic = self.semantic_enc_transformer(x)
             cache_semantic = z_semantic
         else:
             # forward the intermediate features
             _model_kwargs = dict(
-                x=z_low_lvl,
+                x=x,
                 indices=self.cache_layers["semantic"],
                 return_prefix_tokens=False,
                 norm=True,
@@ -385,94 +341,191 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 output_dict=False,
             )
             # forward intermediates does not support jepa masks
-            z_semantic, cache_semantic = self.semantic_enc_transformer.forward_intermediates(**_model_kwargs)
+            z_semantic, cache_semantic = self.semantic_enc_transformer.forward_intermediates(**_model_kwargs)  # type: ignore
 
             # Add head forward
-            z_semantic = z_semantic[:, self.semantic_enc_transformer.num_prefix_tokens :]
+            z_semantic = z_semantic[:, self.semantic_enc_transformer.num_prefix_tokens :]  # type: ignore
             z_semantic = self.semantic_enc_transformer._forward_after_backbone(
                 z_semantic,
-                hw=self.semantic_enc_transformer._get_output_shape(z_low_lvl),
+                hw=self.semantic_enc_transformer._get_output_shape(x),
             )
             # Stack the intermidates features: [n_cache_layers, b, c, h, w]
             # cache_semantic = torch.stack(cache_semantic, dim=0)
 
-        ######## Apply CNN encoder - semantic transformer encoder - quant conv
-        # Semantic token -> quant conv -> latent
-        h = self.encoder.quant_conv(z_semantic)
+        return z_semantic, cache_semantic
+
+    def _apply_quant_conv_quantizer(self, z, use_quantizer=None):
+        # z token -> quant conv -> latent
+        h = self.encoder.quant_conv(z)
 
         # Quantization
-        maybe_q_ret = self.apply_quantizer(h, z_semantic, use_quantizer, cache_type=None)  # Disable cache z or h
-
-        # Do cache here
-        self.z = cache_low_lvl  # [b, c, h, w]
-        self.sem_z = cache_semantic
+        maybe_q_ret = self.apply_quantizer(h, z, use_quantizer, cache_type=None)  # Disable cache z or h
 
         if isinstance(maybe_q_ret, tuple):
             h, q_loss, loss_breakdown = maybe_q_ret
             # NOTE: if quantizer is used, the aug z is not applied
             return h, q_loss, loss_breakdown
 
-        ##### z augmentions (noise adding or channel dropping).
-        h = self.latent_aug(maybe_q_ret)
+        return maybe_q_ret
 
-        if not get_intermediate_features:
-            return h
+    def _encode_bottleneck_after_sem(
+        self,
+        x,
+        use_quantizer=None,
+        get_intermediate_features=False,
+    ):
+        enc_out = edict(
+            to_dec=None,
+            latent=None,
+            q_loss=None,
+            q_loss_breakdown=None,
+            low_lvl_z=None,
+            sem_z=None,
+        )
+
+        ######## Low-level encoder
+        z_low_lvl, cache_low_lvl = self._forward_low_level_encoder(
+            x, get_intermediate_features=get_intermediate_features
+        )
+
+        ######### Semantic encoder
+        z_semantic, cache_semantic = self._forward_semantic_encoder(
+            z_low_lvl, get_intermediate_features=get_intermediate_features
+        )
+
+        ######## Apply CNN encoder - semantic transformer encoder - quant conv
+        quant_ret = self._apply_quant_conv_quantizer(z_semantic, use_quantizer)
+
+        # Do cache here
+        self.z = cache_low_lvl  # [b, c, h, w]
+        self.sem_z = cache_semantic
+        enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic)
+
+        ##### Do quant return out
+        if isinstance(quant_ret, tuple):
+            h, q_loss, loss_breakdown = quant_ret
+            enc_out.update(
+                latent=h,
+                q_loss=q_loss,
+                q_loss_breakdown=loss_breakdown,
+            )
+
+        ##### z augmentions (noise adding or channel dropping).
+        h = self.latent_aug(quant_ret)
+        enc_out.to_dec = h
+
+        return enc_out
+
+    def _encode_bottleneck_before_sem(
+        self,
+        x,
+        use_quantizer=None,
+        get_intermediate_features=False,
+    ):
+        enc_out = edict(to_dec=None, latent=None, q_loss=None, q_loss_breakdown=None, low_lvl_z=None, sem_z=None)
+
+        ######## Low-level encoder
+        z_low_lvl, cache_low_lvl = self._forward_low_level_encoder(
+            x, get_intermediate_features=get_intermediate_features
+        )
+
+        ######## Apply CNN encoder - quant conv
+        quant_ret = self._apply_quant_conv_quantizer(z_low_lvl, use_quantizer)
+        if isinstance(quant_ret, tuple):
+            h, q_loss, loss_breakdown = quant_ret
+            enc_out.update(q_loss=q_loss, q_loss_breakdown=loss_breakdown)
         else:
-            return h, cache_low_lvl, cache_semantic
+            assert torch.is_tensor(quant_ret)
+            h = quant_ret
+        enc_out["latent"] = h  # CNN's output is latent
+
+        ##### z augmentions (noise adding or channel dropping)
+        h = self.latent_aug(h)
+
+        ##### Do post-quant conv
+        h = self.decoder.quant_conv(h)
+
+        ######### Semantic encoder
+        # served as decoder actually ...
+        z_semantic, cache_semantic = self._forward_semantic_encoder(
+            h, get_intermediate_features=get_intermediate_features
+        )
+        enc_out["to_dec"] = z_semantic  # sem_z is sent to 'decoder'
+
+        # Do cache here
+        self.z = cache_low_lvl  # [b, c, h, w]
+        self.sem_z = cache_semantic
+        enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic)
+
+        return enc_out
+
+    def encode(self, x, use_quantizer=None, get_intermediate_features=False):
+        inputs = dict(
+            x=x,
+            use_quantizer=use_quantizer,
+            get_intermediate_features=get_intermediate_features,
+        )
+        t = self.latent_bottleneck_type
+        if t == "after_semantic":
+            return self._encode_bottleneck_after_sem(**inputs)
+        elif t == "before_semantic":
+            return self._encode_bottleneck_before_sem(**inputs)
+        else:
+            raise ValueError(f"Unknown latent bottleneck type: {t}")
 
     def decode(
         self,
-        h: Union[torch.Tensor, tuple],
+        inp: dict,
         inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
         clamp=False,
-    ):
+    ) -> dict:
         """
         Decode the latent into the corresponding channels image.
-        Output the reconstructed image or recon, quantizer loss and loss breakdowns.
+        Output the latent, to_dec, q_loss, q_loss_breakdown, recon, deep_supervision_outputs (optional)
         """
-        q_loss = loss_breakdown = None
-        if self.quantizer_type is not None and isinstance(h, (tuple, list)):
-            h, q_loss, loss_breakdown = h
-        else:
-            assert torch.is_tensor(h), "z should be the (quantized) latent"
+        out_d = edict(**inp)  # quantization-related, to_dec, latent
+        h = inp["to_dec"]
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
-        # Apply Post-quant conv - semantic transformer decoder - CNN decoder
-        if self.st_skip_sem_decoder:
-            h = self.decoder.quant_conv["post_quant_conv"](h)
-            h_skipped = h.clone()
-        else:
-            h = self.decoder.quant_conv(h)
+        # Apply post-quant conv - semantic transformer decoder - CNN decoder
+        if self.latent_bottleneck_type == "after_semantic":
+            # TODO: if is before semantic, we need to apply the post-quant
+            if self.st_skip_sem_decoder:
+                h = self.decoder.quant_conv["post_quant_conv"](h)
+                h_skipped = h.clone()
+            else:
+                h = self.decoder.quant_conv(h)
 
         # Apply semantic transformer decoder if it exists
         if self.semantic_transformer_dec is not None:
             h = self.semantic_transformer_dec(h)
 
         # Cat the skipped latent
-        if self.st_skip_sem_decoder:
-            h = torch.cat([h, h_skipped], dim=1)
-            h = self.decoder.quant_conv["st_cat_conv"](h)
+        if self.latent_bottleneck_type == "after_semantic":
+            if self.st_skip_sem_decoder:
+                h = torch.cat([h, h_skipped], dim=1)
+                h = self.decoder.quant_conv["st_cat_conv"](h)
 
         # Decode using the CNN decoder
         dec = self.decoder.decoder(h, chan, ret_all_res_features=self._is_deep_supervision)
 
         # Deep supervision output to 'dec'
-        dec: Tensor | dict[str, Tensor | list[Tensor]]
+        dec: dict[str, Tensor | list[Tensor]]
         if self._is_deep_supervision:
-            dec, interms = dec
+            recon, interms = dec  # decoder multi-scale feature as 'interms'
             deep_sup_outputs = self._forward_deep_supervised_heads(interms)
-            dec = edict({"recon": dec, "deep_supervision_outputs": deep_sup_outputs})
             if clamp:
-                dec.recon = dec.recon.clamp(-1, 1)
-        elif clamp:
-            dec = dec.clamp(-1, 1)
-
-        if self.quantizer_type is not None:
-            return dec, q_loss, loss_breakdown
+                recon = recon.clamp(-1, 1)
+            out_d.update(recon=recon, deep_supervision_outputs=deep_sup_outputs)
         else:
-            return dec
+            out_d["recon"] = dec
+
+        if clamp:
+            out_d.recon = out_d.recon.clamp(-1, 1)
+
+        return out_d
 
     def _forward_deep_supervised_heads(self, interms: list[Tensor]):
         """Forward the deep supervised heads given the intermediate features."""
@@ -647,9 +700,9 @@ def test_model_forward_backward():
     # Create the model with correct configuration structure
     cnn_cfg = {
         "model": {
-            "resolution": 256,
+            "resolution": 1024,
             "in_channels": 300,
-            "z_channels": 512,  # Connect encoder and decoder
+            "z_channels": 768,  # Connect encoder and decoder
             "latent_channels": 16,
             "channels": 128,  # Base channels
             "channels_mult": [2, 4, 4],  # Channel multiplier
@@ -670,7 +723,7 @@ def test_model_forward_backward():
     }
 
     trans_enc_cfg = {
-        "embed_dim": 1024,
+        "embed_dim": 1152,
         "depth": 12,  # vit intern 300m -> embed_dim=1024, depth=24, num_heads=16
         "num_heads": 16,
         "mlp_ratio": 4.0,
@@ -681,10 +734,12 @@ def test_model_forward_backward():
         "pos_embed_grid_size": (32, 32),  # Grid size for position embedding
         # Additional required fields from merged configuration
         "img_size": 32,  # Expected by NaFlexVitCfg
-        "in_chans": 512,  # Should match z_channels from transformer
-        "out_chans": 512,  # Output channels
-        "unpatch_size": 1,  # 2->1
+        "in_chans": 768,  # Should match z_channels from transformer
+        "out_chans": 768,  # Output channels
+        "unpatch_size": 2,  # 2->1
         "reg_tokens": 4,
+        "rope_type": "axial",
+        "attn_type": "gated",
     }
 
     trans_dec_cfg = {
@@ -705,7 +760,14 @@ def test_model_forward_backward():
         "reg_tokens": 0,
     }
 
-    model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+    model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
+        cnn_cfg,
+        trans_enc_cfg,
+        trans_dec_cfg=None,
+        hybrid_tokenizer_kwargs={
+            "latent_bottleneck_type": "before_semantic",
+        },
+    )
     model = model.to(device)  # Move model to device (CUDA or CPU)
     model.eval()
     logger.info("Model created successfully!")
@@ -724,14 +786,7 @@ def test_model_forward_backward():
     with torch.no_grad():
         model.train()
         encoded = model.encode(x)
-        if isinstance(encoded, tuple):
-            encoded_tensor, q_loss, loss_breakdown = encoded
-            logger.info(f"Encoded shape: {encoded_tensor.shape}")
-            logger.info(f"Quantizer loss: {q_loss}")
-        else:
-            encoded_tensor = encoded
-            logger.info(f"Encoded shape: {encoded_tensor.shape}")
-            q_loss = None
+        encoded_tensor = encoded.to_dec
 
         # Print cached tensors
         logger.info("Cached tensors:")
@@ -744,13 +799,9 @@ def test_model_forward_backward():
         logger.info(f"Projected semantic z shape: {sem_z_proj}")
 
         # Decode with proper input shape
-        decoded = model.decode(encoded_tensor, x.shape)
-        if isinstance(decoded, tuple):
-            decoded_tensor, dec_q_loss, dec_loss_breakdown = decoded
-            logger.info(f"Decoded shape: {decoded_tensor.shape}")
-        else:
-            decoded_tensor = decoded
-            logger.info(f"Decoded shape: {decoded_tensor.shape}")
+        decoded = model.decode(encoded, x.shape)
+        decoded_tensor = decoded.recon
+        logger.info(f"Decoded shape: {decoded_tensor.shape}")
 
     # Test training mode
     model.train()
@@ -758,17 +809,8 @@ def test_model_forward_backward():
 
     # Forward pass with gradients
     encoded = model.encode(x)
-    if isinstance(encoded, tuple):
-        encoded_tensor, q_loss, loss_breakdown = encoded
-    else:
-        encoded_tensor = encoded
-        q_loss = None
-
-    decoded = model.decode(encoded_tensor, x.shape)
-    if isinstance(decoded, tuple):
-        decoded_tensor, dec_q_loss, dec_loss_breakdown = decoded
-    else:
-        decoded_tensor = decoded
+    encoded_tensor, q_loss, loss_breakdown = encoded.to_dec, encoded.q_loss, encoded.q_loss_breakdown
+    decoded_tensor = model.decode(encoded, x.shape).recon
 
     # Backward and check the gradients
     target = torch.randn_like(decoded_tensor)
@@ -844,6 +886,7 @@ def test_forward_pca():
 
     with torch.no_grad():
         output = model(img)
+        recon = output.recon
 
     print(output)
 
@@ -863,5 +906,5 @@ if __name__ == "__main__":
 
     lt.monkey_patch()
     with logger.catch():
-        # test_model_forward_backward()
-        test_forward_pca()
+        test_model_forward_backward()
+        # test_forward_pca()

@@ -30,7 +30,18 @@ dataset:
       256: 14
       512: 5
 
-  weights: [18, 18, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 18, 10, 10, 11, 18]
+  weights:
+    [25, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 20, 10, 16, 10, 11, 20]
+
+# proxy_task:
+#   optimizer:
+#     _target_: heavyball.AdamW
+#     _partial_: true
+#     lr: 2.0e-4
+#     weight_decay: 0.01
+#     caution: true
+#     mars: false
+#     betas: ${tuple:[0.9,0.99]}
 
 tokenizer:
   cnn_cfg:
@@ -130,7 +141,7 @@ ema:
   _partial_: true
   beta: 0.9995
   update_after_step: 0
-  update_every: 3
+  update_every: 2
   use_foreach: true
   allow_different_devices: true
   # update_model_with_ema_every: 5_000
@@ -148,7 +159,7 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-26_00-24-00_hybrid_cosmos_f16c64_jepa_pretrained/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -191,15 +202,16 @@ train:
 
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    betas: [0.95, 0.99]
+    betas: [0.9, 0.95]
+    mu: 0.95
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.01
+      lr: 3.0e-4
+      weight_decay: 0.02
     oned_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.0
+      lr: 3.0e-4
+      weight_decay: 0.02
 
     # _target_: torch.optim.AdamW
     # _partial_: true
@@ -210,15 +222,31 @@ train:
     # # foreach: true
     # fused: true
 
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.02
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
+
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
+    lr: 3.0e-4
     weight_decay: 1.0e-5
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]
     foreach: true
     # fused: true
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import einops
 import torch
@@ -13,7 +13,10 @@ from timm.layers.create_norm import get_norm_layer
 from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.models import eva, naflexvit
+from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU
 from timm.models.naflexvit import (
+    Block,
     NaFlexEmbeds,
     NaFlexVit,
     checkpoint,
@@ -28,6 +31,209 @@ from src.utilities.config_utils import (
 )
 
 from .norm import *  # register custom norms
+from .transformer import GatedAttention
+
+
+class GatedAttentionTimmWrapped(GatedAttention):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        qkv_fused: bool = True,
+        qkv_bias_separate: bool = False,
+        num_prefix_tokens: int = 1,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        attn_head_dim: Optional[int] = None,
+        norm_layer: Optional[Callable] = None,
+        qk_norm: bool = False,
+        scale_norm: bool = True,
+        rotate_half: bool = False,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__(
+            dim,
+            num_heads,
+            num_heads,
+            norm_layer,
+            qk_norm,
+            qkv_bias,
+            num_prefix_tokens=num_prefix_tokens,
+            attention_dropout=attn_drop,
+            headwise_attn_output_gate=True,
+            elementwise_attn_output_gate=False,
+        )
+
+
+class EvaBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = True,
+        qkv_fused: bool = True,
+        mlp_ratio: float = 4.0,
+        swiglu_mlp: bool = False,
+        swiglu_align_to: int = 0,
+        scale_mlp: bool = False,
+        scale_attn_inner: bool = False,
+        num_prefix_tokens: int = 1,
+        attn_type: str = "eva",
+        rotate_half: bool = False,
+        proj_drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        init_values: Optional[float] = None,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
+        attn_head_dim: Optional[int] = None,
+        device=None,
+        dtype=None,
+        **kwargs,
+    ):
+        """Initialize the EVA transformer block.
+
+        Args:
+          dim: Input dimension of the token embeddings
+            num_heads: Number of attention heads
+            qkv_bias: Whether to use bias terms in query, key, value projections
+            qkv_fused: Whether to use a single projection for query, key, value
+            mlp_ratio: Ratio of MLP hidden dimension to input dimension
+            swiglu_mlp: Whether to use SwiGLU activation in the MLP
+            scale_mlp: Whether to use normalization in the MLP
+            scale_attn_inner: Whether to use normalization within the attention mechanism
+            num_prefix_tokens: Number of tokens at the beginning of the sequence (class tokens, etc.)
+            attn_type: Type of attention module to use ('eva' or 'rope')
+            proj_drop: Dropout rate for projection layers
+            attn_drop: Dropout rate for attention matrix
+            drop_path: Stochastic depth rate
+            init_values: Initial value for LayerScale, None = no LayerScale
+            act_layer: Activation layer constructor
+            norm_layer: Normalization layer constructor
+            attn_head_dim: Dimension of each attention head (if None, computed as dim // num_heads)
+        """
+        dd = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.norm1 = norm_layer(dim, **dd)
+        logger.debug(f"Layer uses attention type {attn_type}")
+        attn_cls = {"rope": AttentionRope, "eva": EvaAttention, "gated": GatedAttentionTimmWrapped}[attn_type]
+        self.attn = attn_cls(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qkv_fused=qkv_fused,
+            num_prefix_tokens=num_prefix_tokens,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            attn_head_dim=attn_head_dim,
+            norm_layer=norm_layer,
+            scale_norm=scale_attn_inner,
+            rotate_half=rotate_half,
+            **dd,
+        )
+        self.gamma_1 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim, **dd)
+        hidden_features = int(dim * mlp_ratio)
+        if swiglu_mlp:
+            if scale_mlp or swiglu_align_to:
+                # when norm in SwiGLU used or alignment enabled, an impl with separate fc for gate & x is used
+                self.mlp = SwiGLU(
+                    in_features=dim,
+                    hidden_features=hidden_features,
+                    norm_layer=norm_layer if scale_mlp else None,
+                    drop=proj_drop,
+                    align_to=swiglu_align_to,
+                    **dd,
+                )
+            else:
+                # w/o any extra norm, an impl with packed weights is used
+                self.mlp = GluMlp(
+                    in_features=dim,
+                    hidden_features=hidden_features * 2,
+                    norm_layer=norm_layer if scale_mlp else None,
+                    act_layer=nn.SiLU,
+                    gate_last=False,
+                    drop=proj_drop,
+                    **dd,
+                )
+        else:
+            self.mlp = Mlp(
+                in_features=dim,
+                hidden_features=hidden_features,
+                act_layer=act_layer,
+                norm_layer=norm_layer if scale_mlp else None,
+                drop=proj_drop,
+                **dd,
+            )
+        self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.gamma_1 is None:
+            x = x + self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
+            x = x + self.drop_path2(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path1(self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
+            x = x + self.drop_path2(self.gamma_2 * self.mlp(self.norm2(x)))
+        return x
+
+
+eva.EvaBlock = EvaBlock  # type: ignore[invalid-assignment]
+
+
+def get_block_fn(cfg) -> Callable:
+    """Get appropriate block function based on configuration.
+
+    Returns a partially applied block constructor with EVA-specific
+    or conflicting parameters pre-configured if needed.
+    """
+    # Check if we need EVA block features
+    use_eva_features = (
+        cfg.attn_type in ("eva", "rope", "gated")
+        or cfg.rope_type not in ("", "none")  # Any ROPE type requires EVA blocks
+        or cfg.swiglu_mlp
+    )
+
+    if use_eva_features:
+        # Determine attention type based on rope_type if not explicitly set
+        attn_type = cfg.attn_type
+        if attn_type == "standard" and cfg.rope_type not in ("", "none"):
+            attn_type = "rope"
+
+        num_prefix_tokens = (1 if cfg.class_token else 0) + cfg.reg_tokens
+        return partial(
+            EvaBlock,
+            attn_type=attn_type,
+            swiglu_mlp=cfg.swiglu_mlp,
+            scale_mlp=cfg.scale_mlp_norm,
+            scale_attn_inner=cfg.scale_attn_inner_norm,
+            qkv_fused=cfg.qkv_fused,
+            num_prefix_tokens=num_prefix_tokens,
+        )
+    else:
+        # Standard ViT block
+        block_fn = cfg.block_fn or Block
+        if cfg.scale_mlp_norm or cfg.scale_attn_inner_norm:
+            # param names differ between EVA vs non-EVA block types
+            block_fn = partial(
+                block_fn,
+                scale_mlp_norm=cfg.scale_mlp_norm,
+                scale_attn_norm=cfg.scale_attn_inner_norm,
+            )
+        return block_fn
+
+
+naflexvit.get_block_fn = get_block_fn
 
 
 @dataclass
@@ -538,9 +744,9 @@ class IJEPANaFlexViT(Transformer):
             lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
             others["lejepa_proj"] = lejepa_proj
 
-        # spatial tokens only
-        x = x[:, self.num_prefix_tokens :]
-        others["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
+            # spatial tokens only
+            x = x[:, self.num_prefix_tokens :]
+            others["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
         else:
             x = x[:, self.num_prefix_tokens :]  # spatial tokens only

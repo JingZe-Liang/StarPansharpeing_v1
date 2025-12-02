@@ -150,8 +150,8 @@ class EncoderDecoder(torch.nn.Module):
             x = x.to(self.encoder_dtype)
 
             # Tokenizer specific forward
-            if hasattr(self.encoder, "encode_with_itermediate_features"):
-                ret = self.encoder.encode_with_itermediate_features(x)
+            if hasattr(self.encoder, "encode_with_intermediate_features"):
+                ret = self.encoder.encode_with_intermediate_features(x)
                 if isinstance(ret, dict):
                     x = ret["itermediate_features"]
                 else:

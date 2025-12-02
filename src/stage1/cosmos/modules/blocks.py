@@ -645,9 +645,7 @@ class LlamaFFN(nn.Module):
         self.w2 = conv_cls(intermediate_size, hidden_size, 1, 1, 0)
         self.w3 = conv_cls(hidden_size, intermediate_size, 1, 1, 0)
 
-        self.weight_init()
-
-    def weight_init(self):
+    def init_weights(self):
         torch.nn.init.trunc_normal_(self.w1.weight, std=0.02)
         torch.nn.init.trunc_normal_(self.w2.weight, std=0.02)
         torch.nn.init.trunc_normal_(self.w3.weight, std=0.02)

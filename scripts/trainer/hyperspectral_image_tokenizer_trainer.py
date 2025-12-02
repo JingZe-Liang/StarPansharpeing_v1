@@ -21,7 +21,7 @@ from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
-from easydict import EasyDict
+from easydict import EasyDict as edict
 from einops import rearrange
 from ema_pytorch import EMA
 from fvcore.nn import parameter_count_table
@@ -851,6 +851,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 "for efficience testing the scripts, disable the compilation.",
                 level="WARNING",
             )
+
             heavyball.utils.compile_mode = None
 
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
@@ -1060,7 +1061,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 # Loss
                 loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
 
-            return EasyDict({"proxy_loss": loss, "proxy_loss_breakdowns": {"ijepa_loss": loss}})
+            return edict({"proxy_loss": loss, "proxy_loss_breakdowns": {"ijepa_loss": loss}})
 
         if "lejepa" == cfg.task:
             # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
@@ -1095,13 +1096,13 @@ class CosmosHyperspectralTokenizerTrainer:
                     sigreg=self.proxy_lejepa_sigreg,
                     lam=cfg.sigreg.lam,
                 )
-            return EasyDict({"proxy_loss": loss, "proxy_loss_breakdowns": breakdowns})
+            return edict({"proxy_loss": loss, "proxy_loss_breakdowns": breakdowns})
 
         else:
             raise NotImplementedError("Unknown proxy task {cfg.task}")
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
-        out_d = {}
+        out_d = edict()
 
         with self.accelerator.autocast():
             # `is_testing` is deprecated, use `ema` instead
@@ -1137,28 +1138,25 @@ class CosmosHyperspectralTokenizerTrainer:
                     tokenizer.eval()
                 else:
                     tokenizer = self.tokenizer
-                _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
 
-                latent = None
-                if self.use_quantizer:
-                    dec_out, q_loss, q_info = tokenizer(x)
-                else:
-                    dec_out = tokenizer(x)
+                # Forward tokenizer
+                dec_out = tokenizer(x)
 
                 # Is deep supervision
+                _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
                 if getattr(_unwrap_tok, "_is_deep_supervision", False):
                     assert isinstance(dec_out, dict), "dec_out must be a dict for deep supervision"
                     recon = dec_out["recon"]
-                    out_d["deep_supervision_outputs"] = dec_out["deep_supervision_outputs"]
+                    out_d.deep_supervision_outputs = dec_out["deep_supervision_outputs"]
                 else:
                     recon = dec_out
 
         # basic out
-        out_d.update({"latent": latent, "recon": recon})
+        out_d.update(latent=dec_out["latent"], recon=recon)
 
         # quantizer output dict
         if self.use_quantizer:
-            _q_dict = dict(q_loss=q_loss, q_info=q_info, latent_q=latent)
+            _q_dict = dict(q_loss=dec_out["q_loss"], q_info=dec_out["q_loss_breakdown"], latent_q=dec_out["latent"])
         else:
             _q_dict = dict(q_loss=None, q_info=None, latent_q=None)
         out_d.update(_q_dict)

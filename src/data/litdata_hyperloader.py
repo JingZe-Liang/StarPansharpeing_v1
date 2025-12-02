@@ -394,7 +394,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
             assert isinstance(sample, (torch.Tensor, np.ndarray)), (
                 f"sample must be dict or tensor/array, got {type(sample)}"
             )
-            sample = {"img": sample}
+            sample = {"img": sample, "__key__": "N/A"}  # N/A means no key saved in litdata dataset.
         return sample
 
     def __getitem__(self, idx):
@@ -1074,10 +1074,10 @@ def __test_index_file_litdata_loader():
 def __test_normal_image_loader():
     from litdata.streaming.serializers import BytesSerializer, StringSerializer
 
-    path = "data2/HyperspectralEarth/LitData_hyper_images"
+    path = "/Data2/ZihanCao/dataset/litdataHyperImages"
     stream_ds_kwargs = {
         "transform_prob": 0.0,
-        "resize_before_transform": 128,
+        "resize_before_transform": 512,
         "is_cycled": False,
     }
     # serializers = {
@@ -1097,7 +1097,7 @@ def __test_normal_image_loader():
 
     dl = StreamingDataLoader(ds, **loader_kwargs)
     for sample in dl:
-        print(sample["img"].shape)
+        print(sample["__key__"], sample["img"].shape)
 
 
 def __test_get_item_key():
@@ -1126,22 +1126,22 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
-    # __test_normal_image_loader()
+    __test_normal_image_loader()
     # __test_get_item_key()
 
-    from omegaconf import OmegaConf
+    # from omegaconf import OmegaConf
 
-    cfg = OmegaConf.load(
-        "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
-        # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
-    )
+    # cfg = OmegaConf.load(
+    #     "scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
+    #     # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
+    # )
 
-    logger.info(cfg.train_loader.paths)
-    ds, dl = create_hyper_image_litdata_flatten_paths_loader(
-        paths=cfg.train_loader.paths,
-        weights=cfg.train_loader.weights,
-        loader_kwargs=cfg.train_loader.loader_kwargs,
-    )
+    # logger.info(cfg.train_loader.paths)
+    # ds, dl = create_hyper_image_litdata_flatten_paths_loader(
+    #     paths=cfg.train_loader.paths,
+    #     weights=cfg.train_loader.weights,
+    #     loader_kwargs=cfg.train_loader.loader_kwargs,
+    # )
 
-    for sample in dl:
-        print(sample["img"].shape)
+    # for sample in dl:
+    #     print(sample["img"].shape)

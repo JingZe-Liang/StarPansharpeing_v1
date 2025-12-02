@@ -217,8 +217,10 @@ class Attention(Attention_):
             # (bs, nhead, n, head_dim)
             if rope.shape[-2] + npt != N:
                 logger.warning(f"Rope shape mismatch: {rope.shape[-2]} != {N}")
-                rope_q = rope[:, :, :N]  # N is the sequence length
-                rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
+                rope_q = torch.narrow(rope, -2, 0, N)
+                rope_k = torch.narrow(rope, -2, 0, N)
+                # rope_q = rope[:, :, :N]  # N is the sequence length
+                # rope_k = rope[:, :, :N]  # Q and K have same length in self-attention
             else:
                 rope_q = rope
                 rope_k = rope
@@ -279,7 +281,7 @@ class GatedAttention(nn.Module):
         hidden_size: int = 1024,
         num_attention_heads: int = 8,
         num_key_value_heads: int = 2,
-        norm_layer: str = "layernorm",
+        norm_layer: str | Callable | None = "layernorm",
         use_qk_norm: bool = False,
         qkv_bias: bool = True,
         rms_norm_eps: float = 1e-6,
@@ -337,8 +339,9 @@ class GatedAttention(nn.Module):
             self.num_key_value_heads * self.head_dim,
             bias=qkv_bias,
         )
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias)
+        self.proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=qkv_bias)
         if self.use_qk_norm:
+            norm_layer = norm_layer or "layernorm"
             self.q_norm = create_norm_layer(norm_layer, self.head_dim, eps=rms_norm_eps)
             self.k_norm = create_norm_layer(norm_layer, self.head_dim, eps=rms_norm_eps)
 
@@ -361,7 +364,7 @@ class GatedAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
         # position_ids: Optional[torch.LongTensor] = None,
         # past_key_value: Optional[Cache] = None,
         # output_attentions: bool = False,
@@ -426,9 +429,15 @@ class GatedAttention(nn.Module):
         ####### Rope
         if rope is not None:  # (seq_max_l, head_dim)
             npt = self.num_prefix_tokens
-            # (bs, nhead, n, head_dim)
-            rope_q = rope[:, :, :q_len]
-            rope_k = rope[:, :, :kv_len]
+            N = hidden_states.shape[-2]
+            # (bs, nhead, n, head_dim) or (n, head_dim)
+            if rope.shape[-2] + npt != N:
+                logger.warning(f"Rope shape mismatch: {rope.shape[-2]} != {N}")
+                rope_q = torch.narrow(rope, -2, 0, N)
+                rope_k = torch.narrow(rope, -2, 0, N)
+            else:
+                rope_q = rope
+                rope_k = rope
 
             query_states = torch.cat(
                 [
@@ -459,13 +468,13 @@ class GatedAttention(nn.Module):
         # key_states = repeat_kv(key_states, self.num_key_value_groups)
         # value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # causal_mask = attention_mask
-        # if attention_mask is not None:  # no matter the length, we just slice it
-        #     causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        # causal_mask = attn_mask
+        # if attn_mask is not None:  # no matter the length, we just slice it
+        #     causal_mask = attn_mask[:, :, :, : key_states.shape[-2]]
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == "cuda" and attn_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
@@ -481,7 +490,7 @@ class GatedAttention(nn.Module):
         #     dropout_p=self.attention_dropout if self.training else 0.0,
         #     is_causal=self.is_causal,
         #     enable_gqa=True,
-        #     attn_mask=attention_mask,
+        #     attn_mask=attn_mask,
         # )
 
         # Jvp supported flash attention
@@ -494,15 +503,17 @@ class GatedAttention(nn.Module):
             query_states,
             key_states,
             value_states,
-            attention_mask=attention_mask,
+            attention_mask=attn_mask,
             dropout=self.attention_dropout if self.training else 0.0,
         )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
         if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
             attn_output = attn_output * torch.sigmoid(gate_score)
+
+        # attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.proj(attn_output)  # compactible with timm attentions
+
         return attn_output
 
 

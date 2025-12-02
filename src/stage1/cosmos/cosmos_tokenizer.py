@@ -11,6 +11,7 @@ from typing import Any, Literal, Optional, no_type_check
 import accelerate
 import numpy as np
 import torch
+from easydict import EasyDict as edict
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import (
@@ -857,7 +858,7 @@ class ContinuousImageTokenizer(nn.Module):
         use_quantizer: bool | None = None,
         cache_type: str = "z",
     ):
-        if cache_type is None or cache_type == "none":
+        if cache_type in (None, "none"):
             # No cache
             return
 
@@ -872,7 +873,7 @@ class ContinuousImageTokenizer(nn.Module):
             else:
                 setattr(self, cache_type, None)
 
-    def encode_with_itermediate_features(self, x, use_quantizer=None):
+    def encode_with_intermediate_features(self, x, use_quantizer=None):
         z, feats = self.encoder.encoder(x, ret_interm_feats=True)
         h = self.encoder.quant_conv(z)
         maybe_q_encoded = self.apply_quantizer(h, use_quantizer)
@@ -882,59 +883,64 @@ class ContinuousImageTokenizer(nn.Module):
             encoded, q_loss, loss_breakdown = maybe_q_encoded
         else:
             encoded = h
+
         return dict(
             encoded=encoded,
             itermediate_feats=feats,
             q_loss=q_loss,
-            loss_breakdown=loss_breakdown,
+            q_loss_breakdown=loss_breakdown,
         )
 
     def encode(self, x, use_quantizer=None):
+        enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
+
         # Encoder
         z = self.encoder.encoder(x)
         h = self.encoder.quant_conv(z)
-        # TODO: add additional cross-attention to convert the 2D latent to 1D latent
 
         # Quantization
         maybe_q_ret = self.apply_quantizer(h, z, use_quantizer)
         if isinstance(maybe_q_ret, tuple):
             h, q_loss, loss_breakdown = maybe_q_ret
-            # NOTE: if quantizer is used, the aug z is not applied
-            return h, q_loss, loss_breakdown
+            enc_out.update(latent=h, q_loss=q_loss, q_loss_breakdown=loss_breakdown)
 
         # z augmentions
         h = self.latent_aug(maybe_q_ret)
-        return h
+        enc_out.latent = h
+
+        return enc_out
 
     def decode(
         self,
-        h: torch.Tensor | tuple,
+        inp: dict,
         inp_shape: Annotated[torch.Size | int, "bs,c,h,w or c"],
         clamp=False,
     ):
-        # Break down input z losses
-        q_loss = loss_breakdown = None
-        if self.quantizer_type is not None and isinstance(h, (tuple, list)):
-            h, q_loss, loss_breakdown = h
-        else:
-            assert torch.is_tensor(h), "z should be the (quantized) latent"
+        """
+        Decoder forward method. Outputs contain
+        recon, latent, q_loss, q_loss_breakdown, loss_breakdown
+        """
+        dec_out = edict(**inp)
+        h = inp["latent"]
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
         dec = self.decoder(h, chan)  # [b, c, h, w]
+
+        # Clamp
         if clamp:
             dec = dec.clamp(-1, 1)
+        dec_out["recon"] = dec
 
-        if self.quantizer_type is not None:
-            return dec, q_loss, loss_breakdown
-        else:
-            return dec
+        return dec_out
 
-    def forward(self, input: torch.Tensor, enc_kwargs={}, dec_kwargs={}):
+    def forward(self, input: torch.Tensor, enc_kwargs: dict = {}, dec_kwargs: dict = {}) -> dict:
         if cosmos_block.compile_forward_fn and cosmos_block.compile_forward_fn:
             torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
-        latent = self.encode(input, **enc_kwargs)
-        dec = self.decode(latent, input.shape, **dec_kwargs)
+
+        enc = self.encode(input, **enc_kwargs)
+        dec = self.decode(enc, input.shape, **dec_kwargs)
+
         return dec
 
     # * --- checkpoint loding --- #

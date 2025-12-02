@@ -64,7 +64,7 @@ def dump_config(config, path, log_config=True):
 def set_defaults(cfg: dict | None, defaults: dict[str, Any], use_edict=True) -> dict | edict:
     """set defaults for dict/edict config"""
     if cfg is None:
-        cfg = edict() if use_edict else {}
+        cfg = {}
     for k, v in defaults.items():
         cfg.setdefault(k, v)
-    return edict(cfg) if use_edict else dict(cfg)
+    return edict(cfg) if use_edict else cfg
