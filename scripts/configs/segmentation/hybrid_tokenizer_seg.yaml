@@ -28,7 +28,7 @@ metric:
   _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
   n_classes: ${dataset.consts.num_classes}
   ignore_index: 255
-  include_bg: true
+  include_bg: false
   input_format: index
   task: multiclass
 
@@ -38,8 +38,8 @@ train:
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:
-    patch_size: ${dataset.patch_size}
-    stride: ${dataset.stride}
+    patch_size: 128 #${dataset.consts.patch_size}
+    stride: 32 #${dataset.consts.stride}
 
   use_single_img_indexing: false
   patches_per_image:
@@ -47,12 +47,12 @@ train:
 
   proj_dir: runs/stage2_classification/
   finetune_strategy: finetune_all
-  max_grad_norm: 3.0
+  max_grad_norm: 1.0
 
   track_metrics_duration: -1
   track_metrics_after: 2000
-  visualize_every: 1000
-  max_steps: 300_000
+  visualize_every: 500
+  max_steps: 40_000
   save_every: 500
   is_neg_1_1: true
 
@@ -62,10 +62,9 @@ train:
   segment_optim:
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 6.0e-4
-    weight_decay: 1.0e-4
-    eps: 1e-10
-    betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
+    lr: 4.0e-4
+    weight_decay: 0.0
+    betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     caution: true
     foreach: true
 
@@ -92,7 +91,7 @@ train:
     _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
     ignore_index: 255
     ce_weight: null
-    loss_weights: [0.5, 1.0, 0.5]
+    loss_weights: [1.0, 1.0, 0.5]
     mode: multiclass
 
   log:
@@ -102,5 +101,5 @@ train:
   debug: true
 
 val:
-  val_duration: 20
+  val_duration: 50
   max_val_iters: -1

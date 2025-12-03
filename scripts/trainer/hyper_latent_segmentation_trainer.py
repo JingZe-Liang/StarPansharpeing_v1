@@ -9,7 +9,6 @@ from typing import Callable, Literal, Sequence, cast
 
 import accelerate
 import hydra
-import lazy_loader
 import numpy as np
 import PIL.Image as Image
 import torch
@@ -21,7 +20,6 @@ from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from einops import rearrange
 from ema_pytorch import EMA
 from jaxtyping import Float, Int
-from kornia.utils.image import make_grid, tensor_to_image
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import load_file
@@ -30,11 +28,12 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
+from torchvision.utils import make_grid
 from tqdm import tqdm, trange
 
 from src.data.window_slider import WindowSlider, model_predict_patcher
 from src.stage2.segmentation.data.data_split import SingleImageHyperspectralSegmentationDataset
-from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset
+from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset, label_background_recover
 from src.stage2.segmentation.metrics import HyperSegmentationScore
 from src.stage2.utilities.loss import HyperSegmentationLoss
 from src.utilities.config_utils import to_easydict_recursive
@@ -44,7 +43,7 @@ from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
-from src.utilities.train_utils.visualization import visualize_segmentation_map
+from src.utilities.train_utils.visualization import get_rgb_image, visualize_segmentation_map
 
 
 @dataclass
@@ -181,7 +180,7 @@ class HyperSegmentationTrainer:
             self.segment_loss = hydra.utils.instantiate(self.train_cfg.segment_loss)
         else:
             # default loss
-            self.segment_loss = nn.CrossEntropyLoss()
+            self.segment_loss = nn.CrossEntropyLoss(ignore_index=255)
         self.log_msg(f"use segmentation loss: {self.segment_loss.__class__.__name__}")
 
         # training state counter
@@ -981,7 +980,7 @@ class HyperSegmentationTrainer:
         self.model.eval()
 
         # Initialize metrics directly
-        seg_metrics = hydra.utils.instantiate(self.metric_cfg).to(self.device)
+        seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(self.metric_cfg).to(self.device)
         loss_metrics = MeanMetric().to(device=self.device)
 
         val_iter = self.get_val_loader_iter()
@@ -1021,7 +1020,10 @@ class HyperSegmentationTrainer:
             assert self._val_unsampled_mask is None or self._val_unsampled_mask.shape == gt.shape, (
                 "val unsampled mask shape does not match gt shape"
             )
-            seg_metrics.update(pred_seg, gt)  # self._val_unsampled_mask)
+
+            # gt 255 -> 0, others + 1
+            # pred_seg should also + 1
+            seg_metrics.update(pred_seg, gt, self._val_unsampled_mask)
             self.step_train_state("val")
 
         # Compute metrics
@@ -1106,7 +1108,8 @@ class HyperSegmentationTrainer:
         add_step: bool = False,
         only_vis_n: int | None = None,
         n_class: int = 20,
-        use_coco_colors: bool = True,
+        use_coco_colors: bool = False,
+        n_row: int = 1,
     ):
         """Visualize predicted and ground truth segmentation maps side by side.
 
@@ -1129,33 +1132,21 @@ class HyperSegmentationTrainer:
         if gt_map.dim() == 4:  # (B, C, H, W)
             gt_map = gt_map.squeeze(1)  # (B, H, W)
 
+        # Convert the 255 background class to 0
+        gt_map = label_background_recover(gt_map)
+        pred_map += 1
+
         # Only visualize the first few samples
         pred_map = pred_map[:_only_n]
         gt_map = gt_map[:_only_n]
         img = img[:_only_n]
 
+        assert pred_map.shape[-2:] == gt_map.shape[-2:] == pred_map.shape[-2:]
+
         # Visualize input image to RGB
         img_rgb = self.to_rgb(img)
-
-        def convert_to_hwc_format(img_tensor):
-            """Convert tensor to (H, W, C) numpy array format."""
-            if isinstance(img_tensor, Image.Image):
-                return np.array(img_tensor)
-
-            # Handle tensor format
-            if torch.is_tensor(img_tensor):
-                img_tensor = img_tensor.detach().cpu()
-                if img_tensor.dim() == 4:  # (B, C, H, W) -> (H, W, C)
-                    img_tensor = img_tensor[0]  # Take first sample for now
-                if img_tensor.dim() == 3 and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
-                    img_tensor = img_tensor.permute(1, 2, 0)
-            elif isinstance(img_tensor, np.ndarray) and img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
-                img_tensor = np.transpose(img_tensor, (1, 2, 0))
-
-            return img_tensor.numpy() if torch.is_tensor(img_tensor) else img_tensor
-
-        # Convert input image to numpy array and ensure correct format
-        img_rgb = convert_to_hwc_format(img_rgb)
+        img_rgb = get_rgb_image(img, "mean", use_linstretch=True)
+        img_rgb_grid = make_grid(img_rgb, n_row).permute(1, 2, 0).cpu().numpy()
 
         # Visualize segmentation maps for entire batch
         pred_vis = visualize_segmentation_map(
@@ -1165,8 +1156,7 @@ class HyperSegmentationTrainer:
             to_pil=False,
             bg_black=True,
         )
-
-        gt_vis = visualize_segmentation_map(
+        gt_vis = visualize_segmentation_map(  # [B, H, W, C]
             gt_map,
             n_class=n_class,
             use_coco_colors=use_coco_colors,
@@ -1174,47 +1164,24 @@ class HyperSegmentationTrainer:
             bg_black=True,
         )
 
-        # Ensure segmentation maps are numpy arrays
-        if isinstance(pred_vis, Image.Image):
-            pred_vis = np.array(pred_vis)
-        elif isinstance(pred_vis, list):
-            pred_vis = np.stack([np.array(p) for p in pred_vis], axis=0)
+        def _maps_to_grid(m):
+            m = m[..., :3] if m.shape[-1] > 3 else m
+            if m.ndim == 3:
+                return m  # [H, W, C]
+            elif m.ndim == 4:
+                # [B, H, W, C]
+                m = m.transpose(0, -1, 1, 2)
+                m = torch.as_tensor(m)
+                m = make_grid(m, n_row).permute(1, 2, 0)  # [H, W, C]
+            else:
+                raise ValueError(f"Unkonwn shape: {m.shape}")
+            return m.cpu().numpy()
 
-        if isinstance(gt_vis, Image.Image):
-            gt_vis = np.array(gt_vis)
-        elif isinstance(gt_vis, list):
-            gt_vis = np.stack([np.array(g) for g in gt_vis], axis=0)
+        pred_vis_grid = _maps_to_grid(pred_vis)
+        gt_vis_grid = _maps_to_grid(gt_vis)
 
-        # Resize input image to match segmentation map size
-        h, w = pred_vis.shape[1:3] if pred_vis.ndim == 4 else pred_vis.shape[:2]
-        if img_rgb.shape[:2] != (h, w):
-            img_rgb = np.array(Image.fromarray(img_rgb).resize((w, h), Image.Resampling.BILINEAR))
-
-        # Handle batch dimension and concatenate images
-        if pred_vis.ndim == 4:  # Batch processing
-            # Stack all images horizontally for each sample
-            batch_size = pred_vis.shape[0]
-            vis_images = []
-
-            for i in range(batch_size):
-                # Get individual samples
-                img_sample = img_rgb[i] if img_rgb.ndim == 4 else img_rgb
-                pred_sample = pred_vis[i]
-                gt_sample = gt_vis[i]
-
-                # Concatenate horizontally: [img, pred_map, gt_map]
-                combined_vis = np.concatenate([img_sample, pred_sample, gt_sample], axis=1)
-                vis_images.append(combined_vis)
-        else:  # Single sample
-            # Concatenate horizontally: [img, pred_map, gt_map]
-            vis_images = [np.concatenate([img_rgb, pred_vis, gt_vis], axis=1)]
-
-        # Stack all visualizations vertically by batch
-        if len(vis_images) > 1:
-            # Concatenate all samples vertically along the height axis
-            img = np.concatenate(vis_images, axis=0)
-        else:
-            img = vis_images[0]
+        # Concatenate together
+        img = np.concatenate([img_rgb_grid, pred_vis_grid, gt_vis_grid], axis=1)  # [H, W*3, 3]
 
         # Convert to PIL Image and save as PNG
         img = (img * 255.0).astype(np.uint8)

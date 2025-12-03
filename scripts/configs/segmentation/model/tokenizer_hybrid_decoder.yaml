@@ -32,7 +32,7 @@ adapter:
   drop: 0.0
   act_first: false
   conv_bias: false
-  block_types: ["nat", "nat", "mbconv", "mbconv"]
+  block_types: ["mbconv", "mbconv", "mbconv", "mbconv"]
 
 num_classes: ${dataset.consts.num_classes}
 input_channels: ${dataset.consts.bands}

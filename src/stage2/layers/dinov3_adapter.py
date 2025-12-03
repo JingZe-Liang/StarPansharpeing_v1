@@ -545,6 +545,7 @@ class DINOv3_Adapter(nn.Module):
             add_vit_feature,
             freeze_backbone,
         )
+        logger.log("NOTE", "Init backbone")
 
         self._setup_interactions(
             in_channels=in_channels,

@@ -367,7 +367,86 @@ def visualize_segmentation_map(
     to_rgba=False,
     to_pil=False,
     add_channel_dim_1=False,
-) -> VisGTMapType:
+):
+    """Visualize segmentation ground truth maps as color-coded images.
+
+    This function converts integer segmentation labels into color-coded visualizations
+    using specified colormaps. It supports both single images and batches, and can
+    output in various formats (PIL Images, numpy arrays).
+
+    Parameters
+    ----------
+    gt_map : GTMapType
+        Ground truth segmentation map(s). Can be:
+        - numpy array of shape (h, w) with dtype int or uint
+        - torch tensor of shape (b, c, h, w) or (b, h, w) with dtype int or uint
+        For batch inputs, the channel dimension will be squeezed if present.
+    cmap : str, optional
+        Matplotlib colormap name to use for coloring classes.
+        Default is "tab20".
+    n_class : int, optional
+        Number of segmentation classes. Must match the colormap capacity.
+        Default is 20.
+    bg_black : bool, optional
+        Whether to set class 0 (background) to black color.
+        Default is True.
+    colors : Float32[NDArray, "n_class 4"] | list[list[int | float]] | None, optional
+        Custom color array of shape (n_class, 4) where each row is RGBA color.
+        If None, colors are generated from cmap or COCO colors.
+        Default is None.
+    use_coco_colors : bool, optional
+        Whether to use COCO dataset color palette instead of cmap.
+        Default is False.
+    alpha : float, optional
+        Alpha transparency value for all colors (0.0 to 1.0).
+        Default is 1.0 (fully opaque).
+    to_rgba : bool, optional
+        Whether to output RGBA images (4 channels) instead of RGB (3 channels).
+        Default is False.
+    to_pil : bool, optional
+        Whether to return PIL Image objects instead of numpy arrays.
+        If True and input is batch, returns list of PIL Images.
+        Default is False.
+    add_channel_dim_1 : bool, optional
+        Whether to add a channel dimension of size 1 to the output.
+        Useful for compatibility with certain neural network formats.
+        Default is False.
+
+    Returns
+    -------
+    VisGTMapType
+        Visualized segmentation map(s). Return type depends on parameters:
+        - If to_pil=True and single image: PIL.Image.Image
+        - If to_pil=True and batch: list[PIL.Image.Image]
+        - If to_pil=False and single image: Float[NDArray, "h w c"] (c=3 or 4)
+        - If to_pil=False and batch: Float[NDArray, "b h w c"] (c=3 or 4)
+        If add_channel_dim_1=True, an additional dimension is inserted.
+
+    Raises
+    ------
+    AssertionError
+        If n_class exceeds colormap capacity or gt_map has invalid shape.
+
+    Notes
+    -----
+    - Class 0 is typically treated as background. When bg_black=True, it's colored black.
+    - The function handles both numpy arrays and torch tensors transparently.
+    - For batch processing, input tensors should have shape (b, h, w) or (b, c, h, w).
+    - Color values are normalized to [0, 1] range before applying colormap.
+
+    Examples
+    --------
+    >>> # Single image visualization
+    >>> seg_map = np.random.randint(0, 20, (256, 256))
+    >>> vis = visualize_segmentation_map(seg_map, n_class=20)
+    >>> vis.shape  # (256, 256, 3)
+
+    >>> # Batch visualization with PIL output
+    >>> batch_seg = torch.randint(0, 20, (4, 256, 256))
+    >>> vis_list = visualize_segmentation_map(batch_seg, to_pil=True)
+    >>> len(vis_list)  # 4
+    >>> isinstance(vis_list[0], Image.Image)  # True
+    """
     if colors is None:
         if use_coco_colors:
             colors = get_coco_colors()
@@ -410,7 +489,7 @@ def visualize_segmentation_map(
     if to_pil:
         return ms[0] if len(ms) == 1 else ms
     else:
-        ms = np.stack(ms).squeeze(0)
+        ms = np.stack(ms)
         if add_channel_dim_1:
             if ms.ndim == 2:
                 ms = ms[None, ...]

@@ -43,7 +43,7 @@ def get_default_transform():
     transform = AugmentationSequential(
         RandomHorizontalFlip(p=0.5),
         RandomVerticalFlip(p=0.5),
-        RandomRotation(degrees=90, p=0.5),
+        RandomRotation(degrees=90, p=0.5, align_corners=False),
         data_keys=["input", "input", "mask"],
         same_on_batch=False,
     )

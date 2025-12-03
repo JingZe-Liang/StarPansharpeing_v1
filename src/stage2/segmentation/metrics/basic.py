@@ -4,6 +4,7 @@ from typing import Any, Callable, Literal
 import torch
 import torch.nn as nn
 from jaxtyping import Int
+from loguru import logger
 from torch import Tensor
 from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Precision, Recall
 from torchmetrics.segmentation import GeneralizedDiceScore, MeanIoU
@@ -17,7 +18,7 @@ class HyperSegmentationScore(nn.Module):
         task: Literal["binary", "multiclass"] = "multiclass",
         top_k: int = 1,
         reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
-        per_class: bool = False,
+        per_class: bool | None = None,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",
         use_aggregation: bool = False,
@@ -28,16 +29,16 @@ class HyperSegmentationScore(nn.Module):
         self.task = task
         self.top_k = top_k
         self.reduction = reduction
-        self.per_class = per_class
+
+        # macro means per class; micro means over all classes
+        self.per_class = per_class if isinstance(per_class, bool) else reduction == "macro"
 
         if ignore_index is not None:
             if include_bg:
-                warnings.warn(
+                logger.warning(
                     f"include_bg=True is automatically set to False when ignore_index={ignore_index} "
                     f"is used. This prevents mixing ignored pixels (mapped to class 0) with "
                     f"real background class 0 in segmentation metrics.",
-                    UserWarning,
-                    stacklevel=2,
                 )
             self.include_bg = False
         else:
@@ -77,24 +78,24 @@ class HyperSegmentationScore(nn.Module):
         )
 
         # Segmentation metrics need special handling for ignore_index
-        # Adjust num_classes to include ignore_index if it exceeds valid classes
+        # We map ignore_index to class 0 and shift valid classes by +1,
+        # so total number of classes becomes n_classes + 1.
         if ignore_index is not None:
-            if ignore_index >= n_classes:
-                seg_n_classes = ignore_index + 1
-            else:
+            if ignore_index < n_classes:
                 raise ValueError(f"ignore_index {ignore_index} should exceed number of classes {n_classes}")
+            seg_n_classes = n_classes + 1
         else:
             seg_n_classes = n_classes
 
         self.dice_score = GeneralizedDiceScore(
             include_background=self.include_bg,
             num_classes=seg_n_classes,
-            per_class=per_class,
+            per_class=self.per_class,
             input_format=input_format,
         )
         self.mean_iou = MeanIoU(
             num_classes=seg_n_classes,
-            per_class=per_class,
+            per_class=self.per_class,
             include_background=self.include_bg,
             input_format=input_format,
         )
@@ -146,8 +147,10 @@ class HyperSegmentationScore(nn.Module):
             gt_processed = gt.clone()
 
             # Replace ignore_index with 0 (background class)
-            ignore_mask = gt_processed == self.ignore_index
-            gt_processed[ignore_mask] = 0
+            # ignore_mask = gt_processed == self.ignore_index
+            # gt_processed[ignore_mask] = 0
+            gt_processed = torch.where(gt_processed == self.ignore_index, 0, gt_processed + 1)
+            pred_processed = pred_processed + 1
 
             # Update segmentation metrics with processed data
             for metric in segmentation_metrics.values():
@@ -165,8 +168,8 @@ class HyperSegmentationScore(nn.Module):
             metric.reset()
 
     def update(self, pred, gt, mask=None):
-        pred = self._mask_out(pred, mask)[None, None, :]
-        gt = self._mask_out(gt, mask)[None, None, :]
+        pred = self._mask_out(pred, mask)
+        gt = self._mask_out(gt, mask)
         self._update_all_metrics(pred, gt)
 
     def compute(self):
@@ -178,7 +181,7 @@ class HyperSegmentationScore(nn.Module):
     def _mask_out(self, x: Tensor, mask: Tensor | None) -> Tensor:
         if mask is not None:
             assert mask.ndim == 3, "Mask must be 3D tensor, shaped as [bs, h, w]"
-            x = torch.masked_select(x, mask)
+            x = torch.masked_select(x, mask)[None, None, :]
         return x
 
     def forward(

@@ -56,6 +56,8 @@ def sample_img_with_gt_indices(
     # Create patches/labels dict
     patches_dict = defaultdict(list)
     labels_dict = defaultdict(list)
+    # Track which input coordinates actually produced patches (skips border centers)
+    used_coords = defaultdict(list)
 
     for class_id, indices in class_indices.items():
         indices = cast(np.ndarray, indices)
@@ -72,9 +74,13 @@ def sample_img_with_gt_indices(
             if center_x < min_center or center_x >= max_center_x or center_y < min_center or center_y >= max_center_y:
                 continue
 
-            # Convert to padded image coordinates
-            padded_x = center_x + margin
-            padded_y = center_y + margin
+            # Convert to padded image coordinates (start index in padded arrays)
+            # For a patch centered at (center_x, center_y) in the original image,
+            # the corresponding padded slice should start at padded index = center_x
+            # because padded indices are original_index + margin and we want
+            # the slice that maps to original rows [center_x - margin, center_x + margin].
+            padded_x = center_x
+            padded_y = center_y
             slices = slice(padded_x, padded_x + patch_size), slice(padded_y, padded_y + patch_size)
 
             # Extract patch from padded images (now guaranteed to be correct size)
@@ -94,6 +100,8 @@ def sample_img_with_gt_indices(
 
             patches_dict[class_id].append(patch)
             labels_dict[class_id].append(label)
+            # Record the original center coordinate that produced this patch
+            used_coords[class_id].append((center_x, center_y))
 
     # Clip the unsampled area to its original size
     unsampled_area = unsampled_area[margin:-margin, margin:-margin]
@@ -103,7 +111,7 @@ def sample_img_with_gt_indices(
     unsampled_area = unsampled_area.astype(np.bool_)
     unsampled_area = np.logical_not(unsampled_area)  # True means unsampled area
 
-    return patches_dict, labels_dict, unsampled_area
+    return patches_dict, labels_dict, unsampled_area, used_coords
 
 
 class RobustHyperspectralSampler:
@@ -213,10 +221,9 @@ class RobustHyperspectralSampler:
         if self.strategy not in valid_strategies:
             raise ValueError(f"Unknown strategy: {self.strategy}. Available: {valid_strategies}")
 
-        # Compute basic class statistics
-        self.class_stats = self._analyze_class_distribution()
-
         if self.verbose:
+            # Compute basic class statistics
+            self.class_stats = self._analyze_class_distribution()
             self._print_class_distribution()
 
     def _create_class_indices(self) -> Dict[int, List[Tuple[int, int]]]:
@@ -817,7 +824,7 @@ if __name__ == "__main__":
     logger.info("Testing sample_img_with_gt_indices function...")
 
     patch_size = 32
-    patches_dict, labels_dict = sample_img_with_gt_indices(
+    patches_dict, labels_dict, _, used_coords = sample_img_with_gt_indices(
         img=img, gt_map=gt_map, class_indices=sampled_indices, patch_size=patch_size
     )
 
@@ -839,15 +846,18 @@ if __name__ == "__main__":
             assert patch_shape == (patch_size, patch_size, img.shape[2]), f"Wrong patch shape: {patch_shape}"
             assert label_shape == (patch_size, patch_size), f"Wrong label shape: {label_shape}"
 
-            # Check a few coordinates and their corresponding patches
-            class_coords = sampled_indices[class_id]
-            coords = class_coords[:2] if len(class_coords) >= 2 else class_coords
-            logger.info(f"  First 2 sampled coordinates: {coords.tolist()}")
+            # Show the actual coordinates that produced these patches
+            used_class_coords = used_coords.get(class_id, [])
+            coords = used_class_coords[:2] if len(used_class_coords) >= 2 else used_class_coords
+            logger.info(f"  First 2 coordinates that produced patches: {coords}")
 
-            # Check padding effectiveness for boundary pixels
-            test_coord = class_coords[0]  # Get first coordinate
-            center_x, center_y = test_coord
-            logger.info(f"  Test coordinate (center): ({center_x}, {center_y})")
+            # Check padding effectiveness for boundary pixels using the actual used coordinate
+            if used_class_coords:
+                test_coord = used_class_coords[0]
+                center_x, center_y = test_coord
+                logger.info(f"  Test coordinate (center): ({center_x}, {center_y})")
+            else:
+                logger.info("  No usable coordinates produced patches for this class (likely too close to borders)")
 
             # Verify patch contains expected number of non-zero values (for GT, 255 is padding)
             test_label = labels_dict[class_id][0]
