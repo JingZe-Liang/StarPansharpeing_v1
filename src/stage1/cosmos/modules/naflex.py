@@ -343,9 +343,6 @@ class NaFlexVitCfg:
     # adaptive generation decoder
     is_first_cat_noise: bool = False
 
-    # is low-level feature skip the semantic encoder
-    # straight through to CNN decoder
-    latent_straight_through_skip: bool = False
     # enable_jepa: bool = False  # enable jepa training
     # enable_lejepa: bool = False  # enable lejepa training
     # 'ijepa', 'lejepa', None for no pretrained task
@@ -736,7 +733,8 @@ class IJEPANaFlexViT(Transformer):
         ######### IJepa features ########
         if "ijepa" == self.cfg.pretrained_type:
             # x is the backbone's out
-            others["ijepa_feat"] = x
+            others["ijepa_feat"] = x[:, self.num_prefix_tokens :]
+            x = x[:, self.num_prefix_tokens :]
 
         ######### Lejepa projector #########
         elif hasattr(self, "lejepa_projector") and "lejepa" == self.cfg.pretrained_type:

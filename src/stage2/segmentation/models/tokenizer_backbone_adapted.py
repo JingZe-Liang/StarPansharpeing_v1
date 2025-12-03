@@ -164,9 +164,11 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
-                final_latent, _, all_layers = self.backbone.encode(x, get_intermediate_features=True)
+                enc_out = self.backbone.encode(x, get_intermediate_features=True)
+                all_layers = enc_out.sem_z
+                final_latent = enc_out.latent
 
-        # reorg all_layers
+        # reorganize all_layers
         assert all_layers is not None, "all_layers is None"
         assert len(all_layers) == len(self.interaction_indexes), (
             f"{len(all_layers)=} != {len(self.interaction_indexes)=}"
@@ -260,7 +262,7 @@ class TokenizerHybridUNet(nn.Module):
             cnn_cfg=t_cfg.cnn_cfg,
             trans_enc_cfg=t_cfg.trans_enc_cfg,
             trans_dec_cfg=t_cfg.trans_dec_cfg,
-            distillation_kwargs=t_cfg.distill_cfg,
+            distillation_cfg=t_cfg.distill_cfg,
         )
         if self.cfg.tokenizer_pretrained_path is not None:
             tok_backbone.load_pretrained(self.cfg.tokenizer_pretrained_path)

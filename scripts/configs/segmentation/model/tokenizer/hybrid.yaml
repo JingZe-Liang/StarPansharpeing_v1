@@ -79,6 +79,6 @@ trans_dec_cfg:
   unpatch_size: 2
   reg_tokens: 0
   compile_model: false
-distillation_kwargs:
+distillation_cfg:
   dino_feature_dim: 1024
   semantic_feature_dim: 1024

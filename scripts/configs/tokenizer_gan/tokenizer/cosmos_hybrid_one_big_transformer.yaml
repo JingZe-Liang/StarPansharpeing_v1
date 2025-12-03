@@ -10,9 +10,9 @@ _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 cnn_cfg:
   model:
     resolution: 1024
-    in_channels: 384 # nested channels !!
-    out_channels: 384 # nested channels !!
-    z_channels: 512
+    in_channels: 512 # nested channels !!
+    out_channels: 512 # nested channels !!
+    z_channels: 768
     latent_channels: 32
     channels: 128
     channels_mult: [2, 4, 4]
@@ -38,41 +38,48 @@ cnn_cfg:
   decoder_type: default # [default, generative]
 
 trans_enc_cfg:
-  embed_dim: 1024
-  depth: 12
+  embed_dim: 1152
+  depth: 24
   num_heads: 16
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
-  norm_layer: layernorm
+  norm_layer: flarmsnorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
   rope_type: axial
   img_size: 32
-  in_chans: 512
-  out_chans: 512
-  unpatch_size: 1
-  reg_tokens: 0
+  in_chans: 768
+  out_chans: 768
+  unpatch_size: 2
+  reg_tokens: 4
   compile_model: false
+  attn_type: gated
 
-trans_dec_cfg:
-  embed_dim: 1024
-  depth: 12
-  num_heads: 16
-  mlp_ratio: 4.0
-  qkv_bias: true
-  patch_size: 1
-  norm_layer: layernorm
-  pos_embed: learned
-  pos_embed_grid_size: [32, 32]
-  rope_type: axial
-  img_size: 32
-  in_chans: 512
-  out_chans: 512
-  unpatch_size: 2 # sem decoder -> cnn decoder
-  reg_tokens: 0
-  compile_model: false
+trans_dec_cfg: null
+#   embed_dim: 1152
+#   depth: 6
+#   num_heads: 16
+#   mlp_ratio: 4.0
+#   qkv_bias: true
+#   patch_size: 1
+#   norm_layer: flarmsnorm
+#   pos_embed: learned
+#   pos_embed_grid_size: [32, 32]
+#   rope_type: axial
+#   img_size: 32
+#   in_chans: 768
+#   out_chans: 768
+#   unpatch_size: 2 # sem decoder -> cnn decoder
+#   reg_tokens: 4
+#   compile_model: false
 
 distillation_cfg:
   dino_feature_dim: 1024
   semantic_feature_dim: 1024 # 1024 for vit large; 1152 for vit naflex
+  cache_layers:
+    low_level: [0, 1, 2, -1]
+    semantic: [5, 11, 17, 23]
+
+hybrid_tokenizer_cfg:
+  latent_bottleneck_type: before_semantic

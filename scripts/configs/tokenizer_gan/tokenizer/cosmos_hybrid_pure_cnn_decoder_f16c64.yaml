@@ -97,12 +97,12 @@ trans_enc_cfg:
 #   reg_tokens: 0
 #   compile_model: false
 
-distillation_kwargs:
+distillation_cfg:
   dino_feature_dim: 1024
   semantic_feature_dim: 1024 # 1024 for vit large; 1152 for vit naflex
   cache_layers:
     low_level: [0, 1, 2, -1]
     semantic: [5, 11, 17, 23] # 24-layers Naflex-large model
 
-hybrid_tokenizer_kwargs:
+hybrid_tokenizer_cfg:
   deep_supervision_type: null

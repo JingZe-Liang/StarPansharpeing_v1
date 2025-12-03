@@ -62,36 +62,36 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         *,
         cnn_enc_cfg: EncoderDecoderConfig | None = None,
         cnn_dec_cfg: EncoderDecoderConfig | None = None,
-        distillation_kwargs: dict[str, Any] = {},
-        hybrid_tokenizer_kwargs: dict[str, Any] = {},
+        distillation_cfg: dict[str, Any] = {},
+        hybrid_tokenizer_cfg: dict[str, Any] = {},
     ):
         self.cnn_cfg = cnn_cfg
         self.trans_enc_cfg = trans_enc_cfg
         self.trans_dec_cfg = trans_dec_cfg
-        self.distillation_kwargs = distillation_kwargs
+        self.distillation_cfg = distillation_cfg
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
 
         ###### Distillation configs
-        self.distillation_kwargs = set_defaults(
-            distillation_kwargs,
+        self.distillation_cfg = set_defaults(
+            distillation_cfg,
             {
                 "dino_feature_dim": 1024,
                 "semantic_feature_dim": 1152,
                 "cache_layers": self.cache_layers,
             },
         )
-        self._dino_feature_dim = self.distillation_kwargs.dino_feature_dim
-        self._semantic_feature_dim = self.distillation_kwargs.semantic_feature_dim
-        self.cache_layers = self.distillation_kwargs.cache_layers
+        self._dino_feature_dim = self.distillation_cfg.dino_feature_dim
+        self._semantic_feature_dim = self.distillation_cfg.semantic_feature_dim
+        self.cache_layers = self.distillation_cfg.cache_layers
 
         ###### Deep supervision configs
-        self.hybrid_tokenizer_kwargs = set_defaults(
-            hybrid_tokenizer_kwargs,
+        self.hybrid_tokenizer_cfg = set_defaults(
+            hybrid_tokenizer_cfg,
             {"deep_supervision_type": None, "latent_bottleneck_type": "after_semantic"},
         )
         # deep_supervision_type: [direct_out, sum_previous_out]
-        self.deep_supervision_type = self.hybrid_tokenizer_kwargs.deep_supervision_type
-        self.latent_bottleneck_type = self.hybrid_tokenizer_kwargs.latent_bottleneck_type
+        self.deep_supervision_type = self.hybrid_tokenizer_cfg.deep_supervision_type
+        self.latent_bottleneck_type = self.hybrid_tokenizer_cfg.latent_bottleneck_type
         self._is_deep_supervision = self.deep_supervision_type is not None
         self._build_deep_supervised_heads(cnn_cfg)
 
@@ -108,6 +108,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         ##### Transformer models
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
+        self._build_straight_through_skip(hybrid_tokenizer_cfg, cnn_cfg)
 
     def _build_encoder_decoder(
         self,
@@ -186,33 +187,34 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.semantic_transformer_dec.set_grad_checkpointing(self.grad_checkpointing)
             logger.info(f"Init semantic transformer decoder.")
 
-            # Straight through skip for low-level features
-            if trans_dec_cfg.latent_straight_through_skip:
-                self.st_skip_sem_decoder = True
-                # Change the postquant conv
-                orig_post_quant_conv = self.decoder.quant_conv
-                cat_dim = cnn_cfg.model.z_channels + cnn_cfg.model.in_channels
-                skip_through_cat_conv = nn.Sequential(
-                    create_norm_act_layer("layernorm2d", cat_dim, "gelu"),
-                    # post conv to z channels and feed into the cnn decoder
-                    # fuse the skipped latent (=z_channels) and the semantic decoder output
-                    create_conv2d(
-                        cat_dim,
-                        cnn_cfg.model.z_channels,
-                        kernel_size=3,
-                    ),
-                )
-                # replace the post quant conv
-                self.decoder.quant_conv = nn.ModuleDict(
-                    {
-                        "post_quant_conv": orig_post_quant_conv,
-                        "st_cat_conv": skip_through_cat_conv,
-                    }
-                )
-                logger.debug(
-                    f"Will skip the latent through the cat conv without semantic decoder, "
-                    "maybe better for reconstruction -- Experimenting"
-                )
+    def _build_straight_through_skip(self, hybrid_tok_cfg, cnn_cfg):
+        # Straight through skip for low-level features
+        if hybrid_tok_cfg.latent_straight_through_skip:
+            self.st_skip_sem_decoder = True
+            # Change the postquant conv
+            orig_post_quant_conv = self.decoder.quant_conv
+            cat_dim = cnn_cfg.model.z_channels * 2
+            skip_through_cat_conv = nn.Sequential(
+                create_norm_act_layer("layernorm2d", cat_dim, "gelu"),
+                # post conv to z channels and feed into the cnn decoder
+                # fuse the skipped latent (=z_channels) and the semantic decoder output
+                create_conv2d(
+                    cat_dim,
+                    cnn_cfg.model.z_channels,
+                    kernel_size=3,
+                ),
+            )
+            # replace the post quant conv
+            self.decoder.quant_conv = nn.ModuleDict(
+                {
+                    "post_quant_conv": orig_post_quant_conv,
+                    "st_cat_conv": skip_through_cat_conv,
+                }
+            )
+            logger.debug(
+                f"Will skip the latent through the cat conv without semantic decoder, "
+                "maybe better for reconstruction -- Experimenting"
+            )
 
     def _build_deep_supervised_heads(self, cnn_cfg):
         if not self._is_deep_supervision:
@@ -283,12 +285,12 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         z_low_lvl = self.encoder.encoder(x)
 
         # Semantic encoder
-        z_semantic, _ = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+        _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
             z_low_lvl, jepa_masks=jepa_masks
         )
 
         # no quant_conv here
-        return z_semantic
+        return terms.ijepa_feat
 
     def encode_lejepa(self, x, **_ignored_kwargs):
         """
@@ -443,7 +445,12 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         h = self.latent_aug(h)
 
         ##### Do post-quant conv
-        h = self.decoder.quant_conv(h)
+        if self.st_skip_sem_decoder:
+            h = self.decoder.quant_conv["post_quant_conv"](h)  # sent to semantic encoder
+            h_skipped = h.clone()
+            enc_out.h_skipped = h_skipped  #  z_dim
+        else:
+            h = self.decoder.quant_conv(h)
 
         ######### Semantic encoder
         # served as decoder actually ...
@@ -490,23 +497,24 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
         # Apply post-quant conv - semantic transformer decoder - CNN decoder
-        if self.latent_bottleneck_type == "after_semantic":
-            # TODO: if is before semantic, we need to apply the post-quant
-            if self.st_skip_sem_decoder:
+        if self.st_skip_sem_decoder:
+            if self.latent_bottleneck_type == "after_semantic":
                 h = self.decoder.quant_conv["post_quant_conv"](h)
-                h_skipped = h.clone()
+                h_skipped = h.clone()  # z_dim
             else:
-                h = self.decoder.quant_conv(h)
+                h_skipped = inp.get("h_skipped")  # z_dim
+                assert h_skipped is not None
+        else:
+            h = self.decoder.quant_conv(h)
 
         # Apply semantic transformer decoder if it exists
         if self.semantic_transformer_dec is not None:
             h = self.semantic_transformer_dec(h)
 
         # Cat the skipped latent
-        if self.latent_bottleneck_type == "after_semantic":
-            if self.st_skip_sem_decoder:
-                h = torch.cat([h, h_skipped], dim=1)
-                h = self.decoder.quant_conv["st_cat_conv"](h)
+        if self.st_skip_sem_decoder:
+            h = torch.cat([h, h_skipped], dim=1)
+            h = self.decoder.quant_conv["st_cat_conv"](h)
 
         # Decode using the CNN decoder
         dec = self.decoder.decoder(h, chan, ret_all_res_features=self._is_deep_supervision)
@@ -550,8 +558,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         cnn_cfg,
         trans_enc_cfg,
         trans_dec_cfg=None,
-        distillation_kwargs: dict | None = None,
-        hybrid_tokenizer_kwargs: dict | None = None,
+        distillation_cfg: dict | None = None,
+        hybrid_tokenizer_cfg: dict | None = None,
         # overrides for the main cnn_cfg, if None, use the default values
         # in cnn_cfg
         cnn_enc_cfg: dict | None = None,
@@ -572,8 +580,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             trans_dec_cfg,
             cnn_enc_cfg=cnn_enc_cfg,
             cnn_dec_cfg=cnn_dec_cfg,
-            distillation_kwargs=edict(distillation_kwargs) or edict(),
-            hybrid_tokenizer_kwargs=edict(hybrid_tokenizer_kwargs) or edict(),
+            distillation_cfg=edict(distillation_cfg) or edict(),
+            hybrid_tokenizer_cfg=edict(hybrid_tokenizer_cfg) or edict(),
         )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
@@ -764,8 +772,9 @@ def test_model_forward_backward():
         cnn_cfg,
         trans_enc_cfg,
         trans_dec_cfg=None,
-        hybrid_tokenizer_kwargs={
+        hybrid_tokenizer_cfg={
             "latent_bottleneck_type": "before_semantic",
+            "latent_straight_through_skip": True,
         },
     )
     model = model.to(device)  # Move model to device (CUDA or CPU)
@@ -863,7 +872,7 @@ def test_forward_pca():
         cnn_cfg=cfg.cnn_cfg,
         trans_enc_cfg=cfg.trans_enc_cfg,
         trans_dec_cfg=cfg.trans_dec_cfg,
-        distillation_kwargs=cfg.distillation_kwargs,
+        distillation_cfg=cfg.distillation_cfg,
     ).cuda()
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data

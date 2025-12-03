@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: cosmos_hybrid_f16c64_large
+  - tokenizer: cosmos_hybrid_one_big_transformer
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
@@ -26,9 +26,9 @@ accelerator:
 dataset:
   train_loader:
     macro_sampled_batch_size:
-      128: 20
-      256: 14
-      512: 5
+      128: 19
+      256: 12
+      512: 4
 
   weights:
     [25, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 20, 10, 16, 10, 11, 20]
@@ -159,7 +159,7 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-10-30_20-46-53_hybrid_cosmos_f16c64/checkpoints/checkpoint_0
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-11-26_00-24-00_hybrid_cosmos_f16c64_jepa_pretrained/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-01_00-20-11_hybrid_cosmos_f16c64_jepa_pretrained/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -207,10 +207,10 @@ train:
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 3.0e-4
+      lr: 4.0e-4
       weight_decay: 0.02
     oned_params_defaults:
-      lr: 3.0e-4
+      lr: 4.0e-4
       weight_decay: 0.02
 
     # _target_: torch.optim.AdamW
@@ -233,7 +233,7 @@ train:
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 3.0e-4
+    lr: 4.0e-4
     weight_decay: 1.0e-5
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]

@@ -73,7 +73,7 @@ trans_dec_cfg:
   reg_tokens: 4
   compile_model: false
 
-distillation_kwargs:
+distillation_cfg:
   dino_feature_dim: 1024
   semantic_feature_dim: 1024 # 1024 for vit large; 1152 for vit naflex
   cache_layers:

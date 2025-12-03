@@ -1141,15 +1141,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
                 # Forward tokenizer
                 dec_out = tokenizer(x)
+                recon = dec_out["recon"]
 
                 # Is deep supervision
                 _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
                 if getattr(_unwrap_tok, "_is_deep_supervision", False):
                     assert isinstance(dec_out, dict), "dec_out must be a dict for deep supervision"
-                    recon = dec_out["recon"]
                     out_d.deep_supervision_outputs = dec_out["deep_supervision_outputs"]
-                else:
-                    recon = dec_out
 
         # basic out
         out_d.update(latent=dec_out["latent"], recon=recon)
