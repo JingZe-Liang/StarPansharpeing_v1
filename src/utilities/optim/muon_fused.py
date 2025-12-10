@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Iterable, Optional, Tuple, Union
 
@@ -15,20 +16,44 @@ from .dion.dion.newton_schulz_triton import ns_line_1, ns_line_2
 
 ######### Newton-Schulz ABCs ##########
 
-abc_s = torch.tensor(
-    [
-        (8.287212018145622, -23.59588651909882, 17.300387312530923),
-        (4.107059111542197, -2.9478499167379084, 0.54484310829266),
-        (3.9486908534822938, -2.908902115962947, 0.5518191394370131),
-        (3.3184196573706055, -2.488488024314878, 0.5100489401237208),
-        (2.3006520199548186, -1.6689039845747518, 0.4188073119525678),
-        (1.8913014077874002, -1.2679958271945908, 0.37680408948524996),
-        (1.875, -1.25, 0.375),
-    ]
-).to(torch.float64)
-denorm = torch.tensor([1.01, 1.01**3, 1.01**5])
-abc_s = abc_s / denorm[None]
-abc_s = abc_s.detach().cpu().numpy().tolist()
+
+@dataclass
+class MuonConfig:
+    name: str = "su"
+
+
+def gen_muon_consts(cfg: MuonConfig) -> list[tuple]:
+    if cfg.name == "su":
+        abc_s = torch.tensor(
+            [
+                (8.287212018145622, -23.59588651909882, 17.300387312530923),
+                (4.107059111542197, -2.9478499167379084, 0.54484310829266),
+                (3.9486908534822938, -2.908902115962947, 0.5518191394370131),
+                (3.3184196573706055, -2.488488024314878, 0.5100489401237208),
+                (2.3006520199548186, -1.6689039845747518, 0.4188073119525678),
+                (1.8913014077874002, -1.2679958271945908, 0.37680408948524996),
+                (1.875, -1.25, 0.375),
+            ]
+        ).to(torch.float64)
+        denorm = torch.tensor([1.01, 1.01**3, 1.01**5])
+        abc_s = abc_s / denorm[None]
+        abc_s = abc_s.detach().cpu().numpy().tolist()
+    elif cfg.name == "turbo_muon":
+        abc_s = [
+            (4.0848, -6.8946, 2.9270),
+            (3.9505, -6.3029, 2.6377),
+            (3.7418, -5.5913, 2.3037),
+            (2.8769, -3.1427, 1.2046),
+            (2.8366, -3.0525, 1.2012),
+        ]
+    else:
+        raise ValueError(f"Unknown MuonConfig name: {cfg.name}")
+
+    return abc_s
+
+
+muon_cfg = MuonConfig()
+MuonABCs = gen_muon_consts(muon_cfg)
 
 
 @torch.compile(dynamic=False, fullgraph=True)
@@ -38,6 +63,7 @@ def zeropower_via_newtonschulz6_diff_abc(
     norm=False,
     ns_dtype=torch.bfloat16,
     use_triton=False,
+    preconditioned=False,
     epsilon=1e-8,
 ):
     """
@@ -49,7 +75,7 @@ def zeropower_via_newtonschulz6_diff_abc(
     where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
-    global abc_s
+    global MuonABCs
 
     assert (
         G.ndim >= 2
@@ -60,8 +86,10 @@ def zeropower_via_newtonschulz6_diff_abc(
         X = X.mT
 
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)  # epsilon: 1e-7
-    iters = abc_s[:steps] + max(steps - len(abc_s), 0) * abc_s[-1:]
+    if not preconditioned:
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)  # epsilon: 1e-7
+        steps = 4  # forcing 4 steps: see TurboMuon paper.
+    consts = MuonABCs[:steps] + max(steps - len(MuonABCs), 0) * MuonABCs[-1:]
 
     if use_triton:
         X = X.contiguous()
@@ -70,23 +98,45 @@ def zeropower_via_newtonschulz6_diff_abc(
         C = torch.empty_like(X)
         ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
 
-    for i, (a, b, c) in enumerate(iters):
-        if use_triton:
-            # triton code
+        # triton code
+        ns_line_1(X, out=A)  # A = X @ X.mT
+
+        if preconditioned:
+            # see https://github.com/thib-s/flash-newton-schulz/blob/145260f4b49c81b9200c61e0f95751b43bf672d5/newton_schulz_triton.py#L587
+            s = torch.rsqrt(torch.clamp_min(A.abs().sum(dim=-1, keepdim=False), min=epsilon))  # AOL rescaling vector
+            X = X * s.unsqueeze(-1)  # rescale X using s making it closer to orthogonal
+            # first NS iteration with reuse of A
+            a, b, c = consts[0]
+            A = A * s.unsqueeze(-1) * s.unsqueeze(-2)
+        ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
+        ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
+        X, C = C, X  # Swap references to av1oid unnecessary copies
+
+        # Perform the NS iterations
+        for a, b, c in consts[1:]:
             ns_line_1(X, out=A)  # A = X @ X.mT
             ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
             ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
             X, C = C, X  # Swap references to avoid unnecessary copies
-        else:
-            # naive python code
+
+    else:
+        # naive python code: compiled with torch.compile
+        for i, (a, b, c) in enumerate(consts):
             A = X @ X.mT
             A2 = A @ A
-            if i == 0 and norm:
-                n = ((A2**2).sum(dim=(-2, -1), keepdim=True) + epsilon) ** 0.125
-                X, A, A2 = X / n, A / n**2, A2 / n**4
-            B = (
-                b * A + c * A2
-            )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+            if i == 0:
+                if norm:
+                    # Comes from su's blog
+                    n = ((A2**2).sum(dim=(-2, -1), keepdim=True) + epsilon) ** 0.125
+                    X, A, A2 = X / n, A / n**2, A2 / n**4
+                if preconditioned:
+                    # Comes from the TurboMuon paper
+                    s = torch.rsqrt(torch.clamp_min(A.abs().sum(dim=-1, keepdim=False), min=epsilon))
+                    X = X * s.unsqueeze(-1)
+                    A = A * s.unsqueeze(-1) * s.unsqueeze(-2)
+
+            # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+            B = b * A + c * A2
             X = a * X + B @ X
 
     if G.size(-2) > G.size(-1):
@@ -109,20 +159,28 @@ class MuonFSDP(Muon):
         adjust_lr: Optional[str] = "spectral_norm",
         flatten: bool = True,  # NOTE: set to True by default
         use_triton: bool = False,
+        use_preconditioned: bool = False,
         newton_schulz_func: Optional[Callable] = zeropower_via_newtonschulz6_diff_abc,
         force_my_triton: bool = True,
+        muon_steps: int = 5,
         *,
         # muon and adamw/lion param group defaults
         muon_params_defaults: dict[str, Any] = {},
         oned_params_defaults: dict[str, Any] = {},
     ):
-        if use_triton:
-            if force_my_triton:
-                newton_schulz_func = partial(zeropower_via_newtonschulz6_diff_abc, use_triton=True)
-            else:
-                newton_schulz_func = None
         if newton_schulz_func is not None:
-            logger.info(f"[Muon]: will self-defined Newton-Schulz function")
+            newton_schulz_func = lambda G, epsilon: zeropower_via_newtonschulz6_diff_abc(
+                G=G,
+                steps=muon_steps,
+                use_triton=use_triton,
+                preconditioned=use_preconditioned,
+                epsilon=epsilon,
+            )
+            logger.log(
+                "NOTE",
+                "[Muon]: using self-defined triton Newton-Schulz function, "
+                f"use_triton={use_triton}, use_preconditioned={use_preconditioned}",
+            )
 
         super().__init__(
             params,

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sys
+from pathlib import Path
 from typing import Callable, Literal, cast, no_type_check
 
 import cv2
@@ -142,14 +143,22 @@ class UnifiedAnnotator:
         else:
             raise ValueError(f"Condition {condition_name} is not supported.")
 
-    def read_img(self, path: str):
+    def read_img(self, path: str) -> np.ndarray:
+        """Read and preprocess image from path.
+        
+        Args:
+            path: Path to the image file
+            
+        Returns:
+            Preprocessed image as numpy array in RGB format
+        """
         assert os.path.exists(path), "Image path does not exist."
         image = cv2.imread(path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = rsshow(np.array(image), 0)
         image = (image * 255).astype(np.uint8)
 
-        return path
+        return image
 
 
 annotators: dict[str, Callable] = {}
@@ -176,20 +185,60 @@ def prepare_condition_from_webdataset(
         else:
             log_print("annotator already loaded: {}".format(cond))
 
-    _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
-    for sample in ds:
-        assert len(sample["__key__"]) == 1, "WebDataset sample key must be a single string."
+    # _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
+    _has_resumed = resume_from is None
+    _is_loader = isinstance(ds, torch.utils.data.DataLoader)
+    _ds_support_getitem = False
+    try:
+        _ = ds[0]
+        _ds_support_getitem = True
+    except:
+        log_print("Dataset type {} does not support indexing, will use iterator.".format(type(ds)), "debug")
+    # _resumed_flag = resume_from is None  # 如果 resume_from 为 None，直接全部处理
+    # for sample in ds:
+    #     assert len(sample["__key__"]) == 1, "WebDataset sample key must be a single string."
 
     # Resuming iters
-    if _ds_support_getitem and isinstance(resume_from, int):
+    if _ds_support_getitem:
         log_print(f"Resuming from index {resume_from}.", "info")
 
+
         def iterator_generator():
-            for i in range(int(resume_from), len(ds)):
+            _has_complete_set = None
+
+            if isinstance(resume_from, int):
+                indices = range(int(resume_from), len(ds))
+            else:
+                log_print(f'Evaluating the exists condition pairs...')
+                indices = range(len(ds))
+                assert isinstance(resume_from, str), "If resume_from is not an int, it must be a string."
+                files = Path(resume_from).rglob("*")
+                # Get stems
+                stems = [f.stem.split(".")[0] for f in files if f.is_file()]
+                for stem in tqdm(stems, desc='Finding incomplete pairs'):
+                    pair_complete = all(
+                        Path(f"{resume_from}/{stem}.{c}.jpg").exists()
+                        for c in ["hed", "segmentation", "sketch", "mlsd"]
+                    )
+                    if not pair_complete:
+                        log_print(f"{stem} is not complete", "warning")
+                        # remove from set
+                        stems.remove(stem)
+                _has_complete_set = set(stems)
+                log_print(f"Found {len(stems)} files in {resume_from}")
+            for i in indices:
                 sample = ds[i]
+                _k = sample["__key__"]
+                if _has_complete_set is not None:
+                    if isinstance(_k, str) and _k in _has_complete_set:
+                        continue
+                    elif isinstance(_k, list) and any(k in _has_complete_set for k in _k):
+                        continue
+
                 if not _is_loader:
                     sample["img"] = sample["img"].unsqueeze(0)  # add batch dim
                     sample["__key__"] = [sample["__key__"]]  # make it a list
+
                 yield sample
 
         iterator_ = iterator_generator()

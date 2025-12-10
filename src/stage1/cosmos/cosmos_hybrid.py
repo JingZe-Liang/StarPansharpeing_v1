@@ -193,7 +193,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.st_skip_sem_decoder = True
             # Change the postquant conv
             orig_post_quant_conv = self.decoder.quant_conv
-            cat_dim = cnn_cfg.model.z_channels * 2
+            # When skipping the semantic decoder we concatenate two tensors from z-branch:
+            # - the semantic-decoder output 'h' and
+            # - the skipped latent 'h_skipped' (both are z_channels)
+            # therefore the concatenated channel dim equals 2 * z_channels.
+            cat_dim = 2 * cnn_cfg.model.z_channels
             skip_through_cat_conv = nn.Sequential(
                 create_norm_act_layer("layernorm2d", cat_dim, "gelu"),
                 # post conv to z channels and feed into the cnn decoder
@@ -276,6 +280,14 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             interp_feats.append(f)
         return interp_feats
 
+    def encode_ibot(self, x, use_quantizer=None, masks: Tensor | None = None, mask_indices=None, **_ignored_kwargs):
+        z_low_lvl = self.encoder.encoder(x)
+
+        _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+            z_low_lvl, masks=masks, mask_indices=mask_indices
+        )
+        return terms.ibot_proj
+
     def encode_ijepa(self, x, use_quantizer=None, jepa_masks=None, **_ignored_kwargs):
         """
         x -> CNN (with full image) -> transformer (with unmasked patches) -> 1d tokens.
@@ -286,7 +298,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Semantic encoder
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, jepa_masks=jepa_masks
+            z_low_lvl, masks=jepa_masks
         )
 
         # no quant_conv here
@@ -303,7 +315,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Semantic encoder
         # z_low_lvl -> transformer backbone -> projector -> z_proj
         _, others = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, jepa_masks=None
+            z_low_lvl, masks=None
         )
 
         return others.lejepa_proj

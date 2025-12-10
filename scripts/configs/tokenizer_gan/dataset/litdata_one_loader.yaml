@@ -266,6 +266,10 @@ val_loader:
         - ["data/MDAS-EeteS/LitData_hyper_images"]
         - resize_before_transform: 256
 
+      242bands_512:
+        - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
+        - resize_before_transform: 512
+
       368bands_256:
         - ["data/MDAS-HySpex/LitData_hyper_images"]
         - resize_before_transform: 256
@@ -283,6 +287,13 @@ val_loader:
     128: 8
     256: 8
     512: 8
+
+  stream_ds_kwargs:
+    transform_prob: 0.0
+    resize_before_transform: 256
+    shuffle: true
+    is_cycled: true
+    is_hwc: true
 
   loader_kwargs:
     num_workers: 4

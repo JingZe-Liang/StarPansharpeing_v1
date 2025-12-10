@@ -35,13 +35,10 @@ from torch.distributed.fsdp._fully_shard import FSDPModule
 from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from tqdm import trange
 
-from src.data.hyperspectral_loader import (
-    get_hyperspectral_img_loaders_with_different_backends,
-)
-from src.stage1.cosmos.inference.utils import (
-    load_jit_model_shape_matched,
-)
+from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
+from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
     LeJEPAAugmentation,
     MaskCollator,
@@ -245,7 +242,18 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.device
             )
 
-        if cfg.task == "mae":
+        if "ibot" in cfg.task:
+            from src.stage1.self_supervised.dino.loss.ibot_patch_loss import iBOTPatchLoss
+
+            self.ibot_patch_loss = iBOTPatchLoss(
+                patch_out_dim=cfg.loss.patch_out_dim,
+                student_temp=cfg.loss.student_temp,
+                center_momentum=cfg.loss.center_momentum,
+            )
+            self.ibot_patch_loss.init_weights()
+            self.ibot_patch_loss = self.ibot_patch_loss.to(self.device)
+
+        if cfg.task in "mae":
             ...
             raise
 
@@ -386,7 +394,10 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if self.proxy_model is not None:
             ...
-            # the proxy model do not need EMA?
+        #     self.ema_proxy_model = ema_partial(self.proxy_model).to(self.device)
+        #     self.log_msg(f"[EMA]: create EMA for proxy model {self.proxy_model.__class__.__name__}")
+        # else:
+        #     self.ema_proxy_model = None
 
     def configure_logger(self):
         self.logger = logger
@@ -1028,7 +1039,7 @@ class CosmosHyperspectralTokenizerTrainer:
             return x
 
         cfg = self.cfg.proxy_task
-        if "ijepa" == cfg.task:
+        if "ijepa" in cfg.task:
             assert self.proxy_model is not None
 
             # Resize to
@@ -1061,13 +1072,89 @@ class CosmosHyperspectralTokenizerTrainer:
                 # Loss
                 loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
 
-            return edict({"proxy_loss": loss, "proxy_loss_breakdowns": {"ijepa_loss": loss}})
+            return edict(proxy_loss=loss, proxy_loss_breakdowns={"ijepa_loss": loss})
 
-        if "lejepa" == cfg.task:
+        if "ibot" in cfg.task:
+            from src.stage1.self_supervised.dino.data import (
+                MaskingGenerator,
+                generate_ibot_masks,
+            )
+
+            # Resize to
+            img_size = 224  # FIXME: make it flexible at cfg.
+            patch_size = 16  # FIXME: get from cfg or model
+            x = F.interpolate(x, size=img_size, mode="bilinear")
+
+            # Augmentation pipeline
+            # Global and local views has different size
+            global_views: list[torch.Tensor]
+            global_views, _ = self.proxy_aug_pipeline(x)
+            global_x = torch.cat(global_views, dim=0)
+
+            # --- Mask Generation ---
+            B = global_x.shape[0]
+            grid_size = img_size // patch_size
+            N = grid_size**2
+
+            if not hasattr(self, "ibot_mask_generator"):
+                self.ibot_mask_generator = MaskingGenerator(
+                    input_size=(grid_size, grid_size),
+                    max_num_patches=0.5 * N,
+                )
+
+            # Default params from DINO config if not present
+            mask_probability = getattr(cfg, "mask_sample_probability", 0.5)
+            mask_ratio_min_max = getattr(cfg, "mask_ratio_min_max", (0.1, 0.5))
+
+            (
+                masks,
+                mask_indices,
+                masks_weight,
+                n_masked_patches_tensor,
+            ) = generate_ibot_masks(
+                mask_generator=self.ibot_mask_generator,
+                batch_size=B,
+                n_tokens=N,
+                mask_probability=mask_probability,
+                mask_ratio_min_max=mask_ratio_min_max,
+                device=self.device,
+            )
+
+            # Teacher temp
+            teacher_temp = getattr(cfg.loss, "teacher_temp", 0.04)
+
+            # Teacher model
+            with torch.no_grad():
+                teacher_ibot_g_out = self.ema_tokenizer.ema_model.encode_ibot(
+                    global_x, masks=None, mask_indices=mask_indices
+                )  # type: ignore
+                masked_teacher_ibot_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
+                    teacher_ibot_g_out,
+                    teacher_temp=teacher_temp,
+                    n_masked_patches_tensor=n_masked_patches_tensor,
+                )  # [n_masked_patches, K]
+
+            # Student model
+            masked_student_ibot_out = self.tokenizer.encode_ibot(  # type: ignore
+                global_x, masks=masks, mask_indices=mask_indices
+            )
+
+            # IBOT loss
+            ibot_loss = self.ibot_patch_loss.forward_masked(
+                masked_student_ibot_out,
+                masked_teacher_ibot_centered,
+                student_masks_flat=masks,
+                n_masked_patches=mask_indices.shape[0],
+                masks_weight=masks_weight,
+            )
+
+            return edict(proxy_loss=ibot_loss, proxy_loss_breakdowns={"ibot_loss": ibot_loss.detach()})
+
+        if "lejepa" in cfg.task:
             # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
 
             # Resize to
-            img_size = 224  # FIXME: flexible at cfg
+            img_size = 224  # FIXME:  make it flexible at cfg.
             x = F.interpolate(x, size=img_size, mode="bilinear")
 
             # Augmentation pipeline
@@ -1096,7 +1183,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     sigreg=self.proxy_lejepa_sigreg,
                     lam=cfg.sigreg.lam,
                 )
-            return edict({"proxy_loss": loss, "proxy_loss_breakdowns": breakdowns})
+            return edict(proxy_loss=loss, proxy_loss_breakdowns=breakdowns)
 
         else:
             raise NotImplementedError("Unknown proxy task {cfg.task}")
@@ -1656,14 +1743,29 @@ class CosmosHyperspectralTokenizerTrainer:
                 break
 
     def finite_val_loader(self):
+        """Only test some set of validation dataset if it costs too much time."""
         if self.val_dataloader is None:
             raise ValueError("No validation dataloader found")
 
-        for batch in self.val_dataloader:
-            batch = self._randomly_batch_sample_key(batch)
-            if batch is None or batch.get("img", None) is None:
-                continue
-            yield batch
+        if not hasattr(self, "_val_loader_iter"):
+            # state in the loader generator
+            self._val_loader_iter = iter(self.val_dataloader)
+
+        def _inner_iter():
+            for i in trange(self.val_cfg.max_val_iters):
+                try:
+                    batch = next(self._val_loader_iter)
+                except StopIteration:
+                    self.log_msg("[Train]: validation dataloader exhausted, reload")
+                    self._val_loader_iter = iter(self.val_dataloader)
+                    batch = next(self._val_loader_iter)
+
+                batch = self._randomly_batch_sample_key(batch)
+                if batch is None or batch.get("img", None) is None:
+                    continue
+                yield batch
+
+        return _inner_iter()
 
     def val_step(self, batch: dict) -> torch.Tensor:
         img = batch["img"].to(self.device, self.dtype)
@@ -1673,10 +1775,6 @@ class CosmosHyperspectralTokenizerTrainer:
         return recon
 
     def val_loop(self):
-        if not hasattr(self, "_val_loader_iter"):
-            # state in the loader generator
-            self._val_loader_iter = iter(self.finite_val_loader())
-
         if hasattr(self.tokenizer_optim, "eval"):
             self.log_msg("set optimizer to eval mode (support for splus optimizer)")
             self.tokenizer_optim.eval()
@@ -1708,26 +1806,18 @@ class CosmosHyperspectralTokenizerTrainer:
 
         _set_all_model_modes(train=False)
 
-        for val_iter in range(self.val_cfg.max_val_iters):
-            batch = next(self._val_loader_iter)
-            batch = self._randomly_batch_sample_key(batch)
-            try:
-                recon = self.val_step(batch)
-            except Exception as e:
-                # debug here
-                self.log_msg(f"Validation failed, batch keys are {batch.keys()}", level="debug")
-                for k, v in batch.items():
-                    if torch.is_tensor(v):
-                        self.log_msg(f"{k} shape: {v.shape}", only_rank_zero=False, level="debug")
-                    else:
-                        self.log_msg(f"{k}: {v}", only_rank_zero=False, level="debug")
-                raise e
+        for batch in self.finite_val_loader():
+            recon = self.val_step(batch)
 
             recon_for_metrics = self.to_rgb(recon)
             batch_img_rgb = self.to_rgb(batch["img"].to(self.device))
 
             if self.train_cfg.track_metrics:
+                c, h, _ = recon.shape[1:]
                 psnr_fn.update(batch_img_rgb, recon_for_metrics)
+                # NOTE: large hyperspectral image may cause OOM in PSNR/SSIM calculation
+                if c > 200 and h >= 512:
+                    continue
                 ssim_fn.update(batch_img_rgb, recon_for_metrics)
 
             # recon loss
@@ -1810,8 +1900,18 @@ class CosmosHyperspectralTokenizerTrainer:
 
         self.accelerator.save_model(self.ema_vq_disc.ema_model, ema_path / "discriminator")
 
-        if hasattr(self, "ema_proxy_model"):
-            self.accelerator.save_model(self.ema_proxy_model, ema_path / "proxy_model")
+        if self._has_proxy_task:
+            # Determine which proxy model to save
+            proxy_model_to_save = None
+            if self.proxy_model is not None:
+                if getattr(self, "ema_proxy_model", None) is not None:
+                    proxy_model_to_save = self.ema_proxy_model.ema_model
+                else:
+                    proxy_model_to_save = self.proxy_model
+            if proxy_model_to_save is not None:
+                self.accelerator.save_model(proxy_model_to_save, ema_path / "proxy_model")
+            else:
+                self.log_msg("[EMA]: proxy model is None, skip saving", level="DEBUG")
 
         # train state
         _ema_path_state_train = ema_path / "train_state.pth"
@@ -1997,7 +2097,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
-        self.accelerator.load_state(path)
+        self.accelerator.load_state(path, load_kwargs={"weights_only": False})
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):

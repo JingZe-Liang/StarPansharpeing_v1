@@ -382,6 +382,13 @@ def safetensors_codec_io(data_dict: Dict[str, torch.Tensor]) -> bytes:
     return save_safetensors(data_dict)
 
 
+def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
+    """Encodes a NumPy array into NPY file formatted bytes."""
+    with io.BytesIO() as buffer:
+        np.savez(buffer, img)
+        return buffer.getvalue()
+
+
 # --- Decoding Functions ---
 
 # Image.MAX_IMAGE_PIXELS = None  # Disable the decompression bomb protection in PIL
@@ -565,13 +572,6 @@ def npz_decode_io(
         data_dict = {k: v.copy() for k, v in npz_dict.items() if not k.startswith("__")}
 
     return extract_keys_from_data(data_dict, ret_keys=ret_keys)
-
-
-def npy_codec_io(img: np.ndarray, compress: bool = False) -> bytes:
-    """Encodes a NumPy array into NPY file formatted bytes."""
-    with io.BytesIO() as buffer:
-        np.savez(buffer, img)
-        return buffer.getvalue()
 
 
 def npy_decode_io(npy_bytes: bytes) -> np.ndarray:

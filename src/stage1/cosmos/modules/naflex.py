@@ -456,9 +456,12 @@ class IJEPANaFlexViT(Transformer):
     def __init__(self, cfg):
         super().__init__(cfg)
 
+        self.pretrained_type: str = cfg.pretrained_type
         # Build the LeJEPA head
-        if "lejepa" == cfg.pretrained_type:
+        if "lejepa" in self.pretrained_type:
             self._build_jepa_head(cfg)
+        if "ibot" in self.pretrained_type:
+            self._build_ibot_head(cfg)
 
     def _build_jepa_head(self, cfg):
         from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
@@ -471,12 +474,31 @@ class IJEPANaFlexViT(Transformer):
         )
         logger.info("[IJEPA Naflex Transformer]: Build LeJEPA head")
 
+    def _build_ibot_head(self, cfg):
+        from src.stage1.self_supervised.dino.layers.dino_head import DINOHead
+
+        self.ibot_head = DINOHead(
+            in_dim=cfg.embed_dim,
+            out_dim=cfg.ibot_n_prototypes,
+            hidden_dim=cfg.ibot_head_hidden_dim,
+            bottleneck_dim=cfg.ibot_bottleneck_dim,
+            nlayers=cfg.ibot_nlayers,
+        )
+        self.mask_token = nn.Parameter(torch.zeros(1, cfg.embed_dim))
+        logger.info("[IBOT Naflex Transformer]: Build iBOT head")
+
     def _prepare_masks(self, masks=None):
         """Ensure the masks are list of tensors"""
         if masks is not None and not isinstance(masks, list):
             masks = [masks]
 
         return masks
+
+    def _ibot_apply_masks(self, x, masks: Tensor):
+        assert torch.is_tensor(masks)
+        if masks is not None:
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
+        return x
 
     def _jepa_apply_masks(self, x, masks):
         all_x = []
@@ -491,17 +513,31 @@ class IJEPANaFlexViT(Transformer):
         patch_coord,
         patch_valid,
         attn_mask,
-        masks: List[Tensor] | None = None,
+        masks: List[Tensor] | Tensor | None = None,
+        # mask_out: bool = True,  # IJEPA mask out tokens, iBOT only mask not drop
     ):
-        """Forward pass through patch / abs pos / rope pos embeds and patch dropout"""
+        """Forward pass through patch / abs pos / rope pos embeds and patch dropout
+
+        IJEPA masking strategy: mask out the patches, and drop them.
+            RoPE actions:
+            Equals at
+            # axial rope: [S, headD * 2]
+            # rope: [S, headD * 2] -> [B, 1, S, headD * 2]
+            rope_embeds = rope_embeds[None, None].repeat(x.shape[0], 1, 1, 1)
+            # masks -> [B, S_masked] -> [B, 1, S_masked, headD * 2]
+            # gather -> [B, S_masked, headD * 2]
+            m_repeated = m[:, None, :, None].repeat(
+                1, 1, 1, rope_embeds.size(-1)
+            )
+            rope_masked += [rope_embeds.gather(-2, m_repeated)]
+
+        IBOT masking strategy: mask the patches with a learnable token and not drop them.
+            where(masks, mask_token, x)
+        """
         naflex_mode = patch_coord is not None
 
         # patch embed, abs pos embed, returns global grid size as calculated from 'standard' NCHW batches
-        x, grid_size = self.embeds(
-            x,
-            patch_coord=patch_coord,
-            patch_valid=patch_valid,
-        )
+        x, grid_size = self.embeds(x, patch_coord=patch_coord, patch_valid=patch_valid)
 
         # Generate ROPE embeddings at model level
         rope_embeds = None
@@ -534,40 +570,29 @@ class IJEPANaFlexViT(Transformer):
         if attn_mask is None:
             attn_mask = create_attention_mask(patch_valid, num_prefix_tokens=self.num_prefix_tokens, dtype=x.dtype)
 
-        ########## Apply JEPA masks
+        ########## Apply masks
         if masks is not None:
             # Apply masks
             prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
-            x = self._jepa_apply_masks(x, masks=masks)
+            if self.cfg.pretrained_type == "ibot":
+                x = self._ibot_apply_masks(x, masks=masks)
+            else:
+                x = self._jepa_apply_masks(x, masks=masks)
             x = torch.cat([prefixed_tokens, x], dim=1)
 
             # Rope related, rope is applied in attention module
             if rope_embeds is not None:
-                rope_masked = []
-                for m in masks:
-                    # m: [B, S_masked] indices
-                    assert not self.rope_is_mixed, "mixed rope is not supported in JEPA training"
-                    """
-                    Equals at
-                    # axial rope: [S, headD * 2]
-                    # rope: [S, headD * 2] -> [B, 1, S, headD * 2]
-                    rope_embeds = rope_embeds[None, None].repeat(x.shape[0], 1, 1, 1)
-                    # masks -> [B, S_masked] -> [B, 1, S_masked, headD * 2]
-                    # gather -> [B, S_masked, headD * 2]
-                    m_repeated = m[:, None, :, None].repeat(
-                        1, 1, 1, rope_embeds.size(-1)
-                    )
-                    rope_masked += [rope_embeds.gather(-2, m_repeated)]
-                    """
-
-                    rope_masked += [
-                        get_at(
-                            "[S] ropeD, B S_masked -> B 1 S_masked ropeD",
-                            rope_embeds,
-                            m,
-                        )
-                    ]
-                rope_embeds = torch.cat(rope_masked, dim=0)  # [B, 1, S_masked, ropeD]
+                ##### IJEPA masking strategy: mask out
+                if self.pretrained_type == "ijepa":
+                    rope_masked = []
+                    for m in masks:
+                        # m: [B, S_masked] indices
+                        assert not self.rope_is_mixed, "mixed rope is not supported in JEPA training"
+                        rope_masked += [get_at("[S] ropeD, B S_masked -> B 1 S_masked ropeD", rope_embeds, m)]
+                    rope_embeds = torch.cat(rope_masked, dim=0)  # [B, 1, S_masked, ropeD]
+                else:
+                    # Do nothing to rope, only mask the embeded tokens
+                    masks = cast(Tensor, masks)
 
         x = self.norm_pre(x)
         return {
@@ -584,7 +609,7 @@ class IJEPANaFlexViT(Transformer):
         patch_coord: Optional[torch.Tensor] = None,
         patch_valid: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        jepa_masks: Optional[List[Tensor]] = None,
+        masks: Optional[Tensor | List[Tensor]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """ """
         naflex_mode = patch_coord is not None
@@ -595,7 +620,7 @@ class IJEPANaFlexViT(Transformer):
             patch_coord=patch_coord,
             patch_valid=patch_valid,
             attn_mask=attn_mask,
-            masks=jepa_masks,
+            masks=masks,
         )
         x = embeds["patches"]
         rope_embeds = embeds.get("rope_embeds", None)
@@ -650,11 +675,11 @@ class IJEPANaFlexViT(Transformer):
         patch_valid: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         output_type: str | None = None,
-        jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+        masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
     ):
         """Forward with JEPA masks support"""
-        if jepa_masks is not None:
-            jepa_masks = self._prepare_masks(masks=jepa_masks)
+        if masks is not None and self.pretrained_type == "ijepa":
+            masks = self._prepare_masks(masks=masks)
 
         input_is_dict = isinstance(x, Dict)
         naflex_mode = input_is_dict or patch_coord is not None
@@ -717,9 +742,10 @@ class IJEPANaFlexViT(Transformer):
         self,
         x: torch.Tensor,
         output_type: str = "1d",  # fixed it.
-        jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+        masks: Optional[Tensor | List[Tensor]] = None,
+        masks_indices: Optional[Tensor] = None,
     ):
-        others = {}
+        terms = {}
 
         if output_type in (None, "2d"):
             out_hw = self._get_output_shape(x)
@@ -727,31 +753,49 @@ class IJEPANaFlexViT(Transformer):
             out_hw = None  # keep the output to be 1D tensor
 
         # Features
-        x = self.forward_features(x, jepa_masks=jepa_masks)
+        x = self.forward_features(x, masks=masks)
         x = cast(torch.Tensor, x)
 
         ######### IJepa features ########
-        if "ijepa" == self.cfg.pretrained_type:
+        if "ijepa" in self.pretrained_type:
             # x is the backbone's out
-            others["ijepa_feat"] = x[:, self.num_prefix_tokens :]
+            terms["ijepa_feat"] = x[:, self.num_prefix_tokens :]
             x = x[:, self.num_prefix_tokens :]
 
         ######### Lejepa projector #########
-        elif hasattr(self, "lejepa_projector") and "lejepa" == self.cfg.pretrained_type:
+        elif hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
             x = self._pool(x)
             lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
-            others["lejepa_proj"] = lejepa_proj
+            terms["lejepa_proj"] = lejepa_proj
 
             # spatial tokens only
             x = x[:, self.num_prefix_tokens :]
-            others["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
+            terms["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
+
+        ########## IBOT projector ##########
+        elif hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type:
+            x = x[:, self.num_prefix_tokens :]
+            terms["ibot_feat"] = x_tokens = x
+
+            # Check mask shape alignment if masks provided
+            if masks is not None and isinstance(masks, torch.Tensor):
+                B, N = masks.shape
+                assert x.shape[:2] == (
+                    B,
+                    N,
+                ), f"Mask shape {masks.shape} does not match feature shape {x.shape[:2]}"
+
+            if masks_indices is not None:
+                # IBOT teacher does
+                x_tokens = torch.index_select(x_tokens.flatten(0, 1), dim=0, index=masks_indices)
+            terms["ibot_proj"] = self.ibot_head(x_tokens)
 
         else:
             x = x[:, self.num_prefix_tokens :]  # spatial tokens only
 
         # Return the 1d features as the backbone output
         # not forward by the head
-        return x, edict(others)
+        return x, edict(terms)
 
     def forward_intermediates(
         self,

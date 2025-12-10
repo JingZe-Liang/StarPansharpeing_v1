@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 import PIL.Image as Image
 import torch
+from easydict import EasyDict as edict
 from kornia.augmentation import AugmentationSequential, RandomResizedCrop, Resize
 from litdata import (
     CombinedStreamingDataset,
@@ -134,7 +135,7 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
     def __init__(
         self,
         dataset: StreamingDataset,  # must be one dataset to cycle
-        length: int | float = float("inf"),
+        length: int | float | None = float("inf"),
         *args,
         **kwargs,
     ):
@@ -418,7 +419,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         if self._check_chans:
             self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
 
-        return d
+        return edict(d)
 
 
 class ConditionsStreamingDataset(_BaseStreamingDataset):
@@ -436,7 +437,7 @@ class ConditionsStreamingDataset(_BaseStreamingDataset):
 
         d = norm_img(d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1)
 
-        return d
+        return edict(d)
 
 
 class CaptionStreamingDataset(_BaseStreamingDataset):
@@ -451,7 +452,7 @@ class CaptionStreamingDataset(_BaseStreamingDataset):
             caption = d["caption"]["caption"]
             assert isinstance(caption, str), f"Caption must be a string, got {type(caption)}"
             d["caption"] = caption
-        return d  # {caption: str, __key__: str}
+        return edict(d)
 
 
 class GenerativeStreamingDataset(ParallelStreamingDataset):
@@ -723,7 +724,6 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
                 else:
                     for k in collected_keys:
                         batch[k] = batch[k][take:]
-                    break
 
             if samples_collected == target_bs:
                 final_batch = {}
@@ -795,6 +795,14 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
 
         if self.cache_minor:
             yield from self._yield_remaining_cache()
+
+
+def get_dataset_len(ds):
+    if isinstance(ds, ParallelStreamingDataset):
+        # If it's a ParallelStreamingDataset, return the length of the first dataset
+        return len(ds._datasets[0])
+    else:
+        return len(ds)
 
 
 def collate_fn_skip_none(
@@ -873,7 +881,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
     stream_ds_kwargs: dict = {
         "transform_prob": 0.0,
         "resize_before_transform": 256,
-        "shuffle": False,
+        "shuffle": False,  # BUG: shuffle is True will cause the loader return only least ds samples.
         "is_cycled": True,
         "is_hwc": True,
     },
@@ -906,7 +914,13 @@ def create_hyper_image_litdata_flatten_paths_loader(
             **stream_ds_kwargs_,
         )
         dataset.append(ds)
+
         logger.info(f"Create dataset for {name} with paths: {paths}")
+        logger.info(f"Dataset has {get_dataset_len(ds)} samples.")
+        logger.info("---------" * 6 + "\n")
+
+    ds_total = sum(get_dataset_len(ds) for ds in dataset)
+    logger.info(f"Total number of samples: {ds_total}")
 
     # composite
     ds_total = IndexedCombinedStreamingDataset(
@@ -929,14 +943,10 @@ def create_hyper_image_litdata_flatten_paths_loader(
     # statistics
     # from tqdm import tqdm
 
-    # from src.utilities.logging import configure_logger
-
-    # configure_logger(_auto_=False, add_tqdm_filter=True)
-
     # bands_info_n = {}
     # print("Start testing...")
     # for i, sample in tqdm(  # type: ignore
-    #     enumerate(dl),
+    #     enumerate(dataloader),
     #     # total=len(ds_total) // dl.batch_size,
     # ):
     #     if i == 0 and "__key__" not in sample:
@@ -952,9 +962,12 @@ def create_hyper_image_litdata_flatten_paths_loader(
     #         logger.info(
     #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
     #             tqdm=True,
-    # )
+    #         )
 
     return dataset, dataloader
+
+def get_fast_test_hyper_litdata_ds() -> ImageStreamingDataset:
+    ...
 
 
 def __test_create_hyper_image_litdata_loader():
@@ -1074,7 +1087,7 @@ def __test_index_file_litdata_loader():
 def __test_normal_image_loader():
     from litdata.streaming.serializers import BytesSerializer, StringSerializer
 
-    path = "/Data2/ZihanCao/dataset/litdataHyperImages"
+    path = "data2/RemoteSAM270k/LitData_hyper_images2"
     stream_ds_kwargs = {
         "transform_prob": 0.0,
         "resize_before_transform": 512,
@@ -1136,11 +1149,19 @@ if __name__ == "__main__":
     #     # "scripts/configs/tokenizer_gan/dataset/litdata_hyperspectral.yaml"
     # )
 
-    # logger.info(cfg.train_loader.paths)
+    # lcfg = cfg.val_loader
+    # # logger.info(lcfg.paths)
     # ds, dl = create_hyper_image_litdata_flatten_paths_loader(
-    #     paths=cfg.train_loader.paths,
-    #     weights=cfg.train_loader.weights,
-    #     loader_kwargs=cfg.train_loader.loader_kwargs,
+    #     paths=lcfg.paths,
+    #     weights=lcfg.weights,
+    #     loader_kwargs=lcfg.loader_kwargs,
+    #     stream_ds_kwargs={
+    #         "transform_prob": 0.0,
+    #         "resize_before_transform": 256,
+    #         "shuffle": True,
+    #         "is_cycled": True,
+    #         "is_hwc": True,
+    #     },
     # )
 
     # for sample in dl:

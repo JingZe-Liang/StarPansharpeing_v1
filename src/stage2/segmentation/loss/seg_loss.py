@@ -1,5 +1,7 @@
 import segmentation_models_pytorch as smp
 import torch
+from easydict import EasyDict as edict
+from einx import get_at
 from jaxtyping import Float, Int
 from loguru import logger
 from torch import Tensor
@@ -93,11 +95,30 @@ class HyperSegmentationLoss(torch.nn.Module):
 
         return loss, edict(loss_dict)
 
-        return loss, {
-            "dice_loss": dice_loss,
-            "ce_loss": ce_loss,
-            "lovasz_loss": lovasz_loss,
-        }
+    def forward(
+        self, pred: Float[Tensor, "b c h w"] | list[Tensor], gt: Int[Tensor, "b h w"], mask: Tensor | None = None
+    ):
+        # Multiple outputs (deep supervision)
+        if isinstance(pred, (tuple, list)):
+            total_loss = 0.0
+            loss_dict = {name: torch.tensor(0.0, device=pred.device) for name in self.loss_names}
+
+            for p in pred:
+                loss, l_dict = self._forward_loss(p, gt, mask)
+                total_loss += loss
+
+                for name in self.loss_names:
+                    loss_dict[name] += l_dict[name]
+
+            total_loss = total_loss / len(pred)
+
+            for name in self.loss_names:
+                loss_dict[name] /= len(pred)
+
+            return total_loss, edict(loss_dict)
+        # Single output
+        else:
+            return self._forward_loss(pred, gt, mask)
 
 
 # * --- Test --- #

@@ -48,6 +48,7 @@ optimizer:
   betas: [0.9, 0.99]
   oned_param_algo: lion
   use_triton: true
+  use_preconditioned: true # turbo-muon style preconditioning
   muon_params_defaults:
     lr: 3.0e-4
     weight_decay: 0.01

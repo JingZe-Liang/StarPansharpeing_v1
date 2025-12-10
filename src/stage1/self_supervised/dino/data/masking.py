@@ -7,6 +7,49 @@ import math
 import random
 
 import numpy as np
+import torch
+
+
+def generate_ibot_masks(
+    mask_generator,
+    batch_size,
+    n_tokens,
+    mask_probability=0.5,
+    mask_ratio_min_max=(0.1, 0.5),
+    device=None,
+):
+    n_samples_masked = int(batch_size * mask_probability)
+    probs = torch.linspace(*mask_ratio_min_max, n_samples_masked + 1)
+    masks_list = []
+
+    for i in range(0, n_samples_masked):
+        prob_max = probs[i + 1]
+        mask = torch.BoolTensor(mask_generator(int(n_tokens * prob_max)))
+        masks_list.append(mask)
+
+    for _ in range(n_samples_masked, batch_size):
+        masks_list.append(torch.BoolTensor(mask_generator(0)))
+
+    random.shuffle(masks_list)
+
+    masks = torch.stack(masks_list).flatten(1)
+    if device is not None:
+        masks = masks.to(device)
+
+    mask_indices = masks.flatten().nonzero().flatten()
+
+    masks_weight = (
+        (1 / masks.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(masks)[masks]
+    )
+
+    n_masked_patches_tensor = torch.full(
+        (1,),
+        fill_value=mask_indices.shape[0],
+        dtype=torch.long,
+        device=device if device is not None else masks.device,
+    )
+
+    return masks, mask_indices, masks_weight, n_masked_patches_tensor
 
 
 class MaskingGenerator:

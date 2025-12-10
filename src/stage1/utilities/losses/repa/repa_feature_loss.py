@@ -209,20 +209,29 @@ def am_radio_spatial_loss(feature_teacher, feature_student, dim=1):
 def token_relation_loss(
     feature_teacher,
     feature_student,
-    dim=-1,
+    dim=-1,  # TODO: change args name to c_dim=-1
     norm=False,
     img_level=True,
     remove_negative=True,
     remove_only_teacher_neg=False,
+    reduction: str = "mean",
 ):
-    # gram loss actually
-    # feature shape: [b * nf, l, c], dim=-1; [b * nf, c, l], dim=1
+    """
+    Gram loss actually
+    feature shape: [b * nf, l, c], dim=-1; [b * nf, c, l], dim=1,
+        means where the channel dim at which dimension.
+    """
     if dim == 1:
         feature_teacher = feature_teacher.transpose(1, 2)
         feature_student = feature_student.transpose(1, 2)
     if not img_level:
         feature_teacher = feature_teacher.flatten(0, 1)  # (bs * l, c)
         feature_student = feature_student.flatten(0, 1)  # (bs * l, c)
+
+    # Normalize features before computing Gram matrix (consistent with DINOv3 GramLoss)
+    if norm:
+        feature_teacher = F.normalize(feature_teacher, dim=-1)
+        feature_student = F.normalize(feature_student, dim=-1)
 
     if img_level:
         relation_t = torch.einsum("blc,blc->bll", feature_teacher, feature_teacher)
@@ -231,10 +240,6 @@ def token_relation_loss(
         relation_t = torch.einsum("Nc,Nc->NN", feature_teacher, feature_teacher)
         relation_s = torch.einsum("Nc,Nc->NN", feature_student, feature_student)
 
-    if norm:
-        # relation_t = F.normalize(relation_t, dim=-1)
-        relation_s = F.normalize(relation_s, dim=-1)
-
     if remove_negative:
         relation_t = relation_t.clamp(min=0.0)
         relation_s = relation_s.clamp(min=0.0)
@@ -242,7 +247,7 @@ def token_relation_loss(
         relation_t = relation_t.clamp(min=0.0)
         relation_s[(relation_s < 0) & (relation_t < 0)] = 0.0  # ? Check this, if is correct after do teacher clamp
 
-    loss = F.mse_loss(relation_t, relation_s)
+    loss = F.mse_loss(relation_t, relation_s, reduction=reduction)
     return loss
 
 
@@ -272,6 +277,8 @@ def hier_distillation_loss(
     dim: int = -2,
     beta: float = 2.0,
     implem: str = "new",
+    loss_type: str = "cosine",
+    layer_weight_type: str = "softmax",
 ):
     """Hierarchical distillation loss for multi-layer feature alignment.
 
@@ -318,25 +325,41 @@ def hier_distillation_loss(
         feature_teacher = feature_teacher.unbind(dim=0)
         feature_student = feature_student.unbind(dim=0)
 
-    cosine_sims = []
-    for i in range(layers_n):
-        ft, fs = feature_teacher[i], feature_student[i]
-        if implem == "legacy":
-            t_norm = F.normalize(ft, p=2, dim=dim)  # (bs, c, l)
-            s_norm = F.normalize(fs, p=2, dim=dim)  # (bs, c, l)
-            cosine_sim_map = (t_norm * s_norm).sum(dim=dim)  # (bs, l)
-        else:
-            cosine_sim_map = F.cosine_similarity(ft, fs, dim=dim)  # (bs, l)
-        cosine_sims.append(cosine_sim_map)
-    cosine_sims = torch.stack(cosine_sims, dim=0)
-    unsim_loss: Tensor = 1.0 - cosine_sims.mean(dim=(1, 2))  # (layers,)
+    ####### Cosine loss
+    if loss_type == "cosine":
+        cosine_sims = []
+        for i in range(layers_n):
+            ft, fs = feature_teacher[i], feature_student[i]
+            if implem == "legacy":
+                t_norm = F.normalize(ft, p=2, dim=dim)  # (bs, c, l)
+                s_norm = F.normalize(fs, p=2, dim=dim)  # (bs, c, l)
+                cosine_sim_map = (t_norm * s_norm).sum(dim=dim)  # (bs, l)
+            else:
+                cosine_sim_map = F.cosine_similarity(ft, fs, dim=dim)  # (bs, l)
+            cosine_sims.append(cosine_sim_map)
+        cosine_sims = torch.stack(cosine_sims, dim=0)
+        unsim_loss: Tensor = 1.0 - cosine_sims.mean(dim=(1, 2))  # (layers,)
+    elif loss_type == "gram":
+        gram_losses = []
+        for i in range(layers_n):
+            ft, fs = feature_teacher[i], feature_student[i]
+            gram_loss = token_relation_loss(ft, fs, dim=dim, norm=True, remove_neg=True)
+            gram_losses.append(gram_loss)
+        unsim_loss = torch.stack(gram_losses, dim=0)  # name hack for the code compatibility.
 
-    if implem == "legacy":
-        un_sim_exp = (beta * unsim_loss).exp()
-        w_per_layer = weight_base * un_sim_exp
-        w_per_layer = w_per_layer / (w_per_layer.sum() + 1e-6)
+    if layer_weight_type == "softmax":
+        if implem == "legacy" and loss_type == "cosine":
+            un_sim_exp = (beta * unsim_loss).exp()
+            w_per_layer = weight_base * un_sim_exp
+            w_per_layer = w_per_layer / (w_per_layer.sum() + 1e-6)
+        else:
+            w_per_layer = weight_base * torch.softmax(beta * unsim_loss, dim=0)
+    elif layer_weight_type == "equal":
+        w_per_layer = torch.ones_like(unsim_loss) / layers_n
+    elif layer_weight_type == "linear":
+        w_per_layer = weight_base / weight_base.sum()
     else:
-        w_per_layer = weight_base * torch.softmax(beta * unsim_loss, dim=0)
+        raise ValueError(f"Unknown layer weight type {layer_weight_type}")
 
     loss = (w_per_layer * unsim_loss).sum()
 

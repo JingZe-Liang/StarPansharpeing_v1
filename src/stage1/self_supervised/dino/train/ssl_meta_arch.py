@@ -150,8 +150,8 @@ class SSLMetaArch(nn.Module):
         self.ibot_patch_loss = iBOTPatchLoss(cfg.ibot.head_n_prototypes)
 
         # Build student and teacher models
-        self.student = nn.ModuleDict(student_model_dict)
         self.teacher = nn.ModuleDict(teacher_model_dict)
+        self.student = nn.ModuleDict(student_model_dict)
         self.model_ema = self.teacher  # this may be overwritten for distillation
         logger.info(f"Student and Teacher are built: they are both {cfg.student.arch} network.")
 

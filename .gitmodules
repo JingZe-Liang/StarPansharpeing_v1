@@ -149,3 +149,9 @@
 [submodule "src/stage2/Hyperspectral-Classification"]
 	path = src/stage2/Hyperspectral-Classification
 	url = https://github.com/eecn/Hyperspectral-Classification.git
+[submodule "src/stage2/layers/nested_learning"]
+	path = src/stage2/layers/nested_learning
+	url = https://github.com/kmccleary3301/nested_learning.git
+[submodule "src/utilities/transport/py_meanflow"]
+	path = src/utilities/transport/py_meanflow
+	url = https://github.com/Gsunshine/py-meanflow.git

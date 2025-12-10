@@ -46,9 +46,8 @@ def load_weights_with_shape_check(
 
         for (name, param), (weight_name, weight) in zip(param_items, weight_items):
             if name != weight_name:
-                log_print(
-                    f"Name mismatch: model has '{name}', weights have '{weight_name}'",
-                    "warning",
+                logging.warning(
+                    f"Name mismatch: model has '{name}', weights have '{weight_name}'"
                 )
                 missing_keys.append(name)
                 if weight_name in unexpected_keys:

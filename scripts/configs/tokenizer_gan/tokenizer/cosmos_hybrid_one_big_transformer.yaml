@@ -83,3 +83,4 @@ distillation_cfg:
 
 hybrid_tokenizer_cfg:
   latent_bottleneck_type: before_semantic
+  latent_straight_through_skip: true
