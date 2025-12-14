@@ -1103,8 +1103,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
 
             # Default params from DINO config if not present
-            mask_probability = getattr(cfg, "mask_sample_probability", 0.5)
-            mask_ratio_min_max = getattr(cfg, "mask_ratio_min_max", (0.1, 0.5))
+            mask_probability = cfg.ibot_mask.sample_prob  # getattr(cfg, "mask_sample_probability", 0.5)
+            mask_ratio_min_max = cfg.ibot_mask.ratio_min_max  # getattr(cfg, "mask_ratio_min_max", (0.1, 0.5))
+            teacher_temp = cfg.ibot_loss.teacher_temp  # getattr(cfg.loss, "teacher_temp", 0.04)
 
             (
                 masks,
@@ -1119,9 +1120,6 @@ class CosmosHyperspectralTokenizerTrainer:
                 mask_ratio_min_max=mask_ratio_min_max,
                 device=self.device,
             )
-
-            # Teacher temp
-            teacher_temp = getattr(cfg.loss, "teacher_temp", 0.04)
 
             # Teacher model
             with torch.no_grad():

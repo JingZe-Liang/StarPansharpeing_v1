@@ -67,9 +67,7 @@ class ModelConfig(BaseConfig):
     attn_type: str = "linear"
     autocast_linear_attn: bool = False
     ffn_type: str = "glumbconv"
-    mlp_acts: List[Optional[str]] = field(
-        default_factory=lambda: ["silu", "silu", None]
-    )
+    mlp_acts: List[Optional[str]] = field(default_factory=lambda: ["silu", "silu", None])
     mlp_ratio: float = 2.5
     use_pe: bool = False
     pos_embed_type: str = "sincos"
@@ -165,9 +163,7 @@ class TrainingConfig(BaseConfig):
     load_from_lr_scheduler: bool = False
     resume_lr_scheduler: bool = True
     lr_schedule: str = "constant"
-    lr_schedule_args: Dict[str, int] = field(
-        default_factory=lambda: {"num_warmup_steps": 500}
-    )
+    lr_schedule_args: Dict[str, int] = field(default_factory=lambda: {"num_warmup_steps": 500})
     auto_lr: Dict[str, str] = field(default_factory=lambda: {"rule": "sqrt"})
     eval_batch_size: int = 16
     use_fsdp: bool = False
@@ -243,6 +239,12 @@ class TrainingConfig(BaseConfig):
 @dataclass
 class ControlNetConfig(BaseConfig):
     control_signal_type: str = "scribble"
+    # NOTE: pyrallis/argparse cannot handle `list[str] | None` as an argument type.
+    # Use an empty list to represent "not set".
+    control_signal_types: List[str] = field(default_factory=list)
+    drop_prob: float = 0.0
+    # (Optional) validation control maps; keep empty to disable.
+    validation_control_maps: Dict[str, List[str]] = field(default_factory=dict)
     validation_scribble_maps: List[str] = field(
         default_factory=lambda: [
             "output/tmp_embed/controlnet/dog_scribble_thickness_3.jpg",
@@ -294,6 +296,11 @@ class SanaConfig(BaseConfig):
 def model_init_config(config: SanaConfig, latent_size: int = 32):
     pred_sigma = getattr(config.scheduler, "pred_sigma", True)
     learn_sigma = getattr(config.scheduler, "learn_sigma", True) and pred_sigma
+    control_in_channels = None
+    if getattr(config, "controlnet", None) is not None:
+        control_signal_types = getattr(config.controlnet, "control_signal_types", None)
+        if isinstance(control_signal_types, list) and control_signal_types:
+            control_in_channels = config.vae.vae_latent_dim * len(control_signal_types)
     return {
         "input_size": latent_size,
         "pe_interpolation": config.model.pe_interpolation,
@@ -318,4 +325,5 @@ def model_init_config(config: SanaConfig, latent_size: int = 32):
         "cross_norm": config.model.cross_norm,
         "cross_attn_type": config.model.cross_attn_type,
         "timestep_norm_scale_factor": config.scheduler.timestep_norm_scale_factor,
+        "control_in_channels": control_in_channels,
     }

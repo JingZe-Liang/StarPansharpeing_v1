@@ -22,13 +22,13 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 
-from src.stage2.generative.Sana.diffusion.model.builder import MODELS
-from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import (
+from diffusion.model.builder import MODELS
+from diffusion.model.nets.basic_modules import (
     DWMlp,
     GLUMBConv,
     Mlp,
 )
-from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
+from diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -41,20 +41,20 @@ from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     TimestepEmbedder,
     t2i_modulate,
 )
-from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
-from src.stage2.generative.Sana.diffusion.model.utils import (
+from diffusion.model.norms import RMSNorm
+from diffusion.model.utils import (
     auto_grad_checkpoint,
     to_2tuple,
 )
-from src.stage2.generative.Sana.diffusion.utils.dist_utils import get_rank
-from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+from diffusion.utils.dist_utils import get_rank
+from diffusion.utils.import_utils import (
     is_triton_module_available,
 )
-from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
+from diffusion.utils.logger import get_root_logger
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import (
+    from diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
     )
 
@@ -119,13 +119,9 @@ class SanaBlock(nn.Module):
             raise ValueError(f"{attn_type} type is not defined.")
 
         if cross_attn_type in ["flash", "linear"]:
-            self.cross_attn = MultiHeadCrossAttention(
-                hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs
-            )
+            self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs)
         elif cross_attn_type == "vanilla":
-            self.cross_attn = MultiHeadCrossVallinaAttention(
-                hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs
-            )
+            self.cross_attn = MultiHeadCrossVallinaAttention(hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs)
         else:
             raise ValueError(f"{cross_attn_type} type is not defined.")
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -166,9 +162,7 @@ class SanaBlock(nn.Module):
         else:
             raise ValueError(f"{ffn_type} type is not defined.")
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
     def forward(self, x, y, t, mask=None, **kwargs):
         B, N, C = x.shape
@@ -176,16 +170,9 @@ class SanaBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None] + t.reshape(B, 6, -1)
         ).chunk(6, dim=1)
-        x = x + self.drop_path(
-            gate_msa
-            * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa)).reshape(
-                B, N, C
-            )
-        )
+        x = x + self.drop_path(gate_msa * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa)).reshape(B, N, C))
         x = x + self.cross_attn(x, y, mask)
-        x = x + self.drop_path(
-            gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp))
-        )
+        x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp)))
 
         return x
 
@@ -268,9 +255,7 @@ class Sana(nn.Module):
         self.register_buffer("pos_embed", torch.zeros(1, num_patches, hidden_size))
 
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.t_block = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.t_block = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         self.y_embedder = CaptionEmbedder(
             in_channels=caption_channels,
             hidden_size=hidden_size,
@@ -279,12 +264,8 @@ class Sana(nn.Module):
             token_num=model_max_length,
         )
         if self.y_norm:
-            self.attention_y_norm = RMSNorm(
-                hidden_size, scale_factor=y_norm_scale_factor, eps=norm_eps
-            )
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
-        ]  # stochastic depth decay rule
+            self.attention_y_norm = RMSNorm(hidden_size, scale_factor=y_norm_scale_factor, eps=norm_eps)
+        drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 SanaBlock(
@@ -352,19 +333,13 @@ class Sana(nn.Module):
             if mask.shape[0] != y.shape[0]:
                 mask = mask.repeat(y.shape[0] // mask.shape[0], 1)
             mask = mask.squeeze(1).squeeze(1)
-            y = (
-                y.squeeze(1)
-                .masked_select(mask.unsqueeze(-1) != 0)
-                .view(1, -1, x.shape[-1])
-            )
+            y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
             y_lens = mask.sum(dim=1).tolist()
         else:
             y_lens = [y.shape[2]] * y.shape[0]
             y = y.squeeze(1).view(1, -1, x.shape[-1])
         for block in self.blocks:
-            x = auto_grad_checkpoint(
-                block, x, y, t0, y_lens, image_pos_embed
-            )  # (N, T, D) #support grad checkpoint
+            x = auto_grad_checkpoint(block, x, y, t0, y_lens, image_pos_embed)  # (N, T, D) #support grad checkpoint
         x = self.final_layer(x, t)  # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         return x
@@ -461,25 +436,15 @@ def get_2d_sincos_pos_embed(
     """
     if isinstance(grid_size, int):
         grid_size = to_2tuple(grid_size)
-    grid_h = (
-        np.arange(grid_size[0], dtype=np.float32)
-        / (grid_size[0] / base_size)
-        / pe_interpolation
-    )
-    grid_w = (
-        np.arange(grid_size[1], dtype=np.float32)
-        / (grid_size[1] / base_size)
-        / pe_interpolation
-    )
+    grid_h = np.arange(grid_size[0], dtype=np.float32) / (grid_size[0] / base_size) / pe_interpolation
+    grid_w = np.arange(grid_size[1], dtype=np.float32) / (grid_size[1] / base_size) / pe_interpolation
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
     grid = grid.reshape([2, 1, grid_size[1], grid_size[0]])
 
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate(
-            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
-        )
+        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
     return pos_embed
 
 

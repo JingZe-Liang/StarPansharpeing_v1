@@ -23,10 +23,11 @@ from datetime import datetime
 import numpy as np
 import pytz
 import torch.distributed as dist
-from mmcv.utils.logging import logger_initialized
 from termcolor import colored
 
 from .dist_utils import is_local_master
+
+_LOGGER_INITIALIZED: set[str] = set()
 
 
 def get_root_logger(
@@ -47,9 +48,7 @@ def get_root_logger(
     """
     if log_file is None:
         log_file = "/dev/null"
-    logger = get_logger(
-        name=name, log_file=log_file, log_level=log_level, timezone=timezone
-    )
+    logger = get_logger(name=name, log_file=log_file, log_level=log_level, timezone=timezone)
     return logger
 
 
@@ -91,12 +90,12 @@ def get_logger(name, log_file=None, log_level=logging.INFO, timezone="UTC"):
     logger = logging.getLogger(name)
     logger.propagate = False  # disable root logger to avoid duplicate logging
 
-    if name in logger_initialized:
+    if name in _LOGGER_INITIALIZED:
         return logger
     # handle hierarchical names
     # e.g., logger "a" is initialized, then logger "a.b" will skip the
     # initialization since it is a child of "a".
-    for logger_name in logger_initialized:
+    for logger_name in _LOGGER_INITIALIZED:
         if name.startswith(logger_name):
             return logger
 
@@ -128,7 +127,7 @@ def get_logger(name, log_file=None, log_level=logging.INFO, timezone="UTC"):
     log_level = log_level if is_local_master() else logging.ERROR
     logger.setLevel(log_level)
 
-    logger_initialized[name] = True
+    _LOGGER_INITIALIZED.add(name)
 
     return logger
 
@@ -136,9 +135,7 @@ def get_logger(name, log_file=None, log_level=logging.INFO, timezone="UTC"):
 def rename_file_with_creation_time(file_path):
     # 获取文件的创建时间
     creation_time = os.path.getctime(file_path)
-    creation_time_str = datetime.fromtimestamp(creation_time).strftime(
-        "%Y-%m-%d_%H-%M-%S"
-    )
+    creation_time_str = datetime.fromtimestamp(creation_time).strftime("%Y-%m-%d_%H-%M-%S")
 
     # 构建新的文件名
     dir_name, file_name = os.path.split(file_path)

@@ -17,7 +17,7 @@
 import os
 import time
 
-from mmcv import Registry, build_from_cfg
+from mmengine.registry import Registry, build_from_cfg
 from termcolor import colored
 from torch.utils.data import DataLoader
 
@@ -52,6 +52,10 @@ def build_dataset(cfg, resolution=224, **kwargs):
     logger = get_root_logger()
 
     dataset_type = cfg.get("type")
+    from diffusion.data import datasets as _datasets  # noqa: F401
+
+    if dataset_type == "SanaLitdataGenerativeControlDataset":
+        from diffusion.data.datasets import litdata_sana_control as _litdata  # noqa: F401
     logger.info(f"Constructing dataset {dataset_type}...")
     t = time.time()
     transform = cfg.pop("transform", "default_train")

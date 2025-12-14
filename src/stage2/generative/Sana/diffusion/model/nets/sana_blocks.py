@@ -28,15 +28,13 @@ from timm.layers.attention import Attention as Attention_
 from timm.layers.mlp import Mlp
 from transformers import AutoModelForCausalLM
 
-from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
-from src.stage2.generative.Sana.diffusion.model.utils import get_same_padding, to_2tuple
-from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+from diffusion.model.norms import RMSNorm
+from diffusion.model.utils import get_same_padding, to_2tuple
+from diffusion.utils.import_utils import (
     is_xformers_available,
 )
 
-_xformers_available = (
-    False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()
-)
+_xformers_available = False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()
 if _xformers_available:
     import xformers.ops
 
@@ -93,20 +91,14 @@ class MultiHeadCrossAttention(nn.Module):
         if _xformers_available:
             attn_bias = None
             if mask is not None:
-                attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens(
-                    [N] * B, mask
-                )
-            x = xformers.ops.memory_efficient_attention(
-                q, k, v, p=self.attn_drop.p, attn_bias=attn_bias
-            )
+                attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens([N] * B, mask)
+            x = xformers.ops.memory_efficient_attention(q, k, v, p=self.attn_drop.p, attn_bias=attn_bias)
         else:
-            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # [bs, num_heads, seq_len, head_dim]
             if mask is not None and mask.ndim == 2:
                 mask = (1 - mask.to(q.dtype)) * -10000.0
                 mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
-            x = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
-            )
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
             x = x.transpose(1, 2)
 
         x = x.view(B, -1, C)
@@ -157,9 +149,7 @@ class MultiHeadCrossVallinaAttention(MultiHeadCrossAttention):
             mask = (1 - mask.to(q.dtype)) * -10000.0
             mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
 
-        x = self.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
-        )
+        x = self.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
         x = x.to(dtype)
         x = x.transpose(1, 2).contiguous()
 
@@ -204,17 +194,13 @@ class LiteLA(Attention_):
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
 
-    @torch.amp.autocast(
-        "cuda", enabled=os.environ.get("AUTOCAST_LINEAR_ATTN", False) == "true"
-    )
+    @torch.amp.autocast("cuda", enabled=os.environ.get("AUTOCAST_LINEAR_ATTN", False) == "true")
     def attn_matmul(self, q, k, v: torch.Tensor) -> torch.Tensor:
         # lightweight linear attention
         q = self.kernel_func(q)  # B, h, h_d, N
         k = self.kernel_func(k)
 
-        use_fp32_attention = getattr(
-            self, "fp32_attention", False
-        )  # necessary for NAN loss
+        use_fp32_attention = getattr(self, "fp32_attention", False)  # necessary for NAN loss
         if use_fp32_attention:
             q, k, v = q.float(), k.float(), v.float()
 
@@ -228,9 +214,7 @@ class LiteLA(Attention_):
 
         return out
 
-    def forward(
-        self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None) -> torch.Tensor:
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, C)
@@ -263,9 +247,7 @@ class LiteLA(Attention_):
     def module_str(self) -> str:
         _str = type(self).__name__ + "("
         eps = f"{self.eps:.1E}"
-        _str += (
-            f"i={self.in_dim},o={self.out_dim},h={self.heads},d={self.dim},eps={eps}"
-        )
+        _str += f"i={self.in_dim},o={self.out_dim},h={self.heads},d={self.dim},eps={eps}"
         return _str
 
     def __repr__(self):
@@ -278,9 +260,7 @@ class PAGCFGIdentitySelfAttnProcessorLiteLA:
     def __init__(self, attn):
         self.attn = attn
 
-    def __call__(
-        self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None
-    ) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None) -> torch.Tensor:
         x_uncond, x_org, x_ptb = x.chunk(3)
         x_org = torch.cat([x_uncond, x_org])
         B, N, C = x_org.shape
@@ -329,9 +309,7 @@ class PAGIdentitySelfAttnProcessorLiteLA:
     def __init__(self, attn):
         self.attn = attn
 
-    def __call__(
-        self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None
-    ) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None) -> torch.Tensor:
         x_org, x_ptb = x.chunk(2)
         B, N, C = x_org.shape
 
@@ -379,9 +357,7 @@ class SelfAttnProcessorLiteLA:
     def __init__(self, attn):
         self.attn = attn
 
-    def __call__(
-        self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None
-    ) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, mask=None, HW=None, image_rotary_emb=None, block_id=None) -> torch.Tensor:
         B, N, C = x.shape
         if HW is None:
             H = W = int(N**0.5)
@@ -454,9 +430,7 @@ class FlashAttention(Attention_):
         k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
         v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
 
-        use_fp32_attention = getattr(
-            self, "fp32_attention", False
-        )  # necessary for NAN loss
+        use_fp32_attention = getattr(self, "fp32_attention", False)  # necessary for NAN loss
         if use_fp32_attention:
             q, k, v = q.float(), k.float(), v.float()
 
@@ -467,22 +441,16 @@ class FlashAttention(Attention_):
                 dtype=q.dtype,
                 device=q.device,
             )
-            attn_bias.masked_fill_(
-                mask.squeeze(1).repeat(self.num_heads, 1, 1) == 0, float("-inf")
-            )
+            attn_bias.masked_fill_(mask.squeeze(1).repeat(self.num_heads, 1, 1) == 0, float("-inf"))
 
         if _xformers_available:
-            x = xformers.ops.memory_efficient_attention(
-                q, k, v, p=self.attn_drop.p, attn_bias=attn_bias
-            )
+            x = xformers.ops.memory_efficient_attention(q, k, v, p=self.attn_drop.p, attn_bias=attn_bias)
         else:
             q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
             if mask is not None and mask.ndim == 2:
                 mask = (1 - mask.to(x.dtype)) * -10000.0
                 mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
-            x = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
-            )
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
             x = x.transpose(1, 2)
 
         x = x.view(B, N, C)
@@ -501,11 +469,7 @@ class FlashAttention(Attention_):
 class Attention(Attention_):
     def forward(self, x, HW=None, **kwargs):
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         # B,N,3,H,C -> B,H,N,C
         q, k, v = qkv.unbind(0)  # make torchscript happy (cannot use tensor as tuple)
         use_fp32_attention = getattr(self, "fp32_attention", False)
@@ -532,12 +496,8 @@ class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(
-            hidden_size, patch_size * patch_size * out_channels, bias=True
-        )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
@@ -554,12 +514,8 @@ class T2IFinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(
-            hidden_size, patch_size * patch_size * out_channels, bias=True
-        )
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(2, hidden_size) / hidden_size**0.5
-        )
+        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.scale_shift_table = nn.Parameter(torch.randn(2, hidden_size) / hidden_size**0.5)
         self.out_channels = out_channels
 
     def forward(self, x, t):
@@ -576,15 +532,9 @@ class MaskFinalLayer(nn.Module):
 
     def __init__(self, final_hidden_size, c_emb_size, patch_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(
-            final_hidden_size, elementwise_affine=False, eps=1e-6
-        )
-        self.linear = nn.Linear(
-            final_hidden_size, patch_size * patch_size * out_channels, bias=True
-        )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(c_emb_size, 2 * final_hidden_size, bias=True)
-        )
+        self.norm_final = nn.LayerNorm(final_hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(final_hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(c_emb_size, 2 * final_hidden_size, bias=True))
 
     def forward(self, x, t):
         shift, scale = self.adaLN_modulation(t).chunk(2, dim=1)
@@ -600,13 +550,9 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, hidden_size, decoder_hidden_size):
         super().__init__()
-        self.norm_decoder = nn.LayerNorm(
-            hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.norm_decoder = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, decoder_hidden_size, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x, t):
         shift, scale = self.adaLN_modulation(t).chunk(2, dim=1)
@@ -645,22 +591,16 @@ class TimestepEmbedder(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
         freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device)
-            / half
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half
         )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(
-            self.dtype
-        )
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(self.dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -678,9 +618,7 @@ class SizeEmbedder(TimestepEmbedder):
     """
 
     def __init__(self, hidden_size, frequency_embedding_size=256):
-        super().__init__(
-            hidden_size=hidden_size, frequency_embedding_size=frequency_embedding_size
-        )
+        super().__init__(hidden_size=hidden_size, frequency_embedding_size=frequency_embedding_size)
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
@@ -698,9 +636,7 @@ class SizeEmbedder(TimestepEmbedder):
             assert s.shape[0] == bs
         b, dims = s.shape[0], s.shape[1]
         s = rearrange(s, "b d -> (b d)")
-        s_freq = self.timestep_embedding(s, self.frequency_embedding_size).to(
-            self.dtype
-        )
+        s_freq = self.timestep_embedding(s, self.frequency_embedding_size).to(self.dtype)
         s_emb = self.mlp(s_freq)
         s_emb = rearrange(s_emb, "(b d) d2 -> b (d d2)", b=b, d=dims, d2=self.outdim)
         return s_emb
@@ -721,9 +657,7 @@ class LabelEmbedder(nn.Module):
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(
-            num_classes + use_cfg_embedding, hidden_size
-        )
+        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
 
@@ -765,6 +699,7 @@ class CaptionEmbedder(nn.Module):
             hidden_features=hidden_size,
             out_features=hidden_size,
             act_layer=act_layer,
+            norm_layer=nn.LayerNorm,  # NOTE: this is not exists in original Sana implem.
             drop=0,
         )
         self.register_buffer(
@@ -777,16 +712,10 @@ class CaptionEmbedder(nn.Module):
         num_layers = len(self.custom_gemma_layers)
         text_encoder = AutoModelForCausalLM.from_pretrained(model_name).get_decoder()
         pretrained_layers = text_encoder.layers[-num_layers:]
-        for custom_layer, pretrained_layer in zip(
-            self.custom_gemma_layers, pretrained_layers
-        ):
-            info = custom_layer.load_state_dict(
-                pretrained_layer.state_dict(), strict=False
-            )
+        for custom_layer, pretrained_layer in zip(self.custom_gemma_layers, pretrained_layers):
+            info = custom_layer.load_state_dict(pretrained_layer.state_dict(), strict=False)
             print(f"**** {info} ****")
-        print(
-            f"**** Initialized {num_layers} Gemma layers from pretrained model: {model_name} ****"
-        )
+        print(f"**** Initialized {num_layers} Gemma layers from pretrained model: {model_name} ****")
 
     def token_drop(self, caption, force_drop_ids=None):
         """
@@ -853,9 +782,7 @@ class CaptionEmbedderDoubleBr(nn.Module):
         global_caption = caption.mean(dim=2).squeeze()
         use_dropout = self.uncond_prob > 0
         if (train and use_dropout) or (force_drop_ids is not None):
-            global_caption, caption = self.token_drop(
-                global_caption, caption, force_drop_ids
-            )
+            global_caption, caption = self.token_drop(global_caption, caption, force_drop_ids)
         y_embed = self.proj(global_caption)
         return y_embed, caption
 
@@ -985,16 +912,10 @@ class RopePosEmbed(nn.Module):
     @staticmethod
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
         latent_image_ids = torch.zeros(height, width, 3)
-        latent_image_ids[..., 1] = (
-            latent_image_ids[..., 1] + torch.arange(height)[:, None]
-        )
-        latent_image_ids[..., 2] = (
-            latent_image_ids[..., 2] + torch.arange(width)[None, :]
-        )
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
 
-        latent_image_id_height, latent_image_id_width, latent_image_id_channels = (
-            latent_image_ids.shape
-        )
+        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
         latent_image_ids = latent_image_ids.reshape(
             latent_image_id_height * latent_image_id_width, latent_image_id_channels
@@ -1049,15 +970,7 @@ def get_1d_rotary_pos_embed(
     theta = theta * ntk_factor
     freqs = (
         1.0
-        / (
-            theta
-            ** (
-                torch.arange(0, dim, 2, dtype=freqs_dtype, device=pos.device)[
-                    : (dim // 2)
-                ]
-                / dim
-            )
-        )
+        / (theta ** (torch.arange(0, dim, 2, dtype=freqs_dtype, device=pos.device)[: (dim // 2)] / dim))
         / linear_factor
     )  # [D/2]
     freqs = torch.outer(pos, freqs)  # type: ignore   # [S, D/2]
@@ -1073,9 +986,7 @@ def get_1d_rotary_pos_embed(
         return freqs_cos, freqs_sin
     else:
         # lumina
-        freqs_cis = torch.polar(
-            torch.ones_like(freqs), freqs
-        )  # complex64     # [S, D/2]
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64     # [S, D/2]
         return freqs_cis
 
 
@@ -1107,22 +1018,16 @@ def apply_rotary_emb(
 
         if use_real_unbind_dim == -1:
             # Used for flux, cogvideox, hunyuan-dit
-            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(
-                -1
-            )  # [B, S, H, D//2]
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
             x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
         elif use_real_unbind_dim == -2:
             # Used for Sana
             cos = cos.transpose(-1, -2)
             sin = sin.transpose(-1, -2)
-            x_real, x_imag = x.reshape(*x.shape[:-2], -1, 2, x.shape[-1]).unbind(
-                -2
-            )  # [B, H, D//2, S]
+            x_real, x_imag = x.reshape(*x.shape[:-2], -1, 2, x.shape[-1]).unbind(-2)  # [B, H, D//2, S]
             x_rotated = torch.stack([-x_imag, x_real], dim=-2).flatten(2, 3)
         else:
-            raise ValueError(
-                f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2."
-            )
+            raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
 
         out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 

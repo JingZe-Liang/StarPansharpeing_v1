@@ -19,18 +19,18 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 
-from src.stage2.generative.Sana.diffusion.model.builder import MODELS
-from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import (
+from diffusion.model.builder import MODELS
+from diffusion.model.nets.basic_modules import (
     DWMlp,
     GLUMBConv,
     MBConvPreGLU,
     Mlp,
 )
-from src.stage2.generative.Sana.diffusion.model.nets.sana import (
+from diffusion.model.nets.sana import (
     Sana,
     get_2d_sincos_pos_embed,
 )
-from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
+from diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -41,14 +41,14 @@ from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     T2IFinalLayer,
     modulate,
 )
-from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
-from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+from diffusion.model.utils import auto_grad_checkpoint
+from diffusion.utils.import_utils import (
     is_triton_module_available,
 )
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import (
+    from diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
     )
 
@@ -110,9 +110,7 @@ class SanaMSAdaLNBlock(nn.Module):
         else:
             raise ValueError(f"{attn_type} type is not defined.")
 
-        self.cross_attn = MultiHeadCrossAttention(
-            hidden_size, num_heads, **block_kwargs
-        )
+        self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         if ffn_type == "dwmlp":
             approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -154,19 +152,13 @@ class SanaMSAdaLNBlock(nn.Module):
         self.silu = nn.SiLU()
 
     def forward(self, x, y, t, mask=None, HW=None, **kwargs):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.scale_shift_table(self.silu(t)).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.scale_shift_table(self.silu(t)).chunk(
+            6, dim=1
         )
 
-        x = x + self.drop_path(
-            gate_msa.unsqueeze(1)
-            * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), HW=HW)
-        )
+        x = x + self.drop_path(gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), HW=HW))
         x = x + self.cross_attn(x, y, mask)
-        x = x + self.drop_path(
-            gate_mlp.unsqueeze(1)
-            * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW)
-        )
+        x = x + self.drop_path(gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW))
 
         return x
 
@@ -241,9 +233,7 @@ class SanaMSAdaLN(Sana):
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         kernel_size = patch_embed_kernel or patch_size
 
-        self.x_embedder = PatchEmbedMS(
-            patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True
-        )
+        self.x_embedder = PatchEmbedMS(patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True)
         self.y_embedder = CaptionEmbedder(
             in_channels=caption_channels,
             hidden_size=hidden_size,
@@ -257,9 +247,7 @@ class SanaMSAdaLN(Sana):
             self.ar_embedder = SizeEmbedder(hidden_size // 3)  # aspect ratio embed
         self.global_y_embed = None
         self.t_block = None
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
-        ]  # stochastic depth decay rule
+        drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 SanaMSAdaLNBlock(
@@ -306,9 +294,7 @@ class SanaMSAdaLN(Sana):
                 .to(x.device)
                 .to(self.dtype)
             )
-            x = (
-                self.x_embedder(x) + pos_embed
-            )  # (N, T, D), where T = H * W / patch_size ** 2
+            x = self.x_embedder(x) + pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         else:
             x = self.x_embedder(x)
 
@@ -335,11 +321,7 @@ class SanaMSAdaLN(Sana):
             if mask.shape[0] != y.shape[0]:
                 mask = mask.repeat(y.shape[0] // mask.shape[0], 1)
             mask = mask.squeeze(1).squeeze(1)
-            y = (
-                y.squeeze(1)
-                .masked_select(mask.unsqueeze(-1) != 0)
-                .view(1, -1, x.shape[-1])
-            )
+            y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
             y_lens = mask.sum(dim=1).tolist()
         else:
             y_lens = [y.shape[2]] * y.shape[0]

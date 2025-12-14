@@ -167,12 +167,7 @@ def save_checkpoint_fsdp(
 
         if keep_last:
             checkpoints = sorted(
-                [
-                    d
-                    for d in os.listdir(work_dir)
-                    if os.path.isdir(os.path.join(work_dir, d))
-                    and d.startswith("epoch_")
-                ]
+                [d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)) and d.startswith("epoch_")]
             )
             for old_ckpt in checkpoints[:-1]:
                 old_path = os.path.join(work_dir, old_ckpt)
@@ -191,9 +186,7 @@ def save_checkpoint_fsdp(
 
         # add model symlink
         model_link_path = checkpoint_dir + ".pth"
-        state_dict = torch.load(
-            os.path.join(model_dir, "pytorch_model_fsdp.bin"), map_location="cpu"
-        )
+        state_dict = torch.load(os.path.join(model_dir, "pytorch_model_fsdp.bin"), map_location="cpu")
         torch.save({"state_dict": state_dict}, model_link_path)
 
     accelerator.wait_for_everyone()
@@ -258,17 +251,28 @@ def load_checkpoint_ddp(
     if load_ema:
         state_dict = checkpoint["state_dict_ema"]
     else:
-        state_dict = checkpoint.get(
-            "state_dict", checkpoint
-        )  # to be compatible with the official checkpoint
+        state_dict = checkpoint.get("state_dict", checkpoint)  # to be compatible with the official checkpoint
 
     null_embed = torch.load(null_embed_path, map_location="cpu")
     state_dict["y_embedder.y_embedding"] = null_embed["uncond_prompt_embeds"][0]
     rng_state = checkpoint.get("rng_state", None)
 
-    missing, unexpect = model.load_state_dict(state_dict, strict=False)
-    if model_ema is not None:
-        model_ema.load_state_dict(checkpoint["state_dict_ema"], strict=False)
+    try:
+        missing, unexpect = model.load_state_dict(state_dict, strict=False)
+    except Exception as e:
+        logger.error(e)
+        from src.utilities.network_utils import load_weights_with_shape_check
+
+        missing, unexpect = load_weights_with_shape_check(model, state_dict)
+
+    if model_ema is not None and "state_dict_ema" in checkpoint:
+        try:
+            model_ema.load_state_dict(checkpoint["state_dict_ema"], strict=False)
+        except Exception as e:
+            logger.error(e)
+            from src.utilities.network_utils import load_weights_with_shape_check
+
+            load_weights_with_shape_check(model_ema, checkpoint["state_dict_ema"])
     if optimizer is not None and resume_optimizer:
         optimizer.load_state_dict(checkpoint["optimizer"])
     if lr_scheduler is not None and resume_lr_scheduler:
@@ -301,9 +305,7 @@ def load_checkpoint_fsdp(
     else:
         if os.path.isfile(checkpoint):
             checkpoint = os.path.dirname(checkpoint)
-        assert os.path.isdir(
-            checkpoint
-        ), f"Checkpoint directory {checkpoint} does not exist!"
+        assert os.path.isdir(checkpoint), f"Checkpoint directory {checkpoint} does not exist!"
 
         state_dict_model = find_model(
             os.path.join(checkpoint, "model", "pytorch_model_fsdp.bin"),
@@ -316,7 +318,13 @@ def load_checkpoint_fsdp(
             del state_dict_model[key]
             break
 
-    missing, unexpect = model.load_state_dict(state_dict_model, strict=False)
+    try:
+        missing, unexpect = model.load_state_dict(state_dict_model, strict=False)
+    except Exception as e:
+        logger.error(e)
+        from src.utilities.network_utils import load_weights_with_shape_check
+
+        missing, unexpect = load_weights_with_shape_check(model, state_dict_model)
     logger.info(f"Load checkpoint of {checkpoint}.")
 
     return None, missing, unexpect, None

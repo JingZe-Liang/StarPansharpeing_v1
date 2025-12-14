@@ -19,10 +19,10 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 
-from src.stage2.generative.Sana.diffusion.model.builder import MODELS
-from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, MBConvPreGLU, Mlp
-from src.stage2.generative.Sana.diffusion.model.nets.sana import Sana, get_2d_sincos_pos_embed
-from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
+from diffusion.model.builder import MODELS
+from diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, MBConvPreGLU, Mlp
+from diffusion.model.nets.sana import Sana, get_2d_sincos_pos_embed
+from diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -32,12 +32,12 @@ from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     T2IFinalLayer,
     t2i_modulate,
 )
-from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
-from src.stage2.generative.Sana.diffusion.utils.import_utils import is_triton_module_available
+from diffusion.model.utils import auto_grad_checkpoint
+from diffusion.utils.import_utils import is_triton_module_available
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import TritonLiteMLA
+    from diffusion.model.nets.fastlinear.modules import TritonLiteMLA
 
     _triton_modules_available = True
 
@@ -98,9 +98,7 @@ class SanaUMSBlock(nn.Module):
         else:
             raise ValueError(f"{attn_type} type is not defined.")
 
-        self.cross_attn = MultiHeadCrossAttention(
-            hidden_size, num_heads, **block_kwargs
-        )
+        self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         if ffn_type == "dwmlp":
             approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -138,9 +136,7 @@ class SanaUMSBlock(nn.Module):
         else:
             raise ValueError(f"{ffn_type} type is not defined.")
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
         # skip connection
         if skip_linear:
@@ -154,15 +150,9 @@ class SanaUMSBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None] + t.reshape(B, 6, -1)
         ).chunk(6, dim=1)
-        x = x + self.drop_path(
-            gate_msa
-            * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa), HW=HW)
-        )
+        x = x + self.drop_path(gate_msa * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa), HW=HW))
         x = x + self.cross_attn(x, y, mask)
-        x = x + self.drop_path(
-            gate_mlp
-            * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW)
-        )
+        x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW))
 
         return x
 
@@ -235,14 +225,10 @@ class SanaUMS(Sana):
         )
         self.h = self.w = 0
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.t_block = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.t_block = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
         kernel_size = patch_embed_kernel or patch_size
-        self.x_embedder = PatchEmbedMS(
-            patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True
-        )
+        self.x_embedder = PatchEmbedMS(patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True)
         self.y_embedder = CaptionEmbedder(
             in_channels=caption_channels,
             hidden_size=hidden_size,
@@ -251,9 +237,7 @@ class SanaUMS(Sana):
             token_num=model_max_length,
         )
         self.micro_conditioning = micro_condition
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
-        ]  # stochastic depth decay rule
+        drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 SanaUMSBlock(
@@ -301,9 +285,7 @@ class SanaUMS(Sana):
                 .to(x.device)
                 .to(self.dtype)
             )
-            x = (
-                self.x_embedder(x) + pos_embed
-            )  # (N, T, D), where T = H * W / patch_size ** 2
+            x = self.x_embedder(x) + pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         else:
             x = self.x_embedder(x)
 
@@ -318,11 +300,7 @@ class SanaUMS(Sana):
             if mask.shape[0] != y.shape[0]:
                 mask = mask.repeat(y.shape[0] // mask.shape[0], 1)
             mask = mask.squeeze(1).squeeze(1)
-            y = (
-                y.squeeze(1)
-                .masked_select(mask.unsqueeze(-1) != 0)
-                .view(1, -1, x.shape[-1])
-            )
+            y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
             y_lens = mask.sum(dim=1).tolist()
         else:
             y_lens = [y.shape[2]] * y.shape[0]

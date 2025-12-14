@@ -150,6 +150,7 @@ runs/
 tmp/
 .ruff_cache/
 .vscode/
+wandb/
 
 *.png
 *.jpg

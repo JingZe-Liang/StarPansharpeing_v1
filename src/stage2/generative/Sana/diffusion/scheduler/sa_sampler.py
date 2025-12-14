@@ -19,8 +19,8 @@
 import numpy as np
 import torch
 
-from src.stage2.generative.Sana.diffusion.model import gaussian_diffusion as gd
-from src.stage2.generative.Sana.diffusion.model.sa_solver import (
+from diffusion.model import gaussian_diffusion as gd
+from diffusion.model.sa_solver import (
     NoiseScheduleVP,
     SASolver,
     model_wrapper,
@@ -39,9 +39,7 @@ class SASolverSampler:
         self.model = model
         self.device = device
         to_torch = lambda x: x.clone().detach().to(torch.float32).to(device)
-        betas = torch.tensor(
-            gd.get_named_beta_schedule(noise_schedule, diffusion_steps)
-        )
+        betas = torch.tensor(gd.get_named_beta_schedule(noise_schedule, diffusion_steps))
         alphas = 1.0 - betas
         self.register_buffer("alphas_cumprod", to_torch(np.cumprod(alphas, axis=0)))
 
@@ -82,14 +80,10 @@ class SASolverSampler:
             if isinstance(conditioning, dict):
                 cbs = conditioning[list(conditioning.keys())[0]].shape[0]
                 if cbs != batch_size:
-                    print(
-                        f"Warning: Got {cbs} conditionings but batch-size is {batch_size}"
-                    )
+                    print(f"Warning: Got {cbs} conditionings but batch-size is {batch_size}")
             else:
                 if conditioning.shape[0] != batch_size:
-                    print(
-                        f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}"
-                    )
+                    print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
 
         # sampling
         C, H, W = shape

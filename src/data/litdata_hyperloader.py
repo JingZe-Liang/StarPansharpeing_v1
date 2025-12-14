@@ -1,7 +1,9 @@
 import random
+import sys
+import types
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 import PIL.Image as Image
@@ -149,6 +151,9 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
     def transform(self, zipped_samples: zip):
         (sample_d,) = zipped_samples
         return sample_d
+
+    def __getitem__(self, index: int):
+        return self.transform(self.dataset[index])
 
 
 class _BaseStreamingDataset(StreamingDataset):
@@ -508,14 +513,37 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
             keepdim=True,
         )
 
+    def __len__(self) -> int:
+        return len(self.img_ds)
+
+    def __getitem__(self, idx: int) -> Any:
+        samples = (self.img_ds[idx], self.condition_ds[idx], self.caption_ds[idx])
+        return self.transform(samples, rng=None)
+
     def _crop_resize(self, d):
         cond_imgs = [d[k] for k in self._condition_keys]
         img = d[self._img_key]
         proc_imgs = self.crop_resize_fn(*cond_imgs, img)
 
         # Save
+        _prev_sz = None
         for i, k in enumerate(self._condition_keys + [self._img_key]):
-            d[k] = proc_imgs[i]
+            img = proc_imgs[i]
+
+            # Ensure RGB channels
+            if img.ndim == 2:
+                img = img[None].repeat_interleave(3, dim=0)
+            elif img.ndim == 3 and img.shape[0] == 1:
+                img = img.repeat_interleave(3, dim=0)
+
+            if _prev_sz is None:
+                _prev_sz = img.shape[-2:]
+            else:
+                assert _prev_sz == img.shape[-2:], (
+                    f"Size mismatch after crop_resize for key {k}: {_prev_sz} vs {img.shape[-2:]}"
+                )
+
+            d[k] = img
 
         return d
 
@@ -532,33 +560,29 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         return True
 
     @staticmethod
-    def __sana_post_process(
-        d: dict, condition_keys: list[str]
-    ) -> tuple[Tensor, Tensor | float, Tensor | float, dict[str, str | list[Tensor]]]:
+    def __sana_post_process(d: dict[str, Any], condition_keys: list[str]) -> tuple[Tensor, Any, Any, dict[str, Any]]:
         y_lc = torch.nan  # caption feature if has
-        y_text: str = d["caption"]["caption"]
+        y_text: str = d["caption"]
         y_mask_l = torch.nan  # mask
-        data_info = {
+        data_info: dict[str, Any] = {
             "y_text": y_text,
             "valid_length": len(y_text),
             "inp_shape": d["img"].shape[0],  # channel
+            "control_images": {k: d[k] for k in condition_keys},
         }
         img_chw: Tensor = d["img"]
-        cond_chw: list[Tensor] = [d[c] for c in condition_keys]
-        data_info["control_signal"] = cond_chw
         return img_chw, y_lc, y_mask_l, data_info
 
-    def _post_process(self, d: dict):
+    def _post_process(self, d: dict[str, Any]) -> Any:
         if self._post_process_type == "sana":
-            d = self.__sana_post_process(d, self._condition_keys)
+            return self.__sana_post_process(d, self._condition_keys)
         elif self._post_process_type in ("none", None):
-            pass
+            return d
         else:
             raise ValueError(f"Unknown post process type: {self._post_process_type}")
-
         return d
 
-    def transform(self, samples: tuple[dict, ...], rng) -> dict:
+    def transform(self, samples: tuple[dict, ...], rng) -> Any:
         """Static method to transform a dict sample."""
         img_d, cond_d, caption_d = samples
         # Check is paired
@@ -579,7 +603,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         # Post process to reorganize the dict
         sampled_d = self._post_process(sample_d)
 
-        return sample_d
+        return sampled_d
 
     @classmethod
     def create_dataset(
@@ -590,7 +614,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         img_kwargs: dict = {},
         cond_kwargs: dict = {},
         caption_kwargs: dict = {},
-        gen_kwargs: int = 512,
+        gen_kwargs: dict = {"resize": 512},
     ):
         # Pairs: img, conditions, captions
         img_ds = ImageStreamingDataset.create_dataset(input_dir=img_input_dir, **img_kwargs)
@@ -897,6 +921,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
         256: 12,
         512: 6,
     },
+    _collect_stats: bool = False,
 ):
     paths_dict = {}
     # Flatten all files
@@ -941,33 +966,154 @@ def create_hyper_image_litdata_flatten_paths_loader(
     )
 
     # statistics
-    # from tqdm import tqdm
+    if _collect_stats:
+        from tqdm import tqdm
 
-    # bands_info_n = {}
-    # print("Start testing...")
-    # for i, sample in tqdm(  # type: ignore
-    #     enumerate(dataloader),
-    #     # total=len(ds_total) // dl.batch_size,
-    # ):
-    #     if i == 0 and "__key__" not in sample:
-    #         print(sample.keys())
+        logger.warning("Collecting statistics...")
 
-    #     chan = sample["img"].shape[1]
-    #     if chan not in bands_info_n:
-    #         bands_info_n[chan] = 0
-    #     bands_info_n[chan] += sample["img"].shape[0]
+        bands_info_n = {}
+        for i, sample in tqdm(  # type: ignore
+            enumerate(dataloader),
+            # total=len(ds_total) // dl.batch_size,
+        ):
+            if i == 0 and "__key__" not in sample:
+                print(sample.keys())
 
-    #     # logger.debug(f"Batch {i}: shape {sample['img'].shape=}")
-    #     if i % 10 == 0:
-    #         logger.info(
-    #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
-    #             tqdm=True,
-    #         )
+            chan = sample["img"].shape[1]
+            if chan not in bands_info_n:
+                bands_info_n[chan] = 0
+            bands_info_n[chan] += sample["img"].shape[0]
+
+            # logger.debug(f"Batch {i}: shape {sample['img'].shape=}")
+            if i % 10 == 0:
+                logger.info(
+                    f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
+                    tqdm=True,
+                )
 
     return dataset, dataloader
 
-def get_fast_test_hyper_litdata_ds() -> ImageStreamingDataset:
-    ...
+
+def get_fast_test_hyper_litdata_load(
+    data_type: Literal[
+        "DCF",
+        "MMSeg",
+        "Houston",
+        "OHS",
+        "WV3",
+        "QB",
+        "WV2",
+        "WV4",
+        "IKONOS",
+        "RS5M",
+        "BigEarthNetS2",
+        "fmow_RGB",
+        "fmow_MS",
+        "SAM270k",
+    ] = "RS5M",
+    batch_size: int = 8,
+    stream_ds_kwargs: dict[str, Any] | None = None,
+    loader_kwargs: dict[str, Any] | None = None,
+) -> tuple[list[ImageStreamingDataset], StreamingDataLoader]:
+    """
+    Build a quick litdata loader for model/module/function testing.
+
+    The dataset paths are hard-coded here on purpose to avoid relying on yaml.
+    """
+
+    candidates: dict[str, dict[str, Any]] = {
+        "DCF": {
+            "paths": ["data2/DCF_2019/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 128, "is_hwc": True},
+        },
+        "MMSeg": {
+            "paths": ["data/MMSeg_YREB/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 128, "is_hwc": True},
+        },
+        "Houston": {
+            "paths": ["data/Houston/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "SAM270k": {
+            "paths": ["data2/RemoteSAM270k/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "OHS": {
+            "paths": ["data/OHS/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "WV3": {
+            "paths": ["data/WorldView3/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "QB": {
+            "paths": ["data/QuickBird/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "WV2": {
+            "paths": ["data/WorldView2/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "WV4": {
+            "paths": ["data/WorldView4/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "IKONOS": {
+            "paths": ["data/IKONOS/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "RS5M": {
+            "paths": ["data/RS5M/LitData_images_train"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True, "force_to_rgb": True},
+        },
+        "BigEarthNetS2": {
+            "paths": ["data2/BigEarthNet_S2/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 128, "is_hwc": False},
+        },
+        "fmow_MS": {
+            "paths": ["data2/Multispectral-FMow-full/LitData_hyper_images_8bands"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "fmow_RGB": {
+            "paths": ["data/Fmow_rgb/LitData_hyper_images"],
+            "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+    }
+
+    if data_type not in candidates:
+        raise ValueError(f"Unsupported data_type: {data_type}")
+
+    candidate = candidates[data_type]
+    dataset_path = candidate["paths"][0]
+
+    final_stream_kwargs: dict[str, Any] = {
+        "transform_prob": 0.0,
+        "resize_before_transform": 256,
+        "shuffle": False,
+        "is_cycled": True,
+        "is_hwc": True,
+    }
+    final_stream_kwargs.update(candidate["overrides"])
+    if stream_ds_kwargs is not None:
+        final_stream_kwargs.update(stream_ds_kwargs)
+
+    final_loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "num_workers": 2,
+        "persistent_workers": False,
+        "prefetch_factor": None,
+        "shuffle": False,
+    }
+    if loader_kwargs is not None:
+        final_loader_kwargs.update(loader_kwargs)
+
+    dataset = ImageStreamingDataset.create_dataset(
+        input_dir=dataset_path,
+        combined_kwargs={"batching_method": "per_stream"},
+        **final_stream_kwargs,
+    )
+    dataloader = StreamingDataLoader(dataset, **final_loader_kwargs)
+    return [dataset], dataloader
 
 
 def __test_create_hyper_image_litdata_loader():
@@ -1113,6 +1259,18 @@ def __test_normal_image_loader():
         print(sample["__key__"], sample["img"].shape)
 
 
+def __test_gen_loader():
+    img_path = "data2/RemoteSAM270k/LitData_hyper_images2"
+    caption_path = "data2/RemoteSAM270k/LitData_image_captions"
+    condition_path = "data2/RemoteSAM270k/LitData_image_conditions"
+
+    ds = GenerativeStreamingDataset.create_dataset(img_path, condition_path, caption_path)
+    # print(len(ds))
+    dl = StreamingDataLoader(ds, batch_size=8, num_workers=0, shuffle=False)
+    for sample in dl:
+        print(sample["img"].shape)
+
+
 def __test_get_item_key():
     path = "data2/RemoteSAM270k/LitData_hyper_images"
     stream_ds_kwargs = {
@@ -1131,6 +1289,26 @@ def __test_get_item_key():
         print(ds[i]["__key__"])
 
 
+def __test_ds_len():
+    path = "data2/RemoteSAM270k/LitData_image_conditions"
+
+    ds = ConditionsStreamingDataset.create_dataset(
+        input_dir=path,
+        combined_kwargs={"batching_method": "per_stream"},
+        # serializers=serializers,
+        # stream_ds_kwargs={"transform_prob": 0.0, "resize_before_transform": 128, "is_cycled": False},
+    )
+    print(f"Dataset length: {len(ds)}")
+    print(ds[0])
+
+    # path = "data2/RemoteSAM270k/LitData_hyper_images2"
+    # ds = StreamingDataset(
+    #     input_dir=path,
+    # )
+
+    # print(f"Dataset length: {len(ds)}")
+
+
 if __name__ == "__main__":
     """
     python -m src.data.litdata_hyperloader
@@ -1139,7 +1317,9 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
-    __test_normal_image_loader()
+    # __test_normal_image_loader()
+    __test_gen_loader()
+    # __test_ds_len()
     # __test_get_item_key()
 
     # from omegaconf import OmegaConf

@@ -19,7 +19,7 @@ from enum import Enum
 
 import torch
 
-from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
+from diffusion.utils.logger import get_root_logger
 
 
 class InitStrategy(str, Enum):
@@ -43,26 +43,22 @@ class ModelGrowthInitializer:
             config: ModelGrowthConfig config object
         """
         self.target_model = target_model
-        self.pretrained_state = torch.load(
-            config.pretrained_ckpt_path, map_location="cpu"
-        )
+        self.pretrained_state = torch.load(config.pretrained_ckpt_path, map_location="cpu")
         if "state_dict" in self.pretrained_state:
             self.pretrained_state = self.pretrained_state["state_dict"]
         self.target_state = target_model.state_dict()
 
         # get model layers
-        self.pretrained_layers = self._get_num_layers_from_state_dict(
-            self.pretrained_state
-        )
+        self.pretrained_layers = self._get_num_layers_from_state_dict(self.pretrained_state)
         self.target_layers = self._get_num_layers_from_state_dict(self.target_state)
 
         # verify layers
-        assert (
-            config.source_num_layers <= self.pretrained_layers
-        ), f"config source layers({config.source_num_layers}) must be less than pretrained model layers({self.pretrained_layers})"
-        assert (
-            self.target_layers == config.target_num_layers
-        ), f"target model layers({self.target_layers}) must be equal to config target layers({config.target_num_layers})"
+        assert config.source_num_layers <= self.pretrained_layers, (
+            f"config source layers({config.source_num_layers}) must be less than pretrained model layers({self.pretrained_layers})"
+        )
+        assert self.target_layers == config.target_num_layers, (
+            f"target model layers({self.target_layers}) must be equal to config target layers({config.target_num_layers})"
+        )
 
         if config.source_num_layers < self.pretrained_layers:
             self.pretrained_layers = config.source_num_layers
@@ -87,8 +83,7 @@ class ModelGrowthInitializer:
             strategy = InitStrategy(strategy.lower())
         except ValueError:
             raise ValueError(
-                f"unsupported init strategy: {strategy}, "
-                f"supported strategies: {[s.value for s in InitStrategy]}"
+                f"unsupported init strategy: {strategy}, supported strategies: {[s.value for s in InitStrategy]}"
             )
 
         # strategy mapping
@@ -106,9 +101,7 @@ class ModelGrowthInitializer:
 
         # get method parameters
         valid_params = inspect.signature(init_method).parameters.keys()
-        filtered_kwargs = (
-            {k: v for k, v in kwargs.items() if k in valid_params} if kwargs else {}
-        )
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params} if kwargs else {}
 
         # only pass method parameters
         return init_method(**filtered_kwargs)
@@ -164,44 +157,24 @@ class ModelGrowthInitializer:
                     if zero_gate and is_repeated:
                         if "scale_shift_table" in new_key:
                             # set the entire scale_shift_table to 0
-                            self.target_state[new_key] = torch.zeros_like(
-                                self.pretrained_state[key]
-                            )
-                            self.logger.info(
-                                f"zero init entire scale_shift_table: {new_key}"
-                            )
-                        elif (
-                            "cross_attn.proj.weight" in new_key
-                            or "cross_attn.proj.bias" in new_key
-                        ):
+                            self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
+                            self.logger.info(f"zero init entire scale_shift_table: {new_key}")
+                        elif "cross_attn.proj.weight" in new_key or "cross_attn.proj.bias" in new_key:
                             # set the output projection layer of cross attention to 0
-                            self.target_state[new_key] = torch.zeros_like(
-                                self.pretrained_state[key]
-                            )
+                            self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
                             self.logger.info(f"zero init cross attn proj: {new_key}")
-                        elif (
-                            "attn.proj.weight" in new_key or "attn.proj.bias" in new_key
-                        ):
+                        elif "attn.proj.weight" in new_key or "attn.proj.bias" in new_key:
                             # set the output projection layer of self attention to 0
-                            self.target_state[new_key] = torch.zeros_like(
-                                self.pretrained_state[key]
-                            )
+                            self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
                             self.logger.info(f"zero init self attn proj: {new_key}")
-                        elif (
-                            "mlp.point_conv.conv.weight" in new_key
-                            or "mlp.point_conv.conv.bias" in new_key
-                        ):
+                        elif "mlp.point_conv.conv.weight" in new_key or "mlp.point_conv.conv.bias" in new_key:
                             # set the last point_conv of mlp to 0
-                            self.target_state[new_key] = torch.zeros_like(
-                                self.pretrained_state[key]
-                            )
+                            self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
                             self.logger.info(f"zero init mlp point conv: {new_key}")
                         else:
                             # other params copy normally
                             self.target_state[new_key] = self.pretrained_state[key]
-                            self.logger.info(
-                                f"copy transformer params: {key} -> {new_key}"
-                            )
+                            self.logger.info(f"copy transformer params: {key} -> {new_key}")
                     else:
                         # the first appearing layer or not using zero_gate
                         self.target_state[new_key] = self.pretrained_state[key]
@@ -259,9 +232,7 @@ class ModelGrowthInitializer:
                     # linear interpolation
                     lower_value = self.pretrained_state[lower_key]
                     upper_value = self.pretrained_state[upper_key]
-                    self.target_state[key] = (
-                        1 - alpha
-                    ) * lower_value + alpha * upper_value
+                    self.target_state[key] = (1 - alpha) * lower_value + alpha * upper_value
 
         self.target_model.load_state_dict(self.target_state)
         return self.target_model
@@ -294,9 +265,7 @@ class ModelGrowthInitializer:
                             "mlp.point_conv.conv.weight",
                         ]
                     ):
-                        self.target_state[key] = (
-                            torch.randn_like(self.target_state[key]) * scale_spec
-                        )  # *0
+                        self.target_state[key] = torch.randn_like(self.target_state[key]) * scale_spec  # *0
                     elif "q_norm.weight" in key or "k_norm.weight" in key:
                         self.target_state[key] = torch.ones_like(self.target_state[key])
                     elif (
@@ -305,21 +274,12 @@ class ModelGrowthInitializer:
                         or "cross_attn.kv_linear.bias" in key
                         or "cross_attn.proj.bias" in key
                     ):
-                        self.target_state[key] = torch.zeros_like(
-                            self.target_state[key]
-                        )
-                    elif (
-                        "mlp.depth_conv.conv.weight" in key
-                        or "mlp.depth_conv.conv.bias" in key
-                    ):
-                        self.target_state[key] = (
-                            torch.randn_like(self.target_state[key]) * 0.2
-                        )
+                        self.target_state[key] = torch.zeros_like(self.target_state[key])
+                    elif "mlp.depth_conv.conv.weight" in key or "mlp.depth_conv.conv.bias" in key:
+                        self.target_state[key] = torch.randn_like(self.target_state[key]) * 0.2
                     # initialize other params with smaller std (0.02)
                     else:
-                        self.target_state[key] = (
-                            torch.randn_like(self.target_state[key]) * scale_others
-                        )  # *0.02
+                        self.target_state[key] = torch.randn_like(self.target_state[key]) * scale_others  # *0.02
 
         self.target_model.load_state_dict(self.target_state)
         return self.target_model
@@ -352,9 +312,9 @@ class ModelGrowthInitializer:
         Original model layer 2 → New model layer 6 (keep original), layer 7-8 (zero-gate)
         And so on.
         """
-        assert (
-            self.target_layers == self.pretrained_layers * expand_ratio
-        ), f"target layers({self.target_layers}) must be {expand_ratio} times of source layers({self.pretrained_layers})"
+        assert self.target_layers == self.pretrained_layers * expand_ratio, (
+            f"target layers({self.target_layers}) must be {expand_ratio} times of source layers({self.pretrained_layers})"
+        )
 
         self._copy_non_transformer_params()
 
@@ -369,61 +329,34 @@ class ModelGrowthInitializer:
 
                 for key in self.pretrained_state:
                     if f"blocks.{src_layer_idx}." in key:
-                        new_key = key.replace(
-                            f"blocks.{src_layer_idx}.", f"blocks.{target_layer_idx}."
-                        )
+                        new_key = key.replace(f"blocks.{src_layer_idx}.", f"blocks.{target_layer_idx}.")
 
                         # only set zero-gate for the subsequent layers in the expanded group (offset > 0)
                         if zero_gate and offset > 0:
                             if "scale_shift_table" in new_key:
                                 # set the entire scale_shift_table to 0
-                                self.target_state[new_key] = torch.zeros_like(
-                                    self.pretrained_state[key]
-                                )
-                                self.logger.info(
-                                    f"zero init entire scale_shift_table: {new_key}"
-                                )
-                            elif (
-                                "cross_attn.proj.weight" in new_key
-                                or "cross_attn.proj.bias" in new_key
-                            ):
+                                self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
+                                self.logger.info(f"zero init entire scale_shift_table: {new_key}")
+                            elif "cross_attn.proj.weight" in new_key or "cross_attn.proj.bias" in new_key:
                                 # set the output projection layer of cross attention to 0
-                                self.target_state[new_key] = torch.zeros_like(
-                                    self.pretrained_state[key]
-                                )
-                                self.logger.info(
-                                    f"zero init cross attn proj: {new_key}"
-                                )
-                            elif (
-                                "attn.proj.weight" in new_key
-                                or "attn.proj.bias" in new_key
-                            ):
+                                self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
+                                self.logger.info(f"zero init cross attn proj: {new_key}")
+                            elif "attn.proj.weight" in new_key or "attn.proj.bias" in new_key:
                                 # set the output projection layer of self attention to 0
-                                self.target_state[new_key] = torch.zeros_like(
-                                    self.pretrained_state[key]
-                                )
+                                self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
                                 self.logger.info(f"zero init self attn proj: {new_key}")
-                            elif (
-                                "mlp.point_conv.conv.weight" in new_key
-                                or "mlp.point_conv.conv.bias" in new_key
-                            ):
+                            elif "mlp.point_conv.conv.weight" in new_key or "mlp.point_conv.conv.bias" in new_key:
                                 # set the last point_conv of mlp to 0
-                                self.target_state[new_key] = torch.zeros_like(
-                                    self.pretrained_state[key]
-                                )
+                                self.target_state[new_key] = torch.zeros_like(self.pretrained_state[key])
                                 self.logger.info(f"zero init mlp point conv: {new_key}")
                             else:
                                 # other params copy normally
                                 self.target_state[new_key] = self.pretrained_state[key]
-                                self.logger.info(
-                                    f"copy transformer params: {key} -> {new_key}"
-                                )
+                                self.logger.info(f"copy transformer params: {key} -> {new_key}")
                         else:
                             # original layer or not using zero_gate
                             self.target_state[new_key] = self.pretrained_state[key]
-                            self.logger.info(
-                                f"copy transformer params: {key} -> {new_key}"
-                            )
+                            self.logger.info(f"copy transformer params: {key} -> {new_key}")
 
         self.target_model.load_state_dict(self.target_state)
         return self.target_model

@@ -41,6 +41,7 @@ PreservedKeys: list[LiteralString] = [
     "warn_once",
     "once_pattern",
     "not_rank0_print",
+    "_name_",
 ]
 __warn_once_set = set()
 __warn_once_pattern_set = set()
@@ -321,6 +322,15 @@ def _loguru_log_func(
         )
 
 
+def loguru_print_func_name(record: Record):
+    name = record.get("extra", {}).get("_name_", None)
+    if name is not None:
+        msg = f"{name} - {record['message']}"
+        record["message"] = msg
+        del record["extra"]["_name_"]
+    return record
+
+
 @once
 def configure_logger(
     sink=None,
@@ -394,6 +404,7 @@ def configure_logger(
     if print_rank_info:
         logger = logger.patch(process_id_patcher)
     logger = logger.patch(format_extra_patcher)
+    logger = logger.patch(loguru_print_func_name)
 
     # Tqdm logger
     if add_tqdm_filter:
@@ -434,10 +445,10 @@ def set_logger_file(
     file: Optional[Union[str, Path]] = None,
     level: LogLevel = os.getenv("FILE_LOG_LEVEL", "debug"),
     add_time: bool = True,
-    mode="w",
-    filter=None,
-    main_log_lvl_range=None,
-    add_print_once_filter=True,
+    mode: str = "w",
+    filter: list[Callable] | Callable | None = None,
+    main_log_lvl_range: tuple | None = None,
+    add_print_once_filter: bool = True,
 ):
     global logger
 
@@ -773,6 +784,9 @@ def _test_print(rank, is_mp=False):
     )
 
     print("Configured logger")
+
+    global logger
+    logger = logger.bind(_name_="print")
     # print(f"I am process {rank}")
     logger.info(f"i am process {rank}", not_rank0_print=True)
 
@@ -808,5 +822,5 @@ if __name__ == "__main__":
 
     import torch.multiprocessing as mp
 
-    mp.spawn(partial(_test_print, is_mp=True), nprocs=2)
-    # _test_print(0, False)
+    # mp.spawn(partial(_test_print, is_mp=True), nprocs=2)
+    _test_print(0, False)

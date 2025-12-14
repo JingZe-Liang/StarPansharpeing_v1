@@ -17,6 +17,7 @@ from .dion.dion.newton_schulz_triton import ns_line_1, ns_line_2
 ######### Newton-Schulz ABCs ##########
 
 
+
 @dataclass
 class MuonConfig:
     name: str = "su"
@@ -100,17 +101,17 @@ def zeropower_via_newtonschulz6_diff_abc(
 
         # triton code
         ns_line_1(X, out=A)  # A = X @ X.mT
-
+        
+        a, b, c = consts[0]
         if preconditioned:
             # see https://github.com/thib-s/flash-newton-schulz/blob/145260f4b49c81b9200c61e0f95751b43bf672d5/newton_schulz_triton.py#L587
             s = torch.rsqrt(torch.clamp_min(A.abs().sum(dim=-1, keepdim=False), min=epsilon))  # AOL rescaling vector
             X = X * s.unsqueeze(-1)  # rescale X using s making it closer to orthogonal
             # first NS iteration with reuse of A
-            a, b, c = consts[0]
             A = A * s.unsqueeze(-1) * s.unsqueeze(-2)
         ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
         ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
-        X, C = C, X  # Swap references to av1oid unnecessary copies
+        X, C = C, X  # Swap references to avoid unnecessary copies
 
         # Perform the NS iterations
         for a, b, c in consts[1:]:
@@ -161,7 +162,7 @@ class MuonFSDP(Muon):
         use_triton: bool = False,
         use_preconditioned: bool = False,
         newton_schulz_func: Optional[Callable] = zeropower_via_newtonschulz6_diff_abc,
-        force_my_triton: bool = True,
+        force_my_triton: bool = True,  # deprecated
         muon_steps: int = 5,
         *,
         # muon and adamw/lion param group defaults
@@ -213,29 +214,39 @@ class MuonFSDP(Muon):
     def clear_muon_adamw_params(
         cls,
         named_params: Iterable | dict[str, torch.nn.Parameter],
-        ignored_keys_for_muon: tuple | list = (),
+        ignored_keys_for_muon: tuple | list = (),  # for re to match
         oned_param_algo: str = "lion",
     ):
+        import re
+
         muon_params = []
         oned_params = []
 
+        re_ignore_pats = [re.compile(ik) for ik in ignored_keys_for_muon]
         if isinstance(named_params, dict):
             named_params = named_params.items()
-
+            
         for name, p in named_params:
             if p.requires_grad:
                 # conv, linear weights, and other 2D+ parameters
-                if p.ndim >= 2 and name not in ignored_keys_for_muon:
-                    muon_params.append(p)
-                    # logger.debug(f"Muon params: {name} - shaped: {tuple(p.shape)}")
+                if p.ndim >= 2:
+                    # 检查是否匹配忽略模式
+                    should_ignore = False
+                    for re_ignore_pat in re_ignore_pats:
+                        if re_ignore_pat.search(name):  # 使用search而不是match
+                            should_ignore = True
+                            logger.debug(f"[MuonFSDP] Ignored param for Muon: {name} at pattern {re_ignore_pat.pattern}")
+                            break
+                    
+                    if should_ignore:
+                        oned_params.append(p)
+                    else:
+                        muon_params.append(p)
+                        # logger.debug(f"[MuonFSDP] Muon param: {name} - shaped: {tuple(p.shape)}")
+                        
                 # bias, norm weights, embeddings, lm heads (for nlp tasks), and other 1D parameters
                 else:
                     oned_params.append(p)
-                    # logger.debug(
-                    #     f"{oned_param_algo} params: {name} - shaped: {tuple(p.shape)}"
-                    # )
-            # else:
-            #     logger.debug(f"{name} is not requires_grad")
 
         muon_params_g = {"params": muon_params, "algorithm": "muon"}
         oned_params_g = {"params": oned_params, "algorithm": oned_param_algo}

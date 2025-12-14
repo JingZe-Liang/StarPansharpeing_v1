@@ -21,17 +21,17 @@ import torch
 import torch.nn as nn
 from timm.layers.drop import DropPath
 
-from src.stage2.generative.Sana.diffusion.model.builder import MODELS
-from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import (
+from diffusion.model.builder import MODELS
+from diffusion.model.nets.basic_modules import (
     DWMlp,
     GLUMBConv,
     Mlp,
 )
-from src.stage2.generative.Sana.diffusion.model.nets.sana import (
+from diffusion.model.nets.sana import (
     Sana,
     get_2d_sincos_pos_embed,
 )
-from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
+from diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -43,23 +43,21 @@ from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     T2IFinalLayer,
     t2i_modulate,
 )
-from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
-from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+from diffusion.model.utils import auto_grad_checkpoint
+from diffusion.utils.import_utils import (
     is_triton_module_available,
     is_xformers_available,
 )
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import (
+    from diffusion.model.nets.fastlinear.modules import (
         TritonLiteMLA,
     )
 
     _triton_modules_available = True
 
-_xformers_available = (
-    False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()
-)
+_xformers_available = False if os.environ.get("DISABLE_XFORMERS", "0") == "1" else is_xformers_available()
 if _xformers_available:
     pass
 
@@ -122,13 +120,9 @@ class SanaMSBlock(nn.Module):
             raise ValueError(f"{attn_type} type is not defined.")
 
         if cross_attn_type in ["flash", "linear"]:
-            self.cross_attn = MultiHeadCrossAttention(
-                hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs
-            )
+            self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs)
         elif cross_attn_type == "vanilla":
-            self.cross_attn = MultiHeadCrossVallinaAttention(
-                hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs
-            )
+            self.cross_attn = MultiHeadCrossVallinaAttention(hidden_size, num_heads, qk_norm=cross_norm, **block_kwargs)
         else:
             raise ValueError(f"{cross_attn_type} type is not defined.")
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -159,9 +153,7 @@ class SanaMSBlock(nn.Module):
         else:
             raise ValueError(f"{ffn_type} type is not defined.")
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
     def forward(self, x, y, t, mask=None, HW=None, image_rotary_emb=None, **kwargs):
         B, N, C = x.shape
@@ -178,10 +170,7 @@ class SanaMSBlock(nn.Module):
             )
         )
         x = x + self.cross_attn(x, y, mask)
-        x = x + self.drop_path(
-            gate_mlp
-            * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW)
-        )
+        x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp), HW=HW))
 
         return x
 
@@ -266,16 +255,12 @@ class SanaMS(Sana):
         )
         self.h = self.w = 0
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.t_block = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.t_block = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         self.pos_embed_ms = None
         self.cfg_embed_scale = cfg_embed_scale
 
         kernel_size = patch_embed_kernel or patch_size
-        self.x_embedder = PatchEmbedMS(
-            patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True
-        )
+        self.x_embedder = PatchEmbedMS(patch_size, in_channels, hidden_size, kernel_size=kernel_size, bias=True)
         self.y_embedder = CaptionEmbedder(
             in_channels=caption_channels,
             hidden_size=hidden_size,
@@ -283,9 +268,7 @@ class SanaMS(Sana):
             act_layer=approx_gelu,
             token_num=model_max_length,
         )
-        drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, depth)
-        ]  # stochastic depth decay rule
+        drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 SanaMSBlock(
@@ -334,9 +317,7 @@ class SanaMS(Sana):
         bs = x.shape[0]
         x = x.to(self.dtype)
         if self.timestep_norm_scale_factor != 1.0:
-            timestep = (timestep.float() / self.timestep_norm_scale_factor).to(
-                torch.float32
-            )
+            timestep = (timestep.float() / self.timestep_norm_scale_factor).to(torch.float32)
         else:
             timestep = timestep.long().to(torch.float32)
         y = y.to(self.dtype)
@@ -365,9 +346,7 @@ class SanaMS(Sana):
                 x += self.pos_embed_ms  # (N, T, D), where T = H * W / patch_size ** 2
             elif self.pos_embed_type == "3d_rope":
                 self.pos_embed_ms = RopePosEmbed(theta=10000, axes_dim=[0, 16, 16])
-                latent_image_ids = self.pos_embed_ms._prepare_latent_image_ids(
-                    bs, self.h, self.w, x.device, x.dtype
-                )
+                latent_image_ids = self.pos_embed_ms._prepare_latent_image_ids(bs, self.h, self.w, x.device, x.dtype)
                 image_pos_embed = self.pos_embed_ms(latent_image_ids)
                 x += image_pos_embed
             else:
@@ -385,18 +364,10 @@ class SanaMS(Sana):
 
         if mask is not None:
             mask = mask.to(torch.int16)
-            mask = (
-                mask.repeat(y.shape[0] // mask.shape[0], 1)
-                if mask.shape[0] != y.shape[0]
-                else mask
-            )
+            mask = mask.repeat(y.shape[0] // mask.shape[0], 1) if mask.shape[0] != y.shape[0] else mask
             mask = mask.squeeze(1).squeeze(1)
             if _xformers_available:
-                y = (
-                    y.squeeze(1)
-                    .masked_select(mask.unsqueeze(-1) != 0)
-                    .view(1, -1, x.shape[-1])
-                )
+                y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
                 y_lens = mask.sum(dim=1).tolist()
             else:
                 y_lens = mask
@@ -404,9 +375,7 @@ class SanaMS(Sana):
             y_lens = [y.shape[2]] * y.shape[0]
             y = y.squeeze(1).view(1, -1, x.shape[-1])
         else:
-            raise ValueError(
-                f"Attention type is not available due to _xformers_available={_xformers_available}."
-            )
+            raise ValueError(f"Attention type is not available due to _xformers_available={_xformers_available}.")
 
         for block in self.blocks:
             if jvp:
@@ -511,14 +480,10 @@ class SanaMSCM(SanaMS):
                 **kwargs,
             )
         else:
-            model_out = super().forward(
-                x, pretrain_timestep, y, data_info=data_info, **kwargs
-            )
+            model_out = super().forward(x, pretrain_timestep, y, data_info=data_info, **kwargs)
 
         # Flow --> TrigFlow Transformation
-        trigflow_model_out = (
-            (1 - 2 * t) * x + (1 - 2 * t + 2 * t**2) * model_out
-        ) / torch.sqrt(t**2 + (1 - t) ** 2)
+        trigflow_model_out = ((1 - 2 * t) * x + (1 - 2 * t + 2 * t**2) * model_out) / torch.sqrt(t**2 + (1 - t) ** 2)
 
         if return_logvar:
             return trigflow_model_out, logvar

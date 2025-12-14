@@ -912,16 +912,20 @@ class ContinuousImageTokenizer(nn.Module):
 
     def decode(
         self,
-        inp: dict,
+        inp: dict | torch.Tensor,
         inp_shape: Annotated[torch.Size | int, "bs,c,h,w or c"],
         clamp=False,
     ):
         """
         Decoder forward method. Outputs contain
         recon, latent, q_loss, q_loss_breakdown, loss_breakdown
+
+        inp: Encoded output dict or generated latent.
+        inp_shape: torch.Size or int of channels.
+        clamp: Clamp decoded values to (-1, 1).
         """
-        dec_out = edict(**inp)
-        h = inp["latent"]
+        dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)
+        h = dec_out["latent"]
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
@@ -1261,7 +1265,7 @@ def test_tokenizer_forward_backward(
     real_data: str | None = None,
     use_optim=False,
     device="cuda",
-    base_model_ckpt: str = "runs/stage1_cosmos/2025-08-20_20-14-19_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
+    base_model_ckpt: str = "",
     lora_ckpt: list[str] | None = None,
     lora_changes_chans: dict[str, int] | None = None,
     active_lora_name: str | None = None,
@@ -1289,6 +1293,7 @@ def test_tokenizer_forward_backward(
     from tqdm import tqdm, trange
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
+    from src.data.litdata_hyperloader import get_fast_test_hyper_litdata_load
     from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
     from src.stage1.cosmos.modules import blocks
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
@@ -1389,7 +1394,8 @@ def test_tokenizer_forward_backward(
             iterations = [x]
             is_itered = True
         else:
-            dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
+            # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
+            dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1)[1]
             iterations = dl
     else:
         x = torch.randn(*fake_img_shape).to("cuda", dtype)
@@ -1413,15 +1419,21 @@ def test_tokenizer_forward_backward(
                 if isinstance(x, dict):
                     x = x["img"].to("cuda", dtype)
                 encs = tokenizer.encode(x)
-                if isinstance(encs, tuple):
-                    h = encs[0]
-                else:
-                    h = encs
                 decs = tokenizer.decode(encs, x.shape)
+
                 if isinstance(decs, tuple):
                     y = decs[0]
+                elif isinstance(decs, dict):
+                    y = decs["recon"]
                 else:
                     y = decs
+
+                if isinstance(encs, tuple):
+                    h = encs[0]
+                elif isinstance(encs, dict):
+                    h = encs["latent"]
+                else:
+                    h = encs
 
             y.clamp_(-1, 1)
 
@@ -1509,8 +1521,8 @@ if __name__ == "__main__":
     lt.monkey_patch()
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors",
-        real_data="fmow_MS",
+        base_model_ckpt="runs/pretrained/VAEInterp-f8c16.safetensors",
+        real_data="SAM270k",
         save_pca_vis=False,
         pca_type="z",
         is_lora=False,
@@ -1544,9 +1556,13 @@ if __name__ == "__main__":
 # 19:19:44 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.797507286071777
 
 # Fmow_MS
-# 19:24:41 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: -1.2613893747329712
-# 19:24:41 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 4.828085899353027
+# 18:50:37 - ℹ️  [ INFO ] cosmos_tokenizer.py:1490 - mean of the latent: -3.1455795764923096
+# 18:50:37 - ℹ️  [ INFO ] cosmos_tokenizer.py:1491 - std of the latent: 5.390313148498535
 
 # BigEarthNetS2
 # 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: -1.926203727722168
 # 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.4402666091918945
+
+# SAM 270k
+# 19:01:05 - ℹ️  [ INFO ] cosmos_tokenizer.py:1490 - mean of the latent: -0.026932599022984505
+# 19:01:05 - ℹ️  [ INFO ] cosmos_tokenizer.py:1491 - std of the latent: 4.79932975769043

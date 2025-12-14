@@ -145,10 +145,10 @@ class UnifiedAnnotator:
 
     def read_img(self, path: str) -> np.ndarray:
         """Read and preprocess image from path.
-        
+
         Args:
             path: Path to the image file
-            
+
         Returns:
             Preprocessed image as numpy array in RGB format
         """
@@ -202,20 +202,19 @@ def prepare_condition_from_webdataset(
     if _ds_support_getitem:
         log_print(f"Resuming from index {resume_from}.", "info")
 
-
         def iterator_generator():
             _has_complete_set = None
 
             if isinstance(resume_from, int):
                 indices = range(int(resume_from), len(ds))
             else:
-                log_print(f'Evaluating the exists condition pairs...')
+                log_print(f"Evaluating the exists condition pairs...")
                 indices = range(len(ds))
                 assert isinstance(resume_from, str), "If resume_from is not an int, it must be a string."
                 files = Path(resume_from).rglob("*")
                 # Get stems
                 stems = [f.stem.split(".")[0] for f in files if f.is_file()]
-                for stem in tqdm(stems, desc='Finding incomplete pairs'):
+                for stem in tqdm(stems, desc="Finding incomplete pairs"):
                     pair_complete = all(
                         Path(f"{resume_from}/{stem}.{c}.jpg").exists()
                         for c in ["hed", "segmentation", "sketch", "mlsd"]
@@ -225,7 +224,9 @@ def prepare_condition_from_webdataset(
                         # remove from set
                         stems.remove(stem)
                 _has_complete_set = set(stems)
-                log_print(f"Found {len(stems)} files in {resume_from}")
+                log_print(
+                    f"Found {len(stems)} pairs in {resume_from} - remain {len(ds) - len(stems)} to process.", "info"
+                )
             for i in indices:
                 sample = ds[i]
                 _k = sample["__key__"]

@@ -27,12 +27,15 @@ from triton.runtime.autotuner import Autotuner
 class CustomAutotuner(Autotuner):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        device_name = "no_cuda"
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0).replace(" ", "_")
         self.best_config_cache_path = os.path.expanduser(
             os.path.join(
                 "~",
                 ".triton",
                 "best_config_cache",
-                torch.cuda.get_device_name(0).replace(" ", "_"),
+                device_name,
                 self.base_fn.__name__ + ".pkl",
             )
         )
@@ -59,10 +62,7 @@ class CustomAutotuner(Autotuner):
                 used_cached_result = False
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
-                timings = {
-                    config: self._bench(*args, config=config, **kwargs)
-                    for config in pruned_configs
-                }
+                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start
                 self.cache[key] = builtins.min(timings, key=timings.get)

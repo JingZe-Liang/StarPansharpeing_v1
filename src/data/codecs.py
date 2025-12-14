@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import pickle
 import warnings
 from contextlib import suppress
 from functools import partial
@@ -40,7 +41,7 @@ try:
     )
     nvimg_cpu_dec_backends = dict(backend_kinds=[nvimgcodec.CPU_ONLY])
     # encoder
-    logger.debug("Nvidia Image Codec is enabled.")
+    # logger.debug("Nvidia Image Codec is enabled.")
 except ImportError:
     pass
 
@@ -198,6 +199,12 @@ import jsonlines as jsonl
 from litdata.streaming import serializers
 
 
+def _check_valid_obj(b: bytes):
+    if b[:8] == b"NotFound":
+        return None, False
+    return b, True
+
+
 class JsonlSerializer(serializers.Serializer):
     """Serializer for JSONL (JSON Lines) format."""
 
@@ -209,8 +216,12 @@ class JsonlSerializer(serializers.Serializer):
         writer.close()
         return buf.getvalue(), "jsonl"
 
-    def deserialize(self, byte_data: bytes) -> dict | list[dict]:
+    def deserialize(self, byte_data: bytes) -> dict | list[dict] | None:
         """Deserialize JSONL bytes back to a dictionary or list of dictionaries."""
+        byte_data, valid = _check_valid_obj(byte_data)
+        if not valid:
+            return None
+
         text_data = byte_data.decode("utf-8").strip()
 
         if not text_data:
@@ -230,9 +241,13 @@ class JsonlSerializer(serializers.Serializer):
 
 
 class TiffFileSerializer(serializers.TIFFSerializer):
-    def deserialize(self, data: bytes) -> torch.Tensor:
+    def deserialize(self, bytes_data: bytes) -> torch.Tensor | None:
         """Deserialize bytes into an object."""
-        arr = super().deserialize(data)
+        bytes_data, valid = _check_valid_obj(bytes_data)
+        if not valid:
+            return None
+
+        arr = super().deserialize(bytes_data)
         # additional transport like in JPEGSerializer
         if arr.ndim == 3:
             arr = arr.transpose([-1, 0, 1])
@@ -249,6 +264,10 @@ class JPEGGeneralSerializer(serializers.JPEGSerializer):
 
     def deserialize(self, data: bytes) -> torch.Tensor | None:
         """Deserialize bytes into an object."""
+        data, valid = _check_valid_obj(data)
+        if not valid:
+            return None
+
         # filtering and libpng C lib warnings
         saved_stdout = os.dup(1)
         saved_stderr = os.dup(2)
@@ -284,12 +303,85 @@ class JPEGGeneralSerializer(serializers.JPEGSerializer):
             os.close(saved_stderr)
 
 
+def _load_list_img_bytes(img_bytes_list: bytes, decode_type: str = "tiff"):
+    # list of bytes of images
+    # pickle load into a list of image bytes
+    img_lst = pickle.loads(img_bytes_list)
+    ret_img_lst = []
+    for img_b in img_lst:
+        if decode_type == "tiff":
+            img = tiff_decode_io(img_b)
+        elif decode_type == "img":
+            img = img_decode_io(img_b)
+        else:
+            raise ValueError(f"Unsupported decode type: {decode_type}")
+        ret_img_lst.append(img)
+    return ret_img_lst
+
+
+class TiffSequenceFileSerializer(serializers.Serializer):
+    def serialize(self, obj: list[np.ndarray]) -> tuple[bytes, str]:
+        """
+        Serialize a list of numpy arrays to a pickle file.
+        """
+        bytes_lst = []
+        for arr in obj:
+            assert isinstance(arr, np.ndarray), f"All elements must be numpy arrays, but got {type(arr)}"
+            arr_bytes = tiff_codec_io(arr)  # zlib compression
+            bytes_lst.append(arr_bytes)
+        bytes_all = pickle.dumps(bytes_lst, protocol=5)
+        return bytes_all, "tifffile_seq"
+
+    def deserialize(self, byte_data: bytes) -> list[np.ndarray]:
+        return _load_list_img_bytes(byte_data, "tiff")
+
+    def can_serialize(self, obj: list[np.ndarray]) -> bool:
+        return isinstance(obj, list) and all(isinstance(x, np.ndarray) for x in obj)
+
+
+class JPEGSequenceGeneralSerializer(serializers.Serializer):
+    def serialize(self, obj: list[np.ndarray]) -> tuple[bytes, str]:
+        """
+        Serialize a list of numpy arrays to a pickle file.
+        """
+        bytes_lst = []
+        for arr in obj:
+            assert isinstance(arr, np.ndarray), f"All elements must be numpy arrays, but got {type(arr)}"
+            arr_bytes = rgb_codec_io(arr, format="jpeg", quality=95)
+            bytes_lst.append(arr_bytes)
+        bytes_all = pickle.dumps(bytes_lst, protocol=5)
+        return bytes_all, "jpeg_seq"
+
+    def _force_to_rgb(self, arr: np.ndarray | torch.Tensor):
+        if arr.shape[0] == 4:
+            # png with alpha channel
+            logger.debug(f"Warning: 4 channels, shape {arr.shape} -> change to 3 RGB channels.")
+            arr = arr[:3]
+        return arr
+
+    def deserialize(self, byte_data: bytes):
+        byte_data, valid = _check_valid_obj(byte_data)
+        if not valid:
+            return None
+
+        img_lst = _load_list_img_bytes(byte_data, "img")
+        for i in range(len(img_lst)):
+            img_lst[i] = self._force_to_rgb(img_lst[i])
+        return img_lst
+
+    def can_serialize(self, obj: Any) -> bool:
+        return isinstance(obj, list) and all(isinstance(item, np.ndarray) for item in obj)
+
+
 serializers._SERIALIZERS["jsonl"] = JsonlSerializer()  # type: ignore
 serializers._SERIALIZERS["tifffile"] = TiffFileSerializer()
 serializers._SERIALIZERS["jpeg"] = JPEGGeneralSerializer()
-logger.debug("Registered JsonlSerializer for litdata")
-logger.debug("Modified TiffFileSerializer for litdata")
-logger.debug("Modified JPEGGeneralSerializer for litdata")
+serializers._SERIALIZERS["tifffile_seq"] = TiffSequenceFileSerializer()
+serializers._SERIALIZERS["jpeg_seq"] = JPEGSequenceGeneralSerializer()
+
+# logger.debug("Registered JsonlSerializer for litdata")
+# logger.debug("Modified TiffFileSerializer for litdata")
+# logger.debug("Modified JPEGGeneralSerializer for litdata")
 
 
 # *==============================================================

@@ -25,11 +25,10 @@ import pickle
 import shutil
 
 
-import mmcv
 import torch
 import torch.distributed as dist
 from accelerate import skip_first_batches
-from mmcv.runner import get_dist_info
+from mmengine.dist import get_dist_info
 
 
 def is_distributed():
@@ -73,18 +72,14 @@ def get_local_proc_group(group_size=8):
     world_size = get_world_size()
     if world_size <= group_size or group_size == 1:
         return None
-    assert (
-        world_size % group_size == 0
-    ), f"world size ({world_size}) should be evenly divided by group size ({group_size})."
+    assert world_size % group_size == 0, (
+        f"world size ({world_size}) should be evenly divided by group size ({group_size})."
+    )
     process_groups = getattr(get_local_proc_group, "process_groups", dict())
     if group_size not in process_groups:
         num_groups = dist.get_world_size() // group_size
-        groups = [
-            list(range(i * group_size, (i + 1) * group_size)) for i in range(num_groups)
-        ]
-        process_groups.update(
-            {group_size: [torch.distributed.new_group(group) for group in groups]}
-        )
+        groups = [list(range(i * group_size, (i + 1) * group_size)) for i in range(num_groups)]
+        process_groups.update({group_size: [torch.distributed.new_group(group) for group in groups]})
         get_local_proc_group.process_groups = process_groups
 
     group_idx = get_rank() // group_size
@@ -195,10 +190,11 @@ def all_gather_cpu(result_part, tmpdir=None, collect_by_master=True):
     if tmpdir is None:
         tmpdir = "./tmp"
     if rank == 0:
-        mmcv.mkdir_or_exist(tmpdir)
+        os.makedirs(tmpdir, exist_ok=True)
     synchronize()
     # dump the part result to the dir
-    mmcv.dump(result_part, os.path.join(tmpdir, f"part_{rank}.pkl"))
+    with open(os.path.join(tmpdir, f"part_{rank}.pkl"), "wb") as f:
+        pickle.dump(result_part, f)
     synchronize()
     # collect all parts
     if collect_by_master and rank != 0:
@@ -208,7 +204,8 @@ def all_gather_cpu(result_part, tmpdir=None, collect_by_master=True):
         results = []
         for i in range(world_size):
             part_file = os.path.join(tmpdir, f"part_{i}.pkl")
-            results.append(mmcv.load(part_file))
+            with open(part_file, "rb") as f:
+                results.append(pickle.load(f))
     if not collect_by_master:
         synchronize()
     # remove tmp dir
@@ -228,9 +225,7 @@ def all_gather_tensor(tensor, group_size=None, group=None):
     return output
 
 
-def gather_difflen_tensor(
-    feat, num_samples_list, concat=True, group=None, group_size=None
-):
+def gather_difflen_tensor(feat, num_samples_list, concat=True, group=None, group_size=None):
     world_size = get_world_size()
     if world_size == 1:
         if not concat:
@@ -309,14 +304,10 @@ from typing import Union
 
 
 @torch.no_grad()
-def clip_grad_norm_(
-    self, max_norm: Union[float, int], norm_type: Union[float, int] = 2.0
-) -> None:
+def clip_grad_norm_(self, max_norm: Union[float, int], norm_type: Union[float, int] = 2.0) -> None:
     self._lazy_init()
     self._wait_for_previous_optim_step()
-    assert (
-        self._is_root
-    ), "clip_grad_norm should only be called on the root (parent) instance"
+    assert self._is_root, "clip_grad_norm should only be called on the root (parent) instance"
     self._assert_state(TrainingState_.IDLE)
 
     max_norm = float(max_norm)
@@ -325,17 +316,13 @@ def clip_grad_norm_(
     local_norm = _calc_grad_norm(self.params_with_grad, norm_type).cuda()  # type: ignore[arg-type]
     if norm_type == math.inf:
         total_norm = local_norm
-        dist.all_reduce(
-            total_norm, op=torch.distributed.ReduceOp.MAX, group=self.process_group
-        )
+        dist.all_reduce(total_norm, op=torch.distributed.ReduceOp.MAX, group=self.process_group)
     else:
         total_norm = local_norm**norm_type
         dist.all_reduce(total_norm, group=self.process_group)
         total_norm = total_norm ** (1.0 / norm_type)
 
-    clip_coef = torch.tensor(
-        max_norm, dtype=total_norm.dtype, device=total_norm.device
-    ) / (total_norm + 1e-6)
+    clip_coef = torch.tensor(max_norm, dtype=total_norm.dtype, device=total_norm.device) / (total_norm + 1e-6)
     if clip_coef < 1:
         # multiply by clip_coef, aka, (max_norm/total_norm).
         for p in self.params_with_grad:

@@ -155,3 +155,6 @@
 [submodule "src/utilities/transport/py_meanflow"]
 	path = src/utilities/transport/py_meanflow
 	url = https://github.com/Gsunshine/py-meanflow.git
+[submodule "src/stage2/layers/LaCT"]
+	path = src/stage2/layers/LaCT
+	url = https://github.com/a1600012888/LaCT.git

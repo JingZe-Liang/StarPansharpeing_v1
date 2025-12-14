@@ -760,22 +760,19 @@ class IJEPANaFlexViT(Transformer):
         if "ijepa" in self.pretrained_type:
             # x is the backbone's out
             terms["ijepa_feat"] = x[:, self.num_prefix_tokens :]
-            x = x[:, self.num_prefix_tokens :]
 
         ######### Lejepa projector #########
-        elif hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
+        if hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
             x = self._pool(x)
             lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
             terms["lejepa_proj"] = lejepa_proj
 
             # spatial tokens only
-            x = x[:, self.num_prefix_tokens :]
             terms["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
         ########## IBOT projector ##########
-        elif hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type:
-            x = x[:, self.num_prefix_tokens :]
-            terms["ibot_feat"] = x_tokens = x
+        if hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type:
+            terms["ibot_feat"] = x_tokens = x[:, self.num_prefix_tokens :]
 
             # Check mask shape alignment if masks provided
             if masks is not None and isinstance(masks, torch.Tensor):
@@ -790,14 +787,15 @@ class IJEPANaFlexViT(Transformer):
                 x_tokens = torch.index_select(x_tokens.flatten(0, 1), dim=0, index=masks_indices)
             terms["ibot_proj"] = self.ibot_head(x_tokens)
 
-        else:
-            x = x[:, self.num_prefix_tokens :]  # spatial tokens only
+        # Patch tokens
+        x_tokns = x[:, self.num_prefix_tokens :]
+        terms["x_patch_tokens"] = x_tokens
 
         # Return the 1d features as the backbone output
         # not forward by the head
         return x, edict(terms)
 
-    def forward_intermediates(
+    def forward_intermedieates(
         self,
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         indices: Optional[Union[int, List[int]]] = None,

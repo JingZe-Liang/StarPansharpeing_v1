@@ -24,8 +24,8 @@ import math
 import numpy as np
 import torch as th
 
-from src.stage2.generative.Sana.diffusion.model import gaussian_diffusion as gd
-from src.stage2.generative.Sana.diffusion.model.gaussian_diffusion import GaussianDiffusion
+from diffusion.model import gaussian_diffusion as gd
+from diffusion.model.gaussian_diffusion import GaussianDiffusion
 
 
 def space_timesteps(num_timesteps, section_counts):
@@ -53,9 +53,7 @@ def space_timesteps(num_timesteps, section_counts):
             for i in range(1, num_timesteps):
                 if len(range(0, num_timesteps, i)) == desired_count:
                     return set(range(0, num_timesteps, i))
-            raise ValueError(
-                f"cannot create exactly {num_timesteps} steps with an integer stride"
-            )
+            raise ValueError(f"cannot create exactly {num_timesteps} steps with an integer stride")
         section_counts = [int(x) for x in section_counts.split(",")]
     size_per = num_timesteps // len(section_counts)
     extra = num_timesteps % len(section_counts)
@@ -64,9 +62,7 @@ def space_timesteps(num_timesteps, section_counts):
     for i, section_count in enumerate(section_counts):
         size = size_per + (1 if i < extra else 0)
         if size < section_count:
-            raise ValueError(
-                f"cannot divide section of {size} steps into {section_count}"
-            )
+            raise ValueError(f"cannot divide section of {size} steps into {section_count}")
         if section_count <= 1:
             frac_stride = 1
         else:
@@ -128,11 +124,7 @@ class SpacedDiffusion(GaussianDiffusion):
         base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
         last_alpha_cumprod = 1.0
         if kwargs.get("model_mean_type", False) == gd.ModelMeanType.FLOW_VELOCITY:
-            new_sigmas = (
-                flow_shift
-                * base_diffusion.sigmas
-                / (1 + (flow_shift - 1) * base_diffusion.sigmas)
-            )
+            new_sigmas = flow_shift * base_diffusion.sigmas / (1 + (flow_shift - 1) * base_diffusion.sigmas)
             self.timestep_map = new_sigmas * diffusion_steps
             # self.timestep_map = list(self.use_timesteps)
             kwargs["sigmas"] = np.array(new_sigmas)
@@ -154,9 +146,7 @@ class SpacedDiffusion(GaussianDiffusion):
         return super().training_losses(self._wrap_model(model), *args, **kwargs)
 
     def training_losses_diffusers(self, model, *args, **kwargs):  # pylint: disable=signature-differs
-        return super().training_losses_diffusers(
-            self._wrap_model(model), *args, **kwargs
-        )
+        return super().training_losses_diffusers(self._wrap_model(model), *args, **kwargs)
 
     def condition_mean(self, cond_fn, *args, **kwargs):
         return super().condition_mean(self._wrap_model(cond_fn), *args, **kwargs)
@@ -187,9 +177,7 @@ class _WrappedModel:
         if callable(self.timestep_map):
             new_ts = self.timestep_map(timestep)
         else:
-            map_tensor = th.tensor(
-                self.timestep_map, device=timestep.device, dtype=timestep.dtype
-            )
+            map_tensor = th.tensor(self.timestep_map, device=timestep.device, dtype=timestep.dtype)
             new_ts = map_tensor[timestep]
         # if self.rescale_timesteps:
         #     new_ts = new_ts.float() * (1000.0 / self.original_num_steps)

@@ -22,15 +22,15 @@ import torch
 import torch.nn as nn
 from torch.nn import Linear, Module, init
 
-from src.stage2.generative.Sana.diffusion.model.builder import MODELS
-from src.stage2.generative.Sana.diffusion.model.nets.sana import get_2d_sincos_pos_embed
-from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import RopePosEmbed
-from src.stage2.generative.Sana.diffusion.model.nets.sana_multi_scale import (
+from diffusion.model.builder import MODELS
+from diffusion.model.nets.sana import get_2d_sincos_pos_embed
+from diffusion.model.nets.sana_blocks import PatchEmbed, RopePosEmbed
+from diffusion.model.nets.sana_multi_scale import (
     SanaMS,
     SanaMSBlock,
 )
-from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
-from src.stage2.generative.Sana.diffusion.utils.import_utils import (
+from diffusion.model.utils import auto_grad_checkpoint
+from diffusion.utils.import_utils import (
     is_triton_module_available,
     is_xformers_available,
 )
@@ -43,7 +43,7 @@ if is_triton_module_available():
 
 _xformers_available = False
 if is_xformers_available():
-    _xformers_available = True
+    _xformers_available = False  # True    # make it False for BlackWell GPU, if has not install xformers
 
 
 class ControlSanaMSBlock(Module):
@@ -71,21 +71,15 @@ class ControlSanaMSBlock(Module):
         init.zeros_(self.after_proj.weight)
         init.zeros_(self.after_proj.bias)
 
-    def forward(
-        self, x, y, t, control_signal, mask=None, HW=None, image_rotary_emb=None
-    ):
+    def forward(self, x, y, t, control_signal, mask=None, HW=None, image_rotary_emb=None):
         if self.block_index == 0:
             # the first block
             control_signal = self.before_proj(control_signal)
-            control_signal = self.copied_block(
-                x + control_signal, y, t, mask, HW, image_rotary_emb
-            )
+            control_signal = self.copied_block(x + control_signal, y, t, mask, HW, image_rotary_emb)
             control_signal_skip = self.after_proj(control_signal)
         else:
             # load from previous control_signal and produce the control_signal for skip connection
-            control_signal = self.copied_block(
-                control_signal, y, t, mask, HW, image_rotary_emb
-            )
+            control_signal = self.copied_block(control_signal, y, t, mask, HW, image_rotary_emb)
             control_signal_skip = self.after_proj(control_signal)
 
         return control_signal, control_signal_skip
@@ -127,6 +121,7 @@ class SanaMSControlNet(SanaMS):
         copy_blocks_num=7,
         cross_norm=False,
         timestep_norm_scale_factor=1.0,
+        control_in_channels: int | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -161,8 +156,15 @@ class SanaMSControlNet(SanaMS):
         )
         # define controlnet
         self.copy_blocks_num = copy_blocks_num
-        self.controlnet = nn.ModuleList(
-            [ControlSanaMSBlock(self.blocks[i], i) for i in range(copy_blocks_num)]
+        self.controlnet = nn.ModuleList([ControlSanaMSBlock(self.blocks[i], i) for i in range(copy_blocks_num)])
+        self.control_in_channels = int(control_in_channels) if control_in_channels is not None else int(in_channels)
+        self.control_embedder = PatchEmbed(
+            input_size,
+            patch_size,
+            self.control_in_channels,
+            hidden_size,
+            kernel_size=patch_embed_kernel or patch_size,
+            bias=True,
         )
 
     def load_pretrain_and_initialize(self, model_path):
@@ -172,19 +174,57 @@ class SanaMSControlNet(SanaMS):
         self.initialize_all()
         return missing, unexpected
 
-    def initialize_all(self):
-        # freeze all the parameters
-        for p in self.parameters():
-            p.requires_grad_(False)
+    def initialize_all(self, from_base=True):
+        if from_base:
+            # freeze all the parameters
+            for p in self.parameters():
+                p.requires_grad_(False)
 
-        for i, block in enumerate(self.controlnet):
-            block.initialize_all_and_copy_from_base(self.blocks[i])
+            for param in self.control_embedder.parameters():
+                param.requires_grad_(True)
+
+            for i, block in enumerate(self.controlnet):
+                block.initialize_all_and_copy_from_base(self.blocks[i])
+        else:
+            import math
+
+            # not from pretrained base model (base + controlnet, all from scratch)
+            def _init_fn(m):
+                if isinstance(m, nn.Linear):
+                    init.trunc_normal_(m.weight, 0, 0.02)
+                    if m.bias is not None:
+                        init.zeros_(m.bias)
+                elif isinstance(m, (nn.RMSNorm, nn.LayerNorm)):
+                    init.ones_(m.weight)
+                    if m.bias is not None:
+                        init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    init.kaiming_uniform_(m.weight, math.sqrt(3))
+                    if m.bias is not None:
+                        init.zeros_(m.bias)
+
+        init.xavier_uniform_(self.control_embedder.proj.weight)
+        init.zeros_(self.control_embedder.proj.bias)
+        # zero out the unpatcher
+        final_layer_lin = self.final_layer.linear
+        init.zeros_(final_layer_lin.weight)
+        if final_layer_lin.bias is not None:
+            init.zeros_(final_layer_lin.bias)
+
+        # Check if there are nan
+        for n, p in self.named_parameters():
+            if torch.isnan(p).any():
+                raise ValueError(f"Parameter {n} contains NaN after initialization.")
+
+        print("------------------------")
+        print("Sana Controlnet initialized successfully.")
+        print("------------------------")
 
     def forward_controlnet(self, control_signal, pos_embed_ms=None):
         if self.use_pe and pos_embed_ms:
-            control_signal = self.x_embedder(control_signal) + pos_embed_ms
+            control_signal = self.control_embeddelr(control_signal) + pos_embed_ms
         else:
-            control_signal = self.x_embedder(control_signal)
+            control_signal = self.control_embedder(control_signal)
         return control_signal
 
     def forward(self, x, timestep, y, mask=None, data_info=None, **kwargs):
@@ -198,9 +238,7 @@ class SanaMSControlNet(SanaMS):
         bs = x.shape[0]
         x = x.to(self.dtype)
         if self.timestep_norm_scale_factor != 1.0:
-            timestep = (timestep.float() / self.timestep_norm_scale_factor).to(
-                self.dtype
-            )
+            timestep = (timestep.float() / self.timestep_norm_scale_factor).to(self.dtype)
         else:
             timestep = timestep.long().to(self.dtype)
         y = y.to(self.dtype)
@@ -211,10 +249,7 @@ class SanaMSControlNet(SanaMS):
 
         if self.use_pe:
             if self.pos_embed_type == "sincos":
-                if (
-                    self.pos_embed_ms is None
-                    or self.pos_embed_ms.shape[1:] != x.shape[1:]
-                ):
+                if self.pos_embed_ms is None or self.pos_embed_ms.shape[1:] != x.shape[1:]:
                     self.pos_embed_ms = (
                         torch.from_numpy(
                             get_2d_sincos_pos_embed(
@@ -231,18 +266,14 @@ class SanaMSControlNet(SanaMS):
                 x += self.pos_embed_ms  # (N, T, D), where T = H * W / patch_size ** 2
             elif self.pos_embed_type == "3d_rope":
                 self.pos_embed_ms = RopePosEmbed(theta=10000, axes_dim=[0, 16, 16])
-                latent_image_ids = self.pos_embed_ms._prepare_latent_image_ids(
-                    bs, self.h, self.w, x.device, x.dtype
-                )
+                latent_image_ids = self.pos_embed_ms._prepare_latent_image_ids(bs, self.h, self.w, x.device, x.dtype)
                 image_pos_embed = self.pos_embed_ms(latent_image_ids)
             else:
                 raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
 
         # control signal branch
         control_signal = data_info["control_signal"].to(self.dtype)
-        control_signal = self.forward_controlnet(
-            control_signal, pos_embed_ms=image_pos_embed
-        )
+        control_signal = self.forward_controlnet(control_signal, pos_embed_ms=image_pos_embed)
 
         t = self.t_embedder(timestep)  # (N, D)
 
@@ -252,28 +283,19 @@ class SanaMSControlNet(SanaMS):
             y = self.attention_y_norm(y)
 
         if mask is not None:
-            mask = (
-                mask.repeat(y.shape[0] // mask.shape[0], 1)
-                if mask.shape[0] != y.shape[0]
-                else mask
-            )
-            mask = mask.squeeze(1).squeeze(1)
+            mask = mask.repeat(y.shape[0] // mask.shape[0], 1) if mask.shape[0] != y.shape[0] else mask
+            mask = mask.squeeze(1).squeeze(1)  # [bs, l]
             if _xformers_available:
-                y = (
-                    y.squeeze(1)
-                    .masked_select(mask.unsqueeze(-1) != 0)
-                    .view(1, -1, x.shape[-1])
-                )
+                y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
                 y_lens = mask.sum(dim=1).tolist()
             else:
                 y_lens = mask
-        elif _xformers_available:
+        # elif _xformers_available:
+        else:
             y_lens = [y.shape[2]] * y.shape[0]
             y = y.squeeze(1).view(1, -1, x.shape[-1])
-        else:
-            raise ValueError(
-                f"Attention type is not available due to _xformers_available={_xformers_available}."
-            )
+        # else:
+        # raise ValueError(f"Attention type is not available due to _xformers_available={_xformers_available}.")
 
         x = auto_grad_checkpoint(
             self.blocks[0],
@@ -342,13 +364,9 @@ class SanaMSControlNet(SanaMS):
         assert control_signal.dim() == 4, "control_signal should be a 4D tensor"
 
         if x.shape[0] != control_signal.shape[0]:
-            control_signal = control_signal.repeat(
-                x.shape[0] // control_signal.shape[0], 1, 1, 1
-            )
+            control_signal = control_signal.repeat(x.shape[0] // control_signal.shape[0], 1, 1, 1)
 
-        assert (
-            control_signal.shape[0] == x.shape[0]
-        ), "control_signal and x should have the same batch size"
+        assert control_signal.shape[0] == x.shape[0], "control_signal and x should have the same batch size"
         data_info["control_signal"] = control_signal
 
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
@@ -361,18 +379,14 @@ class SanaMSControlNet(SanaMS):
 #################################################################################
 
 
-# @MODELS.register_module()
+@MODELS.register_module(force=True)
 def SanaMSControlNet_600M_P1_D28(**kwargs):
-    return SanaMSControlNet(
-        depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs
-    )
+    return SanaMSControlNet(depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs)
 
 
-# @MODELS.register_module()
+@MODELS.register_module(force=True)
 def SanaMSControlNet_1600M_P1_D20(**kwargs):
-    return SanaMSControlNet(
-        depth=20, hidden_size=2240, patch_size=1, num_heads=20, **kwargs
-    )
+    return SanaMSControlNet(depth=20, hidden_size=2240, patch_size=1, num_heads=20, **kwargs)
 
 
 # * --- Test --- #
@@ -386,6 +400,11 @@ def test_sana_ms_controlnet():
     model = SanaMSControlNet_600M_P1_D28(
         input_size=32,
         in_channels=16,
+        attn_type="flash",
+        ffn_type="mlp",
+        use_pe=True,
+        y_norm=True,
+        qk_norm=True,
     )
     model.to(device)
 
@@ -395,12 +414,12 @@ def test_sana_ms_controlnet():
         "control_signal": torch.randn(1, 16, 32, 32).to(device),
     }
     cap = torch.randn(1, 1, 300, 4096).to(device)
-    mask = None
+    mask = torch.cat([torch.ones(100), torch.zeros(200)])[None].to(device)  # [1, 300]
 
     # forward
     output = model(inputs, timestep, cap, mask, data_info)
     print(output.shape)
-    assert output.shape == torch.Size(1, 16, 32, 32), "output shape is incorrect"
+    assert output.shape == (1, 32, 32, 32), "output shape is incorrect"
 
 
 if __name__ == "__main__":
