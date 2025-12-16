@@ -24,10 +24,10 @@ from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
 
-from diffusion.data.builder import DATASETS
-from diffusion.data.datasets.sana_data import SanaWebDataset
-from diffusion.data.datasets.utils import *
-from diffusion.data.wids import lru_json_load
+from src.stage2.generative.Sana.diffusion.data.builder import DATASETS
+from src.stage2.generative.Sana.diffusion.data.datasets.sana_data import SanaWebDataset
+from src.stage2.generative.Sana.diffusion.data.datasets.utils import *
+from src.stage2.generative.Sana.diffusion.data.wids import lru_json_load
 
 
 def get_closest_ratio(height: float, width: float, ratios: dict):
@@ -283,7 +283,7 @@ class DummyDatasetMS(SanaWebDatasetMS):
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
 
-    from diffusion.data.transforms import get_transform
+    from src.stage2.generative.Sana.diffusion.data.transforms import get_transform
 
     image_size = 256
     transform = get_transform("default_train", image_size)

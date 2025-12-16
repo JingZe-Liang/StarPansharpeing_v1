@@ -42,7 +42,7 @@ vq_loss:
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
-    feature_normalize: false
+    feature_normalize: spatial
     get_hier_teacher_feature: true
   # semantic distillatin loss
   sem_distill_weight: 0.02
@@ -56,7 +56,7 @@ vq_loss:
     repa_model_name: "google/siglip2-large-patch16-512"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
-    feature_normalize: false
+    feature_normalize: spatial
     get_hier_teacher_feature: true
   # vf loss
   vf_loss_weight:

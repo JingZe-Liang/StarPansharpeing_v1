@@ -20,16 +20,14 @@ from diffusers import get_constant_schedule_with_warmup, get_cosine_schedule_wit
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 def build_lr_scheduler(config, optimizer, train_dataloader, lr_scale_ratio):
     if not config.get("lr_schedule_args", None):
         config.lr_schedule_args = dict()
     if config.get("lr_warmup_steps", None):
-        config["num_warmup_steps"] = config.get(
-            "lr_warmup_steps"
-        )  # for compatibility with old version
+        config["num_warmup_steps"] = config.get("lr_warmup_steps")  # for compatibility with old version
 
     logger = get_root_logger()
     logger.info(
@@ -99,9 +97,7 @@ def get_cosine_decay_to_constant_with_warmup(
         if current_step > num_decay_steps:
             return final_lr
 
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_decay_steps - num_warmup_steps)
-        )
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_decay_steps - num_warmup_steps))
         return (
             max(
                 0.0,

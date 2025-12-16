@@ -22,8 +22,9 @@ import numpy as np
 import torch
 from accelerate.state import DistributedType
 
-from diffusion.utils.logger import get_root_logger
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
+
+from ...tools.download import find_model
 
 
 def save_checkpoint(

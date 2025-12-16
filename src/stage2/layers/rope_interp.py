@@ -1,279 +1,324 @@
 import math
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-# ==========================================
-# Part 1: Recursive Dominant Frequency Correction (RDFC) for RoPE
-# ==========================================
+
+def get_resize_crop_region_for_grid(src, tgt_size):
+    th = tw = tgt_size
+    h, w = src
+
+    r = h / w
+
+    # resize
+    if r > 1:
+        resize_height = th
+        resize_width = int(round(th / h * w))
+    else:
+        resize_width = tw
+        resize_height = int(round(tw / w * h))
+
+    crop_top = int(round((th - resize_height) / 2.0))
+    crop_left = int(round((tw - resize_width) / 2.0))
+
+    return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
 
-def apply_rdfc_to_freqs(
-    freqs: torch.Tensor, train_res: int, target_res: int, theta: float = 10000.0, recursive_iter: int = 1
-):
+def apply_rdfc_correction(
+    freqs: torch.Tensor,
+    train_res: int,
+    target_res: int,
+    recursive_iter: int = 2
+) -> torch.Tensor:
     """
-    实现论文 Algorithm 1: Recursive Dominant Frequency Correction.
-    自动识别接近训练分辨率的主频(Dominant Frequency)，并将其周期拉伸至目标分辨率。
-
-    Args:
-        freqs: 原始频率张量 [D/2]
-        train_res: 训练时的分辨率 (height 或 width)
-        target_res: 推理时的目标分辨率 (height 或 width)
-        theta: RoPE base
-        recursive_iter: 递归查找的次数 (论文中 Qwen-Image 可能有多个主频需要修正)
+    Algorithm 1: Recursive Dominant Frequency Correction (RDFC) from UltraImage paper.
+    修正主频以防止内容重复。
     """
-    # 复制一份频率，以免修改原始数据
+    # 避免原地修改
     freqs_new = freqs.clone()
-
-    # 计算每个频率分量对应的周期 T_i = 2 * pi / theta_i
-    # theta_i = 1 / (theta ** (2i/d)) -> freqs input usually is theta_i
+    
+    # 1. 计算每个频率分量的周期 T = 2 * pi / theta
+    # 注意：这里的 freqs 输入通常是 1 / (theta^(...))，即论文中的 theta_i
+    # Period T_i = 2 * pi / freq_val
     periods = 2 * torch.pi / freqs_new
-
-    # 我们需要找到周期最接近 train_res 的那个频率分量
-    # 论文公式 (6): k_h = argmin |T^h_i - h|
-
-    # 为了支持递归(处理多个接近的频率)，我们将最接近的几个都找出来
-    # 在实践中，通常修正最接近的一个即可，但 Qwen 可能需要修正 k=8 和 k=9
-
-    current_periods = periods.clone()
-
-    # 简单的递归模拟：找到最接近的，修改它，然后如果还需要，找下一个
-    # 注意：这里简化为直接找 Top-K 个最接近 train_res 的频率
-
-    diffs = torch.abs(current_periods - train_res)
-
-    # 获取差异最小的几个索引
-    # 对于 Flux 通常 k=1 个 (k=9), Qwen 可能 k=2 个
-    sorted_indices = torch.argsort(diffs)
-
-    for i in range(recursive_iter):
-        idx = sorted_indices[i]
-
-        # 检查是否满足非重复条件 (Eq 7)，如果当前周期小于目标分辨率，则需要修正
-        # 实际上论文是强制修正 dominant frequency
-
-        dominant_period = periods[idx]
-        print(f"RDFC: Detected dominant period {dominant_period:.2f} at index {idx} (Target: {train_res})")
-
-        # 修正频率: theta'_k = 2 * pi / H (Eq 8)
-        # 将该频率的周期强制设为目标分辨率长度 (或稍大以防边缘效应)
-        new_freq = 2 * torch.pi / target_res
-
-        # 应用修正
-        freqs_new[idx] = new_freq
-
+    
+    # 初始化当前的重复周期 (初始认为就是训练分辨率)
+    N_current = train_res
+    
+    # 论文中提到可能存在多个接近的主频 (尤其是在 Qwen-Image 中)，所以递归修正
+    for _ in range(recursive_iter):
+        if N_current >= target_res:
+            break
+            
+        # 找到周期最接近当前 N_current 的频率分量下标 k
+        # Eq (6): k = argmin |T_i - N|
+        diffs = torch.abs(periods - N_current)
+        k = torch.argmin(diffs)
+        
+        # 获取该主频的周期 T_k
+        T_k = periods[k]
+        
+        # 检查是否满足非重复条件 Eq (7)
+        # 如果目标分辨率超过了主频周期，需要拉伸该频率
+        if target_res > T_k:
+            # Eq (8): theta'_k = 2 * pi / H
+            # 将该频率强制设为对应目标分辨率的波长
+            new_freq = 2 * torch.pi / target_res
+            freqs_new[k] = new_freq
+            periods[k] = target_res # 更新周期表以便后续迭代
+            
+            # 更新 N_current (模拟消除了当前层级的重复后，寻找下一个潜在重复)
+            # 论文中这是一个启发式过程，通常一次修正(针对 mid-band)就足够，但为了稳健可以多次
+            # 这里简单起见，我们主要修正这一个最显著的。如果需要完全匹配算法1，需更新 N_current
+            # 在实践中，修正最接近 train_res 的那个频率是最关键的。
+            
     return freqs_new
 
-
-def get_2d_rotary_pos_embed_ultraimage(
-    dim: int, h: int, w: int, train_h: int, train_w: int, theta: float = 10000.0, recursive_iter: int = 1
+def get_1d_rotary_pos_embed_ultra(
+    dim: int,
+    pos: Union[np.ndarray, int],
+    theta: float = 10000.0,
+    use_real=False,
+    linear_factor=1.0,
+    ntk_factor=1.0,
+    repeat_interleave_real=True,
+    freqs_dtype=torch.float32,
+    # === UltraImage 新增参数 ===
+    train_seq_len: Optional[int] = None, # 训练时的序列长度 (分辨率)
+    infer_seq_len: Optional[int] = None, # 当前推理的序列长度 (分辨率)
+    rdfc_iter: int = 2,
 ):
     """
-    生成适用于 2D 图像的 RoPE，并应用 UltraImage 的 RDFC 修正。
-
-    Args:
-        dim: Head dimension
-        h, w: 当前推理的目标高度和宽度
-        train_h, train_w: 模型训练时的分辨率 (如 1024, 1024)
+    基于 UltraImage 改进的 1D RoPE 生成函数。
     """
     assert dim % 2 == 0
-    d_half = dim // 2
 
-    # 生成基础频率
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))  # [D/2]
+    if isinstance(pos, int):
+        pos = torch.arange(pos)
+    if isinstance(pos, np.ndarray):
+        pos = torch.from_numpy(pos)
 
-    # 分别对 H 和 W 维度应用 RDFC 修正
-    # 注意：通常图像 RoPE 是将 dim 分为两半，一半给 H，一半给 W；或者是两个独立的 RoPE 拼接
-    # 这里假设是 Flux/Qwen 的方式：两个独立的 1D RoPE 拼接 (Axial RoPE)
+    theta = theta * ntk_factor
+    
+    # 生成基础频率: theta_i
+    freqs = (
+        1.0 / (theta ** (torch.arange(0, dim, 2, dtype=freqs_dtype, device=pos.device) / dim)) / linear_factor
+    )  # [D/2]
 
-    # 1. 计算 Height 方向的频率
-    freqs_h = apply_rdfc_to_freqs(freqs, train_h, h, theta, recursive_iter)
+    # === UltraImage RDFC Start ===
+    if train_seq_len is not None and infer_seq_len is not None:
+        # 仅当处于外推模式(infer > train)且指定了训练分辨率时启用
+        if infer_seq_len > train_seq_len:
+            freqs = apply_rdfc_correction(freqs, train_seq_len, infer_seq_len, recursive_iter=rdfc_iter)
+    # === UltraImage RDFC End ===
 
-    # 2. 计算 Width 方向的频率
-    freqs_w = apply_rdfc_to_freqs(freqs, train_w, w, theta, recursive_iter)
+    # 生成 outer product [S, D/2]
+    freqs = torch.outer(pos, freqs)
+    
+    is_npu = freqs.device.type == "npu"
+    if is_npu:
+        freqs = freqs.float()
+        
+    if use_real and repeat_interleave_real:
+        # Flux, Hunyuan, CogVideoX style: [cos, cos, sin, sin] interleaved
+        freqs_cos = freqs.cos().repeat_interleave(2, dim=1, output_size=freqs.shape[1] * 2).float()
+        freqs_sin = freqs.sin().repeat_interleave(2, dim=1, output_size=freqs.shape[1] * 2).float()
+        return freqs_cos, freqs_sin
+    elif use_real:
+        # Stable Audio style: [cos, ..., sin, ...] concatenated
+        freqs_cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1).float()
+        freqs_sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1).float()
+        return freqs_cos, freqs_sin
+    else:
+        # Lumina style: complex64
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        return freqs_cis
 
-    # 生成 Grid
-    # grid_h: [H], grid_w: [W]
-    grid_h = torch.arange(h, dtype=torch.float32)
-    grid_w = torch.arange(w, dtype=torch.float32)
-
-    # Meshgrid
-    # y: [H, W], x: [H, W]
-    y, x = torch.meshgrid(grid_h, grid_w, indexing="ij")
-
-    # Flatten: [L] where L = H*W
-    y = y.flatten()
-    x = x.flatten()
-
-    # Outer product to get embeddings
-    # args_h: [L, D/2], args_w: [L, D/2]
-    args_h = torch.outer(y, freqs_h)
-    args_w = torch.outer(x, freqs_w)
-
-    # 组合成 Complex Cis
-    # [L, D/2] (complex64)
-    freqs_cis_h = torch.polar(torch.ones_like(args_h), args_h)
-    freqs_cis_w = torch.polar(torch.ones_like(args_w), args_w)
-
-    # 将 H 和 W 的编码拼接。这取决于具体模型实现。
-    # Flux/Qwen 通常是将 dim 分成两部分，或者在该维度上在此拼接
-    # 这里返回两个分量供模型内部拼接使用，或者拼接成 [L, D] (如果 dim 是总维度)
-    # 假设返回拼接后的 complex 张量 [L, D/2] (意指两组频率交织或拼接)
-    # 为简单起见，这里模仿常见实现，返回拼接后的 cis
-
-    return torch.cat([freqs_cis_h, freqs_cis_w], dim=-1)
-
-
-# ==========================================
-# Part 2: Entropy-guided Adaptive Attention Concentration
-# ==========================================
-
-
-class UltraImageAttentionController:
+def get_2d_rotary_pos_embed_ultra_from_grid(
+    embed_dim, 
+    grid, 
+    use_real=False, 
+    train_res_hw: Optional[Tuple[int, int]] = None # (train_h, train_w)
+):
     """
-    控制器类，用于管理 Attention 的熵计算和 Focus Factor 缓存。
+    2D RoPE Wrapper for UltraImage.
     """
+    assert embed_dim % 4 == 0
+    
+    # Grid shape is typically [2, H, W] or [2, 1, H, W] depending on input
+    # Flatten grid for 1D embedding generation
+    h_pos = grid[0].reshape(-1) # [H*W]
+    w_pos = grid[1].reshape(-1) # [H*W]
+    
+    # 获取当前推理的分辨率 (通过 grid 的最大值估算，或者通过 grid 形状)
+    # 注意：grid 可能是归一化的或者像素坐标。如果是像素坐标：
+    cur_h = int(h_pos.max().item()) + 1
+    cur_w = int(w_pos.max().item()) + 1
+    
+    train_h, train_w = (None, None)
+    if train_res_hw is not None:
+        train_h, train_w = train_res_hw
 
+    # H 维度 Embedding (带 RDFC)
+    res_h = get_1d_rotary_pos_embed_ultra(
+        embed_dim // 2, 
+        h_pos, 
+        use_real=use_real, 
+        train_seq_len=train_h,
+        infer_seq_len=cur_h
+    )
+    
+    # W 维度 Embedding (带 RDFC)
+    res_w = get_1d_rotary_pos_embed_ultra(
+        embed_dim // 2, 
+        w_pos, 
+        use_real=use_real,
+        train_seq_len=train_w,
+        infer_seq_len=cur_w
+    )
+
+    if use_real:
+        cos_h, sin_h = res_h
+        cos_w, sin_w = res_w
+        # Concatenate H and W embeddings
+        cos = torch.cat([cos_h, cos_w], dim=1) # [H*W, D]
+        sin = torch.cat([sin_h, sin_w], dim=1) # [H*W, D]
+        return cos, sin
+    else:
+        # Complex case
+        emb = torch.cat([res_h, res_w], dim=1)
+        return emb
+
+
+
+class UltraImageAttentionProcessor:
+    """
+    实现了 UltraImage 的 Entropy-guided Adaptive Attention Concentration.
+    """
     def __init__(self, lambda_min=1.0, lambda_max=1.3, p=2.0):
         self.lambda_min = lambda_min
         self.lambda_max = lambda_max
         self.p = p
-        self.cached_lambdas = {}  # Key: layer_id, Value: tensor of shape [num_heads, 1, 1]
-        self.is_calibration = False
+        
+        # 缓存每个 layer 的 lambda 因子
+        # Key: layer_name (str), Value: tensor [1, Num_Heads, 1, 1]
+        self.cached_lambdas = {} 
+        
+        # 状态标记
+        self.is_calibration_step = False # 是否是采样的第一步(去噪步)
 
     def reset(self):
         self.cached_lambdas = {}
+        self.is_calibration_step = True # 重置后，下一次调用应视为校准步
 
-    def set_calibration(self, mode: bool):
-        self.is_calibration = mode
-
-    def compute_focus_factors(self, attn_probs: torch.Tensor, layer_id: str):
+    def __call__(
+        self,
+        attn, # Attention layer object (nn.Module)
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        layer_name=None, # 需要传入唯一标识符
+        scale=1.0,
+    ):
         """
-        Stage 1: 根据第一步去噪的 Attention Map 计算熵和 lambda。
-        attn_probs: [B, Num_Heads, N, N] (Full attention map)
-
-        Note: 论文中提到对于超高分辨率，计算全量 Attention Map 显存开销巨大，
-        使用了 Block-wise 的 Triton kernel。这里演示 PyTorch 逻辑。
+        替代标准的 Attention forward。
         """
-        B, H, N, _ = attn_probs.shape
+        batch_size, sequence_length, _ = hidden_states.shape
+        
+        # 1. 准备 Q, K, V
+        query = attn.to_q(hidden_states)
+        
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
 
-        # 1. 计算熵 H_alpha (Eq 10)
-        # H_alpha = - (1/N) * sum(P * log(P))
-        # 为了数值稳定性，输入最好是 logits，但这里假设输入已经是 softmax 后的 probs
-        # 加一个 epsilon 防止 log(0)
-        eps = 1e-10
-        entropy = -torch.sum(attn_probs * torch.log(attn_probs + eps), dim=-1)  # [B, H, N]
-        entropy = torch.mean(entropy, dim=-1)  # Mean over queries -> [B, H]
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
 
-        # 如果 batch > 1，取平均
-        entropy = torch.mean(entropy, dim=0)  # [H]
-
-        H_min = entropy.min()
-        H_max = entropy.max()
-
-        # 2. 计算 Focus Factor lambda (Eq 11)
-        # 熵越小(Local pattern)，lambda 越大(Sharpen)
-        # 熵越大(Global pattern)，lambda 越小(Preserve)
-
-        if H_max - H_min < 1e-6:
-            scaling = torch.zeros_like(entropy)
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+        
+        # [Batch * Heads, SeqLen, HeadDim] -> [Batch, Heads, SeqLen, HeadDim]
+        # 为了方便计算 Head-wise 熵，我们需要把 Batch 和 Heads 分开
+        # 假设 head_to_batch_dim 只是做了 reshape/transpose
+        head_dim = query.shape[-1]
+        num_heads = attn.heads
+        
+        # Reshape for entropy calculation: [B, H, N, D]
+        query_view = query.view(batch_size, num_heads, -1, head_dim)
+        key_view = key.view(batch_size, num_heads, -1, head_dim)
+        
+        # 2. 计算 Attention Logits
+        # S = Q @ K.T / sqrt(d)
+        attention_scores = torch.matmul(query_view, key_view.transpose(-1, -2)) * scale
+        
+        # 3. UltraImage Adaptive Logic
+        if self.is_calibration_step:
+            # === Calibration (First Step) ===
+            # 计算标准概率用于熵计算
+            attn_probs_temp = F.softmax(attention_scores, dim=-1)
+            
+            # 计算熵 H_alpha (Eq 10)
+            # Entropy = - sum(p * log(p))
+            # [B, H, N] (average over target tokens later)
+            eps = 1e-10
+            entropy = -torch.sum(attn_probs_temp * torch.log(attn_probs_temp + eps), dim=-1)
+            
+            # 对 Query 维度取平均得到每个 Head 的熵
+            entropy = torch.mean(entropy, dim=-1) # [B, H]
+            # 对 Batch 取平均
+            entropy = torch.mean(entropy, dim=0)  # [H]
+            
+            # 计算 Focus Factor (Eq 11)
+            H_min = entropy.min()
+            H_max = entropy.max()
+            
+            if H_max - H_min < 1e-6:
+                scaling_factor = torch.zeros_like(entropy)
+            else:
+                scaling_factor = (H_max - entropy) / (H_max - H_min)
+            
+            # lambda = min + (max - min) * factor^p
+            lambdas = self.lambda_min + (self.lambda_max - self.lambda_min) * (scaling_factor ** self.p)
+            
+            # Cache it: [1, H, 1, 1] for broadcasting
+            # 存入字典
+            if layer_name is None:
+                layer_name = f"layer_{len(self.cached_lambdas)}"
+            
+            lambda_tensor = lambdas.view(1, num_heads, 1, 1).to(query.device)
+            self.cached_lambdas[layer_name] = lambda_tensor
+            
+            # 应用 lambda
+            attention_scores = attention_scores * lambda_tensor
+            
         else:
-            scaling = (H_max - entropy) / (H_max - H_min)
+            # === Inference (Subsequent Steps) ===
+            if layer_name in self.cached_lambdas:
+                lambda_tensor = self.cached_lambdas[layer_name]
+                attention_scores = attention_scores * lambda_tensor
+        
+        # 4. Standard Softmax & Output
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        
+        # Dropout if needed (usually 0 for inference)
+        # attention_probs = attn.attn_drop(attention_probs)
 
-        lambdas = self.lambda_min + (self.lambda_max - self.lambda_min) * (scaling**self.p)
+        # Reshape back to [B*H, N, N] for matmul if needed, or keep 4D
+        # View V: [B, H, N, D]
+        value_view = value.view(batch_size, num_heads, -1, head_dim)
+        
+        hidden_states = torch.matmul(attention_probs, value_view)
+        
+        # Reshape back to [B, N, H*D]
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
+        
+        # Output projection
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
 
-        # Cache it: [1, H, 1, 1] for broadcasting
-        self.cached_lambdas[layer_id] = lambdas.view(1, -1, 1, 1)
-        return self.cached_lambdas[layer_id]
-
-
-def scaled_dot_product_attention_ultraimage(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    controller: UltraImageAttentionController,
-    layer_id: str,
-    scale: float = None,
-):
-    """
-    UltraImage 的 Attention 实现。
-    """
-    B, H, N, D = query.shape
-    scale = scale or (1.0 / math.sqrt(D))
-
-    # 1. Compute Logits
-    # S = QK^T
-    attn_logits = torch.matmul(query, key.transpose(-2, -1)) * scale  # [B, H, N, N]
-
-    # 2. Apply Entropy-guided Concentration
-
-    if controller.is_calibration:
-        # Stage 1: Calibration (First Step)
-        # 计算标准的 Softmax
-        attn_probs = F.softmax(attn_logits, dim=-1)
-        # 计算并缓存 Lambda
-        focus_factors = controller.compute_focus_factors(attn_probs, layer_id)
-
-        # 重新应用 Lambda 到 logits 并计算最终 output
-        # P = softmax(lambda * S)
-        attn_logits = attn_logits * focus_factors.to(attn_logits.device)
-        attn_probs = F.softmax(attn_logits, dim=-1)
-
-    else:
-        # Stage 2: Inference (Subsequent Steps)
-        # 直接读取缓存的 Lambda
-        if layer_id in controller.cached_lambdas:
-            focus_factors = controller.cached_lambdas[layer_id].to(attn_logits.device)
-            # Apply scaling
-            attn_logits = attn_logits * focus_factors
-
-        attn_probs = F.softmax(attn_logits, dim=-1)
-
-    # 3. Output
-    output = torch.matmul(attn_probs, value)
-    return output
-
-
-# ==========================================
-# Example Usage
-# ==========================================
-
-if __name__ == "__main__":
-    # 模拟参数
-    dim = 64  # Head dimension
-    train_res = 1024
-    target_res = 4096  # 4x extrapolation
-
-    print("--- Testing RDFC (RoPE) ---")
-    # 1. 获取 UltraImage 的 RoPE Cis
-    rope_cis = get_2d_rotary_pos_embed_ultraimage(
-        dim=dim,
-        h=target_res,
-        w=target_res,
-        train_h=train_res,
-        train_w=train_res,
-        recursive_iter=1,  # 自动修正最显著的一个频率
-    )
-    print(f"RoPE shape: {rope_cis.shape}")  # Should be [H*W, D] (concatenated) or similar
-
-    print("\n--- Testing Adaptive Attention ---")
-    # 2. 初始化控制器
-    controller = UltraImageAttentionController(lambda_min=1.0, lambda_max=1.3, p=2.0)
-
-    # 模拟输入 [B, Heads, SeqLen, Dim]
-    # 假设 SeqLen = 100 (为了跑得快，实际上是 HW)
-    q = torch.randn(1, 8, 100, dim)
-    k = torch.randn(1, 8, 100, dim)
-    v = torch.randn(1, 8, 100, dim)
-
-    # Step 1: Calibration Step (First denoising step)
-    controller.set_calibration(True)
-    out_step1 = scaled_dot_product_attention_ultraimage(q, k, v, controller, layer_id="layer_0")
-    print("Calibration step done. Lambdas cached.")
-    print(f"Cached lambda stats for layer_0: \n{controller.cached_lambdas['layer_0'].squeeze()}")
-
-    # Step 2: Normal Step
-    controller.set_calibration(False)
-    out_step2 = scaled_dot_product_attention_ultraimage(q, k, v, controller, layer_id="layer_0")
-    print("Inference step done using cached lambdas.")
+        return hidden_states

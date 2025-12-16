@@ -157,11 +157,25 @@ def rearrange_lst(x: list[Tensor] | Tensor, pattern: str, **pattern_kwargs: dict
         return rearrange(x, pattern, **pattern_kwargs)
 
 
-def norm_feature(feat: Tensor | list[Tensor], dim=1):
+def norm_feature(feat: Tensor | list[Tensor], dim=1, norm_type="l2"):
+    def _norm_fn(x):
+        if norm_type == "l2":
+            return F.normalize(x, dim=dim)
+        elif norm_type == "spatial":
+            # from iREPA paper
+            gamma = 0.6  # (0.6, 0.8) from its paper
+            # shaped as [b, c, l]
+            spatial_dim = -1 if dim in (1, -2) else 1
+            x = x - gamma * x.mean(dim=spatial_dim, keepdim=True)
+            x = x / (x.std(dim=spatial_dim, keepdim=True) + 1e-6)
+            return x
+        else:
+            raise ValueError(f"Unknown {norm_type=}")
+
     if isinstance(feat, list):
-        return [F.normalize(f, dim=dim) for f in feat]
+        return [_norm_fn(f) for f in feat]
     else:
-        return F.normalize(feat, dim=dim)
+        return _norm_fn(feat)
 
 
 def build_mlp(
@@ -221,8 +235,8 @@ def token_relation_loss(
     feature shape: [b * nf, l, c], dim=-1; [b * nf, c, l], dim=1,
         means where the channel dim at which dimension.
     """
-    if dim == 1:
-        feature_teacher = feature_teacher.transpose(1, 2)
+    if dim in (1, -2):
+        feature_teacher = feature_teacher.transpose(1, 2)  # bcl->blc
         feature_student = feature_student.transpose(1, 2)
     if not img_level:
         feature_teacher = feature_teacher.flatten(0, 1)  # (bs * l, c)
@@ -234,11 +248,11 @@ def token_relation_loss(
         feature_student = F.normalize(feature_student, dim=-1)
 
     if img_level:
-        relation_t = torch.einsum("blc,blc->bll", feature_teacher, feature_teacher)
-        relation_s = torch.einsum("blc,blc->bll", feature_student, feature_student)
+        relation_t = torch.einsum("bsc,blc->bsl", feature_teacher, feature_teacher)
+        relation_s = torch.einsum("bsc,blc->bsl", feature_student, feature_student)
     else:
-        relation_t = torch.einsum("Nc,Nc->NN", feature_teacher, feature_teacher)
-        relation_s = torch.einsum("Nc,Nc->NN", feature_student, feature_student)
+        relation_t = torch.einsum("Bc,Nc->BN", feature_teacher, feature_teacher)
+        relation_s = torch.einsum("Bc,Nc->BN", feature_student, feature_student)
 
     if remove_negative:
         relation_t = relation_t.clamp(min=0.0)
@@ -343,9 +357,11 @@ def hier_distillation_loss(
         gram_losses = []
         for i in range(layers_n):
             ft, fs = feature_teacher[i], feature_student[i]
-            gram_loss = token_relation_loss(ft, fs, dim=dim, norm=True, remove_neg=True)
+            gram_loss = token_relation_loss(ft, fs, dim=dim, norm=True, remove_negative=True)
             gram_losses.append(gram_loss)
         unsim_loss = torch.stack(gram_losses, dim=0)  # name hack for the code compatibility.
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
 
     if layer_weight_type == "softmax":
         if implem == "legacy" and loss_type == "cosine":
@@ -772,7 +788,7 @@ class REPALoss(torch.nn.Module):
         img_is_neg1_1=True,
         rgb_channels: list[int] | Literal["random", "mean", "largest"] | str | None = None,
         img_resize: Literal["dino"] | tuple[int, int] | int | None = "dino",
-        feature_normalize: bool = False,
+        feature_normalize: str | None = "spatial",
         loss_type: str = "repa_original",
         get_hier_teacher_feature: bool = False,
         feature_resample_type: Literal["match_teacher", "match_student"] = "match_student",
@@ -800,6 +816,8 @@ class REPALoss(torch.nn.Module):
             "am_radio",
             "token_relation",
             "hier_distillation",
+            "hier_distillation@gram",
+            "hier_distillation@cosine",
         )
         assert repa_model_type in ("dinov2", "dinov3", "pe", "siglip2")
         assert dino_load_type in ("torch", "timm")
@@ -1279,11 +1297,11 @@ class REPALoss(torch.nn.Module):
         student_feat = rearrange_lst(student_feat, rarg_pattn)
 
         # 3.1 Whether to keep the feature magnitude (norm or not)
-        dim = -2
-        if self.feature_normalize and not self.loss_type == "hier_distillation":
+        dim = 1
+        if self.feature_normalize is not None:
             # if hier_distillation, normalization in the function, see 'hier_distillation_loss'
-            teacher_feat = norm_feature(teacher_feat, dim=dim)
-            student_feat = norm_feature(student_feat, dim=dim)
+            teacher_feat = norm_feature(teacher_feat, dim=dim, norm_type=self.feature_normalize)
+            student_feat = norm_feature(student_feat, dim=dim, norm_type=self.feature_normalize)
 
         # Shape assertion
         _assertion_msg = (
@@ -1297,9 +1315,14 @@ class REPALoss(torch.nn.Module):
                 assert t_feat.shape == s_feat.shape, _assertion_msg(t_feat, s_feat)
 
         # 3.2 loss
-        if self.loss_type == "hier_distillation":
+        if self.loss_type.startswith("hier_distillation"):
+            args = self.loss_type.split("@")  # hier_distillation@cosine/gram
+            if len(args) == 1:
+                hd_loss_type = "cosine"
+            else:
+                hd_loss_type = args[1]
             # hier_distillation_loss needs all list features for weighted computation
-            repa_loss = hier_distillation_loss(teacher_feat, student_feat, dim=dim)
+            repa_loss = hier_distillation_loss(teacher_feat, student_feat, dim=dim, loss_type=hd_loss_type)
         else:
             # Other loss functions use multiple_features_apply
             loss_functions = {

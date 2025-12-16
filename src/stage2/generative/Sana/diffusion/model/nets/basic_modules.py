@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 from timm.layers.mlp import Mlp as timmMLP
 
-from diffusion.model.act import build_act, get_act_name
-from diffusion.model.norms import build_norm, get_norm_name
-from diffusion.model.utils import get_same_padding, val2tuple
+from src.stage2.generative.Sana.diffusion.model.act import build_act, get_act_name
+from src.stage2.generative.Sana.diffusion.model.norms import build_norm, get_norm_name
+from src.stage2.generative.Sana.diffusion.model.utils import get_same_padding, val2tuple
 
 
 class ConvLayer(nn.Module):

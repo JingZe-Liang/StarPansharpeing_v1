@@ -28,22 +28,23 @@ warnings.filterwarnings("ignore")  # ignore warning
 
 
 from diffusion import DPMS, FlowEuler
-from diffusion.model.builder import (
+from tools.controlnet.utils import get_scribble_map, transform_control_signal
+from tools.download import find_model
+
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
     vae_encode,
 )
-from diffusion.model.utils import (
+from src.stage2.generative.Sana.diffusion.model.utils import (
     get_weight_dtype,
     prepare_prompt_ar,
     resize_and_crop_tensor,
 )
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.logger import get_root_logger
-from tools.controlnet.utils import get_scribble_map, transform_control_signal
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 def guidance_type_select(default_guidance_type, pag_scale, attn_type):
@@ -81,9 +82,7 @@ def get_ar_from_ref_image(ref_image):
 
 @dataclass
 class SanaControlNetInference(SanaConfig):
-    config: Optional[str] = (
-        "configs/sana_config/1024ms/Sana_1600M_img1024.yaml"  # config
-    )
+    config: Optional[str] = "configs/sana_config/1024ms/Sana_1600M_img1024.yaml"  # config
     model_path: str = field(
         default="output/Sana_D20/SANA.pth",
         metadata={"help": "Path to the model file (positional)"},
@@ -98,9 +97,7 @@ class SanaControlNetInference(SanaConfig):
     custom_image_size: Optional[int] = None
     shield_model_path: str = field(
         default="google/shieldgemma-2b",
-        metadata={
-            "help": "The path to shield model, we employ ShieldGemma-2B by default."
-        },
+        metadata={"help": "The path to shield model, we employ ShieldGemma-2B by default."},
     )
 
 
@@ -135,12 +132,8 @@ class SanaControlNetPipeline(nn.Module):
         self.base_ratios = eval(f"ASPECT_RATIO_{self.image_size}_TEST")
         self.vis_sampler = self.config.scheduler.vis_sampler
         logger.info(f"Sampler {self.vis_sampler}, flow_shift: {self.flow_shift}")
-        self.guidance_type = guidance_type_select(
-            guidance_type, self.args.pag_scale, config.model.attn_type
-        )
-        logger.info(
-            f"Inference with {self.weight_dtype}, PAG guidance layer: {self.config.model.pag_applied_layers}"
-        )
+        self.guidance_type = guidance_type_select(guidance_type, self.args.pag_scale, config.model.attn_type)
+        logger.info(f"Inference with {self.weight_dtype}, PAG guidance layer: {self.config.model.pag_applied_layers}")
 
         # 1. build vae and text encoder
         self.vae = self.build_vae(config.vae)
@@ -158,20 +151,16 @@ class SanaControlNetPipeline(nn.Module):
                 truncation=True,
                 return_tensors="pt",
             ).to(self.device)
-            self.null_caption_embs = self.text_encoder(
-                null_caption_token.input_ids, null_caption_token.attention_mask
-            )[0]
+            self.null_caption_embs = self.text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask)[
+                0
+            ]
 
     def build_vae(self, config):
-        vae = get_vae(config.vae_type, config.vae_pretrained, self.device).to(
-            self.vae_dtype
-        )
+        vae = get_vae(config.vae_type, config.vae_pretrained, self.device).to(self.vae_dtype)
         return vae
 
     def build_text_encoder(self, config):
-        tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-            name=config.text_encoder_name, device=self.device
-        )
+        tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder_name, device=self.device)
         return tokenizer, text_encoder
 
     def build_sana_model(self, config):
@@ -179,8 +168,7 @@ class SanaControlNetPipeline(nn.Module):
         model_kwargs = model_init_config(config, latent_size=self.latent_size)
         model = build_model(
             config.model.model,
-            use_fp32_attention=config.model.get("fp32_attention", False)
-            and config.model.mixed_precision != "bf16",
+            use_fp32_attention=config.model.get("fp32_attention", False) and config.model.mixed_precision != "bf16",
             **model_kwargs,
         )
         self.logger.info(f"use_fp32_attention: {model.fp32_attention}")
@@ -223,9 +211,7 @@ class SanaControlNetPipeline(nn.Module):
         latents=None,
     ):
         self.ori_height, self.ori_width = ref_image.height, ref_image.width
-        self.guidance_type = guidance_type_select(
-            self.guidance_type, pag_guidance_scale, self.config.model.attn_type
-        )
+        self.guidance_type = guidance_type_select(self.guidance_type, pag_guidance_scale, self.config.model.attn_type)
 
         # 1. pre-compute negative embedding
         if negative_prompt != "":
@@ -236,9 +222,9 @@ class SanaControlNetPipeline(nn.Module):
                 truncation=True,
                 return_tensors="pt",
             ).to(self.device)
-            self.null_caption_embs = self.text_encoder(
-                null_caption_token.input_ids, null_caption_token.attention_mask
-            )[0]
+            self.null_caption_embs = self.text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask)[
+                0
+            ]
 
         if prompt is None:
             prompt = [""]
@@ -254,9 +240,7 @@ class SanaControlNetPipeline(nn.Module):
                     dtype=torch.float,
                     device=self.device,
                 ).repeat(num_images_per_prompt, 1),
-                torch.tensor([[1.0]], device=self.device).repeat(
-                    num_images_per_prompt, 1
-                ),
+                torch.tensor([[1.0]], device=self.device).repeat(num_images_per_prompt, 1),
             )
 
             ar = get_ar_from_ref_image(ref_image)
@@ -282,9 +266,7 @@ class SanaControlNetPipeline(nn.Module):
                     prompts_all = [chi_prompt + prompt for prompt in prompts]
                     num_chi_prompt_tokens = len(self.tokenizer.encode(chi_prompt))
                     max_length_all = (
-                        num_chi_prompt_tokens
-                        + self.config.text_encoder.model_max_length
-                        - 2
+                        num_chi_prompt_tokens + self.config.text_encoder.model_max_length - 2
                     )  # magic number 2: [bos], [_]
 
                 caption_token = self.tokenizer(
@@ -294,16 +276,12 @@ class SanaControlNetPipeline(nn.Module):
                     truncation=True,
                     return_tensors="pt",
                 ).to(device=self.device)
-                select_index = [0] + list(
-                    range(-self.config.text_encoder.model_max_length + 1, 0)
-                )
-                caption_embs = self.text_encoder(
-                    caption_token.input_ids, caption_token.attention_mask
-                )[0][:, None][:, :, select_index].to(self.weight_dtype)
+                select_index = [0] + list(range(-self.config.text_encoder.model_max_length + 1, 0))
+                caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+                    :, :, select_index
+                ].to(self.weight_dtype)
                 emb_masks = caption_token.attention_mask[:, select_index]
-                null_y = self.null_caption_embs.repeat(len(prompts), 1, 1)[:, None].to(
-                    self.weight_dtype
-                )
+                null_y = self.null_caption_embs.repeat(len(prompts), 1, 1)[:, None].to(self.weight_dtype)
 
                 n = len(prompts)
                 if latents is None:
@@ -330,11 +308,7 @@ class SanaControlNetPipeline(nn.Module):
                     thickness=sketch_thickness,
                 )
 
-                control_signal = (
-                    transform_control_signal(control_signal, hw)
-                    .to(self.device)
-                    .to(self.weight_dtype)
-                )
+                control_signal = transform_control_signal(control_signal, hw).to(self.device).to(self.weight_dtype)
 
                 control_signal_latent = vae_encode(
                     self.config.vae.vae_type,
@@ -392,9 +366,7 @@ class SanaControlNetPipeline(nn.Module):
 
             if self.blend_alpha > 0:
                 print(f"blend image and mask with alpha: {self.blend_alpha}")
-                sample = (
-                    sample * (1 - self.blend_alpha) + control_signal * self.blend_alpha
-                )
+                sample = sample * (1 - self.blend_alpha) + control_signal * self.blend_alpha
 
             sample = resize_and_crop_tensor(sample, self.ori_width, self.ori_height)
             samples.append(sample)

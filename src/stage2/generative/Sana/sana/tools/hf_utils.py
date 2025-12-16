@@ -27,9 +27,7 @@ def hf_download_or_fpath(path):
         segs = path.replace("hf://", "").split("/")
         repo_id = "/".join(segs[:2])
         filename = "/".join(segs[2:])
-        return hf_download_data(
-            repo_id, filename, repo_type="model", download_full_repo=True
-        )
+        return hf_download_data(repo_id, filename, repo_type="model", download_full_repo=True)
 
 
 def hf_download_data(

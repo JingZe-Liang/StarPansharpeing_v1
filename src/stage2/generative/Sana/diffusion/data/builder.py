@@ -21,8 +21,8 @@ from mmengine.registry import Registry, build_from_cfg
 from termcolor import colored
 from torch.utils.data import DataLoader
 
-from diffusion.data.transforms import get_transform
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.data.transforms import get_transform
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 DATASETS = Registry("datasets")
 
@@ -52,10 +52,10 @@ def build_dataset(cfg, resolution=224, **kwargs):
     logger = get_root_logger()
 
     dataset_type = cfg.get("type")
-    from diffusion.data import datasets as _datasets  # noqa: F401
+    from src.stage2.generative.Sana.diffusion.data import datasets as _datasets  # noqa: F401
 
     if dataset_type == "SanaLitdataGenerativeControlDataset":
-        from diffusion.data.datasets import litdata_sana_control as _litdata  # noqa: F401
+        from src.stage2.generative.Sana.diffusion.data.datasets import litdata_sana_control as _litdata  # noqa: F401
     logger.info(f"Constructing dataset {dataset_type}...")
     t = time.time()
     transform = cfg.pop("transform", "default_train")

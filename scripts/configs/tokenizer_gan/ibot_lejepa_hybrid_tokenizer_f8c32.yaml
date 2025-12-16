@@ -6,8 +6,9 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: mingtok_f16c64_uvit # [mingtok_f16c64_fm, mingtok_f16c64_uvit]
+  - tokenizer: cosmos_hybrid_one_big_transformer
   - quantizer: quant
+  - proxy_task: ibot_lejepa
   - accelerator: base
   - vq_loss: remote_clip_RN50
   # self ============
@@ -22,22 +23,57 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
+dataset:
+  train_loader:
+    macro_sampled_batch_size:
+      128: 20
+      256: 14
+      512: 8
+
+  weights:
+    [30, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 16, 10, 16, 10, 11, 20]
+
+# proxy_task:
+#   optimizer:
+#     _target_: heavyball.AdamW
+#     _partial_: true
+#     lr: 2.0e-4
+#     weight_decay: 0.01
+#     caution: true
+#     mars: false
+#     betas: ${tuple:[0.9,0.99]}
+
+tokenizer:
+  cnn_cfg:
+    model:
+      latent_channels: 64
+    quantizer_type: null
+    use_channel_drop: false
+    channel_drop_config:
+      drop_type: ${list:[16,32,48]}
+      max_channels: 64
+      drop_prob: 0.5
+  trans_enc_cfg:
+    pretrained_type: ["ibot", "lejepa"]
+    class_token: true
+    global_pool: "map"
+
 vq_loss:
-  reconstruction_weight: 4.0 # ignore this reweighting when using the outer flow loss
-  reconstruction_loss_type: mse
-  disc_in_channels: 512 #${dataset.channels} ## interp conv
   # perceptual loss
-  perceptual_weight: 0.2
+  perceptual_weight: 0.1
   # repa loss
-  repa_loss_weight: 0.1 # 0.1
+  repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
-    repa_model_type: dinov3
-    repa_model_name: "dinov3_vitl16"
+    # repa_model_type: dinov3
+    # repa_model_name: "dinov3_vitl16"
+    repa_model_type: pe
+    repa_model_name: "PE-Spatial-L14-448"
+    repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
     loss_type: hier_distillation
     feature_normalize: spatial
@@ -81,6 +117,7 @@ vq_loss:
   quantizer_options:
   # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
+  disc_in_channels: 512 #${dataset.channels} ## interp conv
   disc_ndf: 128
   disc_num_layers: 3
   use_actnorm: false
@@ -88,10 +125,9 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  disc_weight: 0.4
   ssim_weight: 0.0
-  gen_loss_weight: null
-  force_not_use_recon_loss: true # compute fm loss in transport, not in vqloss class
+  disc_weight: 0.4
+  reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
@@ -100,16 +136,16 @@ vq_loss:
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
-  update_after_step: 1000
+  beta: 0.9995
+  update_after_step: 0
   update_every: 2
   use_foreach: true
   allow_different_devices: true
-  update_model_with_ema_every: 5_000
+  # update_model_with_ema_every: 5_000
 
 train:
-  tokenizer_name: mingtok_f16c64_fm
-  proj_dir: runs/stage1_mingtok
+  tokenizer_name: hybrid_cosmos_f16c64
+  proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 1.0
   track_metrics: true
@@ -119,12 +155,11 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: true
-  resume_path:
-  ema_load_path: #runs/stage1_mingtok/2025-11-09_21-19-05_mingtok_600M_continous/ema
+  resume_path: #runs/stage1_cosmos_hybrid/2025-12-06_18-33-38_hybrid_cosmos_f16c64_jepa_pretrained/checkpoints/checkpoint_45
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema
   compile_model: false
-  only_load_tokenizer: true
+  only_load_tokenizer: false
   seperate_enc_dec: false
-  prepare_dl: false
 
   # augmentations
   aug_pipeline_train_obj: #decoder_deg
@@ -138,54 +173,87 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
+    # _target_: src.utilities.optim.get_muon_optimizer
+    # _partial_: true
+    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
+    # weight_decay: 0.1
+    # adamw_eps: 1.0e-8
+    # ns_diff_abc: true
+    # ns_norm: false
+    # momentum: 0.9
+    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # adamw_wd: 0.
+
+    # _target_: src.utilities.optim.get_muon_triton_optimizer
+    # _partial_: true
+    # general_defaults:
+    #   lr: 4.0e-4
+    # muon_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.1
+    #   momentum: 0.95
+    # adamw_defaults:
+    #   lr: 2.0e-4
+    #   weight_decay: 0.0
+    #   betas: [0.9, 0.95]
+
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    betas: [0.95, 0.99]
+    betas: [0.9, 0.95]
+    mu: 0.95
     oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
     muon_params_defaults:
-      lr: 6.0e-4
-      weight_decay: 0.1
+      lr: 3.0e-4
+      weight_decay: 0.02
     oned_params_defaults:
       lr: 3.0e-4
-      weight_decay: 0.0
+      weight_decay: 0.02
 
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 6.0e-4
-    # weight_decay: 1.0e-4
+    # lr: 3.0e-4
+    # weight_decay: 1.0e-5
     # eps: 1.0e-8
     # betas: [0.95, 0.99]
-    # foreach: true
-    # # fused: true
+    # # foreach: true
+    # fused: true
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.02
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
 
   disc_optimizer:
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    # _partial_: true
-    # betas: [0.5, 0.9]
-    # oned_param_algo: lion
-    # muon_params_defaults:
-    #   lr: 6.0e-4
-    #   weight_decay: 0.1
-    # oned_params_defaults:
-    #   lr: 3.0e-4
-    #   weight_decay: 0.0
-
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 1.0e-4
+    lr: 3.0e-4
+    weight_decay: 1.0e-5
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]
     foreach: true
+    # fused: true
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
-    num_warmup_steps: 0
+    num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
-    min_lr: 1.0e-4
+    min_lr: 1.0e-5
     # _target_: transformers.optimization.get_constant_schedule_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000
@@ -193,20 +261,21 @@ train:
   disc_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
-    num_warmup_steps: 0
+    num_warmup_steps: 1000
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
-    min_lr: 1.0e-4
+    min_lr: 1.0e-5
     # _target_: transformers.optimization.get_constant_schedule_with_warmup
     # _partial_: true
     # num_warmup_steps: 1000
 
   log:
-    run_comment: mingtok_600M_continous
-    log_with_time: True
+    run_comment: hybrid_cosmos_f16c64_jepa_pretrained
+    log_with_time: true
     visualize_every: 500
     log_every: 10
+    log_with: [tensorboard, swanlab]
 
   debug: true
 
@@ -214,4 +283,4 @@ model_sampling: {}
 
 val:
   val_duration: 1000
-  max_val_iters: 8 # val only `max_val_iters` batches
+  max_val_iters: 200 # val only `max_val_iters` batches

@@ -8,7 +8,7 @@ from typing import Sequence
 
 from torch.utils.data import BatchSampler, Dataset, Sampler
 
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 class AspectRatioBatchSampler(BatchSampler):
@@ -38,13 +38,9 @@ class AspectRatioBatchSampler(BatchSampler):
         **kwargs,
     ) -> None:
         if not isinstance(sampler, Sampler):
-            raise TypeError(
-                f"sampler should be an instance of ``Sampler``, but got {sampler}"
-            )
+            raise TypeError(f"sampler should be an instance of ``Sampler``, but got {sampler}")
         if not isinstance(batch_size, int) or batch_size <= 0:
-            raise ValueError(
-                f"batch_size should be a positive integer value, but got batch_size={batch_size}"
-            )
+            raise ValueError(f"batch_size should be a positive integer value, but got batch_size={batch_size}")
 
         self.sampler = sampler
         self.dataset = dataset
@@ -60,14 +56,10 @@ class AspectRatioBatchSampler(BatchSampler):
         self.ratio_nums_gt = kwargs.get("ratio_nums", None)
         assert self.ratio_nums_gt, "ratio_nums_gt must be provided."
         self._aspect_ratio_buckets = {ratio: [] for ratio in aspect_ratios.keys()}
-        self.current_available_bucket_keys = [
-            str(k) for k, v in self.ratio_nums_gt.items() if v >= valid_num
-        ]
+        self.current_available_bucket_keys = [str(k) for k, v in self.ratio_nums_gt.items() if v >= valid_num]
 
         logger = (
-            get_root_logger()
-            if config is None
-            else get_root_logger(os.path.join(config.work_dir, "train_log.log"))
+            get_root_logger() if config is None else get_root_logger(os.path.join(config.work_dir, "train_log.log"))
         )
         logger.warning(
             f"Using valid_num={valid_num} in config file. Available {len(self.current_available_bucket_keys)} aspect_ratios: {self.current_available_bucket_keys}"
@@ -110,19 +102,13 @@ class AspectRatioBatchSampler(BatchSampler):
         str_idx = str(idx)
         if self.caching:
             if str_idx in self.cached_idx:
-                return self.cached_idx[str_idx], self.cached_idx[str_idx][
-                    "closest_ratio"
-                ]
+                return self.cached_idx[str_idx], self.cached_idx[str_idx]["closest_ratio"]
             data_info = self.dataset.get_data_info(int(idx))
             if data_info is None or (
-                self.hq_only
-                and "version" in data_info
-                and data_info["version"] not in ["high_quality"]
+                self.hq_only and "version" in data_info and data_info["version"] not in ["high_quality"]
             ):
                 return None, None
-            closest_ratio = self._get_closest_ratio(
-                data_info["height"], data_info["width"]
-            )
+            closest_ratio = self._get_closest_ratio(data_info["height"], data_info["width"])
             self.data_all[str_idx] = {
                 "height": data_info["height"],
                 "width": data_info["width"],
@@ -141,14 +127,10 @@ class AspectRatioBatchSampler(BatchSampler):
 
             data_info = self.dataset.get_data_info(int(idx))
             if data_info is None or (
-                self.hq_only
-                and "version" in data_info
-                and data_info["version"] not in ["high_quality"]
+                self.hq_only and "version" in data_info and data_info["version"] not in ["high_quality"]
             ):
                 return None, None
-            closest_ratio = self._get_closest_ratio(
-                data_info["height"], data_info["width"]
-            )
+            closest_ratio = self._get_closest_ratio(data_info["height"], data_info["width"])
 
             return data_info, closest_ratio
 
@@ -178,13 +160,9 @@ class BalancedAspectRatioBatchSampler(AspectRatioBatchSampler):
         # Assign samples to each bucket
         self.ratio_nums_gt = kwargs.get("ratio_nums", None)
         assert self.ratio_nums_gt
-        self._aspect_ratio_buckets = {
-            float(ratio): [] for ratio in self.aspect_ratios.keys()
-        }
+        self._aspect_ratio_buckets = {float(ratio): [] for ratio in self.aspect_ratios.keys()}
         self.original_buckets = {}
-        self.current_available_bucket_keys = [
-            k for k, v in self.ratio_nums_gt.items() if v >= 3000
-        ]
+        self.current_available_bucket_keys = [k for k, v in self.ratio_nums_gt.items() if v >= 3000]
         self.all_available_keys = deepcopy(self.current_available_bucket_keys)
         self.exhausted_bucket_keys = []
         self.total_batches = len(self.sampler) // self.batch_size
@@ -203,20 +181,13 @@ class BalancedAspectRatioBatchSampler(AspectRatioBatchSampler):
             data_info = self.dataset.get_data_info(idx)
             height, width = data_info["height"], data_info["width"]
             ratio = height / width
-            closest_ratio = float(
-                min(self.aspect_ratios.keys(), key=lambda r: abs(float(r) - ratio))
-            )
+            closest_ratio = float(min(self.aspect_ratios.keys(), key=lambda r: abs(float(r) - ratio)))
             if closest_ratio not in self.all_available_keys:
                 continue
-            if (
-                self._aspect_ratio_count[closest_ratio]
-                < self.ratio_nums_gt[closest_ratio]
-            ):
+            if self._aspect_ratio_count[closest_ratio] < self.ratio_nums_gt[closest_ratio]:
                 self._aspect_ratio_count[closest_ratio] += 1
                 self._aspect_ratio_buckets[closest_ratio].append(idx)
-                self.original_buckets[closest_ratio].append(
-                    idx
-                )  # Save the original samples for each bucket
+                self.original_buckets[closest_ratio].append(idx)  # Save the original samples for each bucket
             if not self.current_available_bucket_keys:
                 self.current_available_bucket_keys, self.exhausted_bucket_keys = (
                     self.exhausted_bucket_keys,
@@ -243,12 +214,8 @@ class BalancedAspectRatioBatchSampler(AspectRatioBatchSampler):
 
                 # If a bucket is exhausted
                 if not bucket:
-                    self._aspect_ratio_buckets[key] = deepcopy(
-                        self.original_buckets[key][:]
-                    )
+                    self._aspect_ratio_buckets[key] = deepcopy(self.original_buckets[key][:])
                     shuffle(self._aspect_ratio_buckets[key])
             else:
-                self._aspect_ratio_buckets[key] = deepcopy(
-                    self.original_buckets[key][:]
-                )
+                self._aspect_ratio_buckets[key] = deepcopy(self.original_buckets[key][:])
                 shuffle(self._aspect_ratio_buckets[key])

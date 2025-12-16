@@ -158,3 +158,6 @@
 [submodule "src/stage2/layers/LaCT"]
 	path = src/stage2/layers/LaCT
 	url = https://github.com/a1600012888/LaCT.git
+[submodule "src/stage2/generative/LuminaImage"]
+	path = src/stage2/generative/LuminaImage
+	url = https://github.com/Alpha-VLLM/Lumina-Image-2.0.git

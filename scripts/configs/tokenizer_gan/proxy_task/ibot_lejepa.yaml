@@ -1,0 +1,19 @@
+task: ibot+lejepa
+
+aug:
+  n_local: 6
+  n_global: 2
+
+sigreg:
+  knots: 17
+  rnd_proj_dim: 128
+  lam: 0.02
+
+ibot_mask:
+  sample_prob: 0.5
+  ratio_min_max: [0.1, 0.5]
+ibot_loss:
+  patch_out_dim: 1152
+  student_temp: 0.1
+  teacher_temp: 0.04
+  center_momentum: 0.9

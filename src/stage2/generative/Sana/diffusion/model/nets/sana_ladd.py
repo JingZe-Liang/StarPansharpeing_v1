@@ -17,7 +17,7 @@
 import torch
 import torch.nn as nn
 
-from diffusion.model.builder import MODELS
+from src.stage2.generative.Sana.diffusion.model.builder import MODELS
 
 from .ladd_blocks import DiscHead
 from .sana_multi_scale import SanaMSCM
@@ -25,17 +25,13 @@ from .sana_multi_scale import SanaMSCM
 
 @MODELS.register_module()
 class SanaMSCMDiscriminator(nn.Module):
-    def __init__(
-        self, pretrained_model: SanaMSCM, is_multiscale=False, head_block_ids=None
-    ):
+    def __init__(self, pretrained_model: SanaMSCM, is_multiscale=False, head_block_ids=None):
         super().__init__()
         self.transformer = pretrained_model
         self.transformer.requires_grad_(False)
 
         if head_block_ids is None or len(head_block_ids) == 0:
-            self.block_hooks = (
-                {2, 8, 14, 20, 27} if is_multiscale else {self.transformer.depth - 1}
-            )
+            self.block_hooks = {2, 8, 14, 20, 27} if is_multiscale else {self.transformer.depth - 1}
         else:
             self.block_hooks = head_block_ids
 
@@ -97,11 +93,7 @@ class DiscHeadModel:
         self.disc = disc
 
     def state_dict(self):
-        return {
-            name: param
-            for name, param in self.disc.state_dict().items()
-            if not name.startswith("transformer.")
-        }
+        return {name: param for name, param in self.disc.state_dict().items() if not name.startswith("transformer.")}
 
     def __getattr__(self, name):
         return getattr(self.disc, name)

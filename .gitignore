@@ -177,6 +177,7 @@ CLAUDE.local.md
 .clinerules/
 
 compressed_output/
+**/output/
 
 # history
 .history/

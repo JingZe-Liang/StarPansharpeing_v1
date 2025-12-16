@@ -29,20 +29,21 @@ os.environ["DISABLE_XFORMERS"] = "1"
 
 
 from diffusion import SCMScheduler
-from diffusion.model.builder import (
+from tools.download import find_model
+
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
 )
-from diffusion.model.utils import (
+from src.stage2.generative.Sana.diffusion.model.utils import (
     get_weight_dtype,
     prepare_prompt_ar,
     resize_and_crop_tensor,
 )
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.logger import get_root_logger
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 def classify_height_width_bin(height: int, width: int, ratios: dict) -> Tuple[int, int]:
@@ -55,9 +56,7 @@ def classify_height_width_bin(height: int, width: int, ratios: dict) -> Tuple[in
 
 @dataclass
 class SanaSprintInference(SanaConfig):
-    config: Optional[str] = (
-        "configs/sana_sprint_config/1024ms/SanaSprint_1600M_1024px_allqknorm_bf16_scm_ladd.yaml"
-    )
+    config: Optional[str] = "configs/sana_sprint_config/1024ms/SanaSprint_1600M_1024px_allqknorm_bf16_scm_ladd.yaml"
     model_path: str = field(
         default="output/Sana_D20/SANA.pth",
         metadata={"help": "Path to the model file (positional)"},
@@ -74,9 +73,7 @@ class SanaSprintInference(SanaConfig):
     custom_image_size: Optional[int] = None
     shield_model_path: str = field(
         default="google/shieldgemma-2b",
-        metadata={
-            "help": "The path to shield model, we employ ShieldGemma-2B by default."
-        },
+        metadata={"help": "The path to shield model, we employ ShieldGemma-2B by default."},
     )
 
 
@@ -120,15 +117,11 @@ class SanaSprintPipeline(nn.Module):
         self.model = self.build_sana_model(config).to(self.device)
 
     def build_vae(self, config):
-        vae = get_vae(config.vae_type, config.vae_pretrained, self.device).to(
-            self.vae_dtype
-        )
+        vae = get_vae(config.vae_type, config.vae_pretrained, self.device).to(self.vae_dtype)
         return vae
 
     def build_text_encoder(self, config):
-        tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-            name=config.text_encoder_name, device=self.device
-        )
+        tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder_name, device=self.device)
         return tokenizer, text_encoder
 
     def build_sana_model(self, config):
@@ -136,8 +129,7 @@ class SanaSprintPipeline(nn.Module):
         model_kwargs = model_init_config(config, latent_size=self.latent_size)
         model = build_model(
             config.model.model,
-            use_fp32_attention=config.model.get("fp32_attention", False)
-            and config.model.mixed_precision != "bf16",
+            use_fp32_attention=config.model.get("fp32_attention", False) and config.model.mixed_precision != "bf16",
             cfg_embed=config.model.cfg_embed,
             cfg_embed_scale=config.model.cfg_embed_scale,
             **model_kwargs,
@@ -179,9 +171,7 @@ class SanaSprintPipeline(nn.Module):
     ):
         self.ori_height, self.ori_width = height, width
         if use_resolution_binning:
-            self.height, self.width = classify_height_width_bin(
-                height, width, ratios=self.base_ratios
-            )
+            self.height, self.width = classify_height_width_bin(height, width, ratios=self.base_ratios)
         else:
             self.height, self.width = height, width
         self.latent_size_h, self.latent_size_w = (
@@ -219,17 +209,11 @@ class SanaSprintPipeline(nn.Module):
                     dtype=torch.float,
                     device=self.device,
                 ).repeat(num_images_per_prompt, 1),
-                torch.tensor([[1.0]], device=self.device).repeat(
-                    num_images_per_prompt, 1
-                ),
+                torch.tensor([[1.0]], device=self.device).repeat(num_images_per_prompt, 1),
             )
 
             for _ in range(num_images_per_prompt):
-                prompts.append(
-                    prepare_prompt_ar(
-                        prompt, self.base_ratios, device=self.device, show=False
-                    )[0].strip()
-                )
+                prompts.append(prepare_prompt_ar(prompt, self.base_ratios, device=self.device, show=False)[0].strip())
 
             with torch.no_grad():
                 # prepare text feature
@@ -241,9 +225,7 @@ class SanaSprintPipeline(nn.Module):
                     prompts_all = [chi_prompt + prompt for prompt in prompts]
                     num_chi_prompt_tokens = len(self.tokenizer.encode(chi_prompt))
                     max_length_all = (
-                        num_chi_prompt_tokens
-                        + self.config.text_encoder.model_max_length
-                        - 2
+                        num_chi_prompt_tokens + self.config.text_encoder.model_max_length - 2
                     )  # magic number 2: [bos], [_]
 
                 caption_token = self.tokenizer(
@@ -253,12 +235,10 @@ class SanaSprintPipeline(nn.Module):
                     truncation=True,
                     return_tensors="pt",
                 ).to(device=self.device)
-                select_index = [0] + list(
-                    range(-self.config.text_encoder.model_max_length + 1, 0)
-                )
-                caption_embs = self.text_encoder(
-                    caption_token.input_ids, caption_token.attention_mask
-                )[0][:, None][:, :, select_index].to(self.weight_dtype)
+                select_index = [0] + list(range(-self.config.text_encoder.model_max_length + 1, 0))
+                caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+                    :, :, select_index
+                ].to(self.weight_dtype)
                 emb_masks = caption_token.attention_mask[:, select_index]
 
                 n = len(prompts)
@@ -280,9 +260,7 @@ class SanaSprintPipeline(nn.Module):
                     data_info={
                         "img_hw": hw,
                         "aspect_ratio": ar,
-                        "cfg_scale": torch.tensor(
-                            [guidance_scale] * latents.shape[0]
-                        ).to(self.device),
+                        "cfg_scale": torch.tensor([guidance_scale] * latents.shape[0]).to(self.device),
                     },
                     mask=emb_masks,
                 )

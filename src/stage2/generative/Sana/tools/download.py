@@ -24,7 +24,7 @@ import torch
 from termcolor import colored
 from torchvision.datasets.utils import download_url
 
-from sana.tools import hf_download_or_fpath
+from ..sana.tools import hf_download_or_fpath
 
 pretrained_models = {}
 
@@ -42,7 +42,7 @@ def find_model(model_name):
     model_name = hf_download_or_fpath(model_name)
     assert os.path.isfile(model_name), f"Could not find Sana checkpoint at {model_name}"
     print(colored(f"[Sana] Loading model from {model_name}", attrs=["bold"]))
-    return torch.load(model_name, map_location=lambda storage, loc: storage)
+    return torch.load(model_name, map_location=lambda storage, loc: storage, weights_only=False)
 
 
 def download_model(model_name):

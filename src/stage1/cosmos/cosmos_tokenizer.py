@@ -46,7 +46,7 @@ from src.utilities.config_utils import (
     function_config_to_basic_types,
 )
 from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
-from src.utilities.logging import catch_any, log_print
+from src.utilities.logging import catch_any
 from src.utilities.network_utils import load_weights_with_shape_check
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
@@ -82,7 +82,7 @@ class NestChannelDrop(nn.Module):
                 f"max_channels {self.max_channels} should be larger than the max of drop_list {max(self.drop_list)}"
             )
             self.drop_type = "prefixed"
-        log_print(
+        logger.info(
             f"[NestChannelDrop]: drop_type={self.drop_type}, max_channels={self.max_channels}, drop_prob={self.drop_prob}"
         )
 
@@ -455,9 +455,8 @@ class ContinuousImageTokenizer(nn.Module):
                 latent_channels=model_cfg.z_channels,
             )
             tokenizer_cfg.update(asdict(model_cfg))
-            log_print(
+            logger.info(
                 f"start from the pretrained model, cosmos tokenizer cfg is {tokenizer_cfg}",
-                "debug",
             )
             enc_jit, dec_jit = self.load_pretrained(enc_path=enc_path, dec_path=dec_path, tokenizer_cfg=tokenizer_cfg)  # type: ignore
 
@@ -506,22 +505,22 @@ class ContinuousImageTokenizer(nn.Module):
                         uni_tokenizer_path=uni_tokenizer_path,
                     )
                 if verbose and isinstance(profiler, torch.profiler.profile):
-                    log_print(profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+                    logger.info(profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
                 logger.log("NOTE", "load pretrained model done!")
 
         # token channel drop
         self.use_channel_drop = cfg.use_channel_drop
         if self.use_channel_drop:
             self.channel_drop = NestChannelDrop(**asdict(cfg.channel_drop_config))
-            log_print(f"use channel drop: {cfg.channel_drop_config}")
+            logger.info(f"use channel drop: {cfg.channel_drop_config}")
 
         # register repa hook
         if self._vf_on_z_or_module == "module" and (self._use_vf_loss or self._use_repa_loss):
             self.register_feature_hook()
 
         num_parameters = sum(param.numel() for param in self.parameters())
-        log_print(f"model={self.name}, num_parameters={num_parameters:,}")
-        log_print(f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}.")
+        logger.info(f"model={self.name}, num_parameters={num_parameters:,}")
+        logger.info(f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}.")
 
     def _build_encoder_decoder(
         self,
@@ -540,7 +539,7 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             raise ValueError(f"Unknown decoder type: {cfg.decoder_type}")
 
-        log_print(f"[CNN tokenizer]: Build encoder and {cfg.decoder_type} decoder.")
+        logger.info(f"[CNN tokenizer]: Build encoder and {cfg.decoder_type} decoder.")
         return encoder, decoder
 
     def _build_quantizer(self, cfg: ContinuousTokenizerConfig):
@@ -577,9 +576,9 @@ class ContinuousImageTokenizer(nn.Module):
             raise ValueError("quantizer type should be one of [kl, bsq, fsq, None]")
 
         if self.quantizer_type is not None:
-            log_print(f"Using quantizer: {self.quantizer.__class__.__name__}")
+            logger.info(f"Using quantizer: {self.quantizer.__class__.__name__}")
         else:
-            log_print(f"use no quantizer or VAE, the tokenizer is only an AutoEncoder")
+            logger.info(f"use no quantizer or VAE, the tokenizer is only an AutoEncoder")
 
         return self.quantizer
 
@@ -600,11 +599,7 @@ class ContinuousImageTokenizer(nn.Module):
             )
             quant_conv = nn.Sequential(
                 Normalize(model_cfg.latent_channels, norm_type="gn"),
-                torch.nn.Conv2d(
-                    model_cfg.latent_channels,
-                    q_conv_chan,
-                    1,
-                ),
+                torch.nn.Conv2d(model_cfg.latent_channels, q_conv_chan, 1),
             )
         else:
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
@@ -614,13 +609,14 @@ class ContinuousImageTokenizer(nn.Module):
 
         return quant_conv, post_quant_conv
 
-    def _build_feature_align_mlp(self):
+    def _build_feature_align_mlp(self, proj_type: str = "norm_first_force_conv"):
         if self._use_repa_loss:
             if self._vf_on_z_or_module == "module":
                 self._repa_proj = build_mlp(
                     512,  # rely on the module channels
                     self._dino_feature_dim,
                     self._dino_feature_dim,
+                    proj_type=proj_type,
                 )
             else:
                 self._repa_proj = build_mlp(
@@ -629,6 +625,7 @@ class ContinuousImageTokenizer(nn.Module):
                     self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
                     self._dino_feature_dim,
                     self._dino_feature_dim,
+                    proj_type=proj_type,
                 )
         if self._use_vf_loss:
             if self._vf_on_z_or_module == "module":
@@ -636,12 +633,14 @@ class ContinuousImageTokenizer(nn.Module):
                     512,
                     self._dino_feature_dim,
                     self._dino_feature_dim,
+                    proj_type=proj_type,
                 )
             else:
                 self._vf_proj = build_mlp(
                     self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
                     self._dino_feature_dim,
                     self._dino_feature_dim,
+                    proj_type=proj_type,
                 )
 
     def encoder_jit(self, encoder, quant_conv):
@@ -655,7 +654,7 @@ class ContinuousImageTokenizer(nn.Module):
             self._hook_feature = output
 
         self.get_submodule(self._hook_module).register_forward_hook(hook)
-        log_print(f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook")
+        logger.info(f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook")
 
     # * --- model feature alignment --- #
 
@@ -964,14 +963,14 @@ class ContinuousImageTokenizer(nn.Module):
 
         if self.loading_type == "nvidia":
             assert tokenizer_cfg is not None, "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
-            log_print(f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model")
+            logger.info(f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model")
             encoder, _enc_model_mody_keys = load_jit_model_shape_matched(
                 jit_model_path=enc_path,
                 device="cuda",
                 tokenizer_config=tokenizer_cfg,
                 part="encoder",
             )
-            log_print(f"Loading pretrained decoder from {dec_path} for NVIDIA pretrained model")
+            logger.info(f"Loading pretrained decoder from {dec_path} for NVIDIA pretrained model")
             decoder, _dec_model_mody_keys = load_jit_model_shape_matched(
                 jit_model_path=dec_path,
                 device="cuda",
@@ -979,7 +978,7 @@ class ContinuousImageTokenizer(nn.Module):
                 part="decoder",
             )
 
-            log_print(
+            logger.warning(
                 f"not compatible for pretraine models: \n"
                 f"encoder: {_enc_model_mody_keys}\n"
                 f"decoder: {_dec_model_mody_keys}\n",
@@ -991,13 +990,12 @@ class ContinuousImageTokenizer(nn.Module):
 
         else:
             if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
-                log_print(f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model")
+                logger.info(f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model")
                 weights = accelerate.utils.load_state_dict(uni_tokenizer_path)
                 # load_state_dict will check the shape of the model and the state dict
                 _missing_keys, _unexp_keys = load_weights_with_shape_check(self, weights)
-                log_print(
+                logger.warning(
                     f"tokenizer: missing keys {_missing_keys}, unexpected keys {_unexp_keys}",
-                    "warning",
                 )
 
                 # if conv_in is nn.Conv2d for only one channel
@@ -1007,7 +1005,7 @@ class ContinuousImageTokenizer(nn.Module):
                 if isinstance(self.encoder.encoder.conv_in, nn.Conv2d) and weights.get(_tgt_conv_w, None) is not None:
                     self.encoder.encoder.conv_in.weight.data.copy_(weights[_tgt_conv_w])
                     self.encoder.encoder.conv_in.bias.data.copy_(weights.get(_tgt_conv_b, None))
-                    log_print(f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}")
+                    logger.info(f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}")
 
                 # if conv_out is nn.Conv2d for only one channel
                 # and if the pretrained model conv_out is diff bands module
@@ -1016,15 +1014,15 @@ class ContinuousImageTokenizer(nn.Module):
                 if isinstance(self.decoder.decoder.conv_out, nn.Conv2d) and weights.get(_tgt_conv_w, None) is not None:
                     self.decoder.decoder.conv_out.weight.data.copy_(weights[_tgt_conv_w])
                     self.decoder.decoder.conv_out.bias.data.copy_(weights.get(_tgt_conv_b, None))
-                    log_print(f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}")
+                    logger.info(f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}")
 
-                log_print("load pretrained model done.")
+                logger.info("load pretrained model done.")
 
             else:
                 assert enc_path.endswith("safetensors") and dec_path.endswith("safetensors"), (
                     "only support safetensors for now"
                 )
-                log_print(
+                logger.info(
                     "pretrained model is pretrained on hyperspectral images, "
                     "for now is used to finetune on the other dataset"
                 )
@@ -1064,7 +1062,7 @@ class ContinuousImageTokenizer(nn.Module):
                             dim=1,  # after patcher
                         )
                         self.encoder.encoder.conv_in.weight.data.copy_(_mean_conv_in)  # type: ignore
-                        log_print("conv_in is missing, use the mean of the conv_in weight")
+                        logger.info("conv_in is missing, use the mean of the conv_in weight")
 
                     # if conv_in is nn.Conv2d for only one channel
                     # and if the pretrained conv_in's basic module is also conv
@@ -1076,7 +1074,9 @@ class ContinuousImageTokenizer(nn.Module):
                     ):
                         self.encoder.encoder.conv_in.weight.data.copy_(enc_sd[_tgt_conv_w])
                         self.encoder.encoder.conv_in.bias.data.copy_(enc_sd.get(_tgt_conv_b, None))
-                        log_print(f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}")
+                        logger.info(
+                            f"[Cosmos Tokenizer]: conv_in is copied from pretrained model from key {_tgt_conv_w}"
+                        )
 
                 if _conv_out_is_missing:
                     if mean_init_conv_in_out:
@@ -1100,7 +1100,7 @@ class ContinuousImageTokenizer(nn.Module):
                         conv_out_w.data.copy_(_mean_conv_out_w)  # type: ignore
                         conv_out_b.data.copy_(_mean_conv_out_bias)  # type: ignore
 
-                        log_print("conv_out is missing, use the mean of the conv_out weight")
+                        logger.info("conv_out is missing, use the mean of the conv_out weight")
 
                     # if conv_out is nn.Conv2d for only one channel
                     # and if the pretrained model conv_out is diff bands module
@@ -1113,11 +1113,10 @@ class ContinuousImageTokenizer(nn.Module):
                         self.decoder.decoder.conv_out.weight.data.copy_(enc_sd[_tgt_conv_w])
                         self.decoder.decoder.conv_out.bias.data.copy_(enc_sd.get(_tgt_conv_b, None))
 
-                log_print(
+                logger.warning(
                     f"load pretrained model done. \n"
                     f"encoder: missing keys {_enc_missing}, unexpected keys {_enc_unexp}\n"
                     f"decoder: missing keys {_dec_missing}, unexpected keys {_dec_unexp}",
-                    "warning",
                 )
 
     @no_type_check
@@ -1151,7 +1150,7 @@ class ContinuousImageTokenizer(nn.Module):
                 ("decoder.conv_in", self.decoder.decoder.conv_in),
             ],
         ):
-            log_print(f"register norm hook for {_m_name}")
+            logger.info(f"register norm hook for {_m_name}")
             setattr(_m, "_norm_hook_name", _m_name)
             _m.register_forward_hook(_output_norm_hook)
 
@@ -1186,7 +1185,7 @@ class ContinuousImageTokenizer(nn.Module):
                 _conv_out_name = "decoder.decoder.conv_out.wrap_mod"  # decrepeted
 
             module_to_save_layers.append(_conv_out_name)
-            log_print(f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune")
+            logger.info(f"[Cosmos Tokenizer LoRA]: add conv_in and conv_out to fully finetune")
 
         # backbone normalization layers
         if add_norms:
@@ -1251,7 +1250,7 @@ class ContinuousImageTokenizer(nn.Module):
         for m in self.modules():
             if hasattr(m, "grad_checkpointing"):
                 m.grad_checkpointing = enabled
-                log_print(f"set grad_checkpointing={enabled} for {m.__class__.__name__}")
+                logger.info(f"set grad_checkpointing={enabled} for {m.__class__.__name__}")
 
 
 # * --- test --- * #
@@ -1409,8 +1408,8 @@ def test_tokenizer_forward_backward(
 
     metric = MeanMetric().cuda()
     if compute_mean_std:
-        mean_fn = StackMeanMetrics().cuda()
-        std_fn = StackMeanMetrics().cuda()
+        mean_lst = []
+        std_lst = []
     ctx = torch.no_grad if not (use_optim or check_grad) else torch.enable_grad
     mem_ctx = mem_context(device) if show_mem_usage else nullcontext()
     with torch.autocast("cuda", dtype) and mem_ctx:
@@ -1439,12 +1438,10 @@ def test_tokenizer_forward_backward(
 
             # Compute mean and std of the latent
             if compute_mean_std:
-                # mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))
-                mean_c, std_c = h.mean(), h.std()
-                mean_fn.update(mean_c)
-                std_fn.update(std_c)
-                # means.append(mean_c)
-                # stds.append(std_c)
+                mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
+                # mean_c, std_c = h.mean(), h.std()
+                mean_lst.append(mean_c)
+                std_lst.append(std_c)
 
             # save reconstruction
             if save_img_dir is not None:
@@ -1487,12 +1484,10 @@ def test_tokenizer_forward_backward(
 
     # print mean and std of the latent
     if compute_mean_std:
-        # m = torch.mean(torch.stack(means), dim=0)
-        # s = torch.mean(torch.stack(stds), dim=0)
-        m = mean_fn.compute()
-        s = std_fn.compute()
-        logger.info(f"mean of the latent: {m}")
-        logger.info(f"std of the latent: {s}")
+        m = torch.stack(mean_lst).mean(dim=0)
+        s = torch.stack(std_lst).mean(dim=0)
+        logger.info(f"mean of the latent: {m.tolist()}")
+        logger.info(f"std of the latent: {s.tolist()}")
 
     if save_pca_vis:
         if pca_type == "proj":
@@ -1545,7 +1540,7 @@ if __name__ == "__main__":
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=400,
+        max_iters=1000,
         compute_mean_std=True,
         use_optim=False,
         check_grad=False,

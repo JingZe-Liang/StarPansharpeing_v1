@@ -18,6 +18,7 @@ from typing import (
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.attention.flex_attention
 from einops import pack, rearrange, repeat, unpack
 from torch import Size, Tensor, tensor
 from torch.nn import ModuleList
@@ -203,6 +204,26 @@ def apply_rotary_emb(
         x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
 
         return x_out.type_as(x)
+
+def get_resize_crop_region_for_grid(src, tgt_size):
+    """Compatible of using diffusers' rope embedding"""
+    th = tw = tgt_size
+    h, w = src
+
+    r = h / w
+
+    # resize
+    if r > 1:
+        resize_height = th
+        resize_width = int(round(th / h * w))
+    else:
+        resize_width = tw
+        resize_height = int(round(tw / w * h))
+
+    crop_top = int(round((th - resize_height) / 2.0))
+    crop_left = int(round((tw - resize_width) / 2.0))
+
+    return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
 
 # * --- RoPE from Cosmos Predictor2 --- #
@@ -838,7 +859,7 @@ class LearnablePosAxisEmbedding2D(nn.Module):
     def __init__(
         self,
         dim: int,
-        seq_len: list[int, int],
+        seq_len: list[int],
         factorize: bool = True,
         interpolation: Literal["crop", "interpolate"] = "crop",
         eps: float = 1e-6,
@@ -1093,13 +1114,7 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
             embed = torch.arange(axial_dim, device=self.device, dtype=self.dtype)
         elif axial_dim > max_seq_len:
             if self.interp_type == "linear":
-                embed = torch.linspace(
-                    0,
-                    max_seq_len - 1,
-                    steps=axial_dim,
-                    device=self.device,
-                    dtype=self.dtype,
-                )
+                embed = torch.linspace(0, max_seq_len - 1, steps=axial_dim, device=self.device, dtype=self.dtype)
             else:
                 raise ValueError(f"Unknown interpolation type: {self.interp_type}, only support `linear`")
         else:
@@ -1142,7 +1157,10 @@ class ContinuousAxialPositionalEmbedding(nn.Module):
         return axial_embed
 
 
-if __name__ == "__main__":
+##### Tests
+
+
+def _test_rope_class():
     # Example usage
     embed_dim = 16
     grid_size = 4
@@ -1182,3 +1200,47 @@ if __name__ == "__main__":
     k = torch.randn(2, 64 * 64, 8, 32).cuda()
     q, k = rope(q, k)
     print(f"query shaped as {q.shape}")
+
+
+def _test_diffusers_rope(crop_corrds=False):
+    from diffusers.models.embeddings import apply_rotary_emb, get_2d_rotary_pos_embed
+
+    D, n_heads = 1024, 16
+    ae_downsample = 8
+    H, W = 256, 386
+    base_size = 512
+    grid_H, grid_W = H // ae_downsample, W // ae_downsample
+
+    # --------- Diffusers implem ---------- #
+    if crop_corrds:
+        grid_crop_corrds = get_resize_crop_region_for_grid((grid_H, grid_W), base_size)
+    else:
+        grid_crop_corrds = [[0, 0], [grid_H, grid_W]]
+    print(f"crop-top-left: {grid_crop_corrds[0]}, crop-bottom-right: {grid_crop_corrds[1]}")
+    rope_emb = get_2d_rotary_pos_embed(
+        D // n_heads,
+        grid_crop_corrds,
+        (grid_H, grid_W),
+        device=torch.device("cuda:1"),
+        output_type="pt",
+        use_real=True,
+    )
+
+    bs = 2
+    q = torch.randn(bs, n_heads, grid_H * grid_W, D // n_heads).cuda(1)
+    k = torch.randn(bs, n_heads, grid_H * grid_W, D // n_heads).cuda(1)
+    v = torch.randn(bs, n_heads, grid_H * grid_W, D // n_heads).cuda(1)
+    print(f"Q, K, V shape: {q.shape}, {k.shape}, {v.shape}")
+
+    ### use diffusers (not fused) python rope apply function
+    q = apply_rotary_emb(q, rope_emb, use_real=True)
+    k = apply_rotary_emb(k, rope_emb, use_real=True)
+    print(f"roped Q, K shape: {q.shape}, {k.shape}")
+
+    ### attention
+    attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    print(f"attn output shape: {attn.shape}")
+
+
+if __name__ == "__main__":
+    _test_diffusers_rope(False)

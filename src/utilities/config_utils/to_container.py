@@ -30,13 +30,32 @@ def to_object_recursive(config: Iterable):
     return config
 
 
-def to_easydict_recursive(config: Iterable):
+def to_easydict_recursive(config: Any):
     """
     Recursively convert a DictConfig or ListConfig to a EasyDict object.
+
+    For dictionaries with non-string keys, keeps them as regular dictionaries
+    since EasyDict only supports string keys.
     """
     # if is iterable, check if is a DictConfig or ListConfig
     if isinstance(config, (dict, DictConfig)):
-        return EasyDict({k: to_easydict_recursive(v) for k, v in config.items()})
+        # Check if all keys are strings - if so, use EasyDict, otherwise use regular dict
+        if all(isinstance(k, str) for k in config.keys()):
+            # Create empty EasyDict and populate it properly
+            result = EasyDict()
+            # Clear any default content
+            result.clear()
+            for k, v in config.items():
+                # Process the value recursively
+                processed_value = to_easydict_recursive(v)
+                # Use __setitem__ directly to avoid EasyDict's __setattr__ conversion
+                super(EasyDict, result).__setitem__(k, processed_value)
+                # Also set in __dict__ for attribute access
+                result.__dict__[k] = processed_value
+            return result
+        else:
+            # For non-string keys, keep as regular dict but still recurse on values
+            return {k: to_easydict_recursive(v) for k, v in config.items()}
     elif isinstance(config, (list, ListConfig)):
         return [to_easydict_recursive(item) for item in config]
 
@@ -157,21 +176,24 @@ def function_config_to_basic_types_hint_check(func):
 
 if __name__ == "__main__":
     # Example usage
-    config = DictConfig({"key": "value", "list": [1, 2, 3], "anydict": {"a": 1, "b": 2}})
+    config = DictConfig({"key": "value", "list": [1, 2, 3], "anydict": {"a": 1, "b": 2}, "int_dict": {1: 2, 3: 4}})
     # print(type(to_object(config)["list"]))  # <class 'list'>
     # print(to_object_recursive(config))  # {'key': 'value', 'list': [1, 2, 3]}
 
+    config = to_easydict_recursive(config)
+
     print(type(config))
     print(type(config.list))
+    print(type(config.int_dict))
 
     # @function_config_to_basic_types
-    @function_config_to_easy_dict
-    def func(**kwargs):
-        for k, v in kwargs.items():
-            print(k, type(v))
+    # @function_config_to_easy_dict
+    # def func(**kwargs):
+    #     for k, v in kwargs.items():
+    #         print(k, type(v))
 
-    func(key=config.key, lst=config.list)
-    func(anydict=config.anydict)
+    # func(key=config.key, lst=config.list)
+    # func(anydict=config.anydict)
 
     # @function_config_to_basic_types_hint_check
     # def func(key: str, lst: tuple | list):

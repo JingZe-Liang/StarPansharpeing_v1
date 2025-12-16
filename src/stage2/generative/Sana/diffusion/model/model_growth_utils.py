@@ -19,7 +19,7 @@ from enum import Enum
 
 import torch
 
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 class InitStrategy(str, Enum):

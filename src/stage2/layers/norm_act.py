@@ -168,7 +168,7 @@ def _register_new_acts():
     }
     create_act._ACT_LAYER_DEFAULT.update(new_acts)
     create_act._ACT_LAYER_ME.update(new_acts)
-    logger.debug(f"[Timm registered new acts]: 'swiglu', 'poly_norm'")
+    # logger.debug(f"[Timm registered new acts]: 'swiglu', 'poly_norm'")
 
     try:
         from fla.modules.activations import fast_gelu_impl, swiglu, swish
@@ -186,7 +186,7 @@ def _register_new_acts():
         create_act._ACT_LAYER_ME.update(fla_acts)
 
         fla_act_names = list(fla_acts.keys())
-        logger.debug(f"[Timm registered FLA acts]: {', '.join(fla_act_names)}")
+        # logger.debug(f"[Timm registered FLA acts]: {', '.join(fla_act_names)}")
     except ImportError:
         logger.debug("[FLA not available, skipping FLA activation registration]")
 

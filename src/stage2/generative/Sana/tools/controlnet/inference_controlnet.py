@@ -33,19 +33,20 @@ warnings.filterwarnings("ignore")  # ignore warning
 import cv2
 from termcolor import colored
 
-from diffusion import DPMS
-from diffusion.model.builder import (
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
     vae_encode,
 )
-from diffusion.model.utils import prepare_prompt_ar
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.logger import get_root_logger
-from tools.controlnet.utils import get_scribble_map, transform_control_signal
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.model.utils import prepare_prompt_ar
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
+
+from ...diffusion import DPMS
+from ...tools.controlnet.utils import get_scribble_map, transform_control_signal
+from ...tools.download import find_model
 
 
 def set_env(seed=0, latent_size=256):
@@ -89,17 +90,13 @@ def create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidanc
     )
 
     if args.pag_scale != 1.0:
-        save_root = save_root.replace(
-            f"scale{args.cfg_scale}", f"scale{args.cfg_scale}_pagscale{args.pag_scale}"
-        )
+        save_root = save_root.replace(f"scale{args.cfg_scale}", f"scale{args.cfg_scale}_pagscale{args.pag_scale}")
     if flow_shift != 1.0:
         save_root += f"_flowshift{flow_shift}"
     if guidance_type != "classifier-free":
         save_root += f"_{guidance_type}"
     if args.interval_guidance[0] != 0 and args.interval_guidance[1] != 1:
-        save_root += (
-            f"_intervalguidance{args.interval_guidance[0]}{args.interval_guidance[1]}"
-        )
+        save_root += f"_intervalguidance{args.interval_guidance[0]}{args.interval_guidance[1]}"
 
     save_root += f"_imgnums{args.sample_nums}" + args.add_label
     return save_root
@@ -135,7 +132,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
     if isinstance(items, dict):
         get_chunks = get_dict_chunks
     else:
-        from diffusion.data.datasets.utils import get_chunks
+        from src.stage2.generative.Sana.diffusion.data.datasets.utils import get_chunks
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     tqdm_desc = f"{save_root.split('/')[-1]} Using GPU: {args.gpu_id}: {args.start_index}-{args.end_index}"
@@ -149,9 +146,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
         # data prepare
         prompts, hw, ar = (
             [],
-            torch.tensor(
-                [[args.image_size, args.image_size]], dtype=torch.float, device=device
-            ).repeat(bs, 1),
+            torch.tensor([[args.image_size, args.image_size]], dtype=torch.float, device=device).repeat(bs, 1),
             torch.tensor([[1.0]], device=device).repeat(bs, 1),
         )
 
@@ -160,9 +155,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
             args.reference_image_path = ref_image_path
             ar = get_ar_from_ref_image(args.reference_image_path)
         else:
-            assert (
-                "ref_controlmap_path" in chunk[0]
-            ), "neither ref_image_path nor ref_controlmap_path is provided"
+            assert "ref_controlmap_path" in chunk[0], "neither ref_image_path nor ref_controlmap_path is provided"
             prompt, ref_controlmap_path = (
                 chunk[0]["prompt"],
                 chunk[0]["ref_controlmap_path"],
@@ -171,9 +164,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
             ar = get_ar_from_ref_image(args.controlmap_path)
 
         prompt += f" --ar {ar}"
-        prompt_clean, _, hw, ar, custom_hw = prepare_prompt_ar(
-            prompt, base_ratios, device=device, show=False
-        )
+        prompt_clean, _, hw, ar, custom_hw = prepare_prompt_ar(prompt, base_ratios, device=device, show=False)
         latent_size_h, latent_size_w = (
             (
                 int(hw[0, 0] // config.vae.vae_downsample_rate),
@@ -219,9 +210,9 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
             return_tensors="pt",
         ).to(device)
         select_index = [0] + list(range(-config.text_encoder.model_max_length + 1, 0))
-        caption_embs = text_encoder(
-            caption_token.input_ids, caption_token.attention_mask
-        )[0][:, None][:, :, select_index]
+        caption_embs = text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+            :, :, select_index
+        ]
         emb_masks = caption_token.attention_mask[:, select_index]
         null_y = null_caption_embs.repeat(len(prompts), 1, 1)[:, None]
 
@@ -245,17 +236,9 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
                     detect_resolution=int(hw.min()),
                     thickness=int(args.thickness),
                 )
-                control_signal = (
-                    transform_control_signal(control_signal, hw)
-                    .to(device)
-                    .to(weight_dtype)
-                )
+                control_signal = transform_control_signal(control_signal, hw).to(device).to(weight_dtype)
             else:
-                control_signal = (
-                    transform_control_signal(args.controlmap_path, hw)
-                    .to(device)
-                    .to(weight_dtype)
-                )
+                control_signal = transform_control_signal(args.controlmap_path, hw).to(device).to(weight_dtype)
 
             control_signal_latent = vae_encode(
                 config.vae.vae_type,
@@ -308,9 +291,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale, pag_scale
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help="config")
-    parser.add_argument(
-        "--model_path", default=None, type=str, help="Path to the model file (optional)"
-    )
+    parser.add_argument("--model_path", default=None, type=str, help="Path to the model file (optional)")
 
     return parser.parse_known_args()[0]
 
@@ -356,9 +337,9 @@ if __name__ == "__main__":
     args.image_size = config.model.image_size
 
     if args.json_file is None:
-        assert (args.reference_image_path is None) != (
-            args.controlmap_path is None
-        ), "only one of reference_image_path/controlmap_path can be None"
+        assert (args.reference_image_path is None) != (args.controlmap_path is None), (
+            "only one of reference_image_path/controlmap_path can be None"
+        )
 
     set_env(args.seed, args.image_size // config.vae.vae_downsample_rate)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -382,9 +363,7 @@ if __name__ == "__main__":
         min(1, args.interval_guidance[1]),
     ]
     sample_steps_dict = {"flow_dpm-solver": 20, "flow_euler": 28}
-    sample_steps = (
-        args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
-    )
+    sample_steps = args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
     if config.model.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif config.model.mixed_precision == "bf16":
@@ -392,19 +371,11 @@ if __name__ == "__main__":
     elif config.model.mixed_precision == "fp32":
         weight_dtype = torch.float32
     else:
-        raise ValueError(
-            f"weigh precision {config.model.mixed_precision} is not defined"
-        )
-    logger.info(
-        f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, flow_shift: {flow_shift}"
-    )
+        raise ValueError(f"weigh precision {config.model.mixed_precision} is not defined")
+    logger.info(f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
-    vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, device).to(
-        weight_dtype
-    )
-    tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-        name=config.text_encoder.text_encoder_name, device=device
-    )
+    vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, device).to(weight_dtype)
+    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
 
     null_caption_token = tokenizer(
         "",
@@ -413,9 +384,7 @@ if __name__ == "__main__":
         truncation=True,
         return_tensors="pt",
     ).to(device)
-    null_caption_embs = text_encoder(
-        null_caption_token.input_ids, null_caption_token.attention_mask
-    )[0]
+    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask)[0]
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
@@ -468,19 +437,11 @@ if __name__ == "__main__":
     os.makedirs(img_save_dir, exist_ok=True)
     logger.info(f"Sampler {args.sampling_algo}")
 
-    dataset = (
-        "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
-    )
+    dataset = "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
 
-    guidance_type = guidance_type_select(
-        guidance_type, args.pag_scale, config.model.attn_type
-    )
-    logger.info(
-        f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}"
-    )
-    save_root = create_save_root(
-        args, dataset, epoch_name, step_name, sample_steps, guidance_type
-    )
+    guidance_type = guidance_type_select(guidance_type, args.pag_scale, config.model.attn_type)
+    logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
+    save_root = create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type)
     os.makedirs(save_root, exist_ok=True)
 
     if args.debug:

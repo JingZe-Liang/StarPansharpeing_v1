@@ -20,17 +20,16 @@ from copy import deepcopy
 # This file is modified from https://github.com/PixArt-alpha/PixArt-sigma
 import torch
 import torch.nn as nn
+from diffusers.models.embeddings import apply_rotary_emb, get_2d_rotary_pos_embed
+from diffusers.models.embeddings import get_2d_sincos_pos_embed as get_2d_sincos_pos_embed_diffusers
 from torch.nn import Linear, Module, init
 
-from diffusion.model.builder import MODELS
-from diffusion.model.nets.sana import get_2d_sincos_pos_embed
-from diffusion.model.nets.sana_blocks import PatchEmbed, RopePosEmbed
-from diffusion.model.nets.sana_multi_scale import (
-    SanaMS,
-    SanaMSBlock,
-)
-from diffusion.model.utils import auto_grad_checkpoint
-from diffusion.utils.import_utils import (
+from src.stage2.generative.Sana.diffusion.model.builder import MODELS
+from src.stage2.generative.Sana.diffusion.model.nets.sana import get_2d_sincos_pos_embed
+from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import PatchEmbed, RopePosEmbed
+from src.stage2.generative.Sana.diffusion.model.nets.sana_multi_scale import SanaMS, SanaMSBlock
+from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint
+from src.stage2.generative.Sana.diffusion.utils.import_utils import (
     is_triton_module_available,
     is_xformers_available,
 )
@@ -58,8 +57,7 @@ class ControlSanaMSBlock(Module):
         self.after_proj = Linear(hidden_size, hidden_size)
 
     def initialize_all_and_copy_from_base(self, base_block):
-        for name, param in self.named_parameters():
-            param.requires_grad_(True)
+        self.requires_grad_(True)
 
         self.copied_block.load_state_dict(base_block.state_dict())
         self.train()
@@ -167,6 +165,12 @@ class SanaMSControlNet(SanaMS):
             bias=True,
         )
 
+        # set abs pe learnable
+        if hasattr(self, "pos_embed"):
+            abs_pe = self.pos_embed.clone()
+            delattr(self, "pos_embed")
+            self.pos_embed = nn.Parameter(abs_pe, requires_grad=True)
+
     def load_pretrain_and_initialize(self, model_path):
         missing, unexpected = self.load_state_dict(
             torch.load(model_path, map_location="cpu")["state_dict"], strict=False
@@ -174,14 +178,17 @@ class SanaMSControlNet(SanaMS):
         self.initialize_all()
         return missing, unexpected
 
-    def initialize_all(self, from_base=True):
+    def initialize_all(self, from_base=True, learn_all=False):
         if from_base:
             # freeze all the parameters
-            for p in self.parameters():
-                p.requires_grad_(False)
+            if not learn_all:
+                for p in self.parameters():
+                    p.requires_grad_(False)
 
-            for param in self.control_embedder.parameters():
-                param.requires_grad_(True)
+                for param in self.control_embedder.parameters():
+                    param.requires_grad_(True)
+            else:
+                self.requires_grad_(True)
 
             for i, block in enumerate(self.controlnet):
                 block.initialize_all_and_copy_from_base(self.blocks[i])
@@ -203,6 +210,8 @@ class SanaMSControlNet(SanaMS):
                     if m.bias is not None:
                         init.zeros_(m.bias)
 
+            self.apply(_init_fn)
+
         init.xavier_uniform_(self.control_embedder.proj.weight)
         init.zeros_(self.control_embedder.proj.bias)
         # zero out the unpatcher
@@ -221,13 +230,13 @@ class SanaMSControlNet(SanaMS):
         print("------------------------")
 
     def forward_controlnet(self, control_signal, pos_embed_ms=None):
-        if self.use_pe and pos_embed_ms:
-            control_signal = self.control_embeddelr(control_signal) + pos_embed_ms
+        if self.use_pe and pos_embed_ms is not None:
+            control_signal = self.control_embedder(control_signal) + pos_embed_ms
         else:
             control_signal = self.control_embedder(control_signal)
         return control_signal
 
-    def forward(self, x, timestep, y, mask=None, data_info=None, **kwargs):
+    def forward(self, x, timestep, y, mask=None, data_info: dict | None = None, **kwargs):
         """
         Forward pass of Sana.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -247,8 +256,10 @@ class SanaMSControlNet(SanaMS):
         x = self.x_embedder(x)
         image_pos_embed = None
 
+        ### Positional embedding ###
         if self.use_pe:
             if self.pos_embed_type == "sincos":
+                # FIXME: if the pe is learnable ...
                 if self.pos_embed_ms is None or self.pos_embed_ms.shape[1:] != x.shape[1:]:
                     self.pos_embed_ms = (
                         torch.from_numpy(
@@ -264,16 +275,43 @@ class SanaMSControlNet(SanaMS):
                         .to(self.dtype)
                     )
                 x += self.pos_embed_ms  # (N, T, D), where T = H * W / patch_size ** 2
+                abs_pe = self.pos_embed_ms
             elif self.pos_embed_type == "3d_rope":
                 self.pos_embed_ms = RopePosEmbed(theta=10000, axes_dim=[0, 16, 16])
                 latent_image_ids = self.pos_embed_ms._prepare_latent_image_ids(bs, self.h, self.w, x.device, x.dtype)
-                image_pos_embed = self.pos_embed_ms(latent_image_ids)
+                image_pos_embed = self.pos_embed_ms(latent_image_ids)  # is it this correct?
+                abs_pe = None
+            elif self.pos_embed_type == "rope_diffusers":
+                # learnable abs pe + rope
+                if not hasattr(self, "pos_embed"):
+                    raise
+                    abs_pe = get_2d_sincos_pos_embed(
+                        self.pos_embed.shape[-1],
+                        int(self.num_patches**0.5),
+                        pe_interpolation=self.pe_interpolation,
+                        base_size=self.base_size,
+                    )
+                else:
+                    abs_pe = self.pos_embed
+
+                x = x + abs_pe
+
+                # Get rotary positional embeddings
+                rope_hw = self.input_size // self.patch_size
+                image_pos_embed = get_2d_rotary_pos_embed(
+                    self.pos_embed.shape[-1] // self.num_heads,
+                    crops_coords=[[0, 0], [rope_hw, rope_hw]],  # assume is square image
+                    grid_size=(rope_hw, rope_hw),
+                    output_type="pt",
+                    device=x.device,
+                )  # [hw, D]
             else:
                 raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
 
         # control signal branch
+        assert data_info is not None
         control_signal = data_info["control_signal"].to(self.dtype)
-        control_signal = self.forward_controlnet(control_signal, pos_embed_ms=image_pos_embed)
+        control_signal = self.forward_controlnet(control_signal, pos_embed_ms=abs_pe)
 
         t = self.t_embedder(timestep)  # (N, D)
 

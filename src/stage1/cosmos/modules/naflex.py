@@ -14,6 +14,7 @@ from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.models import eva, naflexvit
+from timm.models._manipulate import named_apply
 from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU
 from timm.models.naflexvit import (
     Block,
@@ -25,10 +26,7 @@ from timm.models.naflexvit import (
 )
 from torch import Tensor
 
-from src.utilities.config_utils import (
-    dataclass_from_dict,
-    function_config_to_basic_types,
-)
+from src.utilities.config_utils import dataclass_from_dict, function_config_to_basic_types
 
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
@@ -173,6 +171,7 @@ class EvaBlock(nn.Module):
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+    @torch.compile
     def forward(
         self,
         x: torch.Tensor,
@@ -347,6 +346,38 @@ class NaFlexVitCfg:
     # enable_lejepa: bool = False  # enable lejepa training
     # 'ijepa', 'lejepa', None for no pretrained task
     pretrained_type: Any = None  # Union[str, list[str]]
+
+    # IBOT head cfgs
+    ibot_n_prototypes: int = 65536
+    ibot_head_hidden_dim: int = 2048
+    ibot_bottleneck_dim: int = 256
+    ibot_nlayers: int = 3
+
+
+def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | None = None):
+    std = 1.0 / math.sqrt(d_model)
+    torch.nn.init.trunc_normal_(module.layer1.weight, std=std, a=-3 * std, b=3 * std)
+
+    # scale init by depth as in https://arxiv.org/abs/1908.11365 -- worked slightly better.
+    std = 1.0 / math.sqrt(d_ffn)
+    if layer_id is not None:
+        std = std / math.sqrt(2 * (layer_id + 1))
+    torch.nn.init.trunc_normal_(module.layer2.weight, std=std, a=-3 * std, b=3 * std)
+
+def attention_init_fn(module, layer_id: int | None = None):
+    std = 1.0 / math.sqrt(module.q_dim)
+    torch.nn.init.trunc_normal_(module.q_proj.weight, std=std, a=-3 * std, b=3 * std)
+    std = 1.0 / math.sqrt(module.ctx_dim)
+    torch.nn.init.trunc_normal_(module.k_proj.weight, std=std, a=-3 * std, b=3 * std)
+    torch.nn.init.trunc_normal_(module.v_proj.weight, std=std, a=-3 * std, b=3 * std)
+
+    std = 1.0 / math.sqrt(module.inner_dim)
+    torch.nn.init.trunc_normal_(module.output_proj.weight, std=std, a=-3 * std, b=3 * std)
+    
+    for layer in module.q_norm, module.k_norm, module.v_norm:
+        if hasattr(layer, "init_weights"):
+            layer.init_weights()
+
 
 
 class Transformer(NaFlexVit):
@@ -574,7 +605,7 @@ class IJEPANaFlexViT(Transformer):
         if masks is not None:
             # Apply masks
             prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
-            if self.cfg.pretrained_type == "ibot":
+            if "ibot" in self.cfg.pretrained_type:
                 x = self._ibot_apply_masks(x, masks=masks)
             else:
                 x = self._jepa_apply_masks(x, masks=masks)
@@ -663,7 +694,7 @@ class IJEPANaFlexViT(Transformer):
         if naflex_mode:
             return {
                 "patches": x,
-                "patch_valid": embeds.get("patch_valid", None),
+                "patch_valid": embeds.get("patch_valid", None)
             }
 
         return x
@@ -684,7 +715,7 @@ class IJEPANaFlexViT(Transformer):
         input_is_dict = isinstance(x, Dict)
         naflex_mode = input_is_dict or patch_coord is not None
         if naflex_mode:
-            assert jepa_masks is None, "JEPA does not support naflex mode."
+            assert masks is None, "JEPA does not support naflex mode."
 
             if input_is_dict:
                 # Handle dictionary input from NaFlex collator, dict inputs take priority over args
@@ -716,7 +747,7 @@ class IJEPANaFlexViT(Transformer):
                 out_hw = None  # keep the output to be 1D tensor
 
             # Features
-            x = self.forward_features(x, jepa_masks=jepa_masks)
+            x = self.forward_features(x, masks=masks)
             x = cast(torch.Tensor, x)
             x = x[:, self.num_prefix_tokens :]
 
@@ -753,8 +784,7 @@ class IJEPANaFlexViT(Transformer):
             out_hw = None  # keep the output to be 1D tensor
 
         # Features
-        x = self.forward_features(x, masks=masks)
-        x = cast(torch.Tensor, x)
+        x = cast(torch.Tensor, self.forward_features(x, masks=masks))
 
         ######### IJepa features ########
         if "ijepa" in self.pretrained_type:
@@ -763,10 +793,11 @@ class IJEPANaFlexViT(Transformer):
 
         ######### Lejepa projector #########
         if hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
-            x = self._pool(x)
-            lejepa_proj = self.lejepa_projector(x)  # x is the backbone's out
-            terms["lejepa_proj"] = lejepa_proj
+            # NOTE: may use all spatial tokens to compute the lejepa loss?
 
+            x_pool = self._pool(x)
+            lejepa_proj = self.lejepa_projector(x_pool)  # x is the backbone's out
+            terms["lejepa_proj"] = lejepa_proj
             # spatial tokens only
             terms["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
@@ -777,10 +808,10 @@ class IJEPANaFlexViT(Transformer):
             # Check mask shape alignment if masks provided
             if masks is not None and isinstance(masks, torch.Tensor):
                 B, N = masks.shape
-                assert x.shape[:2] == (
+                assert x_tokens.shape[:2] == (
                     B,
                     N,
-                ), f"Mask shape {masks.shape} does not match feature shape {x.shape[:2]}"
+                ), f"Mask shape {masks.shape} does not match feature shape {x_tokens.shape[:2]}"
 
             if masks_indices is not None:
                 # IBOT teacher does
@@ -788,12 +819,13 @@ class IJEPANaFlexViT(Transformer):
             terms["ibot_proj"] = self.ibot_head(x_tokens)
 
         # Patch tokens
-        x_tokns = x[:, self.num_prefix_tokens :]
+        x_tokens = x[:, self.num_prefix_tokens :]
         terms["x_patch_tokens"] = x_tokens
 
         # Return the 1d features as the backbone output
         # not forward by the head
-        return x, edict(terms)
+        # terms: [prefixed_tokens, ijepa_feat, lejepa_proj, ibot_feat, ibot_proj, x_patch_tokens]
+        return x_tokens, edict(terms)
 
     def forward_intermedieates(
         self,

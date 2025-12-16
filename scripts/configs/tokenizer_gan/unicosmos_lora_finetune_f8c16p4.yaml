@@ -110,7 +110,7 @@ vq_loss:
     repa_img_size: 512
     repa_model_name: "dinov3_vitl16"
     loss_type: am_radio
-    feature_normalize: false
+    feature_normalize: spatial
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true

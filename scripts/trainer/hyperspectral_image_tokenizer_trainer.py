@@ -37,6 +37,7 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
+import wandb
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
@@ -52,6 +53,7 @@ from src.stage1.utilities.train.network import (
     get_model_learnable_params,
     get_parameters_encoder_frozen,
 )
+from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
@@ -70,6 +72,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
+        self._trackers_name = self.train_cfg.log.log_with
         accelerate.utils.set_seed(2025)
 
         # logger
@@ -224,37 +227,51 @@ class CosmosHyperspectralTokenizerTrainer:
             return
 
         self._has_proxy_task = True
-        if "ijepa" in cfg.task:
-            # Projector
-            self.proxy_model = hydra.utils.instantiate(cfg.model)
-            self.log_msg(f"Init proxy model for proxy task: {cfg.task}")
-            logger.info(f"Model params: \n{parameter_count_table(self.proxy_model)}")
+        self._proxy_tasks: list[str] = cfg.task.split("+") if isinstance(cfg.task, str) else cfg.task
+        assert len(self._proxy_tasks) > 0, f"proxy tasks got no tasks: {self._proxy_tasks=}, but {cfg.task=}"
 
-        if "lejepa" in cfg.task:
+        def _create_aug_pipline():
+            if getattr(self, "proxy_aug_pipeline", None) is not None:
+                return self.proxy_aug_pipeline
+
             # Augmentation pipeline
-            self.proxy_aug_pipeline = LeJEPAAugmentation(
+            proxy_aug_pipeline = LeJEPAAugmentation(
                 n_locals=cfg.aug.n_local,
                 n_globals=cfg.aug.n_global,
                 stack=False,
                 is_neg_1_1=True,
             )
+            return proxy_aug_pipeline
+
+        # Init the proxy model/augmentation pipline
+        if "ijepa" in self._proxy_tasks:
+            # Projector
+            self.proxy_model = hydra.utils.instantiate(cfg.model)
+            self.log_msg(f"Init proxy model for proxy task: {cfg.task}")
+            logger.info(f"Model params: \n{parameter_count_table(self.proxy_model)}")
+            logger.info("Create <cyan>ijepa</cyan> pretrained proxy task.")
+
+        if "lejepa" in self._proxy_tasks:
+            self.proxy_aug_pipeline = _create_aug_pipline()
             self.proxy_lejepa_sigreg = SIGReg(knots=cfg.sigreg.knots, rnd_proj_dim=cfg.sigreg.rnd_proj_dim).to(
                 self.device
             )
+            logger.info("Create <cyan>lejepa</cyan> pretrained proxy task.")
 
-        if "ibot" in cfg.task:
+        if "ibot" in self._proxy_tasks:
             from src.stage1.self_supervised.dino.loss.ibot_patch_loss import iBOTPatchLoss
 
+            self.proxy_aug_pipeline = _create_aug_pipline()
             self.ibot_patch_loss = iBOTPatchLoss(
-                patch_out_dim=cfg.loss.patch_out_dim,
-                student_temp=cfg.loss.student_temp,
-                center_momentum=cfg.loss.center_momentum,
+                patch_out_dim=cfg.ibot_loss.patch_out_dim,
+                student_temp=cfg.ibot_loss.student_temp,
+                center_momentum=cfg.ibot_loss.center_momentum,
             )
             self.ibot_patch_loss.init_weights()
             self.ibot_patch_loss = self.ibot_patch_loss.to(self.device)
+            logger.info("Create <cyan>ibot</cyan> pretrained proxy task.")
 
-        if cfg.task in "mae":
-            ...
+        if "mae" in self._proxy_tasks:
             raise
 
         # Optimizer and scheduler
@@ -490,13 +507,42 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.accelerator.init_trackers("train")
                 self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker("tensorboard")  # type: ignore
 
+                if "wandb" in self._trackers_name:
+                    self.wandb_logger: wandb.Run = self.accelerator.get_tracker("wandb", unwrap=True)
+                    self.wandb_logger.watch(self.tokenizer, log="gradients", log_freq=200)
+                    logger.info("Will log to wandb.")
+
+                if "swanlab" in self._trackers_name:
+                    import swanlab
+
+                    exp_name = getattr(self.train_cfg.log, "exp_name", None)
+                    self.swanlab_logger = swanlab.init(
+                        project="RSTokenizer",
+                        workspace="iamzihan",
+                        experiment_name=exp_name,
+                        logdir=str(Path(log_dir) / "swanlab"),
+                        resume="never",
+                    )
+                    self.swanlab_logger
+                    logger.info("Will log to swanlab.")
+
+            #### Log code into dir
+            from src.utilities.logging import get_python_pkg_env, zip_code_into_dir
+
+            code_dir = ["src/data", "src/stage1", "scripts"]
+            zip_code_into_dir(save_dir=log_dir, code_dir=code_dir)
+            get_python_pkg_env(file=str(log_dir / "requirements.txt"))
+
+            logger.info("[Code]: code files are zipped and saved.")
+            logger.info("[Env]: python package environment requirements are saved.")
+
         return log_file
 
     def tenb_log_any(
         self,
         log_type: Literal["metric", "image", "grad_norm_per_param", "grad_norm_sum"],
         logs: dict,
-        step: int,
+        step: int | None = None,
         **kwargs,
     ):
         assert log_type in [
@@ -505,13 +551,32 @@ class CosmosHyperspectralTokenizerTrainer:
             "grad_norm_per_param",
             "grad_norm_sum",
         ], "log_type must be one of [metric, image, grad_norm_per_param, grad_norm_sum]"
+        if step is None:
+            step = self.global_step
+        step = cast(int, step)
 
         if log_type == "metric":
             if hasattr(self, "tb_logger"):
                 self.tb_logger.log(logs, step=step)
+            if hasattr(self, "wandb_logger"):
+                self.wandb_logger.log(logs, step=step)
+            if hasattr(self, "swanlab_logger"):
+                self.swanlab_logger.log(logs, step=step)
         elif log_type == "image":
             if hasattr(self, "tb_logger"):
-                self.tb_logger.log_images(logs, step=step)
+                self.tb_logger.log_images(logs, step=step, dataformats="HWC")
+            if hasattr(self, "wandb_logger"):
+                _keys = list(logs.keys())
+                for k in _keys:
+                    logs[k] = wandb.Image(logs[k])
+                self.wandb_logger.log(logs, step=step)
+            if hasattr(self, "swanlab_logger"):
+                import swanlab
+
+                _keys = list(logs.keys())
+                for k in _keys:
+                    logs[k] = swanlab.Image(logs[k], file_type="jpg")
+                self.swanlab_logger.log(logs, step=step)
         elif log_type in ("grad_norm_per_param", "grad_norm_sum"):
             assert "model" in logs, "model name must be in logs"
             model: torch.nn.Module = logs.pop("model")
@@ -539,17 +604,18 @@ class CosmosHyperspectralTokenizerTrainer:
                     _grad_norm = (_grad.data**2).sum() ** 0.5
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
-                    else:
+                    elif log_type == "grad_norm_sum":
                         norms[f"{model_cls_n}_grad_norm"] += _grad_norm
                         _n_params_sumed += 1
             # log
             if log_type == "grad_norm_sum":
                 norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
             if hasattr(self, "tb_logger"):
-                self.tb_logger.log(
-                    norms,
-                    step=step,
-                )
+                self.tb_logger.log(norms, step=step)
+            if hasattr(self, "wandb_logger"):
+                self.wandb_logger.log(norms, step=step)
+            if hasattr(self, "swanlab_logger"):
+                self.swanlab_logger.log(norms, step=step)
         else:
             raise NotImplementedError(f"Unknown log_type {log_type}")
 
@@ -1029,7 +1095,10 @@ class CosmosHyperspectralTokenizerTrainer:
         else:
             raise ValueError(f"Unknown mode {mode}")
 
-    def forward_proxy_task(self, x):
+    def forward_proxy_task(self, x) -> dict | None:
+        """
+        Forward pretraining proxy tasks.
+        """
         if not self._has_proxy_task:
             return None
 
@@ -1039,7 +1108,16 @@ class CosmosHyperspectralTokenizerTrainer:
             return x
 
         cfg = self.cfg.proxy_task
-        if "ijepa" in cfg.task:
+        proxy_tasks = self._proxy_tasks
+        ret = edict()
+        proxy_loss_breakdown = edict()
+        proxy_loss = 0.0
+
+        # Proxy vars statements
+        global_views = local_views = global_x = None
+
+        #### Forward proxy tasks
+        if "ijepa" in proxy_tasks:
             assert self.proxy_model is not None
 
             # Resize to
@@ -1072,13 +1150,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 # Loss
                 loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
 
-            return edict(proxy_loss=loss, proxy_loss_breakdowns={"ijepa_loss": loss})
+            proxy_loss_breakdown.ijepa_loss = loss.detach()
+            proxy_loss = proxy_loss + loss
 
-        if "ibot" in cfg.task:
-            from src.stage1.self_supervised.dino.data import (
-                MaskingGenerator,
-                generate_ibot_masks,
-            )
+        if "ibot" in proxy_tasks:
+            from src.stage1.self_supervised.dino.data import MaskingGenerator, generate_ibot_masks
 
             # Resize to
             img_size = 224  # FIXME: make it flexible at cfg.
@@ -1087,8 +1163,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Augmentation pipeline
             # Global and local views has different size
-            global_views: list[torch.Tensor]
-            global_views, _ = self.proxy_aug_pipeline(x)
+            assert hasattr(self, "proxy_aug_pipeline"), "proxy_aug_pipeline is not defined"
+            global_views, local_views = self.proxy_aug_pipeline(x)  # type: ignore
             global_x = torch.cat(global_views, dim=0)
 
             # --- Mask Generation ---
@@ -1123,32 +1199,35 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Teacher model
             with torch.no_grad():
-                teacher_ibot_g_out = self.ema_tokenizer.ema_model.encode_ibot(
-                    global_x, masks=None, mask_indices=mask_indices
-                )  # type: ignore
-                masked_teacher_ibot_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
-                    teacher_ibot_g_out,
-                    teacher_temp=teacher_temp,
-                    n_masked_patches_tensor=n_masked_patches_tensor,
-                )  # [n_masked_patches, K]
+                with self.accelerator.autocast():
+                    teacher_ibot_g_out = self.ema_tokenizer.ema_model.encode_ibot(  # type: ignore
+                        global_x, masks=None, mask_indices=mask_indices
+                    )
+                    masked_teacher_ibot_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
+                        teacher_ibot_g_out,
+                        teacher_temp=teacher_temp,
+                        n_masked_patches_tensor=n_masked_patches_tensor,
+                    )  # [n_masked_patches, K]
 
             # Student model
-            masked_student_ibot_out = self.tokenizer.encode_ibot(  # type: ignore
-                global_x, masks=masks, mask_indices=mask_indices
-            )
+            with self.accelerator.autocast():
+                masked_student_ibot_out = self.tokenizer.encode_ibot(  # type: ignore
+                    global_x, masks=masks, mask_indices=mask_indices
+                )
 
-            # IBOT loss
-            ibot_loss = self.ibot_patch_loss.forward_masked(
-                masked_student_ibot_out,
-                masked_teacher_ibot_centered,
-                student_masks_flat=masks,
-                n_masked_patches=mask_indices.shape[0],
-                masks_weight=masks_weight,
-            )
+                # IBOT loss
+                ibot_loss = self.ibot_patch_loss.forward_masked(
+                    masked_student_ibot_out,
+                    masked_teacher_ibot_centered,
+                    student_masks_flat=masks,
+                    n_masked_patches=mask_indices.shape[0],
+                    masks_weight=masks_weight,
+                )
 
-            return edict(proxy_loss=ibot_loss, proxy_loss_breakdowns={"ibot_loss": ibot_loss.detach()})
+            proxy_loss = proxy_loss + ibot_loss
+            proxy_loss_breakdown.ibot_loss = ibot_loss.detach()
 
-        if "lejepa" in cfg.task:
+        if "lejepa" in proxy_tasks:
             # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
 
             # Resize to
@@ -1157,17 +1236,19 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Augmentation pipeline
             # Global and local views has different size
-            global_views: list[torch.Tensor]
-            global_views, local_views = self.proxy_aug_pipeline(x)
+            if global_views is None or local_views is None:
+                global_views, local_views = self.proxy_aug_pipeline(x)
+            global_x = torch.cat(global_views, dim=0)
             ng, nl = len(global_views), len(local_views)
 
             # Encoding views
             assert hasattr(self.tokenizer, "encode_lejepa")
             with self.accelerator.autocast():
-                global_x = torch.cat(global_views, dim=0)
+                # Global embeddings
                 global_emb = self.tokenizer.encode_lejepa(global_x)  # type: ignore
                 global_emb = rearrange(global_emb, "(ng bs) ... -> ng bs ...", ng=ng)
 
+                # Local embeddings
                 local_emb = None
                 if local_views is not None:
                     local_x = torch.cat(local_views, dim=0)
@@ -1181,10 +1262,16 @@ class CosmosHyperspectralTokenizerTrainer:
                     sigreg=self.proxy_lejepa_sigreg,
                     lam=cfg.sigreg.lam,
                 )
-            return edict(proxy_loss=loss, proxy_loss_breakdowns=breakdowns)
+            # return edict(proxy_loss=loss, proxy_loss_breakdowns=breakdowns)
 
-        else:
-            raise NotImplementedError("Unknown proxy task {cfg.task}")
+            proxy_loss = proxy_loss + loss
+            proxy_loss_breakdown.update(**breakdowns)
+
+        #### Summarize losses and loss breakdown
+        ret.proxy_loss = proxy_loss
+        ret.proxy_loss_breakdown = proxy_loss_breakdown
+
+        return ret
 
     def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
         out_d = edict()
@@ -1567,7 +1654,7 @@ class CosmosHyperspectralTokenizerTrainer:
             if proxy_out is not None:
                 logger.trace(
                     f"Train step: {self.global_step} - "
-                    f"proxy losses: {', '.join(f'{k}: {v.item():.4f}' for k, v in proxy_out.proxy_loss_breakdowns.items())}"
+                    f"proxy losses: {', '.join(f'{k}: {v.item():.4f}' for k, v in proxy_out.proxy_loss_breakdown.items())}"
                     # f"proxy loss: {proxy_out.proxy_loss.item():.4f}"
                 )
 
@@ -1917,10 +2004,7 @@ class CosmosHyperspectralTokenizerTrainer:
         accelerate.utils.save(self.train_state.state_dict(), _ema_path_state_train)
 
         if self.use_quantizer and self.quantizer is not None and isinstance(self.quantizer, nn.Module):
-            self.accelerator.save_model(
-                self.quantizer,
-                ema_path / "quantizer",
-            )
+            self.accelerator.save_model(self.quantizer, ema_path / "quantizer")
 
         self.log_msg(f"[ckpt]: save ema at {ema_path}")
 
@@ -2068,7 +2152,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
 
         # Load proxy model if exists
-        if self._has_proxy_task and hasattr(self, "proxy_model"):
+        if self._has_proxy_task and self.proxy_model is not None:
             if (ema_path / "proxy_model").exists():
                 accelerate.utils.load_checkpoint_in_model(
                     self.accelerator.unwrap_model(self.proxy_model),
@@ -2108,6 +2192,7 @@ class CosmosHyperspectralTokenizerTrainer:
         img_name: str = "train_original_recon",
         add_step: bool = False,
         only_vis_n: int | None = None,
+        save_to_local: bool = False,
     ):
         x = self.to_rgb(x)
         if recon is not None:
@@ -2146,18 +2231,23 @@ class CosmosHyperspectralTokenizerTrainer:
         # save
         img = (img * 255.0).astype(np.uint8)
         img_to_save = Image.fromarray(img)
-        if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.jpg"
-        else:
-            img_name = f"{img_name}.jpg"
 
-        save_path = Path(self.proj_dir) / "vis" / img_name
-        if self.accelerator.is_main_process:
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.accelerator.is_main_process:
-            img_to_save.save(save_path, quality=95)
+        # Log image into logger
+        self.tenb_log_any("image", {img_name: img}, step=self.global_step)  # np.ndarray
 
-        self.log_msg("[Visualize]: save visualization at {}".format(save_path))
+        if save_to_local:
+            if add_step:
+                img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.webp"
+            else:
+                img_name = f"{img_name}.webp"
+
+            save_path = Path(self.proj_dir) / "vis" / img_name
+            if self.accelerator.is_main_process:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.accelerator.is_main_process:
+                img_to_save.save(save_path, quality=90)
+
+            self.log_msg("[Visualize]: save visualization at {}".format(save_path))
 
     def run(self):
         if self.train_cfg.finetune_strategy in [
@@ -2217,6 +2307,7 @@ _configs_dict = {
     "ijepa_cosmos_f16c64": "ijepa_hybrid_tokenizer_f16c64",
     "ijepa_cosmos_f16c64_pure_cnn_decoder": "ijepa_hybrid_tokenizer_cnn_decoder_f16c64",
     "lejepa_cosmos_f16c64": "lejepa_hybrid_tokenizer_f16c64",
+    "ibot_lejepa_cosmos_f8c32": "ibot_lejepa_hybrid_tokenizer_f8c32",
 }
 
 if __name__ == "__main__":

@@ -43,32 +43,33 @@ os.environ["DISABLE_XFORMERS"] = "1"
 
 
 from diffusion import SCMScheduler
-from diffusion.data.builder import build_dataloader, build_dataset
-from diffusion.data.wids import DistributedRangedSampler
-from diffusion.model.builder import (
+from tools.download import find_model
+
+from src.stage2.generative.Sana.diffusion.data.builder import build_dataloader, build_dataset
+from src.stage2.generative.Sana.diffusion.data.wids import DistributedRangedSampler
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
     vae_encode,
 )
-from diffusion.model.model_growth_utils import ModelGrowthInitializer
-from diffusion.model.nets.sana_ladd import DiscHeadModel, SanaMSCMDiscriminator
-from diffusion.model.respace import compute_density_for_timestep_sampling
-from diffusion.model.utils import get_weight_dtype
-from diffusion.utils.checkpoint import load_checkpoint, save_checkpoint
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.data_sampler import AspectRatioBatchSampler
-from diffusion.utils.dist_utils import clip_grad_norm_, dist, flush, get_world_size
-from diffusion.utils.logger import LogBuffer, get_root_logger
-from diffusion.utils.lr_scheduler import build_lr_scheduler
-from diffusion.utils.misc import (
+from src.stage2.generative.Sana.diffusion.model.model_growth_utils import ModelGrowthInitializer
+from src.stage2.generative.Sana.diffusion.model.nets.sana_ladd import DiscHeadModel, SanaMSCMDiscriminator
+from src.stage2.generative.Sana.diffusion.model.respace import compute_density_for_timestep_sampling
+from src.stage2.generative.Sana.diffusion.model.utils import get_weight_dtype
+from src.stage2.generative.Sana.diffusion.utils.checkpoint import load_checkpoint, save_checkpoint
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.data_sampler import AspectRatioBatchSampler
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import clip_grad_norm_, dist, flush, get_world_size
+from src.stage2.generative.Sana.diffusion.utils.logger import LogBuffer, get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.lr_scheduler import build_lr_scheduler
+from src.stage2.generative.Sana.diffusion.utils.misc import (
     DebugUnderflowOverflow,
     init_random_seed,
     set_random_seed,
 )
-from diffusion.utils.optimizer import auto_scale_lr, build_optimizer
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.utils.optimizer import auto_scale_lr, build_optimizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -127,9 +128,7 @@ def log_validation(
     torch.cuda.empty_cache()
     vis_sampler = config.scheduler.vis_sampler
     model = accelerator.unwrap_model(model).eval()
-    hw = torch.tensor(
-        [[image_size, image_size]], dtype=torch.float, device=device
-    ).repeat(1, 1)
+    hw = torch.tensor([[image_size, image_size]], dtype=torch.float, device=device).repeat(1, 1)
     ar = torch.tensor([[1.0]], device=device).repeat(1, 1)
     null_y = torch.load(null_embed_path, map_location="cpu")
     null_y = null_y["uncond_prompt_embeds"].to(device)
@@ -165,9 +164,7 @@ def log_validation(
                 embed["caption_embeds"].to(device),
                 embed["emb_mask"].to(device),
             )
-            model_kwargs = dict(
-                data_info={"img_hw": hw, "aspect_ratio": ar}, mask=emb_masks
-            )
+            model_kwargs = dict(data_info={"img_hw": hw, "aspect_ratio": ar}, mask=emb_masks)
 
             scheduler = SCMScheduler()
             scheduler.set_timesteps(
@@ -178,11 +175,7 @@ def log_validation(
             timesteps = scheduler.timesteps
 
             model_kwargs["data_info"].update(
-                {
-                    "cfg_scale": torch.tensor(
-                        [config.model.cfg_scale] * latents.shape[0]
-                    ).to(device)
-                }
+                {"cfg_scale": torch.tensor([config.model.cfg_scale] * latents.shape[0]).to(device)}
             )
 
             #  sCM MultiStep Sampling Loop:
@@ -198,37 +191,26 @@ def log_validation(
                 )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents, denoised = scheduler.step(
-                    model_pred, i, t, latents, generator=generator, return_dict=False
-                )
+                latents, denoised = scheduler.step(model_pred, i, t, latents, generator=generator, return_dict=False)
 
             latent_outputs.append(denoised / sigma_data)
 
         torch.cuda.empty_cache()
         if vae is None:
-            vae = get_vae(
-                config.vae.vae_type, config.vae.vae_pretrained, accelerator.device
-            ).to(vae_dtype)
+            vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
         for prompt, latent in zip(validation_prompts, latent_outputs):
             latent = latent.to(vae_dtype)
             samples = vae_decode(config.vae.vae_type, vae, latent)
             samples = (
-                torch.clamp(127.5 * samples + 128.0, 0, 255)
-                .permute(0, 2, 3, 1)
-                .to("cpu", dtype=torch.uint8)
-                .numpy()[0]
+                torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()[0]
             )
             image = Image.fromarray(samples)
-            current_image_logs.append(
-                {"validation_prompt": prompt + label_suffix, "images": [image]}
-            )
+            current_image_logs.append({"validation_prompt": prompt + label_suffix, "images": [image]})
 
         return current_image_logs
 
     # First run with original noise
-    image_logs += run_sampling(
-        init_z=None, label_suffix="", vae=vae, sampler=vis_sampler
-    )
+    image_logs += run_sampling(init_z=None, label_suffix="", vae=vae, sampler=vis_sampler)
 
     # Second run with init_noise if provided
     if init_noise is not None:
@@ -250,17 +232,13 @@ def log_validation(
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             for validation_prompt, image in formatted_images:
-                tracker.writer.add_images(
-                    validation_prompt, image[None, ...], step, dataformats="NHWC"
-                )
+                tracker.writer.add_images(validation_prompt, image[None, ...], step, dataformats="NHWC")
         elif tracker.name == "wandb":
             import wandb
 
             wandb_images = []
             for validation_prompt, image in formatted_images:
-                wandb_images.append(
-                    wandb.Image(image, caption=validation_prompt, file_type="jpg")
-                )
+                wandb_images.append(wandb.Image(image, caption=validation_prompt, file_type="jpg"))
             tracker.log({"validation": wandb_images})
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
@@ -274,10 +252,7 @@ def log_validation(
 
         widths, heights = zip(*(img.size for img in images))
         max_width = max(widths)
-        total_height = sum(
-            heights[i : i + images_per_row][0]
-            for i in range(0, len(images), images_per_row)
-        )
+        total_height = sum(heights[i : i + images_per_row][0] for i in range(0, len(images), images_per_row))
 
         new_im = Image.new("RGB", (max_width * images_per_row, total_height))
 
@@ -301,9 +276,7 @@ def log_validation(
         local_vis_save_path = osp.join(config.work_dir, "log_vis")
         os.umask(0o000)
         os.makedirs(local_vis_save_path, exist_ok=True)
-        concatenated_image = concatenate_images(
-            image_logs, images_per_row=5, image_format=file_format
-        )
+        concatenated_image = concatenate_images(image_logs, images_per_row=5, image_format=file_format)
         save_path = (
             osp.join(local_vis_save_path, f"vis_{step}.{file_format}")
             if init_noise is None
@@ -333,9 +306,7 @@ def train(
 ):
     if getattr(config.train, "debug_nan", False):
         DebugUnderflowOverflow(model, max_frames_to_save=100)
-        logger.info(
-            "NaN debugger registered. Start to detect overflow during training."
-        )
+        logger.info("NaN debugger registered. Start to detect overflow during training.")
     log_buffer = LogBuffer()
 
     global_step = start_step + 1
@@ -350,9 +321,7 @@ def train(
             f"Start caching your dataset for batch_sampler at {cache_file}. \n"
             f"This may take a lot of time...No training will launch"
         )
-        train_dataloader.batch_sampler.sampler.set_start(
-            max(train_dataloader.batch_sampler.exist_ids, 0)
-        )
+        train_dataloader.batch_sampler.sampler.set_start(max(train_dataloader.batch_sampler.exist_ids, 0))
         for index, _ in enumerate(train_dataloader):
             accelerator.wait_for_everyone()
             if index % 2000 == 0:
@@ -370,10 +339,7 @@ def train(
                 )
                 accelerator.wait_for_everyone()
                 break
-            if (
-                len(train_dataloader.batch_sampler.cached_idx)
-                == len(train_dataloader) - 1000
-            ):
+            if len(train_dataloader.batch_sampler.cached_idx) == len(train_dataloader) - 1000:
                 logger.info(
                     f"Saving rank: {rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
                 )
@@ -384,19 +350,13 @@ def train(
                 )
             continue
         accelerator.wait_for_everyone()
-        print(
-            f"Saving rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}"
-        )
-        json.dump(
-            train_dataloader.batch_sampler.cached_idx, open(cache_file, "w"), indent=4
-        )
+        print(f"Saving rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}")
+        json.dump(train_dataloader.batch_sampler.cached_idx, open(cache_file, "w"), indent=4)
         return
 
     phase = "G"
     sigma_data = config.scheduler.sigma_data
-    uncond_y = pretrained_model.y_embedder.y_embedding.repeat(
-        config.train.train_batch_size, 1, 1, 1
-    )
+    uncond_y = pretrained_model.y_embedder.y_embedding.repeat(config.train.train_batch_size, 1, 1, 1)
     # Now you train the model
     g_step = 0
     d_step = 0
@@ -459,8 +419,7 @@ def train(
                         )[0][:, None]
                         y_mask = txt_tokens.attention_mask[:, None, None]
                 elif (
-                    "gemma" in config.text_encoder.text_encoder_name
-                    or "Qwen" in config.text_encoder.text_encoder_name
+                    "gemma" in config.text_encoder.text_encoder_name or "Qwen" in config.text_encoder.text_encoder_name
                 ):
                     with torch.no_grad():
                         if not config.text_encoder.chi_prompt:
@@ -471,9 +430,7 @@ def train(
                             prompt = [chi_prompt + i for i in batch[1]]
                             num_chi_prompt_tokens = len(tokenizer.encode(chi_prompt))
                             max_length_all = (
-                                num_chi_prompt_tokens
-                                + config.text_encoder.model_max_length
-                                - 2
+                                num_chi_prompt_tokens + config.text_encoder.model_max_length - 2
                             )  # magic number 2: [bos], [_]
                         txt_tokens = tokenizer(
                             prompt,
@@ -489,9 +446,7 @@ def train(
                             txt_tokens.input_ids,
                             attention_mask=txt_tokens.attention_mask,
                         )[0][:, None][:, :, select_index]
-                        y_mask = txt_tokens.attention_mask[:, None, None][
-                            :, :, :, select_index
-                        ]
+                        y_mask = txt_tokens.attention_mask[:, None, None][:, :, :, select_index]
                 else:
                     print("error")
                     exit()
@@ -514,19 +469,11 @@ def train(
                     )
                     denoise_timesteps = None
                 elif weighting_scheme == "logit_normal_trigflow_ladd":
-                    indices = torch.randint(
-                        0, len(config.scheduler.add_noise_timesteps), (bs,)
-                    )
-                    u = torch.tensor(
-                        [config.scheduler.add_noise_timesteps[i] for i in indices]
-                    )
+                    indices = torch.randint(0, len(config.scheduler.add_noise_timesteps), (bs,))
+                    u = torch.tensor([config.scheduler.add_noise_timesteps[i] for i in indices])
                     if len(config.scheduler.add_noise_timesteps) == 1:
                         # zero-SNR
-                        denoise_timesteps = (
-                            torch.tensor([1.57080 for i in indices])
-                            .float()
-                            .to(clean_images.device)
-                        )
+                        denoise_timesteps = torch.tensor([1.57080 for i in indices]).float().to(clean_images.device)
                     else:
                         denoise_timesteps = u.float().to(clean_images.device)
 
@@ -545,11 +492,7 @@ def train(
             # get images and timesteps
             x0 = clean_images
             t = timesteps.view(-1, 1, 1, 1)
-            t_G = (
-                denoise_timesteps.view(-1, 1, 1, 1)
-                if denoise_timesteps is not None
-                else t
-            )
+            t_G = denoise_timesteps.view(-1, 1, 1, 1) if denoise_timesteps is not None else t
 
             z = torch.randn_like(x0) * sigma_data
             x_t = torch.cos(t) * x0 + torch.sin(t) * z
@@ -608,13 +551,9 @@ def train(
                             dxt_dt_uncond, dxt_dt = cfg_dxt_dt.chunk(2)
 
                             scm_cfg_scale = scm_cfg_scale.view(-1, 1, 1, 1)
-                            dxt_dt = dxt_dt_uncond + scm_cfg_scale * (
-                                dxt_dt - dxt_dt_uncond
-                            )
+                            dxt_dt = dxt_dt_uncond + scm_cfg_scale * (dxt_dt - dxt_dt_uncond)
                         else:
-                            pretrain_pred = pretrained_model(
-                                x_t / sigma_data, t.flatten(), **model_kwargs
-                            )
+                            pretrain_pred = pretrained_model(x_t / sigma_data, t.flatten(), **model_kwargs)
                             dxt_dt = sigma_data * pretrain_pred
 
                     v_x = torch.cos(t) * torch.sin(t) * dxt_dt / sigma_data
@@ -647,21 +586,13 @@ def train(
                     r = min(1, global_step / config.train.tangent_warmup_steps)
 
                     # Calculate gradient g using JVP rearrangement
-                    g = (
-                        -torch.cos(t)
-                        * torch.cos(t)
-                        * (sigma_data * F_theta_minus - dxt_dt)
-                    )
-                    second_term = -r * (
-                        torch.cos(t) * torch.sin(t) * x_t + sigma_data * F_theta_grad
-                    )
+                    g = -torch.cos(t) * torch.cos(t) * (sigma_data * F_theta_minus - dxt_dt)
+                    second_term = -r * (torch.cos(t) * torch.sin(t) * x_t + sigma_data * F_theta_grad)
                     g = g + second_term
 
                     # Tangent normalization
                     g_norm = torch.linalg.vector_norm(g, dim=(1, 2, 3), keepdim=True)
-                    g = (
-                        g / (g_norm + 0.1)
-                    )  # 0.1 is the constant c, can be modified but 0.1 was used in the paper
+                    g = g / (g_norm + 0.1)  # 0.1 is the constant c, can be modified but 0.1 was used in the paper
 
                     sigma = torch.tan(t) * sigma_data
                     weight = 1 / sigma
@@ -700,9 +631,7 @@ def train(
                     )
                     t_new = timesteps.view(-1, 1, 1, 1)
 
-                    random_mask = (
-                        torch.rand_like(t_new) < config.train.largest_timestep_prob
-                    )
+                    random_mask = torch.rand_like(t_new) < config.train.largest_timestep_prob
 
                     t_new = torch.where(
                         random_mask,
@@ -722,10 +651,7 @@ def train(
                         jvp=False,
                     )
 
-                    pred_x_0 = (
-                        torch.cos(t_new) * x_t_new
-                        - torch.sin(t_new) * F_theta * sigma_data
-                    )
+                    pred_x_0 = torch.cos(t_new) * x_t_new - torch.sin(t_new) * F_theta * sigma_data
 
                 # Sample timesteps for discriminator
                 timesteps_D, _ = get_timesteps(
@@ -740,26 +666,17 @@ def train(
                 noised_predicted_x0 = torch.cos(t_D) * pred_x_0 + torch.sin(t_D) * z_D
 
                 # Calculate adversarial loss
-                pred_fake = disc(
-                    noised_predicted_x0 / sigma_data, t_D.flatten(), **model_kwargs
-                )
+                pred_fake = disc(noised_predicted_x0 / sigma_data, t_D.flatten(), **model_kwargs)
                 if config.train.discriminator_loss == "cross entropy":
-                    adv_loss = F.binary_cross_entropy_with_logits(
-                        pred_fake, torch.ones_like(pred_fake)
-                    )
+                    adv_loss = F.binary_cross_entropy_with_logits(pred_fake, torch.ones_like(pred_fake))
                 elif config.train.discriminator_loss == "hinge":
                     adv_loss = -torch.mean(pred_fake)
                 else:
-                    raise ValueError(
-                        f"Invalid adversarial loss type: {config.train.discriminator_loss}"
-                    )
+                    raise ValueError(f"Invalid adversarial loss type: {config.train.discriminator_loss}")
 
                 # Total loss = sCM loss / reconstruct loss + LADD loss
                 if config.train.scm_loss:
-                    total_loss = (
-                        config.train.scm_lambda * loss
-                        + adv_loss * config.train.adv_lambda
-                    )
+                    total_loss = config.train.scm_lambda * loss + adv_loss * config.train.adv_lambda
                 elif config.train.reconstruct_loss:
                     total_loss = loss + adv_loss * config.train.adv_lambda
                 else:
@@ -773,15 +690,11 @@ def train(
 
                 if g_step % config.train.gradient_accumulation_steps == 0:
                     if accelerator.sync_gradients:
-                        grad_norm = accelerator.clip_grad_norm_(
-                            model.parameters(), config.train.gradient_clip
-                        )
+                        grad_norm = accelerator.clip_grad_norm_(model.parameters(), config.train.gradient_clip)
                         if torch.logical_or(grad_norm.isnan(), grad_norm.isinf()):
                             optimizer_G.zero_grad(set_to_none=True)
                             optimizer_D.zero_grad(set_to_none=True)
-                            logger.warning(
-                                "NaN or Inf detected in grad_norm, skipping iteration..."
-                            )
+                            logger.warning("NaN or Inf detected in grad_norm, skipping iteration...")
                             continue
 
                         # switch phase to D
@@ -800,17 +713,13 @@ def train(
 
                 with torch.no_grad():
                     scm_cfg_scale = torch.tensor(
-                        np.random.choice(
-                            config.train.scm_cfg_scale, size=bs, replace=True
-                        ),
+                        np.random.choice(config.train.scm_cfg_scale, size=bs, replace=True),
                         device=x_t.device,
                     )
                     data_info["cfg_scale"] = scm_cfg_scale
 
                     if config.train.train_largest_timestep:
-                        random_mask = (
-                            torch.rand_like(t_G) < config.train.largest_timestep_prob
-                        )
+                        random_mask = torch.rand_like(t_G) < config.train.largest_timestep_prob
                         t_G = torch.where(
                             random_mask,
                             torch.full_like(t_G, config.train.largest_timestep),
@@ -828,9 +737,7 @@ def train(
                         data_info=data_info,
                         return_logvar=False,
                     )
-                    pred_x_0 = (
-                        torch.cos(t_G) * x_t - torch.sin(t_G) * F_theta * sigma_data
-                    )
+                    pred_x_0 = torch.cos(t_G) * x_t - torch.sin(t_G) * F_theta * sigma_data
 
                 # Sample timesteps for fake and real samples
                 timestep_D_fake, _ = get_timesteps(
@@ -853,12 +760,8 @@ def train(
                 # Add noise to predicted x0 and real x0
                 z_D_fake = torch.randn_like(x0) * sigma_data
                 z_D_real = torch.randn_like(x0) * sigma_data
-                noised_predicted_x0 = (
-                    torch.cos(t_D_fake) * pred_x_0 + torch.sin(t_D_fake) * z_D_fake
-                )
-                noised_latents = (
-                    torch.cos(t_D_real) * x0 + torch.sin(t_D_real) * z_D_real
-                )
+                noised_predicted_x0 = torch.cos(t_D_fake) * pred_x_0 + torch.sin(t_D_fake) * z_D_fake
+                noised_latents = torch.cos(t_D_real) * x0 + torch.sin(t_D_real) * z_D_real
 
                 # Add misaligned pairs if enabled and batch size > 1
                 if config.train.misaligned_pairs_D and bs > 1:
@@ -873,15 +776,10 @@ def train(
 
                     # Add noise to shifted pairs
                     z_D_shifted = torch.randn_like(shifted_x0) * sigma_data
-                    noised_shifted_x0 = (
-                        torch.cos(t_D_shifted) * shifted_x0
-                        + torch.sin(t_D_shifted) * z_D_shifted
-                    )
+                    noised_shifted_x0 = torch.cos(t_D_shifted) * shifted_x0 + torch.sin(t_D_shifted) * z_D_shifted
 
                     # Concatenate with original noised samples
-                    noised_predicted_x0 = torch.cat(
-                        [noised_predicted_x0, noised_shifted_x0], dim=0
-                    )
+                    noised_predicted_x0 = torch.cat([noised_predicted_x0, noised_shifted_x0], dim=0)
                     t_D_fake = torch.cat([t_D_fake, t_D_shifted], dim=0)
                     y = torch.cat([y, y], dim=0)
                     y_mask = torch.cat([y_mask, y_mask], dim=0)
@@ -890,21 +788,13 @@ def train(
                     fake_kwargs = model_kwargs
 
                 # Calculate D loss
-                pred_fake = disc(
-                    noised_predicted_x0 / sigma_data, t_D_fake.flatten(), **fake_kwargs
-                )
-                pred_true = disc(
-                    noised_latents / sigma_data, t_D_real.flatten(), **model_kwargs
-                )
+                pred_fake = disc(noised_predicted_x0 / sigma_data, t_D_fake.flatten(), **fake_kwargs)
+                pred_true = disc(noised_latents / sigma_data, t_D_real.flatten(), **model_kwargs)
 
                 # cross entropy loss
                 if config.train.discriminator_loss == "cross entropy":
-                    loss_gen = F.binary_cross_entropy_with_logits(
-                        pred_fake, torch.zeros_like(pred_fake)
-                    )
-                    loss_real = F.binary_cross_entropy_with_logits(
-                        pred_true, torch.ones_like(pred_true)
-                    )
+                    loss_gen = F.binary_cross_entropy_with_logits(pred_fake, torch.zeros_like(pred_fake))
+                    loss_real = F.binary_cross_entropy_with_logits(pred_true, torch.ones_like(pred_true))
                     loss_D = loss_gen + loss_real
                 # hinge loss
                 elif config.train.discriminator_loss == "hinge":
@@ -912,9 +802,7 @@ def train(
                     loss_gen = torch.mean(F.relu(1.0 + pred_fake))
                     loss_D = 0.5 * (loss_real + loss_gen)
                 else:
-                    raise ValueError(
-                        f"Invalid discriminator loss type: {config.train.discriminator_loss}"
-                    )
+                    raise ValueError(f"Invalid discriminator loss type: {config.train.discriminator_loss}")
 
                 def calculate_gradient_penalty(discriminator):
                     from torch.utils.checkpoint import checkpoint
@@ -925,23 +813,17 @@ def train(
                     grad_penalty = 0.0
 
                     for i, head_input in enumerate(head_inputs):
-                        head_input = torch.autograd.Variable(
-                            head_input, requires_grad=True
-                        )
+                        head_input = torch.autograd.Variable(head_input, requires_grad=True)
 
                         def forward_head(head_input):
                             return discriminator.heads[i](head_input, None)
 
-                        discriminator_logits = checkpoint(
-                            forward_head, head_input, use_reentrant=False
-                        )
+                        discriminator_logits = checkpoint(forward_head, head_input, use_reentrant=False)
 
                         gradients = torch.autograd.grad(
                             outputs=discriminator_logits,
                             inputs=head_input,
-                            grad_outputs=torch.ones(discriminator_logits.size()).to(
-                                head_input.device
-                            ),
+                            grad_outputs=torch.ones(discriminator_logits.size()).to(head_input.device),
                             create_graph=True,
                             retain_graph=True,
                         )[0]
@@ -967,15 +849,11 @@ def train(
 
                 if d_step % config.train.gradient_accumulation_steps == 0:
                     if accelerator.sync_gradients:
-                        grad_norm = accelerator.clip_grad_norm_(
-                            disc.parameters(), config.train.gradient_clip
-                        )
+                        grad_norm = accelerator.clip_grad_norm_(disc.parameters(), config.train.gradient_clip)
                         if torch.logical_or(grad_norm.isnan(), grad_norm.isinf()):
                             optimizer_G.zero_grad(set_to_none=True)
                             optimizer_D.zero_grad(set_to_none=True)
-                            logger.warning(
-                                "NaN or Inf detected in grad_norm, skipping iteration..."
-                            )
+                            logger.warning("NaN or Inf detected in grad_norm, skipping iteration...")
                             continue
 
                         # switch back to phase G and add global step by one.
@@ -987,41 +865,19 @@ def train(
             model_time_all += time.time() - model_time_start
 
             # update log information
-            if (
-                phase == "G" and g_step % config.train.gradient_accumulation_steps == 0
-            ) or (
+            if (phase == "G" and g_step % config.train.gradient_accumulation_steps == 0) or (
                 phase == "D" and d_step % config.train.gradient_accumulation_steps == 0
             ):
                 lr = lr_scheduler.get_last_lr()[0]
                 logs = {}
                 if config.train.scm_loss:
-                    logs.update(
-                        {args.loss_report_name: accelerator.gather(loss).mean().item()}
-                    )
-                    logs.update(
-                        {
-                            "loss_no_logvar": accelerator.gather(loss_no_logvar)
-                            .mean()
-                            .item()
-                        }
-                    )
-                    logs.update(
-                        {
-                            "loss_no_weight": accelerator.gather(loss_no_weight)
-                            .mean()
-                            .item()
-                        }
-                    )
+                    logs.update({args.loss_report_name: accelerator.gather(loss).mean().item()})
+                    logs.update({"loss_no_logvar": accelerator.gather(loss_no_logvar).mean().item()})
+                    logs.update({"loss_no_weight": accelerator.gather(loss_no_weight).mean().item()})
                     logs.update({"g_norm": accelerator.gather(g_norm).mean().item()})
-                if (
-                    phase == "D"
-                ):  # since we already change the phase to D, but the current step is still in G.
-                    logs.update(
-                        {"total_loss": accelerator.gather(total_loss).mean().item()}
-                    )
-                    logs.update(
-                        {"adv_loss": accelerator.gather(adv_loss).mean().item()}
-                    )
+                if phase == "D":  # since we already change the phase to D, but the current step is still in G.
+                    logs.update({"total_loss": accelerator.gather(total_loss).mean().item()})
+                    logs.update({"adv_loss": accelerator.gather(adv_loss).mean().item()})
                 else:
                     logs.update(
                         {
@@ -1031,9 +887,7 @@ def train(
                         }
                     )
                     if config.train.r1_penalty:
-                        logs.update(
-                            {"r1_penalty": accelerator.gather(r1_penalty).mean().item()}
-                        )
+                        logs.update({"r1_penalty": accelerator.gather(r1_penalty).mean().item()})
                 if grad_norm is not None:
                     logs.update(grad_norm=accelerator.gather(grad_norm).mean().item())
                 log_buffer.update(logs)
@@ -1045,19 +899,14 @@ def train(
                     t_lm = lm_time_all / config.train.log_interval
                     t_vae = vae_time_all / config.train.log_interval
                     avg_time = (time.time() - time_start) / (step + 1)
-                    eta = str(
-                        datetime.timedelta(
-                            seconds=int(avg_time * (total_steps - global_step - 1))
-                        )
-                    )
+                    eta = str(datetime.timedelta(seconds=int(avg_time * (total_steps - global_step - 1))))
                     eta_epoch = str(
                         datetime.timedelta(
                             seconds=int(
                                 avg_time
                                 * (
                                     train_dataloader_len
-                                    - sampler.step_start
-                                    // config.train.train_batch_size
+                                    - sampler.step_start // config.train.train_batch_size
                                     - step
                                     - 1
                                 )
@@ -1067,12 +916,9 @@ def train(
                     log_buffer.average()
 
                     current_step = (
-                        global_step
-                        - sampler.step_start // config.train.train_batch_size
+                        global_step - sampler.step_start // config.train.train_batch_size
                     ) % train_dataloader_len
-                    current_step = (
-                        train_dataloader_len if current_step == 0 else current_step
-                    )
+                    current_step = train_dataloader_len if current_step == 0 else current_step
                     info = (
                         f"Epoch: {epoch} | Global Step: {global_step} | Local Step: {current_step} // {train_dataloader_len}, "
                         f"total_eta: {eta}, epoch_eta:{eta_epoch}, time: all:{t:.3f}, model:{t_m:.3f}, data:{t_d:.3f}, "
@@ -1085,9 +931,7 @@ def train(
                     )
                     info += f"phase: {phase}, "
 
-                    info += ", ".join(
-                        [f"{k}:{v:.4f}" for k, v in log_buffer.output.items()]
-                    )
+                    info += ", ".join([f"{k}:{v:.4f}" for k, v in log_buffer.output.items()])
                     last_tic = time.time()
                     log_buffer.clear()
                     data_time_all = 0
@@ -1106,8 +950,7 @@ def train(
                     raise ValueError("Loss is NaN too much times. Break here.")
                 if (
                     global_step % config.train.save_model_steps == 0
-                    or (time.time() - training_start_time) / 3600
-                    > config.train.early_stop_hours
+                    or (time.time() - training_start_time) / 3600 > config.train.early_stop_hours
                 ):
                     if accelerator.is_main_process:
                         os.umask(0o000)
@@ -1130,14 +973,8 @@ def train(
                             step=global_step,
                             add_suffix=config.train.suffix_checkpoints,
                         )
-                        if (
-                            config.train.online_metric
-                            and global_step % config.train.eval_metric_step == 0
-                            and step > 1
-                        ):
-                            online_metric_monitor_dir = osp.join(
-                                config.work_dir, config.train.online_metric_dir
-                            )
+                        if config.train.online_metric and global_step % config.train.eval_metric_step == 0 and step > 1:
+                            online_metric_monitor_dir = osp.join(config.work_dir, config.train.online_metric_dir)
                             os.makedirs(online_metric_monitor_dir, exist_ok=True)
                             with open(
                                 f"{online_metric_monitor_dir}/{ckpt_saved_path.split('/')[-1]}.txt",
@@ -1146,17 +983,10 @@ def train(
                                 f.write(osp.join(config.work_dir, "config.py") + "\n")
                                 f.write(ckpt_saved_path)
 
-                    if (
-                        time.time() - training_start_time
-                    ) / 3600 > config.train.early_stop_hours:
-                        logger.info(
-                            f"Stopping training at epoch {epoch}, step {global_step} due to time limit."
-                        )
+                    if (time.time() - training_start_time) / 3600 > config.train.early_stop_hours:
+                        logger.info(f"Stopping training at epoch {epoch}, step {global_step} due to time limit.")
                         return
-                if config.train.visualize and (
-                    global_step % config.train.eval_sampling_steps == 0
-                    or (step + 1) == 1
-                ):
+                if config.train.visualize and (global_step % config.train.eval_sampling_steps == 0 or (step + 1) == 1):
                     if accelerator.is_main_process:
                         if validation_noise is not None:
                             log_validation(
@@ -1185,12 +1015,7 @@ def train(
                 # for internal, refactor dataloader logic to remove the ad-hoc implementation
                 if (
                     config.model.multi_scale
-                    and (
-                        train_dataloader_len
-                        - sampler.step_start // config.train.train_batch_size
-                        - step
-                    )
-                    < 30
+                    and (train_dataloader_len - sampler.step_start // config.train.train_batch_size - step) < 30
                 ):
                     # global_step = epoch * train_dataloader_len
                     global_step = (
@@ -1203,11 +1028,7 @@ def train(
 
                 data_time_start = time.time()
 
-        if (
-            epoch % config.train.save_model_epochs == 0
-            or epoch == config.train.num_epochs
-            and not config.debug
-        ):
+        if epoch % config.train.save_model_epochs == 0 or epoch == config.train.num_epochs and not config.debug:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 # os.umask(0o000)
@@ -1222,9 +1043,7 @@ def train(
                     add_symlink=True,
                 )
 
-                online_metric_monitor_dir = osp.join(
-                    config.work_dir, config.train.online_metric_dir
-                )
+                online_metric_monitor_dir = osp.join(config.work_dir, config.train.online_metric_dir)
                 os.makedirs(online_metric_monitor_dir, exist_ok=True)
                 with open(
                     f"{online_metric_monitor_dir}/{ckpt_saved_path.split('/')[-1]}.txt",
@@ -1245,28 +1064,9 @@ def train(
 
 @pyrallis.wrap()
 def main(cfg: SanaConfig) -> None:
-    global \
-        train_dataloader_len, \
-        start_epoch, \
-        start_step, \
-        vae, \
-        generator, \
-        num_replicas, \
-        rank, \
-        training_start_time
-    global \
-        load_vae_feat, \
-        load_text_feat, \
-        validation_noise, \
-        text_encoder, \
-        tokenizer, \
-        model_weight_dtype
-    global \
-        max_length, \
-        validation_prompts, \
-        latent_size, \
-        valid_prompt_embed_suffix, \
-        null_embed_path
+    global train_dataloader_len, start_epoch, start_step, vae, generator, num_replicas, rank, training_start_time
+    global load_vae_feat, load_text_feat, validation_noise, text_encoder, tokenizer, model_weight_dtype
+    global max_length, validation_prompts, latent_size, valid_prompt_embed_suffix, null_embed_path
     global image_size, cache_file, total_steps, vae_dtype
 
     config = cfg
@@ -1292,9 +1092,7 @@ def main(cfg: SanaConfig) -> None:
     os.makedirs(config.work_dir, exist_ok=True)
 
     init_handler = InitProcessGroupKwargs()
-    init_handler.timeout = datetime.timedelta(
-        seconds=5400
-    )  # change timeout to avoid a strange NCCL bug
+    init_handler.timeout = datetime.timedelta(seconds=5400)  # change timeout to avoid a strange NCCL bug
     # Initialize accelerator and tensorboard logging
     if config.train.use_fsdp:
         init_train = "FSDP"
@@ -1305,9 +1103,7 @@ def main(cfg: SanaConfig) -> None:
 
         set_fsdp_env()
         fsdp_plugin = FullyShardedDataParallelPlugin(
-            state_dict_config=FullStateDictConfig(
-                offload_to_cpu=False, rank0_only=False
-            ),
+            state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False),
         )
     else:
         init_train = "DDP"
@@ -1376,9 +1172,7 @@ def main(cfg: SanaConfig) -> None:
         else None
     )
     if not config.data.load_vae_feat:
-        vae = get_vae(
-            config.vae.vae_type, config.vae.vae_pretrained, accelerator.device
-        ).to(vae_dtype)
+        vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
     tokenizer = text_encoder = None
     if not config.data.load_text_feat:
         tokenizer, text_encoder = get_tokenizer_and_text_encoder(
@@ -1389,9 +1183,7 @@ def main(cfg: SanaConfig) -> None:
         text_embed_dim = config.text_encoder.caption_channels
     config.text_encoder.caption_channels = text_embed_dim
 
-    logger.info(
-        f"vae type: {config.vae.vae_type}, path: {config.vae.vae_pretrained}, weight_dtype: {vae_dtype}"
-    )
+    logger.info(f"vae type: {config.vae.vae_type}, path: {config.vae.vae_pretrained}, weight_dtype: {vae_dtype}")
     if config.text_encoder.chi_prompt:
         chi_prompt = "\n".join(config.text_encoder.chi_prompt)
         logger.info(f"Complex Human Instruct: {chi_prompt}")
@@ -1410,16 +1202,12 @@ def main(cfg: SanaConfig) -> None:
             uuid_chi_prompt = hashlib.sha256(chi_prompt.encode()).hexdigest()
         else:
             uuid_chi_prompt = hashlib.sha256(b"").hexdigest()
-        config.train.valid_prompt_embed_root = osp.join(
-            config.train.valid_prompt_embed_root, uuid_chi_prompt
-        )
+        config.train.valid_prompt_embed_root = osp.join(config.train.valid_prompt_embed_root, uuid_chi_prompt)
         Path(config.train.valid_prompt_embed_root).mkdir(parents=True, exist_ok=True)
 
         if config.text_encoder.chi_prompt:
             # Save complex human instruct to a file
-            chi_prompt_file = osp.join(
-                config.train.valid_prompt_embed_root, "chi_prompt.txt"
-            )
+            chi_prompt_file = osp.join(config.train.valid_prompt_embed_root, "chi_prompt.txt")
             with open(chi_prompt_file, "w", encoding="utf-8") as f:
                 f.write(chi_prompt)
 
@@ -1433,15 +1221,9 @@ def main(cfg: SanaConfig) -> None:
                 logger.info("Preparing Visualization prompt embeddings...")
                 break
         if accelerator.is_main_process and not skip:
-            if config.data.load_text_feat and (
-                tokenizer is None or text_encoder is None
-            ):
-                logger.info(
-                    f"Loading text encoder and tokenizer from {config.text_encoder.text_encoder_name} ..."
-                )
-                tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-                    name=config.text_encoder.text_encoder_name
-                )
+            if config.data.load_text_feat and (tokenizer is None or text_encoder is None):
+                logger.info(f"Loading text encoder and tokenizer from {config.text_encoder.text_encoder_name} ...")
+                tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name)
 
             for prompt in validation_prompts:
                 prompt_embed_path = osp.join(
@@ -1456,13 +1238,10 @@ def main(cfg: SanaConfig) -> None:
                         truncation=True,
                         return_tensors="pt",
                     ).to(accelerator.device)
-                    caption_emb = text_encoder(
-                        txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask
-                    )[0]
+                    caption_emb = text_encoder(txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask)[0]
                     caption_emb_mask = txt_tokens.attention_mask
                 elif (
-                    "gemma" in config.text_encoder.text_encoder_name
-                    or "Qwen" in config.text_encoder.text_encoder_name
+                    "gemma" in config.text_encoder.text_encoder_name or "Qwen" in config.text_encoder.text_encoder_name
                 ):
                     if not config.text_encoder.chi_prompt:
                         max_length_all = config.text_encoder.model_max_length
@@ -1471,9 +1250,7 @@ def main(cfg: SanaConfig) -> None:
                         prompt = chi_prompt + prompt
                         num_chi_prompt_tokens = len(tokenizer.encode(chi_prompt))
                         max_length_all = (
-                            num_chi_prompt_tokens
-                            + config.text_encoder.model_max_length
-                            - 2
+                            num_chi_prompt_tokens + config.text_encoder.model_max_length - 2
                         )  # magic number 2: [bos], [_]
 
                     txt_tokens = tokenizer(
@@ -1483,17 +1260,13 @@ def main(cfg: SanaConfig) -> None:
                         truncation=True,
                         return_tensors="pt",
                     ).to(accelerator.device)
-                    select_index = [0] + list(
-                        range(-config.text_encoder.model_max_length + 1, 0)
-                    )
-                    caption_emb = text_encoder(
-                        txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask
-                    )[0][:, select_index]
+                    select_index = [0] + list(range(-config.text_encoder.model_max_length + 1, 0))
+                    caption_emb = text_encoder(txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask)[0][
+                        :, select_index
+                    ]
                     caption_emb_mask = txt_tokens.attention_mask[:, select_index]
                 else:
-                    raise ValueError(
-                        f"{config.text_encoder.text_encoder_name} is not supported!!"
-                    )
+                    raise ValueError(f"{config.text_encoder.text_encoder_name} is not supported!!")
 
                 torch.save(
                     {"caption_embeds": caption_emb, "emb_mask": caption_emb_mask},
@@ -1508,20 +1281,11 @@ def main(cfg: SanaConfig) -> None:
                 return_tensors="pt",
             ).to(accelerator.device)
             if "T5" in config.text_encoder.text_encoder_name:
-                null_token_emb = text_encoder(
-                    null_tokens.input_ids, attention_mask=null_tokens.attention_mask
-                )[0]
-            elif (
-                "gemma" in config.text_encoder.text_encoder_name
-                or "Qwen" in config.text_encoder.text_encoder_name
-            ):
-                null_token_emb = text_encoder(
-                    null_tokens.input_ids, attention_mask=null_tokens.attention_mask
-                )[0]
+                null_token_emb = text_encoder(null_tokens.input_ids, attention_mask=null_tokens.attention_mask)[0]
+            elif "gemma" in config.text_encoder.text_encoder_name or "Qwen" in config.text_encoder.text_encoder_name:
+                null_token_emb = text_encoder(null_tokens.input_ids, attention_mask=null_tokens.attention_mask)[0]
             else:
-                raise ValueError(
-                    f"{config.text_encoder.text_encoder_name} is not supported!!"
-                )
+                raise ValueError(f"{config.text_encoder.text_encoder_name} is not supported!!")
             torch.save(
                 {
                     "uncond_prompt_embeds": null_token_emb,
@@ -1536,9 +1300,7 @@ def main(cfg: SanaConfig) -> None:
             del null_tokens
             flush()
 
-    os.environ["AUTOCAST_LINEAR_ATTN"] = (
-        "true" if config.model.autocast_linear_attn else "false"
-    )
+    os.environ["AUTOCAST_LINEAR_ATTN"] = "true" if config.model.autocast_linear_attn else "false"
 
     # 1. build scheduler
     predict_info = ""
@@ -1632,15 +1394,9 @@ def main(cfg: SanaConfig) -> None:
             m.clip_grad_norm_ = types.MethodType(clip_grad_norm_, m)
 
     # 3. build dataloader
-    config.data.data_dir = (
-        config.data.data_dir
-        if isinstance(config.data.data_dir, list)
-        else [config.data.data_dir]
-    )
+    config.data.data_dir = config.data.data_dir if isinstance(config.data.data_dir, list) else [config.data.data_dir]
     config.data.data_dir = [
-        data
-        if data.startswith(("https://", "http://", "gs://", "/", "~"))
-        else osp.abspath(osp.expanduser(data))
+        data if data.startswith(("https://", "http://", "gs://", "/", "~")) else osp.abspath(osp.expanduser(data))
         for data in config.data.data_dir
     ]
     num_replicas = int(os.environ["WORLD_SIZE"])
@@ -1672,9 +1428,7 @@ def main(cfg: SanaConfig) -> None:
             cache_file += f"-{i}"
         cache_file += ".json"
 
-        sampler = DistributedRangedSampler(
-            dataset, num_replicas=num_replicas, rank=rank
-        )
+        sampler = DistributedRangedSampler(dataset, num_replicas=num_replicas, rank=rank)
         batch_sampler = AspectRatioBatchSampler(
             sampler=sampler,
             dataset=dataset,
@@ -1689,17 +1443,11 @@ def main(cfg: SanaConfig) -> None:
             caching=args.caching,
             clipscore_filter_thres=args.data.del_img_clip_thr,
         )
-        train_dataloader = build_dataloader(
-            dataset, batch_sampler=batch_sampler, num_workers=config.train.num_workers
-        )
+        train_dataloader = build_dataloader(dataset, batch_sampler=batch_sampler, num_workers=config.train.num_workers)
         train_dataloader_len = len(train_dataloader)
-        logger.info(
-            f"rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}"
-        )
+        logger.info(f"rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}")
     else:
-        sampler = DistributedRangedSampler(
-            dataset, num_replicas=num_replicas, rank=rank
-        )
+        sampler = DistributedRangedSampler(dataset, num_replicas=num_replicas, rank=rank)
         train_dataloader = build_dataloader(
             dataset,
             num_workers=config.train.num_workers,
@@ -1715,9 +1463,7 @@ def main(cfg: SanaConfig) -> None:
     lr_scale_ratio = 1
     if getattr(config.train, "auto_lr", None):
         lr_scale_ratio = auto_scale_lr(
-            config.train.train_batch_size
-            * get_world_size()
-            * config.train.gradient_accumulation_steps,
+            config.train.train_batch_size * get_world_size() * config.train.gradient_accumulation_steps,
             config.train.optimizer,
             **config.train.auto_lr,
         )
@@ -1742,9 +1488,7 @@ def main(cfg: SanaConfig) -> None:
             else:
                 logger.info(f"Layer: unnamed, Learning rate: {group['lr']:.8f}")
 
-    lr_scheduler = build_lr_scheduler(
-        config.train, optimizer_G, train_dataloader, lr_scale_ratio
-    )
+    lr_scheduler = build_lr_scheduler(config.train, optimizer_G, train_dataloader, lr_scale_ratio)
     logger.warning(
         f"{colored(f'Basic Setting: ', 'green', attrs=['bold'])}"
         f"lr: {config.train.optimizer['lr']:.5f}, bs: {config.train.train_batch_size}, gc: {config.train.grad_checkpointing}, "
@@ -1769,10 +1513,7 @@ def main(cfg: SanaConfig) -> None:
     complete_state_dict = {}
 
     # Resume training
-    if (
-        config.model.resume_from is not None
-        and config.model.resume_from["checkpoint"] is not None
-    ):
+    if config.model.resume_from is not None and config.model.resume_from["checkpoint"] is not None:
         ckpt_path = osp.join(config.work_dir, "checkpoints")
         check_flag = osp.exists(ckpt_path) and len(os.listdir(ckpt_path)) != 0
         if config.model.resume_from["checkpoint"] == "latest":
@@ -1780,28 +1521,18 @@ def main(cfg: SanaConfig) -> None:
                 config.model.resume_from["resume_optimizer"] = True
                 config.model.resume_from["resume_lr_scheduler"] = True
                 checkpoints = os.listdir(ckpt_path)
-                if "latest.pth" in checkpoints and osp.exists(
-                    osp.join(ckpt_path, "latest.pth")
-                ):
-                    config.model.resume_from["checkpoint"] = osp.realpath(
-                        osp.join(ckpt_path, "latest.pth")
-                    )
+                if "latest.pth" in checkpoints and osp.exists(osp.join(ckpt_path, "latest.pth")):
+                    config.model.resume_from["checkpoint"] = osp.realpath(osp.join(ckpt_path, "latest.pth"))
                 else:
                     checkpoints = [i for i in checkpoints if i.startswith("epoch_")]
                     checkpoints = sorted(
                         checkpoints,
                         key=lambda x: int(x.replace(".pth", "").split("_")[3]),
                     )
-                    config.model.resume_from["checkpoint"] = osp.join(
-                        ckpt_path, checkpoints[-1]
-                    )
+                    config.model.resume_from["checkpoint"] = osp.join(ckpt_path, checkpoints[-1])
             else:
-                config.model.resume_from["resume_optimizer"] = (
-                    config.train.load_from_optimizer
-                )
-                config.model.resume_from["resume_lr_scheduler"] = (
-                    config.train.load_from_lr_scheduler
-                )
+                config.model.resume_from["resume_optimizer"] = config.train.load_from_optimizer
+                config.model.resume_from["resume_lr_scheduler"] = config.train.load_from_lr_scheduler
                 config.model.resume_from["checkpoint"] = config.model.load_from
 
         if config.model.resume_from["checkpoint"] is not None:
@@ -1823,22 +1554,14 @@ def main(cfg: SanaConfig) -> None:
                 checkpoint = find_model(disc_ckpt_path)
                 heads_state = checkpoint.get("state_dict", checkpoint)
 
-                heads_state = {
-                    k: v
-                    for k, v in heads_state.items()
-                    if not k.startswith("transformer.")
-                }
+                heads_state = {k: v for k, v in heads_state.items() if not k.startswith("transformer.")}
                 complete_state_dict.update(heads_state)
 
                 if optimizer_D is not None and "optimizer" in checkpoint:
                     try:
                         optimizer_D.load_state_dict(checkpoint["optimizer"])
                     except Exception as e:
-                        logger.warning(
-                            colored(
-                                f"Skipping discriminator optimizer resume: {e}", "red"
-                            )
-                        )
+                        logger.warning(colored(f"Skipping discriminator optimizer resume: {e}", "red"))
 
             path = osp.basename(config.model.resume_from["checkpoint"])
         try:
@@ -1851,9 +1574,7 @@ def main(cfg: SanaConfig) -> None:
         checkpoint = find_model(config.model.teacher_model)
         backbone_state = checkpoint.get("state_dict", checkpoint)
 
-        has_transformer_prefix = any(
-            k.startswith("transformer.") for k in backbone_state.keys()
-        )
+        has_transformer_prefix = any(k.startswith("transformer.") for k in backbone_state.keys())
         if not has_transformer_prefix:
             backbone_state = {f"transformer.{k}": v for k, v in backbone_state.items()}
 
@@ -1865,22 +1586,15 @@ def main(cfg: SanaConfig) -> None:
         logger.warning(colored(f"Discriminator Unexpected keys: {unexpected}", "red"))
 
     # resume randomise
-    set_random_seed(
-        (start_step + 1) // config.train.save_model_steps
-        + int(os.environ["LOCAL_RANK"])
-    )
-    logger.info(
-        f"Set seed: {(start_step + 1) // config.train.save_model_steps + int(os.environ['LOCAL_RANK'])}"
-    )
+    set_random_seed((start_step + 1) // config.train.save_model_steps + int(os.environ["LOCAL_RANK"]))
+    logger.info(f"Set seed: {(start_step + 1) // config.train.save_model_steps + int(os.environ['LOCAL_RANK'])}")
 
     # Prepare everything
     # There is no specific order to remember, you just need to unpack the
     # objects in the same order you gave them to the prepare method.
     model, pretrained_model = accelerator.prepare(model, pretrained_model)
     disc = accelerator.prepare(disc)
-    optimizer_G, optimizer_D, lr_scheduler = accelerator.prepare(
-        optimizer_G, optimizer_D, lr_scheduler
-    )
+    optimizer_G, optimizer_D, lr_scheduler = accelerator.prepare(optimizer_G, optimizer_D, lr_scheduler)
 
     # Start Training
     train(

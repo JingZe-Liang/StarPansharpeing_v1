@@ -7,10 +7,10 @@ import numpy as np
 import torch
 import webdataset as wds
 from PIL import Image
+from tools.metrics.utils import tracker
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
-from diffusion.data.transforms import get_transform
-from tools.metrics.utils import tracker
+from src.stage2.generative.Sana.diffusion.data.transforms import get_transform
 
 try:
     from tqdm import tqdm
@@ -40,9 +40,9 @@ class DummyDataset(Dataset):
         tokenizer=None,
     ) -> None:
         super().__init__()
-        assert (
-            real_flag in self.FLAGS and fake_flag in self.FLAGS
-        ), f"CLIP Score only support modality of {self.FLAGS}. However, get {real_flag} and {fake_flag}"
+        assert real_flag in self.FLAGS and fake_flag in self.FLAGS, (
+            f"CLIP Score only support modality of {self.FLAGS}. However, get {real_flag} and {fake_flag}"
+        )
         self.gen_img_path = gen_img_path
         print(f"images are from {gen_img_path}")
         self.real_folder = self._load_img_from_path(real_path)
@@ -93,17 +93,13 @@ class DummyDataset(Dataset):
                     img_path = os.path.join(self.gen_img_path, f"{k}.jpg")
                     image_list.append(img_path)
             elif isinstance(all_lines, dict):
-                assert sample_nums >= 30_000, ValueError(
-                    f"{sample_nums} is not supported for json files"
-                )
+                assert sample_nums >= 30_000, ValueError(f"{sample_nums} is not supported for json files")
                 for k, v in all_lines.items():
                     img_path = os.path.join(self.gen_img_path, f"{k}.jpg")
                     image_list.append(img_path)
 
         else:
-            raise ValueError(
-                f"Only JSON file type is supported now. Wrong with: {path}"
-            )
+            raise ValueError(f"Only JSON file type is supported now. Wrong with: {path}")
 
         return image_list
 
@@ -118,15 +114,11 @@ class DummyDataset(Dataset):
                     v = data_dict[k]
                     txt_list.append(v["prompt"])
             elif isinstance(all_lines, dict):
-                assert sample_nums >= 30_000, ValueError(
-                    f"{sample_nums} is not supported for json files"
-                )
+                assert sample_nums >= 30_000, ValueError(f"{sample_nums} is not supported for json files")
                 for k, v in all_lines.items():
                     txt_list.append(v["prompt"])
         else:
-            raise ValueError(
-                f"Only JSON file type is supported now. Wrong with: {path}"
-            )
+            raise ValueError(f"Only JSON file type is supported now. Wrong with: {path}")
 
         return txt_list
 
@@ -236,18 +228,12 @@ def calculate_clip_score(dataloader, model, real_flag, fake_flag, save_json_path
         fake_features = forward_modality(model, batch_data["fake"], fake_flag)
 
         # normalize features
-        real_features = real_features / real_features.norm(dim=1, keepdim=True).to(
-            torch.float32
-        )
-        fake_features = fake_features / fake_features.norm(dim=1, keepdim=True).to(
-            torch.float32
-        )
+        real_features = real_features / real_features.norm(dim=1, keepdim=True).to(torch.float32)
+        fake_features = fake_features / fake_features.norm(dim=1, keepdim=True).to(torch.float32)
 
         score = logit_scale * (fake_features * real_features).sum()
         if save_json_path is not None:
-            json_dict[batch_data["key"][0]] = {
-                f"{batch_data['prompt_key'][0]}": f"{score:.04f}"
-            }
+            json_dict[batch_data["key"][0]] = {f"{batch_data['prompt_key'][0]}": f"{score:.04f}"}
 
         score_acc += score
         sample_num += batch_data["real"].shape[0]
@@ -262,15 +248,11 @@ def calculate_clip_score_official(dataloader):
     import numpy as np
     from torchmetrics.multimodal.clip_score import CLIPScore
 
-    clip_score_fn = CLIPScore(model_name_or_path="openai/clip-vit-large-patch14").to(
-        device
-    )
+    clip_score_fn = CLIPScore(model_name_or_path="openai/clip-vit-large-patch14").to(device)
     # clip_score_fn = CLIPScore(model_name_or_path="openai/clip-vit-base-patch16").to(device)
     all_clip_scores = []
 
-    for batch_data in tqdm(
-        dataloader, desc=args.exp_name, position=args.gpu_id, leave=True
-    ):
+    for batch_data in tqdm(dataloader, desc=args.exp_name, position=args.gpu_id, leave=True):
         imgs = batch_data["real"].add_(1.0).mul_(0.5)
         imgs = (imgs * 255).to(dtype=torch.uint8, device=device)
 
@@ -297,17 +279,15 @@ def main():
     txt_path = args.txt_path if args.txt_path is not None else args.img_path
     gen_img_path = str(os.path.join(args.img_path, args.exp_name))
     if ".tar" in gen_img_path:
-        save_txt_path = os.path.join(
-            txt_path, f"{args.exp_name}_{args.tar_prompt_key}_clip_score.txt"
-        ).replace(".tar", "")
+        save_txt_path = os.path.join(txt_path, f"{args.exp_name}_{args.tar_prompt_key}_clip_score.txt").replace(
+            ".tar", ""
+        )
         save_json_path = save_txt_path.replace(".tar", "").replace(".txt", ".json")
         if os.path.exists(save_json_path):
             print(f"{save_json_path} exists. Finished.")
             return None
     else:
-        save_txt_path = os.path.join(
-            txt_path, f"{args.exp_name}_sample{sample_nums}_clip_score.txt"
-        )
+        save_txt_path = os.path.join(txt_path, f"{args.exp_name}_sample{sample_nums}_clip_score.txt")
         save_json_path = None
     if os.path.exists(save_txt_path):
         with open(save_txt_path) as f:
@@ -339,9 +319,7 @@ def main():
             tokenizer=clip.tokenize,
             gen_img_path=gen_img_path,
         )
-    dataloader = DataLoader(
-        dataset, args.batch_size, num_workers=num_workers, pin_memory=True
-    )
+    dataloader = DataLoader(dataset, args.batch_size, num_workers=num_workers, pin_memory=True)
 
     print("Calculating CLIP Score:")
     if args.clipscore_type == "diffusers":
@@ -366,9 +344,7 @@ def main():
 def parse_args():
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument("--batch-size", type=int, default=50, help="Batch size to use")
-    parser.add_argument(
-        "--clip-model", type=str, default="ViT-L/14", help="CLIP model to use"
-    )
+    parser.add_argument("--clip-model", type=str, default="ViT-L/14", help="CLIP model to use")
     # parser.add_argument('--clip-model', type=str, default='ViT-B/16', help='CLIP model to use')
     parser.add_argument("--img_path", type=str, default=None)
     parser.add_argument("--txt_path", type=str, default=None)
@@ -413,15 +389,11 @@ def parse_args():
     )
 
     # online logging setting
-    parser.add_argument(
-        "--clipscore_type", type=str, default="self", choices=["diffusers", "self"]
-    )
+    parser.add_argument("--clipscore_type", type=str, default="self", choices=["diffusers", "self"])
     parser.add_argument("--log_metric", type=str, default="metric")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--log_clip_score", action="store_true")
-    parser.add_argument(
-        "--suffix_label", type=str, default="", help="used for clip_score online log"
-    )
+    parser.add_argument("--suffix_label", type=str, default="", help="used for clip_score online log")
     parser.add_argument(
         "--tracker_pattern",
         type=str,

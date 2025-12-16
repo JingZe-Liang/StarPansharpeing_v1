@@ -29,7 +29,7 @@ from torchvision.transforms import ToTensor
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 _CITATION = """\
 @article{ghosh2024geneval,
@@ -55,13 +55,9 @@ def set_env(seed=0):
 @torch.inference_mode()
 def visualize():
     tqdm_desc = f"{save_root.split('/')[-1]} Using GPU: {args.gpu_id}: {args.start_index}-{args.end_index}"
-    for index, metadata in tqdm(
-        list(enumerate(metadatas)), desc=tqdm_desc, position=args.gpu_id, leave=True
-    ):
+    for index, metadata in tqdm(list(enumerate(metadatas)), desc=tqdm_desc, position=args.gpu_id, leave=True):
         metadata["include"] = (
-            metadata["include"]
-            if isinstance(metadata["include"], list)
-            else eval(metadata["include"])
+            metadata["include"] if isinstance(metadata["include"], list) else eval(metadata["include"])
         )
         seed_everything(args.seed)
         index += args.start_index
@@ -95,18 +91,14 @@ def visualize():
                         width=None,
                         num_inference_steps=50,
                         guidance_scale=9.0,
-                        num_images_per_prompt=min(
-                            batch_size, args.n_samples - sample_count
-                        ),
+                        num_images_per_prompt=min(batch_size, args.n_samples - sample_count),
                         negative_prompt=None,
                     ).images
                     for sample in samples:
                         sample.save(os.path.join(sample_path, f"{sample_count:05}.png"))
                         sample_count += 1
                     if not args.skip_grid:
-                        all_samples.append(
-                            torch.stack([ToTensor()(sample) for sample in samples], 0)
-                        )
+                        all_samples.append(torch.stack([ToTensor()(sample) for sample in samples], 0))
 
             if not args.skip_grid and all_samples:
                 # additionally, save as grid
@@ -115,14 +107,7 @@ def visualize():
                 grid = make_grid(grid, nrow=n_rows, normalize=True, value_range=(-1, 1))
 
                 # to image
-                grid = (
-                    grid.mul(255)
-                    .add_(0.5)
-                    .clamp_(0, 255)
-                    .permute(1, 2, 0)
-                    .to("cpu", torch.uint8)
-                    .numpy()
-                )
+                grid = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
                 grid = Image.fromarray(grid.astype(np.uint8))
                 grid.save(os.path.join(outpath, f"grid.png"))
                 del grid
@@ -135,9 +120,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     # GenEval
     parser.add_argument("--dataset", default="GenEval", type=str)
-    parser.add_argument(
-        "--model_path", default=None, type=str, help="Path to the model file (optional)"
-    )
+    parser.add_argument("--model_path", default=None, type=str, help="Path to the model file (optional)")
     parser.add_argument(
         "--outdir",
         type=str,
@@ -193,9 +176,7 @@ if __name__ == "__main__":
     logger = get_root_logger()
     generator = torch.Generator(device=device).manual_seed(args.seed)
     n_rows = batch_size = args.n_samples
-    assert args.batch_size == 1, ValueError(
-        f"{batch_size} > 1 is not available in GenEval"
-    )
+    assert args.batch_size == 1, ValueError(f"{batch_size} > 1 is not available in GenEval")
 
     from diffusers import DiffusionPipeline
 

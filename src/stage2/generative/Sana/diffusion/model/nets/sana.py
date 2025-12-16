@@ -20,15 +20,13 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-from timm.models.layers import DropPath
+from diffusers.models.embeddings import get_2d_rotary_pos_embed
+from loguru import logger
+from timm.layers import DropPath
 
-from diffusion.model.builder import MODELS
-from diffusion.model.nets.basic_modules import (
-    DWMlp,
-    GLUMBConv,
-    Mlp,
-)
-from diffusion.model.nets.sana_blocks import (
+from src.stage2.generative.Sana.diffusion.model.builder import MODELS
+from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import DWMlp, GLUMBConv, Mlp
+from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     Attention,
     CaptionEmbedder,
     FlashAttention,
@@ -41,22 +39,15 @@ from diffusion.model.nets.sana_blocks import (
     TimestepEmbedder,
     t2i_modulate,
 )
-from diffusion.model.norms import RMSNorm
-from diffusion.model.utils import (
-    auto_grad_checkpoint,
-    to_2tuple,
-)
-from diffusion.utils.dist_utils import get_rank
-from diffusion.utils.import_utils import (
-    is_triton_module_available,
-)
-from diffusion.utils.logger import get_root_logger
+from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
+from src.stage2.generative.Sana.diffusion.model.utils import auto_grad_checkpoint, to_2tuple
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import get_rank
+from src.stage2.generative.Sana.diffusion.utils.import_utils import is_triton_module_available
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from diffusion.model.nets.fastlinear.modules import (
-        TritonLiteMLA,
-    )
+    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import TritonLiteMLA
 
     _triton_modules_available = True
 
@@ -164,13 +155,18 @@ class SanaBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
-    def forward(self, x, y, t, mask=None, **kwargs):
+    def forward(self, x, y, t, mask=None, image_rotary_emb=None, **kwargs):
         B, N, C = x.shape
 
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None] + t.reshape(B, 6, -1)
         ).chunk(6, dim=1)
-        x = x + self.drop_path(gate_msa * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa)).reshape(B, N, C))
+        x = x + self.drop_path(
+            gate_msa
+            * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa), image_rotary_emb=image_rotary_emb).reshape(
+                B, N, C
+            )
+        )
         x = x + self.cross_attn(x, y, mask)
         x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp)))
 
@@ -180,7 +176,7 @@ class SanaBlock(nn.Module):
 #############################################################################
 #                                 Core Sana Model                                #
 #################################################################################
-@MODELS.register_module()
+@MODELS.register_module(force=True)
 class Sana(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -221,6 +217,7 @@ class Sana(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.input_size = input_size
         self.pred_sigma = pred_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if pred_sigma else in_channels
@@ -236,6 +233,8 @@ class Sana(nn.Module):
         self.config = config
         self.timestep_norm_scale_factor = timestep_norm_scale_factor
         kernel_size = patch_embed_kernel or patch_size
+        logger.info(f"{use_pe=}, {pos_embed_type=}, {attn_type=}, {ffn_type=}, {cross_attn_type=}")
+
         self.x_embedder = PatchEmbed(
             input_size,
             patch_size,
@@ -265,6 +264,7 @@ class Sana(nn.Module):
         )
         if self.y_norm:
             self.attention_y_norm = RMSNorm(hidden_size, scale_factor=y_norm_scale_factor, eps=norm_eps)
+
         drop_path = [x.item() for x in torch.linspace(0, drop_path, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
@@ -288,17 +288,12 @@ class Sana(nn.Module):
 
         self.initialize_weights()
 
-        if config and config.work_dir:
-            logger = get_root_logger(os.path.join(config.work_dir, "train_log.log"))
-            logger = logger.info
-        else:
-            logger = print
         if get_rank() == 0:
-            logger(
+            logger.info(
                 f"use pe: {use_pe}, pos embed type: {pos_embed_type}, "
                 f"position embed interpolation: {self.pe_interpolation}, base size: {self.base_size}"
             )
-            logger(
+            logger.info(
                 f"attention type: {attn_type}; ffn type: {ffn_type}; self-attn qk norm: {qk_norm}; "
                 f"cross-attn type: {cross_attn_type};  cross-attn qk norm: {cross_norm}; "
                 f"autocast linear attn: {os.environ.get('AUTOCAST_LINEAR_ATTN', False)}"
@@ -315,20 +310,28 @@ class Sana(nn.Module):
         timestep = timestep.to(self.dtype)
         y = y.to(self.dtype)
         pos_embed = self.pos_embed.to(self.dtype)
+
         self.h, self.w = x.shape[-2] // self.patch_size, x.shape[-1] // self.patch_size
+
         x = self.x_embedder(x)
         image_pos_embed = None
+
         if self.use_pe:
             if self.pos_embed_type == "sincos":
                 x = x + pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
             elif self.pos_embed_type == "3d_rope":
                 image_pos_embed = pos_embed
                 x += image_pos_embed
+            elif self.pos_embed_type == "rope_diffusers":
+                x = x + pos_embed
+                image_pos_embed = self.rope
+
         t = self.t_embedder(timestep.to(x.dtype))  # (N, D)
         t0 = self.t_block(t)
         y = self.y_embedder(y, self.training)  # (N, 1, L, D)
         if self.y_norm:
             y = self.attention_y_norm(y)
+
         if mask is not None:
             if mask.shape[0] != y.shape[0]:
                 mask = mask.repeat(y.shape[0] // mask.shape[0], 1)
@@ -338,8 +341,10 @@ class Sana(nn.Module):
         else:
             y_lens = [y.shape[2]] * y.shape[0]
             y = y.squeeze(1).view(1, -1, x.shape[-1])
+
         for block in self.blocks:
             x = auto_grad_checkpoint(block, x, y, t0, y_lens, image_pos_embed)  # (N, T, D) #support grad checkpoint
+
         x = self.final_layer(x, t)  # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         return x
@@ -398,6 +403,24 @@ class Sana(nn.Module):
             elif self.pos_embed_type == "3d_rope":
                 # Initialize (and freeze) pos_embed by 3D-Rope embedding:
                 pos_embed = RopePosEmbed(theta=10000, axes_dim=[0, 16, 16])
+            elif self.pos_embed_type == "rope_diffusers":
+                # abs pe + rope
+                pos_embed = get_2d_sincos_pos_embed(
+                    self.pos_embed.shape[-1],
+                    # int(self.x_embedder.num_patches**0.5),
+                    int(self.num_patches**0.5),
+                    pe_interpolation=self.pe_interpolation,
+                    base_size=self.base_size,
+                )
+                rope_hw = self.input_size // self.patch_size
+                rope = get_2d_rotary_pos_embed(
+                    self.pos_embed.shape[-1] // self.num_heads,
+                    crops_coords=[[0, 0], [rope_hw, rope_hw]],  # assume is square image
+                    grid_size=(rope_hw, rope_hw),
+                    output_type="pt",
+                    device=torch.device("cuda"),
+                )  # [hw, D]
+                self.rope = rope
             else:
                 raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
 

@@ -6,8 +6,8 @@ from PIL import Image
 from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 
-from tools.controlnet.annotator.hed import HEDdetector
-from tools.controlnet.annotator.util import HWC3, nms, resize_image
+from ...tools.controlnet.annotator.hed import HEDdetector
+from ...tools.controlnet.annotator.util import HWC3, nms, resize_image
 
 preprocessor = None
 

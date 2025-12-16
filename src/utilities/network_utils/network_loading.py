@@ -10,6 +10,7 @@ from loguru import logger as logging
 from peft import PeftConfig, PeftModel
 from torch.autograd import profiler
 from torch.nn.modules.module import _IncompatibleKeys
+from tqdm import tqdm
 
 from ..config_utils import function_config_to_basic_types
 
@@ -65,23 +66,25 @@ def load_weights_with_shape_check(
                 unexpected_keys.remove(weight_name)
 
     elif load_strategy == "search":
-        for name, param in module.named_parameters():
+        params = list(module.named_parameters())
+        for name, param in tqdm(params, desc="Loading model checkpoint ..."):
             if name in unexpected_keys:  # search in the whole weight keys, O(n) complexity
                 unexpected_keys.remove(name)  # This key was expected, and remove from the total key set
                 if param.shape == weights[name].shape:
                     param.data.copy_(weights[name].data)
-                    # log_print(
-                    #     f"Weights loaded for {name} (shape: {param.shape})", "debug"
-                    # )
                 else:
                     logging.warning(
                         f"Shape mismatch for {name}: expected {param.shape}, got {weights[name].shape} - skipping",
+                        tqdm=True,
                     )
                     # Consider this a missing key since we didn't load it
                     missing_keys.append(name)
             else:
                 missing_keys.append(name)
-                logging.warning(f"{name} not found in weights")
+                logging.warning(f"{name} not found in weights", tqdm=True)
+    
+    else:
+        raise Value
 
     return _IncompatibleKeys(missing_keys=missing_keys, unexpected_keys=unexpected_keys)
 

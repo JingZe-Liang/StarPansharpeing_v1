@@ -373,7 +373,7 @@ class LeJEPAAugmentation:
         self.global_view_pipe = global_view_pipe if global_view_pipe is not None else create_global_view_augmentations()
         self.local_view_pipe = local_view_pipe if local_view_pipe is not None else create_local_view_augmentations()
 
-    def __call__(self, x: torch.Tensor):
+    def __call__(self, x: torch.Tensor) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]]:
         if self.is_neg_1_1:
             x = (x + 1) / 2
 

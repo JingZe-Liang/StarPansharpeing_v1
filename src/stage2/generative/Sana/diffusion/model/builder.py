@@ -27,10 +27,10 @@ from transformers import (
 )
 from transformers import logging as transformers_logging
 
-from diffusion.model.dc_ae.efficientvit.ae_model_zoo import (
+from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import (
     DCAE_HF,
 )
-from diffusion.model.utils import (
+from src.stage2.generative.Sana.diffusion.model.utils import (
     set_fp32_attention,
     set_grad_checkpoint,
 )
@@ -44,7 +44,7 @@ def build_model(cfg, use_grad_checkpoint=False, use_fp32_attention=False, gc_ste
     if isinstance(cfg, str):
         cfg = dict(type=cfg)
     # Import model modules to ensure they are registered into MODELS.
-    import diffusion.model.nets  # noqa: F401
+    import src.stage2.generative.Sana.diffusion.model.nets  # noqa: F401
 
     model = MODELS.build(cfg, default_args=kwargs)
 
@@ -124,7 +124,7 @@ def get_vae(name, model_path, device="cuda", **kwargs):
         dc_ae = AutoencoderDC.from_pretrained(model_path).to(device).eval()
         return dc_ae
 
-    # > remote sensing cosmos AE
+    # remote sensing cosmos AE
     elif "cosmos_RS" in name:
         print(colored(f"[Cosmos RS] Loading model from {model_path}", attrs=["bold"]))
         from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
@@ -166,8 +166,48 @@ def get_vae(name, model_path, device="cuda", **kwargs):
         # cosmos_ae_lora.requires_grad_(False)
         # return cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
         cosmos_ae = cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
-        cosmos_ae.scaling_factor = 4.78
-        cosmos_ae.shift_factor = 0.0
+        cosmos_ae.scaling_factor = torch.tensor(
+            [
+                3.796875,
+                3.0,
+                3.640625,
+                3.390625,
+                3.640625,
+                2.921875,
+                4.15625,
+                3.984375,
+                2.65625,
+                2.9375,
+                4.375,
+                5.125,
+                7.03125,
+                2.734375,
+                2.703125,
+                4.96875,
+            ],
+            device=device,
+        ).view(1, 16, 1, 1)
+        cosmos_ae.shift_factor = torch.tensor(
+            [
+                -1.0546875,
+                -1.1328125,
+                -2.171875,
+                0.07666015625,
+                -0.7109375,
+                0.3984375,
+                -1.6171875,
+                -0.453125,
+                0.65625,
+                2.828125,
+                0.09619140625,
+                -1.15625,
+                -1.4453125,
+                0.8984375,
+                3.421875,
+                -1.078125,
+            ],
+            device=device,
+        ).view(1, 16, 1, 1)
         return cosmos_ae
     else:
         print("error load vae")
@@ -280,3 +320,31 @@ def vae_decode(name, vae, latent, **kwargs):
         print("error load vae")
         exit()
     return samples
+
+
+if __name__ == "__main__":
+    from src.data.litdata_hyperloader import get_fast_test_hyper_litdata_load
+
+    vae = get_vae("cosmos_RS", model_path="runs/pretrained/VAEInterp-f8c16.safetensors")
+    vae = vae.cuda()
+    print("Load VAE done.")
+
+    _, dl = get_fast_test_hyper_litdata_load("SAM270k", 1)
+
+    sample = next(iter(dl))
+    images = sample["img"].cuda()
+    print("Get data done.", images.shape)
+    breakpoint()
+    z = vae_encode("cosmos_RS", vae=vae, images=images, sample_posterior=None, device="cuda")
+    print(f"Encoding z info: min: {z.min()}, max: {z.max()}, std: {z.std()}")
+
+    images_rec = vae_decode("cosmos_RS", vae=vae, latent=z)
+    images_rec = images_rec.to(torch.float32)
+    print("Reconstruction done.", images_rec.shape)
+
+    # PSNR
+    images.add_(1).div_(2)
+    images_rec.add_(1).div_(2)
+    mse = torch.mean((images - images_rec) ** 2)
+    psnr = 10 * torch.log10(1 / mse)
+    print("PSNR:", psnr.item())

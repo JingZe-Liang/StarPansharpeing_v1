@@ -197,7 +197,7 @@ class TrainingConfig(BaseConfig):
     online_metric: bool = False
     eval_metric_step: int = 5000
     online_metric_dir: str = "metric_helper"
-    work_dir: str = "/cache/exps/"
+    work_dir: str = "cache/exps/"
     skip_step: int = 0
     loss_type: str = "huber"
     huber_c: float = 0.001

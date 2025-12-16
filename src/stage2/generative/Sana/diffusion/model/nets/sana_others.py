@@ -19,18 +19,18 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 
-from diffusion.model.nets.basic_modules import DWMlp, MBConvPreGLU, Mlp
-from diffusion.model.nets.sana_blocks import (
+from src.stage2.generative.Sana.diffusion.model.nets.basic_modules import DWMlp, MBConvPreGLU, Mlp
+from src.stage2.generative.Sana.diffusion.model.nets.sana_blocks import (
     Attention,
     FlashAttention,
     MultiHeadCrossAttention,
     t2i_modulate,
 )
-from diffusion.utils.import_utils import is_triton_module_available
+from src.stage2.generative.Sana.diffusion.utils.import_utils import is_triton_module_available
 
 _triton_modules_available = False
 if is_triton_module_available():
-    from diffusion.model.nets.fastlinear.modules import TritonLiteMLA
+    from src.stage2.generative.Sana.diffusion.model.nets.fastlinear.modules import TritonLiteMLA
 
     _triton_modules_available = True
 
@@ -78,9 +78,7 @@ class SanaMSPABlock(nn.Module):
             # TODO: Here the num_heads set to 36 for tmp used
             self_num_heads = hidden_size // 32
             # self.attn = LiteLA(hidden_size, hidden_size, heads=self_num_heads, eps=1e-8)
-            self.attn = SlimLiteLA(
-                hidden_size, hidden_size, heads=self_num_heads, eps=1e-8
-            )
+            self.attn = SlimLiteLA(hidden_size, hidden_size, heads=self_num_heads, eps=1e-8)
         elif attn_type == "triton_linear":
             # linear self attention with triton kernel fusion
             self_num_heads = hidden_size // 32
@@ -95,12 +93,8 @@ class SanaMSPABlock(nn.Module):
         else:
             raise ValueError(f"{attn_type} type is not defined.")
 
-        self.cross_attn = MultiHeadCrossAttention(
-            hidden_size, num_heads, **block_kwargs
-        )
-        self.norm2 = nn.LayerNorm(
-            int(hidden_size * mlp_ratio * 2), elementwise_affine=False, eps=1e-6
-        )
+        self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
+        self.norm2 = nn.LayerNorm(int(hidden_size * mlp_ratio * 2), elementwise_affine=False, eps=1e-6)
         if ffn_type == "dwmlp":
             approx_gelu = lambda: nn.GELU(approximate="tanh")
             self.mlp = DWMlp(
@@ -143,16 +137,12 @@ class SanaMSPABlock(nn.Module):
         else:
             raise ValueError(f"{ffn_type} type is not defined.")
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
         # parallel layers
         self.mlp_ratio = mlp_ratio
         self.in_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.in_proj = nn.Linear(
-            hidden_size, (hidden_size * 3 + int(hidden_size * mlp_ratio * 2))
-        )
+        self.in_proj = nn.Linear(hidden_size, (hidden_size * 3 + int(hidden_size * mlp_ratio * 2)))
         self.in_split = [hidden_size * 3] + [int(hidden_size * mlp_ratio * 2)]
 
     def forward(self, x, y, t, mask=None, HW=None, **kwargs):
@@ -172,9 +162,7 @@ class SanaMSPABlock(nn.Module):
         x_1 = self.in_proj(self.in_norm(x))
         qkv, x_mlp = torch.split(x_1, self.in_split, dim=-1)
 
-        qkv = t2i_modulate(
-            self.norm1(qkv), shift_msa.repeat(1, 1, 3), scale_msa.repeat(1, 1, 3)
-        )
+        qkv = t2i_modulate(self.norm1(qkv), shift_msa.repeat(1, 1, 3), scale_msa.repeat(1, 1, 3))
         x_mlp = t2i_modulate(
             self.norm2(x_mlp),
             shift_mlp.repeat(1, 1, int(self.mlp_ratio * 2)),
@@ -239,9 +227,7 @@ class SanaMSPABlock(nn.Module):
             # TODO: Here the num_heads set to 36 for tmp used
             self_num_heads = hidden_size // 32
             # self.attn = LiteLA(hidden_size, hidden_size, heads=self_num_heads, eps=1e-8)
-            self.attn = SlimLiteLA(
-                hidden_size, hidden_size, heads=self_num_heads, eps=1e-8
-            )
+            self.attn = SlimLiteLA(hidden_size, hidden_size, heads=self_num_heads, eps=1e-8)
         elif attn_type == "triton_linear":
             # linear self attention with triton kernel fusion
             self_num_heads = hidden_size // 32
@@ -256,12 +242,8 @@ class SanaMSPABlock(nn.Module):
         else:
             raise ValueError(f"{attn_type} type is not defined.")
 
-        self.cross_attn = MultiHeadCrossAttention(
-            hidden_size, num_heads, **block_kwargs
-        )
-        self.norm2 = nn.LayerNorm(
-            int(hidden_size * mlp_ratio * 2), elementwise_affine=False, eps=1e-6
-        )
+        self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
+        self.norm2 = nn.LayerNorm(int(hidden_size * mlp_ratio * 2), elementwise_affine=False, eps=1e-6)
         if ffn_type == "dwmlp":
             approx_gelu = lambda: nn.GELU(approximate="tanh")
             self.mlp = DWMlp(
@@ -304,16 +286,12 @@ class SanaMSPABlock(nn.Module):
         else:
             raise ValueError(f"{ffn_type} type is not defined.")
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(6, hidden_size) / hidden_size**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
         # parallel layers
         self.mlp_ratio = mlp_ratio
         self.in_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.in_proj = nn.Linear(
-            hidden_size, (hidden_size * 3 + int(hidden_size * mlp_ratio * 2))
-        )
+        self.in_proj = nn.Linear(hidden_size, (hidden_size * 3 + int(hidden_size * mlp_ratio * 2)))
         self.in_split = [hidden_size * 3] + [int(hidden_size * mlp_ratio * 2)]
 
     def forward(self, x, y, t, mask=None, HW=None, **kwargs):
@@ -325,9 +303,7 @@ class SanaMSPABlock(nn.Module):
         x_1 = self.in_proj(self.in_norm(x))
         qkv, x_mlp = torch.split(x_1, self.in_split, dim=-1)
 
-        qkv = t2i_modulate(
-            self.norm1(qkv), shift_msa.repeat(1, 1, 3), scale_msa.repeat(1, 1, 3)
-        )
+        qkv = t2i_modulate(self.norm1(qkv), shift_msa.repeat(1, 1, 3), scale_msa.repeat(1, 1, 3))
         x_mlp = t2i_modulate(
             self.norm2(x_mlp),
             shift_mlp.repeat(1, 1, int(self.mlp_ratio * 2)),

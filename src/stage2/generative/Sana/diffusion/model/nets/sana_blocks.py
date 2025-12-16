@@ -23,14 +23,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from diffusers.models.embeddings import apply_rotary_emb as apply_rotary_emb_diffusers
 from einops import rearrange
 from timm.layers.attention import Attention as Attention_
 from timm.layers.mlp import Mlp
 from transformers import AutoModelForCausalLM
 
-from diffusion.model.norms import RMSNorm
-from diffusion.model.utils import get_same_padding, to_2tuple
-from diffusion.utils.import_utils import (
+from src.stage2.generative.Sana.diffusion.model.norms import RMSNorm
+from src.stage2.generative.Sana.diffusion.model.utils import get_same_padding, to_2tuple
+from src.stage2.generative.Sana.diffusion.utils.import_utils import (
     is_xformers_available,
 )
 
@@ -76,7 +77,7 @@ class MultiHeadCrossAttention(nn.Module):
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
 
-    def forward(self, x, cond, mask=None):
+    def forward(self, x, cond, mask=None, **kwargs):
         # query: img tokens; key/value: condition; mask: if padding tokens
         B, N, C = x.shape
         first_dim = 1 if _xformers_available else B
@@ -94,7 +95,7 @@ class MultiHeadCrossAttention(nn.Module):
                 attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens([N] * B, mask)
             x = xformers.ops.memory_efficient_attention(q, k, v, p=self.attn_drop.p, attn_bias=attn_bias)
         else:
-            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # [bs, num_heads, seq_len, head_dim]
+            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)  # [bs, num_heads, seq_len, head_dim]
             if mask is not None and mask.ndim == 2:
                 mask = (1 - mask.to(q.dtype)) * -10000.0
                 mask = mask[:, None, None].repeat(1, self.num_heads, 1, 1)
@@ -128,7 +129,7 @@ class MultiHeadCrossVallinaAttention(MultiHeadCrossAttention):
         attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
         return attn_weight @ value
 
-    def forward(self, x, cond, mask=None):
+    def forward(self, x, cond, mask=None, **kwargs):
         # query: img tokens; key/value: condition; mask: if padding tokens
         B, N, C = x.shape
 
@@ -195,7 +196,7 @@ class LiteLA(Attention_):
             self.k_norm = nn.Identity()
 
     @torch.amp.autocast("cuda", enabled=os.environ.get("AUTOCAST_LINEAR_ATTN", False) == "true")
-    def attn_matmul(self, q, k, v: torch.Tensor) -> torch.Tensor:
+    def attn_matmul(self, q, k, v: torch.Tensor, **_) -> torch.Tensor:
         # lightweight linear attention
         q = self.kernel_func(q)  # B, h, h_d, N
         k = self.kernel_func(k)
@@ -416,7 +417,7 @@ class FlashAttention(Attention_):
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
 
-    def forward(self, x, mask=None, HW=None, block_id=None, **kwargs):
+    def forward(self, x, mask=None, HW=None, block_id=None, image_rotary_emb=None, **kwargs):
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, C)
@@ -428,11 +429,15 @@ class FlashAttention(Attention_):
 
         q = q.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
         k = k.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
-        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)
+        v = v.reshape(B, N, self.num_heads, C // self.num_heads).to(dtype)  # BNHC
 
         use_fp32_attention = getattr(self, "fp32_attention", False)  # necessary for NAN loss
         if use_fp32_attention:
             q, k, v = q.float(), k.float(), v.float()
+
+        if image_rotary_emb is not None:
+            q = apply_rotary_emb_diffusers(q, image_rotary_emb, sequence_dim=1)
+            k = apply_rotary_emb_diffusers(k, image_rotary_emb, sequence_dim=1)
 
         attn_bias = None
         if mask is not None:

@@ -34,21 +34,22 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore")  # ignore warning
 
 from diffusion import DPMS, FlowEuler, SASolverSampler
-from diffusion.data.datasets.utils import (
+
+# from src.stage2.generative.Sana.diffusion.utils.misc import read_config
+from tools.download import find_model
+
+from src.stage2.generative.Sana.diffusion.data.datasets.utils import (
     get_chunks,
 )
-from diffusion.model.builder import (
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
 )
-from diffusion.model.utils import get_weight_dtype, prepare_prompt_ar
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.logger import get_root_logger
-
-# from diffusion.utils.misc import read_config
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.model.utils import get_weight_dtype, prepare_prompt_ar
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 @torch.no_grad()
@@ -60,14 +61,7 @@ def pil_image(
         _log_api_usage_once(save_image)
     grid = make_grid(tensor, **kwargs)
     # Add 0.5 after unnormalizing to [0, 255] to round to the nearest integer
-    ndarr = (
-        grid.mul(255)
-        .add_(0.5)
-        .clamp_(0, 255)
-        .permute(1, 2, 0)
-        .to("cpu", torch.uint8)
-        .numpy()
-    )
+    ndarr = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
     img = Image.fromarray(ndarr)
     return img
 
@@ -108,11 +102,7 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
                 )
 
                 for _ in range(batch_size):
-                    prompts.append(
-                        prepare_prompt_ar(
-                            prompt, base_ratios, device=device, show=False
-                        )[0].strip()
-                    )
+                    prompts.append(prepare_prompt_ar(prompt, base_ratios, device=device, show=False)[0].strip())
                     latent_size_h, latent_size_w = latent_size, latent_size
 
                 # check exists
@@ -138,9 +128,7 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
                     truncation=True,
                     return_tensors="pt",
                 ).to(device)
-                caption_embs = text_encoder(
-                    caption_token.input_ids, caption_token.attention_mask
-                )[0][:, None]
+                caption_embs = text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None]
                 emb_masks, null_y = (
                     caption_token.attention_mask,
                     null_caption_embs.repeat(len(prompts), 1, 1)[:, None],
@@ -157,9 +145,7 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
                         device=device,
                         generator=generator,
                     )
-                    model_kwargs = dict(
-                        data_info={"img_hw": hw, "aspect_ratio": ar}, mask=emb_masks
-                    )
+                    model_kwargs = dict(data_info={"img_hw": hw, "aspect_ratio": ar}, mask=emb_masks)
 
                     if args.sampling_algo == "dpm-solver":
                         dpm_solver = DPMS(
@@ -177,9 +163,7 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
                             method="multistep",
                         )
                     elif args.sampling_algo == "sa-solver":
-                        sa_solver = SASolverSampler(
-                            model.forward_with_dpmsolver, device=device
-                        )
+                        sa_solver = SASolverSampler(model.forward_with_dpmsolver, device=device)
                         samples = sa_solver.sample(
                             S=25,
                             batch_size=n,
@@ -244,14 +228,7 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
                 grid = make_grid(grid, nrow=n_rows, normalize=True, value_range=(-1, 1))
 
                 # to image
-                grid = (
-                    grid.mul(255)
-                    .add_(0.5)
-                    .clamp_(0, 255)
-                    .permute(1, 2, 0)
-                    .to("cpu", torch.uint8)
-                    .numpy()
-                )
+                grid = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
                 grid = Image.fromarray(grid.astype(np.uint8))
                 grid.save(save_path)
                 del grid
@@ -263,18 +240,14 @@ def visualize(items, bs, sample_steps, cfg_scale, pag_scale=1.0):
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help="config")
-    parser.add_argument(
-        "--model_path", default=None, type=str, help="Path to the model file (optional)"
-    )
+    parser.add_argument("--model_path", default=None, type=str, help="Path to the model file (optional)")
 
     return parser.parse_known_args()[0]
 
 
 @dataclass
 class SanaInference(SanaConfig):
-    config: Optional[str] = (
-        "configs/sana_config/1024ms/Sana_1600M_img1024.yaml"  # config
-    )
+    config: Optional[str] = "configs/sana_config/1024ms/Sana_1600M_img1024.yaml"  # config
     dataset: str = "DPG"
     outdir: str = "outputs"
     n_samples: int = 4
@@ -289,9 +262,7 @@ class SanaInference(SanaConfig):
     pag_scale: float = 1.0
     sampling_algo: str = field(
         default="dpm-solver",
-        metadata={
-            "choices": ["dpm-solver", "sa-solver", "flow_euler", "flow_dpm-solver"]
-        },
+        metadata={"choices": ["dpm-solver", "sa-solver", "flow_euler", "flow_dpm-solver"]},
     )
     bs: int = 1
     seed: int = 0
@@ -309,9 +280,7 @@ class SanaInference(SanaConfig):
         metadata={"help": "A list value, like [0, 1.] for use cfg"},
     )
     ablation_selections: list = None
-    ablation_key: str = field(
-        default=None, metadata={"choices": ["step", "cfg_scale", "pag_scale"]}
-    )
+    ablation_key: str = field(default=None, metadata={"choices": ["step", "cfg_scale", "pag_scale"]})
     if_save_dirname: bool = False
 
 
@@ -331,9 +300,7 @@ if __name__ == "__main__":
 
     n_rows = args.n_samples // 2
     batch_size = args.n_samples
-    assert args.batch_size == 1, ValueError(
-        f"{batch_size} > 1 is not available in DPG-bench"
-    )
+    assert args.batch_size == 1, ValueError(f"{batch_size} > 1 is not available in DPG-bench")
 
     # only support fixed latent size currently
     latent_size = args.image_size // config.vae.vae_downsample_rate
@@ -359,19 +326,13 @@ if __name__ == "__main__":
         "flow_dpm-solver": 20,
         "flow_euler": 28,
     }
-    sample_steps = (
-        args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
-    )
+    sample_steps = args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
     weight_dtype = get_weight_dtype(config.model.mixed_precision)
-    logger.info(
-        f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, flow_shift: {flow_shift}"
-    )
+    logger.info(f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
     vae_dtype = get_weight_dtype(config.vae.weight_dtype)
     vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, device).to(vae_dtype)
-    tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-        name=config.text_encoder.text_encoder_name, device=device
-    )
+    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
 
     null_caption_token = tokenizer(
         "",
@@ -380,9 +341,7 @@ if __name__ == "__main__":
         truncation=True,
         return_tensors="pt",
     ).to(device)
-    null_caption_embs = text_encoder(
-        null_caption_token.input_ids, null_caption_token.attention_mask
-    )[0]
+    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask)[0]
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
@@ -428,9 +387,7 @@ if __name__ == "__main__":
             items = [item.strip() for item in f.readlines()]
     logger.info(f"Eval first {min(args.sample_nums, len(items))}/{len(items)} samples")
     items = items[: max(0, args.sample_nums)]
-    items = items[
-        max(0, args.start_index) : min(len(items), args.end_index)
-    ]  # save path
+    items = items[max(0, args.start_index) : min(len(items), args.end_index)]  # save path
 
     match = re.search(r".*epoch_(\d+).*step_(\d+).*", args.model_path)
     epoch_name, step_name = match.groups() if match else ("unknown", "unknown")
@@ -440,9 +397,7 @@ if __name__ == "__main__":
     os.makedirs(img_save_dir, exist_ok=True)
     logger.info(f"Sampler {args.sampling_algo}")
 
-    def create_save_root(
-        args, dataset, epoch_name, step_name, sample_steps, guidance_type
-    ):
+    def create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type):
         save_root = os.path.join(
             img_save_dir,
             # f"{datetime.now().date() if args.exist_time_prefix == '' else args.exist_time_prefix}_"
@@ -473,57 +428,35 @@ if __name__ == "__main__":
             guidance_type = "classifier-free"
         return guidance_type
 
-    dataset = (
-        "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
-    )
+    dataset = "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
     if args.ablation_selections and args.ablation_key:
         for ablation_factor in args.ablation_selections:
             setattr(args, args.ablation_key, eval(ablation_factor))
             print(f"Setting {args.ablation_key}={eval(ablation_factor)}")
-            sample_steps = (
-                args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
-            )
-            guidance_type = guidance_type_select(
-                guidance_type, args.pag_scale, config.model.attn_type
-            )
+            sample_steps = args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
+            guidance_type = guidance_type_select(guidance_type, args.pag_scale, config.model.attn_type)
 
-            save_root = create_save_root(
-                args, dataset, epoch_name, step_name, sample_steps, guidance_type
-            )
+            save_root = create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type)
             os.makedirs(save_root, exist_ok=True)
             if args.if_save_dirname and args.gpu_id == 0:
                 # save at work_dir/metrics/tmp_xxx.txt for metrics testing
-                with open(
-                    f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w"
-                ) as f:
-                    print(
-                        f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt"
-                    )
+                with open(f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w") as f:
+                    print(f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt")
                     f.write(os.path.basename(save_root))
-            logger.info(
-                f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}"
-            )
+            logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
             visualize(items, args.bs, sample_steps, args.cfg_scale, args.pag_scale)
     else:
-        guidance_type = guidance_type_select(
-            guidance_type, args.pag_scale, config.model.attn_type
-        )
-        logger.info(
-            f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}"
-        )
+        guidance_type = guidance_type_select(guidance_type, args.pag_scale, config.model.attn_type)
+        logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
-        save_root = create_save_root(
-            args, dataset, epoch_name, step_name, sample_steps, guidance_type
-        )
+        save_root = create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type)
         os.makedirs(save_root, exist_ok=True)
         if args.if_save_dirname and args.gpu_id == 0:
             os.makedirs(f"{work_dir}/metrics", exist_ok=True)
             # save at work_dir/metrics/tmp_dpg_xxx.txt for metrics testing
             with open(f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w") as f:
-                print(
-                    f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt"
-                )
+                print(f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt")
                 f.write(os.path.basename(save_root))
 
         visualize(items, args.bs, sample_steps, args.cfg_scale, args.pag_scale)

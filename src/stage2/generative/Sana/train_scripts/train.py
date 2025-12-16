@@ -34,10 +34,6 @@ from PIL import Image
 from termcolor import colored
 from tqdm import tqdm
 
-_repo_root = Path(__file__).resolve().parents[5]
-if str(_repo_root) not in sys.path:
-    sys.path.insert(0, str(_repo_root))
-
 sys.path.append("src/stage2/generative/Sana")  # add Sana to path
 
 import numpy as np
@@ -46,48 +42,33 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator, InitProcessGroupKwargs, skip_first_batches
 from diffusion import DPMS, FlowEuler, Scheduler
-from diffusion.data.builder import (
+
+from src.stage2.generative.Sana.diffusion.data.builder import (
     build_dataloader,
     build_dataset,
 )
-from diffusion.data.wids import DistributedRangedSampler
-from diffusion.model.builder import (
+from src.stage2.generative.Sana.diffusion.data.wids import DistributedRangedSampler
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
     vae_encode,
 )
-from diffusion.model.model_growth_utils import (
+from src.stage2.generative.Sana.diffusion.model.model_growth_utils import (
     ModelGrowthInitializer,
 )
-from diffusion.model.respace import (
-    compute_density_for_timestep_sampling,
-)
-from diffusion.model.utils import get_weight_dtype
-from diffusion.utils.checkpoint import (
-    load_checkpoint,
-    save_checkpoint,
-)
-from diffusion.utils.config import (
-    SanaConfig,
-    model_init_config,
-)
-from diffusion.utils.data_sampler import (
-    AspectRatioBatchSampler,
-)
-from diffusion.utils.dist_utils import flush, get_world_size
-from diffusion.utils.logger import LogBuffer, get_root_logger
-from diffusion.utils.lr_scheduler import build_lr_scheduler
-from diffusion.utils.misc import (
-    DebugUnderflowOverflow,
-    init_random_seed,
-    set_random_seed,
-)
-from diffusion.utils.optimizer import (
-    auto_scale_lr,
-    build_optimizer,
-)
+from src.stage2.generative.Sana.diffusion.model.respace import compute_density_for_timestep_sampling
+from src.stage2.generative.Sana.diffusion.model.utils import get_weight_dtype
+from src.stage2.generative.Sana.diffusion.utils.checkpoint import load_checkpoint, save_checkpoint
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.data_sampler import AspectRatioBatchSampler
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import flush, get_world_size
+from src.stage2.generative.Sana.diffusion.utils.logger import LogBuffer, get_root_logger
+from src.stage2.generative.Sana.diffusion.utils.lr_scheduler import build_lr_scheduler
+from src.stage2.generative.Sana.diffusion.utils.misc import DebugUnderflowOverflow, init_random_seed, set_random_seed
+from src.stage2.generative.Sana.diffusion.utils.optimizer import auto_scale_lr, build_optimizer
+from src.utilities.logging import configure_logger, set_logger_file
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -212,7 +193,7 @@ def log_validation(
         null_y = null_y[:, None]
 
     # Create sampling noise:
-    logger.info("Running validation... ")
+    logger.info(f"Running validation using {vis_sampler} sampler... ")
     image_logs = []
 
     def _load_control_image(path_str: str) -> torch.Tensor:
@@ -329,7 +310,13 @@ def log_validation(
 
         return control_sig, vae_for_encode
 
-    def run_sampling(init_z=None, label_suffix="", vae=None, sampler="dpm-solver"):
+    def run_sampling(
+        init_z=None,
+        label_suffix="",
+        vae=None,
+        # sampler="dpm-solver",
+        sampler="flow_euler",
+    ):
         latents = []
         current_image_logs = []
         for prompt in validation_prompts:
@@ -430,7 +417,7 @@ def log_validation(
                     cfg_scale=4.5,
                     model_kwargs=model_kwargs,
                 )
-                denoised = flow_solver.sample(z, steps=28)
+                denoised = flow_solver.sample(z, steps=50)  # 28 orignially
             elif sampler == "flow_dpm-solver":
                 dpm_solver = DPMS(
                     model.forward_with_dpmsolver,
@@ -443,7 +430,7 @@ def log_validation(
                 )
                 denoised = dpm_solver.sample(
                     z,
-                    steps=20,
+                    steps=30,
                     order=2,
                     skip_type="time_uniform_flow",
                     method="multistep",
@@ -484,7 +471,7 @@ def log_validation(
 
         return current_image_logs
 
-    def run_sampling_from_loader(init_z=None, label_suffix="", vae=None, sampler="dpm-solver", valid_iters: int = 10):
+    def run_sampling_from_loader(init_z=None, label_suffix="", vae=None, sampler="flow_euler", valid_iters: int = 10):
         import random
 
         assert loader is not None
@@ -559,7 +546,7 @@ def log_validation(
                     cfg_scale=4.5,
                     model_kwargs=model_kwargs,
                 )
-                denoised = flow_solver.sample(z, steps=28)
+                denoised = flow_solver.sample(z, steps=50)  # 28 orignially
             elif sampler == "flow_dpm-solver":
                 dpm_solver = DPMS(
                     model.forward_with_dpmsolver,
@@ -976,6 +963,8 @@ def train(
 
             if loss_nan_timer > 20:
                 raise ValueError("Loss is NaN too much times. Break here.")
+
+            ###### Save model
             if (
                 global_step % config.train.save_model_steps == 0
                 or (time.time() - training_start_time) / 3600 > config.train.early_stop_hours
@@ -1017,6 +1006,7 @@ def train(
                     if config.train.online_metric and global_step % config.train.eval_metric_step == 0 and step > 1:
                         online_metric_monitor_dir = osp.join(config.work_dir, config.train.online_metric_dir)
                         os.makedirs(online_metric_monitor_dir, exist_ok=True)
+
                         with open(
                             f"{online_metric_monitor_dir}/{ckpt_saved_path.split('/')[-1]}.txt",
                             "w",
@@ -1171,6 +1161,9 @@ def main(cfg: SanaConfig) -> None:
         config.train.train_batch_size = min(64, config.train.train_batch_size)
         args.report_to = "tensorboard"
 
+    # Add time into work dir
+    config.work_dir = osp.join(config.work_dir, time.strftime("%Y%m%d_%H%M%S_") + "Sana_RS_tokenizer_ControlNet")
+
     os.umask(0o000)
     os.makedirs(config.work_dir, exist_ok=True)
 
@@ -1187,7 +1180,11 @@ def main(cfg: SanaConfig) -> None:
     )
 
     log_name = "train_log.log"
-    logger = get_root_logger(osp.join(config.work_dir, log_name))
+    if accelerator.is_main_process:
+        log_file = osp.join(config.work_dir, log_name)
+        set_logger_file(file=log_file)
+        logger.info(f"Log file will saved at {log_file}")
+
     logger.info(accelerator.state)
 
     config.train.seed = init_random_seed(getattr(config.train, "seed", None))
@@ -1328,11 +1325,17 @@ def main(cfg: SanaConfig) -> None:
         logger.warning(f"Unexpected keys: {unexpected}")
 
     # Controlnet specifics
-    if "ControlNet" in model.__class__.__name__:
-        assert hasattr(model, "initialize_all"), "ControlNet model must have 'initialize_all' method."
-        model.initialize_all(from_base=False)
-        logger.info("ControlNet model initialized all parameters after loading checkpoint.")
-        logger.info("-------------------------")
+    # Learn all params
+    model.requires_grad_(True)
+
+    # if "ControlNet" in model.__class__.__name__:
+    #     assert hasattr(model, "initialize_all"), "ControlNet model must have 'initialize_all' method."
+    #     from ..diffusion.model.nets.sana_multi_scale_controlnet import SanaMSControlNet
+
+    #     model: SanaMSControlNet
+    #     model.initialize_all(from_base=True, learn_all=True)
+    #     logger.info("ControlNet model initialized all parameters after loading checkpoint.")
+    #     logger.info("-------------------------")
 
     # 4-2. model growth
     if config.model_growth is not None:
@@ -1558,29 +1561,40 @@ def main(cfg: SanaConfig) -> None:
 
     # optimizer = build_optimizer(model, config.train.optimizer)
 
-    from src.utilities.optim import MuonFSDP
+    from heavyball import ForeachAdamW
 
-    optimizer = MuonFSDP.create_muon_optimizer(
-        model.named_parameters(),
-        oned_param_algo="adamw",
-        lr=3.0e-4,
-        mu=0.95,
+    optimizer = ForeachAdamW(
+        model.parameters(),
+        lr=2.0e-4,
         betas=(0.9, 0.95),
-        weight_decay=0.1,
-        epsilon=1e-9,
-        adjust_lr="rms_norm",
-        use_preconditioned=True,
-        use_triton=True,
-        ignored_keys_for_muon=(
-            r"control_embedder.*",
-            r"x_embedder.*",
-            r"t_embedder.*",
-            r"final_layer.*",
-            r".*norm\..*",
-            r".*\.bias$",
-        ),
+        eps=1e-9,
+        weight_decay=0.02,
+        caution=True,
     )
-    logger.info("Using Muon optimizer")
+
+    # from src.utilities.optim import MuonFSDP
+
+    # optimizer = MuonFSDP.create_muon_optimizer(
+    #     model.named_parameters(),
+    #     oned_param_algo="adamw",
+    #     lr=2.0e-4,
+    #     mu=0.95,
+    #     betas=(0.9, 0.95),
+    #     weight_decay=0.1,
+    #     epsilon=1e-9,
+    #     adjust_lr="rms_norm",
+    #     use_preconditioned=True,
+    #     use_triton=True,
+    #     ignored_keys_for_muon=(
+    #         r"control_embedder.*",
+    #         r"x_embedder.*",
+    #         r"t_embedder.*",
+    #         r"final_layer.*",
+    #         r".*norm\..*",
+    #         r".*\.bias$",
+    #     ),
+    # )
+    # logger.info("Using Muon optimizer")
 
     if config.train.lr_schedule_args and config.train.lr_schedule_args.get("num_warmup_steps", None):
         config.train.lr_schedule_args["num_warmup_steps"] = (
@@ -1694,4 +1708,11 @@ def main(cfg: SanaConfig) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from contextlib import nullcontext
+
+    from accelerate.state import PartialState
+
+    ctx = logger.catch if PartialState().is_main_process else nullcontext
+
+    with ctx():
+        main()

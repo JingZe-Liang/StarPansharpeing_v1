@@ -168,12 +168,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Transformer Encoder and Decoder
         enc_model_cls = Transformer
         dec_model_cls = Transformer
-        if trans_enc_cfg.pretrained_type in ("ijepa", "lejepa"):
+        if trans_enc_cfg.pretrained_type is not None:  # ("ijepa", "lejepa"):
             enc_model_cls = IJEPANaFlexViT
-        if trans_dec_cfg is not None and trans_dec_cfg.pretrained_type in (
-            "ijepa",
-            "lejepa",
-        ):
+        if trans_dec_cfg is not None and trans_dec_cfg.pretrained_type is not None:
             dec_model_cls = IJEPANaFlexViT
 
         self.semantic_enc_transformer = enc_model_cls(self.trans_enc_cfg)
@@ -202,18 +199,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 create_norm_act_layer("layernorm2d", cat_dim, "gelu"),
                 # post conv to z channels and feed into the cnn decoder
                 # fuse the skipped latent (=z_channels) and the semantic decoder output
-                create_conv2d(
-                    cat_dim,
-                    cnn_cfg.model.z_channels,
-                    kernel_size=3,
-                ),
+                create_conv2d(cat_dim, cnn_cfg.model.z_channels, kernel_size=3),
             )
             # replace the post quant conv
             self.decoder.quant_conv = nn.ModuleDict(
-                {
-                    "post_quant_conv": orig_post_quant_conv,
-                    "st_cat_conv": skip_through_cat_conv,
-                }
+                {"post_quant_conv": orig_post_quant_conv, "st_cat_conv": skip_through_cat_conv}
             )
             logger.debug(
                 f"Will skip the latent through the cat conv without semantic decoder, "
@@ -284,7 +274,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         z_low_lvl = self.encoder.encoder(x)
 
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, masks=masks, mask_indices=mask_indices
+            z_low_lvl, masks=masks, masks_indices=mask_indices
         )
         return terms.ibot_proj
 
@@ -314,11 +304,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Semantic encoder
         # z_low_lvl -> transformer backbone -> projector -> z_proj
-        _, others = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+        _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
             z_low_lvl, masks=None
         )
 
-        return others.lejepa_proj
+        return terms.lejepa_proj
 
     def _forward_low_level_encoder(self, x, get_intermediate_features=False):
         ############ Low-level encoder

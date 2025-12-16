@@ -34,22 +34,22 @@ warnings.filterwarnings("ignore")  # ignore warning
 
 from asset.examples import examples
 from diffusion import DPMS, FlowEuler, SASolverSampler
-from diffusion.model.builder import (
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
 )
-from diffusion.model.utils import (
+from src.stage2.generative.Sana.diffusion.model.utils import (
     get_weight_dtype,
     prepare_prompt_ar,
     resize_and_crop_tensor,
 )
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.dist_utils import flush
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.dist_utils import flush
 from tools.download import find_model
 
-# from diffusion.utils.misc import read_config
+# from src.stage2.generative.Sana.diffusion.utils.misc import read_config
 
 MAX_SEED = np.iinfo(np.int32).max
 
@@ -287,7 +287,7 @@ def generate_img(
 
 
 if __name__ == "__main__":
-    from diffusion.utils.logger import get_root_logger
+    from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
     args = get_args()
     config = args = pyrallis.parse(config_class=SanaInference, config_path=args.config)

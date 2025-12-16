@@ -24,8 +24,8 @@ import math
 import numpy as np
 import torch as th
 
-from diffusion.model import gaussian_diffusion as gd
-from diffusion.model.gaussian_diffusion import GaussianDiffusion
+from src.stage2.generative.Sana.diffusion.model import gaussian_diffusion as gd
+from src.stage2.generative.Sana.diffusion.model.gaussian_diffusion import GaussianDiffusion
 
 
 def space_timesteps(num_timesteps, section_counts):

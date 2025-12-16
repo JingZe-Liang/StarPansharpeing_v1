@@ -34,16 +34,17 @@ warnings.filterwarnings("ignore")  # ignore warning
 os.environ["DISABLE_XFORMERS"] = "1"
 
 from diffusion import SCMScheduler
-from diffusion.model.builder import (
+from tools.download import find_model
+
+from src.stage2.generative.Sana.diffusion.model.builder import (
     build_model,
     get_tokenizer_and_text_encoder,
     get_vae,
     vae_decode,
 )
-from diffusion.model.utils import get_weight_dtype, prepare_prompt_ar
-from diffusion.utils.config import SanaConfig, model_init_config
-from diffusion.utils.logger import get_root_logger
-from tools.download import find_model
+from src.stage2.generative.Sana.diffusion.model.utils import get_weight_dtype, prepare_prompt_ar
+from src.stage2.generative.Sana.diffusion.utils.config import SanaConfig, model_init_config
+from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
 
 
 def set_env(seed=0, latent_size=256):
@@ -83,7 +84,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
     if isinstance(items, dict):
         get_chunks = get_dict_chunks
     else:
-        from diffusion.data.datasets.utils import get_chunks
+        from src.stage2.generative.Sana.diffusion.data.datasets.utils import get_chunks
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
@@ -112,16 +113,12 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
         # data prepare
         prompts, hw, ar = (
             [],
-            torch.tensor(
-                [[args.image_size, args.image_size]], dtype=torch.float, device=device
-            ).repeat(bs, 1),
+            torch.tensor([[args.image_size, args.image_size]], dtype=torch.float, device=device).repeat(bs, 1),
             torch.tensor([[1.0]], device=device).repeat(bs, 1),
         )
         if bs == 1:
             prompt = data_dict[chunk[0]]["prompt"] if dict_prompt else chunk[0]
-            prompt_clean, _, hw, ar, custom_hw = prepare_prompt_ar(
-                prompt, base_ratios, device=device, show=False
-            )
+            prompt_clean, _, hw, ar, custom_hw = prepare_prompt_ar(prompt, base_ratios, device=device, show=False)
             latent_size_h, latent_size_w = (
                 (
                     int(hw[0, 0] // config.vae.vae_downsample_rate),
@@ -134,11 +131,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
         else:
             for data in chunk:
                 prompt = data_dict[data]["prompt"] if dict_prompt else data
-                prompts.append(
-                    prepare_prompt_ar(prompt, base_ratios, device=device, show=False)[
-                        0
-                    ].strip()
-                )
+                prompts.append(prepare_prompt_ar(prompt, base_ratios, device=device, show=False)[0].strip())
             latent_size_h, latent_size_w = latent_size, latent_size
 
         # check exists
@@ -176,9 +169,9 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
             return_tensors="pt",
         ).to(device)
         select_index = [0] + list(range(-config.text_encoder.model_max_length + 1, 0))
-        caption_embs = text_encoder(
-            caption_token.input_ids, caption_token.attention_mask
-        )[0][:, None][:, :, select_index]
+        caption_embs = text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+            :, :, select_index
+        ]
         emb_masks = caption_token.attention_mask[:, select_index]
 
         # start sampling
@@ -199,9 +192,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
                 data_info={
                     "img_hw": hw,
                     "aspect_ratio": ar,
-                    "cfg_scale": torch.tensor([cfg_scale] * latents.shape[0]).to(
-                        device
-                    ),
+                    "cfg_scale": torch.tensor([cfg_scale] * latents.shape[0]).to(device),
                 },
                 mask=emb_masks,
             )
@@ -219,9 +210,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
                 )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents, denoised = scheduler.step(
-                    model_pred, i, t, latents, return_dict=False
-                )
+                latents, denoised = scheduler.step(model_pred, i, t, latents, return_dict=False)
 
         samples = (denoised / sigma_data).to(vae_dtype)
         samples = vae_decode(config.vae.vae_type, vae, samples)
@@ -229,9 +218,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
 
         os.umask(0o000)
         for i, sample in enumerate(samples):
-            save_file_name = (
-                f"{chunk[i]}.jpg" if dict_prompt else f"{prompts[i][:100]}.jpg"
-            )
+            save_file_name = f"{chunk[i]}.jpg" if dict_prompt else f"{prompts[i][:100]}.jpg"
             save_path = os.path.join(save_root, save_file_name)
             save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
 
@@ -305,20 +292,14 @@ if __name__ == "__main__":
         min(1, args.interval_guidance[1]),
     ]
     sample_steps_dict = {"scm": 2}
-    sample_steps = (
-        args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
-    )
+    sample_steps = args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
 
     weight_dtype = get_weight_dtype(config.model.mixed_precision)
-    logger.info(
-        f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, "
-    )
+    logger.info(f"Inference with {weight_dtype}, default guidance_type: {guidance_type}, ")
 
     vae_dtype = get_weight_dtype(config.vae.weight_dtype)
     vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, device).to(vae_dtype)
-    tokenizer, text_encoder = get_tokenizer_and_text_encoder(
-        name=config.text_encoder.text_encoder_name, device=device
-    )
+    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
 
     null_caption_token = tokenizer(
         "",
@@ -327,9 +308,7 @@ if __name__ == "__main__":
         truncation=True,
         return_tensors="pt",
     ).to(device)
-    null_caption_embs = text_encoder(
-        null_caption_token.input_ids, null_caption_token.attention_mask
-    )[0]
+    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask)[0]
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
@@ -385,9 +364,7 @@ if __name__ == "__main__":
     os.makedirs(img_save_dir, exist_ok=True)
     logger.info(f"Sampler {args.sampling_algo}")
 
-    def create_save_root(
-        args, dataset, epoch_name, step_name, sample_steps, guidance_type
-    ):
+    def create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type):
         save_root = os.path.join(
             img_save_dir,
             f"{dataset}_epoch{epoch_name}_step{step_name}_scale{args.cfg_scale}"
@@ -403,34 +380,22 @@ if __name__ == "__main__":
         save_root += f"_imgnums{args.sample_nums}" + args.add_label
         return save_root
 
-    dataset = (
-        "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
-    )
+    dataset = "MJHQ-30K" if args.json_file and "MJHQ-30K" in args.json_file else args.dataset
     if args.ablation_selections and args.ablation_key:
         for ablation_factor in args.ablation_selections:
             setattr(args, args.ablation_key, eval(ablation_factor))
             print(f"Setting {args.ablation_key}={eval(ablation_factor)}")
-            sample_steps = (
-                args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
-            )
+            sample_steps = args.step if args.step != -1 else sample_steps_dict[args.sampling_algo]
 
-            save_root = create_save_root(
-                args, dataset, epoch_name, step_name, sample_steps, guidance_type
-            )
+            save_root = create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type)
             os.makedirs(save_root, exist_ok=True)
             if args.if_save_dirname and args.gpu_id == 0:
                 os.makedirs(f"{work_dir}/metrics", exist_ok=True)
                 # save at work_dir/metrics/tmp_xxx.txt for metrics testing
-                with open(
-                    f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w"
-                ) as f:
-                    print(
-                        f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt"
-                    )
+                with open(f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w") as f:
+                    print(f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt")
                     f.write(os.path.basename(save_root))
-            logger.info(
-                f"Inference with {weight_dtype}, guidance_type: {guidance_type}"
-            )
+            logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}")
 
             visualize(
                 config=config,
@@ -444,17 +409,13 @@ if __name__ == "__main__":
     else:
         logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}")
 
-        save_root = create_save_root(
-            args, dataset, epoch_name, step_name, sample_steps, guidance_type
-        )
+        save_root = create_save_root(args, dataset, epoch_name, step_name, sample_steps, guidance_type)
         os.makedirs(save_root, exist_ok=True)
         if args.if_save_dirname and args.gpu_id == 0:
             os.makedirs(f"{work_dir}/metrics", exist_ok=True)
             # save at work_dir/metrics/tmp_xxx.txt for metrics testing
             with open(f"{work_dir}/metrics/tmp_{dataset}_{time.time()}.txt", "w") as f:
-                print(
-                    f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt"
-                )
+                print(f"save tmp file at {work_dir}/metrics/tmp_{dataset}_{time.time()}.txt")
                 f.write(os.path.basename(save_root))
 
         if args.debug:

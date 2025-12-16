@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 
 import torch
 
-from diffusion.data.builder import DATASETS
+from src.stage2.generative.Sana.diffusion.data.builder import DATASETS
 
 
 ControlSignalType = Literal["hed", "segmentation", "sketch", "mlsd", "random"]
