@@ -364,6 +364,7 @@ def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | Non
         std = std / math.sqrt(2 * (layer_id + 1))
     torch.nn.init.trunc_normal_(module.layer2.weight, std=std, a=-3 * std, b=3 * std)
 
+
 def attention_init_fn(module, layer_id: int | None = None):
     std = 1.0 / math.sqrt(module.q_dim)
     torch.nn.init.trunc_normal_(module.q_proj.weight, std=std, a=-3 * std, b=3 * std)
@@ -373,11 +374,10 @@ def attention_init_fn(module, layer_id: int | None = None):
 
     std = 1.0 / math.sqrt(module.inner_dim)
     torch.nn.init.trunc_normal_(module.output_proj.weight, std=std, a=-3 * std, b=3 * std)
-    
+
     for layer in module.q_norm, module.k_norm, module.v_norm:
         if hasattr(layer, "init_weights"):
             layer.init_weights()
-
 
 
 class Transformer(NaFlexVit):
@@ -692,10 +692,7 @@ class IJEPANaFlexViT(Transformer):
         x = self.norm(x)
 
         if naflex_mode:
-            return {
-                "patches": x,
-                "patch_valid": embeds.get("patch_valid", None)
-            }
+            return {"patches": x, "patch_valid": embeds.get("patch_valid", None)}
 
         return x
 

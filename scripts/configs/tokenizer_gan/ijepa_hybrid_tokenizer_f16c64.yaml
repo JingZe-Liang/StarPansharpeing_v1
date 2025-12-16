@@ -157,7 +157,7 @@ train:
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  grad_checkpoint: true
+  grad_checkpoint: false
   resume_path: #runs/stage1_cosmos_hybrid/2025-12-06_18-33-38_hybrid_cosmos_f16c64_jepa_pretrained/checkpoints/checkpoint_45
   ema_load_path: runs/stage1_cosmos_hybrid/2025-12-16_01-15-52_hybrid_cosmos_f16c64_jepa_pretrained_gram_distillation_v1/ema
   compile_model: false
@@ -246,6 +246,14 @@ train:
     caution: true
     mars: false
     betas: ${tuple:[0.5,0.9]}
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

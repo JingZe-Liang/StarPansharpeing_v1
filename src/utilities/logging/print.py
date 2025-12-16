@@ -23,6 +23,7 @@ from pathlib import Path
 from types import FunctionType, MethodType
 from typing import Any, Callable, Dict, Literal, LiteralString, Optional, Union
 
+import loguru
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger
@@ -71,7 +72,7 @@ _set_levels()
 
 
 def is_true(x):
-    return x in (True, 1, "true", "True")
+    return x in (True, 1, "1", "true", "True")
 
 
 def is_false(x):
@@ -430,9 +431,14 @@ def configure_logger(
         # Only log this message if it doesn't have tqdm binding to avoid infinite recursion
         logger.info("Add tqdm write logger.")
 
+    if colorize:
+        logger = logger.opt(colors=True)
+
     # TODO: check this.
     if patch_log_func:
         logger.log = _loguru_log_func
+
+    setattr(loguru, "logger", logger)
 
     return handler
 
@@ -785,17 +791,18 @@ def _test_print(rank, is_mp=False):
 
     print("Configured logger")
 
-    global logger
-    logger = logger.bind(_name_="print")
+    from loguru import logger
+
+    # logger = logger.bind(_name_="print")
     # print(f"I am process {rank}")
     logger.info(f"i am process {rank}", not_rank0_print=True)
 
     # Test tqdm
     from tqdm import tqdm
 
-    for i in tqdm(range(10)):
-        time.sleep(0.3)
-        logger.bind(tqdm=True).info(f"Processing item {i} in rank {rank}")
+    # for i in tqdm(range(10)):
+    #     time.sleep(0.3)
+    #     logger.bind(tqdm=True).info(f"Processing item {i} in rank {rank}")
 
     if is_mp:
         accelerator.wait_for_everyone()
@@ -803,6 +810,7 @@ def _test_print(rank, is_mp=False):
     # Print other levels
     logger.trace("Trace some msg.")
     logger.debug(f"Debug message from rank {rank}")
+    logger.opt(colors=True).info(f"Info message from rank <green>{rank}</green>")
     logger.warning(f"Warning message from rank {rank}", once=True)
     logger.warning(f"Warning message from rank {rank}", once=True)  # not print
     logger.error(f"Error message from rank {rank}")

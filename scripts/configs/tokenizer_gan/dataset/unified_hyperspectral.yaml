@@ -9,14 +9,14 @@ size_128_bs: 20
 size_256_bs: 14
 size_512_bs: 7
 val_bs: 12
-max_workers: 5
-min_workers: 4
-shuffle_size: 100
-prefetch_factor: 6
+max_workers: 4
+min_workers: 3
+shuffle_size: 0
+prefetch_factor: 2
 
 train_paths:
   #> multispectral datasets
-  - - data2/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0006..0000}.tar
+  - - data/BigEarthNet_S2/hyper_images/BigEarthNet_data_{0006..0000}.tar
   - - data/TUM_128/hyper_images/TUM_128_data_{0006..0000}.tar
   - - data/MMSeg_YREB/hyper_images/MMSeg_YREB_train_part-12_bands-MSI-{0003..0000}.tar
   - - data/DCF_2020/hyper_images/DFC_2020_public-13_bands-px_256-MSI-{0002..0000}.tar
@@ -282,7 +282,7 @@ val_loader:
   loader_type: webdataset
   paths: ${dataset.val_paths}
   basic_kwargs:
-    shuffle_size: -1
+    shuffle_size: 100
     num_workers: ${dataset.min_workers}
     resample: true
     prefetch_factor: ${dataset.prefetch_factor}

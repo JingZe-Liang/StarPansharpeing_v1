@@ -25,18 +25,18 @@ accelerator:
 vq_loss:
   # disc_in_channels: ${dataset.channels}
   # perceptual loss
-  perceptual_weight: 0.05
   # repa loss
-  repa_loss_weight: 0.02 # 0.1
+  repa_loss_weight: 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
+    repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_student
-    loss_type: am_radio_spatial
+    loss_type: am_radio
     feature_normalize: spatial
   # vf loss
   vf_loss_weight:
@@ -70,8 +70,8 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.04
-  disc_weight: 0.1
+  ssim_weight: 0
+  disc_weight: 0.4
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
@@ -87,11 +87,11 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_path:
-  loading_type:
+  uni_path: ""
+  loading_type: ""
 
   # augmentations
-  latent_noise_prob: 0.0
+  latent_noise_prob: 0.2
   use_channel_drop: false
 
   # blocks
@@ -108,7 +108,7 @@ tokenizer:
     patch_size: 1
     attn_type: none
     padding_mode: reflect # for boundary?
-    adaptive_mode: interp_proj
+    adaptive_mode: interp
 
     # latents
     latent_channels: 16
@@ -118,20 +118,25 @@ tokenizer:
     act_checkpoint: true
 
   channel_drop_config:
-    drop_type: ${list:[4, 8, 12]}
+    drop_type: ${list:[4,8,12]}
     max_channels: ${tokenizer.model.latent_channels}
-    drop_prob: 0.5
+    drop_prob: 0.0
 
 ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
   beta: 0.999
-  update_after_step: 1000
+  update_after_step: 0
   update_every: 2
+  use_foreach: true
+  allow_different_devices: true
 
 train:
-  tokenizer_name: uni_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}
+  tokenizer_name: uni_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_adamw_caution
   proj_dir: runs/stage1_cosmos_nested
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 0.3
+  max_grad_norm: 3.0
+  grad_checkpoint: false
   track_metrics: false
   track_metrics_duration: -1
   track_metrics_after: 2000
@@ -139,7 +144,7 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   resume_path:
-  ema_load_path: runs/stage1_cosmos_nested/2025-10-04_02-15-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  ema_load_path: runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -156,47 +161,26 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    _target_: heavyball.AdamW
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.5, 0.95]
-    # foreach: true
+    weight_decay: 0.02
+    caution: true
+    betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
 
   disc_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    _target_: heavyball.AdamW
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1.0e-8
-    # betas: [0.0, 0.9] #[0.9, 0.95]
-    # foreach: true
+    weight_decay: 0.01
+    caution: true
+    mars: false
+    betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
-    num_warmup_steps: 1000
+    num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
@@ -208,7 +192,7 @@ train:
   disc_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
-    num_warmup_steps: 1000
+    num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
@@ -218,10 +202,11 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_latent_noise=${tokenizer.latent_noise_prob}_channel_drop=${tokenizer.use_channel_drop}
+    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_adamw_caution
     log_with_time: True
     visualize_every: 500
     log_every: 10
+    log_with: ["swanlab"]
 
   debug: true
 

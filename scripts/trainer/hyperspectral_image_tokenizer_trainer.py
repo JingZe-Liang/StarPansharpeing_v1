@@ -17,6 +17,7 @@ import torch
 import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
@@ -37,7 +38,6 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
-import wandb
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
@@ -1651,6 +1651,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 check_quality(x, out_d["recon"])
 
             logger.trace(f"Train step: {self.global_step} - recon loss: {tokenizer_loss} - Channels: {x.shape[1]}")
+
             if proxy_out is not None:
                 logger.trace(
                     f"Train step: {self.global_step} - "
@@ -1670,6 +1671,17 @@ class CosmosHyperspectralTokenizerTrainer:
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
+
+            latent_status = {
+                "latent/min": out_d.latent.min().item(),
+                "latent/max": out_d.latent.max().item(),
+                "latent/mean": out_d.latent.mean().item(),
+                "latent/std": out_d.latent.std().item(),
+            }
+            self.log_msg(
+                f"Image latent status: min/max: {latent_status['latent/min'], latent_status['latent/max']}, "
+                f"mean/std: {latent_status['latent/mean'], latent_status['latent/std']}"
+            )
             self.log_msg(f"[Train Disc]: {_log_disc_losses}")
             if self._has_proxy_task and proxy_out is not None:
                 self.log_msg(f"[Train proxy]: <cyan>proxy_loss</>: {proxy_out.proxy_loss.item():.4f}")
@@ -1677,6 +1689,7 @@ class CosmosHyperspectralTokenizerTrainer:
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)
             self.tenb_log_any("metric", log_disc_loss, self.global_step)
+            self.tenb_log_any("metric", latent_status, step=self.global_step)
             if self._has_proxy_task and proxy_out is not None:
                 self.tenb_log_any(
                     "metric",
@@ -2331,7 +2344,7 @@ if __name__ == "__main__":
         + "\n"
         + "Start Running , Good Luck!\n"
         + "=" * 60
-        + "</>",
+        + "</green>",
         not_rank0_print=True,
     )
 

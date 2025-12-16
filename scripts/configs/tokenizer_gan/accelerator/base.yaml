@@ -16,7 +16,7 @@ project_config:
   project_dir: runs/stage1_cosmos/
   logging_dir: runs/stage1_cosmos/tensorboard
   # ==================
-  total_limit: 5
+  total_limit: 2
   automatic_checkpoint_naming: true
 gradient_accumulation_plugin:
   _target_: accelerate.utils.GradientAccumulationPlugin

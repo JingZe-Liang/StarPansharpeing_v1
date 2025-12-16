@@ -206,7 +206,7 @@ def _sample_t_distributional(
             torch.tensor(a, device=device),
             torch.tensor(b, device=device),
         )
-        t = dist.sample((bs))
+        t = dist.sample((bs,))
         return t
 
     # Default: standard normal, absolute value then clamp to [0,1] for stability
