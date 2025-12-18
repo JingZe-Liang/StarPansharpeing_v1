@@ -16,9 +16,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from flash_attn.layers.rotary import (
-    RotaryEmbedding as FlashAttnRotaryEmbedding,  # type: ignore
-)
 from fvcore.nn import parameter_count
 from jaxtyping import Float
 from loguru import logger

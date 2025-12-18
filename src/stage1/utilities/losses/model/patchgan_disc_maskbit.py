@@ -10,8 +10,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from src.stage1.utilities.losses.model.triton_rms_norm import TritonRMSNorm2dFunc
 from src.utilities.logging import log_print
+
+# from src.stage1.utilities.losses.model.triton_rms_norm import TritonRMSNorm2dFunc
 
 
 class LayerNorm2d(nn.LayerNorm):
@@ -23,9 +24,9 @@ class LayerNorm2d(nn.LayerNorm):
         return out
 
 
-class TritonRMSNorm2d(nn.LayerNorm):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
+# class TritonRMSNorm2d(nn.LayerNorm):
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 
 class RMSNorm2d(nn.Module):
@@ -62,7 +63,7 @@ REGISTERED_NORM_DICT = {
     "bn2d": nn.BatchNorm2d,
     "ln": nn.LayerNorm,
     "ln2d": LayerNorm2d,
-    "trms2d": TritonRMSNorm2d,
+    # "trms2d": TritonRMSNorm2d,
     "rms2d": RMSNorm2d,
     "gn": lambda num_features: nn.GroupNorm(32, num_features),
 }

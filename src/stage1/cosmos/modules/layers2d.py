@@ -53,6 +53,7 @@ from .blocks import (
     ResnetBlockMoE2D,
     ResnetBlockSlotsInjected,
     TimestepEmbedder,
+    block_basic_init,
     make_attn,
     nonlinearity,
 )
@@ -237,7 +238,7 @@ class Encoder(nn.Module):
         logger.info(f"[Encoder]: Using block name: {block_name}")
 
         # Patcher.
-        self.patcher = Patcher(patch_size, patch_method)
+        self.patcher = Patcher(patch_size, patch_method) if patch_size > 1 else nn.Identity()
         logger.info(f"[Encoder]: in_channels: {in_channels}, patch_size: {patch_size}, patch_method: {patch_method}")
 
         # calculate the number of downsample operations
@@ -389,9 +390,29 @@ class Encoder(nn.Module):
 
     @safe_init_weights
     def init_weights(self):
-        named_apply(partial(init_weight_jax, classifier_name=""), self)
-        logger.info("[Encoder]: init weights.")
+        self.conv_in.init_weights()
+        for layer in self.down:
+            res_block = layer.block
+            for rb in res_block:
+                rb.init_weights()
 
+            attn_block = layer.attn
+            for ab in attn_block:
+                ab.init_weights()
+
+            downsample_block = getattr(layer, "downsample", None)
+            if downsample_block is not None:
+                downsample_block.apply(block_basic_init)
+
+        self.mid.block_1.init_weights()
+        if not isinstance(self.mid.attn_1, nn.Identity):
+            self.mid.attn_1.init_weights()
+        self.mid.block_2.init_weights()
+
+        block_basic_init(self.norm_out)
+        block_basic_init(self.conv_out)
+
+        logger.info("[Encoder]: init weights.")
 
 class Decoder(nn.Module):
     def __init__(
@@ -448,7 +469,7 @@ class Decoder(nn.Module):
 
         # UnPatcher.
         self.patch_size = patch_size
-        self.unpatcher = UnPatcher(patch_size, patch_method)
+        self.unpatcher = UnPatcher(patch_size, patch_method) if patch_size > 1 else nn.Identity()
 
         # calculate the number of upsample operations
         self.num_upsamples = int(math.log2(spatial_compression)) - int(math.log2(patch_size))
@@ -613,7 +634,28 @@ class Decoder(nn.Module):
 
     @safe_init_weights
     def init_weights(self):
-        named_apply(partial(init_weight_jax, classifier_name=""), self)
+        self.conv_out.init_weights()
+        for layer in self.up:
+            res_block = layer.block
+            for rb in res_block:
+                rb.init_weights()
+
+            attn_block = layer.attn
+            for ab in attn_block:
+                ab.init_weights()
+
+            upsample_block = getattr(layer, "upsample", None)
+            if upsample_block is not None:
+                upsample_block.apply(block_basic_init)
+
+        self.mid.block_1.init_weights()
+        if not isinstance(self.mid.attn_1, nn.Identity):
+            self.mid.attn_1.init_weights()
+        self.mid.block_2.init_weights()
+
+        block_basic_init(self.norm_out)
+        block_basic_init(self.conv_in)
+
         logger.info("[Decoder]: init weights.")
 
 

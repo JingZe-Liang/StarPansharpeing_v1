@@ -25,7 +25,7 @@ from accelerate.state import PartialState
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from loguru import logger
-from timm.layers import LayerScale2d, create_act_layer, create_conv2d
+from timm.layers import LayerScale2d, create_act_layer, create_conv2d, create_norm
 from timm.layers.drop import DropPath
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
@@ -84,6 +84,36 @@ def get_same_padding(kernel_size: int | tuple[int, ...]):
         return kernel_size // 2
     else:
         raise ValueError(f"kernel_size should be int or tuple, got {type(kernel_size)}")
+
+
+# Create constant tuple of norm classes to avoid recreating it every time
+_NORM_CLASSES = tuple(
+    create_norm.get_norm_layer(f)
+    for f in ["batchnorm2d", "rmsnorm", "rmsnorm2d", "layernorm", "layernorm2d", "groupnorm"]
+)
+
+
+def block_basic_init(module: nn.Module, name: str = "", dim: int | None = None):
+    gain = None
+    if dim is not None:
+        gain = math.sqrt(2 / dim)
+
+    if isinstance(module, nn.Conv2d):
+        if gain is None:
+            gain = math.sqrt(2 / module.weight.shape[0])
+        nn.init.trunc_normal_(module.weight, std=gain)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.Linear):
+        if gain is None:
+            gain = math.sqrt(2 / module.weight.shape[0])
+        nn.init.trunc_normal_(module.weight, std=gain)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, _NORM_CLASSES):
+        nn.init.ones(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
 
 
 # * --- Convolutional Layers --- #
@@ -666,7 +696,8 @@ class Mlp(nn.Module):
     ):
         super().__init__()
         out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
+        self.hidden_features = hidden_features = hidden_features or in_features
+
         bias = (bias, bias)
         drop_probs = (drop, drop)
         linear_layer = partial(nn.Conv2d, kernel_size=1)
@@ -686,6 +717,10 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop2(x)
         return x
+
+    @safe_init_weights
+    def init_weights(self):
+        block_basic_init(self, dim=self.hidden_features)
 
 
 # * --- Input and output convs with different bands images --- #
@@ -1798,10 +1833,12 @@ class ResnetBlock(nn.Module):
     ):
         super().__init__()
         self.in_channels = in_channels
-        out_channels = in_channels if out_channels is None else out_channels
-        padding_mode = kwargs.get("padding_mode", "reflect")
-        norm_type = kwargs.get("norm_type", "gn")
+        self.out_channels = out_channels = in_channels if out_channels is None else out_channels
+        self.norm_type = norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
+        padding_mode = kwargs.get("padding_mode", "reflect")
+        self.layer_idx = kwargs.get("layer_idx", None)
+
         self.use_dico_cca = kwargs.get("use_dico_cca", False)
         if self.use_dico_cca:
             logger.warning(f"Using dico cca, may cause large memory usage")
@@ -1812,7 +1849,7 @@ class ResnetBlock(nn.Module):
         self.act1 = ACT2FN[act_type[0]]
         self.conv1 = nn.Conv2d(
             in_channels,
-            out_channels,
+            self.out_channels,
             kernel_size=3,
             stride=1,
             padding=1,
@@ -1822,7 +1859,7 @@ class ResnetBlock(nn.Module):
         self.act2 = ACT2FN[act_type[1]]
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(
-            out_channels,
+            self.out_channels,
             out_channels,
             kernel_size=3,
             stride=1,
@@ -1891,6 +1928,12 @@ class ResnetBlock(nn.Module):
         if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, use_reentrant=False)
         return self.forward_fn(x)
+
+    def init_weights(self):
+        def _inner(m):
+            block_basic_init(m, dim=self.out_channels)
+
+        self.apply(_inner)
 
 
 class ResnetBlockSlotsInjected(ResnetBlock):

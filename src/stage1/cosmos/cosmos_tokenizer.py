@@ -596,14 +596,24 @@ class ContinuousImageTokenizer(nn.Module):
                 DeprecationWarning,
             )
             quant_conv = nn.Sequential(
-                Normalize(model_cfg.latent_channels, norm_type="gn"),
+                Normalize(model_cfg.latent_channels, norm_type=cfg.model.norm_type),  # type: ignore
                 torch.nn.Conv2d(model_cfg.latent_channels, q_conv_chan, 1),
             )
+            nn.init.ones_(quant_conv[0].weight)
+            nn.init.zeros_(quant_conv[0].bias)
+            nn.init.trunc_normal_(quant_conv[1].weight, std=0.02)
+            nn.init.zeros_(quant_conv[1].bias)
         else:
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
+            nn.init.trunc_normal_(quant_conv.weight, std=0.02)
+            nn.init.zeros_(quant_conv.bias)
 
         # then the quantizer will output the latent_channels h
         post_quant_conv = torch.nn.Conv2d(model_cfg.latent_channels, model_cfg.z_channels, 1)
+        nn.init.trunc_normal_(post_quant_conv.weight, std=0.02)
+        nn.init.zeros_(post_quant_conv.bias)
+
+        logger.debug(f"[Tokenizer]: Built quant_conv/post_quant_conv and init them")
 
         return quant_conv, post_quant_conv
 
@@ -1464,7 +1474,7 @@ def test_tokenizer_forward_backward(
             config["model"].update(other_model_kwargs.pop("model"))
         else:
             config.update(other_model_kwargs)
-    tokenizer = model_cls.create_model(**config).cuda()
+    tokenizer = model_cls.create_model(**config).to(device)
     tokenizer = tokenizer.to(dtype)
 
     if is_lora:
@@ -1507,7 +1517,7 @@ def test_tokenizer_forward_backward(
         if Path(real_data).exists():
             # only support RGB image
             x = Image.open(real_data).convert("RGB")
-            x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().cuda()
+            x = torch.from_numpy(np.array(x)).permute(2, 0, 1).unsqueeze(0).float().to(device)
             x = x / 255.0
             x = x * 2 - 1  # normalize to [-1, 1]
             iterations = [x]
@@ -1517,7 +1527,7 @@ def test_tokenizer_forward_backward(
             dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1)[1]
             iterations = dl
     else:
-        x = torch.randn(*fake_img_shape).to("cuda", dtype=dtype)
+        x = torch.randn(*fake_img_shape).to(device, dtype=dtype)
         iterations = [x]
 
     if not is_itered and upscale != 1:
@@ -1526,7 +1536,7 @@ def test_tokenizer_forward_backward(
     if use_optim:
         opt = torch.optim.Adam(tokenizer.parameters(), lr=1e-4, fused=True)
 
-    metric = MeanMetric().cuda()
+    metric = MeanMetric().to(device)
     if compute_mean_std:
         mean_lst = []
         std_lst = []
@@ -1580,7 +1590,7 @@ def test_tokenizer_forward_backward(
 
             # psnr
             if real_data:
-                psnr = PeakSignalNoiseRatio(data_range=1.0).cuda()
+                psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
                 psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
                 # logger.info(f"PSNR: {psnr_val}")
                 tbar.set_description(f"PSNR: {psnr_val:.4f} - shape: {x.shape}")
@@ -1632,11 +1642,8 @@ def test_tokenizer_forward_backward(
 
 if __name__ == "__main__":
     """
-    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 python -m src.stage1.cosmos.cosmos_tokenizer
+    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
     """
-    import lovely_tensors as lt
-
-    lt.monkey_patch()
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="",  # "runs/pretrained/VAEInterp-f8c16.safetensors",
@@ -1667,6 +1674,7 @@ if __name__ == "__main__":
         compute_mean_std=False,
         use_optim=True,
         check_grad=True,
+        device="cpu",
     )
 
 # RS5M

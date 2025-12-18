@@ -31,7 +31,12 @@ from timm.layers.norm import LayerNorm2d
 
 from src.utilities.config_utils import once
 
-from .rmsnorm_triton import TritonRMSNorm2dFunc
+try:
+    from .rmsnorm_triton import TritonRMSNorm2dFunc
+except Exception as e:
+    logger.warning("TritonRMSNorm2dFunc not available. Falling back to torch.nn.LayerNorm")
+    logger.warning(f"Exception: {e}")
+    TritonRMSNorm2dFunc = None
 
 
 def time2batch(x: torch.Tensor) -> tuple[torch.Tensor, int]:
@@ -137,6 +142,7 @@ class LayerNorm2d(torch.nn.LayerNorm):
 
 class TritonRMSNorm2d(torch.nn.LayerNorm):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert TritonRMSNorm2dFunc is not None, "TritonRMSNorm2dFunc is not available."
         return TritonRMSNorm2dFunc.apply(x, self.weight, self.bias, self.eps)
 
 

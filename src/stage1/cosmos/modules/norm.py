@@ -7,7 +7,12 @@ from timm.layers import create_act, create_norm
 
 from src.utilities.logging import once
 
-from .rmsnorm_triton import TritonRMSNorm2dFunc
+try:
+    from .rmsnorm_triton import TritonRMSNorm2dFunc
+except Exception as e:
+    logger.warning("TritonRMSNorm2dFunc not available. Falling back to torch.nn.LayerNorm")
+    logger.warning(f"Exception: {e}")
+    TritonRMSNorm2dFunc = None
 
 
 class RMSNorm(nn.Module):
@@ -54,6 +59,8 @@ class TritonRMSNorm2d(nn.LayerNorm):
         nn.init.constant_(self.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert TritonRMSNorm2dFunc is not None, "TritonRMSNorm2dFunc is not available."
+
         input_numel = x.numel()
         if input_numel >= 1 << 31:
             num_chunks = (input_numel - 1) // (1 << 31) + 1
