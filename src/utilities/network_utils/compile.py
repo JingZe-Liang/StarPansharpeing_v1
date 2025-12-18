@@ -1,7 +1,5 @@
 from functools import wraps
 
-# * --- no compilation wrappers --- #
-
 
 def null_decorator(**any_kwargs):
     def _inner_decorator(func):

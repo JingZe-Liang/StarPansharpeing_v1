@@ -28,6 +28,7 @@ from typing_extensions import Annotated
 import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, GenerativeDecoder
+from src.stage1.cosmos.modules.blocks import block_basic_init
 from src.stage1.cosmos.modules.proj import build_mlp
 from src.stage1.cosmos.modules.utils import Normalize
 
@@ -37,10 +38,7 @@ from src.stage1.discretization.collections import BinarySphericalQuantizer as BS
 from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
 )
-from src.stage1.discretization.collections.psd import (
-    PowerSphericalDistribution,
-    l2_norm,
-)
+from src.stage1.discretization.collections.psd import PowerSphericalDistribution, l2_norm
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
@@ -601,18 +599,20 @@ class ContinuousImageTokenizer(nn.Module):
             )
             nn.init.ones_(quant_conv[0].weight)
             nn.init.zeros_(quant_conv[0].bias)
-            nn.init.trunc_normal_(quant_conv[1].weight, std=0.02)
+            nn.init.trunc_normal_(quant_conv[1].weight, std=0.01)
             nn.init.zeros_(quant_conv[1].bias)
         else:
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
-            nn.init.trunc_normal_(quant_conv.weight, std=0.02)
+            nn.init.trunc_normal_(quant_conv.weight, std=0.01)
             nn.init.zeros_(quant_conv.bias)
 
         # then the quantizer will output the latent_channels h
         post_quant_conv = torch.nn.Conv2d(model_cfg.latent_channels, model_cfg.z_channels, 1)
-        nn.init.trunc_normal_(post_quant_conv.weight, std=0.02)
+        nn.init.trunc_normal_(post_quant_conv.weight, std=0.01)
         nn.init.zeros_(post_quant_conv.bias)
 
+        # post_quant_conv.apply(block_basic_init)
+        # quant_conv.apply(block_basic_init)
         logger.debug(f"[Tokenizer]: Built quant_conv/post_quant_conv and init them")
 
         return quant_conv, post_quant_conv
@@ -1014,11 +1014,12 @@ class ContinuousImageTokenizer(nn.Module):
         tokenizer_cfg: dict | None = None,
         uni_tokenizer_path: str | None = None,
         mean_init_conv_in_out: bool = False,
+        _reinit_quant_convs: bool = True,
     ) -> tuple[Encoder, Decoder] | None:
         if (enc_path == "" or dec_path == "") and uni_tokenizer_path == "":
             return None
 
-        # * --- load NVIDIA Cosmos separated encoder, decoder checkpoints --- #
+        ######## load NVIDIA Cosmos separated encoder, decoder checkpoints
 
         if self.loading_type == "nvidia":
             assert tokenizer_cfg is not None, "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
@@ -1045,7 +1046,7 @@ class ContinuousImageTokenizer(nn.Module):
             )
             return encoder, decoder
 
-        # * --- load pretrained uni-tokenizer or separate encoder and decoder --- #
+        ####### load pretrained uni-tokenizer or separate encoder and decoder
 
         else:
             if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
@@ -1056,6 +1057,16 @@ class ContinuousImageTokenizer(nn.Module):
                 logger.warning(
                     f"tokenizer: missing keys {_missing_keys}, unexpected keys {_unexp_keys}",
                 )
+
+                if _reinit_quant_convs:
+                    nn.init.trunc_normal_(self.encoder.quant_conv.weight, std=0.01)
+                    nn.init.zeros_(self.encoder.quant_conv.bias)
+
+                    # then the quantizer will output the latent_channels h
+                    nn.init.trunc_normal_(self.decoder.quant_conv.weight, std=0.01)
+                    nn.init.zeros_(self.decoder.quant_conv.bias)
+
+                    logger.warning(f"temp code for continue training")
 
                 # if conv_in is nn.Conv2d for only one channel
                 # and if the pretrained conv_in's basic module is also conv

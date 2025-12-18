@@ -120,9 +120,9 @@ train_loader:
         - ["data/DryadHyper/LitData_hyper_images"]
         - resize_before_transform: 128
 
-      242bands_512:
-        - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
-        - resize_before_transform: 512
+      # 242bands_512:
+      #   - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
+      #   - resize_before_transform: 512
 
       242bands_256:
         - ["data/MDAS-EeteS/LitData_hyper_images"]
@@ -144,7 +144,7 @@ train_loader:
   macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
 
   loader_kwargs:
-    num_workers: 18
+    num_workers: 8
     pin_memory: true
     drop_last: true
     persistent_workers: true
@@ -154,7 +154,7 @@ train_loader:
 
   weights:
     #         3    4  8  10  12 13 13 32 50 150 175 202 202  224 224 242 368  369
-    [18, 18, 15, 10, 10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 18, 10, 11, 18]
+    [18, 18, 15, 10, 10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 10, 11, 18]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
@@ -261,9 +261,9 @@ val_loader:
         - ["data/MDAS-EeteS/LitData_hyper_images"]
         - resize_before_transform: 256
 
-      242bands_512:
-        - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
-        - resize_before_transform: 512
+      # 242bands_512:
+      #   - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
+      #   - resize_before_transform: 512
 
       368bands_256:
         - ["data/MDAS-HySpex/LitData_hyper_images"]
@@ -288,7 +288,7 @@ val_loader:
     is_hwc: true
 
   loader_kwargs:
-    num_workers: 4
+    num_workers: 3
     pin_memory: false
     drop_last: true
     persistent_workers: false

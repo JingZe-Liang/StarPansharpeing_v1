@@ -22,8 +22,8 @@ cnn_cfg:
     spatial_compression: 8
     patch_size: 1
     block_name: res_block
-    norm_type: gn
-    norm_groups: 32
+    norm_type: rmsnorm2d #gn
+    act_type: silu
     adaptive_mode: interp
     downsample_kwargs:
       padconv_use_manually_pad: false

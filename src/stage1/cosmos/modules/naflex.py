@@ -480,7 +480,7 @@ class Transformer(NaFlexVit):
             for layer_id, blk in enumerate(self.blocks, 1):
                 rescale(blk.attn.proj.weight.data, layer_id)
                 rescale(blk.mlp.fc2.weight.data, layer_id)
-            logger.info("Rescale the layers initialization for more stable training")
+            logger.info("[Naflex Transformer]: Rescale the layers initialization for more stable training")
 
 
 class IJEPANaFlexViT(Transformer):
@@ -772,8 +772,11 @@ class IJEPANaFlexViT(Transformer):
         output_type: str = "1d",  # fixed it.
         masks: Optional[Tensor | List[Tensor]] = None,
         masks_indices: Optional[Tensor] = None,
+        *,
+        pretrained_task: list[str] | None = None,
     ):
         terms = {}
+        pretrained_task = [] if pretrained_task is None else pretrained_task
 
         if output_type in (None, "2d"):
             out_hw = self._get_output_shape(x)
@@ -784,14 +787,13 @@ class IJEPANaFlexViT(Transformer):
         x = cast(torch.Tensor, self.forward_features(x, masks=masks))
 
         ######### IJepa features ########
-        if "ijepa" in self.pretrained_type:
+        if "ijepa" in self.pretrained_type and "ijepa" in pretrained_task:
             # x is the backbone's out
             terms["ijepa_feat"] = x[:, self.num_prefix_tokens :]
 
         ######### Lejepa projector #########
-        if hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type:
+        if hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type and "lejepa" in pretrained_task:
             # NOTE: may use all spatial tokens to compute the lejepa loss?
-
             x_pool = self._pool(x)
             lejepa_proj = self.lejepa_projector(x_pool)  # x is the backbone's out
             terms["lejepa_proj"] = lejepa_proj
@@ -799,7 +801,7 @@ class IJEPANaFlexViT(Transformer):
             terms["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
 
         ########## IBOT projector ##########
-        if hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type:
+        if hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type and "ibot" in pretrained_task:
             terms["ibot_feat"] = x_tokens = x[:, self.num_prefix_tokens :]
 
             # Check mask shape alignment if masks provided

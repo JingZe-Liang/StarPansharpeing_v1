@@ -257,7 +257,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.deep_supervised_heads.append(to_out)
         logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
 
-    def load_pretrained(self, uni_tokenizer_path: str, **kwargs):  # type: ignore[invalid-method-override]
+    def load_pretrained(self, uni_tokenizer_path: str,_reinit_quant_convs=True, **kwargs):  # type: ignore[invalid-method-override]
         """Init the model from the pretrained only CNN weights."""
         if uni_tokenizer_path in (None, ""):
             logger.warning(f"No pretrained weights found at {uni_tokenizer_path}, skip loading ckpt.")
@@ -267,6 +267,17 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
         if len(missing_ks) > 0 or len(unexp_ks) > 0:
             logger.warning(f"Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
+            
+        if _reinit_quant_convs:
+            nn.init.trunc_normal_(self.encoder.quant_conv.weight, std=0.01)
+            nn.init.zeros_(self.encoder.quant_conv.bias)
+
+            # then the quantizer will output the latent_channels h
+            nn.init.trunc_normal_(self.decoder.quant_conv.weight, std=0.01)
+            nn.init.zeros_(self.decoder.quant_conv.bias)
+
+            logger.warning(f"temp code for continue training")
+
 
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
@@ -283,7 +294,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         z_low_lvl = self.encoder.encoder(x)
 
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, masks=masks, masks_indices=mask_indices
+            z_low_lvl, masks=masks, masks_indices=mask_indices, pretrained_task=["ibot"]
         )
         return terms.ibot_proj
 
@@ -297,7 +308,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Semantic encoder
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, masks=jepa_masks
+            z_low_lvl, masks=jepa_masks, pretrained_task=["ijepa"]
         )
 
         # no quant_conv here
@@ -314,7 +325,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Semantic encoder
         # z_low_lvl -> transformer backbone -> projector -> z_proj
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
-            z_low_lvl, masks=None
+            z_low_lvl, masks=None, pretrained_task=["lejepa"]
         )
 
         return terms.lejepa_proj

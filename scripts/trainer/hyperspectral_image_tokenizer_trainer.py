@@ -1828,7 +1828,6 @@ class CosmosHyperspectralTokenizerTrainer:
             if self.global_step % self.val_cfg.val_duration == 0:  # and self.accelerator.sync_gradients:
                 self.log_msg("[Train]: start validation ...")
                 self.val_loop()
-                torch.cuda.empty_cache()
 
             if self.global_step >= self.train_cfg.max_steps:
                 _stop_train_and_save = True
@@ -1899,12 +1898,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # track psnr and ssim
         if self.train_cfg.track_metrics:
-            psnr_fn = PeakSignalNoiseRatio(1.0).to(device=self.device, dtype=self.dtype)
-            ssim_fn = StructuralSimilarityIndexMeasure().to(device=self.device, dtype=self.dtype)
+            psnr_fn = PeakSignalNoiseRatio(1.0).to(self.device, self.dtype)
+            ssim_fn = StructuralSimilarityIndexMeasure().to(self.device, self.dtype)
         loss_metrics = MeanMetric().to(device=self.device)
 
         _set_all_model_modes(train=False)
 
+        torch.cuda.empty_cache()
         for batch in self.finite_val_loader():
             recon = self.val_step(batch)
 
@@ -1913,11 +1913,27 @@ class CosmosHyperspectralTokenizerTrainer:
 
             if self.train_cfg.track_metrics:
                 c, h, _ = recon.shape[1:]
-                psnr_fn.update(batch_img_rgb, recon_for_metrics)
+                try:
+                    psnr_fn.update(batch_img_rgb, recon_for_metrics)
+                except Exception as e:
+                    logger.warning(f"PSNR calculation error: {e}")
+                    # Try to compute on CPU
+                    psnr_fn = psnr_fn.to('cpu')
+                    psnr_fn.update(batch_img_rgb.to('cpu'), recon_for_metrics.to('cpu'))
+                    psnr_fn = psnr_fn.to(self.device)
+                    
                 # NOTE: large hyperspectral image may cause OOM in PSNR/SSIM calculation
                 if c > 200 and h >= 512:
                     continue
-                ssim_fn.update(batch_img_rgb, recon_for_metrics)
+            
+                try:
+                    ssim_fn.update(batch_img_rgb, recon_for_metrics)
+                except Exception as e:
+                    logger.warning(f"SSIM calculation error: {e}")
+                    # Try to compute on CPU
+                    ssim_fn = ssim_fn.to('cpu')
+                    ssim_fn.update(batch_img_rgb.to('cpu'), recon_for_metrics.to('cpu'))
+                    ssim_fn = ssim_fn.to(self.device)
 
             # recon loss
             loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
@@ -2281,7 +2297,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "hybrid_cosmos_f16c32p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

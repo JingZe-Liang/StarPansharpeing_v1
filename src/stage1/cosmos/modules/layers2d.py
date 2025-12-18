@@ -414,6 +414,7 @@ class Encoder(nn.Module):
 
         logger.info("[Encoder]: init weights.")
 
+
 class Decoder(nn.Module):
     def __init__(
         self,
@@ -1019,6 +1020,8 @@ class DecoderDiff(nn.Module):
         self.null_cond = nn.Parameter(torch.zeros(1, z_channels, z_res, z_res))
         torch.nn.init.normal_(self.null_cond, std=0.02)
 
+        self.init_weights()
+
     def embed_cond(self, z):
         bs = z.shape[0]
         null_cond_interp = self.null_cond
@@ -1093,6 +1096,28 @@ class DecoderDiff(nn.Module):
 
     def get_last_layer(self):
         return self.final_layer.conv.weight
+
+    @safe_init_weights
+    def init_weights(self):
+        block_basic_init(self.z_embedding)
+        block_basic_init(self.conv_in)
+        self.t_embedder.init_weights()
+
+        self.mid.block_1.init_weights()
+        self.mid.block_2.init_weights()
+
+        for layer in self.up:
+            for rb in layer.block:
+                rb.init_weights()
+            if hasattr(layer, "upsample"):
+                layer.upsample.apply(block_basic_init)
+
+        self.final_layer.init_weights()
+
+        # null cond
+        nn.init.normal_(self.null_cond, std=0.02)
+
+        logger.info("[DecoderDiff]: init weights.")
 
 
 if __name__ == "__main__":

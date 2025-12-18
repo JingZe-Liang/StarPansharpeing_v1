@@ -22,7 +22,8 @@ cnn_cfg:
     spatial_compression: 8
     patch_size: 1
     block_name: res_block
-    norm_type: gn
+    norm_type: rmsnorm2d #gn
+    act_type: silu
     norm_groups: 32
     adaptive_mode: interp
     downsample_kwargs:
@@ -34,7 +35,6 @@ cnn_cfg:
   vf_on_z_or_module: z
   use_repa_loss: true
   dino_feature_dim: 1024
-  cache_type: h
   decoder_type: default # [default, generative]
 
 trans_enc_cfg:

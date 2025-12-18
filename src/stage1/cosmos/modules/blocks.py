@@ -93,26 +93,43 @@ _NORM_CLASSES = tuple(
 )
 
 
-def block_basic_init(module: nn.Module, name: str = "", dim: int | None = None):
-    gain = None
-    if dim is not None:
-        gain = math.sqrt(2 / dim)
-
-    if isinstance(module, nn.Conv2d):
-        if gain is None:
-            gain = math.sqrt(2 / module.weight.shape[0])
-        nn.init.trunc_normal_(module.weight, std=gain)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-    elif isinstance(module, nn.Linear):
-        if gain is None:
-            gain = math.sqrt(2 / module.weight.shape[0])
-        nn.init.trunc_normal_(module.weight, std=gain)
+def block_basic_init(
+    module: nn.Module,
+    name: str = "",
+    dim: int | None = None,
+    init_type: str | None = "trunc_normal",
+    mode: str = "fan_in",
+    nonlinearity: str = "relu",
+    trunc_bounds: tuple[float, float] = (-2.0, 2.0),
+    trunc_std: float | None = None,
+):
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        if init_type in (None, "trunc_normal"):
+            if trunc_std is None:
+                if dim is not None:
+                    std = math.sqrt(2 / dim)
+                else:
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                    std = math.sqrt(2 / fan_in)
+            else:
+                std = trunc_std
+            nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
+        elif init_type == "kaiming_normal":
+            nn.init.kaiming_normal_(module.weight, mode=mode, nonlinearity=nonlinearity)
+        elif init_type == "kaiming_uniform":
+            nn.init.kaiming_uniform_(module.weight, mode=mode, nonlinearity=nonlinearity)
+        elif init_type == "xavier_normal":
+            nn.init.xavier_normal_(module.weight)
+        elif init_type == "xavier_uniform":
+            nn.init.xavier_uniform_(module.weight)
+        else:
+            raise ValueError(f"init_type {init_type} is not supported")
         if module.bias is not None:
             nn.init.zeros_(module.bias)
     elif isinstance(module, _NORM_CLASSES):
-        nn.init.ones(module.weight)
-        if module.bias is not None:
+        if hasattr(module, "weight") and module.weight is not None:
+            nn.init.ones_(module.weight)
+        if hasattr(module, "bias") and module.bias is not None:
             nn.init.zeros_(module.bias)
 
 
@@ -397,6 +414,9 @@ class AttnBlock(nn.Module):
             return checkpoint(fn, x, use_reentrant=False)
         return fn(x)
 
+    def init_weights(self):
+        self.apply(block_basic_init)
+
 
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
@@ -415,6 +435,9 @@ class LinearAttention(nn.Module):
         out = torch.einsum("bhde,bhdn->bhen", context, q)
         out = rearrange(out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w)
         return self.to_out(out)
+
+    def init_weights(self):
+        self.apply(block_basic_init)
 
 
 class LinAttnBlock(LinearAttention):
@@ -568,6 +591,9 @@ class LiteMLA(nn.Module):
 
         return out
 
+    def init_weights(self):
+        self.apply(block_basic_init)
+
 
 class NattenAttention(nn.Module):
     def __init__(
@@ -613,6 +639,9 @@ class NattenAttention(nn.Module):
         out = self.proj_out(out)
 
         return out
+
+    def init_weights(self):
+        self.apply(block_basic_init)
 
 
 def make_attn(in_channels, attn_type="vanilla", act_checkpoint=False):
@@ -720,7 +749,7 @@ class Mlp(nn.Module):
 
     @safe_init_weights
     def init_weights(self):
-        block_basic_init(self, dim=self.hidden_features)
+        block_basic_init(self)
 
 
 # * --- Input and output convs with different bands images --- #
@@ -1931,7 +1960,7 @@ class ResnetBlock(nn.Module):
 
     def init_weights(self):
         def _inner(m):
-            block_basic_init(m, dim=self.out_channels)
+            block_basic_init(m)
 
         self.apply(_inner)
 
@@ -1975,6 +2004,11 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         # zero out the last conv for condition
         self.slots_t_to_mod[-1].weight.data.zero_()
         self.slots_t_to_mod[-1].bias.data.zero_()
+
+    def init_weights(self):
+        super().init_weights()
+        nn.init.zeros_(self.slots_t_to_mod[-1].weight)
+        nn.init.zeros_(self.slots_t_to_mod[-1].bias)
 
     def forward_fn(self, x, slots, t):
         # interpolate 2d
@@ -2123,6 +2157,9 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
 
+    def init_weights(self):
+        self.apply(block_basic_init)
+
 
 class FinalLayer(nn.Module):
     """
@@ -2150,6 +2187,11 @@ class FinalLayer(nn.Module):
         x = self.norm_final(x) * (1 + scale) + shift
         x = self.conv(x)
         return x
+
+    def init_weights(self):
+        self.apply(block_basic_init)
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
 
 
 if __name__ == "__main__":

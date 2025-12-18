@@ -26,6 +26,8 @@ tokenizer:
   cnn_cfg:
     model:
       latent_channels: 32
+    uni_path: runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors
+    loading_type: hybrid_pretrained
 
 vq_loss:
   # perceptual loss
@@ -112,7 +114,6 @@ ema:
   allow_different_devices: true
   # update_model_with_ema_every: 5_000
 
-
 train:
   tokenizer_name: hybrid_cosmos_f16c32
   proj_dir: runs/stage1_cosmos_hybrid
@@ -190,11 +191,11 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c32_spatial_norm_irepa
+    run_comment: hybrid_cosmos_f16c32_spatial_norm_irepa-reduce-norm
     log_with_time: True
     visualize_every: 500
     log_every: 10
-    log_with: ['tensorboard', 'swanlab']
+    log_with: ["tensorboard", "swanlab"]
 
   debug: true
 
