@@ -5,9 +5,9 @@ model:
   channels_mult: [2, 2, 4, 4]
   dropout: 0.0
   in_channels: ${dataset.channels}
+  out_channels: ${dataset.channels}
   spatial_compression: 16
   num_res_blocks: 2
-  out_channels: ${dataset.channels}
   resolution: 1024
   z_channels: 16
   act_checkpoint: true

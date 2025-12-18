@@ -279,3 +279,14 @@ if __name__ == "__main__":
 
     out = net(q, k, v, return_sparsity=False)
     print(out.shape)
+
+    loss = out - torch.randn_like(out)
+    loss = loss.mean()
+    loss.backward()
+
+    # Check params
+    for n, p in net.named_parameters():
+        if p.requires_grad and p.grad is None:
+            print(f"Param {n} has no grad!")
+
+    print("======== Check sparsity done ========")

@@ -484,7 +484,7 @@ class Transformer(NaFlexVit):
 
 
 class IJEPANaFlexViT(Transformer):
-    def __init__(self, cfg):
+    def __init__(self, cfg: NaFlexVitCfg):
         super().__init__(cfg)
 
         self.pretrained_type: str = cfg.pretrained_type

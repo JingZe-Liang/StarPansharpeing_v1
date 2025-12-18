@@ -10,7 +10,9 @@ from timm.layers import create_norm_act_layer
 from .blocks import ResidualBlock, get_same_padding
 from .utils import Normalize
 
-# * --- Upsample and Downsample --- #
+# *==============================================================
+# * Upsample and Downsample blocks
+# *==============================================================
 
 
 def resample_norm_keep(x, x_resampled):
@@ -256,7 +258,7 @@ class ChannelDuplicatingPixelUnshuffleUpSampleLayer(nn.Module):
         return x
 
 
-# * --- Mingtok functional --- #
+############  Mingtok functional ############
 
 
 class MingtokDownsampleShortCut(nn.Module):
@@ -321,7 +323,7 @@ class MingtokUpsampleAverage(nn.Module):
         return x + x_
 
 
-# * --- Upsample and downsample entries --- #
+########## Upsample and downsample entries ##########
 
 
 def build_upsample_block(
@@ -341,7 +343,6 @@ def build_upsample_block(
         f"shortcut: {shortcut}, "
         f"padding_mode: {padding_mode}, "
         f"norm keep: {norm_keep}",
-        "debug",
     )
 
     if block_type == "ConvPixelShuffle":
@@ -397,7 +398,7 @@ def build_downsample_block(
     **kwargs,
 ) -> nn.Module:
     padconv_use_manually_pad = kwargs.pop("padconv_use_manually_pad", True)
-    logger.info(
+    logger.debug(
         f"[build_downsample_block] {block_type=}, "
         f"{in_channels=}, "
         f"{out_channels=}, "

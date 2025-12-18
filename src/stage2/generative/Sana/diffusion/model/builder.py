@@ -19,21 +19,11 @@ from diffusers import AutoencoderDC
 from diffusers.models import AutoencoderKL
 from mmengine.registry import Registry
 from termcolor import colored
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    T5EncoderModel,
-    T5Tokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, T5EncoderModel, T5Tokenizer
 from transformers import logging as transformers_logging
 
-from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import (
-    DCAE_HF,
-)
-from src.stage2.generative.Sana.diffusion.model.utils import (
-    set_fp32_attention,
-    set_grad_checkpoint,
-)
+from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import DCAE_HF
+from src.stage2.generative.Sana.diffusion.model.utils import set_fp32_attention, set_grad_checkpoint
 
 MODELS = Registry("models")
 
@@ -111,17 +101,28 @@ def get_tokenizer_and_text_encoder(
 
 def get_vae(name, model_path, device="cuda", **kwargs):
     if name == "sdxl" or name == "sd3":
-        vae = AutoencoderKL.from_pretrained(model_path).to(device).to(torch.float16)
+        model_name = "stabilityai/stable-diffusion-xl-base-1.0"
+        vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae").to(device).to(torch.float16)
         if name == "sdxl":
             vae.config.shift_factor = 0
         return vae
+    elif name == "sd35":
+        model_name = "stabilityai/stable-diffusion-3.5-large-turbo"
+        vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae").to(device).to(torch.bfloat16)
+        return vae
+    elif name == "flux":
+        model_name = "black-forest-labs/FLUX.1-dev"
+        vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae").to(device).to(torch.bfloat16)
+        return vae
     elif "dc-ae" in name:
         print(colored(f"[DC-AE] Loading model from {model_path}", attrs=["bold"]))
-        dc_ae = DCAE_HF.from_pretrained(model_path).to(device).eval()
+        model_name = "mit-han-lab/dc-ae-f32c32-sana-1.0"
+        dc_ae = DCAE_HF.from_pretrained(model_name).to(device).eval()
         return dc_ae
     elif "AutoencoderDC" in name:
         print(colored(f"[AutoencoderDC] Loading model from {model_path}", attrs=["bold"]))
-        dc_ae = AutoencoderDC.from_pretrained(model_path).to(device).eval()
+        model_name = "Efficient-Large-Model/SANA1.5_4.8B_1024px_diffusers"
+        dc_ae = AutoencoderDC.from_pretrained(model_name, subfolder="vae").to(device).eval()
         return dc_ae
 
     # remote sensing cosmos AE
@@ -222,7 +223,7 @@ def match_dim(x: torch.Tensor):
 
 
 def vae_encode(name, vae, images, sample_posterior, device: torch.device):
-    if name == "sdxl" or name == "sd3":
+    if name == "sdxl" or name == "sd3" or name == "sd35" or name == "flux":
         posterior = vae.encode(images.to(device)).latent_dist
         if sample_posterior:
             z = posterior.sample()
@@ -268,7 +269,7 @@ def vae_encode(name, vae, images, sample_posterior, device: torch.device):
 
 
 def vae_decode(name, vae, latent, **kwargs):
-    if name == "sdxl" or name == "sd3":
+    if name == "sdxl" or name == "sd3" or name == "sd35" or name == "flux":
         latent = (latent.detach() / vae.config.scaling_factor) + vae.config.shift_factor
         samples = vae.decode(latent).sample
     elif "dc-ae" in name:
@@ -323,28 +324,36 @@ def vae_decode(name, vae, latent, **kwargs):
 
 
 if __name__ == "__main__":
+    from torchmetrics.image import PeakSignalNoiseRatio
+
     from src.data.litdata_hyperloader import get_fast_test_hyper_litdata_load
 
-    vae = get_vae("cosmos_RS", model_path="runs/pretrained/VAEInterp-f8c16.safetensors")
+    # vae = get_vae("cosmos_RS", model_path="runs/pretrained/VAEInterp-f8c16.safetensors")
+    vae_name = "AutoencoderDC"
+    print(f"Load VAE {vae_name} ...")
+    vae = get_vae(vae_name, "")
     vae = vae.cuda()
     print("Load VAE done.")
 
     _, dl = get_fast_test_hyper_litdata_load("SAM270k", 1)
 
-    sample = next(iter(dl))
-    images = sample["img"].cuda()
-    print("Get data done.", images.shape)
-    breakpoint()
-    z = vae_encode("cosmos_RS", vae=vae, images=images, sample_posterior=None, device="cuda")
-    print(f"Encoding z info: min: {z.min()}, max: {z.max()}, std: {z.std()}")
+    # sample = next(iter(dl))
+    metric = PeakSignalNoiseRatio(data_range=1.0).cuda()
+    for i, sample in enumerate(dl):
+        images = sample["img"].cuda()
+        print("Get data done.", images.shape)
+        with torch.no_grad():
+            with torch.autocast("cuda", torch.bfloat16):
+                z = vae_encode(vae_name, vae=vae, images=images, sample_posterior=None, device="cuda")
+                print(f"Encoding z info: min: {z.min()}, max: {z.max()}, std: {z.std()}")
+                images_rec = vae_decode(vae_name, vae=vae, latent=z)
+        images_rec = images_rec.to(torch.float32)
+        if i >= 200:
+            break
 
-    images_rec = vae_decode("cosmos_RS", vae=vae, latent=z)
-    images_rec = images_rec.to(torch.float32)
-    print("Reconstruction done.", images_rec.shape)
-
-    # PSNR
-    images.add_(1).div_(2)
-    images_rec.add_(1).div_(2)
-    mse = torch.mean((images - images_rec) ** 2)
-    psnr = 10 * torch.log10(1 / mse)
-    print("PSNR:", psnr.item())
+        # PSNR
+        images.add_(1).div_(2)
+        images_rec.add_(1).div_(2)
+        psnr = metric(images_rec, images)
+        # print("PSNR:", psnr.item())
+    print("Average PSNR:", metric.compute())

@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral]
   - tokenizer: uni_cosmos_f8c16p1_nested # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested]
   - quantizer: quant
   - accelerator: base
@@ -21,6 +21,23 @@ accelerator:
   gradient_accumulation_plugin:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
+
+
+dataset:
+  train_loader:
+    macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
+    loader_kwargs: 
+      num_workers: 4
+      batch_size: 6
+      prefetch_factor: 2
+  val_loader:  
+    loader_kwargs:
+      num_workers: 2
+      batch_size: 8
+      pin_memory: false
+      drop_last: true
+      persistent_workers: false
+
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}

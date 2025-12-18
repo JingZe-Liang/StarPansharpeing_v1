@@ -46,7 +46,7 @@ dataset:
 tokenizer:
   cnn_cfg:
     model:
-      latent_channels: 64
+      latent_channels: 64 # [16,32,64]
     quantizer_type: null
     use_channel_drop: false
     channel_drop_config:
@@ -223,29 +223,30 @@ train:
     # # foreach: true
     # fused: true
 
-    _target_: heavyball.AdamW
-    _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.02
-    caution: true
-    betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
-
-  disc_optimizer:
-    # _target_: torch.optim.AdamW
+    # Adamw seems make the std too large
+    # _target_: heavyball.AdamW
     # _partial_: true
     # lr: 3.0e-4
-    # weight_decay: 1.0e-5
-    # eps: 1.0e-8
-    # betas: [0.5, 0.9] #[0.9, 0.95]
-    # foreach: true
+    # weight_decay: 0.02
+    # caution: true
+    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
 
-    _target_: heavyball.AdamW
+  disc_optimizer:
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 0.01
-    caution: true
-    mars: false
-    betas: ${tuple:[0.5,0.9]}
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.5,0.9]}
 
     # _target_: heavyball.AdamW
     # _partial_: true
@@ -280,7 +281,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c64_jepa_pretrained_gram_distillation_v1
+    run_comment: hybrid_cosmos_f16c64_jepa_pretrained_distill-irepa-spatial-norm
     log_with_time: true
     visualize_every: 500
     log_every: 10

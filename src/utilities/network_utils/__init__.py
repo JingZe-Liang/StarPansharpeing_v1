@@ -7,6 +7,7 @@ from .network_loading import (
     load_peft_model_checkpoint,
     load_weights_with_shape_check,
     remap_peft_model_state_dict,
+    safe_init_weights,
 )
 from .pack import one_d_to_two_d, two_d_to_one_d
 from .perf_utils import (

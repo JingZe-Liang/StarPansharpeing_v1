@@ -17,7 +17,6 @@ import torch
 import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
@@ -38,6 +37,7 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
+import wandb
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
@@ -2280,7 +2280,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "ijepa_cosmos_f16c64"
+_key = "hybrid_cosmos_f16c32p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2320,7 +2320,7 @@ _configs_dict = {
     "ijepa_cosmos_f16c64": "ijepa_hybrid_tokenizer_f16c64",
     "ijepa_cosmos_f16c64_pure_cnn_decoder": "ijepa_hybrid_tokenizer_cnn_decoder_f16c64",
     "lejepa_cosmos_f16c64": "lejepa_hybrid_tokenizer_f16c64",
-    "ibot_lejepa_cosmos_f8c32": "ibot_lejepa_hybrid_tokenizer_f8c32",
+    "ibot_lejepa_cosmos_f8c32": "ibot_lejepa_hybrid_tokenizer_f8c32",  # OOM !
 }
 
 if __name__ == "__main__":

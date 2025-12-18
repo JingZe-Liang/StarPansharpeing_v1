@@ -7,7 +7,7 @@ from typing_extensions import deprecated
 T = TypeVar("T")
 
 
-def dataclass_from_dict(cls: type[T], data: dict, strict: bool = True) -> T:
+def dataclass_from_dict(cls: type[T], data: dict | DictConfig, strict: bool = True) -> T:
     """
     Converts a dictionary to a dataclass instance, recursively for nested structures.
     """

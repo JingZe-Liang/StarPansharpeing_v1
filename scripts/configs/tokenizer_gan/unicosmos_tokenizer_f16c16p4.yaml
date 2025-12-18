@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   - accelerator: base
-  - dataset: hyperspectral
+  - dataset: litdata_one_loader
   - tokenizer: uni_cosmos_f16c16p4
   - quantizer: quant
   - vq_loss: remote_clip_RN50
@@ -15,12 +15,27 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+# dataset:
+#   used: MMSeg_YREB
+#   dataset_names_to_bs:
+#     MMSeg_YREB: 38
+#     DCF_2019: 12
+#   transform_prob: 0.5
+
 dataset:
-  used: MMSeg_YREB
-  dataset_names_to_bs:
-    MMSeg_YREB: 38
-    DCF_2019: 12
-  transform_prob: 0.5
+  train_loader:
+    macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
+    loader_kwargs: 
+      num_workers: 4
+      batch_size: 6
+      prefetch_factor: 2
+  val_loader:  
+    loader_kwargs:
+      num_workers: 2
+      batch_size: 8
+      pin_memory: false
+      drop_last: true
+      persistent_workers: false
 
 vq_loss:
   repa_loss_weight: 1.5

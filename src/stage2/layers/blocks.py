@@ -19,10 +19,12 @@ from timm.layers import (
     get_act_layer,
     get_norm_layer,
 )
-from timm.layers.weight_init import trunc_normal_
 from timm.layers.drop import DropPath
+from timm.layers.weight_init import trunc_normal_
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
+
+from src.utilities.network_utils import safe_init_weights
 
 from .attention import (
     Attention,
@@ -309,6 +311,7 @@ class Spatial2DNATBlock(nn.Module):
             x = _closure(x)
         return x
 
+    @safe_init_weights
     def init_weights(self):
         norms = [get_norm_layer(n) for n in ["layernorm2d", "rmsnorm2d"]]
 
@@ -671,7 +674,7 @@ class EfficientViTBlock(nn.Module):
 
 
 class TTT(nn.Module):
-    r""" Test-Time Training block for ViT^3 model.
+    r"""Test-Time Training block for ViT^3 model.
         - https://arxiv.org/abs/2512.01643
 
     This block implements test-time inner training of two parallel sub-modules:
@@ -691,7 +694,6 @@ class TTT(nn.Module):
     """
 
     def __init__(self, dim, num_heads, qkv_bias=True, **kwargs):
-
         super().__init__()
         head_dim = dim // num_heads
         self.dim = dim
@@ -701,13 +703,13 @@ class TTT(nn.Module):
         self.w1 = nn.Parameter(torch.zeros(1, self.num_heads, head_dim, head_dim))
         self.w2 = nn.Parameter(torch.zeros(1, self.num_heads, head_dim, head_dim))
         self.w3 = nn.Parameter(torch.zeros(head_dim, 1, 3, 3))
-        trunc_normal_(self.w1, std=.02)
-        trunc_normal_(self.w2, std=.02)
-        trunc_normal_(self.w3, std=.02)
+        trunc_normal_(self.w1, std=0.02)
+        trunc_normal_(self.w2, std=0.02)
+        trunc_normal_(self.w3, std=0.02)
         self.proj = nn.Linear(dim + head_dim, dim)
 
         equivalent_head_dim = 9
-        self.scale = equivalent_head_dim ** -0.5
+        self.scale = equivalent_head_dim**-0.5
         # The equivalent head_dim of 3x3dwc branch is 1x(3x3)=9 (1 channel, 3x3 kernel)
         # We used this equivalent_head_dim to compute self.scale in our earlier experiments
         # Using self.scale=head_dim**-0.5 (head_dim of simplified SwiGLU branch) leads to similar performance
@@ -736,7 +738,7 @@ class TTT(nn.Module):
         # We directly compute e = dl/dv_hat for the backward pass.
 
         # --- Backward ---
-        e = - v / float(v.shape[2]) * self.scale
+        e = -v / float(v.shape[2]) * self.scale
         g1 = k.transpose(-2, -1) @ (e * a)
         g2 = k.transpose(-2, -1) @ (e * z1 * (sig * (1.0 + z2 * (1.0 - sig))))
 
@@ -748,7 +750,7 @@ class TTT(nn.Module):
         w1, w2 = w1 - lr * g1, w2 - lr * g2
         return w1, w2
 
-    def inner_train_3x3dwc(self, k, v, w, lr=1.0, implementation='prod'):
+    def inner_train_3x3dwc(self, k, v, w, lr=1.0, implementation="prod"):
         """
         Args:
             k (torch.Tensor): Spatial key tensor of shape [B, C, H, W]
@@ -770,18 +772,18 @@ class TTT(nn.Module):
         # --- Backward ---
         # Two equivalent implementations. The 'prod' implementation appears to be slightly faster
         B, C, H, W = k.shape
-        e = - v / float(v.shape[2] * v.shape[3]) * self.scale
-        if implementation == 'conv':
+        e = -v / float(v.shape[2] * v.shape[3]) * self.scale
+        if implementation == "conv":
             g = F.conv2d(k.reshape(1, B * C, H, W), e.reshape(B * C, 1, H, W), padding=1, groups=B * C)
             g = g.transpose(0, 1)
-        elif implementation == 'prod':
+        elif implementation == "prod":
             k = F.pad(k, (1, 1, 1, 1))
             outs = []
             for dy in (-1, 0, 1):
                 for dx in (-1, 0, 1):
                     ys = 1 + dy
                     xs = 1 + dx
-                    dot = (k[:, :, ys: ys + H, xs: xs + W] * e).sum(dim=(-2, -1))
+                    dot = (k[:, :, ys : ys + H, xs : xs + W] * e).sum(dim=(-2, -1))
                     outs.append(dot)
             g = torch.stack(outs, dim=-1).reshape(B * C, 1, 3, 3)
         else:
@@ -820,7 +822,7 @@ class TTT(nn.Module):
 
         # Inner training using (k, v)
         w1, w2 = self.inner_train_simplified_swiglu(k1, v1, self.w1, self.w2)
-        w3 = self.inner_train_3x3dwc(k2, v2, self.w3, implementation='prod')
+        w3 = self.inner_train_3x3dwc(k2, v2, self.w3, implementation="prod")
 
         # Apply updated inner module to q
         x1 = (q1 @ w1) * F.silu(q1 @ w2)
@@ -834,7 +836,8 @@ class TTT(nn.Module):
         return x
 
     def extra_repr(self) -> str:
-        return f'dim={self.dim}, num_heads={self.num_heads}'
+        return f"dim={self.dim}, num_heads={self.num_heads}"
+
 
 # *==============================================================
 # * Interface

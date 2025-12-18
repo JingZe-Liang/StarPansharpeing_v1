@@ -1351,6 +1351,8 @@ class REPALoss(torch.nn.Module):
     def forward(self, img: Tensor, student_feature: Tensor | list[Tensor]):
         teacher_feat = self._encode_img(img, get_interm_feats=self.get_hier_teacher_feature)
         teacher_feat = teacher_feat.detach() if is_tensor(teacher_feat) else [f.detach() for f in teacher_feat]
+        if self.get_hier_teacher_feature and len(teacher_feat) > len(student_feature):
+            teacher_feat = teacher_feat[-len(student_feature) :]  # last n teacher features
         repa_loss = self.repa_loss(teacher_feat, student_feature)
         return repa_loss
 

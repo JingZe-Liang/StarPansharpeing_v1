@@ -23,7 +23,7 @@ model:
   mixed_precision: bf16
   fp32_attention: false  # true
   # load_from: hf://Efficient-Large-Model/Sana_600M_1024px/checkpoint/Sana_600M_1024px.pth
-  load_from: src/stage2/generative/Sana/output/20251215_235123_Sana_RS_tokenizer_ControlNet/checkpoints/latest.pth #/home/user/zihancao/Project/hyperspectral-1d-tokenizer/src/stage2/generative/Sana/weights/Sana-0.6B/Sana_600M_1024px_MultiLing.pth
+  load_from: #src/stage2/generative/Sana/output/20251215_235123_Sana_RS_tokenizer_ControlNet/checkpoints/latest.pth #/home/user/zihancao/Project/hyperspectral-1d-tokenizer/src/stage2/generative/Sana/weights/Sana-0.6B/Sana_600M_1024px_MultiLing.pth
   resume_from:
   aspect_ratio_type: ASPECT_RATIO_1024
   multi_scale: false
@@ -40,8 +40,12 @@ model:
   class_dropout_prob: 0.2
 # VAE setting
 vae:
-  vae_type: cosmos_RS
-  vae_pretrained: runs/pretrained/VAEInterp-f8c16.safetensors
+  # vae_type: cosmos_RS
+  # vae_pretrained: runs/pretrained/VAEInterp-f8c16.safetensors
+  # vae_latent_dim: 16
+  # vae_downsample_rate: 8
+  vae_type: flux
+  vae_pretrained: flux
   vae_latent_dim: 16
   vae_downsample_rate: 8
 # text encoder

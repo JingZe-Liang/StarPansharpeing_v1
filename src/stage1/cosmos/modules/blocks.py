@@ -24,7 +24,8 @@ import torch.nn.functional as F
 from accelerate.state import PartialState
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from timm.layers import create_act_layer, create_conv2d
+from loguru import logger
+from timm.layers import LayerScale2d, create_act_layer, create_conv2d
 from timm.layers.drop import DropPath
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
@@ -32,8 +33,7 @@ from transformers.activations import ACT2FN
 
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
-from src.utilities.logging import log_print
-from src.utilities.network_utils import null_decorator_no_any_kwgs
+from src.utilities.network_utils import null_decorator_no_any_kwgs, safe_init_weights
 
 from .utils import (
     Normalize,
@@ -65,12 +65,12 @@ if compile_forward_fn:
         #     "epilogue_fusion": epilogue_fusion,
         # },
     )
-    log_print("will compile the forward function and disable donated buffer", "debug")
+    logger.debug("will compile the forward function and disable donated buffer")
     torch._functorch.config.donated_buffer = False  # for adaptive weighting
     torch._dynamo.config.cache_size_limit = 1_000  # larger cache size
 else:
     _compile_decorator = null_decorator_no_any_kwgs
-    log_print("not compile the forward function", "debug")
+    logger.debug("not compile the forward function")
 
 
 # * --- Utilities --- #
@@ -122,7 +122,6 @@ class ConvLayer(nn.Module):
             padding_mode=padding_mode,
         )
         self.norm = Normalize(in_channels=out_channels, norm_type=norm)
-        # self.act = build_act(act_func)
         self.act = create_act_layer(act_func)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -200,7 +199,6 @@ class ResidualBlock(nn.Module):
         self.pre_norm = pre_norm
         self.main = main
         self.shortcut = shortcut
-        # self.post_act = build_act(post_act)
         self.post_act = create_act_layer(post_act)
 
     @_compile_decorator
@@ -299,7 +297,7 @@ class AttnBlock(nn.Module):
     ):
         super().__init__()
         self.sdpa = sdpa
-        log_print(f"[Attention Block]: use sdpa: {self.sdpa}", "debug")
+        logger.debug(f"[Attention Block]: use sdpa: {self.sdpa}")
 
         self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
         self.q = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
@@ -588,7 +586,7 @@ class NattenAttention(nn.Module):
 
 
 def make_attn(in_channels, attn_type="vanilla", act_checkpoint=False):
-    log_print(f"making attention of type '{attn_type}' with {in_channels=}", "debug")
+    logger.debug(f"making attention of type '{attn_type}' with {in_channels=}")
 
     if attn_type.startswith("attn"):
         sdpa = attn_type.endswith("sdpa")
@@ -645,6 +643,7 @@ class LlamaFFN(nn.Module):
         self.w2 = conv_cls(intermediate_size, hidden_size, 1, 1, 0)
         self.w3 = conv_cls(hidden_size, intermediate_size, 1, 1, 0)
 
+    @safe_init_weights
     def init_weights(self):
         torch.nn.init.trunc_normal_(self.w1.weight, std=0.02)
         torch.nn.init.trunc_normal_(self.w2.weight, std=0.02)
@@ -692,12 +691,7 @@ class Mlp(nn.Module):
 # * --- Input and output convs with different bands images --- #
 
 
-def _create_conv_in_module(
-    basic_module: str,
-    c: int,
-    hidden_dim: int,
-    padding_mode: str,
-):
+def _create_conv_in_module(basic_module: str, c: int, hidden_dim: int, padding_mode: str, norm_type: str = "rmsnorm2d"):
     if basic_module == "conv":
         module = nn.Conv2d(
             in_channels=c,
@@ -742,7 +736,7 @@ def _create_conv_in_module(
             dropout=0.0,
             act_checkpoint=False,
             padding_mode=padding_mode,
-            norm_type="gn",
+            norm_type=norm_type,
         )
     elif basic_module == "moe":
         module = nn.Sequential(
@@ -776,6 +770,7 @@ def _create_conv_out_module(
     c: int,
     hidden_dim: int,
     padding_mode: str,
+    norm_type: str = "rmsnorm2d",
 ):
     if basic_module == "conv":
         module = nn.Conv2d(
@@ -820,7 +815,7 @@ def _create_conv_out_module(
             dropout=0.0,
             act_checkpoint=False,
             num_groups=1,
-            norm_type="gn",
+            norm_type=norm_type,
         )
     elif basic_module == "moe":
         module = nn.Sequential(
@@ -854,6 +849,7 @@ class DiffBandsInputConvIn(nn.Module):
         band_lst: list[int],
         hidden_dim: int,
         basic_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
+        norm_type: str = "rmsnorm2d",
         padding_mode: str = "zeros",
         check_grads: bool = True,
     ):
@@ -865,13 +861,14 @@ class DiffBandsInputConvIn(nn.Module):
             "basic_module": basic_module,
             "hidden_dim": hidden_dim,
             "padding_mode": padding_mode,
+            "norm_type": norm_type,
         }
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
             module = _create_conv_in_module(c=c, **self._in_module_partial_kwargs)
             self.in_modules["conv_in_{}".format(c)] = module
-            log_print(f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}")
+            logger.debug(f"[DiffBandsInputConvIn] set conv to hidden module and buffer for channel {c}")
 
     def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
@@ -919,6 +916,7 @@ class DiffBandsInputConvIn(nn.Module):
 
         return h
 
+    @safe_init_weights
     def init_weights(self):
         # init: kaiming uniform
         for name, module in self.in_modules.items():
@@ -937,6 +935,7 @@ class DiffBandsInputConvOut(nn.Module):
         hidden_dim: int,
         basic_module: str = "conv",
         padding_mode: str = "zeros",
+        norm_type: str = "rmsnorm2d",
         check_grads: bool = True,
     ):
         super().__init__()
@@ -949,13 +948,14 @@ class DiffBandsInputConvOut(nn.Module):
             "basic_module": basic_module,
             "hidden_dim": hidden_dim,
             "padding_mode": padding_mode,
+            "norm_type": norm_type,
         }
 
         self.in_modules = nn.ModuleDict()
         for c in band_lst:
             module = _create_conv_out_module(c=c, **self._out_module_partial_kwargs)
             self.in_modules["conv_out_{}".format(c)] = module
-            log_print(f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}")
+            logger.debug(f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}")
 
         self.out_channel = None
 
@@ -1034,6 +1034,7 @@ class DiffBandsInputConvOut(nn.Module):
                     f"[DiffBandsInputConvOut] Unknown basic_module={self.basic_module}. Available: conv, resnet, moe, inv_bottleneck"
                 )
 
+    @safe_init_weights
     def init_weights(self):
         # init: kaiming uniform
         for name, module in self.in_modules.items():
@@ -1191,6 +1192,7 @@ class AdaptiveInputConvLayer(nn.Module):
     def weight(self):
         return self.conv.weight
 
+    @safe_init_weights
     def init_weights(self):
         def _inner(m):
             if isinstance(m, nn.Linear):
@@ -1361,6 +1363,7 @@ class AdaptiveOutputConvLayer(nn.Module):
     def weight(self):
         return self.conv.weight
 
+    @safe_init_weights
     def init_weights(self, zero_out=False):
         # init conv
         if zero_out:
@@ -1457,6 +1460,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
 
         return F.linear(x, w, b)
 
+    @safe_init_weights
     def init_weights(self, zero_out=False):
         if zero_out:
             nn.init.zeros_(self.linear.weight)
@@ -1572,7 +1576,7 @@ class ResnetBlockMoE2D(nn.Module):
         self.out_channels = in_channels if out_channels is None else out_channels
         self.token_mixer_type = token_mixer_type
 
-        log_print(f"[ResnetBlockMoE2D] using token mixer: {token_mixer_type}", "debug")
+        logger.debug(f"[ResnetBlockMoE2D] using token mixer: {token_mixer_type}", "debug")
         if token_mixer_type == "res_block":
             self.token_mixer = ResnetBlock(
                 in_channels=in_channels,
@@ -1677,9 +1681,8 @@ class DiCoBlock(nn.Module):
         if out_channels is None:
             out_channels = in_channels
 
-        log_print(
-            f"[Dico block]: in: {in_channels} out: {out_channels} hidden: {hidden_channels} conv type: {conv_type} ",
-            "debug",
+        logger.debug(
+            f"[Dico block]: in: {in_channels} out: {out_channels} hidden: {hidden_channels} conv type: {conv_type}"
         )
 
         self.norm = Normalize(in_channels, norm_type=norm_type, num_groups=norm_groups)
@@ -1789,7 +1792,7 @@ class ResnetBlock(nn.Module):
         out_channels: int | None = None,
         dropout: float,
         use_residual_factor: bool = False,
-        act_type: tuple = ("gelu", "gelu"),
+        act_type: str | tuple[str, str] = ("silu", "silu"),  # Check: may gelu cause large activation values?
         nin_shortcut_norm: bool = False,
         **kwargs,
     ):
@@ -1800,6 +1803,10 @@ class ResnetBlock(nn.Module):
         norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
         self.use_dico_cca = kwargs.get("use_dico_cca", False)
+        if self.use_dico_cca:
+            logger.warning(f"Using dico cca, may cause large memory usage")
+        if isinstance(act_type, str):
+            act_type = (act_type, act_type)
 
         self.norm1 = Normalize(in_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act1 = ACT2FN[act_type[0]]
@@ -1822,6 +1829,7 @@ class ResnetBlock(nn.Module):
             padding=1,
             padding_mode=padding_mode,
         )
+
         if in_channels != out_channels:
             if nin_shortcut_norm:
                 self.nin_shortcut = nn.Sequential(
@@ -1838,7 +1846,9 @@ class ResnetBlock(nn.Module):
         self.act_checkpoint = kwargs.get("act_checkpoint", False)
         self.use_residual_factor = use_residual_factor
         if use_residual_factor:
-            self.residual_factor = nn.Parameter(torch.ones(1, out_channels, 1, 1))
+            self.layer_scale = LayerScale2d(out_channels, init_values=1e-2)
+        else:
+            self.layer_scale = nn.Identity()
 
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
@@ -1847,13 +1857,15 @@ class ResnetBlock(nn.Module):
     def forward_fn(
         self,
         x: torch.Tensor,
-        slots: torch.Tensor | None = None,
-        t: torch.Tensor | None = None,
+        **kwargs,
+        # slots: torch.Tensor | None = None,
+        # t: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = x
         h = self.norm1(h)
         h = self.act1(h)
         h = self.conv1(h)
+
         if self.use_dico_cca:
             h = self.dico_cca(h)
 
@@ -1863,16 +1875,16 @@ class ResnetBlock(nn.Module):
         h = self.conv2(h)
 
         x = self.nin_shortcut(x)
-        if self.use_residual_factor:
-            h = h * self.residual_factor
-        res = x + h
+        res = x + self.layer_scale(h)
         return res
 
     def forward(
         self,
         x: torch.Tensor,
-        slots: torch.Tensor | None = None,
-        t: torch.Tensor | None = None,
+        *args,
+        **kwargs,
+        # slots: torch.Tensor | None = None,
+        # t: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # slots, t not used, compacted with ResnetBlockSlotsInjected
         # torch.compiler.cudagraph_mark_step_begin()

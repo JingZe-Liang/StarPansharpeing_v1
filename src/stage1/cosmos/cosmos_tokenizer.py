@@ -284,9 +284,6 @@ class DecoderSequential(nn.Module):
             raise ValueError("input should be a tuple of length larger than 1")
 
 
-# * --- Tokenizer main --- #
-
-
 @dataclass
 class ChannelDropConfig:
     drop_type: Any = "exp"
@@ -301,7 +298,7 @@ class EncoderDecoderConfig:
     channels: int = 128
     channels_mult: list[int] = field(default_factory=lambda: [2, 4, 4])
     num_res_blocks: int = 2
-    attn_resolutions: list[int] = field(default_factory=lambda: [])
+    attn_resolutions: list[int] = field(default_factory=list)
     dropout: float = 0.0
     resolution: int = 1024
     z_channels: int = 256  # feature before qunatizer
@@ -349,7 +346,6 @@ class ContinuousTokenizerConfig:
     hook_module: str = "decoder.decoder.mid.block_2"
     vf_on_z_or_module: str = "module"
     dino_feature_dim: int = 1024
-    cache_type: str = "h"  # z or h
     # quantizer related
     quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", None
     random_quant: float = 0.0
@@ -368,7 +364,7 @@ class ContinuousTokenizerConfig:
     latent_noise_type: str = "beta_1_5"  # Beta time-step sample distribution
     # model related
     name: str = "ContinuousImageTokenizer"
-    model: EncoderDecoderConfig = field(default_factory=lambda: EncoderDecoderConfig())
+    model: EncoderDecoderConfig = field(default_factory=EncoderDecoderConfig)
     decoder_type: str = "default"  # default or generative
     z_factor: int = 1
 
@@ -381,19 +377,19 @@ class ContinuousImageTokenizer(nn.Module):
     _use_repa_loss: bool = False
     _use_vf_loss: bool = False
 
-    # vf loss on z or module output
-    _vf_on_z_or_module: Literal["z", "module"] = "module"
+    # repa/vf loss on z or module output
+    _vf_on_z_or_module: str = "z"
     _hook_module: str = "decoder.decoder.mid.block_2"  # "decoder.decoder.up.1.block.2"
     _dino_feature_dim: int = 768  # [768, 1024]
+    _repa_layers: list[int] | None = [0, 1, 2, -1]
 
     # scaling factor for evaluation
     scaling_factor: torch.Tensor | None = None
     shift_factor: torch.Tensor | None = None
 
     # state
-    _hook_feature: torch.Tensor | None = None
-    z: torch.Tensor | None = None  # the latent z
-    supported_cached_hiddens: list[str] = ["z"]
+    z: torch.Tensor | list[torch.Tensor] | None = None
+    supported_cached_hiddens: list[str] = ["h"]
 
     def __init__(self, cfg: ContinuousTokenizerConfig, build_enc_dec_kwargs: dict = {}):
         super().__init__()
@@ -442,7 +438,10 @@ class ContinuousImageTokenizer(nn.Module):
 
         # 4. Encoder and Decoder
         # pretrained encoder and decoder
+
+        # TODO: move this to a separate function
         if cfg.loading_type == "nvidia":
+            assert enc_path is not None and dec_path is not None
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
             # pretrained model from NVIDIA cosmos tokenizer
             assert not self.norm_in_quant_conv, (
@@ -467,19 +466,19 @@ class ContinuousImageTokenizer(nn.Module):
             self.encoder = self.encoder_jit(encoder, quant_conv)
             self.decoder = self.decoder_jit(decoder, post_quant_conv)
 
-        else:
-            # encoder and decoder
-            # not combine the encoder, for FSDP wrap
-            encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, **build_enc_dec_kwargs)
-            quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
+        # encoder and decoder
+        # not combine the encoder, for FSDP wrap
+        encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, **build_enc_dec_kwargs)
+        quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
 
-            self.encoder = self.encoder_jit(encoder, quant_conv)
-            self.decoder = self.decoder_jit(decoder, post_quant_conv)
+        self.encoder = self.encoder_jit(encoder, quant_conv)
+        self.decoder = self.decoder_jit(decoder, post_quant_conv)
 
+        if cfg.loading_type == "pretrained":
             # Load weights
             if cfg.loading_type is not None:
                 if cfg.norm_in_quant_conv:
-                    assert enc_path == "" and dec_path == "", (
+                    assert enc_path in ("", None) and dec_path in ("", None), (
                         "norm_in_quant_conv is not supported for pretrained settings, train it from scratch"
                     )
 
@@ -488,9 +487,7 @@ class ContinuousImageTokenizer(nn.Module):
                 profile = False
                 profiler = (
                     torch.profiler.profile(
-                        activities=[
-                            torch.profiler.ProfilerActivity.CPU,
-                        ],
+                        activities=[torch.profiler.ProfilerActivity.CPU],
                         record_shapes=True,
                         profile_memory=True,
                         with_stack=True,
@@ -609,7 +606,36 @@ class ContinuousImageTokenizer(nn.Module):
 
         return quant_conv, post_quant_conv
 
+    def _set_model_proj_chans(self):
+        self._repa_proj_chans = []
+        self._repa_proj_is_mult = isinstance(self._repa_layers, (list, tuple))
+        if self._repa_layers is None:
+            return None
+
+        base_chans = self.cfg.model.channels
+        channels_mult = self.cfg.model.channels_mult
+        in_ch_mult = (1,) + tuple(channels_mult)
+        n_res = len(channels_mult)
+        for i_level in range(n_res):
+            in_chan, out_chan = (
+                base_chans * in_ch_mult[i_level],
+                base_chans * channels_mult[i_level],
+            )
+            if i_level in self._repa_layers:
+                self._repa_proj_chans.append(out_chan)
+
+        # add mid block
+        if self._repa_layers[-1] == -1:
+            self._repa_proj_chans.append(out_chan)
+            logger.info(f"repa projection channels: {self._repa_proj_chans}")
+
     def _build_feature_align_mlp(self, proj_type: str = "norm_first_force_conv"):
+        logger.log(
+            "NOTE",
+            f"build feature alignment mlp, repa_loss={self._use_repa_loss}, vf_loss={self._use_vf_loss}, "
+            f"vf_on={self._vf_on_z_or_module}, proj_type={proj_type}",
+        )
+
         if self._use_repa_loss:
             if self._vf_on_z_or_module == "module":
                 self._repa_proj = build_mlp(
@@ -619,14 +645,29 @@ class ContinuousImageTokenizer(nn.Module):
                     proj_type=proj_type,
                 )
             else:
-                self._repa_proj = build_mlp(
-                    # if is z: rely on the z channels
-                    # else is the latent channel proj.
-                    self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
-                    self._dino_feature_dim,
-                    self._dino_feature_dim,
-                    proj_type=proj_type,
-                )
+                self._set_model_proj_chans()  # Get per-block chans
+                if self._repa_proj_is_mult:
+                    self._repa_proj = nn.ModuleList(
+                        [
+                            build_mlp(
+                                in_dim,
+                                self._dino_feature_dim,
+                                self._dino_feature_dim,
+                                proj_type=proj_type,
+                            )
+                            for in_dim in self._repa_proj_chans
+                        ]
+                    )
+                else:
+                    self._repa_proj = build_mlp(
+                        # if is z: rely on the z channels
+                        # else is the latent channel proj.
+                        self.model_cfg.latent_channels,
+                        self._dino_feature_dim,
+                        self._dino_feature_dim,
+                        proj_type=proj_type,
+                    )
+
         if self._use_vf_loss:
             if self._vf_on_z_or_module == "module":
                 self._vf_proj = build_mlp(
@@ -636,12 +677,28 @@ class ContinuousImageTokenizer(nn.Module):
                     proj_type=proj_type,
                 )
             else:
-                self._vf_proj = build_mlp(
-                    self.model_cfg.z_channels if self.cfg.cache_type == "z" else self.model_cfg.latent_channels,
-                    self._dino_feature_dim,
-                    self._dino_feature_dim,
-                    proj_type=proj_type,
-                )
+                self._set_model_proj_chans()  # Get per-block chans
+                if self._repa_proj_is_mult:
+                    self._vf_proj = nn.ModuleList(
+                        [
+                            build_mlp(
+                                in_dim,
+                                self._dino_feature_dim,
+                                self._dino_feature_dim,
+                                proj_type=proj_type,
+                            )
+                            for in_dim in self._repa_proj_chans
+                        ]
+                    )
+                else:
+                    self._vf_proj = build_mlp(
+                        # if is z: rely on the z channels
+                        # else is the latent channel proj.
+                        self.model_cfg.latent_channels,
+                        self._dino_feature_dim,
+                        self._dino_feature_dim,
+                        proj_type=proj_type,
+                    )
 
     def encoder_jit(self, encoder, quant_conv):
         return nn.Sequential(OrderedDict([("encoder", encoder), ("quant_conv", quant_conv)]))
@@ -651,24 +708,31 @@ class ContinuousImageTokenizer(nn.Module):
 
     def register_feature_hook(self):
         def hook(module, input, output):
-            self._hook_feature = output
+            self._repa_cached = output
 
         self.get_submodule(self._hook_module).register_forward_hook(hook)
         logger.info(f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook")
 
-    # * --- model feature alignment --- #
+    ########### model feature alignment ##############
 
     @torch.autocast("cuda", torch.bfloat16)
     def get_repa_feature(self):
         # only one feature
         if hasattr(self, "_repa_proj"):
             if self._vf_on_z_or_module == "z":
-                # project on latent
-                assert self.z is not None, "z should be set before get_vf_feature"
-                return self._repa_proj(self.z)
+                cached = self.z
+                if self._repa_proj_is_mult:
+                    projections = []
+                    for i, proj in enumerate(self._repa_proj):
+                        projections.append(proj(cached[i]))  # type: ignore[index]
+                    return projections
+                else:
+                    # project on latent
+                    assert cached is not None, "cached latent should be set before get_repa_feature"
+                    return self._repa_proj(cached)
             elif self._vf_on_z_or_module == "module":
                 # proj on block out
-                return self._repa_proj(self._hook_feature)
+                return self._repa_proj(self.z)
             else:
                 raise ValueError(f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}")
 
@@ -679,17 +743,18 @@ class ContinuousImageTokenizer(nn.Module):
         if hasattr(self, "_vf_proj"):
             if self._vf_on_z_or_module == "z":
                 # project on latent
-                assert self.z is not None, "z should be set before get_vf_feature"
-                return self._vf_proj(self.z)
+                cached = self.z
+                assert cached is not None, "cached latent should be set before get_vf_feature"
+                return self._vf_proj(cached)
             elif self._vf_on_z_or_module == "module":
                 # proj on block out
-                return self._vf_proj(self._hook_feature)
+                return self._vf_proj(self.z)
             else:
                 raise ValueError(f"vf loss should get feature when vf is computed on {self._vf_on_z_or_module}")
 
         return None
 
-    # * --- GAN training loss utils --- #
+    ######## GAN training loss utils ##########
 
     def get_last_layer(self):
         # get decoder last layer weight for discriminator loss
@@ -716,7 +781,7 @@ class ContinuousImageTokenizer(nn.Module):
             else:
                 raise ValueError(f"block_name {block_name} not supported, only res_block and res_moe are supported")
 
-    # * --- latent structure shaping --- #
+    ########### latent structure shaping #########
 
     def _latent_noising(self, h: torch.Tensor, mask: torch.Tensor | None = None):
         # mask: 1 means the channel is dropped, 0 means the channel is not dropped
@@ -741,7 +806,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return h_noise
 
-    # * --- AE encode and decode --- #
+    ######## AE encode and decode ######
 
     def _use_quantizer(self, use_quantizer=None):
         if self.quantizer_type is None:
@@ -756,7 +821,11 @@ class ContinuousImageTokenizer(nn.Module):
             # Or decided by the input arg
             return use_quantizer
 
-    def _has_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
+    def _has_quantizer_applied_fn(self, h):
+        """
+        z is the before quant conv feature
+        h is the latent
+        """
         h_dtype = h.dtype
         h = h.float()  # quantizers are in float32
         assert self.quantizer is not None, "quantizer should not be None"
@@ -809,34 +878,18 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             raise RuntimeError("can not reach here")
 
-        ######## Cache z (or h?) for feature distillation ########
-
-        # Cache the latent
-        # TODO: fix the discreate quantizer
-        if self.cfg.cache_type == "z":
-            self._training_latent_cache(z, use_quantizer, cache_type)
-        else:
-            self._training_latent_cache(res[0], use_quantizer, cache_type)
-
         return res
 
-    def _no_quantizer_applied_fn(self, h, z, use_quantizer=None, cache_type="z"):
-        # Do no quantization, but cache the latent
-        cached_ = z if self.cfg.cache_type == "z" else h
-        self._training_latent_cache(cached_, use_quantizer, cache_type)
-        return h
-
-    def apply_quantizer(self, h, z, use_quantizer=None, cache_type="z"):
-        # TODO: Cache z or h; affect the repa mlp projection
+    def apply_quantizer(self, h: Tensor, use_quantizer: bool | None = None, **kwargs):
         _use_quantizer = self._use_quantizer(use_quantizer)
         # Quantization
         if _use_quantizer:
-            return self._has_quantizer_applied_fn(h, z, _use_quantizer, cache_type)
+            return self._has_quantizer_applied_fn(h)
         # Autoencoder
         else:
-            return self._no_quantizer_applied_fn(h, z, _use_quantizer, cache_type)
+            return h
 
-    def latent_aug(self, h):
+    def latent_aug(self, h: Tensor) -> Tensor:
         if self.training:
             mask = None
             if self.use_channel_drop:
@@ -851,28 +904,8 @@ class ContinuousImageTokenizer(nn.Module):
 
         return h
 
-    def _training_latent_cache(
-        self,
-        cached_tensor: Tensor,
-        use_quantizer: bool | None = None,
-        cache_type: str = "z",
-    ):
-        if cache_type in (None, "none"):
-            # No cache
-            return
-
-        assert cache_type in self.supported_cached_hiddens, (
-            f"cache_type {cache_type} not supported, only {self.supported_cached_hiddens} are supported"
-        )
-        # not use_quantizer, save the unquantized latent
-        if self.training:
-            # Save latent if is AE
-            if hasattr(self, "_vf_proj") or hasattr(self, "_repa_proj"):
-                setattr(self, cache_type, cached_tensor)
-            else:
-                setattr(self, cache_type, None)
-
-    def encode_with_intermediate_features(self, x, use_quantizer=None):
+    def encode_with_intermediate_features(self, x: Tensor, use_quantizer: bool | None = None):
+        """outter method for get encoder's intermidates"""
         z, feats = self.encoder.encoder(x, ret_interm_feats=True)
         h = self.encoder.quant_conv(z)
         maybe_q_encoded = self.apply_quantizer(h, use_quantizer)
@@ -881,30 +914,45 @@ class ContinuousImageTokenizer(nn.Module):
         if isinstance(maybe_q_encoded, tuple):
             encoded, q_loss, loss_breakdown = maybe_q_encoded
         else:
-            encoded = h
+            encoded = maybe_q_encoded
 
-        return dict(
+        return edict(
             encoded=encoded,
             itermediate_feats=feats,
             q_loss=q_loss,
             q_loss_breakdown=loss_breakdown,
         )
 
-    def encode(self, x, use_quantizer=None):
+    def encode(self, x: Tensor, use_quantizer: bool | None = None):
         enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
 
-        # Encoder
-        z = self.encoder.encoder(x)
-        h = self.encoder.quant_conv(z)
+        need_repa_cache = self.training and (hasattr(self, "_repa_proj") or hasattr(self, "_vf_proj"))
+        interms: list[Tensor] | None = None
+        if need_repa_cache and getattr(self, "_repa_proj_is_mult", False) and self._repa_layers is not None:
+            repa_layers: list[int]
+            if isinstance(self._repa_layers, int):
+                repa_layers = [self._repa_layers]
+            else:
+                repa_layers = list(self._repa_layers)
+            z, interms = self.encoder.encoder(x, ret_interm_feats=repa_layers)
+            self.z = interms
+            # To latent (before quantizer)
+            h_pre_quant = self.encoder.quant_conv(z)
+        else:
+            z = self.encoder.encoder(x)
+            h_pre_quant = self.encoder.quant_conv(z)
+            self.z = h_pre_quant
 
         # Quantization
-        maybe_q_ret = self.apply_quantizer(h, z, use_quantizer)
+        maybe_q_ret = self.apply_quantizer(h_pre_quant, use_quantizer)
         if isinstance(maybe_q_ret, tuple):
             h, q_loss, loss_breakdown = maybe_q_ret
             enc_out.update(latent=h, q_loss=q_loss, q_loss_breakdown=loss_breakdown)
+        else:
+            h = maybe_q_ret
 
         # z augmentions
-        h = self.latent_aug(maybe_q_ret)
+        h = self.latent_aug(h)
         enc_out.latent = h
 
         return enc_out
@@ -938,7 +986,7 @@ class ContinuousImageTokenizer(nn.Module):
         return dec_out
 
     def forward(self, input: torch.Tensor, enc_kwargs: dict = {}, dec_kwargs: dict = {}) -> dict:
-        if cosmos_block.compile_forward_fn and cosmos_block.compile_forward_fn:
+        if cosmos_block.compile_forward_fn:
             torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
 
         enc = self.encode(input, **enc_kwargs)
@@ -946,7 +994,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return dec
 
-    # * --- checkpoint loding --- #
+    ######## checkpoint loding #########
     @no_type_check
     def load_pretrained(
         self,
@@ -1161,7 +1209,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return norms
 
-    # * --- lora-related methods --- #
+    ########### lora-related methods ########
 
     def peft_fully_finetune_modules(self, add_norms: bool = False, conv_stem_reinit=False) -> list[str]:
         """
@@ -1236,7 +1284,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         return add_tgt_modules
 
-    # * --- Create model --- #
+    ############ Create model #########
 
     @classmethod
     def create_model(cls, config: DictConfig | None = None, **kwargs):
@@ -1251,6 +1299,78 @@ class ContinuousImageTokenizer(nn.Module):
             if hasattr(m, "grad_checkpointing"):
                 m.grad_checkpointing = enabled
                 logger.info(f"set grad_checkpointing={enabled} for {m.__class__.__name__}")
+
+
+##### Configs #######
+
+
+def vae_f8_config(
+    in_chans: int = 512,
+    latent_chans: int = 16,
+    z_chans: int = 256,
+    vae_factor: int = 8,
+    patch_size: int = 1,
+    use_repa_loss: bool = True,
+    pretrained_path: str = "",
+):
+    cfg: dict[str, Any] = {
+        "model": {
+            "attn_resolutions": [32],
+            "channels": 128,
+            "channels_mult": [2, 4, 4],
+            "dropout": 0.0,
+            "in_channels": in_chans,
+            "out_channels": in_chans,
+            "z_channels": z_chans,
+            "latent_channels": latent_chans,
+            "spatial_compression": vae_factor,
+            "patch_size": patch_size,
+            "num_res_blocks": 2,
+            "resolution": 1024,
+            "patch_method": "haar",
+            "act_checkpoint": True,
+            "block_name": "res_block",  # res_block, res_moe
+            "padding_mode": "reflect",
+            "norm_type": "gn",
+            "norm_groups": 32,
+            "attn_type": "none",
+            "adaptive_mode": "interp",
+        },
+        "uni_path": pretrained_path,
+        "loading_type": "pretrained" if Path(pretrained_path).exists() else None,
+        "quantizer_type": None,
+        # repa
+        "hook_for_repa": False,
+        "use_repa_loss": use_repa_loss,
+        "use_vf_loss": False,
+        "vf_on_z_or_module": "z",
+        "dino_feature_dim": 1024,
+        "z_factor": 1,
+    }
+
+    cfg = OmegaConf.create(cfg)
+    return cfg
+
+
+def vae_f16_config(
+    in_chans: int = 512,
+    latent_chans: int = 16,
+    z_chans: int = 256,
+    vae_factor: int = 16,
+    use_repa_loss: bool = True,
+    patch_size: int = 1,
+    pretrained_path: str = "",
+):
+    cfg = vae_f8_config(
+        in_chans=in_chans,
+        latent_chans=latent_chans,
+        z_chans=z_chans,
+        vae_factor=vae_factor,
+        patch_size=patch_size,
+        use_repa_loss=use_repa_loss,
+        pretrained_path=pretrained_path,
+    )
+    cfg.model.channels_mult = [2, 2, 4, 4]
 
 
 # * --- test --- * #
@@ -1296,13 +1416,12 @@ def test_tokenizer_forward_backward(
     from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
     from src.stage1.cosmos.modules import blocks
     from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
-    from src.utilities.logging import print
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
     default_multi_chans = 512  # [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
     # default_nested_chans = 500  # max hyperspectral chans in the training datasets
-    config = {
+    config: dict[str, Any] = {
         "model": {
             "attn_resolutions": [32],
             "channels": 128,
@@ -1345,7 +1464,7 @@ def test_tokenizer_forward_backward(
         else:
             config.update(other_model_kwargs)
     tokenizer = model_cls.create_model(**config).cuda()
-    tokenizer = tokenizer.eval().to(dtype)
+    tokenizer = tokenizer.to(dtype)
 
     if is_lora:
         assert lora_ckpt is not None, "lora_ckpt is required for lora test"
@@ -1471,6 +1590,9 @@ def test_tokenizer_forward_backward(
                 y.mean().backward()
                 opt.step()
 
+                # Get repa features
+                repa_feats = tokenizer.get_repa_feature()
+
             if check_grad:
                 for n, p in tokenizer.named_parameters():
                     if p.grad is None:
@@ -1509,14 +1631,14 @@ def test_tokenizer_forward_backward(
 
 if __name__ == "__main__":
     """
-    MODEL_COMPILED=0 python -m src.stage1.cosmos.cosmos_tokenizer
+    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 python -m src.stage1.cosmos.cosmos_tokenizer
     """
     import lovely_tensors as lt
 
     lt.monkey_patch()
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/pretrained/VAEInterp-f8c16.safetensors",
+        base_model_ckpt="",  # "runs/pretrained/VAEInterp-f8c16.safetensors",
         real_data="SAM270k",
         save_pca_vis=False,
         pca_type="z",
@@ -1541,9 +1663,9 @@ if __name__ == "__main__":
         dtype=torch.bfloat16,
         upscale=1,
         max_iters=1000,
-        compute_mean_std=True,
-        use_optim=False,
-        check_grad=False,
+        compute_mean_std=False,
+        use_optim=True,
+        check_grad=True,
     )
 
 # RS5M

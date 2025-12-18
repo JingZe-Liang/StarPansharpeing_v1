@@ -38,6 +38,8 @@ from timm.layers.weight_init import init_weight_jax
 from timm.models._manipulate import named_apply
 from typing_extensions import deprecated
 
+from src.utilities.network_utils import safe_init_weights
+
 from .blocks import (
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,
@@ -56,7 +58,6 @@ from .blocks import (
 )
 from .patching import Patcher, UnPatcher
 from .resample import build_downsample_block, build_upsample_block
-from .utils import AdaptiveGroupNorm
 
 
 def is_list_tuple(x: Any) -> bool:
@@ -95,6 +96,7 @@ def make_block_fn(
     moe_type="tc",
     padding_mode: str = "zeros",
     norm_type: str = "gn",
+    act_type: str | tuple[str, str] = "silu",
     token_mixer_type: Literal["res_block", "dico_block", "convnext"] = "res_block",
     **kwargs,
 ):
@@ -160,7 +162,7 @@ def make_block_fn(
                 padding_mode=padding_mode,
                 norm_type=norm_type,
                 use_dico_cca=False,
-                act_type=("gelu", "gelu"),
+                act_type=act_type,
                 nin_shortcut_norm=True,
                 **kwargs,
             )
@@ -201,6 +203,7 @@ class Encoder(nn.Module):
         conv_in_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
         attn_type: str = "attn_vanilla",
+        act_type: str | tuple[str, str] = "silu",
         # if block_name != 'moe', does not use
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
@@ -286,6 +289,7 @@ class Encoder(nn.Module):
             moe_n_selected=self.moe_n_selected,
             moe_n_shared_experts=self.moe_n_shared_experts,
             hidden_factor=self.hidden_factor,
+            act_type=act_type,
             moe_type=self.moe_type,
             act_checkpoint=act_checkpoint,
             use_residual_factor=use_residual_factor,
@@ -383,6 +387,7 @@ class Encoder(nn.Module):
         h = self.conv_out(h)
         return h if not ret_interm_feats else (h, feats)
 
+    @safe_init_weights
     def init_weights(self):
         named_apply(partial(init_weight_jax, classifier_name=""), self)
         logger.info("[Encoder]: init weights.")
@@ -408,6 +413,7 @@ class Decoder(nn.Module):
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        act_type: str| tuple[str,str]='silu',
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
         moe_n_shared_experts: int = 1,
@@ -474,6 +480,7 @@ class Decoder(nn.Module):
             act_checkpoint=act_checkpoint,
             use_residual_factor=use_residual_factor,
             padding_mode=padding_mode,
+            act_type=act_type,
             norm_type=norm_type,
             num_groups=norm_groups,
             token_mixer_type=moe_token_mixer_type,
@@ -604,6 +611,7 @@ class Decoder(nn.Module):
         else:
             return self.conv_out.wrap_mod.weight
 
+    @safe_init_weights
     def init_weights(self):
         named_apply(partial(init_weight_jax, classifier_name=""), self)
         logger.info("[Decoder]: init weights.")
@@ -697,7 +705,6 @@ class GenerativeDecoder(Decoder):
         self.noise_ls = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block_out = channels * channels_mult[i_level]
-            # adap_gn = AdaptiveGroupNorm(z_channels, block_in, eps=1e-6)
             adap_gn = create_norm_layer("adaptivegn", z_channels, in_chan=block_in, eps=1e-6)
             self.cond_layers.append(adap_gn)
             if self.per_layer_noise:

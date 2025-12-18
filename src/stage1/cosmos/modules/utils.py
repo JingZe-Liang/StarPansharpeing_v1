@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 from einops import pack, rearrange, unpack
 from loguru import logger
+from timm.layers import create_norm, create_norm_layer
 from timm.layers.norm import LayerNorm2d
 
 from src.utilities.config_utils import once
@@ -201,8 +202,6 @@ AdaptiveGroupNorm32 = partial(AdaptiveGroupNorm, num_groups=32)
 
 @once
 def __register_adaptive_norm():
-    from timm.layers import create_norm
-
     create_norm._NORM_MAP["adaptivegn"] = AdaptiveGroupNorm  # type: ignore
     create_norm._NORM_MAP["adaptivegn32"] = AdaptiveGroupNorm32  # type: ignore
     create_norm._NORM_MAP["adaptiveln2d"] = AdaptiveLayerNorm2d  # type: ignore
@@ -252,19 +251,18 @@ def unit_magnitude_normalize(x, dim=None, eps=1e-4):
 
 
 def Normalize(in_channels, norm_type: str | None = "gn", **norm_kwargs) -> nn.Module | Callable:
-    if norm_type == "gn":
+    if norm_type in ("gn", "groupnorm"):
         return torch.nn.GroupNorm(
             num_channels=in_channels,
             eps=1e-6,
             affine=True,
             num_groups=norm_kwargs.get("num_groups", 32),
         )
-
     elif norm_type == "bn2d":
         cls = torch.nn.BatchNorm2d
     elif norm_type == "ln2dcompiled":
         cls = LayerNorm2d
-    elif norm_type == "ln2d":
+    elif norm_type in ("ln2d", "layernorm2d"):
         cls = tl.LayerNorm2d
     elif norm_type == "unit_vec_norm":
         return partial(unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4))

@@ -67,7 +67,9 @@ def load_weights_with_shape_check(
 
     elif load_strategy == "search":
         params = list(module.named_parameters())
-        for name, param in tqdm(params, desc="Loading model checkpoint ..."):
+        tbar = tqdm(params, desc="Loading model checkpoint ...")
+        for name, param in tbar:
+            tbar.set_description(f"Meteralizing param={name}")
             if name in unexpected_keys:  # search in the whole weight keys, O(n) complexity
                 unexpected_keys.remove(name)  # This key was expected, and remove from the total key set
                 if param.shape == weights[name].shape:
@@ -431,3 +433,31 @@ def load_diffbands_tokenizer_then_peft_lora(
     logging.info(f"Tokenizer loaded with PEFT config: {peft_config}")
 
     return peft_config, tokenizer
+
+
+def safe_init_weights(func):
+    def _wrapper(*args, **kwargs):
+        module = args[0]
+        assert isinstance(module, nn.Module), f"{module} is not a nn.Module, it is a {type(module)}"
+
+        # Check if module is on meta device
+        params_iter = module.parameters()
+        p = None
+        try:
+            p = next(params_iter)
+        except StopIteration:
+            pass
+
+        if p is None:
+            logging.info(f"Module {type(module)} got no params, skipping init")
+            return
+        elif str(p.device) == "meta":
+            logging.debug(f"Module params are on meta device, skipping weight initialization")
+            return
+
+        # Init function
+        r = func(*args, **kwargs)
+
+        return r
+
+    return _wrapper

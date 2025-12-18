@@ -1561,40 +1561,40 @@ def main(cfg: SanaConfig) -> None:
 
     # optimizer = build_optimizer(model, config.train.optimizer)
 
-    from heavyball import ForeachAdamW
+    # from heavyball import ForeachAdamW
 
-    optimizer = ForeachAdamW(
-        model.parameters(),
-        lr=2.0e-4,
-        betas=(0.9, 0.95),
-        eps=1e-9,
-        weight_decay=0.02,
-        caution=True,
-    )
-
-    # from src.utilities.optim import MuonFSDP
-
-    # optimizer = MuonFSDP.create_muon_optimizer(
-    #     model.named_parameters(),
-    #     oned_param_algo="adamw",
+    # optimizer = ForeachAdamW(
+    #     model.parameters(),
     #     lr=2.0e-4,
-    #     mu=0.95,
     #     betas=(0.9, 0.95),
-    #     weight_decay=0.1,
-    #     epsilon=1e-9,
-    #     adjust_lr="rms_norm",
-    #     use_preconditioned=True,
-    #     use_triton=True,
-    #     ignored_keys_for_muon=(
-    #         r"control_embedder.*",
-    #         r"x_embedder.*",
-    #         r"t_embedder.*",
-    #         r"final_layer.*",
-    #         r".*norm\..*",
-    #         r".*\.bias$",
-    #     ),
+    #     eps=1e-9,
+    #     weight_decay=0.02,
+    #     caution=True,
     # )
-    # logger.info("Using Muon optimizer")
+
+    from src.utilities.optim import MuonFSDP
+
+    optimizer = MuonFSDP.create_muon_optimizer(
+        model.named_parameters(),
+        oned_param_algo="adamw",
+        lr=3.0e-4,
+        mu=0.95,
+        betas=(0.9, 0.95),
+        weight_decay=0.1,
+        epsilon=1e-9,
+        adjust_lr="rms_norm",
+        use_preconditioned=True,
+        use_triton=True,
+        ignored_keys_for_muon=(
+            r"control_embedder.*",
+            r"x_embedder.*",
+            r"t_embedder.*",
+            r"final_layer.*",
+            r".*norm\..*",
+            r".*\.bias$",
+        ),
+    )
+    logger.info("Using Muon optimizer")
 
     if config.train.lr_schedule_args and config.train.lr_schedule_args.get("num_warmup_steps", None):
         config.train.lr_schedule_args["num_warmup_steps"] = (
