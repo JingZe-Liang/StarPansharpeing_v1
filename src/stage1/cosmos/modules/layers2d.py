@@ -230,7 +230,7 @@ class Encoder(nn.Module):
         self.block_name = block_name
 
         logger.info(
-            f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, "
+            f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, act_type: {act_type}, "
             f"use activation checkpoint: {act_checkpoint}"
         )
         logger.info(f"[Encoder]: z_channels: {z_channels}, patch size: {patch_size}")
@@ -413,7 +413,7 @@ class Decoder(nn.Module):
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
         block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
-        act_type: str| tuple[str,str]='silu',
+        act_type: str | tuple[str, str] = "silu",
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
         moe_n_shared_experts: int = 1,
@@ -440,7 +440,7 @@ class Decoder(nn.Module):
         self.block_name = block_name
 
         logger.info(
-            f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, "
+            f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, act_type: {act_type}, "
             f"use activation checkpoint: {act_checkpoint}"
         )
         logger.info(f"[Decoder]: z_channels: {z_channels}")

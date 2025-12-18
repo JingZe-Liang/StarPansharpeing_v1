@@ -25,11 +25,11 @@ defaults:
 dataset:
   train_loader:
     macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
-    loader_kwargs: 
+    loader_kwargs:
       num_workers: 4
       batch_size: 6
       prefetch_factor: 2
-  val_loader:  
+  val_loader:
     loader_kwargs:
       num_workers: 2
       batch_size: 8

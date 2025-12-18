@@ -69,7 +69,7 @@ class MlpConvForce2D(nn.Module):
         )
 
     def forward(self, x, hw: tuple | None = None):
-        assert x.ndim in (3, 4), f'Input must be 3D or 4D tensor, but got {x.ndim}D tensor.'
+        assert x.ndim in (3, 4), f"Input must be 3D or 4D tensor, but got {x.ndim}D tensor."
         img_hw = hw or self.hw
         if img_hw is None and x.ndim == 3:
             img_hw = (int(x.shape[1] ** 0.5), int(x.shape[1] ** 0.5))

@@ -256,6 +256,14 @@ train:
     # mars: false
     # betas: ${tuple:[0.5,0.9]}
 
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 2.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # mars: false
+    # betas: ${tuple:[0.5,0.9]}
+
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true

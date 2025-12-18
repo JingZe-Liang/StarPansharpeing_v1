@@ -330,6 +330,7 @@ class EncoderDecoderConfig:
     # padding and norm
     padding_mode: str = "reflect"
     norm_type: str = "gn"
+    act_type: str = "silu"
     norm_groups: int = 32
     resample_norm_keep: bool = False
     # adaptive conv
@@ -1516,7 +1517,7 @@ def test_tokenizer_forward_backward(
             dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1)[1]
             iterations = dl
     else:
-        x = torch.randn(*fake_img_shape).to("cuda", dtype)
+        x = torch.randn(*fake_img_shape).to("cuda", dtype=dtype)
         iterations = [x]
 
     if not is_itered and upscale != 1:
@@ -1639,7 +1640,7 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="",  # "runs/pretrained/VAEInterp-f8c16.safetensors",
-        real_data="SAM270k",
+        real_data=None,
         save_pca_vis=False,
         pca_type="z",
         is_lora=False,

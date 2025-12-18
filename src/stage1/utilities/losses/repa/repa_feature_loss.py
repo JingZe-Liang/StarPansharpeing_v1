@@ -211,12 +211,16 @@ def repa_loss_(feature_teacher, feature_student, dim=1):
     return -torch.sum(feature_teacher * feature_student, dim=dim).mean()
 
 
-def am_radio_spatial_loss(feature_teacher, feature_student, dim=1):
+def am_radio_spatial_loss(feature_teacher, feature_student, l1_ratio=0.0, dim=1):
     # b, c, l
     assert feature_teacher.shape == feature_student.shape
     un_sim = 1 - torch.cosine_similarity(feature_teacher, feature_student, dim=dim)
-    smooth_l1 = F.smooth_l1_loss(feature_teacher, feature_student)
-    loss = un_sim.mean() + smooth_l1 * 0.1
+    loss = un_sim.mean()
+
+    if l1_ratio > 0:
+        smooth_l1 = F.smooth_l1_loss(feature_teacher, feature_student)
+        loss = loss + l1_ratio * smooth_l1
+
     return loss
 
 
@@ -1352,6 +1356,8 @@ class REPALoss(torch.nn.Module):
         teacher_feat = self._encode_img(img, get_interm_feats=self.get_hier_teacher_feature)
         teacher_feat = teacher_feat.detach() if is_tensor(teacher_feat) else [f.detach() for f in teacher_feat]
         if self.get_hier_teacher_feature and len(teacher_feat) > len(student_feature):
+            assert is_list_tuple(teacher_feat), "teacher_feat must be a list when get_hier_teacher_feature is True"
+            assert is_list_tuple(student_feature), "student_feature must be a list"
             teacher_feat = teacher_feat[-len(student_feature) :]  # last n teacher features
         repa_loss = self.repa_loss(teacher_feat, student_feature)
         return repa_loss

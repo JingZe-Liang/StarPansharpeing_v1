@@ -5,14 +5,14 @@ dataset_names_to_img_size:
 channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369]}
 img_size: 512 # placeholder
 rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-size_128_bs: 20
-size_256_bs: 14
-size_512_bs: 7
-val_bs: 12
-max_workers: 4
-min_workers: 3
+size_128_bs: 16
+size_256_bs: 12
+size_512_bs: 5
+val_bs: 8
+max_workers: 2
+min_workers: 1
 shuffle_size: 0
-prefetch_factor: 2
+prefetch_factor: 1
 
 train_paths:
   #> multispectral datasets
@@ -283,9 +283,9 @@ val_loader:
   paths: ${dataset.val_paths}
   basic_kwargs:
     shuffle_size: 100
-    num_workers: ${dataset.min_workers}
+    num_workers: 1
     resample: true
-    prefetch_factor: ${dataset.prefetch_factor}
+    # prefetch_factor: 0
     shuffle_within_workers: false
     quantile_img_clip: 1.0 # 0.99 v.s. 1.0, may be not clip has better PSNR?
   changed_kwargs_by_loader: ${dataset.val_changed_kwargs_by_loader}

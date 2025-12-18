@@ -22,22 +22,21 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
-
 dataset:
   train_loader:
-    macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
-    loader_kwargs: 
-      num_workers: 4
-      batch_size: 6
-      prefetch_factor: 2
-  val_loader:  
+    macro_sampled_batch_size: { 128: 12, 256: 12, 512: 6 }
     loader_kwargs:
       num_workers: 2
+      batch_size: 6
+      prefetch_factor: 2
+      persistent_workers: true
+  val_loader:
+    loader_kwargs:
+      num_workers: 1
       batch_size: 8
       pin_memory: false
       drop_last: true
       persistent_workers: false
-
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}
@@ -52,8 +51,9 @@ vq_loss:
     repa_img_size: 512
     repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
-    feature_resample_type: match_student
-    loss_type: am_radio
+    feature_resample_type: match_teacher
+    get_hier_teacher_feature: true
+    loss_type: hier_distillation
     feature_normalize: spatial
   # vf loss
   vf_loss_weight:
@@ -113,7 +113,7 @@ tokenizer:
 
   # blocks
   model:
-    norm_type: gn
+    norm_type: rmsnorm2d
     norm_groups: 32
     block_name: res_block
     moe_token_mixer_type: res_block
@@ -160,8 +160,8 @@ train:
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  resume_path:
-  ema_load_path: runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  resume_path: #runs/stage1_cosmos_nested/2025-12-17_18-45-37_cosmos_f8c16p1_unified_hyperspectral_adamw_caution/checkpoints/checkpoint_2
+  ema_load_path: runs/stage1_cosmos_nested/2025-12-18_13-45-48_cosmos_f8c16p1_unified_hyperspectral_irepa-spatial-norm_noisy_latent_aug/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -178,21 +178,34 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: heavyball.AdamW
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.02
-    caution: true
-    betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.02
+    oned_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.02
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.02
+    # caution: true
+    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
 
   disc_optimizer:
-    _target_: heavyball.AdamW
+    _target_: torch.optim.AdamW
     _partial_: true
     lr: 3.0e-4
-    weight_decay: 0.01
-    caution: true
-    mars: false
-    betas: ${tuple:[0.5,0.9]}
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -219,7 +232,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_adamw_caution
+    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_irepa-spatial-norm_noisy_latent_aug
     log_with_time: True
     visualize_every: 500
     log_every: 10

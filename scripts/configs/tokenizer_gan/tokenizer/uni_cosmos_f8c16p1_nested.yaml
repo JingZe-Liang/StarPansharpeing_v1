@@ -12,8 +12,9 @@ model:
   z_channels: 256
   latent_channels: 16
   act_checkpoint: false
-  norm_type: gn
+  norm_type: rmsnorm2d #gn
   norm_groups: 32
+  act_type: silu
   block_name: res_block
   moe_token_mixer_type: res_block
   hidden_factor: 4

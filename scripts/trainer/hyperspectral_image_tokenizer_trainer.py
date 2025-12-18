@@ -17,6 +17,7 @@ import torch
 import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
@@ -37,7 +38,6 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
 
-import wandb
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
@@ -1342,11 +1342,12 @@ class CosmosHyperspectralTokenizerTrainer:
             if torch.is_tensor(repa_feature):
                 out_d["repa_feature"] = repa_feature
             elif isinstance(repa_feature, (tuple, list)):
-                assert len(repa_feature) == 2, (
-                    "only support two repa features (low level and semantic features distillation)."
-                )
-                out_d["repa_feature"] = repa_feature[0]
-                out_d["semantic_feature"] = repa_feature[1]
+                if torch.is_tensor(repa_feature[0]):
+                    out_d["repa_feature"] = repa_feature
+                else:
+                    # hybrid tokenizer returns two features: low-level and semantic features
+                    out_d["repa_feature"] = repa_feature[0]
+                    out_d["semantic_feature"] = repa_feature[1]
             else:
                 raise ValueError(f"Unknown repa_feature type {type(repa_feature)}, only support tensor, tuple or list.")
         elif hasattr(_unwrap_tok, "get_vf_feature") and getattr(_unwrap_tok, "_use_vf_loss", False):
@@ -2280,7 +2281,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "hybrid_cosmos_f16c32p1"
+_key = "unicosmos_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
