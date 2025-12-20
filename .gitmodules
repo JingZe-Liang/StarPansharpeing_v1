@@ -161,3 +161,9 @@
 [submodule "src/stage2/generative/LuminaImage"]
 	path = src/stage2/generative/LuminaImage
 	url = https://github.com/Alpha-VLLM/Lumina-Image-2.0.git
+[submodule "src/stage1/self_supervised/pixio"]
+    path = src/stage1/self_supervised/pixio
+    url = https://github.com/facebookresearch/pixio.git
+[submodule "src/stage1/VAEs/SSVAE"]
+	path = src/stage1/VAEs/SSVAE
+	url = https://github.com/zai-org/SSVAE.git

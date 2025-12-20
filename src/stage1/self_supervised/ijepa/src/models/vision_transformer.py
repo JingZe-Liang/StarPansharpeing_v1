@@ -197,6 +197,7 @@ class Block(nn.Module):
             drop=drop,
         )
 
+    @torch.compile
     def forward(self, x, return_attention=False):
         y, attn = self.attn(self.norm1(x))
         if return_attention:

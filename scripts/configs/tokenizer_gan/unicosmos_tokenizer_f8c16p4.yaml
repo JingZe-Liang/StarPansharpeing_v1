@@ -108,7 +108,7 @@ tokenizer:
   loading_type: "pretrained"
 
   # augmentations
-  latent_noise_prob: 0.2
+  latent_noise_prob: 0.0
   use_channel_drop: false
 
   # blocks
@@ -186,8 +186,8 @@ train:
     use_triton: true
     use_preconditioned: true # turbo-muon style preconditioning
     muon_params_defaults:
-      lr: 2.0e-4
-      weight_decay: 0.02
+    lr: 2.0e-4
+    weight_decay: 0.02
     oned_params_defaults:
       lr: 2.0e-4
       weight_decay: 0.02

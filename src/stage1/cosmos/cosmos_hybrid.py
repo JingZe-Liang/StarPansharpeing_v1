@@ -3,7 +3,6 @@ Hyperspectral Transformer Tokenizer with hybrid CNN / Transformer architecture.
 RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
-from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from typing import Any, List, NamedTuple, Optional, Self, Tuple, Union
 
@@ -13,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from easydict import EasyDict as edict
-from einops.layers.torch import Rearrange
+from einops import rearrange
 from loguru import logger
 from omegaconf import OmegaConf
 from timm.layers import create_conv2d, create_norm_act_layer
@@ -257,7 +256,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.deep_supervised_heads.append(to_out)
         logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
 
-    def load_pretrained(self, uni_tokenizer_path: str,_reinit_quant_convs=True, **kwargs):  # type: ignore[invalid-method-override]
+    def load_pretrained(self, uni_tokenizer_path: str, _reinit_quant_convs=False, **kwargs):  # type: ignore[invalid-method-override]
         """Init the model from the pretrained only CNN weights."""
         if uni_tokenizer_path in (None, ""):
             logger.warning(f"No pretrained weights found at {uni_tokenizer_path}, skip loading ckpt.")
@@ -267,8 +266,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         missing_ks, unexp_ks = load_weights_with_shape_check(self, weights, load_strategy="search")
         if len(missing_ks) > 0 or len(unexp_ks) > 0:
             logger.warning(f"Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
-            
+
         if _reinit_quant_convs:
+            # Init the quant convs for latent min/max value not too large
             nn.init.trunc_normal_(self.encoder.quant_conv.weight, std=0.01)
             nn.init.zeros_(self.encoder.quant_conv.bias)
 
@@ -277,7 +277,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             nn.init.zeros_(self.decoder.quant_conv.bias)
 
             logger.warning(f"temp code for continue training")
-
 
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
@@ -289,6 +288,85 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 f = F.interpolate(f, size=max_size, mode="bilinear", align_corners=False)
             interp_feats.append(f)
         return interp_feats
+
+    def encode_mae(self, x, use_quantizer=None, **_ignored_kwargs):
+        from ..self_supervised.mae_masking import mae_random_masking, restore_sequence_by_ids
+
+        mae_type = self.trans_enc_cfg.pretrained_type
+        mask_ratio = self.trans_enc_cfg.mae_mask_ratio
+        mask_type = self.trans_enc_cfg.mae_mask_type
+        mae_pixio_mask_grid = self.trans_enc_cfg.mae_pixio_mask_grid
+        assert mae_type in ("latent_mae", "pixel_mae"), (
+            f"MAE type supports type=(latent_mae, pixel_mae), but got {mae_type}"
+        )
+        enc_out = edict(to_dec=None, latent=None, q_loss=None, q_loss_breakdown=None, low_lvl_z=None, sem_z=None)
+
+        # Forward the CNN encoder
+        z_low_lvl = self.encoder.encoder(x)
+
+        if self.latent_bottleneck_type == "before_semantic":
+            quant_ret = self._apply_quant_conv_quantizer(z_low_lvl, use_quantizer)
+            if isinstance(quant_ret, tuple):
+                h = quant_ret[0]
+            else:
+                h = quant_ret
+            enc_out.latent = h
+            h = self.latent_aug(h)
+
+            ##### Do post-quant conv
+            if self.st_skip_sem_decoder:
+                h = self.decoder.quant_conv["post_quant_conv"](h)  # sent to semantic encoder
+                h_skipped = h.clone()
+                enc_out.h_skipped = h_skipped
+            else:
+                h = self.decoder.quant_conv(h)
+        else:
+            h = z_low_lvl
+            h = self.latent_aug(h)
+
+        # For positional embedding, the original mae first add the pe and
+        # then mask, here we left the pe inside the transformer, and pass the int mask
+        # indices in the using einx to take the cooresponding pe/rope and then add them.
+
+        # prepare the encoder's masks: L_masked_x = L_x * mask_ratio
+        ps = self.semantic_enc_transformer.patch_size
+        hw = h.shape[-2:]
+        bchw = (h.shape[0], h.shape[1], hw[0] // ps, hw[1] // ps)
+        _, mask, ids_keep, ids_restore = mae_random_masking(mask_type, mask_ratio, mae_pixio_mask_grid, bchw=bchw)
+        mask, ids_keep, ids_restore = mask.to(h.device), ids_keep.to(h.device), ids_restore.to(h.device)
+
+        _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+            z_low_lvl, masks=ids_keep, ids_restore=ids_restore, pretrained_task=[mae_type]
+        )
+        if mae_type == "latent_mae":
+            mae_decode_out = terms.mae_decode_out  # [b,l,c]
+            # patch 2d low-level latent
+            z_tgt = rearrange(z_low_lvl, "b c (h p1) (w p2) -> b (h w) (p1 p2 c)", p1=ps, p2=ps)
+            loss = (mae_decode_out - z_tgt) ** 2
+            loss = loss.mean(dim=-1)
+            loss = (loss * mask).sum() / mask.sum()
+            return loss, mae_decode_out
+        else:
+            # mae_type == "pixel_mae"
+            # continue to decode to pixel space
+            # 1. Unpatchify the transformer output to 2D latent
+            # terms.mae_decode_out_2d is already [B, C, H, W] from naflex.py
+            h = terms.mae_decode_out_2d
+            enc_out.to_dec = h
+
+            # 2. Decode using the cnn decoder
+            decode_out = self.decode(enc_out, inp_shape=x.shape)
+            recon = decode_out.recon
+
+            # 3. Prepare the pixel-level mask
+            mask_2d = mask.reshape(mask.shape[0], 1, bchw[-2], bchw[-1])
+            mask_up = F.interpolate(mask_2d, size=x.shape[-2:], mode="nearest")
+
+            # 4. Calculate loss
+            loss = (recon - x) ** 2
+            # Normalize by total number of masked elements (pixels * channels)
+            loss = (loss * mask_up).sum() / (mask_up.sum() * x.shape[1] + 1e-6)
+            return loss, recon
 
     def encode_ibot(self, x, use_quantizer=None, masks: Tensor | None = None, mask_indices=None, **_ignored_kwargs):
         z_low_lvl = self.encoder.encoder(x)
@@ -318,7 +396,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         """
         LeJEPA encoding with augmentated global and local views.
         """
-
         # Low-level encoder
         z_low_lvl = self.encoder.encoder(x)
 
@@ -341,6 +418,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 cache_low_lvl = z_low_lvl = low_lvl_out
             elif isinstance(low_lvl_out, (list, tuple)):
                 z_low_lvl, cache_low_lvl = low_lvl_out
+            else:
+                raise NotImplementedError
         else:
             z_low_lvl = self.encoder.encoder(x)
 
@@ -822,7 +901,7 @@ def hybrid_ijepa_f8_config(
     backbone_embed_dim: int = 1024,
     backbone_enc_n_layers: int = 12,
     backbone_dec_n_layers: int = 12,
-    norm_layer: str = "flarmsnorm",
+    norm_layer: str = "rmsnorm",
     use_repa_loss: bool = True,
     pretrained_path: str = "",
 ):
@@ -862,7 +941,7 @@ def hybrid_ijepa_f8_config(
         "vf_on_z_or_module": "z",  # Visual feature on z
         "use_repa_loss": use_repa_loss,
         "dino_feature_dim": 1024,
-        "loading_type": "hybrid_pretrained",
+        "loading_type": "",
         "uni_path": pretrained_path,
     }
 
@@ -884,7 +963,7 @@ def hybrid_ijepa_f8_config(
         "reg_tokens": 4,
         "rope_type": "axial",
         "attn_type": "gated",
-        "pretrained_type": "ijepa",
+        "pretrained_type": "latent_mae",  # "ijepa",
     }
 
     cfg = OmegaConf.create(
@@ -977,7 +1056,7 @@ def test_model_forward_backward(
     device = torch.device("cuda")
 
     cfg = hybrid_ijepa_f8_config(
-        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
+        # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
         use_repa_loss=False,
     )
     # cfg = hybrid_distillation_f16_config(
@@ -1046,6 +1125,10 @@ def test_model_forward_backward(
                     # Eval mode
                     model.eval()
                     with torch.no_grad():
+                        loss = model.encode_mae(x)
+                        print(f"Loss: {loss}")
+                        exit(0)
+
                         encoded = model.encode(x)
                         encoded_tensor = encoded.to_dec
 
@@ -1179,9 +1262,6 @@ if __name__ == "__main__":
     """
     MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_hybrid
     """
-    import lovely_tensors as lt
-
-    lt.monkey_patch()
     with logger.catch():
         test_model_forward_backward(
             real_data="SAM270k", compute_mean_std=True, max_iters=1, save_pca_vis=True, pca_type="z"

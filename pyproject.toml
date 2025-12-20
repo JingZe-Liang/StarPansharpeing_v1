@@ -171,7 +171,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/*.py" = ["I", "D"]        # Disable all docstring-related rules
+"**/*.py" = ["I", "D"]   # Disable all docstring-related rules
 "__init__.py" = ["F401"]
 "hubconf.py" = ["F401"]
 
@@ -263,6 +263,7 @@ unused-ignore-comment = "ignore"
 redundant-cast = "ignore"
 unresolved-attribute = "ignore"
 possibly-missing-attribute = "ignore"
+invalid-method-override = "ignore"
 # possibly-unbound-attribute = "error"
 # possibly-unbound-import = "error"
 

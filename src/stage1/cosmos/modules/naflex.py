@@ -1,10 +1,14 @@
+from timm.layers.create_norm import create_norm_layer
 import math
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import einops
 import torch
+
 import torch.nn as nn
+from torch import Tensor
 from easydict import EasyDict as edict
 from einx import get_at
 from loguru import logger
@@ -13,18 +17,22 @@ from timm.layers.create_norm import get_norm_layer
 from timm.layers.helpers import to_2tuple
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed
+from timm.layers import get_act_layer, Mlp, LayerScale
 from timm.models import eva, naflexvit
 from timm.models._manipulate import named_apply
 from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from timm.models.naflexvit import (
     Block,
     NaFlexEmbeds,
     NaFlexVit,
-    checkpoint,
+    # checkpoint,
     create_attention_mask,
     feature_take_indices,
+    get_init_weights_vit,
 )
-from torch import Tensor
+from timm.layers.drop import calculate_drop_path_rates
+from diffusers.models.embeddings import get_2d_sincos_pos_embed
 
 from src.utilities.config_utils import dataclass_from_dict, function_config_to_basic_types
 
@@ -171,6 +179,9 @@ class EvaBlock(nn.Module):
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        self.ls1 = nn.Identity()  # LayerScale(dim, 1e-5)
+        self.ls2 = nn.Identity()  # LayerScale(dim, 1e-5)
+
     @torch.compile
     def forward(
         self,
@@ -179,8 +190,8 @@ class EvaBlock(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.gamma_1 is None:
-            x = x + self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
-            x = x + self.drop_path2(self.mlp(self.norm2(x)))
+            x = x + self.ls1(self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)))
+            x = x + self.ls2(self.drop_path2(self.mlp(self.norm2(x))))
         else:
             x = x + self.drop_path1(self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
             x = x + self.drop_path2(self.gamma_2 * self.mlp(self.norm2(x)))
@@ -232,7 +243,9 @@ def get_block_fn(cfg) -> Callable:
         return block_fn
 
 
-naflexvit.get_block_fn = get_block_fn
+naflexvit.get_block_fn = get_block_fn  # type: ignore
+
+# -------------- Naflex Config ------------------ #
 
 
 @dataclass
@@ -273,10 +286,8 @@ class NaFlexVitCfg:
 
     # Position embedding configuration
     pos_embed: str = "learned"  # Type of position embedding ('learned', 'factorized', 'rope', 'none')
-    pos_embed_grid_size: Optional[Tuple[int, int]] = (
-        16,
-        16,
-    )  # Grid size for position embedding initialization
+    # Grid size for position embedding initialization
+    pos_embed_grid_size: Optional[Tuple[int, int]] = (16, 16)
     pos_embed_interp_mode: str = "bicubic"  # Interpolation mode for position embedding resizing
     pos_embed_ar_preserving: bool = False  # Whether to preserve aspect ratio during position embedding interpolation
     pos_embed_use_grid_sample: bool = False  # Whether to use grid_sample for naflex position embedding interpolation
@@ -299,7 +310,7 @@ class NaFlexVitCfg:
     fc_norm: Optional[bool] = None  # Whether to normalize features before final classifier (after pooling)
 
     # Global pooling setup
-    global_pool: str = ""  # Type of global pooling for final sequence  # * no pooling
+    global_pool: str = ""  # Type of global pooling for final sequence
     pool_include_prefix: bool = False  # Whether to include class/register prefix tokens in global pooling
     attn_pool_num_heads: Optional[int] = None  # Override num_heads for attention pool
     attn_pool_mlp_ratio: Optional[float] = None  # Override mlp_ratio for attention pool
@@ -342,8 +353,6 @@ class NaFlexVitCfg:
     # adaptive generation decoder
     is_first_cat_noise: bool = False
 
-    # enable_jepa: bool = False  # enable jepa training
-    # enable_lejepa: bool = False  # enable lejepa training
     # 'ijepa', 'lejepa', None for no pretrained task
     pretrained_type: Any = None  # Union[str, list[str]]
 
@@ -352,6 +361,16 @@ class NaFlexVitCfg:
     ibot_head_hidden_dim: int = 2048
     ibot_bottleneck_dim: int = 256
     ibot_nlayers: int = 3
+
+    # MAE head cfgs
+    mae_decoder_dim: int = 768
+    mae_decoder_pe_init_type: str = "trunc_normal"  # trunc_normal or sincos
+    mae_decoder_depth: int = 8
+    mae_mask_type: str = "kaiming"  # 'kaiming' or 'pixio'
+    mae_mask_ratio: float = 0.8
+    mae_decoder_head: str = "seperated"  # 'shared' or 'seperated'
+    mae_pixio_mask_grid: int = 2
+    mae_latent_size: int=14  # latent size for mae 
 
 
 def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | None = None):
@@ -488,11 +507,98 @@ class IJEPANaFlexViT(Transformer):
         super().__init__(cfg)
 
         self.pretrained_type: str = cfg.pretrained_type
-        # Build the LeJEPA head
+
+        # --------- Build the heads or decoders --------- #
         if "lejepa" in self.pretrained_type:
             self._build_jepa_head(cfg)
         if "ibot" in self.pretrained_type:
             self._build_ibot_head(cfg)
+        if "latent_mae" in self.pretrained_type or "pixel_mae" in self.pretrained_type:
+            self._build_mae_decoder(cfg)
+
+    def _build_mae_decoder(self, cfg: NaFlexVitCfg):
+        """
+        Latent MAE is more like JEPA,
+            image x -> CNN encoder -> latent -> mask inside Naflex transformer (MAE encoder) ->
+                -> merge masked tokens in  Naflex transformer (MAE decoder) -> predict the masked tokens (MSE loss)
+            this type MAE works at latent, so called latent_mae
+
+        Pixel MAE is more like the original pixel-space MAE,
+            image x -> CNN encoder -> latent -> mask inside Naflex transformer (MAE encoder) ->
+                -> merge masked tokens in  Naflex transformer (MAE decoder) -> CNN decoder -> reconstruct the image
+            this type MAE works at pixel, so called pixel_mae
+        """
+        assert "latent_mae" in cfg.pretrained_type or "pixel_mae" in cfg.pretrained_type, "MAE decoder is not supported"
+        embed_dim = cfg.mae_decoder_dim
+        mae_decoder_depth = cfg.mae_decoder_depth
+        block_fn = get_block_fn(cfg)
+        dpr = calculate_drop_path_rates(cfg.drop_path_rate, cfg.depth)  # stochastic depth decay rule
+        norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
+        act_layer = get_act_layer(cfg.act_layer) or nn.GELU
+        mlp_layer = cfg.mlp_layer or Mlp
+        dd: dict = {"device": None, "dtype": None}
+        self.mae_decoder = nn.ModuleList(
+            [
+                block_fn(
+                    dim=embed_dim,
+                    num_heads=cfg.num_heads,
+                    mlp_ratio=cfg.mlp_ratio,
+                    qkv_bias=cfg.qkv_bias,
+                    qk_norm=cfg.qk_norm,
+                    proj_bias=cfg.proj_bias,
+                    init_values=cfg.init_values,
+                    proj_drop=cfg.proj_drop_rate,
+                    attn_drop=cfg.attn_drop_rate,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                    mlp_layer=mlp_layer,
+                    **dd,
+                )
+                for i in range(mae_decoder_depth)
+            ]
+        )
+        logger.debug("Build MAE decoder", name="MAE Naflex Transformer")
+
+        # --------- Decoder embeddings, mask token, and decoder norm/predictor ----------- #
+
+        # Init the decoder blocks
+        init_mode = "timm"
+        init_fn = get_init_weights_vit(mode=init_mode)
+        # mae implement this using jax init fn
+        self.mae_decoder.apply(init_fn)
+
+        n_patches = (cfg.mae_latent_size // cfg.patch_size) ** 2
+        # the pixio implementation fix the norm at the encoder's head
+        # here we move the norm with mae embedder
+        self.mae_embedder = nn.Sequential(
+            create_norm_layer(cfg.norm_layer, cfg.embed_dim),
+            nn.Linear(cfg.embed_dim, cfg.mae_decoder_dim, bias=True),
+        )
+        self.mae_mask_token = nn.Parameter(torch.zeros(1, 1, cfg.mae_decoder_dim))
+        self.mae_pos_embed = nn.Parameter(torch.zeros(1, n_patches + self.num_prefix_tokens, cfg.mae_decoder_dim))
+        if cfg.mae_decoder_head == "seperated":
+            self.mae_head = nn.Sequential(
+                norm_layer(cfg.mae_decoder_dim),
+                nn.Linear(cfg.mae_decoder_dim, cfg.patch_size**2 * cfg.out_chans, bias=True),
+            )
+
+        # init weights
+        pos_embed_init_type: str = cfg.mae_decoder_pe_init_type  # [trunc_norm, sincos]
+        if pos_embed_init_type == "trunc_normal":
+            nn.init.trunc_normal_(self.mae_pos_embed, std=0.02)
+        elif pos_embed_init_type == "sincos":
+            init_pe = get_2d_sincos_pos_embed(
+                cfg.mae_decoder_dim,
+                grid_size=cfg.img_size // cfg.patch_size,
+                cls_token=True if self.num_prefix_tokens > 0 else False,
+                extra_tokens=self.num_prefix_tokens,
+                output_type="pt",
+            )
+            with torch.no_grad():
+                self.mae_pos_embed.copy_(init_pe.unsqueeze(0))
+        nn.init.normal_(self.mae_mask_token, std=0.02)
+        logger.debug("Init the MAE decoder", name="MAE Naflex Transformer")
 
     def _build_jepa_head(self, cfg):
         from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
@@ -525,18 +631,24 @@ class IJEPANaFlexViT(Transformer):
 
         return masks
 
-    def _ibot_apply_masks(self, x, masks: Tensor):
-        assert torch.is_tensor(masks)
+    def _ibot_apply_masks(self, x, masks: torch.BoolTensor):
         if masks is not None:
+            assert torch.is_tensor(masks)
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
         return x
 
-    def _jepa_apply_masks(self, x, masks):
+    def _jepa_apply_masks(self, x, masks: list[Tensor]):
         all_x = []
         for m in masks:
             mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
             all_x += [torch.gather(x, dim=1, index=mask_keep)]
         return torch.cat(all_x, dim=0)
+
+    def _mae_apply_masks(self, x, masks: torch.IntTensor):
+        """masks is a Tensor of indices of [B, S_masked]"""
+        D = x.size(-1)
+        x = torch.gather(x, dim=1, index=masks.unsqueeze(-1).repeat(1, 1, D))
+        return x
 
     def _forward_embeds(
         self,
@@ -545,11 +657,14 @@ class IJEPANaFlexViT(Transformer):
         patch_valid,
         attn_mask,
         masks: List[Tensor] | Tensor | None = None,
-        # mask_out: bool = True,  # IJEPA mask out tokens, iBOT only mask not drop
     ):
         """Forward pass through patch / abs pos / rope pos embeds and patch dropout
 
         IJEPA masking strategy: mask out the patches, and drop them.
+            For this instance, `masks` is a list of Int32 mask indices shaped as [B, S_masked]
+                e.g., [tensor([[ 14,  28,  42,  56,  70,  84,  98, 112, 126, 140, 154],
+                        [ 30,  31,  32,  44,  45,  46,  58,  59,  60,  72,  73]])]
+                that can be torch.gather indexed.
             RoPE actions:
             Equals at
             # axial rope: [S, headD * 2]
@@ -566,7 +681,6 @@ class IJEPANaFlexViT(Transformer):
             where(masks, mask_token, x)
         """
         naflex_mode = patch_coord is not None
-
         # patch embed, abs pos embed, returns global grid size as calculated from 'standard' NCHW batches
         x, grid_size = self.embeds(x, patch_coord=patch_coord, patch_valid=patch_valid)
 
@@ -601,14 +715,17 @@ class IJEPANaFlexViT(Transformer):
         if attn_mask is None:
             attn_mask = create_attention_mask(patch_valid, num_prefix_tokens=self.num_prefix_tokens, dtype=x.dtype)
 
-        ########## Apply masks
+        # ------------ Apply masks ------------ #
         if masks is not None:
             # Apply masks
             prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
-            if "ibot" in self.cfg.pretrained_type:
+            if "ibot" in self.pretrained_type:
                 x = self._ibot_apply_masks(x, masks=masks)
-            else:
+            elif "ijepa" in self.pretrained_type:
                 x = self._jepa_apply_masks(x, masks=masks)
+            elif self._is_mae():
+                x = self._mae_apply_masks(x, masks=masks)
+
             x = torch.cat([prefixed_tokens, x], dim=1)
 
             # Rope related, rope is applied in attention module
@@ -620,7 +737,12 @@ class IJEPANaFlexViT(Transformer):
                         # m: [B, S_masked] indices
                         assert not self.rope_is_mixed, "mixed rope is not supported in JEPA training"
                         rope_masked += [get_at("[S] ropeD, B S_masked -> B 1 S_masked ropeD", rope_embeds, m)]
-                    rope_embeds = torch.cat(rope_masked, dim=0)  # [B, 1, S_masked, ropeD]
+                    rope_embeds = torch.cat(rope_masked, dim=0)  # [B*n_masks, 1, S_masked, ropeD]
+                elif self._is_mae():
+                    # masks: [B, S_masked] indices, can be cat since the MAE has the same length token to keep
+                    # for each sample in a batch
+                    assert torch.is_tensor(masks), f"masks should be a tensor, got {type(masks)}"
+                    rope_embeds = get_at("[S] ropeD, B S_masked -> B 1 S_masked ropeD", rope_embeds, masks)
                 else:
                     # Do nothing to rope, only mask the embeded tokens
                     masks = cast(Tensor, masks)
@@ -672,20 +794,20 @@ class IJEPANaFlexViT(Transformer):
                         pos_embed_has_batch=naflex_mode,
                     )
                 if do_checkpointing:
-                    x = checkpoint(blk, x, rope=rope_embed, attn_mask=attn_mask)
+                    x = torch_checkpoint(blk, x, rope_embed, attn_mask, use_reentrant=False)
                 else:
                     x = blk(x, rope=rope_embed, attn_mask=attn_mask)
         elif rope_embeds is not None:
             # Axial ROPE mode with shared embeddings
             for blk in self.blocks:
                 if do_checkpointing:
-                    x = checkpoint(blk, x, rope=rope_embeds, attn_mask=attn_mask)
+                    x = torch_checkpoint(blk, x, rope_embeds, attn_mask, use_reentrant=False)
                 else:
                     x = blk(x, rope=rope_embeds, attn_mask=attn_mask)
         else:
             for blk in self.blocks:
                 if do_checkpointing:
-                    x = checkpoint(blk, x, attn_mask=attn_mask)
+                    x = torch_checkpoint(blk, x, None, attn_mask, use_reentrant=False)
                 else:
                     x = blk(x, attn_mask=attn_mask)
 
@@ -696,7 +818,7 @@ class IJEPANaFlexViT(Transformer):
 
         return x
 
-    def forward(
+    def forward(  # type: ignore[invalid-method-override]
         self,
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         patch_coord: Optional[torch.Tensor] = None,
@@ -766,6 +888,10 @@ class IJEPANaFlexViT(Transformer):
 
         return out
 
+    def _is_mae(self, pretrained_task: list[str] | None = None):
+        pretrained_task = cast(list[str], pretrained_task or self.pretrained_type)
+        return "latent_mae" in pretrained_task or "pixel_mae" in pretrained_task
+
     def _forward_pretrained_backbone(
         self,
         x: torch.Tensor,
@@ -774,22 +900,86 @@ class IJEPANaFlexViT(Transformer):
         masks_indices: Optional[Tensor] = None,
         *,
         pretrained_task: list[str] | None = None,
+        **kwargs,
     ):
         terms = {}
         pretrained_task = [] if pretrained_task is None else pretrained_task
 
-        if output_type in (None, "2d"):
-            out_hw = self._get_output_shape(x)
-        else:
-            out_hw = None  # keep the output to be 1D tensor
+        # if output_type in (None, "2d"):
+        out_hw = self._get_output_shape(x)
+        # else:
+        #     out_hw = None  # keep the output to be 1D tensor
 
-        # Features
+        # ---------- forward backbone ---------- #
+        # breakpoint()
         x = cast(torch.Tensor, self.forward_features(x, masks=masks))
 
+        # ---------- forward different pretrained heads / decoders ---------- #
         ######### IJepa features ########
         if "ijepa" in self.pretrained_type and "ijepa" in pretrained_task:
             # x is the backbone's out
             terms["ijepa_feat"] = x[:, self.num_prefix_tokens :]
+
+        ######### MAE decoders ########
+        if self._is_mae(pretrained_task):
+            ids_restore = kwargs.get("ids_restore", None)
+            assert ids_restore is not None, "ids_restore is required for MAE decoder"
+
+            # x is masked inside `forward_features`
+            x_masked = x
+            # 1. embed to decoder dim
+            x_dec = self.mae_embedder(x_masked)
+            # 2. add mask_token to the masked positions (following pixio pattern)
+            x_cls_reg = x_dec[:, : self.num_prefix_tokens, :]
+            x_patches_masked = x_dec[:, self.num_prefix_tokens :]
+            mask_tokens = self.mae_mask_token.repeat(x.shape[0], ids_restore.shape[1] - x_patches_masked.shape[1], 1)
+
+            # Concatenate visible tokens with mask tokens, then gather (unshuffle)
+            x_dec_spatial = torch.cat([x_patches_masked, mask_tokens], dim=1)
+            x_dec_spatial = torch.gather(
+                x_dec_spatial, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x_dec_spatial.shape[2])
+            )
+
+            # Append prefix tokens after gather operation
+            x_dec = torch.cat([x_cls_reg, x_dec_spatial], dim=1)
+
+            # 3. add decoder's positional embedding
+            # Calculate spatial size excluding prefix tokens
+            spatial_tokens = x_dec.shape[1] - self.num_prefix_tokens
+            hw = int(spatial_tokens**0.5)
+            abs_pe = resample_abs_pos_embed(
+                self.mae_pos_embed, new_size=[hw, hw], num_prefix_tokens=self.num_prefix_tokens
+            )
+            x_dec = x_dec + abs_pe
+            x_dec = x_dec.contiguous()
+            # 4. call decoder blocks and head
+            do_checkpointing = self.grad_checkpointing and self.training and not torch.jit.is_scripting()
+            for blk in self.mae_decoder:
+                if do_checkpointing:
+                    x_dec = torch_checkpoint(blk, x_dec, None, None, use_reentrant=False)
+                else:
+                    x_dec = blk(x_dec)
+
+            if self.cfg.mae_decoder_head == "shared":
+                x_dec = self.head(x_dec)
+            else:
+                x_dec = self.mae_head(x_dec)
+            # 5. unpatchify if needed
+            # assert out_hw is not None
+            p, c, h, w = self.unpatch_size, self.cfg.out_chans, out_hw[0], out_hw[1]
+            x_dec_2d = self.unpatchify(x_dec[:, self.num_prefix_tokens :], hw=out_hw)
+            # x_dec_2d = einops.rearrange(
+            #     x_dec[:, self.num_prefix_tokens:],
+            #     "bs (h w) (p1 p2 c) -> bs c (h p1) (w p2)",
+            #     h=h // p,
+            #     w=w // p,
+            #     p1=p,
+            #     p2=p,
+            #     c=c
+            # )
+            # 6. form the output
+            terms["mae_decode_out"] = x_dec[:, self.num_prefix_tokens :]
+            terms["mae_decode_out_2d"] = x_dec_2d
 
         ######### Lejepa projector #########
         if hasattr(self, "lejepa_projector") and "lejepa" in self.cfg.pretrained_type and "lejepa" in pretrained_task:
@@ -805,12 +995,11 @@ class IJEPANaFlexViT(Transformer):
             terms["ibot_feat"] = x_tokens = x[:, self.num_prefix_tokens :]
 
             # Check mask shape alignment if masks provided
-            if masks is not None and isinstance(masks, torch.Tensor):
+            if masks is not None and isinstance(masks, Tensor):
                 B, N = masks.shape
-                assert x_tokens.shape[:2] == (
-                    B,
-                    N,
-                ), f"Mask shape {masks.shape} does not match feature shape {x_tokens.shape[:2]}"
+                assert x_tokens.shape[:2] == (B, N), (
+                    f"Mask shape {masks.shape} does not match feature shape {x_tokens.shape[:2]}"
+                )
 
             if masks_indices is not None:
                 # IBOT teacher does
@@ -839,7 +1028,7 @@ class IJEPANaFlexViT(Transformer):
         patch_coord: Optional[torch.Tensor] = None,
         patch_valid: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        jepa_masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+        masks: Optional[Tensor | List[Tensor]] = None,
     ):
         """Forward features that returns intermediates.
 
@@ -861,10 +1050,9 @@ class IJEPANaFlexViT(Transformer):
         """
 
         # Prepare JEPA masks
-        if jepa_masks is not None:
-            # jepa_masks = self._prepare_masks(masks=jepa_masks)
+        if masks is not None:
             raise ValueError(f"Input masks are not supported for getting the intermidate features")
-            jepa_masks = None
+            masks = None
 
         return super().forward_intermediates(
             x,
@@ -886,15 +1074,6 @@ class MAENaFlexViT(Transformer):
 
 
 class DINONaFlexVit(Transformer): ...
-
-
-def mode_support_jepa(model):
-    import inspect
-
-    sig = inspect.signature(model.forward)
-    params = sig.parameters
-
-    return "jepa_masks" in params
 
 
 def __test_jepa_naflex():

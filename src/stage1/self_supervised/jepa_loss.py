@@ -124,3 +124,18 @@ def create_ijepa_loss(
     )
 
     return loss_fn
+
+
+if __name__ == "__main__":
+    """
+    python -m src.stage1.self_supervised.jepa_loss
+    """
+    collator = MaskCollator(input_size=(224, 224), patch_size=16, nenc=1, npred=4)
+    x = torch.randn(2, 3, 224, 224)
+    x, masks_enc, masks_pred = collator(x)
+    print("x shape:", x.shape)
+    for enc_mask in masks_enc:
+        print(enc_mask.shape)
+    print("----------")
+    for pred_mask in masks_pred:
+        print(pred_mask.shape)

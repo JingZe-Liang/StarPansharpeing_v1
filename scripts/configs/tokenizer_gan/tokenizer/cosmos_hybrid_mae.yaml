@@ -54,24 +54,18 @@ trans_enc_cfg:
   reg_tokens: 4
   compile_model: false
   attn_type: gated
+  init_values: 1.0e-5 # layerscale
+  #### MAE pretraining
+  mae_decoder_depth: 12
+  mae_decoder_dim: 512
+  mae_mask_type: pixio
+  mae_mask_ratio: 0.75
+  mae_pixio_mask_grid: 2
+  mae_latent_size: 14
+  mae_decoder_head: seperated
+  pretrained_type: pixel_mae
 
 trans_dec_cfg: null
-#   embed_dim: 1152
-#   depth: 6
-#   num_heads: 16
-#   mlp_ratio: 4.0
-#   qkv_bias: true
-#   patch_size: 1
-#   norm_layer: flarmsnorm
-#   pos_embed: learned
-#   pos_embed_grid_size: [32, 32]
-#   rope_type: axial
-#   img_size: 32
-#   in_chans: 768
-#   out_chans: 768
-#   unpatch_size: 2 # sem decoder -> cnn decoder
-#   reg_tokens: 4
-#   compile_model: false
 
 distillation_cfg:
   dino_feature_dim: 1024

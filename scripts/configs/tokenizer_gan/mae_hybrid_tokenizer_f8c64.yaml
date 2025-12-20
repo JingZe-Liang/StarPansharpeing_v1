@@ -6,9 +6,9 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: cosmos_hybrid_one_big_transformer
+  - tokenizer: cosmos_hybrid_mae
   - quantizer: quant
-  - proxy_task: ijepa
+  - proxy_task: mae
   - accelerator: base
   - vq_loss: remote_clip_RN50
   # self ============
@@ -33,33 +33,16 @@ dataset:
   weights:
     [30, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 16, 10, 16, 10, 11, 20]
 
-# proxy_task:
-#   optimizer:
-#     _target_: heavyball.AdamW
-#     _partial_: true
-#     lr: 2.0e-4
-#     weight_decay: 0.01
-#     caution: true
-#     mars: false
-#     betas: ${tuple:[0.9,0.99]}
-
 tokenizer:
   cnn_cfg:
     model:
-      latent_channels: 64 # [16,32,64]
+      latent_channels: 32 # [16,32,64]
     quantizer_type: null
     use_channel_drop: false
     channel_drop_config:
       drop_type: ${list:[16,32,48]}
       max_channels: 64
       drop_prob: 0.5
-  trans_enc_cfg:
-    #   in_chans: 1024
-    #   out_chans: 1024
-    pretrained_type: "ijepa"
-  # trans_dec_cfg:
-  #   in_chans: 1024
-  #   out_chans: 1024
 
 vq_loss:
   # perceptual loss
@@ -159,7 +142,7 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-12-06_18-33-38_hybrid_cosmos_f16c64_jepa_pretrained/checkpoints/checkpoint_45
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-16_01-15-52_hybrid_cosmos_f16c64_jepa_pretrained_gram_distillation_v1/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-20_19-27-19_hybrid_cosmos_f16c64_mae_pretrained/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -176,30 +159,6 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 4.0e-4 # Reduced learning rate for hybrid model stability
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
-    # _target_: src.utilities.optim.get_muon_triton_optimizer
-    # _partial_: true
-    # general_defaults:
-    #   lr: 4.0e-4
-    # muon_defaults:
-    #   lr: 4.0e-4
-    #   weight_decay: 0.1
-    #   momentum: 0.95
-    # adamw_defaults:
-    #   lr: 2.0e-4
-    #   weight_decay: 0.0
-    #   betas: [0.9, 0.95]
-
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
     betas: [0.9, 0.95]
@@ -213,24 +172,19 @@ train:
     oned_params_defaults:
       lr: 3.0e-4
       weight_decay: 0.02
-
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-5
-    # eps: 1.0e-8
-    # betas: [0.95, 0.99]
-    # # foreach: true
-    # fused: true
-
-    # Adamw seems make the std too large
     # _target_: heavyball.AdamW
     # _partial_: true
     # lr: 3.0e-4
     # weight_decay: 0.02
     # caution: true
     # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
-
+  #   _target_: torch.optim.AdamW
+  #   _partial_: true
+  #   lr: 3.0e-4
+  #   weight_decay: 1.0e-5
+  #   eps: 1.0e-8
+  #   betas: [0.9, 0.95]
+  #   foreach: true
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
@@ -239,30 +193,6 @@ train:
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]
     foreach: true
-
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 0.01
-    # caution: true
-    # mars: false
-    # betas: ${tuple:[0.5,0.9]}
-
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.01
-    # caution: true
-    # mars: false
-    # betas: ${tuple:[0.5,0.9]}
-
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.01
-    # caution: true
-    # mars: false
-    # betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -289,11 +219,11 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c64_jepa_pretrained_distill-irepa-spatial-norm
+    run_comment: hybrid_cosmos_f16c64_mae_pretrained
     log_with_time: true
     visualize_every: 500
     log_every: 10
-    log_with: ['tensorboard', 'swanlab']
+    log_with: ["tensorboard", "swanlab"]
 
   debug: true
 

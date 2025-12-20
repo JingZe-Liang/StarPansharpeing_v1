@@ -47,6 +47,8 @@ from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any
 from src.utilities.network_utils import load_weights_with_shape_check
 
+from ..utilities.losses.latent_reg import NestChannelDrop, lcr_loss, lmr_apply, LatentMaskConfig
+
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
@@ -336,6 +338,9 @@ class EncoderDecoderConfig:
     # generative decoder specific
     per_layer_noise: bool = False
 
+    def __post_init__(self):
+        self.adaptive_mode in ("interp", "slice")
+
 
 @dataclass
 class ContinuousTokenizerConfig:
@@ -357,10 +362,15 @@ class ContinuousTokenizerConfig:
     uni_path: Optional[str] = ""
     loading_type: Optional[str] = None  # "nvidia", "uni", None
     # latent augmented related
+    # channel drop from dc-vae2
     use_channel_drop: bool = False
     channel_drop_config: ChannelDropConfig = field(default_factory=ChannelDropConfig)
+    # latent noise
     latent_noise_prob: float = 0.0
     latent_noise_type: str = "beta_1_5"  # Beta time-step sample distribution
+    # non-mask-out (replace)-type latent augmentation
+    use_latent_mask: bool=False
+    latent_mask_config: LatentMaskConfig = field(default_factory=LatentMaskConfig)
     # model related
     name: str = "ContinuousImageTokenizer"
     model: EncoderDecoderConfig = field(default_factory=EncoderDecoderConfig)
@@ -504,11 +514,16 @@ class ContinuousImageTokenizer(nn.Module):
                     logger.info(profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
                 logger.log("NOTE", "load pretrained model done!")
 
-        # token channel drop
+        # latent regularization
         self.use_channel_drop = cfg.use_channel_drop
+        self.use_latent_mask = cfg.use_latent_mask
         if self.use_channel_drop:
             self.channel_drop = NestChannelDrop(**asdict(cfg.channel_drop_config))
             logger.info(f"use channel drop: {cfg.channel_drop_config}")
+        if cfg.use_latent_mask:
+            self.latent_mask_cfg = cfg.latent_mask_config
+            logger.info(f"use latent mask replacement: {self.latent_mask_cfg}")
+            self.mask_token = nn.Parameter(torch.randn(1, self.latent_channels, 1, 1))
 
         # register repa hook
         if self._vf_on_z_or_module == "module" and (self._use_vf_loss or self._use_repa_loss):
@@ -581,6 +596,8 @@ class ContinuousImageTokenizer(nn.Module):
     def _build_pre_post_quant_convs(self, cfg: ContinuousTokenizerConfig):
         model_cfg = self.model_cfg
         q_conv_chan = model_cfg.latent_channels
+        _quant_conv_init_kwargs = dict(std=0.01, a=-1.2, b=1.2)
+
         if cfg.quantizer_type == "kl":
             q_conv_chan = q_conv_chan * 2
         elif cfg.quantizer_type == "psd":
@@ -599,11 +616,11 @@ class ContinuousImageTokenizer(nn.Module):
             )
             nn.init.ones_(quant_conv[0].weight)
             nn.init.zeros_(quant_conv[0].bias)
-            nn.init.trunc_normal_(quant_conv[1].weight, std=0.01)
+            nn.init.trunc_normal_(quant_conv[1].weight, **_quant_conv_init_kwargs)
             nn.init.zeros_(quant_conv[1].bias)
         else:
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
-            nn.init.trunc_normal_(quant_conv.weight, std=0.01)
+            nn.init.trunc_normal_(quant_conv.weight, **_quant_conv_init_kwargs)
             nn.init.zeros_(quant_conv.bias)
 
         # then the quantizer will output the latent_channels h
@@ -912,6 +929,13 @@ class ContinuousImageTokenizer(nn.Module):
             if self.use_latent_denoise:
                 # latent noising and then to _vf_proj (vf decoder)
                 h = self._latent_noising(h, mask)
+            if self.use_latent_mask:
+                lmr_res = lmr_apply(h, **asdict(self.latent_mask_cfg))
+                if isinstance(lmr_res, tuple):
+                    _, mask_lmr = lmr_res
+                    # replace with mask token
+                    mask_token_expanded = self.mask_token.expand_as(h)
+                    h = torch.where(mask_lmr, mask_token_expanded, h)
 
         return h
 

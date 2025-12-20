@@ -30,6 +30,7 @@ from ..model import (
 )
 from ..repa import LatentGramLoss, REPALoss, VFLoss
 from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
+from ..latent_reg import lcr_loss
 
 # * --- utilities --- #
 
@@ -332,6 +333,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
+        lcr_loss_weight: float | None = None,
+        lcr_loss_options: dict = {},
         ssim_weight: float = 0.1,
         # if is video
         num_frames: int = 1,
@@ -375,6 +378,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.num_frames = num_frames
         self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
+        self.lcr_loss_weight = lcr_loss_weight
+        self.lcr_loss_options = lcr_loss_options
+        self.use_lcr = lcr_loss_weight is not None and lcr_loss_weight > 0.0
         if force_not_use_recon_loss:
             logger.info(
                 "[VQ fn loss]: not use reconstruction loss, make sure you will compute this main loss elsewhere"
@@ -826,6 +832,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         repa_loss: torch.Tensor | None = None,
         sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
+        lcr_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
         # other =======
@@ -838,12 +845,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "total_loss": total_loss.clone().detach(),
                 "nll_loss": nll_loss.detach(),
                 "reconstruct_loss": reconstruction_loss.detach().mean(),
-                "ssim_loss": ssim_loss.detach().mean(),
-                "perceptual_loss": percep_loss.detach().mean(),
-                "repa_loss": repa_loss.detach().mean(),
-                "sem_dist_loss": sem_dist_loss.detach().mean(),
-                "vf_loss": vf_loss.detach().mean(),
-                "gram_loss": gram_loss.detach().mean(),
+                "ssim_loss": ssim_loss.detach().mean() if ssim_loss is not None else self.zero,
+                "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
+                "repa_loss": repa_loss.detach().mean() if repa_loss is not None else self.zero,
+                "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
+                "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
+                "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
+                "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
                 "d_weight": self.zero,
                 "disc_factor": self.zero,
                 "g_loss": self.zero,
@@ -855,12 +863,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     # image losses
                     "nll_loss": nll_loss.detach(),
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
-                    "perceptual_loss": percep_loss.detach().mean(),
-                    "gram_loss": gram_loss.detach().mean(),
-                    "ssim_loss": ssim_loss.detach().mean(),
-                    "repa_loss": repa_loss.detach().mean(),
-                    "sem_dist_loss": sem_dist_loss.detach().mean(),
-                    "vf_loss": vf_loss.detach().mean(),
+                    "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
+                    "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
+                    "ssim_loss": ssim_loss.detach().mean() if ssim_loss is not None else self.zero,
+                    "repa_loss": repa_loss.detach().mean() if repa_loss is not None else self.zero,
+                    "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
+                    "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
+                    "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
                     # discriminator loss
                     "d_weight": disc_weight,
                     "disc_factor": torch.tensor(disc_factor),
@@ -873,8 +882,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
                 log = {
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
-                    "perceptual_loss": percep_loss.detach().mean(),
-                    "gram_loss": gram_loss.detach().mean(),
+                    "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
+                    "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
                     "g_loss": real_g_loss.detach(),
                 }
 
@@ -989,6 +998,14 @@ class VQLPIPSWithDiscriminator(nn.Module):
             gram_loss = self.gram_loss(inputs, reconstructions, nll_loss, enc_last_layer)
             gram_loss = gram_loss * self.gram_loss_weight
 
+        # * lcr loss
+        lcr_loss_val = self.zero
+        if self.use_lcr:
+            assert tokenizer_feat is not None, "tokenizer_feat (z) is required for lcr_loss"
+            local_corr, lcr_loss_val = lcr_loss(tokenizer_feat, **self.lcr_loss_options)
+            lcr_weight = self._calculate_adaptive_weight(nll_loss, lcr_loss_val, last_layer=enc_last_layer)
+            lcr_loss_val = lcr_loss_val * lcr_weight * self.lcr_loss_weight
+
         # * (un)conditional gan loss
         disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.disc_iter_start_for_g)
         d_weight = 1.0
@@ -1019,7 +1036,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss, q_loss_logs = self._q_loss(q_loss_total, q_loss_breakdown, global_step)
 
         # * basic losses
-        loss = nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss
+        loss = nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss + lcr_loss_val
 
         # * form logs
         log = self._train_generator_log_form(
@@ -1032,6 +1049,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             repa_loss=repa_loss,
             sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
+            lcr_loss=lcr_loss_val,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,
             gram_loss=gram_loss,

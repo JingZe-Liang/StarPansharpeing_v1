@@ -18,6 +18,7 @@ import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
@@ -271,8 +272,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.ibot_patch_loss = self.ibot_patch_loss.to(self.device)
             logger.info("Create <cyan>ibot</cyan> pretrained proxy task.")
 
-        if "mae" in self._proxy_tasks:
-            raise
+        if "mae" in self._proxy_tasks or "latent_mae" in self._proxy_tasks or "pixel_mae" in self._proxy_tasks:
+            pass
 
         # Optimizer and scheduler
         if self.proxy_model is not None:
@@ -515,6 +516,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 if "swanlab" in self._trackers_name:
                     import swanlab
 
+                    exp_cfg = {
+                        "train_cfg": to_cont(self.train_cfg),
+                        "model_cfg": to_cont(self.tokenizer_cfg),
+                        "proxy_cfg": to_cont(getattr(self, "proxy_task", None)),
+                    }
                     exp_name = getattr(self.train_cfg.log, "exp_name", None)
                     self.swanlab_logger = swanlab.init(
                         project="RSTokenizer",
@@ -522,8 +528,8 @@ class CosmosHyperspectralTokenizerTrainer:
                         experiment_name=exp_name,
                         logdir=str(Path(log_dir) / "swanlab"),
                         resume="never",
+                        config=exp_cfg,
                     )
-                    self.swanlab_logger
                     logger.info("Will log to swanlab.")
 
             #### Log code into dir
@@ -587,7 +593,7 @@ class CosmosHyperspectralTokenizerTrainer:
             if log_type == "grad_norm_sum":
                 norms[f"{model_cls_n}_grad_norm"] = 0
 
-            for n, p in model.named_parameters():
+            for n, p in tqdm(model.named_parameters(), desc="logging grad norms", leave=False):
                 if p.grad is not None:
                     # must sync grad here, `is_main_process` would cause the ranks do not sync
                     if isinstance(p.grad, DTensor):
@@ -1153,6 +1159,18 @@ class CosmosHyperspectralTokenizerTrainer:
             proxy_loss_breakdown.ijepa_loss = loss.detach()
             proxy_loss = proxy_loss + loss
 
+        if "latent_mae" in proxy_tasks or "pixel_mae" in proxy_tasks:
+            img_size = 224
+            x = F.interpolate(x, size=img_size, mode="bilinear")
+            with self.accelerator.autocast():
+                proxy_loss, mae_recon = self.tokenizer.encode_mae(x)
+            if "latent_mae" in proxy_tasks:
+                # if works on pixel space, the `mae_recon` is the image
+                mae_recon = None
+            proxy_loss_breakdown = {"mae_loss": proxy_loss.detach()}
+            # expose mae_recon at top-level so callers can access it directly
+            ret.mae_recon = mae_recon.detach() if mae_recon is not None else None
+
         if "ibot" in proxy_tasks:
             from src.stage1.self_supervised.dino.data import MaskingGenerator, generate_ibot_masks
 
@@ -1584,7 +1602,8 @@ class CosmosHyperspectralTokenizerTrainer:
         quality_track_n = self.train_cfg.track_metrics_duration
         quality_track_after = self.train_cfg.track_metrics_after
         check_quality = None
-        proxy_out = None
+        out_d = proxy_out = None
+
         if quality_track_n >= 0:
             self._psnr_fn = PeakSignalNoiseRatio(data_range=1.0).to(self.device, self.dtype)
             self._ssim_fn = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device, self.dtype)
@@ -1604,6 +1623,8 @@ class CosmosHyperspectralTokenizerTrainer:
             # with torch.autograd.set_detect_anomaly(True):
             # self.log_msg(f"input shape: {x.shape}", level="debug")
 
+            # ----- Training augmentaion ------- #
+            # TODO: move this into another augmentation pipeline?
             if self.use_training_aug:
                 # NOTE: augmentation pipeline
                 # is decoder_clean, x_clean -> aug -> x_deg
@@ -1652,12 +1673,16 @@ class CosmosHyperspectralTokenizerTrainer:
                 check_quality(x, out_d["recon"])
 
             logger.trace(f"Train step: {self.global_step} - recon loss: {tokenizer_loss} - Channels: {x.shape[1]}")
-
             if proxy_out is not None:
                 logger.trace(
                     f"Train step: {self.global_step} - "
-                    f"proxy losses: {', '.join(f'{k}: {v.item():.4f}' for k, v in proxy_out.proxy_loss_breakdown.items())}"
-                    # f"proxy loss: {proxy_out.proxy_loss.item():.4f}"
+                    f"proxy losses: {
+                        ', '.join(
+                            f'{k}: {v.item():.4f}'
+                            for k, v in proxy_out.proxy_loss_breakdown.items()
+                            if torch.is_tensor(v) and v.numel() == 1
+                        )
+                    }"
                 )
 
         self.step_train_state()
@@ -1703,6 +1728,11 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if self.global_step % self.train_cfg.log.visualize_every == 0:
             self.visualize_reconstruction(x, out_d["recon"], add_step=True, img_name="recon/train_recon")
+            if proxy_out.get("mae_recon", None) is not None:
+                mae_recon = proxy_out["mae_recon"]
+                assert torch.is_tensor(mae_recon) and mae_recon.ndim == 4
+                x_vis = F.interpolate(x, size=mae_recon.shape[-2], mode="bilinear")
+                self.visualize_reconstruction(x_vis, mae_recon, add_step=True, img_name="recon/mae_recon")
 
     def format_log(self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None) -> str:
         def dict_round_to_list_str(d: dict, n_round: int = 3, select: list[str] | None = None):
@@ -1918,21 +1948,21 @@ class CosmosHyperspectralTokenizerTrainer:
                 except Exception as e:
                     logger.warning(f"PSNR calculation error: {e}")
                     # Try to compute on CPU
-                    psnr_fn = psnr_fn.to('cpu')
-                    psnr_fn.update(batch_img_rgb.to('cpu'), recon_for_metrics.to('cpu'))
+                    psnr_fn = psnr_fn.to("cpu")
+                    psnr_fn.update(batch_img_rgb.to("cpu"), recon_for_metrics.to("cpu"))
                     psnr_fn = psnr_fn.to(self.device)
-                    
+
                 # NOTE: large hyperspectral image may cause OOM in PSNR/SSIM calculation
                 if c > 200 and h >= 512:
                     continue
-            
+
                 try:
                     ssim_fn.update(batch_img_rgb, recon_for_metrics)
                 except Exception as e:
                     logger.warning(f"SSIM calculation error: {e}")
                     # Try to compute on CPU
-                    ssim_fn = ssim_fn.to('cpu')
-                    ssim_fn.update(batch_img_rgb.to('cpu'), recon_for_metrics.to('cpu'))
+                    ssim_fn = ssim_fn.to("cpu")
+                    ssim_fn.update(batch_img_rgb.to("cpu"), recon_for_metrics.to("cpu"))
                     ssim_fn = ssim_fn.to(self.device)
 
             # recon loss
@@ -2297,7 +2327,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "hybrid_cosmos_f16c32p1"
+_key = "mae_cosmos_f8c64"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2337,6 +2367,7 @@ _configs_dict = {
     "ijepa_cosmos_f16c64": "ijepa_hybrid_tokenizer_f16c64",
     "ijepa_cosmos_f16c64_pure_cnn_decoder": "ijepa_hybrid_tokenizer_cnn_decoder_f16c64",
     "lejepa_cosmos_f16c64": "lejepa_hybrid_tokenizer_f16c64",
+    "mae_cosmos_f8c64": "mae_hybrid_tokenizer_f8c64",
     "ibot_lejepa_cosmos_f8c32": "ibot_lejepa_hybrid_tokenizer_f8c32",  # OOM !
 }
 
