@@ -3,6 +3,7 @@ Hyperspectral Transformer Tokenizer with hybrid CNN / Transformer architecture.
 RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
+from pickle import FALSE
 from dataclasses import asdict, dataclass
 from typing import Any, List, NamedTuple, Optional, Self, Tuple, Union
 
@@ -70,6 +71,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.distillation_cfg = distillation_cfg
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
 
+        self.latent_channels = self.cnn_cfg.model.latent_channels
+
         ###### Distillation configs
         self.distillation_cfg = set_defaults(
             distillation_cfg,
@@ -101,12 +104,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         build_enc_dec_kwargs = {}
         if cnn_enc_cfg is not None or cnn_dec_cfg is not None:
             # If the encoder or decoder config is provided, use it
-            build_enc_dec_kwargs = edict(
-                {
-                    "enc_cnn_model_cfg": cnn_enc_cfg,
-                    "dec_cnn_model_cfg": cnn_dec_cfg,
-                }
-            )
+            build_enc_dec_kwargs = edict(enc_cnn_model_cfg=cnn_enc_cfg, dec_cnn_model_cfg=cnn_dec_cfg)
         super().__init__(self.cnn_cfg, build_enc_dec_kwargs=build_enc_dec_kwargs)
 
         ##### Transformer models
@@ -116,6 +114,16 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         ### Loading pretrained models
         if self.cnn_cfg.loading_type == "hybrid_pretrained":
             self.load_pretrained(self.cnn_cfg.uni_path)
+
+        if "lejepa_latent" in self.trans_enc_cfg.pretrained_type:
+            from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
+
+            assert self.latent_bottleneck_type == "before_semantic", (
+                "LeJEPA latent loss requires the latent bottleneck before semantic encoder"
+            )
+
+            self.lejepa_projector_latent = create_lejepa_projector(self.latent_channels, self.latent_channels)
+            logger.info("[LeJEPA loss]: create lejepa loss and projector for the latent")
 
     def _build_encoder_decoder(  # type: ignore
         self,
@@ -383,14 +391,22 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         """
         # Low-level encoder
         z_low_lvl = self.encoder.encoder(x)
-
         # Semantic encoder
         _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
             z_low_lvl, masks=jepa_masks, pretrained_task=["ijepa"]
         )
-
         # no quant_conv here
         return terms.ijepa_feat
+
+    def encode_lejepa_latent(self, x, **_ignored_kwargs):
+        assert self.latent_bottleneck_type == "before_semantic"
+        # Low-level encoder
+        z_low_lvl = self.encoder.encoder(x)
+        # quant conv
+        h = self.encoder.quant_conv(z_low_lvl)
+        h_pool = h.mean(dim=(2, 3))
+        h_proj = self.lejepa_projector_latent(h_pool)
+        return h_proj
 
     def encode_lejepa(self, x, **_ignored_kwargs):
         """
@@ -680,13 +696,14 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     def get_repa_feature(
-        self,
+        self, force_to: bool=False,
     ) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]] | None:
-        if not self._use_repa_loss:
-            return None
-        elif not self.training:
-            # is not training, do not proj since we do not need to train using repa features
-            return None
+        if not force_to:
+            if not self._use_repa_loss:
+                return None
+            elif not self.training:
+                # is not training, do not proj since we do not need to train using repa features
+                return None
 
         # z and sem_z
         z, sem_z = self.z, self.sem_z
@@ -931,7 +948,8 @@ def hybrid_ijepa_f8_config(
             "spatial_compression": 8,  # Default spatial compression
             "patch_size": 1,  # Default patch size
             "block_name": "res_block",  # Default block type
-            "norm_type": "gn",  # Default normalization
+            "norm_type": "rmsnorm2d",  # Default normalization
+            "act_type": "silu",
             "norm_groups": 32,  # Default number of groups
             "adaptive_mode": "interp",
             "downsample_kwargs": {"padconv_use_manually_pad": False},
@@ -941,7 +959,7 @@ def hybrid_ijepa_f8_config(
         "vf_on_z_or_module": "z",  # Visual feature on z
         "use_repa_loss": use_repa_loss,
         "dino_feature_dim": 1024,
-        "loading_type": "",
+        "loading_type": "hybrid_pretrained",
         "uni_path": pretrained_path,
     }
 
@@ -963,7 +981,7 @@ def hybrid_ijepa_f8_config(
         "reg_tokens": 4,
         "rope_type": "axial",
         "attn_type": "gated",
-        "pretrained_type": "latent_mae",  # "ijepa",
+        "pretrained_type": ["ijepa", "lejepa_latent"],
     }
 
     cfg = OmegaConf.create(
@@ -1051,13 +1069,14 @@ def test_model_forward_backward(
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
     from src.data.litdata_hyperloader import get_fast_test_hyper_litdata_load
-    from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk
 
     device = torch.device("cuda")
 
     cfg = hybrid_ijepa_f8_config(
         # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
-        use_repa_loss=False,
+        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_05-34-15_hybrid_cosmos_f16c64_ijepa_pretrained_sem/ema/tokenizer/model.safetensors",
+        latent_chans=32,
+        use_repa_loss=True,
     )
     # cfg = hybrid_distillation_f16_config(
     #     pretrained_path="runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors",
@@ -1071,7 +1090,10 @@ def test_model_forward_backward(
         distillation_cfg=cfg.distillation_cfg,
     )
     model = model.to(device, torch.bfloat16)  # Move model to device (CUDA or CPU)
-    model.eval()
+    if save_pca_vis:
+        model.train()
+    else:
+        model.eval()
     logger.info("Model created successfully!")
     # model.set_grad_checkpointing(enabled=True)
 
@@ -1092,7 +1114,7 @@ def test_model_forward_backward(
             is_itered = True
         else:
             # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
-            dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1)[1]  # type: ignore
+            dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1, stream_ds_kwargs={"shuffle": True})[1]  # type: ignore
             iterations = dl
     else:
         x = torch.randn(*fake_img_shape).to(device, dtype)
@@ -1114,6 +1136,9 @@ def test_model_forward_backward(
 
     with torch.autocast(str(device), dtype=torch.bfloat16):
         for index, x in (tbar := tqdm(enumerate(iterations))):
+            if index < 10:
+                continue
+
             with ctx():
                 if isinstance(x, dict):
                     x = x["img"].to(device, dtype)
@@ -1123,12 +1148,7 @@ def test_model_forward_backward(
                 # Forward pass
                 if not (use_optim or check_grad):
                     # Eval mode
-                    model.eval()
                     with torch.no_grad():
-                        loss = model.encode_mae(x)
-                        print(f"Loss: {loss}")
-                        exit(0)
-
                         encoded = model.encode(x)
                         encoded_tensor = encoded.to_dec
 
@@ -1142,7 +1162,6 @@ def test_model_forward_backward(
                         )
                 else:
                     # Training mode
-                    model.train()
                     encoded = model.encode(x)
                     encoded_tensor, q_loss, loss_breakdown = encoded.to_dec, encoded.q_loss, encoded.q_loss_breakdown
                     decoded_tensor = model.decode(encoded, x.shape).recon
@@ -1212,14 +1231,15 @@ def test_model_forward_backward(
     if save_pca_vis:
         Path("tmp").mkdir(exist_ok=True)
         if pca_type == "proj":
-            feat = model.get_repa_feature()
+            feat = model.get_repa_feature(force_to=True)
             if feat is not None:
                 # feat is a tuple of (low_lvl_z_proj, sem_z_proj)
                 if isinstance(feat, tuple) and len(feat) >= 2:
                     # Use semantic features for PCA
-                    feat_to_use = feat[1] if feat[1] is not None else feat[0]
-                    if isinstance(feat_to_use, list):
-                        feat_to_use = feat_to_use[2]
+                    # feat_to_use = feat[1] if feat[1] is not None else feat[0]
+                    # if isinstance(feat_to_use, list):
+                    #     feat_to_use = feat_to_use[2]
+                    feat_to_use= feat
                 else:
                     feat_to_use = feat
             else:
@@ -1239,23 +1259,86 @@ def test_model_forward_backward(
                     feat_to_use = encoded.latent
                     # logger.warning("PCA with 'z' type not supported for iterated data in current implementation")
 
+        breakpoint()
+        if isinstance(feat_to_use, tuple):
+            # cat all together
+            feat_to_use = [*feat_to_use[0], *feat_to_use[1]]
+
         if feat_to_use is not None:
             assert feat_to_use is not None, "Feature should not be None for PCA"
-            hw = feat_to_use.shape[-2:]
-            feat_to_use = feat_to_use.reshape(feat_to_use.shape[0], feat_to_use.shape[1], -1)
-            feat_to_use = feat_to_use - feat_to_use.mean(-1, keepdim=True)
-            feat_to_use = feat_to_use / feat_to_use.std(-1, keepdim=True)
-            feat_to_use = feat_to_use.reshape(-1, feat_to_use.shape[1], hw[0], hw[1])
+            # plot
+            import matplotlib.pyplot as plt
 
-            feat_pca = feature_pca_sk(feat_to_use.float())
-            # Normalize
-            feat_pca = (feat_pca - feat_pca.min()) / (feat_pca.max() - feat_pca.min())
-            feat_pca = (feat_pca * 255.0).to(torch.uint8).detach().cpu().numpy()[0].transpose(1, 2, 0)
-            Image.fromarray(feat_pca).save(f"tmp/repa_feature_pca_{pca_type}.png")
-            logger.info(f"Save PCA visualization to tmp/repa_feature_pca_{pca_type}.png")
+            if torch.is_tensor(feat_to_use):
+                logger.info(f'Got 1 feature to PCA visualization with shape {feat_to_use.shape}')
+                feat_pca = _get_pca_vis(feat_to_use)
+                n_cols, nrows = 2, 1
+                fig, axes = plt.subplots(figsize=(8, 8), ncols=n_cols, nrows=nrows)
+                axes[0].imshow(feat_pca[:, :, :3])
+                axes[0].set_title("PCA")
+                x_vis = (x.float() + 1) / 2
+                x_vis = x_vis[0].cpu().numpy().transpose(1, 2, 0)
+                axes[1].imshow(x_vis)
+                axes[1].set_title("Input Image")
+            else:
+                logger.info(f'Got {len(feat_to_use)} feature maps for PCA visualization')
+                # is a list
+                feat_pca = [_get_pca_vis(fea)[0] for fea in feat_to_use ]
+                n_cols, nrows = 5, 2
+                fig, axes = plt.subplots(figsize=(20, 8), ncols=n_cols, nrows=nrows)
+                x_vis = (x.float() + 1) / 2
+                x_vis = x_vis[0].cpu().numpy().transpose(1, 2, 0)
+                all_figs = [*feat_pca, x_vis]
+                axes = axes.flatten()
+                i = 0
+                for f in all_figs:
+                    axes[i].imshow(f)
+                    i += 1
+
+            fig.savefig(f"tmp/pca_vis.webp")
 
     # Return for compatibility with original function
     return decoded_tensor.mean().item() if use_optim else 0.0
+
+
+def _get_pca_vis(feat_list: torch.Tensor | list[torch.Tensor], norm_type: str = "channel"):
+    from src.stage1.utilities.losses.repa.feature_pca import feature_pca_sk, pca_list, feature_pca_torch
+    from tqdm import tqdm
+
+    if isinstance(feat_list, torch.Tensor):
+        feat_list = [feat_list]
+    
+    feat_list_2 = []
+    for feat in feat_list:
+        if norm_type == "channel":
+            feat = feat / feat.norm(dim=1, keepdim=True)
+            feat = (feat - feat.mean(dim=1, keepdim=True)) / feat.std(dim=1, keepdim=True)
+        else:
+            hw = feat.shape[-2:]
+            feat = feat.reshape(feat.shape[0], feat.shape[1], -1)
+            feat = feat - feat.mean(-1, keepdim=True)
+            feat = feat / feat.std(-1, keepdim=True)
+            feat = feat.reshape(-1, feat.shape[1], hw[0], hw[1])
+        feat_list_2.append(feat)
+
+    feat_pca = []
+    for i in tqdm(range(len(feat_list_2)), desc="PCA visualization", leave=False):
+        f = feat_list_2[i]
+        if f.shape[1] <= 3:
+            feat_pca.append(f.float().detach().cpu().numpy()[0].transpose(1, 2, 0))
+            continue
+        # Use torch PCA
+        f_pca = feature_pca_torch(f.float(), pca_k=3, norm_pca=False)
+        feat_pca.append(f_pca)
+
+    # Normalize
+    for i in range(len(feat_pca)):
+        f_pca = feat_pca[i]
+        f_pca = (f_pca - f_pca.min()) / (f_pca.max() - f_pca.min())
+        f_pca = (f_pca * 255.0).to(torch.uint8).detach().cpu().numpy()[0].transpose(1, 2, 0)
+        feat_pca[i] = f_pca
+
+    return feat_pca
 
 
 if __name__ == "__main__":
@@ -1264,6 +1347,6 @@ if __name__ == "__main__":
     """
     with logger.catch():
         test_model_forward_backward(
-            real_data="SAM270k", compute_mean_std=True, max_iters=1, save_pca_vis=True, pca_type="z"
+            real_data="SAM270k", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
         )
         # test_forward_pca()

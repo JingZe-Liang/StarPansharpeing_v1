@@ -343,7 +343,18 @@ class VQLPIPSWithDiscriminator(nn.Module):
     ):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla", "non_saturate", "relative"]
-        assert quantizer_type in ["lfq", "bsq", "vq", "vq_advance", "kl", "fsq", "psd", None]  # fmt: skip
+        assert quantizer_type in [
+            "lfq",
+            "bsq",
+            "vq",
+            "vq_advance",
+            "kl",
+            "fsq",
+            "psd",
+            "multiscale_bsq",
+            "multiscale_leechq",
+            None,
+        ]  # fmt: skip
         assert disc_network_type in [
             "patchgan",
             "patchgan_v2",
@@ -407,7 +418,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # TODO: add ibq here
         elif quantizer_type == "ibq":
             raise NotImplementedError("ibq loss is not implemented")
-        elif quantizer_type in ("bsq", "lfq"):
+        elif quantizer_type in ("bsq", "lfq", "multiscale_bsq", "multiscale_leechq"):
             default_quant_opts = dict(
                 quantizer_loss_weight=0.1,
                 codebook_enlarge_ratio=3,
@@ -693,7 +704,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             }
 
         # > lfq or bsq ===============
-        elif self.quantizer_type in ("lfq", "bsq"):
+        elif self.quantizer_type in ("lfq", "bsq", "multiscale_bsq", "multiscale_leechq"):
             q_loss = q_loss_total * self.quantizer_options["quantizer_loss_weight"]
             cb_enlarge_r = self.quantizer_options["codebook_enlarge_ratio"]
             codebook_enlarge_steps = self.quantizer_options["codebook_enlarge_steps"]
@@ -720,6 +731,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "batch_entropy": q_loss_breakdown.batch_entropy,
                     "per_sample_entropy": q_loss_breakdown.per_sample_entropy,
                 }
+            elif self.quantizer_type in ("multiscale_bsq", "multiscale_leechq"):
+                logs = {
+                    "q_loss": q_loss,
+                    "all_losses": q_loss_breakdown.all_losses,
+                }
+                if hasattr(q_loss_breakdown, "all_entropies"):
+                    logs["all_entropies"] = q_loss_breakdown.all_entropies
 
         # > kl or psd =============
         elif self.quantizer_type in ("kl", "psd"):
@@ -731,6 +749,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
             # no loss for fsq
             q_loss = q_loss_total  # is zero
             logs = {"fsq_loss": q_loss}  # must be zeros
+            
+        elif self.qunatizer_type == '':
+            ...
 
         return q_loss, logs
 
@@ -748,7 +769,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 ],
                 self.quantizer_options,
             )
-        elif self.quantizer_type == "bsq":
+        elif self.quantizer_type in ("bsq", "multiscale_bsq", "multiscale_leechq"):
             _assert_in_dict(
                 [
                     "quantizer_loss_weight",
@@ -944,9 +965,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss_total: torch.Tensor | None = None,
         outer_recon_loss: torch.Tensor | None = None,
         # repa projected or z (latent) vf projected
-        tokenizer_feat: torch.Tensor | None = None,
+        latent: torch.Tensor | None = None,
+        tokenizer_feat: torch.Tensor | list[torch.Tensor] | None = None,
         # for semantic distillation
-        tokenizer_feat2: torch.Tensor | None = None,
+        tokenizer_feat2: torch.Tensor | list[torch.Tensor] | None = None,
         enc_last_layer: nn.Parameter | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
         # generator update
@@ -1000,11 +1022,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * lcr loss
         lcr_loss_val = self.zero
+        # breakpoint()
         if self.use_lcr:
-            assert tokenizer_feat is not None, "tokenizer_feat (z) is required for lcr_loss"
-            local_corr, lcr_loss_val = lcr_loss(tokenizer_feat, **self.lcr_loss_options)
-            lcr_weight = self._calculate_adaptive_weight(nll_loss, lcr_loss_val, last_layer=enc_last_layer)
-            lcr_loss_val = lcr_loss_val * lcr_weight * self.lcr_loss_weight
+            assert latent is not None, "latent (h) is required for lcr_loss"
+            local_corr, lcr_loss_val = lcr_loss(latent, **self.lcr_loss_options)
+            if lcr_loss_val > 0:
+                lcr_weight = self._calculate_adaptive_weight(nll_loss, lcr_loss_val, last_layer=enc_last_layer)
+                lcr_loss_val = lcr_loss_val * lcr_weight * self.lcr_loss_weight
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.disc_iter_start_for_g)
@@ -1169,6 +1193,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         last_layer: nn.Parameter | torch.Tensor | None = None,
         enc_last_layer: nn.Parameter | None = None,
         cond: torch.Tensor | None = None,
+        latent: torch.Tensor | None = None,
         tokenizer_feat: torch.Tensor | None = None,
         # tokenizer distillation feature (low-level and semantic)
         tokenizer_feat2: torch.Tensor | None = None,
@@ -1234,6 +1259,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 cond=cond,
                 q_loss_total=q_loss_total,
                 outer_recon_loss=outer_recon_loss,
+                latent=latent,
                 tokenizer_feat=tokenizer_feat,
                 tokenizer_feat2=tokenizer_feat2,
                 enc_last_layer=enc_last_layer,

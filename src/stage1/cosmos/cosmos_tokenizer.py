@@ -35,6 +35,8 @@ from src.stage1.cosmos.modules.utils import Normalize
 # Quantizers
 from src.stage1.discretization.collections import FSQ
 from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
+from src.stage1.discretization.collections.multiscale_bsq import MultiScaleBSQ
+from src.stage1.discretization.collections.multiscale_leechq import MultiScaleLeechQ
 from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
 )
@@ -47,176 +49,12 @@ from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any
 from src.utilities.network_utils import load_weights_with_shape_check
 
-from ..utilities.losses.latent_reg import NestChannelDrop, lcr_loss, lmr_apply, LatentMaskConfig
+from ..utilities.losses.latent_reg import NestChannelDrop, lcr_loss, lmr_apply, LatentMaskConfig, ChannelDropConfig
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
 
-# * --- Latent augmentation --- #
-
-
-class NestChannelDrop(nn.Module):
-    def __init__(
-        self,
-        drop_type: str | list[int] = "uniform_4",
-        max_channels: int = 16,
-        drop_prob: float = 0.5,
-    ):
-        super().__init__()
-        self.max_channels = max_channels
-        self.drop_prob = drop_prob
-
-        if isinstance(drop_type, str):
-            drop_type, args = drop_type.lower().split("_")
-            self.drop_type = drop_type
-            if drop_type == "exp":
-                self.sample_kwargs = {"lambda": float(args)}
-            elif drop_type == "uniform":
-                assert args.isdigit(), "args should be an int"
-                self.sample_kwargs = {"low": int(args)}
-            else:
-                raise ValueError(f"drop_type {drop_type} not supported, only exp and uniform are supported")
-        else:  # list
-            self.drop_list = drop_type
-            assert max(self.drop_list) < self.max_channels, (
-                f"max_channels {self.max_channels} should be larger than the max of drop_list {max(self.drop_list)}"
-            )
-            self.drop_type = "prefixed"
-        logger.info(
-            f"[NestChannelDrop]: drop_type={self.drop_type}, max_channels={self.max_channels}, drop_prob={self.drop_prob}"
-        )
-
-        self.channel_arange = nn.Buffer(torch.arange(self.max_channels, dtype=torch.int32), persistent=False)
-
-    def exponential_sampling(self, lambda_val, size=1):
-        u = np.random.uniform(size=size)
-        k = -np.log(1 - u) / lambda_val
-        return torch.as_tensor(np.floor(k).astype(int)).clip_(0, self.max_channels).unsqueeze(-1)
-
-    def uniform_sampling(self, low: int, size: int = 1):
-        # (bs, 1)
-        k = torch.randint(low=low, high=self.max_channels, size=(size, 1))
-        return k
-
-    def prefixed_sampling(self, size: int = 1):
-        drop_list = self.drop_list
-        leave_channels = np.random.choice(drop_list, size=size, replace=True)
-        return torch.as_tensor(leave_channels).unsqueeze(-1)
-
-    def forward(self, z, inference_channels: int | None = None) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        """
-        Apply channel drop to the input tensor.
-
-        Args:
-            z: Input tensor of shape (bs, c, h, w)
-            inference_channels: Number of channels to keep during inference
-
-        Returns:
-            If applying channel drop: tuple of (z, mask) where mask is the channel mask
-            If not applying channel drop: z tensor only
-        """
-        if (self.training and np.random.random() > self.drop_prob) or (
-            not self.training and inference_channels is None
-        ):
-            return z
-
-        if inference_channels is not None:
-            assert not self.training
-            assert inference_channels <= self.max_channels
-            return z[:, :inference_channels]
-
-        assert self.max_channels == z.shape[1]
-
-        bs = z.shape[0]
-        if self.drop_type == "exp":
-            leave_channels = self.exponential_sampling(size=bs, **self.sample_kwargs)
-        elif self.drop_type == "uniform":
-            leave_channels = self.uniform_sampling(size=bs, **self.sample_kwargs)  # type: ignore
-        elif self.drop_type == "prefixed":
-            leave_channels = self.prefixed_sampling(size=bs)
-        else:
-            raise ValueError(f"drop_type {self.drop_type} not supported, only exp and uniform are supported")
-
-        # drop channels
-
-        # 1. expand the cached empty z
-        # if self.dropped_x.shape[-2:] != z.shape[-2:]:
-        #     if self.learnable:
-        #         z_empty = nn.functional.interpolate(
-        #             self.dropped_x,
-        #             size=z.shape[-2:],
-        #             mode="bilinear",
-        #             align_corners=False,
-        #         )
-        #         z_empty = z_empty.expand(bs, -1, -1, -1)
-        #     else:
-        #         z_empty = torch.zeros_like(z)
-        # else:
-        #     z_empty = self.dropped_x.expand(bs, -1, -1, -1)
-        z_zeros = torch.zeros_like(z)
-
-        # 2. drop channels
-        channels = self.channel_arange[None].expand(bs, -1)  # type: ignore
-        cond = channels < leave_channels.to(channels)
-        mask = cond.unsqueeze(-1).unsqueeze(-1).expand_as(z)  # (bs, c, h, w)
-        z = torch.where(mask, z, z_zeros)
-
-        return z, mask
-
-
-def _sample_t_distributional(
-    bs: int,
-    device: str | torch.device = "cuda",
-    noise_type_cfg: str = "beta_1_3",
-    timestep_range: tuple[int, int] = (0, 1),
-):
-    """Sample a latent noising time-step in specific distribution"""
-    # NOTE: helper sub-functions are defined below; this function only parses the string and dispatches.
-    # Output shape: (bs, 1, 1, 1); value range depends on distribution.
-
-    # Backward compatibility: map patterns like "exp_0.2" to "exp_max_0.2_lambda_5"
-    if noise_type_cfg.startswith("exp_") and not noise_type_cfg.startswith("exp_max_"):
-        _val = float(noise_type_cfg.split("_")[1])
-        noise_type_cfg = f"exp_max_{_val}_lambda_5"
-
-    # Uniform in [0, max_val]
-    elif noise_type_cfg.startswith("uniform_max_"):
-        max_val = float(noise_type_cfg.split("_")[-1])
-        t = torch.rand((bs,), device=device) * max_val
-
-    # Truncated exponential on [0, T]
-    elif noise_type_cfg.startswith("exp_max_"):
-        parts = noise_type_cfg.split("_")
-        # exp_max_{T} or exp_max_{T}_lambda_{lam}
-        T = float(parts[2])
-        lam = 5.0
-        if len(parts) >= 5 and parts[3] == "lambda":
-            lam = float(parts[4])
-
-        u = torch.rand((bs,), device=device)
-        exp_term = torch.exp(torch.tensor(-lam * T, device=device))
-        t = -torch.log1p(-u * (1.0 - exp_term)) / lam
-
-    # Beta(a, b) scaled to [0,1]
-    elif noise_type_cfg.startswith("beta_"):
-        parts = noise_type_cfg.split("_")
-        a = float(parts[1])
-        b = float(parts[2])
-        dist = torch.distributions.Beta(
-            torch.tensor(a, device=device),
-            torch.tensor(b, device=device),
-        )
-        t = dist.sample((bs,))
-        return t
-
-    # Default: standard normal, absolute value then clamp to [0,1] for stability
-    else:
-        t = torch.abs(torch.rand((bs,), device=device))
-
-    return t
-
-
-# * --- Network utilities --- #
+#  --- Network utilities --- #
 
 
 class MultiInputSequential(nn.Sequential):
@@ -285,13 +123,6 @@ class DecoderSequential(nn.Module):
 
 
 @dataclass
-class ChannelDropConfig:
-    drop_type: Any = "exp"
-    max_channels: int = 16
-    drop_prob: float = 0.5
-
-
-@dataclass
 class EncoderDecoderConfig:
     in_channels: Any = 16  # in or list[int]
     out_channels: Any = 16
@@ -351,10 +182,17 @@ class ContinuousTokenizerConfig:
     vf_on_z_or_module: str = "module"
     dino_feature_dim: int = 1024
     # quantizer related
-    quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", None
+    quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None
     random_quant: float = 0.0
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
+    # multiscale bsq related
+    mbsq_codebook_size: int = 1024
+    mbsq_schedule_mode: str = "original"
+    # multiscale leechq related
+    mleech_codebook_size: int = 196560
+    mleech_leech_type: str = "full"
+    mleech_schedule_mode: str = "original"
     norm_in_quant_conv: bool = False
     # loading related
     enc_path: Optional[str] = ""
@@ -369,13 +207,15 @@ class ContinuousTokenizerConfig:
     latent_noise_prob: float = 0.0
     latent_noise_type: str = "beta_1_5"  # Beta time-step sample distribution
     # non-mask-out (replace)-type latent augmentation
-    use_latent_mask: bool=False
+    use_latent_mask: bool = False
     latent_mask_config: LatentMaskConfig = field(default_factory=LatentMaskConfig)
     # model related
     name: str = "ContinuousImageTokenizer"
     model: EncoderDecoderConfig = field(default_factory=EncoderDecoderConfig)
     decoder_type: str = "default"  # default or generative
     z_factor: int = 1
+    # pretrained task
+    pretrained_type: Any = None
 
 
 class ContinuousImageTokenizer(nn.Module):
@@ -533,6 +373,11 @@ class ContinuousImageTokenizer(nn.Module):
         logger.info(f"model={self.name}, num_parameters={num_parameters:,}")
         logger.info(f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}.")
 
+        # pretraining task
+        self.pretrained_type = cfg.pretrained_type
+        if cfg.pretrained_type == "ijepa":
+            self._build_lejepa_projector(cfg)
+
     def _build_encoder_decoder(
         self,
         cfg: ContinuousTokenizerConfig,
@@ -578,6 +423,20 @@ class ContinuousImageTokenizer(nn.Module):
                 dim=model_cfg.latent_channels,
                 num_codebooks=cfg.fsq_num_codebooks,
                 channel_first=True,
+            )
+        elif self.quantizer_type == "multiscale_bsq":
+            self.quantizer = MultiScaleBSQ(
+                dim=model_cfg.latent_channels,
+                codebook_size=cfg.mbsq_codebook_size,
+                schedule_mode=cfg.mbsq_schedule_mode,
+                new_quant=True,
+            )
+        elif self.quantizer_type == "multiscale_leechq":
+            self.quantizer = MultiScaleLeechQ(
+                dim=model_cfg.latent_channels,
+                codebook_size=cfg.mleech_codebook_size,
+                leech_type=cfg.mleech_leech_type,
+                schedule_mode=cfg.mleech_schedule_mode,
             )
         elif self.quantizer_type == "psd":
             self.quantizer = PowerSphericalDistribution  # not quantizer, compatible with trainer  # type: ignore
@@ -633,6 +492,13 @@ class ContinuousImageTokenizer(nn.Module):
         logger.debug(f"[Tokenizer]: Built quant_conv/post_quant_conv and init them")
 
         return quant_conv, post_quant_conv
+
+    def _build_lejepa_projector(self, cfg: ContinuousTokenizerConfig):
+        from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
+
+        latent_dim = cfg.model.latent_channels
+        self.lejepa_projector = create_lejepa_projector(latent_dim, latent_dim, mean_out_hw=False)
+        logger.info(f"[Comos Tokenizer]: build LeJEPA projector for latent dimension {latent_dim}")
 
     def _set_model_proj_chans(self):
         self._repa_proj_chans = []
@@ -890,6 +756,30 @@ class ContinuousImageTokenizer(nn.Module):
             hq, indices = self.quantizer(h)
             res = hq.to(h_dtype), fsq_loss, loss_breakdown
 
+        elif self.quantizer_type == "multiscale_bsq":
+            # hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies
+            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = self.quantizer(h)
+            mbsq_loss = all_losses.sum()
+            loss_breakdown = {
+                "all_losses": all_losses,
+                "all_indices": all_indices,
+                "residual_norm_per_scale": residual_norm_per_scale,
+                "all_entropies": all_entropies,
+            }
+            res = hq.to(h_dtype), mbsq_loss, loss_breakdown
+
+        elif self.quantizer_type == "multiscale_leechq":
+            # hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies
+            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = self.quantizer(h)
+            mleech_loss = all_losses.sum()
+            loss_breakdown = {
+                "all_losses": all_losses,
+                "all_indices": all_indices,
+                "residual_norm_per_scale": residual_norm_per_scale,
+                "all_entropies": all_entropies,
+            }
+            res = hq.to(h_dtype), mleech_loss, loss_breakdown
+
         elif self.quantizer_type == "psd":
             mu = h[:, :-1]
             kappa = h[:, -1]
@@ -957,6 +847,15 @@ class ContinuousImageTokenizer(nn.Module):
             q_loss=q_loss,
             q_loss_breakdown=loss_breakdown,
         )
+
+    def encode_lejepa(self, x, **_ignored_kwargs):
+        z = self.encoder.encoder(x)
+        h_pre_quant = self.encoder.quant_conv(z)
+
+        # pool and project: [b, d]
+        h_pool = torch.nn.functional.adaptive_avg_pool2d(h_pre_quant, output_size=1)
+        h_proj = self.lejepa_projector(h_pool)
+        return h_proj
 
     def encode(self, x: Tensor, use_quantizer: bool | None = None):
         enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
@@ -1038,7 +937,7 @@ class ContinuousImageTokenizer(nn.Module):
         tokenizer_cfg: dict | None = None,
         uni_tokenizer_path: str | None = None,
         mean_init_conv_in_out: bool = False,
-        _reinit_quant_convs: bool = True,
+        _reinit_quant_convs: bool = False,
     ) -> tuple[Encoder, Decoder] | None:
         if (enc_path == "" or dec_path == "") and uni_tokenizer_path == "":
             return None

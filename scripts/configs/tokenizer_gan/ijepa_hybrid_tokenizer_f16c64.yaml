@@ -23,6 +23,18 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
+proxy_task:
+  task: ["ijepa"] #"lejepa_latent"
+
+  aug:
+    n_local: 6
+    n_global: 2
+
+  sigreg:
+    knots: 17
+    rnd_proj_dim: 128
+    lam: 0.02
+
 dataset:
   train_loader:
     macro_sampled_batch_size:
@@ -46,7 +58,7 @@ dataset:
 tokenizer:
   cnn_cfg:
     model:
-      latent_channels: 64 # [16,32,64]
+      latent_channels: 32 # [16,32,64]
     quantizer_type: null
     use_channel_drop: false
     channel_drop_config:
@@ -56,7 +68,7 @@ tokenizer:
   trans_enc_cfg:
     #   in_chans: 1024
     #   out_chans: 1024
-    pretrained_type: "ijepa"
+    pretrained_type: ["ijepa"] # "lejepa_latent"]
   # trans_dec_cfg:
   #   in_chans: 1024
   #   out_chans: 1024
@@ -135,6 +147,10 @@ vq_loss:
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
+  lcr_loss_weight: 0.0
+  lcr_loss_options:
+    thresh: 0.75
+    windows_size: [2, 2]
 
 ema:
   _target_: ema_pytorch.EMA
@@ -147,7 +163,7 @@ ema:
   # update_model_with_ema_every: 5_000
 
 train:
-  tokenizer_name: hybrid_cosmos_f16c64
+  tokenizer_name: hybrid_cosmos_f8c32_ijepa
   proj_dir: runs/stage1_cosmos_hybrid
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 1.0
@@ -159,7 +175,7 @@ train:
   save_every: 1000
   grad_checkpoint: true
   resume_path: #runs/stage1_cosmos_hybrid/2025-12-06_18-33-38_hybrid_cosmos_f16c64_jepa_pretrained/checkpoints/checkpoint_45
-  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-16_01-15-52_hybrid_cosmos_f16c64_jepa_pretrained_gram_distillation_v1/ema
+  ema_load_path: runs/stage1_cosmos_hybrid/2025-12-21_05-34-15_hybrid_cosmos_f16c64_ijepa_pretrained_sem/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -212,7 +228,7 @@ train:
       weight_decay: 0.02
     oned_params_defaults:
       lr: 3.0e-4
-      weight_decay: 0.02
+      weight_decay: 0
 
     # _target_: torch.optim.AdamW
     # _partial_: true
@@ -289,11 +305,11 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: hybrid_cosmos_f16c64_jepa_pretrained_distill-irepa-spatial-norm
+    run_comment: hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa
     log_with_time: true
     visualize_every: 500
     log_every: 10
-    log_with: ['tensorboard', 'swanlab']
+    log_with: ["tensorboard", "swanlab"]
 
   debug: true
 

@@ -370,7 +370,7 @@ class NaFlexVitCfg:
     mae_mask_ratio: float = 0.8
     mae_decoder_head: str = "seperated"  # 'shared' or 'seperated'
     mae_pixio_mask_grid: int = 2
-    mae_latent_size: int=14  # latent size for mae 
+    mae_latent_size: int = 14  # latent size for mae
 
 
 def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | None = None):
@@ -510,7 +510,7 @@ class IJEPANaFlexViT(Transformer):
 
         # --------- Build the heads or decoders --------- #
         if "lejepa" in self.pretrained_type:
-            self._build_jepa_head(cfg)
+            self._build_lejepa_head(cfg)
         if "ibot" in self.pretrained_type:
             self._build_ibot_head(cfg)
         if "latent_mae" in self.pretrained_type or "pixel_mae" in self.pretrained_type:
@@ -600,7 +600,7 @@ class IJEPANaFlexViT(Transformer):
         nn.init.normal_(self.mae_mask_token, std=0.02)
         logger.debug("Init the MAE decoder", name="MAE Naflex Transformer")
 
-    def _build_jepa_head(self, cfg):
+    def _build_lejepa_head(self, cfg):
         from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
 
         self.lejepa_projector = create_lejepa_projector(
@@ -731,7 +731,7 @@ class IJEPANaFlexViT(Transformer):
             # Rope related, rope is applied in attention module
             if rope_embeds is not None:
                 ##### IJEPA masking strategy: mask out
-                if self.pretrained_type == "ijepa":
+                if "ijepa" in self.pretrained_type:
                     rope_masked = []
                     for m in masks:
                         # m: [B, S_masked] indices
@@ -911,7 +911,6 @@ class IJEPANaFlexViT(Transformer):
         #     out_hw = None  # keep the output to be 1D tensor
 
         # ---------- forward backbone ---------- #
-        # breakpoint()
         x = cast(torch.Tensor, self.forward_features(x, masks=masks))
 
         # ---------- forward different pretrained heads / decoders ---------- #

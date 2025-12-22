@@ -94,6 +94,11 @@ vq_loss:
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
+  # lcr loss
+  lcr_loss_weight: 0.02
+  lcr_loss_options: 
+    thresh: 0.75
+    windows_size: [2,2]
 
 tokenizer:
   # repa
@@ -104,7 +109,7 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_path: "runs/pretrained/VAEInterp-f8c16.safetensors"
+  uni_path: "runs/pretrained/model.safetensors"
   loading_type: "pretrained"
 
   # augmentations
@@ -133,11 +138,15 @@ tokenizer:
 
     # train
     act_checkpoint: true
-
   channel_drop_config:
     drop_type: ${list:[4,8,12]}
     max_channels: ${tokenizer.model.latent_channels}
     drop_prob: 0.0
+  use_latent_mask: true
+  latent_mask_config:
+    mask_ratios: [0.0, 0.25, 0.5, 0.75]
+    block_sizes: {16: [1,1], 32:[2,2]}
+    mask_probs: {16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15]}
 
 ema:
   _target_: ema_pytorch.EMA
@@ -186,8 +195,8 @@ train:
     use_triton: true
     use_preconditioned: true # turbo-muon style preconditioning
     muon_params_defaults:
-    lr: 2.0e-4
-    weight_decay: 0.02
+      lr: 2.0e-4
+      weight_decay: 0.02
     oned_params_defaults:
       lr: 2.0e-4
       weight_decay: 0.02

@@ -252,7 +252,7 @@ class CosmosHyperspectralTokenizerTrainer:
             logger.info(f"Model params: \n{parameter_count_table(self.proxy_model)}")
             logger.info("Create <cyan>ijepa</cyan> pretrained proxy task.")
 
-        if "lejepa" in self._proxy_tasks:
+        if "lejepa" in self._proxy_tasks or "lejepa_latent" in self._proxy_tasks:
             self.proxy_aug_pipeline = _create_aug_pipline()
             self.proxy_lejepa_sigreg = SIGReg(knots=cfg.sigreg.knots, rnd_proj_dim=cfg.sigreg.rnd_proj_dim).to(
                 self.device
@@ -1245,7 +1245,7 @@ class CosmosHyperspectralTokenizerTrainer:
             proxy_loss = proxy_loss + ibot_loss
             proxy_loss_breakdown.ibot_loss = ibot_loss.detach()
 
-        if "lejepa" in proxy_tasks:
+        if "lejepa" in proxy_tasks or "lejepa_latent" in proxy_tasks:
             # Lecun's lejepa paper: https://arxiv.org/pdf/2511.08544
 
             # Resize to
@@ -1261,16 +1261,20 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Encoding views
             assert hasattr(self.tokenizer, "encode_lejepa")
+            if "lejepa" in proxy_tasks:
+                lejepa_fn = self.tokenizer.encode_lejepa
+            else:
+                lejepa_fn = self.tokenizer.encode_lejepa_latent
             with self.accelerator.autocast():
                 # Global embeddings
-                global_emb = self.tokenizer.encode_lejepa(global_x)  # type: ignore
+                global_emb = lejepa_fn(global_x)  # type: ignore
                 global_emb = rearrange(global_emb, "(ng bs) ... -> ng bs ...", ng=ng)
 
                 # Local embeddings
                 local_emb = None
                 if local_views is not None:
                     local_x = torch.cat(local_views, dim=0)
-                    local_emb = self.tokenizer.encode_lejepa(local_x)  # type: ignore
+                    local_emb = lejepa_fn(local_x)  # type: ignore
                     local_emb = rearrange(local_emb, "(nl bs) ... -> nl bs ...", nl=nl)
 
                 # Loss
@@ -1282,7 +1286,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
             # return edict(proxy_loss=loss, proxy_loss_breakdowns=breakdowns)
 
-            proxy_loss = proxy_loss + loss
+            proxy_loss = proxy_loss + loss * 0.2
             proxy_loss_breakdown.update(**breakdowns)
 
         #### Summarize losses and loss breakdown
@@ -1405,6 +1409,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 reconstructions=out_d["recon"],
                 q_loss_total=out_d.get("q_loss", None),
                 q_loss_breakdown=out_d.get("q_info", None),
+                latent=out_d.get("latent", None),
                 tokenizer_feat=repa_low_lvl_feat,
                 tokenizer_feat2=semantic_feat,
                 last_layer=self.get_last_layer(mode="dec"),
@@ -1439,15 +1444,15 @@ class CosmosHyperspectralTokenizerTrainer:
         model.requires_grad_(not freeze)
 
     @no_type_check
-    def get_last_layer(self, use_ema: bool = False, mode="dec"):
+    def get_last_layer(self, use_ema: bool = False, mode: str = "dec"):
         if mode == "dec":
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(self.tokenizer_decoder).decoder.get_last_layer()
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
-            if not self.vq_loss_fn.use_gram and not self.vq_loss_fn.use_vf:
-                return None
+            # if not self.vq_loss_fn.use_gram and not self.vq_loss_fn.use_vf:
+            #     return None
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(self.tokenizer_encoder).encoder.conv_out.weight
             else:
@@ -1595,6 +1600,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return out
 
+    def _filter_item_value_in_dict(self, d: dict, to_item=True):
+        dd = {}
+        for k, v in d.items():
+            if torch.is_tensor(v) and v.numel() == 1:
+                dd[k] = v.item() if to_item else v
+        return dd
+
     def train_step(self, batch: dict):
         # torch.autograd.set_detect_anomaly(True)
         x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
@@ -1678,9 +1690,8 @@ class CosmosHyperspectralTokenizerTrainer:
                     f"Train step: {self.global_step} - "
                     f"proxy losses: {
                         ', '.join(
-                            f'{k}: {v.item():.4f}'
-                            for k, v in proxy_out.proxy_loss_breakdown.items()
-                            if torch.is_tensor(v) and v.numel() == 1
+                            f'{k}: {v:.4f}'
+                            for k, v in self._filter_item_value_in_dict(proxy_out.proxy_loss_breakdown).items()
                         )
                     }"
                 )
@@ -1710,7 +1721,13 @@ class CosmosHyperspectralTokenizerTrainer:
             )
             self.log_msg(f"[Train Disc]: {_log_disc_losses}")
             if self._has_proxy_task and proxy_out is not None:
-                self.log_msg(f"[Train proxy]: <cyan>proxy_loss</>: {proxy_out.proxy_loss.item():.4f}")
+                self.log_msg(
+                    f"[Train proxy]: <cyan>proxy_loss</>: {proxy_out.proxy_loss.item():.4f} "
+                    + " ".join(
+                        f"<cyan>{k}</>: {v:.4f}"
+                        for k, v in self._filter_item_value_in_dict(proxy_out.proxy_loss_breakdown).items()
+                    )
+                )
 
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)
@@ -1719,7 +1736,13 @@ class CosmosHyperspectralTokenizerTrainer:
             if self._has_proxy_task and proxy_out is not None:
                 self.tenb_log_any(
                     "metric",
-                    {"proxy_total_loss": proxy_out.proxy_loss.item()},
+                    {
+                        "proxy_total_loss": proxy_out.proxy_loss.item(),
+                        **{
+                            f"proxy_{k}": v
+                            for k, v in self._filter_item_value_in_dict(proxy_out.proxy_loss_breakdown).items()
+                        },
+                    },
                     step=self.global_step,
                 )
 
@@ -1728,7 +1751,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if self.global_step % self.train_cfg.log.visualize_every == 0:
             self.visualize_reconstruction(x, out_d["recon"], add_step=True, img_name="recon/train_recon")
-            if proxy_out.get("mae_recon", None) is not None:
+            if proxy_out is not None and proxy_out.get("mae_recon", None) is not None:
                 mae_recon = proxy_out["mae_recon"]
                 assert torch.is_tensor(mae_recon) and mae_recon.ndim == 4
                 x_vis = F.interpolate(x, size=mae_recon.shape[-2], mode="bilinear")
@@ -1760,7 +1783,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # * tokenzier losses
         if log_token_loss is not None:
-            _selects = ["reconstruct_loss", "ssim_loss", "g_loss", "d_weight"]
+            _selects = ["reconstruct_loss", "ssim_loss", "g_loss", "d_weight", "lcr_loss"]
             if self.vq_loss_fn.use_perceptual_loss:
                 _selects.extend(["perceptual_loss", "gram_loss"])
             if self.vq_loss_fn.use_repa:
@@ -2327,7 +2350,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "mae_cosmos_f8c64"
+_key = "ijepa_cosmos_f16c64"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

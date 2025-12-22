@@ -118,7 +118,11 @@ vq_loss:
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
-
+  # lcr loss
+  lcr_loss_weight: 0.02
+  lcr_loss_options: 
+    thresh: 0.75
+    windows_size: [2,2]
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true

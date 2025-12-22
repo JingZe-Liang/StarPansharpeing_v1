@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.decomposition import PCA as PCA_sk
+from tqdm import tqdm
 
 from src.utilities.logging import log
 
@@ -312,7 +313,7 @@ def pca_list(
             fit_pca = PCA_sk(n_components=dim).fit(x)
 
     reduced_feats = []
-    for feats in image_feats_list:
+    for feats in tqdm(image_feats_list, desc="PCA reducing features", leave=False):
         x_red = fit_pca.transform(flatten(feats))
         if isinstance(x_red, np.ndarray):
             x_red = torch.from_numpy(x_red)

@@ -167,3 +167,9 @@
 [submodule "src/stage1/VAEs/SSVAE"]
 	path = src/stage1/VAEs/SSVAE
 	url = https://github.com/zai-org/SSVAE.git
+[submodule "src/stage1/discretization/InfinityCC"]
+	path = src/stage1/discretization/InfinityCC
+	url = https://github.com/zhaoyue-zephyrus/InfinityCC.git
+[submodule "src/utilities/transport/twinflow/TwinFlow"]
+	path = src/utilities/transport/twinflow/TwinFlow
+	url = https://github.com/inclusionAI/TwinFlow.git

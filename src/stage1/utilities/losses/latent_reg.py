@@ -14,16 +14,25 @@ from torch import Tensor
 from torch.nn import functional as F
 from jaxtyping import Float
 import numpy as np
-from einops import rearrange
+from einops import rearrange, reduce
 from loguru import logger
 from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
+    "ChannelDropConfig",
     "NestChannelDrop",
     "lcr_loss",
+    "LatentMaskConfig",
     "lmr_apply",
 ]
+
+
+@dataclass
+class ChannelDropConfig:
+    drop_type: Any = "exp"
+    max_channels: int = 16
+    drop_prob: float = 0.5
 
 
 class NestChannelDrop(nn.Module):
@@ -219,6 +228,11 @@ def lcr_loss(
     Compute the LCR loss on the latent.
     $\\mathcal{L}_{LCR} = \text{ReLU}(\alpha - \\mathbb{E}[R(\\mathbf{p})])$
     """
+    # Per-channel normalization
+    z_mean = z.mean(dim=[0, 2, 3], keepdim=True)
+    z_std = z.std(dim=[0, 2, 3], keepdim=True)
+    z = (z - z_mean.detach()) / (z_std.detach() + 1e-6)
+    
     # Compute the local correlation
     H, W = z.shape[-2:]
     H_win, W_win = windows_size
@@ -235,6 +249,7 @@ def lcr_loss(
     lcr_loss = F.relu(thresh - local_corr)
 
     return local_corr, lcr_loss
+
 
 @dataclass
 class LatentMaskConfig:
