@@ -214,7 +214,7 @@ class MultiScaleBSQ(Module):
         self.max_flip_lvl = max_flip_lvl
         self.random_flip_1lvl = random_flip_1lvl
         self.flip_lvl_idx = flip_lvl_idx
-        assert (random_flip and random_flip_1lvl) == False
+        assert not  (random_flip and random_flip_1lvl)
         self.drop_when_test = drop_when_test
         self.drop_lvl_idx = drop_lvl_idx
         self.drop_lvl_num = drop_lvl_num

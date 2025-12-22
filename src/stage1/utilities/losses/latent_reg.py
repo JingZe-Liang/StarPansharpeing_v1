@@ -232,7 +232,7 @@ def lcr_loss(
     z_mean = z.mean(dim=[0, 2, 3], keepdim=True)
     z_std = z.std(dim=[0, 2, 3], keepdim=True)
     z = (z - z_mean.detach()) / (z_std.detach() + 1e-6)
-    
+
     # Compute the local correlation
     H, W = z.shape[-2:]
     H_win, W_win = windows_size
@@ -254,6 +254,7 @@ def lcr_loss(
 @dataclass
 class LatentMaskConfig:
     """Any type compatible with OmegaConf structures."""
+
     mask_ratios: Any = field(default_factory=lambda: [0.0, 0.25, 0.5, 0.75])
     block_sizes: Any = field(default_factory=lambda: {16: [1, 1], 32: [2, 2]})
     mask_probs: Any = field(default_factory=lambda: {16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15]})

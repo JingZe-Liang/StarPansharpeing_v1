@@ -45,6 +45,8 @@ vq_advance:
   orthogonal_reg_weight: 0.1
   manual_in_place_optimizer_update: true
 
+multiscale_leechq:
+  
 none: null
 
 quant: ${quantizer[${quantizer.used}]}

@@ -209,10 +209,10 @@ class MultiScaleLeechQ(Module):
         assert not (self.random_short_schedule and self.uniform_short_schedule)
 
         _leech_ckpt_base_dir = (
-            "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/src/stage1/discretization/InfinityCC"
+            "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/src/stage1/discretization/collections/leech_lattice"
         )
         if leech_type == "full":
-            codebook = f"{_leech_ckpt_base_dir}/cache/leech_lattices_normalized.npy"
+            codebook = f"{_leech_ckpt_base_dir}/leech_lattices_normalized.npy"
         elif leech_type == "2":
             codebook = f"{_leech_ckpt_base_dir}/cache/leech_lattices_type2_normalized.npy"
         elif leech_type == "3":
@@ -495,6 +495,7 @@ class SphericalVectorQuantizer(Module):
             nn.init.trunc_normal_(self.embedding.weight, std=0.02)
             # raise ValueError(f"No predefined codebook provided")
 
+    @torch.autocast(enabled=False, device_type="cuda")
     def forward(self, z):
         is_img_or_video = z.ndim >= 4
         should_transpose = default(self.channel_first, is_img_or_video)
@@ -504,19 +505,20 @@ class SphericalVectorQuantizer(Module):
             z, ps = pack_one(z, "b * d")  # x.shape [b, hwt, c]
 
         b, l, d = z.shape
+        dtype = z.dtype
         if self.l2_norm:
-            z_flatten = z.reshape(-1, self.embed_dim)
+            z_flatten = z.reshape(-1, self.embed_dim).float()
             if self.predefined_codebook is None:
-                embedding_weight = F.normalize(self.embedding.weight, dim=-1)
+                embedding_weight = F.normalize(self.embedding.weight, dim=-1).float()
                 d = -z_flatten @ embedding_weight.t()
             else:
                 d = -z_flatten @ self.embedding.weight.t()
         else:
-            z_flatten = z.reshape(-1, self.embed_dim)
+            z_flatten = z.reshape(-1, self.embed_dim).float()
             d = (
                 torch.sum(z_flatten**2, dim=1, keepdim=True)
-                + torch.sum(self.embedding.weight**2, dim=1)
-                - 2 * z_flatten @ self.embedding.weight.t()
+                + torch.sum(self.embedding.weight.float()**2, dim=1)
+                - 2 * z_flatten @ self.embedding.weight.t().float()
             )
 
         min_encoding_indices = torch.argmin(d.detach(), dim=1)
@@ -547,7 +549,7 @@ class SphericalVectorQuantizer(Module):
             min_encoding_indices = min_encoding_indices.view(B, -1)
             min_encoding_indices = unpack_one(min_encoding_indices, ps, "b *")
 
-        ret = (z_q, min_encoding_indices, bit_indices, loss)
+        ret = (z_q.to(dtype), min_encoding_indices, bit_indices, loss)
         return ret
 
     def get_entropy(self, count, eps=1e-4):

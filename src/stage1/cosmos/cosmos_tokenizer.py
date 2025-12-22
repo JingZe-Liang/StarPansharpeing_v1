@@ -4,7 +4,6 @@ import warnings
 from collections import OrderedDict, namedtuple
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
-from itertools import chain
 from pathlib import Path
 from typing import Any, Literal, Optional, no_type_check
 
@@ -14,14 +13,6 @@ import torch
 from easydict import EasyDict as edict
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from peft import (
-    LoraConfig,
-    PeftConfig,
-    PeftModel,
-    get_peft_config,
-    get_peft_model,
-    set_peft_model_state_dict,
-)
 from torch import Tensor, nn
 from typing_extensions import Annotated
 
@@ -49,7 +40,7 @@ from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any
 from src.utilities.network_utils import load_weights_with_shape_check
 
-from ..utilities.losses.latent_reg import NestChannelDrop, lcr_loss, lmr_apply, LatentMaskConfig, ChannelDropConfig
+from ..utilities.losses.latent_reg import NestChannelDrop, lmr_apply, LatentMaskConfig, ChannelDropConfig
 
 KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
 
@@ -193,6 +184,7 @@ class ContinuousTokenizerConfig:
     mleech_codebook_size: int = 196560
     mleech_leech_type: str = "full"
     mleech_schedule_mode: str = "original"
+    # quant convs
     norm_in_quant_conv: bool = False
     # loading related
     enc_path: Optional[str] = ""
@@ -216,6 +208,19 @@ class ContinuousTokenizerConfig:
     z_factor: int = 1
     # pretrained task
     pretrained_type: Any = None
+
+    def __post_init__(self):
+        assert self.quantizer_type in ("lfq", "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None)
+        assert self.mbsq_schedule_mode in ("original", "dynamic")
+        if self.quantizer_type == "leechq":
+            self.model.latent_channels == 24, "predefined leech weight only supports latent channels 24"
+            assert self.mleech_schedule_mode in ("original", "dynamic", "dense")
+        assert self.decoder_type in ("default", "generative")
+        assert self.pretrained_type in (None, "nvidia", "pretrained", "hybrid_pretrained")
+        if self.use_channel_drop:
+            assert self.channel_drop_config.max_channels < self.model.latent_channels, (
+                "channel drop max channels must be smaller than latent channels"
+            )
 
 
 class ContinuousImageTokenizer(nn.Module):
@@ -758,7 +763,9 @@ class ContinuousImageTokenizer(nn.Module):
 
         elif self.quantizer_type == "multiscale_bsq":
             # hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies
-            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = self.quantizer(h)
+            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = (
+                self.quantizer(h)
+            )
             mbsq_loss = all_losses.sum()
             loss_breakdown = {
                 "all_losses": all_losses,
@@ -770,7 +777,9 @@ class ContinuousImageTokenizer(nn.Module):
 
         elif self.quantizer_type == "multiscale_leechq":
             # hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies
-            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = self.quantizer(h)
+            hq, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies = (
+                self.quantizer(h)
+            )
             mleech_loss = all_losses.sum()
             loss_breakdown = {
                 "all_losses": all_losses,
@@ -1237,6 +1246,8 @@ class ContinuousImageTokenizer(nn.Module):
             cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, config, strict=False)
         else:
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
+        if hasattr(cfg, "__post_init__"):
+            cfg.__post_init__()  # check the configs
         return cls(cfg)
 
     def set_grad_checkpointing(self, enabled: bool = True):
@@ -1255,6 +1266,7 @@ def vae_f8_config(
     z_chans: int = 256,
     vae_factor: int = 8,
     patch_size: int = 1,
+    quantizer_type: str | None = None,
     use_repa_loss: bool = True,
     pretrained_path: str = "",
 ):
@@ -1283,7 +1295,7 @@ def vae_f8_config(
         },
         "uni_path": pretrained_path,
         "loading_type": "pretrained" if Path(pretrained_path).exists() else None,
-        "quantizer_type": None,
+        "quantizer_type": quantizer_type,
         # repa
         "hook_for_repa": False,
         "use_repa_loss": use_repa_loss,
@@ -1364,52 +1376,14 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    default_multi_chans = 512  # [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368]
-    # default_nested_chans = 500  # max hyperspectral chans in the training datasets
-    config: dict[str, Any] = {
-        "model": {
-            "attn_resolutions": [32],
-            "channels": 128,
-            "channels_mult": [2, 4, 4],
-            "dropout": 0.0,
-            "in_channels": 512,
-            "spatial_compression": 8,
-            "num_res_blocks": 2,
-            "out_channels": 512,
-            "resolution": 1024,
-            "patch_size": 1,
-            "patch_method": "haar",
-            "z_channels": 256,
-            "latent_channels": 16,
-            "act_checkpoint": True,
-            "block_name": "res_block",  # res_block, res_moe
-            "padding_mode": "reflect",
-            "norm_type": "gn",
-            "norm_groups": 32,
-            "attn_type": "none",
-            "adaptive_mode": "interp",
-            # "upsample_kwargs": {},
-            # "downsample_kwargs": {},
-        },
-        "name": "CI",
-        "uni_path": base_model_ckpt,
-        "loading_type": "pretrained" if Path(base_model_ckpt).exists() else None,
-        "quantizer_type": None,
-        # repa
-        "hook_for_repa": False,
-        "use_repa_loss": True,
-        "use_vf_loss": False,
-        "vf_on_z_or_module": "z",
-        "dino_feature_dim": 1024,
-        "z_factor": 1,
-    }
+    config = vae_f8_config(512, 24, quantizer_type="multiscale_leechq")
     if other_model_kwargs:
         if "model" in other_model_kwargs:
             config["model"].update(other_model_kwargs.pop("model"))
         else:
             config.update(other_model_kwargs)
-    tokenizer = model_cls.create_model(**config).to(device)
-    tokenizer = tokenizer.to(dtype)
+    tokenizer = model_cls.create_model(**config)
+    tokenizer = tokenizer.to(device, dtype)
 
     if is_lora:
         assert lora_ckpt is not None, "lora_ckpt is required for lora test"
@@ -1480,7 +1454,9 @@ def test_tokenizer_forward_backward(
         for index, x in (tbar := tqdm(enumerate(iterations))):
             with ctx():
                 if isinstance(x, dict):
-                    x = x["img"].to("cuda", dtype)
+                    x = x["img"].to(device, dtype)
+                else:
+                    x = x.to(device, dtype)
                 encs = tokenizer.encode(x)
                 decs = tokenizer.decode(encs, x.shape)
 
@@ -1585,21 +1561,6 @@ if __name__ == "__main__":
         save_pca_vis=False,
         pca_type="z",
         is_lora=False,
-        lora_ckpt=[
-            "runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3",
-            "runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB",
-            "runs/stage1_cosmos_lora/2025-09-15_23-03-10_cosmos_lora=lora_r=32_f8c16p1_IKONOS/peft_ckpt/IKONOS",
-            "runs/stage1_cosmos_lora/2025-09-15_17-37-20_cosmos_lora=lora_r=32_f8c16p1_WDC/peft_ckpt/WDC",
-            "runs/stage1_cosmos_lora/2025-09-15_17-23-14_cosmos_lora=lora_r=32_f8c16p1_Xiongan/peft_ckpt/Xiongan",
-        ],
-        lora_changes_chans={
-            "WV3": 8,
-            "QB": 4,
-            "IKONOS": 4,
-            "WDC": 191,
-            "Xiongan": 256,
-        },
-        active_lora_name="QB",
         save_img_dir=None,  # "tmp/vis_pansharpening_loras",
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
