@@ -96,7 +96,7 @@ vq_loss:
   # disc_reg_freq: 2
   # lcr loss
   lcr_loss_weight: 0.02
-  lcr_loss_options: 
+  lcr_loss_options:
     thresh: 0.75
     windows_size: [2,2]
 
@@ -113,7 +113,7 @@ tokenizer:
   loading_type: "pretrained"
 
   # augmentations
-  latent_noise_prob: 0.0
+  latent_noise_prob: 0.2
   use_channel_drop: false
 
   # blocks

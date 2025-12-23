@@ -62,7 +62,7 @@ class NAFBlock(nn.Module):
         def forward_closure(inp):
             x = inp
             x = self.norm1(x)
-            
+
             x = self.conv1(x)
             x = self.conv2(x)
             x = self.sg(x)

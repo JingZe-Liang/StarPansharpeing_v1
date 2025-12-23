@@ -1685,6 +1685,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 check_quality(x, out_d["recon"])
 
             logger.trace(f"Train step: {self.global_step} - recon loss: {tokenizer_loss} - Channels: {x.shape[1]}")
+
             if proxy_out is not None:
                 logger.trace(
                     f"Train step: {self.global_step} - "
@@ -2350,7 +2351,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "ijepa_cosmos_f16c64"
+_key = "unicosmos_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

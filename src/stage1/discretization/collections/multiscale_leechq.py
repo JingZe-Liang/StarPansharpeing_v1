@@ -31,15 +31,17 @@ from .dynamic_resolution import predefined_HW_Scales_dynamic
 
 # constants
 
-Return = namedtuple('Return', ['quantized', 'indices', 'bit_indices', 'entropy_aux_loss'])
+Return = namedtuple("Return", ["quantized", "indices", "bit_indices", "entropy_aux_loss"])
 
-LossBreakdown = namedtuple('LossBreakdown', ['per_sample_entropy', 'batch_entropy', 'commitment'])
+LossBreakdown = namedtuple("LossBreakdown", ["per_sample_entropy", "batch_entropy", "commitment"])
 
 # distributed helpers
+
 
 @cache
 def is_distributed():
     return dist.is_initialized() and dist.get_world_size() > 1
+
 
 def maybe_distributed_mean(t):
     if not is_distributed():
@@ -49,13 +51,17 @@ def maybe_distributed_mean(t):
     t = t / dist.get_world_size()
     return t
 
+
 # helper functions
+
 
 def exists(v):
     return v is not None
 
+
 def identity(t):
     return t
+
 
 def default(*args):
     for arg in args:
@@ -63,42 +69,46 @@ def default(*args):
             return arg() if callable(arg) else arg
     return None
 
+
 def round_up_multiple(num, mult):
     return ceil(num / mult) * mult
+
 
 def pack_one(t, pattern):
     return pack([t], pattern)
 
+
 def unpack_one(t, ps, pattern):
     return unpack(t, ps, pattern)[0]
 
+
 def l2norm(t):
-    return F.normalize(t, dim = -1)
+    return F.normalize(t, dim=-1)
+
 
 # entropy
 
-def log(t, eps = 1e-5):
-    return t.clamp(min = eps).log()
+
+def log(t, eps=1e-5):
+    return t.clamp(min=eps).log()
+
 
 def entropy(prob):
     return (-prob * log(prob)).sum(dim=-1)
 
+
 # cosine sim linear
 
+
 class CosineSimLinear(Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_out,
-        scale = 1.
-    ):
+    def __init__(self, dim_in, dim_out, scale=1.0):
         super().__init__()
         self.scale = scale
         self.weight = nn.Parameter(torch.randn(dim_in, dim_out))
 
     def forward(self, x):
-        x = F.normalize(x, dim = -1)
-        w = F.normalize(self.weight, dim = 0)
+        x = F.normalize(x, dim=-1)
+        w = F.normalize(self.weight, dim=0)
         return (x @ w) * self.scale
 
 
@@ -109,36 +119,64 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original"):
         (32, 32): [(1, 1), (2, 2), (3, 3), (4, 4), (6, 6), (9, 9), (13, 13), (18, 18), (24, 24), (32, 32)],
         (16, 16): [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (8, 8), (10, 10), (13, 13), (16, 16)],
         # 1024x1024
-        (64, 64): [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (7, 7), (9, 9), (12, 12), (16, 16), (21, 21), (27, 27), (36, 36), (48, 48), (64, 64)],
-
+        (64, 64): [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (7, 7),
+            (9, 9),
+            (12, 12),
+            (16, 16),
+            (21, 21),
+            (27, 27),
+            (36, 36),
+            (48, 48),
+            (64, 64),
+        ],
         (36, 64): [(1, 1), (2, 2), (3, 3), (4, 4), (6, 6), (9, 12), (13, 16), (18, 24), (24, 32), (32, 48), (36, 64)],
     }
     if mode == "dynamic":
         predefined_HW_Scales.update(predefined_HW_Scales_dynamic)
     elif mode == "dense":
-        predefined_HW_Scales[(16, 16)] = [(x, x) for x in range(1, 16+1)]
+        predefined_HW_Scales[(16, 16)] = [(x, x) for x in range(1, 16 + 1)]
         predefined_HW_Scales[(32, 32)] = predefined_HW_Scales[(16, 16)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
         predefined_HW_Scales[(64, 64)] = predefined_HW_Scales[(32, 32)] + [(40, 40), (48, 48), (56, 56), (64, 64)]
     elif mode == "dense_f8":
         # predefined_HW_Scales[(16, 16)] = [(x, x) for x in range(1, 16+1)]
-        predefined_HW_Scales[(32, 32)] = [(x, x) for x in range(1, 16+1)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
+        predefined_HW_Scales[(32, 32)] = [(x, x) for x in range(1, 16 + 1)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
         predefined_HW_Scales[(64, 64)] = predefined_HW_Scales[(32, 32)] + [(40, 40), (48, 48), (56, 56), (64, 64)]
         predefined_HW_Scales[(128, 128)] = predefined_HW_Scales[(64, 64)] + [(80, 80), (96, 96), (112, 112), (128, 128)]
     elif mode.startswith("same"):
-        num_quant = int(mode[len("same"):])
+        num_quant = int(mode[len("same") :])
         predefined_HW_Scales[(16, 16)] = [(16, 16) for _ in range(num_quant)]
         predefined_HW_Scales[(32, 32)] = [(32, 32) for _ in range(num_quant)]
         predefined_HW_Scales[(64, 64)] = [(64, 64) for _ in range(num_quant)]
     elif mode == "half":
-        predefined_HW_Scales[(32, 32)] = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (8, 8), (10, 10), (13, 13), (16, 16)]
-        predefined_HW_Scales[(64, 64)] = [(1,1),(2,2),(4,4),(6,6),(8,8),(12,12),(16,16)]
+        predefined_HW_Scales[(32, 32)] = [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (8, 8),
+            (10, 10),
+            (13, 13),
+            (16, 16),
+        ]
+        predefined_HW_Scales[(64, 64)] = [(1, 1), (2, 2), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16)]
 
     predefined_T_Scales = [1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 17, 17, 17, 17, 17]
     patch_THW_shape_per_scale = predefined_HW_Scales[(H, W)]
     if len(predefined_T_Scales) < len(patch_THW_shape_per_scale):
         # print("warning: the length of predefined_T_Scales is less than the length of patch_THW_shape_per_scale!")
         predefined_T_Scales += [predefined_T_Scales[-1]] * (len(patch_THW_shape_per_scale) - len(predefined_T_Scales))
-    patch_THW_shape_per_scale = [(min(T, t), h, w ) for (h, w), t in zip(patch_THW_shape_per_scale, predefined_T_Scales[:len(patch_THW_shape_per_scale)])]
+    patch_THW_shape_per_scale = [
+        (min(T, t), h, w)
+        for (h, w), t in zip(patch_THW_shape_per_scale, predefined_T_Scales[: len(patch_THW_shape_per_scale)])
+    ]
     return patch_THW_shape_per_scale
 
 
@@ -443,9 +481,17 @@ class MultiScaleLeechQ(Module):
         # stack all losses and indices
 
         all_losses = torch.stack(all_losses, dim=-1)
-        all_entropies = torch.zeros(2, len(all_losses)).to(all_losses) # dummy entropies
+        all_entropies = torch.zeros(2, len(all_losses)).to(all_losses)  # dummy entropies
 
-        ret = (quantized_out, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies)
+        ret = (
+            quantized_out,
+            all_indices,
+            all_bit_indices,
+            residual_norm_per_scale,
+            all_losses,
+            var_inputs,
+            all_entropies,
+        )
 
         if not return_all_codes:
             return ret
@@ -517,7 +563,7 @@ class SphericalVectorQuantizer(Module):
             z_flatten = z.reshape(-1, self.embed_dim).float()
             d = (
                 torch.sum(z_flatten**2, dim=1, keepdim=True)
-                + torch.sum(self.embedding.weight.float()**2, dim=1)
+                + torch.sum(self.embedding.weight.float() ** 2, dim=1)
                 - 2 * z_flatten @ self.embedding.weight.t().float()
             )
 
@@ -535,7 +581,6 @@ class SphericalVectorQuantizer(Module):
         cb_usage = torch.bincount(min_encoding_indices.long(), minlength=self.n_embed).float()
         cb_entropy = self.get_entropy(cb_usage)
         loss = torch.zeros(1, device=z.device, dtype=z.dtype)
-        
         # 默认值
         bit_indices = None
 
@@ -543,7 +588,6 @@ class SphericalVectorQuantizer(Module):
             z_q = unpack_one(z_q, ps, "b * d")
             bit_indices = (z_q * math.sqrt(32)).long() + 4
             z_q = rearrange(z_q, "b ... d -> b d ...")
-            
             # 修复：先恢复成 (B, L) 再还原形状
             B = z_q.shape[0]
             min_encoding_indices = min_encoding_indices.view(B, -1)
@@ -564,25 +608,24 @@ class SphericalVectorQuantizer(Module):
             orig_shape = indices.shape
             flat_indices = indices.flatten()
             z_q = self.embedding(flat_indices)
-            
+
             if self.l2_norm:
                 z_q = F.normalize(z_q, dim=-1)
-            
+
             # 恢复形状并调整通道位置
             # 假设输入是 (B, ...) 形状，输出应该是 (B, D, ...)
             # 先恢复成 (B, ..., D)
             z_q = z_q.view(*orig_shape, self.embed_dim)
-            
             # 将通道维度 D 移到第 2 位 (B, D, ...)
             # 这样符合 torch 的习惯 (B, C, H, W) 或 (B, C, T, H, W)
             dims = list(range(len(z_q.shape)))
             new_dims = [dims[0], dims[-1]] + dims[1:-1]
             codes = z_q.permute(*new_dims).contiguous()
-            
+
             # 如果是 4D (B, C, H, W)，转为 5D (B, C, 1, H, W) 以保持一致性
             if codes.ndim == 4:
                 codes = codes.unsqueeze(2)
-                
+
             return codes
         else:
             # dit_label 逻辑保持不变，但递归调用时会进入上面的 int_label 逻辑
@@ -622,9 +665,16 @@ def __test_leech_q():
 
     x = torch.randn(1, 3, 256, 256)
     z = encoder(x)
-    quantized_out, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies, all_codes = quantizer(
-        z, return_all_codes=True
-    )
+    (
+        quantized_out,
+        all_indices,
+        all_bit_indices,
+        residual_norm_per_scale,
+        all_losses,
+        var_inputs,
+        all_entropies,
+        all_codes,
+    ) = quantizer(z, return_all_codes=True)
     # recon = decoder(all_codes)
     # print(recon.shape)
 
@@ -637,8 +687,10 @@ def __test_leech_q():
     diff = (quantized_out - all_codes_fixed).abs().max()
     print(f"Max absolute difference: {diff.item()}")
 
+
 def __test_leech_q_v2():
     from easydict import EasyDict
+
     print("\nRunning Test V2 (Batch size > 1, T > 1)...")
 
     args = EasyDict(
@@ -664,11 +716,18 @@ def __test_leech_q_v2():
     # 测试 Batch Size = 2, T = 1, H=32, W=32
     B, C, T, H, W = 2, 24, 1, 32, 32
     z = torch.randn(B, C, T, H, W)
-    
-    quantized_out, all_indices, all_bit_indices, residual_norm_per_scale, all_losses, var_inputs, all_entropies, all_codes = quantizer(
-        z, return_all_codes=True
-    )
-    
+
+    (
+        quantized_out,
+        all_indices,
+        all_bit_indices,
+        residual_norm_per_scale,
+        all_losses,
+        var_inputs,
+        all_entropies,
+        all_codes,
+    ) = quantizer(z, return_all_codes=True)
+
     print(f"Input shape: {z.shape}")
     print(f"Quantized out shape: {quantized_out.shape}")
     print(f"All codes shape: {all_codes.shape}")
@@ -678,6 +737,7 @@ def __test_leech_q_v2():
     print(f"Max absolute difference: {diff.item()}")
     assert diff < 1e-5, f"Difference too large: {diff.item()}"
     print("Test V2 passed!")
+
 
 if __name__ == "__main__":
     __test_leech_q()

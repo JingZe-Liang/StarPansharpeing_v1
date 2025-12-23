@@ -17,7 +17,6 @@ from .dion.dion.newton_schulz_triton import ns_line_1, ns_line_2
 ######### Newton-Schulz ABCs ##########
 
 
-
 @dataclass
 class MuonConfig:
     name: str = "su"
@@ -101,7 +100,7 @@ def zeropower_via_newtonschulz6_diff_abc(
 
         # triton code
         ns_line_1(X, out=A)  # A = X @ X.mT
-        
+
         a, b, c = consts[0]
         if preconditioned:
             # see https://github.com/thib-s/flash-newton-schulz/blob/145260f4b49c81b9200c61e0f95751b43bf672d5/newton_schulz_triton.py#L587
@@ -225,7 +224,7 @@ class MuonFSDP(Muon):
         re_ignore_pats = [re.compile(ik) for ik in ignored_keys_for_muon]
         if isinstance(named_params, dict):
             named_params = named_params.items()
-            
+
         for name, p in named_params:
             if p.requires_grad:
                 # conv, linear weights, and other 2D+ parameters
@@ -235,15 +234,17 @@ class MuonFSDP(Muon):
                     for re_ignore_pat in re_ignore_pats:
                         if re_ignore_pat.search(name):  # 使用search而不是match
                             should_ignore = True
-                            logger.debug(f"[MuonFSDP] Ignored param for Muon: {name} at pattern {re_ignore_pat.pattern}")
+                            logger.debug(
+                                f"[MuonFSDP] Ignored param for Muon: {name} at pattern {re_ignore_pat.pattern}"
+                            )
                             break
-                    
+
                     if should_ignore:
                         oned_params.append(p)
                     else:
                         muon_params.append(p)
                         # logger.debug(f"[MuonFSDP] Muon param: {name} - shaped: {tuple(p.shape)}")
-                        
+
                 # bias, norm weights, embeddings, lm heads (for nlp tasks), and other 1D parameters
                 else:
                     oned_params.append(p)

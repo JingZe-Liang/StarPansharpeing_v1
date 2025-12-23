@@ -120,9 +120,9 @@ train_loader:
         - ["data/DryadHyper/LitData_hyper_images"]
         - resize_before_transform: 128
 
-      242bands_512:
-        - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
-        - resize_before_transform: 512
+      # 242bands_512:
+      #   - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
+      #   - resize_before_transform: 512
 
       242bands_256:
         - ["data/MDAS-EeteS/LitData_hyper_images"]
@@ -261,9 +261,9 @@ val_loader:
         - ["data/MDAS-EeteS/LitData_hyper_images"]
         - resize_before_transform: 256
 
-      242bands_512:
-        - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
-        - resize_before_transform: 512
+      # 242bands_512:
+      #   - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
+      #   - resize_before_transform: 512
 
       368bands_256:
         - ["data/MDAS-HySpex/LitData_hyper_images"]

@@ -173,7 +173,7 @@ train:
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  grad_checkpoint: true
+  grad_checkpoint: false
   resume_path: #runs/stage1_cosmos_hybrid/2025-12-06_18-33-38_hybrid_cosmos_f16c64_jepa_pretrained/checkpoints/checkpoint_45
   ema_load_path: runs/stage1_cosmos_hybrid/2025-12-21_05-34-15_hybrid_cosmos_f16c64_ijepa_pretrained_sem/ema
   compile_model: false

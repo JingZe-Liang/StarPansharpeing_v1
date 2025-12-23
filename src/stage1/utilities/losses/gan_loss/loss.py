@@ -749,8 +749,14 @@ class VQLPIPSWithDiscriminator(nn.Module):
             # no loss for fsq
             q_loss = q_loss_total  # is zero
             logs = {"fsq_loss": q_loss}  # must be zeros
-            
-        elif self.qunatizer_type == '':
+
+        elif self.qunatizer_type == "":
+            ...
+
+        elif self.qunatizer_type == "":
+            ...
+
+        elif self.qunatizer_type == "":
             ...
 
         return q_loss, logs

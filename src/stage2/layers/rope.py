@@ -205,6 +205,7 @@ def apply_rotary_emb(
 
         return x_out.type_as(x)
 
+
 def get_resize_crop_region_for_grid(src, tgt_size):
     """Compatible of using diffusers' rope embedding"""
     th = tw = tgt_size

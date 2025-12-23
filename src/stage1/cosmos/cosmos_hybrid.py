@@ -696,7 +696,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     def get_repa_feature(
-        self, force_to: bool=False,
+        self,
+        force_to: bool = False,
     ) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]] | None:
         if not force_to:
             if not self._use_repa_loss:
@@ -1239,7 +1240,7 @@ def test_model_forward_backward(
                     # feat_to_use = feat[1] if feat[1] is not None else feat[0]
                     # if isinstance(feat_to_use, list):
                     #     feat_to_use = feat_to_use[2]
-                    feat_to_use= feat
+                    feat_to_use = feat
                 else:
                     feat_to_use = feat
             else:
@@ -1270,7 +1271,7 @@ def test_model_forward_backward(
             import matplotlib.pyplot as plt
 
             if torch.is_tensor(feat_to_use):
-                logger.info(f'Got 1 feature to PCA visualization with shape {feat_to_use.shape}')
+                logger.info(f"Got 1 feature to PCA visualization with shape {feat_to_use.shape}")
                 feat_pca = _get_pca_vis(feat_to_use)
                 n_cols, nrows = 2, 1
                 fig, axes = plt.subplots(figsize=(8, 8), ncols=n_cols, nrows=nrows)
@@ -1281,9 +1282,9 @@ def test_model_forward_backward(
                 axes[1].imshow(x_vis)
                 axes[1].set_title("Input Image")
             else:
-                logger.info(f'Got {len(feat_to_use)} feature maps for PCA visualization')
+                logger.info(f"Got {len(feat_to_use)} feature maps for PCA visualization")
                 # is a list
-                feat_pca = [_get_pca_vis(fea)[0] for fea in feat_to_use ]
+                feat_pca = [_get_pca_vis(fea)[0] for fea in feat_to_use]
                 n_cols, nrows = 5, 2
                 fig, axes = plt.subplots(figsize=(20, 8), ncols=n_cols, nrows=nrows)
                 x_vis = (x.float() + 1) / 2
@@ -1307,7 +1308,7 @@ def _get_pca_vis(feat_list: torch.Tensor | list[torch.Tensor], norm_type: str = 
 
     if isinstance(feat_list, torch.Tensor):
         feat_list = [feat_list]
-    
+
     feat_list_2 = []
     for feat in feat_list:
         if norm_type == "channel":

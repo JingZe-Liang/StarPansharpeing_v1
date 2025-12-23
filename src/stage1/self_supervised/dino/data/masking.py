@@ -38,9 +38,7 @@ def generate_ibot_masks(
 
     mask_indices = masks.flatten().nonzero().flatten()
 
-    masks_weight = (
-        (1 / masks.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(masks)[masks]
-    )
+    masks_weight = (1 / masks.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(masks)[masks]
 
     n_masked_patches_tensor = torch.full(
         (1,),
