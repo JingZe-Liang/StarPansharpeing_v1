@@ -1,23 +1,8 @@
-from collections import namedtuple
-
 import torch
 import torch.nn as nn
+from easydict import EasyDict as edict
 from einops import rearrange, reduce
 from torch.autograd import Function
-
-# Create named tuple for return values
-LossBreakdown = namedtuple(
-    "LossBreakdown",
-    [
-        "commit_loss",
-        "entropy_penalty",
-        "H",
-        "used_codes",
-        "indices",
-        "group_indices",
-        "avg_prob",
-    ],
-)
 
 
 def _inmap(x, eps=0.1):
@@ -181,7 +166,7 @@ class BinarySphericalQuantizer(nn.Module):
         return (
             zq,
             total_loss,
-            LossBreakdown(
+            edict(
                 commit_loss=commit_loss,
                 entropy_penalty=H_penalty_loss,
                 H=cb_entropy,

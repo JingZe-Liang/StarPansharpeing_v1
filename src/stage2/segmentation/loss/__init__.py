@@ -1,1 +1,1 @@
-from .seg_loss import HyperSegmentationLoss
+from .seg_loss import HyperSegmentationLoss, boost_strap_update_label

@@ -151,6 +151,7 @@ tmp/
 .ruff_cache/
 .vscode/
 wandb/
+**/papers
 
 *.png
 *.jpg

@@ -13,12 +13,12 @@ from bitsandbytes.optim import (
 from .came import CAME
 
 # Distributional optimizers from Dino
-_dino_imported = False
+_dion_imported = False
 try:
     from .dion.dion import Dion, DionMixedPrecisionConfig, DionReference, DionSimple
     # from .dion.dion import Muon as MuonAll2All
 
-    _dino_imported = True
+    _dion_imported = True
 except ImportError:
     print("Dion optimizers not available")
 
@@ -34,6 +34,7 @@ from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
 from .muon_fused import MuonFSDP
+from .normuon_fused import NorMuonFSDP
 from .muon_triton import Muon as MuonTriton
 from .sana_came import CAME8BitWrapper, CAMEWrapper, Lion
 
@@ -56,13 +57,14 @@ torch.serialization.add_safe_globals(
         MuonFSDP,
         MounFSDP_v1,
         MounFSDP_v2,
+        NorMuonFSDP,
         CAME,
         CAME8BitWrapper,
         CAMEWrapper,
         Lion,
     ]
 )
-if _dino_imported:
+if _dion_imported:
     torch.serialization.add_safe_globals(
         [
             Dion,

@@ -121,6 +121,80 @@ class HyperSegmentationLoss(torch.nn.Module):
             return self._forward_loss(pred, gt, mask)
 
 
+def boost_strap_update_label(
+    model: torch.nn.Module,
+    img: Tensor,
+    label: Tensor,
+    ratio: float = 0.2,
+    ignore_index: int = 255,
+) -> Tensor:
+    """
+    Dynamically generate pseudo-labels for unlabeled data (Bootstrap / Self-Training).
+
+    Args:
+        model: The segmentation model.
+        img: Input image tensor [B, C, H, W].
+        label: Original label tensor (used for shape/device reference).
+        ratio: Ratio of pixels to select as pseudo-labels (0.0 to 1.0).
+            Pixels with the lowest entropy (highest confidence) are selected.
+        ignore_index: Value to fill for unselected pixels (default: 255).
+
+    Returns:
+        new_label: Tensor [B, H, W] with pseudo-labels at selected indices
+                   and ignore_index elsewhere.
+    """
+    # 1. Ensure probabilistic/deterministic behavior for inference
+    training_mode = model.training
+    model.eval()
+
+    with torch.no_grad():
+        # 2. Forward pass
+        logits = model(img)
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]
+
+        # 3. Calculate Entropy
+        # probs: [B, C, H, W]
+        probs = torch.softmax(logits, dim=1)
+        b, c, h, w = probs.shape
+
+        # entropy: [B, H, W] = -sum(p * log(p))
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+
+        # 4. Select top-k pixels (lowest entropy)
+        num_pixels = h * w
+        k = int(num_pixels * ratio)
+        k = max(1, k)  # Ensure at least 1 pixel is selected if ratio > 0
+
+        # Flatten for topk
+        entropy_flat = entropy.view(b, -1)
+
+        # Find indices of the k smallest entropy values (highest confidence)
+        _, indices = torch.topk(entropy_flat, k, dim=1, largest=False)
+
+        # 5. Generate Pseudo Labels
+        pred_labels = torch.argmax(logits, dim=1)  # [B, H, W]
+        pred_flat = pred_labels.view(b, -1)
+
+        # Create new label tensor filled with ignore_index
+        new_label = torch.full_like(label, ignore_index)
+        new_label_flat = new_label.view(b, -1)
+
+        # Gather selected predictions
+        selected_preds = torch.gather(pred_flat, 1, indices)
+
+        # Scatter predictions into the new label tensor
+        new_label_flat.scatter_(1, indices, selected_preds)
+
+        # Reshape back to [B, H, W]
+        new_label = new_label_flat.view(b, h, w)
+
+    # Restore model mode
+    model.train(training_mode)
+
+    return new_label
+
+
 # * --- Test --- #
 
 
@@ -129,8 +203,17 @@ def test_hyper_seg_loss():
     gt = torch.randint(0, 5, (2, 32, 32))
     loss_fn = HyperSegmentationLoss()
     loss, loss_dict = loss_fn(pred, gt)
+    print(f"Loss: {loss}")
 
-    print(loss)
+    # Test bootstrap
+    model = torch.nn.Conv2d(3, 5, 3, padding=1)
+    img = torch.randn(2, 3, 32, 32)
+    label = torch.zeros(2, 32, 32, dtype=torch.long)
+    new_label = boost_strap_update_label(model, img, label, ratio=0.1)
+    print(f"Bootstrap Label Shape: {new_label.shape}")
+    print(f"Non-ignore pixels: {(new_label != 255).sum()}")
+    print(f"Total pixels: {new_label.numel()}")
+    print(f"Ratio: {(new_label != 255).sum() / new_label.numel()}")
 
 
 if __name__ == "__main__":

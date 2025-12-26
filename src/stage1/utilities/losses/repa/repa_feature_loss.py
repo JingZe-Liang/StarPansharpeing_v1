@@ -47,7 +47,6 @@ from src.stage1.utilities.losses.repa.feature_pca import (
 )
 from src.utilities.config_utils import function_config_to_basic_types
 
-# fmt: off
 # Dino collections
 DINOV3_TO_NUM_LAYERS = {
     "dinov3_vits16": 12,
@@ -80,12 +79,11 @@ SIGLIP2_FEATURE_INDEX: list[int] | None = None
 
 # PE collections
 PE_INTERACTION_INDEXES = {
-    'PE-Spatial-L14-448': [5, 11, 17, 23],
-    'PE-Spatial-G14-448': [9, 21, 33, 48],
-    'PE-Core-B16-224': [3, 5, 8, 11],
-    'PE-Core-G14-448': [9, 21, 33, 48],
+    "PE-Spatial-L14-448": [5, 11, 17, 23],
+    "PE-Spatial-G14-448": [9, 21, 33, 48],
+    "PE-Core-B16-224": [3, 5, 8, 11],
+    "PE-Core-G14-448": [9, 21, 33, 48],
 }
-# fmt: on
 
 # types
 type InterpType = tuple[int, ...] | torch.Size

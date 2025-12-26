@@ -1,6 +1,4 @@
 import random
-import sys
-import types
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Literal
@@ -28,7 +26,7 @@ from src.stage2.denoise.utils.noise_adder import (
     UniHSINoiseAdderKornia,
     get_tokenizer_trainer_noise_adder,
 )
-from src.utilities.config_utils import function_config_to_basic_types
+from src.utilities.config_utils import function_config_to_basic_types, set_defaults
 
 from .augmentations import hyper_transform
 from .utils import large_image_resizer_clipper, norm_img
@@ -676,7 +674,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
     def __init__(
         self,
         dataset,
-        size_based_batch_sizes: dict[int, int],  # size: batch_size
+        size_based_batch_sizes: dict[int, int | None],  # size: batch_size
         cache_minor=False,
         *args: Any,
         batch_size: int = 1,
@@ -716,6 +714,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
             return
 
         target_bs = self.size_bs_s[size]
+        assert target_bs is not None, f"Batch size cannot be None for size {size} in cache"
         cache = self._size_caches[cache_key]
 
         total_samples = sum(batch["img"].shape[0] for batch in cache)
@@ -789,11 +788,16 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
             size = img.shape[-1]  # bs, c, h, w
             channel = img.shape[1]  # bs, c, h, w
 
+            if size not in self.size_bs_s or self.size_bs_s[size] is None:
+                yield batch
+                continue
+
             if self.cache_minor:
                 yield from self._yield_from_cache(channel, size)
 
             if size in self.size_bs_s:
                 target_bs = self.size_bs_s[size]
+                assert target_bs is not None, f"Batch size cannot be None for size {size}"
                 cur_bs = img.shape[0]
 
                 if cur_bs >= target_bs:
@@ -900,7 +904,7 @@ def collate_fn_skip_none(
 
 @function_config_to_basic_types
 def create_hyper_image_litdata_flatten_paths_loader(
-    paths: dict[str, dict],
+    paths: Any,
     weights: list[float | int] | None = None,
     stream_ds_kwargs: dict = {
         "transform_prob": 0.0,
@@ -911,36 +915,46 @@ def create_hyper_image_litdata_flatten_paths_loader(
     },
     loader_kwargs: dict = {
         "batch_size": 8,
-        "num_workers": 16,
+        "num_workers": 8,
         "persistent_workers": True,
         "prefetch_factor": None,
         "shuffle": False,
     },
-    macro_sampled_batch_size: dict[int, int] = {
+    macro_sampled_batch_size: dict[int, int | None] = {
         128: 16,
         256: 12,
         512: 6,
     },
     _collect_stats: bool = False,
 ):
-    paths_dict = {}
+    def _flatten_paths(d: dict[str, Any]) -> dict[str, list]:
+        res: dict[str, list] = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                res.update(_flatten_paths(v))
+            else:
+                res[k] = v
+        return res
+
     # Flatten all files
-    for name, path_dict in paths.items():
-        for sub_name, path_kwgs in path_dict.items():
-            paths_dict[sub_name] = path_kwgs
+    paths_dict: dict[str, list]
+    if isinstance(paths, dict):
+        paths_dict = _flatten_paths(paths)
+    else:
+        # If it's already a flat list or other type, wrap it
+        paths_dict = {"default": [paths, {}]}
 
     dataset = []
-    for name, (paths, kwargs) in paths_dict.items():
-        stream_ds_kwargs_ = stream_ds_kwargs.copy()
-        stream_ds_kwargs_.update(kwargs)
+    for name, (ds_paths, ds_kwargs) in paths_dict.items():
+        ds_kwargs = set_defaults(ds_kwargs, stream_ds_kwargs)
         ds = ImageStreamingDataset.create_dataset(
-            input_dir=paths,
+            input_dir=ds_paths,
             combined_kwargs={"batching_method": "per_stream"},
-            **stream_ds_kwargs_,
+            **ds_kwargs,
         )
         dataset.append(ds)
 
-        logger.info(f"Create dataset for {name} with paths: {paths}")
+        logger.info(f"Create dataset for {name} with paths: {ds_paths}")
         logger.info(f"Dataset has {get_dataset_len(ds)} samples.")
         logger.info("---------" * 6 + "\n")
 
@@ -1180,35 +1194,6 @@ def __test_create_hyper_image_litdata_loader():
     )
     dl = SizeBasedBatchsizeStreamingDataloader(ds, size_based_batch_sizes={128: 16, 256: 12, 512: 6}, **loader_kwargs)
 
-    # from src.utilities.logging import configure_logger
-
-    # configure_logger(add_tqdm_filter=True, _auto_=False)
-
-    # # statistics
-    # bands_info_n = {}
-
-    # print("Start testing...")
-    # for i, sample in tqdm(  # type: ignore
-    #     enumerate(dl),
-    #     # total=len(ds) // dl.batch_size,
-    # ):
-    #     if i == 0 and "__key__" not in sample:
-    #         print(sample.keys())
-
-    #     chan = sample["img"].shape[1]
-    #     if chan not in bands_info_n:
-    #         bands_info_n[chan] = 0
-    #     bands_info_n[chan] += sample["img"].shape[0]
-    #     if i % 10 == 0:
-    #         logger.info(
-    #             f"channel samples: {', '.join(f'{k}: {v}' for k, v in bands_info_n.items())}",
-    #             tqdm=True,
-    #         )
-    #         # print(f"channel samples: {str(bands_info_n)}")
-
-    #     # if i > 500:
-    #     #     break
-
     return ds, dl
 
 
@@ -1301,12 +1286,46 @@ def __test_ds_len():
     print(f"Dataset length: {len(ds)}")
     print(ds[0])
 
-    # path = "data2/RemoteSAM270k/LitData_hyper_images2"
-    # ds = StreamingDataset(
-    #     input_dir=path,
-    # )
 
-    # print(f"Dataset length: {len(ds)}")
+def __test_get_mars_data():
+    from tqdm import tqdm
+
+    mars_data_dir: list[str] = [
+        "data2/MarsBench/mb-boulder_det/",
+        "data2/MarsBench/mb-boulder_seg/",
+        "data2/MarsBench/mb-conequest_seg/",
+        "data2/MarsBench/mb-crater_multi_seg/",
+        "data2/MarsBench/mb-domars16k/",
+        "data2/MarsBench/mb-dust_devil_det/",
+        "data2/MarsBench/mb-landmark_cls/",
+        "data2/MarsBench/mb-mars_seg_mer/",
+        # "data2/MarsBench/mb-mmls/",
+        "data2/MarsBench/mb-surface_cls/",
+        "data2/MarsBench/mb-surface_multi_label_cls/",
+    ]
+    # add suffix: litdata
+    mars_data_dir = [f + "litdata" for f in mars_data_dir]
+    print(mars_data_dir)
+    # path = mars_data_dir[0]
+    # ds, dl= ImageStreamingDataset.create_dataloader(input_dir=path, loader_kwargs={'batch_size': 3, 'num_workers': 1})
+
+    # Get the dataloader
+    # paths should be a dict for _flatten_paths, but if it's a list, we wrap it
+    if isinstance(mars_data_dir, list):
+        mars_paths = {"mars_data": (mars_data_dir, {"is_cycled": False})}
+    else:
+        mars_paths = mars_data_dir
+
+    ds, dl = create_hyper_image_litdata_flatten_paths_loader(
+        mars_paths, loader_kwargs={"batch_size": 8, "num_workers": 4}
+    )
+    total_ds = sum(get_dataset_len(ds) for ds in ds)
+    print(f"Total data: {total_ds}")
+    print(f"Total iters: {total_ds // 8}")
+    with logger.catch():
+        for sample in tqdm(dl, total=total_ds // 8):
+            # print(sample.keys())
+            pass
 
 
 if __name__ == "__main__":
@@ -1318,9 +1337,10 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
     # __test_normal_image_loader()
-    __test_gen_loader()
+    # __test_gen_loader()
     # __test_ds_len()
     # __test_get_item_key()
+    __test_get_mars_data()
 
     # from omegaconf import OmegaConf
 

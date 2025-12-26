@@ -3,7 +3,6 @@ Hyperspectral Transformer Tokenizer with hybrid CNN / Transformer architecture.
 RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
-from pickle import FALSE
 from dataclasses import asdict, dataclass
 from typing import Any, List, NamedTuple, Optional, Self, Tuple, Union
 
@@ -115,7 +114,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         if self.cnn_cfg.loading_type == "hybrid_pretrained":
             self.load_pretrained(self.cnn_cfg.uni_path)
 
-        if "lejepa_latent" in self.trans_enc_cfg.pretrained_type:
+        if self.trans_enc_cfg.pretrained_type is not None and "lejepa_latent" in self.trans_enc_cfg.pretrained_type:
             from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
 
             assert self.latent_bottleneck_type == "before_semantic", (
@@ -423,6 +422,49 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         return terms.lejepa_proj
 
+    def encode_nepa(self, x, **_ignored_kwargs) -> dict:
+        """Encode for NePA (Next Embedding Prediction) pretraining.
+
+        NePA trains the transformer to predict the next position's input embedding
+        from the current position's output, using causal attention and cosine
+        similarity loss in latent space.
+
+        Args:
+            x: Input image tensor [B, C, H, W]
+
+        Returns:
+            dict with:
+                - nepa_loss: scalar loss value
+                - nepa_h_in: [B, T, D] input embeddings (optional)
+                - nepa_h_out: [B, T, D] output hidden states (optional)
+        """
+        # Low-level encoder (CNN)
+        z_low_lvl = self.encoder.encoder(x)
+
+        # Apply quantization and preprocessing based on bottleneck type
+        if self.latent_bottleneck_type == "before_semantic":
+            h = self.encoder.quant_conv(z_low_lvl)
+            h = self.latent_aug(h)
+            if self.st_skip_sem_decoder:
+                h = self.decoder.quant_conv["post_quant_conv"](h)
+            else:
+                h = self.decoder.quant_conv(h)
+        else:
+            # after_semantic: use raw low-level features
+            h = z_low_lvl
+            h = self.latent_aug(h)
+
+        # Forward through semantic encoder with NePA
+        _, terms = self.semantic_enc_transformer._forward_pretrained_backbone(  # type: ignore
+            h, masks=None, pretrained_task=["nepa"], nepa_input=h
+        )
+
+        return {
+            "nepa_loss": terms.nepa_loss,
+            "nepa_h_in": terms.get("nepa_h_in"),
+            "nepa_h_out": terms.get("nepa_h_out"),
+        }
+
     def _forward_low_level_encoder(self, x, get_intermediate_features=False):
         ############ Low-level encoder
         cache_low_lvl = None
@@ -489,6 +531,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         enc_out = edict(
             to_dec=None,
             latent=None,
+            latent_before_quantizer=None,
             q_loss=None,
             q_loss_breakdown=None,
             low_lvl_z=None,
@@ -511,7 +554,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Do cache here
         self.z = cache_low_lvl  # [b, c, h, w]
         self.sem_z = cache_semantic
-        enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic)
+        enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic, latent_before_quantizer=z_semantic)
 
         ##### Do quant return out
         if isinstance(quant_ret, tuple):
@@ -534,12 +577,21 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         use_quantizer=None,
         get_intermediate_features=False,
     ):
-        enc_out = edict(to_dec=None, latent=None, q_loss=None, q_loss_breakdown=None, low_lvl_z=None, sem_z=None)
+        enc_out = edict(
+            to_dec=None,
+            latent=None,
+            latent_before_quantizer=None,
+            q_loss=None,
+            q_loss_breakdown=None,
+            low_lvl_z=None,
+            sem_z=None,
+        )
 
         ######## Low-level encoder
         z_low_lvl, cache_low_lvl = self._forward_low_level_encoder(
             x, get_intermediate_features=get_intermediate_features
         )
+        enc_out["latent_before_quantizer"] = z_low_lvl
 
         ######## Apply CNN encoder - quant conv
         quant_ret = self._apply_quant_conv_quantizer(z_low_lvl, use_quantizer)

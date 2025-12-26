@@ -1,7 +1,7 @@
 import inspect
 import random
 import warnings
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -32,6 +32,8 @@ from src.stage1.discretization.collections.kl_continuous import (
     DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
 )
 from src.stage1.discretization.collections.psd import PowerSphericalDistribution, l2_norm
+
+# other utils
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
@@ -40,9 +42,13 @@ from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any
 from src.utilities.network_utils import load_weights_with_shape_check
 
-from ..utilities.losses.latent_reg import NestChannelDrop, lmr_apply, LatentMaskConfig, ChannelDropConfig
-
-KLLossBreakDown = namedtuple("KLLossBreakDown", ["posterior", "mean", "logvar"])
+from ..utilities.losses.latent_reg import (
+    NestChannelDrop,
+    lmr_apply,
+    LatentMaskConfig,
+    ChannelDropConfig,
+    _sample_t_distributional,
+)
 
 
 #  --- Network utilities --- #
@@ -744,11 +750,7 @@ class ContinuousImageTokenizer(nn.Module):
             kl_loss = posterior.kl()
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
             h = posterior.sample()
-            loss_breakdown = KLLossBreakDown(
-                posterior=posterior,
-                mean=m_,
-                logvar=logvar_,
-            )
+            loss_breakdown = edict(posterior=posterior, mean=m_, logvar=logvar_)
 
             if self.use_channel_drop:
                 h, _ = self.channel_drop(h)
@@ -850,12 +852,10 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             encoded = maybe_q_encoded
 
-        return edict(
-            encoded=encoded,
-            itermediate_feats=feats,
-            q_loss=q_loss,
-            q_loss_breakdown=loss_breakdown,
-        )
+        result = edict(encoded=encoded, itermediate_feats=feats)
+        result.q_loss = q_loss
+        result.q_loss_breakdown = loss_breakdown
+        return result
 
     def encode_lejepa(self, x, **_ignored_kwargs):
         z = self.encoder.encoder(x)
@@ -866,8 +866,19 @@ class ContinuousImageTokenizer(nn.Module):
         h_proj = self.lejepa_projector(h_pool)
         return h_proj
 
+    @staticmethod
+    def _maybe_channels_last_4d(x: Tensor) -> Tensor:
+        if not cosmos_block.model_compiled_flag:
+            return x
+        if (not x.is_cuda) or x.ndim != 4:
+            return x
+        if x.is_contiguous(memory_format=torch.channels_last):
+            return x
+        return x.contiguous(memory_format=torch.channels_last)
+
     def encode(self, x: Tensor, use_quantizer: bool | None = None):
         enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
+        x = self._maybe_channels_last_4d(x)
 
         need_repa_cache = self.training and (hasattr(self, "_repa_proj") or hasattr(self, "_vf_proj"))
         interms: list[Tensor] | None = None
@@ -880,10 +891,10 @@ class ContinuousImageTokenizer(nn.Module):
             z, interms = self.encoder.encoder(x, ret_interm_feats=repa_layers)
             self.z = interms
             # To latent (before quantizer)
-            h_pre_quant = self.encoder.quant_conv(z)
+            h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
         else:
             z = self.encoder.encoder(x)
-            h_pre_quant = self.encoder.quant_conv(z)
+            h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
             self.z = h_pre_quant
 
         # Quantization
@@ -896,6 +907,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # z augmentions
         h = self.latent_aug(h)
+        h = self._maybe_channels_last_4d(h)
         enc_out.latent = h
 
         return enc_out
@@ -915,7 +927,8 @@ class ContinuousImageTokenizer(nn.Module):
         clamp: Clamp decoded values to (-1, 1).
         """
         dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)
-        h = dec_out["latent"]
+        h = self._maybe_channels_last_4d(dec_out["latent"])
+        dec_out["latent"] = h
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
@@ -929,7 +942,7 @@ class ContinuousImageTokenizer(nn.Module):
         return dec_out
 
     def forward(self, input: torch.Tensor, enc_kwargs: dict = {}, dec_kwargs: dict = {}) -> dict:
-        if cosmos_block.compile_forward_fn:
+        if cosmos_block.model_compiled_flag:
             torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
 
         enc = self.encode(input, **enc_kwargs)
@@ -947,6 +960,7 @@ class ContinuousImageTokenizer(nn.Module):
         uni_tokenizer_path: str | None = None,
         mean_init_conv_in_out: bool = False,
         _reinit_quant_convs: bool = False,
+        _freeze_encoder: bool = False,
     ) -> tuple[Encoder, Decoder] | None:
         if (enc_path == "" or dec_path == "") and uni_tokenizer_path == "":
             return None
@@ -999,6 +1013,10 @@ class ContinuousImageTokenizer(nn.Module):
                     nn.init.zeros_(self.decoder.quant_conv.bias)
 
                     logger.warning(f"temp code for continue training")
+
+                if _freeze_encoder:
+                    self.encoder.requires_grad_(False)
+                    logger.log(f"Freeeze the encoder params")
 
                 # if conv_in is nn.Conv2d for only one channel
                 # and if the pretrained conv_in's basic module is also conv
@@ -1246,8 +1264,6 @@ class ContinuousImageTokenizer(nn.Module):
             cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, config, strict=False)
         else:
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
-        if hasattr(cfg, "__post_init__"):
-            cfg.__post_init__()  # check the configs
         return cls(cfg)
 
     def set_grad_checkpointing(self, enabled: bool = True):
@@ -1288,7 +1304,7 @@ def vae_f8_config(
             "act_checkpoint": True,
             "block_name": "res_block",  # res_block, res_moe
             "padding_mode": "reflect",
-            "norm_type": "gn",
+            "norm_type": "rmsnorm2d",
             "norm_groups": 32,
             "attn_type": "none",
             "adaptive_mode": "interp",
@@ -1376,14 +1392,25 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    config = vae_f8_config(512, 24, quantizer_type="multiscale_leechq")
+    config = vae_f8_config(512, 16, quantizer_type=None, pretrained_path=base_model_ckpt)
     if other_model_kwargs:
         if "model" in other_model_kwargs:
             config["model"].update(other_model_kwargs.pop("model"))
         else:
             config.update(other_model_kwargs)
-    tokenizer = model_cls.create_model(**config)
-    tokenizer = tokenizer.to(device, dtype)
+
+    if base_model_ckpt not in ("", None):
+        import accelerate
+
+        with accelerate.init_empty_weights():
+            tokenizer = model_cls.create_model(**config)
+        accelerate.load_checkpoint_and_dispatch(tokenizer, base_model_ckpt, device_map="auto")
+        # Use to_empty() for meta tensor -> device conversion
+        # tokenizer = tokenizer.to_empty(device=device)
+        tokenizer = tokenizer.to(dtype)
+    else:
+        tokenizer = model_cls.create_model(**config)
+        tokenizer = tokenizer.to(device, dtype)
 
     if is_lora:
         assert lora_ckpt is not None, "lora_ckpt is required for lora test"
@@ -1413,6 +1440,7 @@ def test_tokenizer_forward_backward(
         # Move to device and set to eval mode
         tokenizer = tokenizer.to("cuda", dtype)
         tokenizer.eval()
+        # tokenizer = _maybe_channels_last_module(tokenizer)
 
         # Log available LoRAs
         logger.info(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
@@ -1436,6 +1464,8 @@ def test_tokenizer_forward_backward(
             iterations = dl
     else:
         x = torch.randn(*fake_img_shape).to(device, dtype=dtype)
+        # if _is_model_compiled() and str(device).startswith("cuda"):
+        #     x = x.to(memory_format=torch.channels_last)
         iterations = [x]
 
     if not is_itered and upscale != 1:
@@ -1479,7 +1509,6 @@ def test_tokenizer_forward_backward(
             # Compute mean and std of the latent
             if compute_mean_std:
                 mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
-                # mean_c, std_c = h.mean(), h.std()
                 mean_lst.append(mean_c)
                 std_lst.append(std_c)
 
@@ -1523,7 +1552,7 @@ def test_tokenizer_forward_backward(
                 break
 
         if metric.update_count >= 1:
-            logger.info(metric.compute())
+            logger.info(f"Average PSNR: {metric.compute()}")
 
     # print mean and std of the latent
     if compute_mean_std:
@@ -1540,6 +1569,8 @@ def test_tokenizer_forward_backward(
                 feat = tokenizer.encode(x)
                 if isinstance(feat, tuple):
                     feat = feat[0]
+                elif isinstance(feat, dict):
+                    feat = feat["latent"]
         assert feat is not None, "repa feature should not be None"
         feat_pca = feature_pca_sk(feat.float())
         # norm
@@ -1552,38 +1583,22 @@ def test_tokenizer_forward_backward(
 
 if __name__ == "__main__":
     """
-    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
+    CUDA_VISIBLE_DEVICES=0 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
     """
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="",  # "runs/pretrained/VAEInterp-f8c16.safetensors",
-        real_data=None,
-        save_pca_vis=False,
+        base_model_ckpt="runs/stage1_cosmos_nested/2025-12-25_03-17-15_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
+        save_pca_vis=True,
         pca_type="z",
+        real_data="SAM270k",
         is_lora=False,
         save_img_dir=None,  # "tmp/vis_pansharpening_loras",
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=1000,
-        compute_mean_std=False,
-        use_optim=True,
-        check_grad=True,
-        device="cpu",
+        max_iters=1,
+        compute_mean_std=True,
+        use_optim=False,
+        check_grad=False,
+        device="cuda",
     )
-
-# RS5M
-# 19:19:44 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: 2.3075454235076904
-# 19:19:44 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.797507286071777
-
-# Fmow_MS
-# 18:50:37 - ℹ️  [ INFO ] cosmos_tokenizer.py:1490 - mean of the latent: -3.1455795764923096
-# 18:50:37 - ℹ️  [ INFO ] cosmos_tokenizer.py:1491 - std of the latent: 5.390313148498535
-
-# BigEarthNetS2
-# 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1544 - mean of the latent: -1.926203727722168
-# 19:23:15 - ℹ️  [ INFO ] cosmos_tokenizer.py:1545 - std of the latent: 6.4402666091918945
-
-# SAM 270k
-# 19:01:05 - ℹ️  [ INFO ] cosmos_tokenizer.py:1490 - mean of the latent: -0.026932599022984505
-# 19:01:05 - ℹ️  [ INFO ] cosmos_tokenizer.py:1491 - std of the latent: 4.79932975769043

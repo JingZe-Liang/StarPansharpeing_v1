@@ -17,6 +17,23 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+dataset:
+  train_loader:
+    macro_sampled_batch_size: { 128: 16, 256: 10, 512: 4 }
+    loader_kwargs:
+      num_workers: 6
+      batch_size: 6
+      prefetch_factor: 2
+      persistent_workers: true
+  val_loader:
+    macro_sampled_batch_size: {128: 7, 256: 7, 512: 7}
+    loader_kwargs:
+      num_workers: 2
+      batch_size: 4
+      pin_memory: false
+      drop_last: true
+      persistent_workers: false
+
 accelerator:
   gradient_accumulation_plugin:
     num_steps: 1
@@ -42,7 +59,7 @@ vq_loss:
     feature_normalize: spatial
     get_hier_teacher_feature: true
   # semantic distillatin loss
-  sem_distill_weight: 0.1
+  sem_distill_weight: 0.0
   sem_distill_options:
     c_dim_first: true
     build_proj: false
@@ -173,7 +190,7 @@ train:
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
-  resume_path: #runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_48
+  resume_path: runs/stage1_cosmos_leechq/2025-12-23_13-04-56_nested_cosmos_f8c24p1_leechq_repa_litdata_one_loader/checkpoints/checkpoint_0
   ema_load_path: #runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/ema
 
   finetune_cfg:
@@ -181,6 +198,13 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # betas: ${tuple:[0.95, 0.99]}
+    # weight_decay: 1.0e-6
+    # eps: 1.0e-8
+    # foreach: true
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
     betas: ${tuple:[0.9, 0.95]}
@@ -225,6 +249,8 @@ train:
     log_with_time: true
     visualize_every: 500
     log_every: 10
+    log_with: [swanlab]
+    exp_name: cosmos_AE_tokenizer_repa_quantizer_leechq
 
   debug: true
 

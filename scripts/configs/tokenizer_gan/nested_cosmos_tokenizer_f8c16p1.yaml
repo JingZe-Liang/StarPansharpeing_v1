@@ -132,15 +132,15 @@ train:
   tokenizer_name: uni_cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}
   proj_dir: runs/stage1_cosmos_nested
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 0.3
+  max_grad_norm: 1.0
   track_metrics: false
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  resume_path:
-  ema_load_path: runs/stage1_cosmos_nested/2025-10-21_00-35-10_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
+  resume_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/checkpoints/checkpoint_105
+  ema_load_path: #runs/stage1_cosmos_nested/2025-10-21_00-35-10_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false

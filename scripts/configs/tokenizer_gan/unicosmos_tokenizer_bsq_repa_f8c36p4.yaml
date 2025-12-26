@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: mars # [hyperspectral, unified_hyperspectral]
   - tokenizer: uni_cosmos_f8c16p1_nested # base tokenizer
   - quantizer: quant
   - accelerator: base
@@ -21,21 +21,40 @@ accelerator:
   gradient_accumulation_plugin:
     num_steps: 1
 
+dataset:
+  train_loader:
+    macro_sampled_batch_size: { 128: 16, 256: 10, 512: 4 }
+    loader_kwargs:
+      num_workers: 6
+      batch_size: 6
+      prefetch_factor: 2
+      persistent_workers: true
+  val_loader:
+    macro_sampled_batch_size: { 128: 8, 256: 8, 512: 6 }
+    loader_kwargs:
+      num_workers: 2
+      batch_size: 4
+      pin_memory: false
+      drop_last: true
+      persistent_workers: false
+
 vq_loss:
   # perceptual loss
-  perceptual_weight: 0.05
+  perceptual_weight: 0.1
   # repa loss
-  repa_loss_weight: 0.02 # 0.1
+  repa_loss_weight: 0 # 0.1
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
+    repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
     feature_resample_type: match_teacher
-    loss_type: am_radio
-    feature_normalize: true
+    loss_type: hier_distillation
+    feature_normalize: spatial
+    get_hier_teacher_feature: true
   # vf loss
   vf_loss_weight:
   vf_loss_options:
@@ -68,17 +87,21 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.06
-  disc_weight: 0.1
+  ssim_weight: 0
+  disc_weight: 0.4
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
+  lcr_loss_weight: 0.0
+  lcr_loss_options:
+    thresh: 0.75
+    windows_size: [2, 2]
 
 tokenizer:
   # repa
-  use_repa_loss: true
+  use_repa_loss: false
   use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
   vf_on_z_or_module: z # [z, module]
@@ -88,8 +111,8 @@ tokenizer:
   quantizer_type: bsq
 
   # loading
-  uni_path:
-  loading_type:
+  uni_path: runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors
+  loading_type: pretrained
 
   # augmentations
   latent_noise_prob: 0.0
@@ -133,10 +156,34 @@ ema:
   allow_different_devices: true
   update_model_with_ema_every: 5000
 
+peft:
+  _target_: peft.LoraConfig
+  peft_type: lora
+  r: 32
+  lora_alpha: 8
+  use_dora: false
+  use_rslora: false
+  target_modules:
+    # [placeholder, add in tokenizer class]
+    # - conv1
+    # - conv2
+    # - q
+    # - k
+    # - v
+    # - proj_out
+  lora_dropout: 0
+  modules_to_save:
+    # [placeholder, add in tokenizer class]
+    # - encoder.encoder.conv_in
+    # - decoder.decoder.conv_out
+    # - _repa_proj
+    # - encoder.quant_conv
+    # - decoder.quant_conv
+
 train:
-  tokenizer_name: cosmos_bsq
+  tokenizer_name: cosmos_bsq_lora
   proj_dir: runs/stage1_cosmos_bsq/
-  finetune_strategy: finetune_all
+  finetune_strategy: peft
   max_grad_norm: 1.0
   track_metrics: true
   track_metrics_duration: -1
@@ -150,52 +197,28 @@ train:
   grad_check: false
   compile_model: false
   resume_path: #runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_48
-  ema_load_path: runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/ema
+  ema_load_path:
+  # lora specifics
+  conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
+  add_norms: false
+  save_peft_ckpts: true
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-9
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
     betas: ${tuple:[0.95, 0.99]}
     oned_param_algo: lion
-    use_triton: false
+    use_triton: true
     muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.01
+      lr: 3.0e-4
+      weight_decay: 0.02
     oned_params_defaults:
-      lr: 4.0e-4
+      lr: 3.0e-4
       weight_decay: 0.0
-
-    # _target_: heavyball.ForeachAdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1e-9
-    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
-    # caution: true
-    # foreach: true
-
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -205,26 +228,6 @@ train:
     weight_decay: 1.0e-6
     eps: 1.0e-8
     foreach: true
-
-    # _target_: heavyball.ForeachAdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1e-9
-    # betas: ${tuple:[0.9, 0.999]} #[0.5, 0.9], gan training beta1 is zero
-    # caution: true
-    # foreach: true
-
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-9
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
@@ -249,6 +252,8 @@ train:
     log_with_time: true
     visualize_every: 500
     log_every: 10
+    log_with: ["swanlab"]
+    exp_name: bsq-lora
 
   debug: true
 

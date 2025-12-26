@@ -308,9 +308,9 @@ class MultiScaleBSQ(Module):
                 else:
                     summed_codes += code
         # project out
-        summed_codes = summed_codes.permute(0, 2, 3, 4, 1).contiguous()
+        summed_codes = summed_codes.permute(0, 2, 3, 4, 1)
         summed_codes = self.project_out(summed_codes)
-        summed_codes = summed_codes.permute(0, 4, 1, 2, 3).contiguous()
+        summed_codes = summed_codes.permute(0, 4, 1, 2, 3)
 
         if summed_codes.size(2) == 1:
             summed_codes = summed_codes.squeeze(2)
@@ -344,9 +344,9 @@ class MultiScaleBSQ(Module):
                 scale_num = len(scale_schedule)
 
         # x = self.project_in(x)
-        x = x.permute(0, 2, 3, 4, 1).contiguous()  # (b, c, t, h, w) => (b, t, h, w, c)
+        x = x.permute(0, 2, 3, 4, 1)  # (b, c, t, h, w) => (b, t, h, w, c)
         x = self.project_in(x)
-        x = x.permute(0, 4, 1, 2, 3).contiguous()  # (b, t, h, w, c) => (b, c, t, h, w)
+        x = x.permute(0, 4, 1, 2, 3)  # (b, t, h, w, c) => (b, c, t, h, w)
         x = self.layernorm(x)
 
         quantized_out = 0.0
@@ -410,7 +410,7 @@ class MultiScaleBSQ(Module):
                 all_indices.append(indices)
                 # quantized_list.append(torch.norm(quantized.detach(), dim=1).mean())
                 if (pt, ph, pw) != (T, H, W):
-                    quantized_up = F.interpolate(quantized, size=(T, H, W), mode=self.z_interplote_up).contiguous()
+                    quantized_up = F.interpolate(quantized, size=(T, H, W), mode=self.z_interplote_up)
                 else:
                     quantized_up = quantized
                 if self.remove_residual_detach:
@@ -423,9 +423,7 @@ class MultiScaleBSQ(Module):
                 all_losses.append(loss)
                 if si != scale_num - 1:
                     var_inputs.append(
-                        F.interpolate(
-                            quantized_out, size=scale_schedule[si + 1], mode=self.z_interplote_down
-                        ).contiguous()
+                        F.interpolate(quantized_out, size=scale_schedule[si + 1], mode=self.z_interplote_down)
                     )
 
                 if self.use_decay_factor:
@@ -435,9 +433,9 @@ class MultiScaleBSQ(Module):
         # print("quantized_list:", quantized_list)
         # import ipdb; ipdb.set_trace()
         # project out, if needed
-        quantized_out = quantized_out.permute(0, 2, 3, 4, 1).contiguous()  # (b, c, t, h, w) => (b, t, h, w, c)
+        quantized_out = quantized_out.permute(0, 2, 3, 4, 1)  # (b, c, t, h, w) => (b, t, h, w, c)
         quantized_out = self.project_out(quantized_out)
-        quantized_out = quantized_out.permute(0, 4, 1, 2, 3).contiguous()  # (b, t, h, w, c) => (b, c, t, h, w)
+        quantized_out = quantized_out.permute(0, 4, 1, 2, 3)  # (b, t, h, w, c) => (b, c, t, h, w)
 
         # image
         if quantized_out.size(2) == 1:

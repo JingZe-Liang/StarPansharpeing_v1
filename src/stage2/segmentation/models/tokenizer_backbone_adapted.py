@@ -30,81 +30,111 @@ TOKENIZER_INTERACTION_INDEXES = {
 
 
 def _create_default_cfg():
-    # cm244c384
-    _cnn_model_str = (
-        "resolution=512 in_channels=384 out_channels=384 z_channels=512 latent_channels=64 "
-        "channels=128 channels_mult=[2,4,4] num_res_blocks=2 attn_resolutions=[] "
-        "dropout=0.0 spatial_compression=8 patch_size=1 block_name=res_block "
-        "norm_type=gn norm_groups=32 adaptive_mode=interp downsample_kwargs.padconv_use_manually_pad=false "
-        "upsample_kwargs.interp_type=nearest_interp"
+    cfg_dict = dict(
+        tokenizer=dict(
+            cnn_cfg=dict(
+                model=dict(
+                    resolution=512,
+                    in_channels=512,
+                    out_channels=512,
+                    z_channels=512,
+                    latent_channels=32,
+                    channels=128,
+                    channels_mult=[2, 4, 4],
+                    num_res_blocks=2,
+                    attn_resolutions=[],
+                    dropout=0.0,
+                    spatial_compression=8,
+                    patch_size=1,
+                    block_name="res_block",
+                    norm_type="rmsnorm2d",
+                    norm_groups=32,
+                    adaptive_mode="interp",
+                    downsample_kwargs=dict(padconv_use_manually_pad=False),
+                    upsample_kwargs=dict(interp_type="nearest_interp"),
+                ),
+                quantizer_type=None,
+                vf_on_z_or_module="z",
+                use_repa_loss=False,
+                dino_feature_dim=1024,
+            ),
+            trans_enc_cfg=dict(
+                embed_dim=1024,
+                depth=12,
+                num_heads=16,
+                mlp_ratio=4.0,
+                qkv_bias=True,
+                patch_size=2,
+                norm_layer="layernorm",
+                pos_embed="learned",
+                rope_type="axial",
+                pos_embed_grid_size=[32, 32],
+                img_size=32,
+                in_chans=512,
+                out_chans=512,
+                unpatch_size=1,
+                reg_tokens=0,
+            ),
+            trans_dec_cfg=dict(
+                embed_dim=1024,
+                depth=12,
+                num_heads=16,
+                mlp_ratio=4.0,
+                qkv_bias=True,
+                patch_size=1,
+                norm_layer="layernorm",
+                pos_embed="learned",
+                rope_type="axial",
+                pos_embed_grid_size=[32, 32],
+                img_size=32,
+                in_chans=512,
+                out_chans=512,
+                unpatch_size=2,
+                reg_tokens=0,
+            ),
+            distill_cfg=dict(
+                dino_feature_dim=1024,
+                semantic_feature_dim=1024,
+            ),
+        ),
+        tokenizer_feature=dict(
+            pretrained_path=None,
+            features_per_stage=[512, 512, 512, 512],
+            model_name="hybrid_tokenizer_b16",
+            pretrained_size=512,
+            in_channels=3,
+            conv_inplane=64,
+            drop_path_rate=0.3,
+            with_cffn=True,
+            cffn_ratio=0.25,
+            deform_num_heads=16,
+            deform_ratio=0.5,
+            add_vit_feature=True,
+            use_extra_extractor=True,
+            with_cp=True,
+        ),
+        adapter=dict(
+            adapter_type="default",
+            latent_width=64,
+            n_conv_per_stage=1,
+            depth_per_stage=1,
+            norm="layernorm2d",
+            act="gelu",
+            drop=0.0,
+            act_first=False,
+            conv_bias=False,
+            block_types=["nat", "nat", "mbconv", "mbconv"],
+        ),
+        tokenizer_pretrained_path=None,
+        input_channels=155,
+        num_classes=2,
+        deep_supervision=False,
+        n_stages=4,
+        use_latent=True,
+        ensure_rgb_type=None,
+        _debug=False,
     )
-    _cnn_model_cfg = OmegaConf.from_dotlist(_cnn_model_str.split(" "))
-    _cnn_str = "quantizer_type=null vf_on_z_or_module=z use_repa_loss=false dino_feature_dim=1024 cache_type=h"
-    _cnn_cfg = OmegaConf.from_dotlist(_cnn_str.split(" "))
-    tokenizer_cfg = OmegaConf.create({"cnn_cfg": {"model": _cnn_model_cfg, **_cnn_cfg}})
-
-    # h16d12c1024
-    _trans_enc_str = (
-        "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=2 norm_layer=layernorm pos_embed=learned rope_type=axial "
-        "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
-        "out_chans=512 unpatch_size=1 reg_tokens=0"
-    )
-    _trans_enc_cfg = OmegaConf.from_dotlist(_trans_enc_str.split(" "))
-    tokenizer_cfg.trans_enc_cfg = _trans_enc_cfg
-
-    # h16d12c1024
-    _trans_dec_str = (
-        "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=1 norm_layer=layernorm pos_embed=learned rope_type=axial "
-        "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
-        "out_chans=512 unpatch_size=2 reg_tokens=0"
-    )
-    _trans_dec_cfg = OmegaConf.from_dotlist(_trans_dec_str.split(" "))
-    tokenizer_cfg.trans_dec_cfg = _trans_dec_cfg
-
-    _distill_str = "dino_feature_dim=1024 semantic_feature_dim=1024"
-    distill_cfg = OmegaConf.from_dotlist(_distill_str.split(" "))
-    tokenizer_cfg.distill_cfg = distill_cfg
-
-    # * ----------------------------------------------
-
-    _tokenizer_feature_str = (
-        "pretrained_path=null features_per_stage=[512,512,512,512] "
-        "model_name=hybrid_tokenizer_b16 "
-        # encoder
-        "pretrained_size=512 in_channels=3 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
-        "cffn_ratio=0.25 deform_num_heads=16 deform_ratio=0.5 add_vit_feature=true "
-        "use_extra_extractor=true with_cp=true "
-    )
-    tokenizer_feature_cfg = OmegaConf.from_dotlist(_tokenizer_feature_str.split(" "))
-
-    # * ----------------------------------------------
-
-    _adapter_str = (
-        "adapter_type=default latent_width=64 n_conv_per_stage=1 "
-        "depth_per_stage=1 norm=layernorm2d act=gelu drop=0.0 "
-        "act_first=false conv_bias=false block_types=[nat,nat,mbconv,mbconv]"
-    )
-    adapter_cfg = OmegaConf.from_dotlist(_adapter_str.split(" "))
-
-    # * ----------------------------------------------
-
-    _unet_str = (
-        "input_channels=155 num_classes=2 deep_supervision=false n_stages=4 "
-        "use_latent=true ensure_rgb_type=null _debug=false"
-    )
-    unet_cfg = OmegaConf.from_dotlist(_unet_str.split(" "))
-
-    # composite the all configs
-    cfg = OmegaConf.create()
-    cfg.tokenizer = tokenizer_cfg
-    cfg.tokenizer_feature = tokenizer_feature_cfg
-    cfg.adapter = adapter_cfg
-    cfg.tokenizer_pretrained_path = None  # need to override
-    cfg.merge_with(unet_cfg)
-
-    return cfg
+    return OmegaConf.create(cfg_dict)
 
 
 # *==============================================================

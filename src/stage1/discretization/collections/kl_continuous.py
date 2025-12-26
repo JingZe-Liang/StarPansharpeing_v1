@@ -1,5 +1,6 @@
 import torch
 from torch import autocast
+import numpy as np
 
 
 class DiagonalGaussianDistribution(object):

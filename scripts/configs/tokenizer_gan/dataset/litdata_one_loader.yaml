@@ -154,7 +154,7 @@ train_loader:
 
   weights:
     #         3    4  8  10  12 13 13 32 50 150 175 202 202  224 224 242 368  369
-    [30, 26, 15, 10, 10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 13, 10, 11, 18]
+    [30, 26, 15, 10, 10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 10, 11, 18]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader

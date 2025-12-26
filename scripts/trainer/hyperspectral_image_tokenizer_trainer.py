@@ -28,7 +28,6 @@ from einops import rearrange
 from ema_pytorch import EMA
 from fvcore.nn import parameter_count_table
 from kornia.utils.image import make_grid, tensor_to_image
-from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -208,9 +207,6 @@ class CosmosHyperspectralTokenizerTrainer:
         # Training state counter
         self.train_state = StepsCounter(["train"])
 
-        # clear GPU memory
-        # torch.cuda.empty_cache()
-
     def _ensure_last_layer_requires_grad(self):
         # Call after the optimizer is initialized
         if self._is_peft_tuning:
@@ -274,6 +270,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if "mae" in self._proxy_tasks or "latent_mae" in self._proxy_tasks or "pixel_mae" in self._proxy_tasks:
             pass
+
+        if "nepa" in self._proxy_tasks:
+            # NePA doesn't require an additional proxy model - the loss is computed
+            # directly inside the tokenizer's transformer using cosine similarity
+            # between consecutive embedding positions
+            logger.info("Create <cyan>nepa</cyan> (Next Embedding Prediction) pretrained proxy task.")
 
         # Optimizer and scheduler
         if self.proxy_model is not None:
@@ -353,6 +355,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Init tokenizer model
             self.tokenizer: nn.Module = hydra.utils.instantiate(self.tokenizer_cfg)
+            if self.train_cfg.finetune_strategy == "decoder_only":
+                self.tokenizer.encoder.requires_grad_(False)
+                logger.log("NOTE", "freeze the tokenizer encoder.")
 
             # quantizer in the tokenizer, not handled by this trainer
             self.use_quantizer = getattr(self.tokenizer, "quantizer", None) is not None  # vq, bsq, fsq, kl
@@ -643,6 +648,7 @@ class CosmosHyperspectralTokenizerTrainer:
             "error",
             "debug",
             "critical",
+            "note",
         ], f"Unknown level {level}"
 
         def str_msg(*msg):
@@ -1289,6 +1295,22 @@ class CosmosHyperspectralTokenizerTrainer:
             proxy_loss = proxy_loss + loss * 0.2
             proxy_loss_breakdown.update(**breakdowns)
 
+        if "nepa" in proxy_tasks:
+            # NePA (Next Embedding Prediction) loss
+            # Optionally resize to fixed size for stable training
+            nepa_img_size = getattr(cfg, "nepa_img_size", None)
+            if nepa_img_size is not None:
+                x_nepa = F.interpolate(x, size=nepa_img_size, mode="bilinear")
+            else:
+                x_nepa = x
+
+            with self.accelerator.autocast():
+                nepa_out = self.tokenizer.encode_nepa(x_nepa)
+                loss = nepa_out["nepa_loss"]
+
+            proxy_loss_breakdown.nepa_loss = loss.detach()
+            proxy_loss = proxy_loss + loss
+
         #### Summarize losses and loss breakdown
         ret.proxy_loss = proxy_loss
         ret.proxy_loss_breakdown = proxy_loss_breakdown
@@ -1445,23 +1467,25 @@ class CosmosHyperspectralTokenizerTrainer:
 
     @no_type_check
     def get_last_layer(self, use_ema: bool = False, mode: str = "dec"):
+        def _check_req_grad(w):
+            if mode == "enc":
+                if not w.requires_grad and self.train_cfg.finetune_strategy not in ("decoder_only", "peft"):
+                    raise ValueError(f"The last layer weight must be enabled requires_grad when {mode=}")
+            else:
+                if not w.requires_grad:
+                    raise ValueError(f"The last layer weight must be enabled requires_grad {mode=}")
+
         if mode == "dec":
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(self.tokenizer_decoder).decoder.get_last_layer()
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
-            # if not self.vq_loss_fn.use_gram and not self.vq_loss_fn.use_vf:
-            #     return None
             if self.sep_enc_dec:
                 w = self.accelerator.unwrap_model(self.tokenizer_encoder).encoder.conv_out.weight
             else:
                 w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
-
-        w = safe_dtensor_operation(w, prefer_full=True)
-        if not w.requires_grad:
-            # assert self._is_peft_tuning, f'the last layer weight may not requires_grad only if seted by PEFT'
-            raise ValueError("The last layer weight must be enabled requires_grad")
+        _check_req_grad(w)
 
         return w
 
@@ -1923,7 +1947,6 @@ class CosmosHyperspectralTokenizerTrainer:
         img = batch["img"].to(self.device, self.dtype)
         with torch.no_grad():
             recon = self.forward_tokenizer(img, ema=True)["recon"]
-
         return recon
 
     def val_loop(self):
@@ -1972,6 +1995,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 except Exception as e:
                     logger.warning(f"PSNR calculation error: {e}")
                     # Try to compute on CPU
+                    torch.cuda.empty_cache()
                     psnr_fn = psnr_fn.to("cpu")
                     psnr_fn.update(batch_img_rgb.to("cpu"), recon_for_metrics.to("cpu"))
                     psnr_fn = psnr_fn.to(self.device)
@@ -1985,8 +2009,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 except Exception as e:
                     logger.warning(f"SSIM calculation error: {e}")
                     # Try to compute on CPU
-                    ssim_fn = ssim_fn.to("cpu")
-                    ssim_fn.update(batch_img_rgb.to("cpu"), recon_for_metrics.to("cpu"))
+                    fallback_device = "cuda:1"
+                    ssim_fn = ssim_fn.to(fallback_device)
+                    ssim_fn.update(batch_img_rgb.to(fallback_device), recon_for_metrics.to(fallback_device))
                     ssim_fn = ssim_fn.to(self.device)
 
             # recon loss
@@ -2106,6 +2131,7 @@ class CosmosHyperspectralTokenizerTrainer:
             assert self.accelerator.distributed_type != accelerate.utils.DistributedType.DEEPSPEED, (
                 "Deepspeed does not support PEFT yet."
             )
+            logger.info("Loading EMA tokenizer ...")
 
             _assume_path = ema_path / "tokenizer"
             if not _assume_path.exists():
@@ -2208,6 +2234,10 @@ class CosmosHyperspectralTokenizerTrainer:
                         accelerate.utils.load_state_dict((ema_path / "tokenizer" / "model.safetensors").as_posix()),
                     )
 
+            if self.train_cfg.finetune_strategy == "decoder_only":
+                logger.log("NOTE", f"Freeze the tokenizer's encoder")
+                self.accelerator.unwrap_model(self.tokenizer).encoder.requires_grad_(False)
+
         # Load discriminator to online model
         if (
             self.train_cfg.finetune_strategy
@@ -2218,6 +2248,7 @@ class CosmosHyperspectralTokenizerTrainer:
             ]
             and not self.train_cfg.only_load_tokenizer
         ):
+            logger.info("Loading EMA discriminator ...")
             try:
                 accelerate.utils.load_checkpoint_in_model(
                     self.accelerator.unwrap_model(self.vq_loss_fn.discriminator),
@@ -2259,7 +2290,9 @@ class CosmosHyperspectralTokenizerTrainer:
         self.prepare_ema_models()  # This will update EMA models with online models' weights
 
         # clear the accelerator model registration
-        self.log_msg("[Load EMA]: clear the accelerator registrations and re-prepare training")
+        self.log_msg(
+            "[Load EMA]: <green>EMA checkpoints loaded</green>. clear the accelerator registrations and re-prepare training"
+        )
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
@@ -2351,7 +2384,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_f8c16p4"
+_key = "unicosmos_bsq_f8c36p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2374,6 +2407,7 @@ _configs_dict = {
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",
     # bsq quantized
     "unicosmos_bsq_f8c36p4": "unicosmos_tokenizer_bsq_repa_f8c36p4",
+    "unicosmos_leechq_f8c24p1": "nested_cosmos_tokenizer_f8c24p1_leechq",
     # sana CDAE
     "sana_f8c16p1_lita": "dcae_f8c16p1_attn",
     "sana_f8c16p1_conv": "dcae_f8c16p1_conv",
@@ -2397,6 +2431,7 @@ _configs_dict = {
 
 if __name__ == "__main__":
     from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
+    from loguru import logger
 
     # change the config name in cli
     cli_default_dict = {

@@ -1,0 +1,79 @@
+# Mars数据集配置 - 用于在火星影像上微调
+# 使用litdata oneloader格式，可直接用于create_hyper_image_litdata_flatten_paths_loader
+
+used: mars
+dataset_names_to_img_size:
+  mars_images: 256
+
+dataset_channel: 3  # Mars图像通常是RGB
+img_size: 256
+rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+
+train_loader:
+  _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
+  paths:
+    mars_rgb_path:
+      3bands_256:
+        - [
+            "data2/MarsBench/mb-boulder_det/litdata",
+            "data2/MarsBench/mb-boulder_seg/litdata",
+            "data2/MarsBench/mb-conequest_seg/litdata",
+            "data2/MarsBench/mb-crater_multi_seg/litdata",
+            "data2/MarsBench/mb-domars16k/litdata",
+            "data2/MarsBench/mb-dust_devil_det/litdata",
+            "data2/MarsBench/mb-landmark_cls/litdata",
+            "data2/MarsBench/mb-mars_seg_mer/litdata",
+            "data2/MarsBench/mb-surface_cls/litdata",
+            "data2/MarsBench/mb-surface_multi_label_cls/litdata",
+          ]
+        - resize_before_transform: 256
+
+  macro_sampled_batch_size: {}
+
+  loader_kwargs:
+    num_workers: 16
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
+    batch_size: 6
+    prefetch_factor: null
+    shuffle: false
+
+  weights: [1.0]  # 只有一个数据组
+
+val_loader:
+  _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
+  paths:
+    mars_rgb_path:
+      3bands_256:
+        - [
+            "data2/MarsBench/mb-boulder_det/litdata",
+            "data2/MarsBench/mb-boulder_seg/litdata",
+            "data2/MarsBench/mb-conequest_seg/litdata",
+            "data2/MarsBench/mb-crater_multi_seg/litdata",
+            "data2/MarsBench/mb-domars16k/litdata",
+            "data2/MarsBench/mb-dust_devil_det/litdata",
+            "data2/MarsBench/mb-landmark_cls/litdata",
+            "data2/MarsBench/mb-mars_seg_mer/litdata",
+            "data2/MarsBench/mb-surface_cls/litdata",
+            "data2/MarsBench/mb-surface_multi_label_cls/litdata",
+          ]
+        - resize_before_transform: 512
+
+  macro_sampled_batch_size: {}
+
+  stream_ds_kwargs:
+    transform_prob: 0.0
+    resize_before_transform: 512
+    shuffle: true
+    is_cycled: true
+    is_hwc: true
+
+  loader_kwargs:
+    num_workers: 3
+    pin_memory: false
+    drop_last: true
+    persistent_workers: false
+    batch_size: 8
+
+  weights: [1.0]  # 只有一个数据组

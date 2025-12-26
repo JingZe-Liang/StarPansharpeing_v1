@@ -1,6 +1,5 @@
 import math
-import os
-from functools import partial, wraps
+from functools import partial
 from inspect import isclass
 from typing import (
     Annotated,
@@ -17,8 +16,6 @@ from typing import (
 import lazy_loader
 import numpy as np
 import torch
-import torch._dynamo
-import torch._functorch.config
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.state import PartialState
@@ -33,7 +30,7 @@ from transformers.activations import ACT2FN
 
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekECMoE
 from src.stage1.MoEs.deepseek_moe.moe_layer import DeepseekV2MoE as DeepSeekTCMoE
-from src.utilities.network_utils import null_decorator_no_any_kwgs, safe_init_weights
+from src.utilities.network_utils import compile_decorator, model_compiled_flag, safe_init_weights
 
 from .utils import (
     Normalize,
@@ -44,33 +41,6 @@ from .utils import (
 )
 
 natten = lazy_loader.load("natten")
-
-# * --- Blocks compilations --- * #
-
-compile_forward_fn = bool(int(os.getenv("MODEL_COMPILED", "1")))
-# options
-compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
-compile_full_graph = True
-epilogue_fusion = True
-shape_padding = True
-
-if compile_forward_fn:
-    _compile_decorator = torch.compile(
-        mode=compile_mode,
-        fullgraph=compile_full_graph,
-        # options={
-        #     "max_autotune": False,
-        #     "triton.cudagraphs": True,
-        #     "shape_padding": shape_padding,
-        #     "epilogue_fusion": epilogue_fusion,
-        # },
-    )
-    logger.debug("will compile the forward function and disable donated buffer")
-    torch._functorch.config.donated_buffer = False  # for adaptive weighting
-    torch._dynamo.config.cache_size_limit = 1_000  # larger cache size
-else:
-    _compile_decorator = null_decorator_no_any_kwgs
-    logger.debug("not compile the forward function")
 
 
 # * --- Utilities --- #
@@ -131,6 +101,37 @@ def block_basic_init(
             nn.init.ones_(module.weight)
         if hasattr(module, "bias") and module.bias is not None:
             nn.init.zeros_(module.bias)
+
+
+def _to_conv_channels_last_memformat(x: Tensor) -> Tensor:
+    if (not model_compiled_flag) or (not x.is_cuda) or x.ndim != 4:
+        return x
+    if x.is_contiguous(memory_format=torch.channels_last):
+        return x
+    return x.contiguous(memory_format=torch.channels_last)
+
+
+def _pad2d_like_conv(x: Tensor, pad: int, padding_mode: str) -> Tensor:
+    """
+    Padding in nn.Conv2d will cause the channels_last memory format to
+    contiguous format which makes the torch.compile runtime fail at different
+    tensor stride.
+
+    Fix:
+        after the padding, mannually cast the memory format to channels_last.
+    """
+    if pad == 0:
+        return x
+
+    padding = (pad, pad, pad, pad)
+    if padding_mode in ("zeros", "constant"):
+        x = F.pad(x, padding, mode="constant", value=0.0)
+    else:
+        x = F.pad(x, padding, mode=padding_mode)
+
+    if model_compiled_flag and x.is_cuda and x.ndim == 4:
+        x = _to_conv_channels_last_memformat(x)
+    return x
 
 
 # * --- Convolutional Layers --- #
@@ -248,7 +249,7 @@ class ResidualBlock(nn.Module):
         self.shortcut = shortcut
         self.post_act = create_act_layer(post_act)
 
-    @_compile_decorator
+    @compile_decorator
     def forward_main(self, x: torch.Tensor) -> torch.Tensor:
         if self.pre_norm is None:
             return self.main(x)
@@ -573,7 +574,7 @@ class LiteMLA(nn.Module):
         out = torch.reshape(out, (B, -1, H, W))
         return out
 
-    @_compile_decorator
+    @compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # generate multi-scale q, k, v
         qkv = self.qkv(x)
@@ -1421,7 +1422,7 @@ class AdaptiveOutputConvLayer(nn.Module):
             return self._forward_conv_with_wb(x, w, self.conv.bias)
 
         # Adaptive cases - use mapping
-        return self.forward_mappings[self.mode](x.contiguous(), out_channels)
+        return self.forward_mappings[self.mode](x, out_channels)
 
     @property
     def weight(self):
@@ -1591,7 +1592,7 @@ class MoE2DBlock(nn.Module):
         else:
             raise ValueError(f"[MoE2DBlockTC] Unknown moe_type={self.moe_type}")
 
-    @_compile_decorator
+    @compile_decorator
     def _forward_fn(self, x: torch.Tensor):
         # x: (B, C, H, W)
         h, w = x.shape[-2:]
@@ -1609,7 +1610,6 @@ class MoE2DBlock(nn.Module):
         return x
 
     def forward(self, x):
-        x = x.contiguous()
         if self.training and self.act_checkpoint:
             return checkpoint(self._forward_fn, x, use_reentrant=False)
         return self._forward_fn(x)
@@ -1673,6 +1673,7 @@ class ResnetBlockMoE2D(nn.Module):
                 act_checkpoint=act_checkpoint,
                 drop_path=drop_out,
                 norm_type=norm_type,
+                padding_mode=padding_mode,
             )
         else:
             raise ValueError(
@@ -1717,7 +1718,7 @@ class DiCoCompactChannelAttention(nn.Module):
         return h
 
 
-@_compile_decorator
+@compile_decorator
 def modulation(x, shift, scale):
     return x * (scale + 1) + shift
 
@@ -1822,7 +1823,7 @@ class DiCoBlock(nn.Module):
                 if m.bias is not None:
                     m.bias.data.zero_()
 
-    @_compile_decorator
+    @compile_decorator
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
         h = x
 
@@ -1865,7 +1866,7 @@ class ResnetBlock(nn.Module):
         self.out_channels = out_channels = in_channels if out_channels is None else out_channels
         self.norm_type = norm_type = kwargs.get("norm_type", "gn")
         gn_norm_groups = kwargs.get("num_groups", 32)
-        padding_mode = kwargs.get("padding_mode", "reflect")
+        self.padding_mode = kwargs.get("padding_mode", "reflect")
         self.layer_idx = kwargs.get("layer_idx", None)
 
         self.use_dico_cca = kwargs.get("use_dico_cca", False)
@@ -1881,8 +1882,10 @@ class ResnetBlock(nn.Module):
             self.out_channels,
             kernel_size=3,
             stride=1,
-            padding=1,
-            padding_mode=padding_mode,
+            # padding=1,
+            # padding_mode=self.padding_mode,
+            padding=0,
+            padding_mode="zeros",
         )
         self.norm2 = Normalize(out_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act2 = ACT2FN[act_type[1]]
@@ -1892,16 +1895,17 @@ class ResnetBlock(nn.Module):
             out_channels,
             kernel_size=3,
             stride=1,
-            padding=1,
-            padding_mode=padding_mode,
+            # padding=1,
+            # padding_mode=self.padding_mode,
+            padding=0,
+            padding_mode="zeros",
         )
+        self._conv_pad = 1
 
         if in_channels != out_channels:
             if nin_shortcut_norm:
-                self.nin_shortcut = nn.Sequential(
-                    Normalize(  # type: ignore
-                        in_channels, num_groups=gn_norm_groups, norm_type=norm_type
-                    ),
+                self.nin_shortcut = nn.Sequential(  # type: ignore
+                    Normalize(in_channels, num_groups=gn_norm_groups, norm_type=norm_type),
                     nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
                 )
             else:
@@ -1919,17 +1923,12 @@ class ResnetBlock(nn.Module):
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
 
-    @_compile_decorator
-    def forward_fn(
-        self,
-        x: torch.Tensor,
-        **kwargs,
-        # slots: torch.Tensor | None = None,
-        # t: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    @compile_decorator
+    def forward_fn(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         h = x
         h = self.norm1(h)
         h = self.act1(h)
+        h = _pad2d_like_conv(h, self._conv_pad, self.padding_mode)
         h = self.conv1(h)
 
         if self.use_dico_cca:
@@ -1938,6 +1937,7 @@ class ResnetBlock(nn.Module):
         h = self.norm2(h)
         h = self.act2(h)
         h = self.dropout(h)
+        h = _pad2d_like_conv(h, self._conv_pad, self.padding_mode)
         h = self.conv2(h)
 
         x = self.nin_shortcut(x)
@@ -1949,11 +1949,7 @@ class ResnetBlock(nn.Module):
         x: torch.Tensor,
         *args,
         **kwargs,
-        # slots: torch.Tensor | None = None,
-        # t: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # slots, t not used, compacted with ResnetBlockSlotsInjected
-        # torch.compiler.cudagraph_mark_step_begin()
         if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, use_reentrant=False)
         return self.forward_fn(x)
@@ -1963,6 +1959,10 @@ class ResnetBlock(nn.Module):
             block_basic_init(m)
 
         self.apply(_inner)
+
+        # to channels last memory format
+        if model_compiled_flag and self.training:
+            self = self.to(memory_format=torch.channels_last)
 
 
 class ResnetBlockSlotsInjected(ResnetBlock):
@@ -2063,7 +2063,9 @@ class ConvNeXtBlock(nn.Module):
     ):
         super().__init__()
 
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim, padding_mode=padding_mode)
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=0, groups=dim, padding_mode="zeros")
+        self._conv_padding = 3
+        self.padding_mode = padding_mode
         self.norm = Normalize(dim, norm_type=norm_type, num_groups=num_groups)
 
         self.pwconv1 = nn.Conv2d(dim, hidden_dim, kernel_size=1)
@@ -2085,10 +2087,11 @@ class ConvNeXtBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.act_checkpoint = act_checkpoint
 
-    @_compile_decorator
+    @compile_decorator
     def forward_fn(self, x):
         input = x
 
+        x = _pad2d_like_conv(x, self._conv_padding, self.padding_mode)
         x = self.dwconv(x)
         x = self.norm(x)
 
@@ -2108,6 +2111,9 @@ class ConvNeXtBlock(nn.Module):
         if self.act_checkpoint and self.training:
             return checkpoint(self.forward_fn, x, use_reentrant=False)  # type: ignore
         return self.forward_fn(x)
+
+    def init_weights(self):
+        self.apply(block_basic_init)
 
 
 # * --- Diffusion blocks --- #

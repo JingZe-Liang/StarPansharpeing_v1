@@ -504,7 +504,7 @@ def set_logger_file(
         mode=mode,
         filter=file_filter,
     )
-    logger = logger.patch(format_extra_patcher)
+    loguru.logger = logger.patch(format_extra_patcher)
 
     log_print(
         f"Set logger to log to file: {file} with level {level}, handler id: {handler}",
@@ -811,7 +811,7 @@ def _test_print(rank, is_mp=False):
     logger.trace("Trace some msg.")
     logger.debug(f"Debug message from rank {rank}")
     logger.opt(colors=True).info(f"Info message from rank <green>{rank}</green>")
-    logger.warning(f"Warning message from rank {rank}", once=True)
+    logger.warning(f"<red>Warning</red> message from rank {rank}", once=True, _name_="any warning test")
     logger.warning(f"Warning message from rank {rank}", once=True)  # not print
     logger.error(f"Error message from rank {rank}")
 

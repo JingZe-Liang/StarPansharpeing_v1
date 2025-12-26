@@ -211,15 +211,25 @@ class MultiScaleLeechQ(Module):
         disable_flip_prob=0.0,  # disable random flip in this image
         uniform_short_schedule=False,
         leech_type="full",
+        chunk_size=4096,
         **kwargs,
     ):
         super().__init__()
-        codebook_dim = dim
+        self.dim = dim
+        self.codebook_dim = 24
+        self.num_groups = dim // 24 if dim % 24 == 0 else 1
+        self.chunk_size = chunk_size
 
-        requires_projection = codebook_dim != dim
-        self.project_in = nn.Linear(dim, codebook_dim) if requires_projection else nn.Identity()
-        self.project_out = nn.Linear(codebook_dim, dim) if requires_projection else nn.Identity()
-        self.has_projections = requires_projection
+        if self.num_groups > 1:
+            self.project_in = nn.Identity()
+            self.project_out = nn.Identity()
+            self.has_projections = False
+        else:
+            requires_projection = self.codebook_dim != dim
+            self.project_in = nn.Linear(dim, self.codebook_dim) if requires_projection else nn.Identity()
+            self.project_out = nn.Linear(self.codebook_dim, dim) if requires_projection else nn.Identity()
+            self.has_projections = requires_projection
+
         self.layernorm = nn.Identity()
         self.use_stochastic_depth = use_stochastic_depth
         self.drop_rate = drop_rate
@@ -262,11 +272,12 @@ class MultiScaleLeechQ(Module):
 
         self.lfq = SphericalVectorQuantizer(
             n_embed=codebook_size,
-            embed_dim=codebook_dim,
+            embed_dim=self.codebook_dim,
             l2_norm=True,
             predefined_codebook=codebook,
             grad="ste",
             requires_grad=False,
+            chunk_size=self.chunk_size,
         )
         self.lfq.reset_parameters()
 
@@ -317,10 +328,13 @@ class MultiScaleLeechQ(Module):
                 else:
                     summed_codes += code
 
+        if self.num_groups > 1:
+            summed_codes = rearrange(summed_codes, "(b g) c t h w -> b (g c) t h w", g=self.num_groups)
+
         if self.has_projections:
-            summed_codes = summed_codes.permute(0, 2, 3, 4, 1).contiguous()
+            summed_codes = summed_codes.permute(0, 2, 3, 4, 1)
             summed_codes = self.project_out(summed_codes)
-            summed_codes = summed_codes.permute(0, 4, 1, 2, 3).contiguous()
+            summed_codes = summed_codes.permute(0, 4, 1, 2, 3)
 
         if summed_codes.size(2) == 1:
             summed_codes = summed_codes.squeeze(2)
@@ -353,6 +367,9 @@ class MultiScaleLeechQ(Module):
             x = x.unsqueeze(2)
         B, C, T, H, W = x.size()
 
+        if self.num_groups > 1:
+            x = rearrange(x, "b (g c) t h w -> (b g) c t h w", g=self.num_groups, c=self.codebook_dim)
+
         if self.schedule_mode.startswith("same"):
             scale_num = int(self.schedule_mode[len("same") :])
             assert T == 1
@@ -375,10 +392,9 @@ class MultiScaleLeechQ(Module):
             scale_schedule = scale_schedule[:scale_num]
 
         if self.has_projections:
-            # x = self.project_in(x)
-            x = x.permute(0, 2, 3, 4, 1).contiguous()  # (b, c, t, h, w) => (b, t, h, w, c)
+            x = x.permute(0, 2, 3, 4, 1)  # (b, c, t, h, w) => (b, t, h, w, c)
             x = self.project_in(x)
-            x = x.permute(0, 4, 1, 2, 3).contiguous()  # (b, t, h, w, c) => (b, c, t, h, w)
+            x = x.permute(0, 4, 1, 2, 3)  # (b, t, h, w, c) => (b, c, t, h, w)
 
         x = self.layernorm(x)
 
@@ -447,7 +463,7 @@ class MultiScaleLeechQ(Module):
                     all_bit_indices.append(bit_indices)
                 # quantized_list.append(torch.norm(quantized.detach(), dim=1).mean())
                 if (pt, ph, pw) != (T, H, W):
-                    quantized = F.interpolate(quantized, size=(T, H, W), mode=self.z_interplote_up).contiguous()
+                    quantized = F.interpolate(quantized, size=(T, H, W), mode=self.z_interplote_up)
 
                 if self.remove_residual_detach:
                     residual = residual - quantized
@@ -457,26 +473,38 @@ class MultiScaleLeechQ(Module):
 
                 if si != scale_num - 1:
                     var_inputs.append(
-                        F.interpolate(
-                            quantized_out, size=scale_schedule[si + 1], mode=self.z_interplote_down
-                        ).contiguous()
+                        F.interpolate(quantized_out, size=scale_schedule[si + 1], mode=self.z_interplote_down)
                     )
 
                 if self.use_decay_factor:
                     out_fact -= 0.1
-        # print("residual_list:", residual_list)
-        # print("interpolate_residual_list:", interpolate_residual_list)
-        # print("quantized_list:", quantized_list)
-        # import ipdb; ipdb.set_trace()
+
+        # whether to return all codes from all codebooks across layers
+        if return_all_codes:
+            all_codes = self.get_codes_from_indices(all_indices)
+        else:
+            all_codes = None
+
         # project out, if needed
         if self.has_projections:
-            quantized_out = quantized_out.permute(0, 2, 3, 4, 1).contiguous()  # (b, c, t, h, w) => (b, t, h, w, c)
+            quantized_out = quantized_out.permute(0, 2, 3, 4, 1)  # (b, c, t, h, w) => (b, t, h, w, c)
             quantized_out = self.project_out(quantized_out)
-            quantized_out = quantized_out.permute(0, 4, 1, 2, 3).contiguous()  # (b, t, h, w, c) => (b, c, t, h, w)
+            quantized_out = quantized_out.permute(0, 4, 1, 2, 3)  # (b, t, h, w, c) => (b, c, t, h, w)
+
+        if self.num_groups > 1:
+            quantized_out = rearrange(quantized_out, "(b g) c ... -> b (g c) ...", g=self.num_groups)
+            all_indices = [rearrange(idx, "(b g) ... -> b g ...", g=self.num_groups) for idx in all_indices]
+            all_bit_indices = [
+                rearrange(idx, "(b g) ... -> b g ...", g=self.num_groups) if idx is not None else None
+                for idx in all_bit_indices
+            ]
+            var_inputs = [rearrange(v, "(b g) c ... -> b (g c) ...", g=self.num_groups) for v in var_inputs]
 
         # image
         if quantized_out.size(2) == 1:
             quantized_out = quantized_out.squeeze(2)
+            if all_codes is not None and all_codes.size(2) == 1:
+                all_codes = all_codes.squeeze(2)
 
         # stack all losses and indices
 
@@ -496,16 +524,20 @@ class MultiScaleLeechQ(Module):
         if not return_all_codes:
             return ret
 
-        # whether to return all codes from all codebooks across layers
-        all_codes = self.get_codes_from_indices(all_indices)
-
-        # will return all codes in shape (quantizer, batch, sequence length, codebook dimension)
-
         return (*ret, all_codes)
 
 
 class SphericalVectorQuantizer(Module):
-    def __init__(self, n_embed, embed_dim, l2_norm=True, predefined_codebook=None, grad="ste", requires_grad=False):
+    def __init__(
+        self,
+        n_embed,
+        embed_dim,
+        l2_norm=True,
+        predefined_codebook=None,
+        grad="ste",
+        requires_grad=False,
+        chunk_size=4096,
+    ):
         super().__init__()
         self.embedding = nn.Embedding(n_embed, embed_dim)
         self.embedding.weight.requires_grad = requires_grad
@@ -514,6 +546,7 @@ class SphericalVectorQuantizer(Module):
         self.embed_dim = embed_dim
         self.l2_norm = l2_norm
         self.predefined_codebook = predefined_codebook
+        self.chunk_size = chunk_size
 
         assert grad in ["ste"]
         self.grad = grad
@@ -552,23 +585,33 @@ class SphericalVectorQuantizer(Module):
 
         b, l, d = z.shape
         dtype = z.dtype
-        if self.l2_norm:
-            z_flatten = z.reshape(-1, self.embed_dim).float()
-            if self.predefined_codebook is None:
-                embedding_weight = F.normalize(self.embedding.weight, dim=-1).float()
-                d = -z_flatten @ embedding_weight.t()
-            else:
-                d = -z_flatten @ self.embedding.weight.t()
-        else:
-            z_flatten = z.reshape(-1, self.embed_dim).float()
-            d = (
-                torch.sum(z_flatten**2, dim=1, keepdim=True)
-                + torch.sum(self.embedding.weight.float() ** 2, dim=1)
-                - 2 * z_flatten @ self.embedding.weight.t().float()
-            )
+        z_flatten = z.reshape(-1, self.embed_dim)
 
-        min_encoding_indices = torch.argmin(d.detach(), dim=1)
-        z_q = self.embedding(min_encoding_indices).view(z.shape)
+        # Chunked argmin to avoid OOM for large codebooks
+        indices_list = []
+
+        with torch.no_grad():
+            if self.l2_norm:
+                if self.predefined_codebook is None:
+                    w = F.normalize(self.embedding.weight, dim=-1).to(dtype).t()
+                else:
+                    w = self.embedding.weight.t().to(dtype)
+
+                for i in range(0, z_flatten.shape[0], self.chunk_size):
+                    z_chunk = z_flatten[i : i + self.chunk_size]
+                    d_chunk = -z_chunk @ w
+                    indices_list.append(torch.argmin(d_chunk, dim=1))
+            else:
+                w = self.embedding.weight.t().to(dtype)
+                w_sq = torch.sum(self.embedding.weight.to(dtype) ** 2, dim=1)
+                for i in range(0, z_flatten.shape[0], self.chunk_size):
+                    z_chunk = z_flatten[i : i + self.chunk_size]
+                    d_chunk = torch.sum(z_chunk**2, dim=1, keepdim=True) + w_sq - 2 * z_chunk @ w
+                    indices_list.append(torch.argmin(d_chunk, dim=1))
+
+        min_encoding_indices = torch.cat(indices_list, dim=0)
+
+        z_q = self.embedding(min_encoding_indices).view(z.shape).to(dtype)
         if self.l2_norm:
             z_q = F.normalize(z_q, dim=-1)
 
@@ -620,7 +663,7 @@ class SphericalVectorQuantizer(Module):
             # 这样符合 torch 的习惯 (B, C, H, W) 或 (B, C, T, H, W)
             dims = list(range(len(z_q.shape)))
             new_dims = [dims[0], dims[-1]] + dims[1:-1]
-            codes = z_q.permute(*new_dims).contiguous()
+            codes = z_q.permute(*new_dims)  # .contiguous()
 
             # 如果是 4D (B, C, H, W)，转为 5D (B, C, 1, H, W) 以保持一致性
             if codes.ndim == 4:
@@ -739,6 +782,65 @@ def __test_leech_q_v2():
     print("Test V2 passed!")
 
 
+def __test_leech_q_v3():
+    from easydict import EasyDict
+
+    print("\nRunning Test V3 (dim=48, num_groups=2)...")
+
+    args = EasyDict(
+        codebook_dim=48,
+        codebook_size=196_560,
+        drop_rate=0.0,
+        schedule_mode="original",
+        leech_type="full",
+        use_stochastic_depth=False,
+        keep_last_quant=False,
+    )
+
+    quantizer = MultiScaleLeechQ(
+        codebook_size=args.codebook_size,
+        dim=args.codebook_dim,
+        use_stochastic_depth=args.use_stochastic_depth,
+        drop_rate=args.drop_rate,
+        schedule_mode=args.schedule_mode,
+        keep_last_quant=args.keep_last_quant,
+        leech_type=args.leech_type,
+    )
+
+    # 测试 Batch Size = 2, C = 48, T = 1, H=32, W=32
+    B, C, T, H, W = 2, 48, 1, 32, 32
+    z = torch.randn(B, C, T, H, W)
+
+    (
+        quantized_out,
+        all_indices,
+        all_bit_indices,
+        residual_norm_per_scale,
+        all_losses,
+        var_inputs,
+        all_entropies,
+        all_codes,
+    ) = quantizer(z, return_all_codes=True)
+
+    print(f"Input shape: {z.shape}")
+    print(f"Quantized out shape: {quantized_out.shape}")
+    print(f"All codes shape: {all_codes.shape}")
+    print(f"Number of indices per scale: {len(all_indices)}")
+    print(f"Shape of first index: {all_indices[0].shape}")
+
+    # 验证数值一致性
+    diff = (quantized_out - all_codes).abs().max()
+    print(f"Max absolute difference: {diff.item()}")
+    assert diff < 1e-5, f"Difference too large: {diff.item()}"
+    assert quantized_out.shape == (B, C, H, W)
+    # The first scale is (1, 1, 1)
+    assert all_indices[0].shape == (B, 2, 1, 1, 1)  # B, G, T, H, W
+    # The last scale is (1, 32, 32)
+    assert all_indices[-1].shape == (B, 2, 1, 32, 32)
+    print("Test V3 passed!")
+
+
 if __name__ == "__main__":
     __test_leech_q()
     __test_leech_q_v2()
+    __test_leech_q_v3()

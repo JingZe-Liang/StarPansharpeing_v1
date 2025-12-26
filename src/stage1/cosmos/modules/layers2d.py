@@ -269,16 +269,6 @@ class Encoder(nn.Module):
                 mode=adaptive_mode,
             )
 
-            # NOTE: normally a conv
-            # self.conv_in = torch.nn.Conv2d(
-            #     in_channels,
-            #     channels,
-            #     kernel_size=3,
-            #     stride=1,
-            #     padding=1,
-            #     padding_mode=padding_mode,
-            # )
-
         # downsampling
         curr_res = resolution // patch_size
         in_ch_mult = (1,) + tuple(channels_mult)

@@ -173,3 +173,12 @@
 [submodule "src/utilities/transport/twinflow/TwinFlow"]
 	path = src/utilities/transport/twinflow/TwinFlow
 	url = https://github.com/inclusionAI/TwinFlow.git
+[submodule "src/stage1/self_supervised/nepa"]
+	path = src/stage1/self_supervised/nepa
+	url = https://github.com/SihanXU/nepa.git
+[submodule "src/stage2/stereo_matching/WHU_stereo"]
+	path = src/stage2/stereo_matching/WHU_stereo
+	url = https://github.com/Sheng029/WHU-Stereo.git
+[submodule "src/stage2/stereo_matching/SemStereo"]
+	path = src/stage2/stereo_matching/SemStereo
+	url = https://github.com/chenchen235/SemStereo.git

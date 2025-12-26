@@ -22,14 +22,6 @@ from torch.nn.modules.conv import _ConvNd
 from ...layers.dinov3_adapter import DINOv3_Adapter
 from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage
 
-# sys.path.append("src/stage1/utilities/losses/dinov3")  # load dinov3 self-holded adapter
-# from dinov3.eval.segmentation.models.backbone.dinov3_adapter import (  # type: ignore
-#     DINOv3_Adapter,
-# )
-# from dinov3.models.vision_transformer import (  # type: ignore
-#     DinoVisionTransformer,
-# )
-
 
 def initialize(module) -> None:
     if isinstance(module, _ConvNd):

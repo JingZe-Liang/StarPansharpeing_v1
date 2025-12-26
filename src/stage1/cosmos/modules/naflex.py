@@ -35,9 +35,48 @@ from timm.layers.drop import calculate_drop_path_rates
 from diffusers.models.embeddings import get_2d_sincos_pos_embed
 
 from src.utilities.config_utils import dataclass_from_dict, function_config_to_basic_types
+from src.utilities.network_utils import compile_decorator
 
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
+
+
+def nepa_prediction_loss(h_in: Tensor, h_out: Tensor, shift: bool = True) -> Tensor:
+    """
+    Next Embedding Prediction loss (negative cosine similarity).
+
+    This loss encourages the model to predict the next position's input embedding
+    from the current position's output hidden state, similar to autoregressive
+    language modeling but in latent space.
+
+    Args:
+        h_in:  [B, T, D] input embeddings (target, will be detached)
+        h_out: [B, T, D] output hidden states (prediction)
+        shift: if True, predict h_in[i+1] from h_out[i] (next token prediction)
+               if False, predict h_in[i] from h_out[i] (position-wise matching)
+
+    Returns:
+        loss: scalar, negative cosine similarity in range [-1, 1]
+    """
+    # Detach target to prevent gradient flow
+    h_in = h_in.detach()
+
+    if shift:
+        # Next token prediction: h_out[i] predicts h_in[i+1]
+        p = h_out[:, :-1, :]  # positions 0 to T-2
+        z = h_in[:, 1:, :]  # positions 1 to T-1
+    else:
+        # Position-wise matching
+        p = h_out
+        z = h_in
+
+    # L2 normalize along feature dimension
+    p = torch.nn.functional.normalize(p, dim=-1)
+    z = torch.nn.functional.normalize(z, dim=-1)
+
+    # Negative cosine similarity (minimize to maximize similarity)
+    loss = -(p * z).sum(dim=-1).mean()
+    return loss
 
 
 class GatedAttentionTimmWrapped(GatedAttention):
@@ -56,6 +95,7 @@ class GatedAttentionTimmWrapped(GatedAttention):
         qk_norm: bool = False,
         scale_norm: bool = True,
         rotate_half: bool = False,
+        is_causal: bool = False,
         device=None,
         dtype=None,
     ):
@@ -70,6 +110,7 @@ class GatedAttentionTimmWrapped(GatedAttention):
             attention_dropout=attn_drop,
             headwise_attn_output_gate=True,
             elementwise_attn_output_gate=False,
+            is_causal=is_causal,
         )
 
 
@@ -95,6 +136,7 @@ class EvaBlock(nn.Module):
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         attn_head_dim: Optional[int] = None,
+        is_causal: bool = False,
         device=None,
         dtype=None,
         **kwargs,
@@ -126,6 +168,11 @@ class EvaBlock(nn.Module):
         self.norm1 = norm_layer(dim, **dd)
         logger.debug(f"Layer uses attention type {attn_type}")
         attn_cls = {"rope": AttentionRope, "eva": EvaAttention, "gated": GatedAttentionTimmWrapped}[attn_type]
+
+        attn_kwargs = {}
+        if attn_type == "gated":
+            attn_kwargs["is_causal"] = is_causal
+
         self.attn = attn_cls(
             dim,
             num_heads=num_heads,
@@ -138,6 +185,7 @@ class EvaBlock(nn.Module):
             norm_layer=norm_layer,
             scale_norm=scale_attn_inner,
             rotate_half=rotate_half,
+            **attn_kwargs,
             **dd,
         )
         self.gamma_1 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
@@ -179,10 +227,7 @@ class EvaBlock(nn.Module):
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.ls1 = nn.Identity()  # LayerScale(dim, 1e-5)
-        self.ls2 = nn.Identity()  # LayerScale(dim, 1e-5)
-
-    @torch.compile
+    @compile_decorator
     def forward(
         self,
         x: torch.Tensor,
@@ -190,8 +235,8 @@ class EvaBlock(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.gamma_1 is None:
-            x = x + self.ls1(self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)))
-            x = x + self.ls2(self.drop_path2(self.mlp(self.norm2(x))))
+            x = x + self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
+            x = x + self.drop_path2(self.mlp(self.norm2(x)))
         else:
             x = x + self.drop_path1(self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
             x = x + self.drop_path2(self.gamma_2 * self.mlp(self.norm2(x)))
@@ -229,6 +274,7 @@ def get_block_fn(cfg) -> Callable:
             scale_attn_inner=cfg.scale_attn_inner_norm,
             qkv_fused=cfg.qkv_fused,
             num_prefix_tokens=num_prefix_tokens,
+            is_causal=getattr(cfg, "is_causal", False),  # despite the 'nepa' pretrained task, `is_causal` is False
         )
     else:
         # Standard ViT block
@@ -372,6 +418,13 @@ class NaFlexVitCfg:
     mae_pixio_mask_grid: int = 2
     mae_latent_size: int = 14  # latent size for mae
 
+    # NePA (Next Embedding Prediction) cfgs
+    nepa_is_causal: bool = True  # Whether to use causal attention for NePA
+    nepa_shift_prediction: bool = True  # Whether to predict next position (shift by 1)
+    # attn_mask_type: 'is_causal' (implicit, requires gated attn) or 'explicit' (default) or None (auto)
+    nepa_attn_mask_type: Optional[str] = "explicit"
+    is_causal: bool = False  # Global model causality (if True, applies to all tasks)
+
 
 def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | None = None):
     std = 1.0 / math.sqrt(d_model)
@@ -480,10 +533,34 @@ class Transformer(NaFlexVit):
 
         return x
 
-    @function_config_to_basic_types
     @classmethod
+    @function_config_to_basic_types
     def create_model(cls, **overrides):
-        cfg = dataclass_from_dict(NaFlexVitCfg, overrides)
+        cfg: NaFlexVitCfg = dataclass_from_dict(NaFlexVitCfg, overrides)
+
+        # Support for NePA implicit causal mask
+        # Configure attn_mask_type: 'is_causal' (implicit) or 'explicit'
+        if cfg.pretrained_type is not None and "nepa" in cfg.pretrained_type and cfg.nepa_is_causal:
+            mask_type = cfg.nepa_attn_mask_type
+
+            # Auto-selection if None
+            if mask_type is None:
+                mask_type = "is_causal" if cfg.attn_type == "gated" else "explicit"
+
+            if mask_type == "is_causal":
+                if cfg.attn_type == "gated":
+                    cfg.is_causal = True
+                    logger.info("[NePA]: Enabled implicit causal attention (is_causal=True for GatedAttention)")
+                else:
+                    logger.warning(
+                        f"[NePA]: 'is_causal' mask requested but attn_type='{cfg.attn_type}' "
+                        "does not support it. Falling back to explicit mask."
+                    )
+                    cfg.is_causal = False
+            else:
+                # Explicit mode
+                cfg.is_causal = False
+
         model = cls(cfg)
         return model
 
@@ -515,6 +592,8 @@ class IJEPANaFlexViT(Transformer):
             self._build_ibot_head(cfg)
         if "latent_mae" in self.pretrained_type or "pixel_mae" in self.pretrained_type:
             self._build_mae_decoder(cfg)
+        if "nepa" in self.pretrained_type:
+            self._build_nepa_head(cfg)
 
     def _build_mae_decoder(self, cfg: NaFlexVitCfg):
         """
@@ -623,6 +702,77 @@ class IJEPANaFlexViT(Transformer):
         )
         self.mask_token = nn.Parameter(torch.zeros(1, cfg.embed_dim))
         logger.info("[IBOT Naflex Transformer]: Build iBOT head")
+
+    def _build_nepa_head(self, cfg: NaFlexVitCfg):
+        """Build NePA (Next Embedding Prediction) pretraining components.
+
+        NePA doesn't require an additional head - the loss is computed directly
+        on the embedding space using cosine similarity between transformer output
+        and (shifted) input embeddings.
+        """
+        self.nepa_is_causal = cfg.nepa_is_causal
+        self.nepa_shift = cfg.nepa_shift_prediction
+        logger.info(
+            f"[NePA NaFlex Transformer]: Build NePA pretraining support "
+            f"(causal={self.nepa_is_causal}, shift={self.nepa_shift}, nepa_attn_mask_type={cfg.nepa_attn_mask_type})"
+        )
+
+    def _forward_nepa_backbone(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Forward pass for NePA pretraining with optional causal attention.
+
+        NePA (Next Embedding Prediction) trains the model to predict the next
+        position's input embedding from the current position's output. This is
+        similar to autoregressive language modeling but in latent space.
+
+        Args:
+            x: Input tensor [B, C, H, W]
+
+        Returns:
+            h_in: [B, T, D] input embeddings before transformer blocks
+            h_out: [B, T, D] output hidden states after transformer blocks
+        """
+        naflex_mode = False
+
+        # 1. Get embeddings (before transformer blocks)
+        embeds = self._forward_embeds(x, patch_coord=None, patch_valid=None, attn_mask=None, masks=None)
+        h_in = embeds["patches"].clone()  # [B, T, D] - input embeddings
+        x_forward = embeds["patches"]
+        rope_embeds = embeds.get("rope_embeds", None)
+
+        # 2. Create causal attention mask if enabled
+        causal_mask = None
+
+        # Check if we should use implicit causal implementation
+        # Implicit mode is active if model.cfg.is_causal is True.
+        # This was configured in create_model based on nepa_attn_mask_type.
+        is_model_causal = getattr(self.cfg, "is_causal", True)
+
+        # Only create explicit mask if NePA implies causal AND model is NOT natively causal
+        if getattr(self, "nepa_is_causal", True) and not is_model_causal:
+            seq_len = x_forward.shape[1]
+            # Upper triangular mask: position i cannot attend to positions > i
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, device=x_forward.device, dtype=x_forward.dtype),
+                diagonal=1,
+            )
+            # Convert to attention mask format (0 = attend, -inf = mask)
+            causal_mask = causal_mask * torch.finfo(x_forward.dtype).min
+
+        # 3. Forward through transformer blocks with causal attention
+        do_checkpointing = self.grad_checkpointing and self.training and not torch.jit.is_scripting()
+        for blk in self.blocks:
+            if do_checkpointing:
+                x_forward = torch_checkpoint(blk, x_forward, rope_embeds, causal_mask, use_reentrant=False)
+            else:
+                x_forward = blk(x_forward, rope=rope_embeds, attn_mask=causal_mask)
+
+        # 4. Apply final layer norm
+        h_out = self.norm(x_forward)  # [B, T, D] - output hidden states
+
+        return h_in, h_out
 
     def _prepare_masks(self, masks=None):
         """Ensure the masks are list of tensors"""
@@ -1004,6 +1154,17 @@ class IJEPANaFlexViT(Transformer):
                 # IBOT teacher does
                 x_tokens = torch.index_select(x_tokens.flatten(0, 1), dim=0, index=masks_indices)
             terms["ibot_proj"] = self.ibot_head(x_tokens)
+
+        ########## NePA (Next Embedding Prediction) ##########
+        if hasattr(self, "nepa_is_causal") and "nepa" in self.cfg.pretrained_type and "nepa" in pretrained_task:
+            # Use dedicated NePA forward pass with causal attention
+            h_in, h_out = self._forward_nepa_backbone(kwargs.get("nepa_input", x))
+            # Compute NePA loss
+            shift = getattr(self, "nepa_shift", True)
+            nepa_loss = nepa_prediction_loss(h_in, h_out, shift=shift)
+            terms["nepa_loss"] = nepa_loss
+            terms["nepa_h_in"] = h_in
+            terms["nepa_h_out"] = h_out
 
         # Patch tokens
         x_tokens = x[:, self.num_prefix_tokens :]

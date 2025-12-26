@@ -6,8 +6,8 @@ from typing import Literal
 import accelerate
 import torch
 import torch.nn as nn
-from loguru import logger as logging
 from peft import PeftConfig, PeftModel
+from loguru import logger
 from torch.autograd import profiler
 from torch.nn.modules.module import _IncompatibleKeys
 from tqdm import tqdm
@@ -43,11 +43,11 @@ def load_weights_with_shape_check(
         weight_items = list(weights.items())
 
         if len(param_items) != len(weight_items):
-            logging.warning(f"Parameter count mismatch: model has {len(param_items)}, weights have {len(weight_items)}")
+            logger.warning(f"Parameter count mismatch: model has {len(param_items)}, weights have {len(weight_items)}")
 
         for (name, param), (weight_name, weight) in zip(param_items, weight_items):
             if name != weight_name:
-                logging.warning(f"Name mismatch: model has '{name}', weights have '{weight_name}'")
+                logger.warning(f"Name mismatch: model has '{name}', weights have '{weight_name}'")
                 missing_keys.append(name)
                 if weight_name in unexpected_keys:
                     unexpected_keys.remove(weight_name)
@@ -55,9 +55,9 @@ def load_weights_with_shape_check(
             if param.shape == weight.shape:
                 param.data.copy_(weight.data)
                 unexpected_keys.remove(weight_name)
-                logging.debug(f"Weights loaded for {name} (shape: {param.shape})")
+                logger.debug(f"Weights loaded for {name} (shape: {param.shape})")
             else:
-                logging.warning(
+                logger.warning(
                     f"Shape mismatch for {name}: expected {param.shape}, got {weight.shape} - skipping",
                 )
                 missing_keys.append(name)
@@ -73,7 +73,7 @@ def load_weights_with_shape_check(
                 if param.shape == weights[name].shape:
                     param.data.copy_(weights[name].data)
                 else:
-                    logging.warning(
+                    logger.warning(
                         f"Shape mismatch for {name}: expected {param.shape}, got {weights[name].shape} - skipping",
                         tqdm=True,
                     )
@@ -81,7 +81,7 @@ def load_weights_with_shape_check(
                     missing_keys.append(name)
             else:
                 missing_keys.append(name)
-                logging.warning(f"{name} not found in weights", tqdm=True)
+                logger.warning(f"{name} not found in weights", tqdm=True)
 
     else:
         raise Value
@@ -152,9 +152,9 @@ def load_fsdp_model(fsdp_plugin, accelerator, model, input_dir, model_index=0, a
                 return
             weights_name = f"{FSDP_MODEL_NAME}.bin" if model_index == 0 else f"{FSDP_MODEL_NAME}_{model_index}.bin"
             input_model_file = os.path.join(input_dir, weights_name)
-            logging.info(f"Loading model from {input_model_file}")
+            logger.info(f"Loading model from {input_model_file}")
             state_dict = torch.load(input_model_file)
-            logging.info(f"Model loaded from {input_model_file}")
+            logger.info(f"Model loaded from {input_model_file}")
         elif fsdp_plugin.state_dict_type == StateDictType.LOCAL_STATE_DICT:
             weights_name = (
                 f"{FSDP_MODEL_NAME}_rank{accelerator.process_index}.bin"
@@ -162,16 +162,16 @@ def load_fsdp_model(fsdp_plugin, accelerator, model, input_dir, model_index=0, a
                 else f"{FSDP_MODEL_NAME}_{model_index}_rank{accelerator.process_index}.bin"
             )
             input_model_file = os.path.join(input_dir, weights_name)
-            logging.info(f"Loading model from {input_model_file}")
+            logger.info(f"Loading model from {input_model_file}")
             state_dict = torch.load(input_model_file)
-            logging.info(f"Model loaded from {input_model_file}")
+            logger.info(f"Model loaded from {input_model_file}")
         elif fsdp_plugin.state_dict_type == StateDictType.SHARDED_STATE_DICT:
             ckpt_dir = (
                 os.path.join(input_dir, f"{FSDP_MODEL_NAME}_{model_index}")
                 if f"{FSDP_MODEL_NAME}" not in input_dir
                 else input_dir
             )
-            logging.info(f"Loading model from {ckpt_dir}")
+            logger.info(f"Loading model from {ckpt_dir}")
             state_dict = {"model": _get_model_state_dict(model, adapter_only=adapter_only)}
             dist_cp.load(
                 state_dict=state_dict,
@@ -179,7 +179,7 @@ def load_fsdp_model(fsdp_plugin, accelerator, model, input_dir, model_index=0, a
                 planner=DefaultLoadPlanner(),
             )
             state_dict = state_dict["model"]
-            logging.info(f"Model loaded from {ckpt_dir}")
+            logger.info(f"Model loaded from {ckpt_dir}")
 
         if fsdp_plugin.fsdp_version == 1:
             load_result = _set_model_state_dict(model, state_dict, adapter_only=adapter_only)
@@ -357,7 +357,7 @@ def load_peft_model_checkpoint(
         base_sd = accelerate.utils.load_state_dict(base_model_pretrained_path)
         # Load the base model
         _incompact_keys = base_model.load_state_dict(base_sd, strict=False)
-        logging.info(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
+        logger.info(f"Base model loaded with incompatible keys:\n{_incompact_keys}")
     else:
         warnings.warn("No base model checkpoint provided. Please make sure the base model is initialized correctly.")
 
@@ -373,7 +373,7 @@ def load_peft_model_checkpoint(
     return peft_config, peft_model
 
 
-# * --- LoRA weights loading entry --- #
+# Tokenizer lora module utilities
 
 
 @function_config_to_basic_types
@@ -428,7 +428,7 @@ def load_diffbands_tokenizer_then_peft_lora(
         **peft_kwargs,
     )
 
-    logging.info(f"Tokenizer loaded with PEFT config: {peft_config}")
+    logger.info(f"Tokenizer loaded with PEFT config: {peft_config}")
 
     return peft_config, tokenizer
 
@@ -447,10 +447,10 @@ def safe_init_weights(func):
             pass
 
         if p is None:
-            logging.info(f"Module {type(module)} got no params, skipping init")
+            logger.info(f"Module {type(module)} got no params, skipping init")
             return
         elif str(p.device) == "meta":
-            logging.debug(f"Module params are on meta device, skipping weight initialization")
+            logger.debug(f"Module params are on meta device, skipping weight initialization")
             return
 
         # Init function
