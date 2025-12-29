@@ -1,0 +1,32 @@
+dataset_name: "WHU"
+compute_seg: false  # WHU does not have segmentation labels
+num_classes: null
+min_disp: 0
+max_disp: 128
+
+paths:
+  train: data/Downstreams/WHU_Stereo_Matching/litdata/train
+  val: data/Downstreams/WHU_Stereo_Matching/litdata/val
+  test: data/Downstreams/WHU_Stereo_Matching/litdata/test
+
+train:
+  _target_: src.stage2.stereo_matching.data.WHU.WHUStreamingDataset.create_dataloader
+  input_dir: ${..paths.train}
+  stream_ds_kwargs:
+    shuffle: false
+    is_cycled: true
+  loader_kwargs:
+    batch_size: 4
+    num_workers: 4
+    persistent_workers: true
+
+val:
+  _target_: src.stage2.stereo_matching.data.WHU.WHUStreamingDataset.create_dataloader
+  input_dir: ${..paths.val}
+  stream_ds_kwargs:
+    shuffle: false
+    is_cycled: true
+  loader_kwargs:
+    batch_size: 2
+    num_workers: 2
+    persistent_workers: true

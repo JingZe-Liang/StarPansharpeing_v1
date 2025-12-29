@@ -20,7 +20,8 @@ from loguru import logger
 from omegaconf import OmegaConf
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
-from timm.layers import get_norm_layer, get_act_layer
+from timm.layers import get_norm_layer, get_act_layer, LayerNorm2d
+import segmentation_models_pytorch as smp
 
 from src.stage1.cosmos.cosmos_hybrid import CosmosHybridTokenizer
 from src.stage2.segmentation.models.adapter import DINOv3EncoderAdapter
@@ -29,6 +30,8 @@ from src.stage2.segmentation.models.tokenizer_backbone_adapted import (
     HybridTokenizerEncoderAdapter,
 )
 from src.utilities.config_utils import function_config_to_basic_types
+
+logger = logger.bind(_name_="stereo_match_model_v2")
 
 # =============================================================================
 # Configuration
@@ -39,7 +42,9 @@ from src.utilities.config_utils import function_config_to_basic_types
 class SemStereoConfig:
     # Model Architecture
     num_classes: int = 6
-    min_disp: int = -128
+
+    # US3D is set to [−64, 64) and WHU is set to [0, 128)
+    min_disp: int = -64
     max_disp: int = 64
 
     # Feature & Backbone
@@ -53,8 +58,9 @@ class SemStereoConfig:
     tokenizer_model_name: str = "cosmos_tokenizer"
 
     # Loss Weights
-    alpha: float = 1.0  # Semantic loss weight
+    alpha: float = 1.0  # Semantic loss weight (CE)
     beta: float = 0.5  # LRSC loss weight
+    gamma: float = 0.5  # Dice loss weight for semantic segmentation
 
     # Flags
     seg_if: bool = True
@@ -63,7 +69,7 @@ class SemStereoConfig:
     debug: bool = False
 
     # Original Cfg Object (Legacy support for create function)
-    legacy_cfg: Optional[edict] = None
+    legacy_cfg: Optional[dict] = None
 
 
 # =============================================================================
@@ -116,7 +122,7 @@ create_norm._NORM_MAP["layernorm3d"] = LayerNorm3d  # type: ignore
 
 
 class BasicConv(nn.Module):
-    """Basic Convolution block with BN and ReLU."""
+    """Basic Convolution block with LayerNorm and ReLU."""
 
     def __init__(
         self,
@@ -136,18 +142,18 @@ class BasicConv(nn.Module):
                 self.conv = nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
             else:
                 self.conv = nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
-            self.bn = nn.BatchNorm3d(out_channels)
+            self.norm = LayerNorm3d(out_channels)
         else:
             if deconv:
                 self.conv = nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
             else:
                 self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
-            self.bn = nn.BatchNorm2d(out_channels)
+            self.norm = LayerNorm2d(out_channels)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.conv(x)
         if self.use_bn:
-            x = self.bn(x)
+            x = self.norm(x)
         if self.relu:
             x = F.relu(x, inplace=True)
         return x
@@ -448,13 +454,13 @@ class SSRUpsample(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.conv = nn.Sequential(
-            nn.BatchNorm2d(1), nn.Conv2d(1, num_classes, kernel_size=3, padding=1), nn.BatchNorm2d(num_classes)
+            LayerNorm2d(1), nn.Conv2d(1, num_classes, kernel_size=3, padding=1), LayerNorm2d(num_classes)
         )
         self.conv1 = nn.Sequential(
-            nn.Conv2d(num_classes, num_classes, kernel_size=1, padding=0), nn.BatchNorm2d(num_classes)
+            nn.Conv2d(num_classes, num_classes, kernel_size=1, padding=0), LayerNorm2d(num_classes)
         )
         self.conv2 = nn.Sequential(
-            nn.Conv2d(num_classes, num_classes, kernel_size=1, padding=0), nn.BatchNorm2d(num_classes)
+            nn.Conv2d(num_classes, num_classes, kernel_size=1, padding=0), LayerNorm2d(num_classes)
         )
         self.conv3 = nn.Conv2d(num_classes, 1, kernel_size=1, padding=0)
 
@@ -634,11 +640,11 @@ class SemStereo(nn.Module):
             self.spx16_8 = Conv2x(self.chans2[3] * 2, self.chans2[2], True)
             self.spx32_16 = Conv2x(self.chans2[4], self.chans2[3], True)
 
-            self.chal_0 = nn.Sequential(nn.Conv2d(self.chans[0], self.chans2[0], 1), nn.BatchNorm2d(self.chans2[0]))
-            self.chal_1 = nn.Sequential(nn.Conv2d(self.chans[1], self.chans2[1], 1), nn.BatchNorm2d(self.chans2[1]))
-            self.chal_2 = nn.Sequential(nn.Conv2d(self.chans[2], self.chans2[2], 1), nn.BatchNorm2d(self.chans2[2]))
-            self.chal_3 = nn.Sequential(nn.Conv2d(self.chans[3], self.chans2[3], 1), nn.BatchNorm2d(self.chans2[3]))
-            self.chal_4 = nn.Sequential(nn.Conv2d(self.chans[4], self.chans2[4], 1), nn.BatchNorm2d(self.chans2[4]))
+            self.chal_0 = nn.Sequential(nn.Conv2d(self.chans[0], self.chans2[0], 1), LayerNorm2d(self.chans2[0]))
+            self.chal_1 = nn.Sequential(nn.Conv2d(self.chans[1], self.chans2[1], 1), LayerNorm2d(self.chans2[1]))
+            self.chal_2 = nn.Sequential(nn.Conv2d(self.chans[2], self.chans2[2], 1), LayerNorm2d(self.chans2[2]))
+            self.chal_3 = nn.Sequential(nn.Conv2d(self.chans[3], self.chans2[3], 1), LayerNorm2d(self.chans2[3]))
+            self.chal_4 = nn.Sequential(nn.Conv2d(self.chans[4], self.chans2[4], 1), LayerNorm2d(self.chans2[4]))
 
             # Cost Volume 1 (GWC)
             self.patch = nn.Conv3d(
@@ -681,7 +687,16 @@ class SemStereo(nn.Module):
 
             self.ssr_upsample = SSRUpsample(self.num_classes)
 
+        # Loss functions
+        self.dice_loss_fn = smp.losses.DiceLoss(
+            mode="multiclass",
+            ignore_index=-100,
+        )
+
         self._init_weights()
+
+        # Disable gradients for unused parameters to avoid warnings
+        self._disable_unused_params_gradients()
 
     def _create_tok_encoder(self):
         # Fallback to legacy config access because adapter creation depends on it for now,
@@ -697,7 +712,8 @@ class SemStereo(nn.Module):
             cnn_cfg=t_cfg.cnn_cfg,
             trans_enc_cfg=t_cfg.trans_enc_cfg,
             trans_dec_cfg=None,
-            distillation_cfg=t_cfg.distill_cfg,
+            distillation_cfg=t_cfg.distillation_cfg,
+            hybrid_tokenizer_cfg=t_cfg.hybrid_tokenizer_cfg,
         )
         if self.config.tokenizer_pretrained_path is not None:
             tok_backbone.load_pretrained(self.config.tokenizer_pretrained_path)
@@ -723,7 +739,8 @@ class SemStereo(nn.Module):
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
-            target_channels=[512, 512, 512, 512],
+            target_channels=[512, 512, 512],  # s2, s4, s8
+            keys=["2", "3", "4"],
             conv_op=nn.Conv2d,
             norm_op=get_norm_layer(a_cfg.norm),
             nonlin=get_act_layer(a_cfg.act),
@@ -738,27 +755,54 @@ class SemStereo(nn.Module):
                 continue
             if isinstance(m, (nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d, nn.ConvTranspose3d)):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm)):
+            elif isinstance(m, (LayerNorm2d, LayerNorm3d, nn.LayerNorm, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+    def _disable_unused_params_gradients(self):
+        """
+        Disable gradients for parameters that are not used in stereo matching forward pass.
+
+        Based on testing, these parameters always have None gradients during training:
+        - encoder.dinov3_adapter.spm.fc1 (weight, bias)
+        - encoder.dinov3_adapter.up (weight, bias)
+        - encoder.dinov3_adapter.norm1 (weight, bias)
+        - head_r parameters (only used when seg_if=True and training with right GT)
+        """
+        unused_param_patterns = [
+            "encoder.dinov3_adapter.spm.fc1",
+            "encoder.dinov3_adapter.up",
+            "encoder.dinov3_adapter.norm1",
+        ]
+
+        # If seg_if is False, also disable head_r parameters
+        if not self.seg_if:
+            unused_param_patterns.append("head_r")
+
+        disabled_count = 0
+        for name, param in self.named_parameters():
+            for pattern in unused_param_patterns:
+                if name.startswith(pattern):
+                    param.requires_grad = False
+                    disabled_count += 1
+                    logger.debug(f"Disabled gradient for: {name}")
+                    break
+
+        logger.info(f"Disabled gradients for {disabled_count} unused parameters")
+
     def extract_features(self, img: Tensor) -> List[Tensor]:
         skips, _ = self.encoder(img)
-        # DINOv3 Adapter outputs: s1, s2, s4, s8 (relative to input)
-        # But we need: s2, s4, s8, s16, s32 for SemStereo
-        # Actual outputs from debug:
-        # s1: 320x320 (stride 1), s2: 160x160 (stride 2), s4: 80x80 (stride 4), s8: 40x40 (stride 8)
+        # DINOv3 Adapter outputs: s2, s4, s8 (relative to input)
+        # s2: stride 2, s4: stride 4, s8: stride 8
 
-        s1, s2, s4, s8 = skips  # Rename for clarity
+        s2, s4, s8 = skips  # Rename for clarity
 
         # Map to SemStereo expected strides:
         # [s2, s4, s8, s16, s32]
-        # We have: s1, s2, s4, s8
-        # So:
-        # - s2 (160x160) -> features[0]
-        # - s4 (80x80) -> features[1]
-        # - s8 (40x40) -> features[2]
-        # - Need to generate s16 and s32 by downsampling s8
+        # s2 -> features[0]
+        # s4 -> features[1]
+        # s8 -> features[2]
+        # Need to generate s16 and s32 by downsampling s8
 
         f_s2 = self.adapter_convs[0](s2)  # 160x160, 128ch
         f_s4 = self.adapter_convs[1](s4)  # 80x80, 256ch
@@ -906,87 +950,186 @@ class SemStereo(nn.Module):
                     return {"d_final": pred_up * 4}
                 return {"d_final": pred_up * 4, "P_l": pred_label}
 
-    def compute_losses(self, outputs, d_gt, seg_gt_l=None, seg_gt_r=None, alpha=None, beta=None):
+    def compute_losses(self, outputs, d_gt, seg_gt_l=None, seg_gt_r=None, alpha=None, beta=None, gamma=None):
+        """
+        Compute multi-task losses for SemStereo model (disparity + semantics).
+
+        Args:
+            outputs (Dict[str, Tensor]): Model forward output dictionary containing:
+                - 'd_final': Final disparity prediction [B, H, W] in pixels
+                - 'd_aux': Auxiliary disparity predictions list (for multi-scale supervision)
+                - 'P_l': Left image semantic prediction [B, num_classes, H, W]
+                - 'P_r': Right image semantic prediction [B, num_classes, H, W] (optional)
+
+            d_gt (Tensor): Disparity ground truth [B, H, W] in pixels.
+                Represents the horizontal offset of each pixel in the left image
+                when matched in the right image.
+
+            seg_gt_l (Tensor, optional): Left image semantic segmentation ground truth [B, H, W],
+                where each pixel value is a class index (0 to num_classes-1).
+                If None, semantic loss will not be computed.
+
+            seg_gt_r (Tensor, optional): Right image semantic segmentation ground truth [B, H, W].
+                Primarily used for Left-Right Semantic Consistency (LRSC) loss.
+                If None, LRSC loss will not be computed.
+
+            alpha (float, optional): Weight coefficient for disparity loss.
+                If None, uses self.config.alpha (default 1.0).
+
+            beta (float, optional): Weight coefficient for semantic loss.
+                If None, uses self.config.beta (default 0.5).
+
+            gamma (float, optional): Weight coefficient for Dice loss.
+                If None, uses self.config.gamma (default 0.5).
+
+        Returns:
+            Dict[str, Tensor]: Loss dictionary containing:
+                - 'total': Weighted total loss
+                - 'disp': Disparity loss (smooth L1)
+                - 'seg': Semantic loss (CE)
+                - 'dice': Dice loss for semantic segmentation
+                - 'lrsc': Left-right semantic consistency loss
+                - 'semantic_loss': Semantic classification loss (Cross Entropy, if seg_gt_l exists)
+                - 'lrsc_loss': Left-right semantic consistency loss (if seg_gt_r exists)
+
+        Notes:
+            - Only disparity values within valid range participate in loss computation (min_disp < d_gt < max_disp)
+            - LRSC loss warps left semantics to right view using predicted disparity, then compares with right GT
+            - Multi-scale auxiliary losses (d_aux) use the same weights as the main loss
+        """
         if alpha is None:
             alpha = self.config.alpha
         if beta is None:
             beta = self.config.beta
+        if gamma is None:
+            gamma = self.config.gamma
 
+        # Get mask that shows invalid places
         mask = (d_gt < self.max_disp) & (d_gt > self.min_disp)
         mask.detach_()
 
+        # Handle shape mismatch: d_final is typically [B, H, W], while d_gt/mask are [B, 1, H, W]
+        if d_gt.dim() == 4:
+            d_gt_s = d_gt.squeeze(1)
+            mask_s = mask.squeeze(1)
+        else:
+            d_gt_s = d_gt
+            mask_s = mask
+
         d_final = outputs["d_final"]
-        L_disp = F.smooth_l1_loss(d_final[mask], d_gt[mask], reduction="mean")
+        if d_final.dim() == 4:
+            d_final = d_final.squeeze(1)
+        L_disp = F.smooth_l1_loss(d_final[mask_s], d_gt_s[mask_s], reduction="mean")
 
-        for d_est in outputs["d_aux"]:
-            if d_est is not None:
-                if d_est.shape[-2:] != d_gt.shape[-2:]:
-                    d_est = F.interpolate(d_est, size=d_gt.shape[-2:], mode="bilinear", align_corners=False)
-                L_disp += 0.7 * F.smooth_l1_loss(d_est[mask], d_gt[mask], reduction="mean")
+        # d_aux only exists in training mode
+        if "d_aux" in outputs:
+            for d_est in outputs["d_aux"]:
+                if d_est is not None:
+                    if d_est.dim() == 4:
+                        d_est = d_est.squeeze(1)
+                    if d_est.shape[-2:] != d_gt_s.shape[-2:]:
+                        d_est = F.interpolate(
+                            d_est.unsqueeze(1).float(), size=d_gt_s.shape[-2:], mode="bilinear", align_corners=False
+                        ).squeeze(1)
+                    L_disp += 0.7 * F.smooth_l1_loss(d_est[mask_s].to(d_gt_s.dtype), d_gt_s[mask_s], reduction="mean")
 
+        # Semantic CE Loss
         L_seg = torch.tensor(0.0, device=d_gt.device)
-        if seg_gt_l is not None:
+        if seg_gt_l is not None and "P_l" in outputs:
             L_seg_l = F.cross_entropy(outputs["P_l"], seg_gt_l.long())
-            if seg_gt_r is not None:
+            if seg_gt_r is not None and "P_r" in outputs:
                 L_seg_r = F.cross_entropy(outputs["P_r"], seg_gt_r.long())
                 L_seg = (L_seg_l + L_seg_r) / 2.0
             else:
                 L_seg = L_seg_l
 
-        P_l_prob = F.softmax(outputs["P_l"], dim=1)
-        if seg_gt_l is not None:
-            GT_onehot = F.one_hot(seg_gt_l.long(), self.num_classes).permute(0, 3, 1, 2).float()
-            target_r_warped = warp_by_disparity(GT_onehot, d_final.unsqueeze(1))
-            target = target_r_warped.argmax(dim=1)
-        else:
-            target_r_warped = warp_by_disparity(P_l_prob, d_final.unsqueeze(1))
-            target = target_r_warped.argmax(dim=1)
+        # Dice Loss for segmentation
+        L_dice = torch.tensor(0.0, device=d_gt.device)
+        if seg_gt_l is not None and "P_l" in outputs:
+            L_dice_l = self.dice_loss_fn(outputs["P_l"], seg_gt_l)
+            if seg_gt_r is not None and "P_r" in outputs:
+                L_dice_r = self.dice_loss_fn(outputs["P_r"], seg_gt_r)
+                L_dice = (L_dice_l + L_dice_r) / 2.0
+            else:
+                L_dice = L_dice_l
 
-        L_LRSC = F.cross_entropy(outputs["P_r"], target)
+        # LRSC loss requires P_l and P_r
+        L_LRSC = torch.tensor(0.0, device=d_gt.device)
+        if "P_l" in outputs and "P_r" in outputs:
+            P_l_prob = F.softmax(outputs["P_l"], dim=1)
+            if seg_gt_l is not None:
+                # Handle ignore_index -100 for one_hot
+                valid_mask = (seg_gt_l != -100).float()
+                if valid_mask.dim() == 3:
+                    valid_mask = valid_mask.unsqueeze(1)
 
-        loss = L_disp + alpha * L_seg + beta * L_LRSC
+                seg_gt_l_safe = seg_gt_l.clone()
+                seg_gt_l_safe[seg_gt_l == -100] = 0
 
-        return {"total": loss, "disp": L_disp, "seg": L_seg, "lrsc": L_LRSC}
+                GT_onehot = F.one_hot(seg_gt_l_safe.long(), self.num_classes)
+                if GT_onehot.dim() == 5:  # [B, 1, H, W, C]
+                    GT_onehot = GT_onehot.squeeze(1)
+                GT_onehot = GT_onehot.permute(0, 3, 1, 2).float()
+                GT_onehot = GT_onehot * valid_mask
 
+                target_r_warped = warp_by_disparity(GT_onehot, d_final.unsqueeze(1))
+                mask_r_warped = warp_by_disparity(valid_mask, d_final.unsqueeze(1))
 
-def _create_default_cfg() -> edict:
-    from .tokenizer_hybrid_stero_matching import _create_default_cfg as _v1_cfg
+                target = target_r_warped.argmax(dim=1)
+                target[mask_r_warped.squeeze(1) < 0.5] = -100
+            else:
+                target_r_warped = warp_by_disparity(P_l_prob, d_final.unsqueeze(1))
+                target = target_r_warped.argmax(dim=1)
+                # For P_l_prob, we don't have a label mask, but grid_sample might warp out of bounds
+                # grid_sample with padding_mode="zeros" would be better if we wanted to mask out-of-bounds
+                # Current warp_by_disparity uses padding_mode="border"
 
-    cfg = _v1_cfg()
-    return cfg
+            L_LRSC = F.cross_entropy(outputs["P_r"], target, ignore_index=-100)
 
+        loss = L_disp + alpha * L_seg + gamma * L_dice + beta * L_LRSC
 
-@function_config_to_basic_types
-def create_semstereo_model(
-    cfg: edict | None = None,
-    num_classes: int = 6,
-    **overrides,
-) -> SemStereo:
-    if cfg is None:
-        cfg = _create_default_cfg()
+        return {"total": loss, "disp": L_disp, "seg": L_seg, "dice": L_dice, "lrsc": L_LRSC}
 
-    if overrides:
-        cfg_omega = OmegaConf.create(cfg)
-        cfg_omega.merge_with(OmegaConf.create(overrides))
-        cfg = edict(OmegaConf.to_container(cfg_omega, resolve=True))
+    @classmethod
+    @function_config_to_basic_types
+    def create_semstereo_model(
+        cls,
+        cfg: dict | None = None,
+        num_classes: int = 6,
+        **overrides,
+    ):
+        if cfg is None:
+            from .tokenizer_hybrid_stero_matching import _create_default_cfg as create_backbone_cfg
 
-    # Bridge Legacy Edict Config -> Dataclass Config
-    stereo_cfg = cfg.stereo
-    config = SemStereoConfig(
-        num_classes=num_classes,
-        min_disp=stereo_cfg.min_disp,
-        max_disp=stereo_cfg.max_disp,
-        tokenizer_pretrained_path=cfg.tokenizer_pretrained_path,
-        debug=getattr(cfg, "_debug", False),
-        legacy_cfg=cfg,
-    )
+            cfg = create_backbone_cfg()
 
-    return SemStereo(config)
+        if overrides:
+            cfg_omega = OmegaConf.create(cfg)
+            cfg_omega.merge_with(OmegaConf.create(overrides))
+            cfg = edict(OmegaConf.to_container(cfg_omega, resolve=True))
+
+        # Bridge Legacy Edict Config -> Dataclass Config
+        stereo_cfg = cfg.stereo
+        config = SemStereoConfig(
+            num_classes=num_classes,
+            min_disp=stereo_cfg.min_disp,
+            max_disp=stereo_cfg.max_disp,
+            tokenizer_pretrained_path=cfg.tokenizer_pretrained_path,
+            debug=getattr(cfg, "_debug", False),
+            legacy_cfg=cfg,
+        )
+
+        return cls(config)
 
 
 if __name__ == "__main__":
+    """
+    python -m src.stage2.stereo_matching.models.tokenizer_hybrid_stero_matching_v2
+    """
+    from .tokenizer_hybrid_stero_matching import _create_default_cfg as create_backbone_cfg
+
     with logger.catch():
-        cfg = _create_default_cfg()
+        cfg = create_backbone_cfg()
         cfg._debug = True
         cfg.tokenizer_pretrained_path = None
 
@@ -994,12 +1137,59 @@ if __name__ == "__main__":
             num_classes=6, max_disp=192, tokenizer_pretrained_path=None, debug=True, legacy_cfg=cfg
         )
         model = SemStereo(config).cuda()
-        model.eval()
+        model.train()
 
-        left = torch.randn(1, 3, 320, 320).cuda()
-        right = torch.randn(1, 3, 320, 320).cuda()
+        size = 512
+        left = torch.randn(2, 3, size, size).cuda()
+        right = torch.randn(2, 3, size, size).cuda()
 
-        with torch.no_grad():
+        print("=" * 80)
+        print("Testing forward and backward to find parameters with None gradients")
+        print("=" * 80)
+
+        # Forward pass
+        with torch.autocast("cuda", torch.bfloat16):
             out = model(left, right)
 
-        print("Output keys:", out.keys())
+        # Create dummy loss
+        loss = out["d_final"].mean()
+
+        # Backward pass
+        loss.backward()
+
+        # Check all parameters
+        print("\n" + "=" * 80)
+        print("Parameters with None gradients:")
+        print("=" * 80)
+
+        none_grad_params = []
+        for name, param in model.named_parameters():
+            if param.grad is None:
+                none_grad_params.append(name)
+                print(f"  {name}: {param.shape}")
+
+        print("\n" + "=" * 80)
+        print(f"Total parameters with None gradients: {len(none_grad_params)}")
+        print("=" * 80)
+
+        # Group by module
+        from collections import defaultdict
+
+        grouped = defaultdict(list)
+        for param_name in none_grad_params:
+            parts = param_name.split(".")
+            if len(parts) >= 3:
+                module = ".".join(parts[:3])
+                grouped[module].append(param_name)
+
+        print("\n" + "=" * 80)
+        print("Grouped by module:")
+        print("=" * 80)
+        for module, params in sorted(grouped.items()):
+            print(f"\n{module}:")
+            for p in params:
+                print(f"  - {p}")
+
+        print("\n" + "=" * 80)
+        print("Test completed!")
+        print("=" * 80)

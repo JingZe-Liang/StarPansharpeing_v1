@@ -317,10 +317,14 @@ class DINOv3EncoderAdapter(nn.Module):
         nonlin: Union[None, Type[torch.nn.Module], str] = nn.ReLU,
         nonlin_kwargs: dict | None = None,
         conv_bias: bool = False,
+        keys: list[str] = None,
     ):
         super().__init__()
         self.dinov3_adapter = dinov3_adapter
         self.target_channels = target_channels
+        self.keys = keys if keys is not None else ["1", "2", "3", "4"]
+        assert len(self.target_channels) == len(self.keys), f"{len(self.target_channels)} != {len(self.keys)}"
+
         self.conv_op = conv_op
         self.norm_op = norm_op if norm_op is not None else nn.BatchNorm2d
         self.norm_op_kwargs = norm_op_kwargs if norm_op_kwargs is not None else {}
@@ -360,11 +364,9 @@ class DINOv3EncoderAdapter(nn.Module):
 
         others = None
         if isinstance(feats, tuple):
-            # assert len(feats) == 2
             feats, others = feats
 
-        keys = ["1", "2", "3", "4"]
-        x_list = [feats[k] for k in keys]
+        x_list = [feats[k] for k in self.keys]
 
         # Apply FAPM projection
         ys = self.fapm(x_list)
@@ -372,7 +374,11 @@ class DINOv3EncoderAdapter(nn.Module):
         # Apply learnable upsampling
         skips = []
         for i, y in enumerate(ys):
-            target = (H // (2**i), W // (2**i))
+            # key "1" corresponds to upsample to H//1, "2" to H//2, etc.
+            # but i is just index in self.keys
+            key = self.keys[i]
+            scale = int(key) - 1
+            target = (H // (2**scale), W // (2**scale))
             y = self.ups[i](y, target)
             skips.append(y)
 

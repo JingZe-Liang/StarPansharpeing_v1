@@ -3,7 +3,6 @@ from glob import glob
 from pathlib import Path
 
 import hydra
-import scipy.special
 from omegaconf import ListConfig, OmegaConf
 
 OmegaConf.register_new_resolver("eval", lambda x: eval(x))
@@ -15,8 +14,8 @@ OmegaConf.register_new_resolver("glob", lambda x: ListConfig([str(p) for p in Pa
 
 
 @hydra.main(
-    config_path="../configs/change_detection/",
-    config_name="tokenizer_hybrid_adaptor",
+    config_path="../configs/stereo_matching/",
+    config_name="hybrid_stereo_matching",
     version_base=None,
 )
 def main(args):
@@ -51,4 +50,13 @@ def main(args):
         pass
 
 
+def main_compose():
+    hydra.initialize_config_dir(
+        "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/scripts/configs/stereo_matching/dataset"
+    )
+    cfg = hydra.compose("us3d")
+    print(cfg.train.input_dir)
+
+
 main()
+# main_compose()

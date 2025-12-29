@@ -1,0 +1,51 @@
+# Data consts
+dataset_name: "US3D"
+compute_seg: true  # US3D has segmentation labels
+mode: train
+place: jax_oma
+num_classes: 6
+min_disp: -64
+max_disp: 64
+
+paths:
+  jax:
+    train: "data/Downstreams/US3D_Stereo_Matching/JAX/train"
+    val: "data/Downstreams/US3D_Stereo_Matching/JAX/val"
+    test: "data/Downstreams/US3D_Stereo_Matching/JAX/test"
+  oma:
+    train: "data/Downstreams/US3D_Stereo_Matching/OMA/train"
+    val: "data/Downstreams/US3D_Stereo_Matching/OMA/val"
+    test: "data/Downstreams/US3D_Stereo_Matching/OMA/test"
+  jax_oma:
+    train:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/train"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/train"
+    val:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/val"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/val"
+    test:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/test"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/test"
+
+train:
+  _target_: src.stage2.stereo_matching.data.US3D.US3DStreamingDataset.create_dataloader
+  input_dir: ${..paths.${..place}.train}
+  stream_ds_kwargs:
+    shuffle: false
+    is_cycled: true
+  loader_kwargs:
+    batch_size: 2
+    num_workers: 4
+    persistent_workers: true
+
+val:
+  _target_: src.stage2.stereo_matching.data.US3D.US3DStreamingDataset.create_dataloader
+  input_dir: ${..paths.${..place}.test}
+  stream_ds_kwargs:
+    shuffle: false
+    is_cycled: true
+    output_size: 512
+  loader_kwargs:
+    batch_size: 2
+    num_workers: 2
+    persistent_workers: true

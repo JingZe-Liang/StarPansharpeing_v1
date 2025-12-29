@@ -48,33 +48,17 @@ class HyperSegmentationScore(nn.Module):
 
         # Classification metrics support ignore_index directly
         self.accuracy = Accuracy(
-            task=task,
-            num_classes=n_classes,
-            ignore_index=ignore_index,
-            top_k=top_k,
-            average=reduction,
+            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
         )
         self.precision = Precision(
-            task=task,
-            num_classes=n_classes,
-            ignore_index=ignore_index,
-            top_k=top_k,
-            average=reduction,
+            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
         )
         self.recall = Recall(
-            task=task,
-            num_classes=n_classes,
-            ignore_index=ignore_index,
-            top_k=top_k,
-            average=reduction,
+            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
         )
         self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
         self.f1_score = F1Score(
-            task=task,
-            num_classes=n_classes,
-            average=reduction,
-            top_k=top_k,
-            ignore_index=ignore_index,
+            task=task, num_classes=n_classes, average=reduction, top_k=top_k, ignore_index=ignore_index
         )
 
         # Segmentation metrics need special handling for ignore_index
@@ -131,10 +115,7 @@ class HyperSegmentationScore(nn.Module):
         }
 
         # Segmentation metrics need special handling
-        segmentation_metrics = {
-            "dice": self.dice_score,
-            "mean_iou": self.mean_iou,
-        }
+        segmentation_metrics = {"dice": self.dice_score, "mean_iou": self.mean_iou}
 
         # Update classification metrics directly
         for metric in classification_metrics.values():

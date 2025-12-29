@@ -293,7 +293,6 @@ class SanaMSControlNet(SanaMS):
                     )
                 else:
                     abs_pe = self.pos_embed
-
                 x = x + abs_pe
 
                 # Get rotary positional embeddings
@@ -311,7 +310,7 @@ class SanaMSControlNet(SanaMS):
         # control signal branch
         assert data_info is not None
         control_signal = data_info["control_signal"].to(self.dtype)
-        control_signal = self.forward_controlnet(control_signal, pos_embed_ms=abs_pe)
+        control_signal = self.forward_controlnet(control_signal, pos_embed_ms=abs_pe if self.use_pe else None)
 
         t = self.t_embedder(timestep)  # (N, D)
 

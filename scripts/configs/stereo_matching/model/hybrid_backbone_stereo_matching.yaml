@@ -1,0 +1,10 @@
+_target_: src.stage2.stereo_matching.models.tokenizer_hybrid_stero_matching_v2.SemStereo.create_semstereo_model
+num_classes: ${dataset.num_classes}
+tokenizer_pretrained_path: "runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors"
+stereo:
+  min_disp: ${dataset.min_disp}
+  max_disp: ${dataset.max_disp}
+  alpha: 1.0
+  beta: 0.5
+  seg_if: true
+  stereo_if: true

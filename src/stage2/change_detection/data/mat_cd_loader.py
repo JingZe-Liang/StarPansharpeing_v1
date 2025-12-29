@@ -27,7 +27,6 @@ from kornia.augmentation import (
 )
 from loguru import logger
 from scipy import io as sio
-from skimage.transform import rescale, resize
 from torch.utils.data import DataLoader, Dataset
 
 from src.data.window_slider import WindowSlider

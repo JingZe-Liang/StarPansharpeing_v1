@@ -16,6 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 from typing_extensions import Annotated
 
+# Blocks
 import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, GenerativeDecoder
@@ -374,7 +375,7 @@ class ContinuousImageTokenizer(nn.Module):
         if cfg.use_latent_mask:
             self.latent_mask_cfg = cfg.latent_mask_config
             logger.info(f"use latent mask replacement: {self.latent_mask_cfg}")
-            self.mask_token = nn.Parameter(torch.randn(1, self.latent_channels, 1, 1))
+            self.mask_token = nn.Parameter(torch.randn(1, self.latent_channels, 1, 1) * 0.2)
 
         # register repa hook
         if self._vf_on_z_or_module == "module" and (self._use_vf_loss or self._use_repa_loss):
@@ -1506,6 +1507,53 @@ def test_tokenizer_forward_backward(
 
             y.clamp_(-1, 1)
 
+            # debug:
+            scaling_factor = torch.tensor(
+                [
+                    0.46484375,
+                    0.94140625,
+                    0.62109375,
+                    0.443359375,
+                    0.7265625,
+                    0.53125,
+                    0.8203125,
+                    0.6640625,
+                    0.6171875,
+                    0.369140625,
+                    0.50390625,
+                    0.69140625,
+                    0.435546875,
+                    0.6484375,
+                    0.63671875,
+                    0.51953125,
+                ],
+                device=device,
+            ).view(1, 16, 1, 1)
+            shift_factor = torch.tensor(
+                [
+                    -1.2734375,
+                    0.197265625,
+                    -1.1328125,
+                    -1.0625,
+                    -1.765625,
+                    -0.5078125,
+                    0.388671875,
+                    -0.51953125,
+                    -0.474609375,
+                    -0.09912109375,
+                    0.1669921875,
+                    -0.37890625,
+                    -0.796875,
+                    0.466796875,
+                    -0.62890625,
+                    -0.263671875,
+                ],
+                device=device,
+            ).view(1, 16, 1, 1)
+            # norm the latent
+            h_norm = (h - shift_factor) / scaling_factor
+            logger.debug(f"Normed latent value range {h_norm.min().item(), h_norm.max().item()}")
+
             # Compute mean and std of the latent
             if compute_mean_std:
                 mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
@@ -1583,11 +1631,11 @@ def test_tokenizer_forward_backward(
 
 if __name__ == "__main__":
     """
-    CUDA_VISIBLE_DEVICES=0 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
+    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
     """
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos_nested/2025-12-25_03-17-15_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
+        base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
         save_pca_vis=True,
         pca_type="z",
         real_data="SAM270k",
@@ -1596,7 +1644,7 @@ if __name__ == "__main__":
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=1,
+        max_iters=1000,
         compute_mean_std=True,
         use_optim=False,
         check_grad=False,

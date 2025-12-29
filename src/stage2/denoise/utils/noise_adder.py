@@ -3,7 +3,7 @@ from typing import cast
 import numpy as np
 import torch
 
-from src.stage2.denoise.utils.add_noise import (
+from .add_noise import (
     AddNoiseBlindv1,
     AddNoiseComplex,
     AddNoiseDeadline,
@@ -12,7 +12,7 @@ from src.stage2.denoise.utils.add_noise import (
     AddNoiseNoniid,
     AddNoiseStripe,
 )
-from src.stage2.denoise.utils.add_noise_torch import (
+from .add_noise_torch import (
     PredefinedNoiseType,
     get_default_noise_transformation,
 )

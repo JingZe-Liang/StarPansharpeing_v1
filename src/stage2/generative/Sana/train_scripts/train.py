@@ -27,12 +27,15 @@ import warnings
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, cast
+from typing import Any, Callable, Optional, cast
 
 from loguru import logger
 from PIL import Image
 from termcolor import colored
 from tqdm import tqdm
+from ema_pytorch import EMA
+
+logger = logger.bind(tqdm=True)
 
 sys.path.append("src/stage2/generative/Sana")  # add Sana to path
 
@@ -112,7 +115,7 @@ def ema_update(model_dest, model_src, rate):
 
 
 @torch.no_grad()
-def encode_caption_with_LLM(config, txt: str, device="cuda"):
+def encode_caption_with_LLM(config, txt: str, tokenizer, text_encoder, device="cuda", max_length=300):
     if "T5" in config.text_encoder.text_encoder_name:
         with torch.no_grad():
             txt_tokens = tokenizer(  # type: ignore
@@ -170,23 +173,23 @@ def encode_caption_with_LLM(config, txt: str, device="cuda"):
 
 @torch.inference_mode()
 def log_validation(
-    accelerator,
-    config,
-    model,
-    logger,
-    step,
-    device,
-    vae=None,
-    init_noise=None,
-    control_signal=None,
-    loader: torch.utils.data.DataLoader | None = None,
+    accelerator: Accelerator,
+    config: SanaConfig,
+    state: "TrainState",
+    logger: Any,
+    step: int,
+    device: torch.device,
+    vae: Optional[torch.nn.Module] = None,
+    init_noise: Optional[torch.Tensor] = None,
+    control_signal: Optional[torch.Tensor] = None,
+    loader: Optional[torch.utils.data.DataLoader] = None,
 ):
     torch.cuda.empty_cache()
     vis_sampler = config.scheduler.vis_sampler
-    model = accelerator.unwrap_model(model).eval()
-    hw = torch.tensor([[image_size, image_size]], dtype=torch.float, device=device).repeat(1, 1)
+    model = accelerator.unwrap_model(state.model_instance).eval()
+    hw = torch.tensor([[state.image_size, state.image_size]], dtype=torch.float, device=device).repeat(1, 1)
     ar = torch.tensor([[1.0]], device=device).repeat(1, 1)
-    null_y = torch.load(null_embed_path, map_location="cpu")
+    null_y = torch.load(state.null_embed_path, map_location="cpu")
     null_y = null_y["uncond_prompt_embeds"].to(device)
     # Add dimension to match condition format: [1, 300, 2304] -> [1, 1, 300, 2304]
     if null_y.dim() == 3:
@@ -199,8 +202,8 @@ def log_validation(
     def _load_control_image(path_str: str) -> torch.Tensor:
         img = Image.open(osp.expanduser(path_str))
         img = img.convert("RGB")
-        if img.size != (image_size, image_size):
-            img = img.resize((image_size, image_size), resample=Image.BICUBIC)
+        if img.size != (state.image_size, state.image_size):
+            img = img.resize((state.image_size, state.image_size), resample=Image.BICUBIC)
         arr = np.asarray(img).astype(np.float32) / 255.0  # HWC, [0, 1]
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # 1CHW
         tensor = tensor * 2.0 - 1.0  # [-1, 1]
@@ -263,13 +266,13 @@ def log_validation(
         if control_sig.shape[0] != 1:
             control_sig = control_sig[:1]
 
-        if control_sig.shape[-2:] == (latent_size, latent_size):
+        if control_sig.shape[-2:] == (state.latent_size, state.latent_size):
             return control_sig, vae_for_encode
 
-        if control_sig.shape[-2:] == (image_size, image_size):
+        if control_sig.shape[-2:] == (state.image_size, state.image_size):
             if vae_for_encode is None:
                 vae_for_encode = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(
-                    vae_dtype
+                    state.vae_dtype
                 )
 
             control_signal_types = getattr(config.controlnet, "control_signal_types", None)
@@ -301,12 +304,12 @@ def log_validation(
                     "control_signal appears to be image-space but VAE encoding failed (%s); "
                     "fall back to nearest resize to latent_size=%s.",
                     exc,
-                    latent_size,
+                    state.latent_size,
                 )
 
-        if control_sig.shape[-2:] != (latent_size, latent_size):
+        if control_sig.shape[-2:] != (state.latent_size, state.latent_size):
             raise
-            # control_sig = F.interpolate(control_sig, size=(latent_size, latent_size), mode="nearest")
+            # control_sig = F.interpolate(control_sig, size=(state.latent_size, state.latent_size), mode="nearest")
 
         return control_sig, vae_for_encode
 
@@ -319,13 +322,13 @@ def log_validation(
     ):
         latents = []
         current_image_logs = []
-        for prompt in validation_prompts:
+        for prompt in state.validation_prompts:
             z = (
                 torch.randn(
                     1,
                     config.vae.vae_latent_dim,
-                    latent_size,
-                    latent_size,
+                    state.latent_size,
+                    state.latent_size,
                     device=device,
                 )
                 if init_z is None
@@ -334,7 +337,7 @@ def log_validation(
             embed = torch.load(
                 osp.join(
                     config.train.valid_prompt_embed_root,
-                    f"{prompt[:50]}_{valid_prompt_embed_suffix}",
+                    f"{prompt[:50]}_{state.valid_prompt_embed_suffix}",
                 ),
                 map_location="cpu",
             )
@@ -361,8 +364,8 @@ def log_validation(
                             pad = torch.zeros(
                                 1,
                                 expected_channels - control_sig.shape[1],
-                                latent_size,
-                                latent_size,
+                                state.latent_size,
+                                state.latent_size,
                                 device=control_sig.device,
                                 dtype=control_sig.dtype,
                             )
@@ -371,7 +374,9 @@ def log_validation(
                     data_info["control_signal"] = control_sig.to(device=device, dtype=z.dtype)
                 else:
                     if vae is None:
-                        vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
+                        vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(
+                            state.vae_dtype
+                        )
                     control_sig = _build_control_signal(len(latents), vae)
 
                 if "control_signal" not in data_info:
@@ -386,8 +391,8 @@ def log_validation(
                     data_info["control_signal"] = torch.zeros(
                         1,
                         control_latent_channels,
-                        latent_size,
-                        latent_size,
+                        state.latent_size,
+                        state.latent_size,
                         device=device,
                         dtype=z.dtype,
                     )
@@ -442,10 +447,10 @@ def log_validation(
             latents.append(denoised)
         torch.cuda.empty_cache()
         if vae is None:
-            vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
+            vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(state.vae_dtype)
 
-        for prompt, latent in zip(validation_prompts, latents):
-            latent = latent.to(vae_dtype)
+        for prompt, latent in zip(state.validation_prompts, latents):
+            latent = latent.to(state.vae_dtype)
             samples = vae_decode(config.vae.vae_type, vae, latent)
             img_type = getattr(config.vae, "img_type", "rgb")
             if img_type == "rgb":
@@ -479,21 +484,24 @@ def log_validation(
 
         latents = []
         current_image_logs = []
-        validation_prompts_logs = []
+        current_image_logs = []
+        validation_prompts_logs: list[str] = []
 
         rnd_indices = random.sample(range(len(iter_ds)), valid_iters)
         for index in rnd_indices:
             # Random sample on item
             _, caption, _, data_info, *_ = iter_ds[index]
             validation_prompts_logs.append(caption)
-            caption_embs, emb_masks = encode_caption_with_LLM(config, caption)
+            caption_embs, emb_masks = encode_caption_with_LLM(
+                config, caption, state.tokenizer, state.text_encoder, device=device
+            )
 
             z = (
                 torch.randn(
                     1,
                     config.vae.vae_latent_dim,
-                    latent_size,
-                    latent_size,
+                    state.latent_size,
+                    state.latent_size,
                     device=device,
                 )
                 if init_z is None
@@ -572,12 +580,12 @@ def log_validation(
 
         ##### To image #####
         torch.cuda.empty_cache()
-        if vae is None:
-            vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
+        if state.vae is None:
+            state.vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(state.vae_dtype)
 
         for prompt, latent in zip(validation_prompts_logs, latents):
-            latent = latent.to(vae_dtype)
-            samples = vae_decode(config.vae.vae_type, vae, latent)
+            latent = latent.to(state.vae_dtype)
+            samples = vae_decode(config.vae.vae_type, state.vae, latent)
             img_type = getattr(config.vae, "img_type", "rgb")
             if img_type == "rgb":
                 samples = (
@@ -603,8 +611,8 @@ def log_validation(
         return current_image_logs
 
     # First run with original noise
-    # image_logs += run_sampling(init_z=None, label_suffix="", vae=vae, sampler=vis_sampler)
-    image_logs += run_sampling_from_loader(None, "", vae, vis_sampler, valid_iters=3)
+    # image_logs += run_sampling(init_z=None, label_suffix="", vae=state.vae, sampler=vis_sampler)
+    image_logs += run_sampling_from_loader(None, "", state.vae, vis_sampler, valid_iters=3)
 
     # Second run with init_noise if provided
     if init_noise is not None:
@@ -617,7 +625,7 @@ def log_validation(
         #     vae=vae,
         #     sampler=vis_sampler,
         # )
-        image_logs += run_sampling_from_loader(init_noise, " w/ init noise", vae, vis_sampler, valid_iters=3)
+        image_logs += run_sampling_from_loader(init_noise, " w/ init noise", state.vae, vis_sampler, valid_iters=3)
 
     formatted_images = []
     for log in image_logs:
@@ -688,33 +696,34 @@ def log_validation(
 
 
 def train(
-    config,
-    args,
-    accelerator,
-    model,
-    model_ema,
-    optimizer,
-    lr_scheduler,
-    train_dataloader,
-    train_diffusion,
-    logger,
+    config: SanaConfig,
+    args: SanaConfig,
+    accelerator: Accelerator,
+    model: torch.nn.Module,
+    model_ema: Optional[EMA],
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    train_dataloader: torch.utils.data.DataLoader,
+    train_diffusion: Scheduler,
+    logger: Any,
+    state: "TrainState",
 ):
     if getattr(config.train, "debug_nan", False):
         DebugUnderflowOverflow(model, max_frames_to_save=100)
         logger.info("NaN debugger registered. Start to detect overflow during training.")
     log_buffer = LogBuffer()
 
-    global_step = start_step + 1
-    skip_step = max(config.train.skip_step, global_step) % train_dataloader_len
-    skip_step = skip_step if skip_step < (train_dataloader_len - 20) else 0
+    global_step = state.start_step + 1
+    skip_step = max(config.train.skip_step, global_step) % state.train_dataloader_len
+    skip_step = skip_step if skip_step < (state.train_dataloader_len - 20) else 0
     loss_nan_timer = 0
-    model_instance.to(accelerator.device)
+    state.model_instance.to(accelerator.device)
 
     # Cache Dataset for BatchSampler
     if args.caching and config.model.multi_scale:
         caching_start = time.time()
         logger.info(
-            f"Start caching your dataset for batch_sampler at {cache_file}. \n"
+            f"Start caching your dataset for batch_sampler at {state.cache_file}. \n"
             f"This may take a lot of time...No training will launch"
         )
         train_dataloader.batch_sampler.sampler.set_start(max(train_dataloader.batch_sampler.exist_ids, 0))
@@ -723,53 +732,57 @@ def train(
             accelerator.wait_for_everyone()
             if index % 2000 == 0:
                 logger.info(
-                    f"rank: {rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
+                    f"rank: {state.rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
                 )
                 print(
-                    f"rank: {rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
+                    f"rank: {state.rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
                 )
             if (time.time() - caching_start) / 3600 > 3.7:
+                assert state.cache_file is not None
                 json.dump(
                     train_dataloader.batch_sampler.cached_idx,
-                    open(cache_file, "w"),
+                    open(state.cache_file, "w"),
                     indent=4,
                 )
                 accelerator.wait_for_everyone()
                 break
             if len(train_dataloader.batch_sampler.cached_idx) == len(train_dataloader) - 1000:
                 logger.info(
-                    f"Saving rank: {rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
+                    f"Saving rank: {state.rank}, Cached file len: {len(train_dataloader.batch_sampler.cached_idx)} / {len(train_dataloader)}"
                 )
+                assert state.cache_file is not None
                 json.dump(
                     train_dataloader.batch_sampler.cached_idx,
-                    open(cache_file, "w"),
+                    open(state.cache_file, "w"),
                     indent=4,
                 )
             accelerator.wait_for_everyone()
             continue
         accelerator.wait_for_everyone()
-        print(f"Saving rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}")
-        json.dump(train_dataloader.batch_sampler.cached_idx, open(cache_file, "w"), indent=4)
+        print(f"Saving rank-{state.rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}")
+        assert state.cache_file is not None
+        json.dump(train_dataloader.batch_sampler.cached_idx, open(state.cache_file, "w"), indent=4)
         return
 
     # Now you train the model
-    for epoch in range(start_epoch + 1, config.train.num_epochs + 1):
+    for epoch in range(state.start_epoch + 1, config.train.num_epochs + 1):
         time_start, last_tic = time.time(), time.time()
         sampler = (
             train_dataloader.batch_sampler.sampler
-            if (num_replicas > 1 or config.model.multi_scale)
+            if (state.num_replicas > 1 or config.model.multi_scale)
             else train_dataloader.sampler
         )
         sampler.set_epoch(epoch)
         sampler.set_start(max((skip_step - 1) * config.train.train_batch_size, 0))
+
         if skip_step > 1 and accelerator.is_main_process:
             logger.info(f"Skipped Steps: {skip_step}")
         skip_step = 1
         data_time_start = time.time()
-        data_time_all = 0
-        lm_time_all = 0
-        vae_time_all = 0
-        model_time_all = 0
+        data_time_all = 0.0
+        lm_time_all = 0.0
+        vae_time_all = 0.0
+        model_time_all = 0.0
 
         # loops
         for step, batch in enumerate(tqdm(train_dataloader, total=len(train_dataloader))):
@@ -777,13 +790,13 @@ def train(
             accelerator.wait_for_everyone()
             data_time_all += time.time() - data_time_start
             vae_time_start = time.time()
-            if load_vae_feat:
+            if state.load_vae_feat:
                 z = batch[0].to(accelerator.device)
             else:
                 with torch.no_grad():
                     z = vae_encode(
                         config.vae.vae_type,
-                        vae,
+                        state.vae,
                         batch[0],
                         config.vae.sample_posterior,
                         accelerator.device,
@@ -806,7 +819,7 @@ def train(
                 n_cond = len(control_images)
                 drop_mask = None
                 if drop_prob > 0:
-                    drop_mask = (torch.rand(bs, n_cond, generator=generator) < drop_prob).to(accelerator.device)
+                    drop_mask = (torch.rand(bs, n_cond, generator=state.generator) < drop_prob).to(accelerator.device)
 
                 control_latents_all: list[torch.Tensor] = []
                 control_latents_train: list[torch.Tensor] = []
@@ -825,7 +838,7 @@ def train(
                         with torch.no_grad():
                             latent = vae_encode(
                                 config.vae.vae_type,
-                                vae,
+                                state.vae,
                                 control_img,
                                 config.vae.sample_posterior,
                                 accelerator.device,
@@ -850,11 +863,13 @@ def train(
             lm_time_start = time.time()
 
             ###### Text feature process
-            if load_text_feat:
+            if state.load_text_feat:
                 y = batch[1]  # bs, 1, N, C
                 y_mask = batch[2]  # bs, 1, 1, N
             else:
-                y, y_mask = encode_caption_with_LLM(config, batch[1])
+                y, y_mask = encode_caption_with_LLM(
+                    config, batch[1], state.tokenizer, state.text_encoder, device=accelerator.device
+                )
 
             # Sample a random timestep for each image
             bs = clean_images.shape[0]
@@ -896,7 +911,8 @@ def train(
                 if accelerator.sync_gradients:
                     grad_norm = accelerator.clip_grad_norm_(model.parameters(), config.train.gradient_clip)
                     if not config.train.use_fsdp and config.train.ema_update and model_ema is not None:
-                        ema_update(model_ema, model, config.train.ema_rate)
+                        # ema_update(model_ema, model, config.train.ema_rate)
+                        model_ema.update()
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -918,12 +934,17 @@ def train(
                 t_lm = lm_time_all / config.train.log_interval
                 t_vae = vae_time_all / config.train.log_interval
                 avg_time = (time.time() - time_start) / (step + 1)
-                eta = str(datetime.timedelta(seconds=int(avg_time * (total_steps - global_step - 1))))
+                eta = str(datetime.timedelta(seconds=int(avg_time * (state.total_steps - global_step - 1))))
                 eta_epoch = str(
                     datetime.timedelta(
                         seconds=int(
                             avg_time
-                            * (train_dataloader_len - sampler.step_start // config.train.train_batch_size - step - 1)
+                            * (
+                                state.train_dataloader_len
+                                - sampler.step_start // config.train.train_batch_size
+                                - step
+                                - 1
+                            )
                         )
                     )
                 )
@@ -931,11 +952,11 @@ def train(
 
                 current_step = (
                     global_step - sampler.step_start // config.train.train_batch_size
-                ) % train_dataloader_len
-                current_step = train_dataloader_len if current_step == 0 else current_step
+                ) % state.train_dataloader_len
+                current_step = state.train_dataloader_len if current_step == 0 else current_step
 
                 info = (
-                    f"Epoch: {epoch} | Global Step: {global_step} | Local Step: {current_step} // {train_dataloader_len}, "
+                    f"Epoch: {epoch} | Global Step: {global_step} | Local Step: {current_step} // {state.train_dataloader_len}, "
                     f"total_eta: {eta}, epoch_eta:{eta_epoch}, time: all:{t:.3f}, model:{t_m:.3f}, data:{t_d:.3f}, "
                     f"lm:{t_lm:.3f}, vae:{t_vae:.3f}, lr:{lr:.3e}, Cap: {batch[5][0]}, "
                 )
@@ -967,7 +988,7 @@ def train(
             ###### Save model
             if (
                 global_step % config.train.save_model_steps == 0
-                or (time.time() - training_start_time) / 3600 > config.train.early_stop_hours
+                or (time.time() - state.training_start_time) / 3600 > config.train.early_stop_hours
             ):
                 torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
@@ -998,7 +1019,7 @@ def train(
                             optimizer=optimizer,
                             lr_scheduler=lr_scheduler,
                             step=global_step,
-                            generator=generator,
+                            generator=state.generator,
                             add_symlink=True,
                         )
 
@@ -1014,7 +1035,7 @@ def train(
                             f.write(osp.join(config.work_dir, "config.py") + "\n")
                             f.write(ckpt_saved_path)
 
-                if (time.time() - training_start_time) / 3600 > config.train.early_stop_hours:
+                if (time.time() - state.training_start_time) / 3600 > config.train.early_stop_hours:
                     logger.info(f"Stopping training at epoch {epoch}, step {global_step} due to time limit.")
                     return
 
@@ -1026,24 +1047,24 @@ def train(
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     if config.train.use_fsdp:
-                        model_instance.load_state_dict(merged_state_dict)
+                        state.model_instance.load_state_dict(merged_state_dict)
 
                     val_control_signal = None
                     if isinstance(data_info, dict):
                         raw_val_control = data_info.get("_control_signal_all", data_info.get("control_signal"))
                         if torch.is_tensor(raw_val_control):
-                            val_control_signal = raw_val_control.detach()
+                            val_control_signal = cast(torch.Tensor, raw_val_control).detach()
 
-                    if validation_noise is not None:
+                    if state.validation_noise is not None:
                         log_validation(
                             accelerator=accelerator,
                             config=config,
-                            model=model_instance,
+                            state=state,
                             logger=logger,
                             step=global_step,
                             device=accelerator.device,
-                            vae=vae,
-                            init_noise=validation_noise,
+                            vae=state.vae,
+                            init_noise=state.validation_noise,
                             control_signal=val_control_signal,
                             loader=train_dataloader,
                         )
@@ -1051,11 +1072,11 @@ def train(
                         log_validation(
                             accelerator=accelerator,
                             config=config,
-                            model=model_instance,
+                            state=state,
                             logger=logger,
                             step=global_step,
                             device=accelerator.device,
-                            vae=vae,
+                            vae=state.vae,
                             control_signal=val_control_signal,
                             loader=train_dataloader,
                         )
@@ -1063,11 +1084,11 @@ def train(
             # avoid dead-lock of multiscale data batch sampler
             if (
                 config.model.multi_scale
-                and (train_dataloader_len - sampler.step_start // config.train.train_batch_size - step) < 30
+                and (state.train_dataloader_len - sampler.step_start // config.train.train_batch_size - step) < 30
             ):
                 global_step = (
-                    (global_step + train_dataloader_len - 1) // train_dataloader_len
-                ) * train_dataloader_len + 1
+                    (global_step + state.train_dataloader_len - 1) // state.train_dataloader_len
+                ) * state.train_dataloader_len + 1
                 logger.info("Early stop current iteration")
                 skip_first_batches(train_dataloader, True)
                 break
@@ -1104,7 +1125,7 @@ def train(
                         model_ema=accelerator.unwrap_model(model_ema) if model_ema is not None else None,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
-                        generator=generator,
+                        generator=state.generator,
                         add_symlink=True,
                     )
 
@@ -1119,13 +1140,39 @@ def train(
                     f.write(ckpt_saved_path)
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class TrainState:
+    train_dataloader_len: int
+    start_epoch: int
+    start_step: int
+    vae: Optional[torch.nn.Module]
+    generator: torch.Generator
+    num_replicas: int
+    rank: int
+    training_start_time: float
+    load_vae_feat: bool
+    load_text_feat: bool
+    validation_noise: Optional[torch.Tensor]
+    text_encoder: Optional[torch.nn.Module]
+    tokenizer: Optional[Any]
+    max_length: int
+    validation_prompts: list[str]
+    latent_size: int
+    valid_prompt_embed_suffix: str
+    null_embed_path: str
+    image_size: int
+    cache_file: Optional[str]
+    total_steps: int
+    vae_dtype: torch.dtype
+    model_instance: torch.nn.Module
+
+
 @pyrallis.wrap()
 def main(cfg: SanaConfig) -> None:
-    # Why the fuck you use so much globals !!!!!!!
-    global train_dataloader_len, start_epoch, start_step, vae, generator, num_replicas, rank, training_start_time
-    global load_vae_feat, load_text_feat, validation_noise, text_encoder, tokenizer
-    global max_length, validation_prompts, latent_size, valid_prompt_embed_suffix, null_embed_path
-    global image_size, cache_file, total_steps, vae_dtype, model_instance
+    # Ensure distributed env vars exist for single-process runs
 
     # Ensure distributed env vars exist for single-process runs
     os.environ.setdefault("WORLD_SIZE", "1")
@@ -1284,7 +1331,16 @@ def main(cfg: SanaConfig) -> None:
     ).train()
 
     if (not config.train.use_fsdp) and config.train.ema_update:
-        model_ema = deepcopy(model).eval()
+        # model_ema = deepcopy(model).eval()
+        model_ema = EMA(
+            model,
+            beta=config.train.ema_rate,
+            update_every=3,
+            include_online_model=False,
+            use_foreach=True,
+            update_after_step=100,
+            update_model_with_ema_every=1000,
+        )
         logger.info("Creating EMA model for DDP mode")
     elif config.train.use_fsdp and config.train.ema_update:
         logger.warning("EMA update is not supported in FSDP mode. Setting model_ema to None.")
@@ -1304,7 +1360,7 @@ def main(cfg: SanaConfig) -> None:
     if config.train.use_fsdp:
         model_instance = deepcopy(model)
     elif model_ema is not None:
-        model_instance = deepcopy(model_ema)
+        model_instance = model_ema.ema_model
     else:
         model_instance = model
 
@@ -1346,8 +1402,8 @@ def main(cfg: SanaConfig) -> None:
             **config.model_growth.init_params,
         )
 
-    if config.train.ema_update and not config.train.use_fsdp and model_ema is not None:
-        ema_update(model_ema, model, 0.0)
+    # if config.train.ema_update and not config.train.use_fsdp and model_ema is not None:
+    #     ema_update(model_ema, model, 0.0)
 
     # 5. build dataloader
     config.data.data_dir = config.data.data_dir if isinstance(config.data.data_dir, list) else [config.data.data_dir]
@@ -1415,6 +1471,9 @@ def main(cfg: SanaConfig) -> None:
         train_dataloader_len = len(train_dataloader)
     load_vae_feat = getattr(train_dataloader.dataset, "load_vae_feat", False)
     load_text_feat = getattr(train_dataloader.dataset, "load_text_feat", False)
+    validation_prompts = []
+    valid_prompt_embed_suffix = ""
+    cache_file = locals().get("cache_file", None)
 
     ############# Make some caches for validations ##########
 
@@ -1431,6 +1490,8 @@ def main(cfg: SanaConfig) -> None:
                 uuid_sys_prompt = hashlib.sha256(chi_prompt.encode()).hexdigest()
             else:
                 uuid_sys_prompt = hashlib.sha256(b"").hexdigest()
+            if config.train.valid_prompt_embed_root is None:
+                config.train.valid_prompt_embed_root = ""
             config.train.valid_prompt_embed_root = osp.join(config.train.valid_prompt_embed_root, uuid_sys_prompt)
             Path(config.train.valid_prompt_embed_root).mkdir(parents=True, exist_ok=True)
 
@@ -1461,8 +1522,8 @@ def main(cfg: SanaConfig) -> None:
                         **text_encoder_extra,
                     )
 
-                tokenizer = cast(Callable, tokenizer)
-                text_encoder = cast(Callable, text_encoder)
+                tokenizer = cast(Any, tokenizer)
+                text_encoder = cast(Any, text_encoder)
 
                 for prompt in validation_prompts:
                     prompt_embed_path = osp.join(
@@ -1545,7 +1606,7 @@ def main(cfg: SanaConfig) -> None:
                 del null_tokens
                 flush()
         else:
-            validation_prompts = None
+            validation_prompts = []
             logger.info("Not provide any validation prompts, take them from the train loader.")
 
     # 6. build optimizer and lr scheduler
@@ -1576,7 +1637,7 @@ def main(cfg: SanaConfig) -> None:
 
     optimizer = MuonFSDP.create_muon_optimizer(
         model.named_parameters(),
-        oned_param_algo="adamw",
+        oned_param_algo="lion",
         lr=3.0e-4,
         mu=0.95,
         betas=(0.9, 0.95),
@@ -1593,6 +1654,7 @@ def main(cfg: SanaConfig) -> None:
             r".*norm\..*",
             r".*\.bias$",
         ),
+        oned_params_defaults={"weight_decay": 0.0},
     )
     logger.info("Using Muon optimizer")
 
@@ -1693,6 +1755,32 @@ def main(cfg: SanaConfig) -> None:
     logger.info(f"Set seed: {(start_step + 1) // config.train.save_model_steps + int(os.environ['LOCAL_RANK'])}")
 
     # Start Training
+    state = TrainState(
+        train_dataloader_len=train_dataloader_len,
+        start_epoch=start_epoch,
+        start_step=start_step,
+        vae=vae,
+        generator=generator,
+        num_replicas=num_replicas,
+        rank=rank,
+        training_start_time=training_start_time,
+        load_vae_feat=load_vae_feat,
+        load_text_feat=load_text_feat,
+        validation_noise=validation_noise,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        validation_prompts=validation_prompts,
+        latent_size=latent_size,
+        valid_prompt_embed_suffix=valid_prompt_embed_suffix,
+        null_embed_path=null_embed_path,
+        image_size=image_size,
+        cache_file=cache_file,
+        total_steps=total_steps,
+        vae_dtype=vae_dtype,
+        model_instance=model_instance,
+    )
+
     train(
         config=config,
         args=args,
@@ -1704,6 +1792,7 @@ def main(cfg: SanaConfig) -> None:
         train_dataloader=train_dataloader,
         train_diffusion=train_diffusion,
         logger=logger,
+        state=state,
     )
 
 

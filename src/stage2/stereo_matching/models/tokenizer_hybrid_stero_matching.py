@@ -557,16 +557,16 @@ class TokenizerStereoMatching(nn.Module):
 # =============================================================================
 
 
-def _create_default_cfg() -> edict:
+def _create_default_cfg():
     """创建默认配置，参考hybrid_distillation_f16_config。"""
     # CNN模型配置
     cnn_cfg = dict(
         model=dict(
             resolution=512,
-            in_channels=384,
-            out_channels=384,
-            z_channels=512,
-            latent_channels=64,
+            in_channels=512,
+            out_channels=512,
+            z_channels=768,
+            latent_channels=32,  # Must match pretrained model
             channels=128,
             channels_mult=[2, 4, 4],
             num_res_blocks=2,
@@ -575,7 +575,7 @@ def _create_default_cfg() -> edict:
             spatial_compression=8,
             patch_size=1,
             block_name="res_block",
-            norm_type="gn",
+            norm_type="rmsnorm2d",
             norm_groups=32,
             adaptive_mode="interp",
             downsample_kwargs=dict(padconv_use_manually_pad=False),
@@ -599,49 +599,47 @@ def _create_default_cfg() -> edict:
 
     # Transformer编码器配置
     trans_enc_cfg = dict(
-        embed_dim=1024,
-        depth=12,
+        embed_dim=1152,
+        depth=24,
         num_heads=16,
         mlp_ratio=4.0,
         qkv_bias=True,
         patch_size=2,
-        norm_layer="layernorm",
+        norm_layer="flarmsnorm",
         pos_embed="learned",
         pos_embed_grid_size=[32, 32],
         rope_type="axial",
         img_size=32,
-        in_chans=512,
-        out_chans=512,
-        unpatch_size=1,
-        reg_tokens=0,
+        in_chans=768,  # Must match z_channels from CNN encoder
+        out_chans=768,  # Must match pretrained model
+        unpatch_size=2,
+        reg_tokens=4,
         compile_model=False,
-        pretrained_type=None,
+        attn_type="gated",  # Must match pretrained model config
+        pretrained_type=None,  # ["ijepa"],
     )
 
-    # Transformer解码器配置 - 立体匹配不需要decoder
     trans_dec_cfg = None
 
-    # 蒸馏配置
     distill_cfg = dict(
-        dino_feature_dim=1024,
-        semantic_feature_dim=1024,
-        cache_layers=dict(
-            low_level=[0, 1, 2, -1],
-            semantic=[2, 5, 8, 11],
-        ),
+        dino_feature_dim=1152,
+        semantic_feature_dim=1152,
+        cache_layers=dict(low_level=[0, 1, 2, -1], semantic=[2, 5, 8, 11]),
     )
 
-    # Tokenizer配置
     tokenizer_cfg = OmegaConf.create(
         dict(
             cnn_cfg=cnn_cfg,
             trans_enc_cfg=trans_enc_cfg,
             trans_dec_cfg=trans_dec_cfg,
-            distill_cfg=distill_cfg,
+            distillation_cfg=distill_cfg,
+            hybrid_tokenizer_cfg=dict(
+                latent_bottleneck_type="before_semantic",
+                latent_straight_through_skip=True,
+            ),
         )
     )
 
-    # Tokenizer特征配置
     tokenizer_feature_cfg = dict(
         pretrained_path=None,
         features_per_stage=[512, 512, 512, 512],
@@ -659,7 +657,6 @@ def _create_default_cfg() -> edict:
         with_cp=True,
     )
 
-    # Adapter配置
     adapter_cfg = dict(
         adapter_type="default",
         latent_width=64,
@@ -673,7 +670,6 @@ def _create_default_cfg() -> edict:
         block_types=["nat", "nat", "mbconv", "mbconv"],
     )
 
-    # 立体匹配配置
     stereo_cfg = dict(
         min_disp=-128,
         max_disp=64,
@@ -690,7 +686,7 @@ def _create_default_cfg() -> edict:
     cfg.tokenizer_pretrained_path = None
     cfg._debug = False
 
-    return edict(OmegaConf.to_container(cfg, resolve=True))
+    return cfg
 
 
 @function_config_to_basic_types

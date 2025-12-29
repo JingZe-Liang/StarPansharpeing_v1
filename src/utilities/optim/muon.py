@@ -709,11 +709,9 @@ class Muon(torch.optim.Optimizer):
                 # conv, linear weights, and other 2D+ parameters
                 if p.ndim >= 2 and name not in ignored_keys_for_muon:
                     muon_params.append(p)
-                    # logger.debug(f"Muon params: {name} - shaped: {p.shape}")
                 # bias, norm weights, embeddings, lm heads (for nlp tasks), and other 1D parameters
                 else:
                     adamw_params.append(p)
-                    # logger.debug(f"AdamW params: {name} - shaped: {p.shape}")
             else:
                 logger.debug(f"{name} is not requires_grad")
 

@@ -245,6 +245,7 @@ def _register_new_norms():
         create_norm._NORM_MAP.update(  # type: ignore
             {"flarmsnorm": FlaRMSNorm, "flalayernorm": FlaLayerNorm}
         )
+        logger.debug(f'[Timm regsitered new norms]: "flarmsnorm", "flalayernorm"')
     except ImportError:
         logger.debug("FLA not available, skipping FLA norms registration")
 

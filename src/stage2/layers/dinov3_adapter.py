@@ -642,7 +642,7 @@ class DINOv3_Adapter(nn.Module):
         self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
-        print(f"[Dinov3 Adapter]: Use norm type {type(self.norm1)}")
+        # print(f"[Dinov3 Adapter]: Use norm type {type(self.norm1)}")
         if use_bn:
             # FIXME: bn mismatch
             logger.warning(f"Use BN in module, may cause train/test running mean/var difference.")

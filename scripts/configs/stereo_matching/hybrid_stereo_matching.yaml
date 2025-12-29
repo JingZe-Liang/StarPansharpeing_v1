@@ -1,0 +1,112 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # tokenizer ==========
+  - dataset: us3d
+  - model@segment_model: hybrid_backbone_stereo_matching
+  # self ============
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  _target_: accelerate.Accelerator
+  mixed_precision: bf16
+  log_with: tensorboard
+  dataloader_config:
+    _target_: accelerate.utils.DataLoaderConfiguration
+    split_batches: False
+    even_batches: False
+    non_blocking: True
+    dispatch_batches: None
+    use_seedable_sampler: False
+    use_stateful_dataloader: False
+  project_config:
+    _target_: accelerate.utils.ProjectConfiguration
+    # ==================
+    # placeholder, changed by code
+    project_dir: runs/stage2_stereo_matching/
+    logging_dir: runs/stage2_stereo_matching/tensorboard
+    # ==================
+    total_limit: 2
+    automatic_checkpoint_naming: true
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+    adjust_scheduler: false
+    sync_with_dataloader: false
+    sync_each_batch: false
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
+  update_after_step: 0
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+
+train:
+  proj_dir: runs/stage2_stereo_matching/
+  max_grad_norm: 0.03
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 500_000
+  save_every: 1000
+  seperate_enc_dec: false
+  resume_path:
+  ema_load_path: runs/stage2_stereo_matching/2025-12-29_04-46-00_hybrid_backbone_stereo_matching/ema
+  only_load_tokenizer: true
+  compile_model: false
+
+  segment_optim:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.02
+    oned_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0
+
+  segment_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  log:
+    run_comment: hybrid_backbone_stereo_matching
+    log_with_time: true
+    visualize_every: 200
+    log_every: 10
+    log_with: ['swanlab']
+    exp_name: hybrid_backbone_stereo_matching
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: 20 # val only `max_val_iters` batches
+
+metric:
+  _target_: src.stage2.stereo_matching.metrics.unified.UnifiedSemStereoMetrics
+  num_classes: ${dataset.num_classes}
+  min_disp: ${dataset.min_disp}
+  max_disp: ${dataset.max_disp}
+  compute_seg: ${dataset.compute_seg}  # Dynamic based on dataset
+  compute_stereo: true

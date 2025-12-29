@@ -145,7 +145,8 @@ def get_vae(name, model_path, device="cuda", **kwargs):
                 z_channels=256,
                 latent_channels=16,
                 act_checkpoint=False,
-                norm_type="gn",
+                norm_type="rmsnorm2d",
+                act_type="silu",
                 block_name="res_block",
                 use_residual_factor=False,
                 patch_method="haar",
@@ -167,49 +168,17 @@ def get_vae(name, model_path, device="cuda", **kwargs):
         # cosmos_ae_lora.requires_grad_(False)
         # return cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
         cosmos_ae = cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
+        # fmt: off
         cosmos_ae.scaling_factor = torch.tensor(
-            [
-                3.796875,
-                3.0,
-                3.640625,
-                3.390625,
-                3.640625,
-                2.921875,
-                4.15625,
-                3.984375,
-                2.65625,
-                2.9375,
-                4.375,
-                5.125,
-                7.03125,
-                2.734375,
-                2.703125,
-                4.96875,
-            ],
+            [0.470703125, 0.95703125, 0.63671875, 0.455078125, 0.74609375, 0.53515625, 0.8359375, 0.671875, 0.62890625, 0.375, 0.51171875, 0.69921875, 0.447265625, 0.66015625, 0.65234375, 0.53515625],
             device=device,
         ).view(1, 16, 1, 1)
         cosmos_ae.shift_factor = torch.tensor(
-            [
-                -1.0546875,
-                -1.1328125,
-                -2.171875,
-                0.07666015625,
-                -0.7109375,
-                0.3984375,
-                -1.6171875,
-                -0.453125,
-                0.65625,
-                2.828125,
-                0.09619140625,
-                -1.15625,
-                -1.4453125,
-                0.8984375,
-                3.421875,
-                -1.078125,
-            ],
+            [-1.2734375, 0.193359375, -1.1171875, -1.0859375, -1.78125, -0.52734375, 0.3984375, -0.5, -0.482421875, -0.09375, 0.1689453125, -0.38671875, -0.8046875, 0.49609375, -0.62109375, -0.2578125],
             device=device,
         ).view(1, 16, 1, 1)
-        return cosmos_ae
+        # fmt: on
+        return cosmos_ae.eval()
     else:
         print("error load vae")
         exit()

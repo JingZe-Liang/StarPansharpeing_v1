@@ -1,8 +1,7 @@
 import torch
 from accelerate.state import PartialState
 from torch.distributed.tensor import DTensor, Replicate, Shard
-
-from ..logging import log_print
+from loguru import logger
 
 
 def to_full_tensor(tensor: DTensor) -> torch.Tensor:
@@ -28,16 +27,15 @@ def to_full_tensor(tensor: DTensor) -> torch.Tensor:
     try:
         return tensor.full_tensor()
     except Exception as e:
-        log_print(f"full_tensor() failed: {e}", level="warning", warn_once=True)
+        logger.warning(f"full_tensor() failed: {e}", warn_once=True)
         try:
             replicated = tensor.redistribute(placements=[Replicate()])
             return replicated.to_local()
         except Exception as e2:
-            log_print(f"redistribute() failed: {e2}", level="warning", warn_once=True)
-            log_print(
+            logger.warning(f"redistribute() failed: {e2}", warn_once=True)
+            logger.warning(
                 "Failed to get full tensor, using local tensor instead. "
                 "Results may be incomplete in distributed training.",
-                level="warning",
                 warn_once=True,
             )
             return tensor._local_tensor.to(device)

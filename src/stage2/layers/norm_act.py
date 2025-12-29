@@ -199,14 +199,47 @@ def _register_new_norms():
         create_norm._NORM_MAP.update({"flashrmsnorm": FlashRMSNorm})  # type: ignore
     except ImportError:
         pass
-
     try:
-        # from fla.modules import LayerNorm, RMSNorm
         import fla.modules
 
-        create_norm._NORM_MAP.update({"flarmsnorm": fla.modules.RMSNorm, "flalayernorm": fla.modules.LayerNorm})
+        class FlaRMSNorm(fla.modules.RMSNorm):
+            def __init__(
+                self,
+                hidden_size: int,
+                elementwise_affine: bool = True,
+                bias: bool = False,
+                eps: float = 1e-5,
+                **kwargs,
+            ):
+                super().__init__(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    bias=bias,
+                    eps=eps,
+                )
+
+        class FlaLayerNorm(fla.modules.LayerNorm):
+            def __init__(
+                self,
+                hidden_size: int,
+                elementwise_affine: bool = True,
+                bias: bool = False,
+                eps: float = 1e-5,
+                **kwargs,
+            ):
+                super().__init__(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    bias=bias,
+                    eps=eps,
+                )
+
+        create_norm._NORM_MAP.update(  # type: ignore
+            {"flarmsnorm": FlaRMSNorm, "flalayernorm": FlaLayerNorm}
+        )
+        logger.debug(f'[Timm regsitered new norms]: "flarmsnorm", "flalayernorm"')
     except ImportError:
-        pass
+        logger.debug("FLA not available, skipping FLA norms registration")
 
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore

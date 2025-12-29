@@ -7,12 +7,12 @@ import accelerate
 import torch
 import torch.nn as nn
 from peft import PeftConfig, PeftModel
-from loguru import logger
 from torch.autograd import profiler
 from torch.nn.modules.module import _IncompatibleKeys
 from tqdm import tqdm
 
 from ..config_utils import function_config_to_basic_types
+from loguru import logger
 
 
 @profiler.record_function("load_weights_with_shape_check")
@@ -84,7 +84,7 @@ def load_weights_with_shape_check(
                 logger.warning(f"{name} not found in weights", tqdm=True)
 
     else:
-        raise Value
+        raise ValueError(f"Invalid load strategy: {load_strategy}")
 
     return _IncompatibleKeys(missing_keys=missing_keys, unexpected_keys=unexpected_keys)
 
