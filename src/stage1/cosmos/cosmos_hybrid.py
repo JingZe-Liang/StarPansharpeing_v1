@@ -4,7 +4,7 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from dataclasses import asdict, dataclass
-from typing import Any, List, NamedTuple, Optional, Self, Tuple, Union
+from typing import Any, List, Optional, Union, cast
 
 import accelerate
 import numpy as np
@@ -283,7 +283,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             nn.init.trunc_normal_(self.decoder.quant_conv.weight, std=0.01)
             nn.init.zeros_(self.decoder.quant_conv.bias)
 
-            logger.warning(f"temp code for continue training")
+            logger.warning(
+                f"temp code for continue training that initialize the quant convs using trunc_norm_ with std=0.01"
+            )
 
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
@@ -421,6 +423,27 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         )
 
         return terms.lejepa_proj
+
+    def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
+        """返回semantic encoder输出的normed CLS token (B, D)，用于DINO cls token loss。"""
+        z_low_lvl = self.encoder.encoder(x)
+
+        if self.latent_bottleneck_type == "before_semantic":
+            h = self.encoder.quant_conv(z_low_lvl)
+            h = self.latent_aug(h)
+            if self.st_skip_sem_decoder:
+                h = self.decoder.quant_conv["post_quant_conv"](h)
+            else:
+                h = self.decoder.quant_conv(h)
+        else:
+            h = z_low_lvl
+            h = self.latent_aug(h)
+
+        tokens = self.semantic_enc_transformer.forward_features(h, masks=None)  # type: ignore[arg-type]
+        tokens = cast(torch.Tensor, tokens)
+        if getattr(self.semantic_enc_transformer, "num_prefix_tokens", 0) <= 0:
+            raise ValueError("semantic_enc_transformer未启用cls token（请在配置中设置`class_token: true`）。")
+        return tokens[:, 0, :]
 
     def encode_nepa(self, x, **_ignored_kwargs) -> dict:
         """Encode for NePA (Next Embedding Prediction) pretraining.
@@ -1034,7 +1057,7 @@ def hybrid_ijepa_f8_config(
         "reg_tokens": 4,
         "rope_type": "axial",
         "attn_type": "gated",
-        "pretrained_type": ["ijepa", "lejepa_latent"],
+        "pretrained_type": ["ijepa"],
     }
 
     cfg = OmegaConf.create(
@@ -1176,8 +1199,6 @@ def test_model_forward_backward(
     if not is_itered and upscale != 1:
         x = torch.nn.functional.interpolate(x, scale_factor=upscale, align_corners=True, mode="bicubic")
 
-    # logger.info(f"Input shape: {x.shape}")
-
     if use_optim:
         opt = torch.optim.Adam(model.parameters(), lr=1e-4)
 
@@ -1312,7 +1333,6 @@ def test_model_forward_backward(
                     feat_to_use = encoded.latent
                     # logger.warning("PCA with 'z' type not supported for iterated data in current implementation")
 
-        breakpoint()
         if isinstance(feat_to_use, tuple):
             # cat all together
             feat_to_use = [*feat_to_use[0], *feat_to_use[1]]
@@ -1400,6 +1420,6 @@ if __name__ == "__main__":
     """
     with logger.catch():
         test_model_forward_backward(
-            real_data="SAM270k", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
+            real_data="RS5M", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
         )
         # test_forward_pca()

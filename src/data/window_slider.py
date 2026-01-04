@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 
 class WindowSlider:
@@ -40,7 +41,7 @@ class WindowSlider:
         else:
             self.stride = window_size  # no overlap by default
 
-    def slide_windows(self, sample: dict[str, Any]) -> Generator[dict[str, Any], None, None]:
+    def slide_windows(self, sample: dict[str, Any], *, use_tqdm=True) -> Generator[dict[str, Any], None, None]:
         """
         Generate sliding windows from a full image sample.
 
@@ -102,34 +103,60 @@ class WindowSlider:
         }
 
         # Generate all windows, each containing the full batch
-        for i in range(num_windows_h):
-            for j in range(num_windows_w):
-                # Calculate ideal window position
-                h_start = i * self.stride
-                w_start = j * self.stride
-                h_end = h_start + self.window_size
-                w_end = w_start + self.window_size
+        for i, j in self._iter_window_indices(num_windows_h, num_windows_w, use_tqdm=use_tqdm):
+            h_start, h_end, w_start, w_end = self._get_window_bounds(h, w, i, j)
+            window_sample = self._extract_window_batch(sample, h_start, h_end, w_start, w_end, i, j, original_info)
+            yield window_sample
 
-                # Adjust window position to ensure it stays within image boundaries
-                # Always return full-sized windows
-                if h_end > h:
-                    # Window extends beyond bottom edge, shift up
-                    h_start = h - self.window_size
-                    h_end = h
-                if w_end > w:
-                    # Window extends beyond right edge, shift left
-                    w_start = w - self.window_size
-                    w_end = w
+    def _iter_window_indices(
+        self,
+        num_windows_h: int,
+        num_windows_w: int,
+        *,
+        use_tqdm: bool,
+    ) -> Generator[tuple[int, int], None, None]:
+        if not use_tqdm:
+            for i in range(num_windows_h):
+                for j in range(num_windows_w):
+                    yield i, j
+            return
 
-                # Ensure window doesn't go beyond top/left edges
-                h_start = max(0, h_start)
-                w_start = max(0, w_start)
-                h_end = min(h, h_start + self.window_size)
-                w_end = min(w, w_start + self.window_size)
+        for i in tqdm(
+            range(num_windows_h),
+            desc="windows-h",
+            position=0,
+            leave=True,
+            dynamic_ncols=True,
+        ):
+            with tqdm(
+                range(num_windows_w),
+                desc=f"windows-w (i={i + 1}/{num_windows_h})",
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
+            ) as j_pbar:
+                for j in j_pbar:
+                    yield i, j
 
-                # Extract window for the entire batch at once
-                window_sample = self._extract_window_batch(sample, h_start, h_end, w_start, w_end, i, j, original_info)
-                yield window_sample
+    def _get_window_bounds(self, h: int, w: int, i: int, j: int) -> tuple[int, int, int, int]:
+        h_start = i * self.stride
+        w_start = j * self.stride
+        h_end = h_start + self.window_size
+        w_end = w_start + self.window_size
+
+        if h_end > h:
+            h_start = h - self.window_size
+            h_end = h
+        if w_end > w:
+            w_start = w - self.window_size
+            w_end = w
+
+        h_start = max(0, h_start)
+        w_start = max(0, w_start)
+        h_end = min(h, h_start + self.window_size)
+        w_end = min(w, w_start + self.window_size)
+
+        return h_start, h_end, w_start, w_end
 
     def _extract_window_batch(
         self,
@@ -500,12 +527,13 @@ def model_predict_patcher(
     stride: int | None = None,
     overlap: float | None = None,
     label_mode: str = "seg",
+    use_tqdm: bool = False,
 ):
     assert callable(postprocess_model_out) or postprocess_model_out is None, (
         "postprocess_model_out must be callable or None"
     )
     slider = WindowSlider(slide_keys=patch_keys, window_size=patch_size, stride=stride, overlap=overlap)
-    windowed_samples = slider.slide_windows(model_in)
+    windowed_samples = slider.slide_windows(model_in, use_tqdm=use_tqdm)
     model_outs: list[dict] = []
     for sample in windowed_samples:
         model_out = model(sample)

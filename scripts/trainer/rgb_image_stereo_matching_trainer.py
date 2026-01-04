@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, Sequence, cast, Any
 
 import accelerate
 import hydra
@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
-from accelerate.tracking import TensorBoardTracker
 from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -22,7 +21,6 @@ from safetensors.torch import load_file
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fully_shard import FSDPModule
-from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchvision.utils import make_grid
 from tqdm import tqdm, trange
@@ -33,15 +31,14 @@ from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset
 from src.stage2.stereo_matching.utils.vis import visualize_stereo
 from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import dict_round_to_list_str, log
+from src.utilities.logging import dict_round_to_list_str, log, log_any_into_writter
 from src.utilities.network_utils import load_peft_model_checkpoint
-from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import get_rgb_image
 
 from loguru import logger
-from src.stage2.stereo_matching.metrics.basic import EndPointError, D1Error
+from src.stage2.stereo_matching.metrics import UnifiedStereoSegmentationMetrics
 
 
 @dataclass
@@ -77,7 +74,6 @@ class StereoMatchingTrainer:
     """
 
     def __init__(self, cfg: DictConfig):
-        cfg = to_easydict_recursive(cfg)
         self.cfg = cfg
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
@@ -231,16 +227,23 @@ class StereoMatchingTrainer:
             tenb_dir = log_dir / "tensorboard"
             self.accelerator.project_configuration.logging_dir = str(tenb_dir)
             if self.accelerator.is_main_process:
-                self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
+                self.logger.info(f"[Tensorboard]: logger files at {tenb_dir}")
+
                 self.accelerator.init_trackers("train")
-                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker("tensorboard")  # type: ignore
+                if "tensorboard" in self._trackers_name:
+                    self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker("tensorboard")  # type: ignore
+                    logger.log("NOTE", "will log with tensorboard")
 
                 if "wandb" in self._trackers_name:
                     import wandb
 
-                    self.wandb_logger: wandb.Run = self.accelerator.get_tracker("wandb", unwrap=True)
-                    self.wandb_logger.watch(self.model, log="gradients", log_freq=200)
-                    logger.info("Will log to wandb.")
+                    self.wandb_logger: wandb.Run = wandb.init(
+                        project="RS_Stereo_Matching",
+                        name=getattr(self.train_cfg.log, "exp_name", None),
+                        config=to_cont(self.cfg),
+                    )
+                    # self.wandb_logger.watch(self.model, log="gradients", log_freq=200)
+                    logger.log("NOTE", "will log with wandb")
 
                 if "swanlab" in self._trackers_name:
                     import swanlab
@@ -251,14 +254,14 @@ class StereoMatchingTrainer:
                         "dataset_cfg": to_cont(self.dataset_cfg),
                     }
                     self.swanlab_logger = swanlab.init(
-                        project="RSTokenizer",
+                        project="RS_Stereo_Matching",
                         workspace="iamzihan",
                         experiment_name=getattr(self.train_cfg.log, "exp_name", None),  # type: ignore
                         logdir=str(Path(log_dir) / "swanlab"),
                         resume="never",
                         config=exp_cfg,
                     )
-                    logger.info("Will log to swanlab.")
+                    logger.log("NOTE", "Will log with swanlab")
 
             #### Log code into dir
             from src.utilities.logging import get_python_pkg_env, zip_code_into_dir
@@ -272,66 +275,25 @@ class StereoMatchingTrainer:
 
         return log_file
 
+    @property
+    def loggers(self) -> dict[str, Any]:
+        _loggers = {}
+        if hasattr(self, "tb_logger"):
+            _loggers["tensorboard"] = self.tb_logger
+        if hasattr(self, "wandb_logger"):
+            _loggers["wandb"] = self.wandb_logger
+        if hasattr(self, "swanlab_logger"):
+            _loggers["swanlab"] = self.swanlab_logger
+        return _loggers
+
     def tenb_log_any(
         self,
         log_type: Literal["metric", "image", "grad_norm_per_param", "grad_norm_sum"],
         logs: dict,
-        step: int,
+        step: int | None = None,
         **kwargs,
     ):
-        assert log_type in [
-            "metric",
-            "image",
-            "grad_norm_per_param",
-            "grad_norm_sum",
-        ], "log_type must be one of [metric, image, grad_norm_per_param, grad_norm_sum]"
-
-        if log_type == "metric":
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log(logs, step=step)
-        elif log_type == "image":
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log_images(logs, step=step)
-        elif log_type in ("grad_norm_per_param", "grad_norm_sum"):
-            assert "model" in logs, "model name must be in logs"
-            model = logs.pop("model")
-            # take out the grad of norms
-            model_cls_n = model.__class__.__name__
-            norms = {}
-            if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] = 0.0
-                _n_params_sumed = 0
-
-            for n, p in model.named_parameters():
-                if p.grad is not None:
-                    # must sync grad here, `is_main_process` would cause the ranks do not sync
-                    if isinstance(p.grad, DTensor):
-                        _grad = p.grad._local_tensor
-                        if p.grad._local_tensor.device == torch.device("cpu"):
-                            self.log_msg(
-                                "p.grad is on cpu, this should not happen",
-                                level="WARNING",
-                            )
-                            # ensure the corss rank does not involve cpu bankend
-                            _grad = _grad.cuda()
-                        _p_grad = safe_dtensor_operation(p.grad)
-                        _grad_norm = (_p_grad.data**2).sum() ** 0.5
-                    else:
-                        _grad_norm = p.grad.data.norm()
-
-                    if log_type == "grad_norm_per_param":
-                        norms[f"{model_cls_n}/{n}"] = _grad_norm
-                    else:
-                        norms[f"{model_cls_n}_grad_norm"] += _grad_norm
-                        _n_params_sumed += 1  # type: ignore
-
-            # log
-            if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed  # type: ignore
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log(norms, step=step)
-        else:
-            raise NotImplementedError(f"Unknown log_type {log_type}")
+        log_any_into_writter(log_type, self.loggers, logs, step, **kwargs)
 
     def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
@@ -559,6 +521,15 @@ class StereoMatchingTrainer:
             # backward
             self.optim.zero_grad()
             self.accelerator.backward(loss)
+
+            # Optional: Log gradient norms before clipping
+            if self.train_cfg.log.log_every > 0 and self.global_step % self.train_cfg.log.log_every == 0:
+                self.tenb_log_any(
+                    "grad_norm_sum",
+                    {"model": self.model},
+                    step=self.global_step,
+                )
+
             self.gradient_check(self.model)
             self.optim.step()
             self.sched.step()
@@ -587,7 +558,18 @@ class StereoMatchingTrainer:
                 f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                 f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
             )
-            self.log_msg(f"[Train Tok]: {_log_losses}")
+
+            # Simple check the disp value range
+            gt_disp = batch["dsp"]
+            mask = gt_disp > -100
+            gt_disp = gt_disp[mask]
+            disp = train_out.disparity_final
+            disp = disp[mask.squeeze(1)]
+            self.log_msg(f"[Train state]: {_log_losses}")
+            logger.info(
+                f"Disp pred min/max {disp.min().item():.4f}/{disp.max().item():.4f} "
+                f"DSP gt min/max {gt_disp.min().item():.4f}/{gt_disp.max().item():.4f}"
+            )
 
             # tensorboard log
             self.tenb_log_any("metric", train_out.log_losses, self.global_step)
@@ -726,13 +708,28 @@ class StereoMatchingTrainer:
         # Initialize metrics
         loss_metrics = {}
 
-        # Stereo metrics
-        epe_metric = EndPointError()
-        d1_metric = D1Error()
+        # Initialize unified metrics
+        # Get configuration from dataset and metric configs
+        min_disp = getattr(self.dataset_cfg, "min_disp", -64)
+        max_disp = getattr(self.dataset_cfg, "max_disp", 64)
+        num_classes = getattr(self.dataset_cfg, "num_classes", 6)
+        compute_seg = getattr(self.dataset_cfg, "compute_seg", False)
+        ignore_index = getattr(self.metric_cfg, "ignore_index", None)
+
+        # Create unified metrics
+        unified_metrics = UnifiedStereoSegmentationMetrics(
+            min_disp=min_disp,
+            max_disp=max_disp,
+            num_classes=num_classes,
+            compute_stereo=True,
+            compute_seg=compute_seg,
+            ignore_index=ignore_index,
+            stereo_thresholds=[1.0, 2.0, 3.0],
+            seg_reduction="macro",
+        )
 
         # Move metrics to device
-        epe_metric = epe_metric.to(self.device)
-        d1_metric = d1_metric.to(self.device)
+        unified_metrics = unified_metrics.to(self.device)
 
         val_iter = self.get_val_loader_iter()
         for i, batch in enumerate(val_iter):
@@ -747,23 +744,29 @@ class StereoMatchingTrainer:
                         loss_metrics[k] = MeanMetric().to(self.device)
                     loss_metrics[k].update(v)
 
-            # Update stereo metrics
+            # Update unified metrics
+            # Stereo matching
             d_gt = batch["dsp"]
             d_pred = val_out.disparity_final
+
+            # Semantic segmentation (if available)
+            seg_pred = val_out.semantic_left
+            seg_gt = batch.get("cls")  # US3D has 'cls', WHU doesn't
 
             # Move to float for metric calculation
             d_gt_f = d_gt.float()
             d_pred_f = d_pred.float()
 
-            epe_metric.update(d_pred_f, d_gt_f)
-            d1_metric.update(d_pred_f, d_gt_f)
+            # Update metrics
+            unified_metrics.update(
+                disp_pred=d_pred_f,
+                disp_target=d_gt_f,
+                seg_pred=seg_pred,
+                seg_target=seg_gt,
+            )
 
             # Debug logging for the first batch to check disparity range
             if i == 0 and self.accelerator.is_main_process:
-                # Mask out invalid values for stats (assuming US3D range [-64, 64])
-                # Usually -100 or huge negative numbers are used for invalid pixels in some datasets,
-                # but let's just check raw values first or simple valid mask
-
                 # Check d_gt stats
                 valid_mask_gt = d_gt_f > -100  # Simple check
                 if valid_mask_gt.any():
@@ -783,9 +786,13 @@ class StereoMatchingTrainer:
         # Compute metrics
         metrics = {k: m.compute().item() for k, m in loss_metrics.items()}
 
-        # Add stereo metrics
-        metrics["EPE"] = epe_metric.compute().item()
-        metrics["D1"] = d1_metric.compute().item()
+        # Add unified metrics
+        unified_results = unified_metrics.compute()
+        flat_metrics = unified_metrics.flatten_metrics(unified_results)
+
+        # Convert to float for logging
+        for k, v in flat_metrics.items():
+            metrics[k] = v
 
         if self.accelerator.is_main_process:
             _metric_str = " - ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
@@ -914,6 +921,7 @@ class StereoMatchingTrainer:
             pred_seg_left=pred_seg_left,
             pred_seg_right=pred_seg_right,
             title=title,
+            invalid_thres=-500,
             dsp_vmin=dsp_vmin,
             dsp_vmax=dsp_vmax,
         )
@@ -930,9 +938,13 @@ class StereoMatchingTrainer:
 
             save_path = Path(self.proj_dir) / "vis" / save_name
             if self.accelerator.is_main_process:
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                pil_img.save(save_path)
-                self.log_msg(f"Saved visualization to {save_path}")
+                if self._trackers_name:
+                    tag = "val/vis" if len(pil_images) == 1 else f"val/vis_{i}"
+                    self.tenb_log_any(log_type="image", logs={tag: pil_img}, step=self.global_step)
+                else:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    pil_img.save(save_path)
+                    self.log_msg(f"Saved visualization to {save_path}")
 
     def run(self):
         if self.train_cfg.resume_path is not None:

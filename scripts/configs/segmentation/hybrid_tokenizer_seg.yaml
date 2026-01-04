@@ -5,12 +5,11 @@ hydra:
 
 defaults:
   # wrapper ==========
-  - dataset: mat_singles
+  - dataset: five_billion # [five_billion, mat_singles]
   - accelerator: base
-  - model@segment_model: tokenizer_hybrid_decoder
+  - model@segment_model: tokenizer_hybrid_decoder # [tokenizer_hybrid_decoder, tokenizer_hybrid_dpt]
   # self ===============
   - _self_
-
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
@@ -20,7 +19,7 @@ ema:
   _partial_: true
   beta: 0.995
   update_after_step: 1000
-  update_every: 3
+  update_every: 2
   allow_different_devices: true
   lazy_init_ema: true
 
@@ -28,13 +27,13 @@ metric:
   _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
   n_classes: ${dataset.consts.num_classes}
   ignore_index: 255
-  include_bg: false
+  include_bg: false  # False because we map ignore_index to 0, which should be excluded
   input_format: index
   task: multiclass
 
 train:
   # Wrapper-based training
-  val_slide_window: true
+  val_slide_window: false
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:
@@ -43,7 +42,7 @@ train:
 
   use_single_img_indexing: false
   patches_per_image:
-  macro_batch_size: 32
+  macro_batch_size: 2 #4
 
   proj_dir: runs/stage2_classification/
   finetune_strategy: finetune_all
@@ -57,28 +56,19 @@ train:
   is_neg_1_1: true
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_classification/2025-12-31_23-42-37_FiveBillionChina_tokenizer_hybrid_adaptor/ema
+
+  bootstrap_ratio: 0.
+  bootstrap_start_step: 0
 
   segment_optim:
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 4.0e-4
+    lr: 2.0e-4
     weight_decay: 0.0
     betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
     caution: true
     foreach: true
-
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    # _partial_: true
-    # betas: [0.95, 0.99]
-    # oned_param_algo: lion
-    # use_triton: true
-    # muon_params_defaults:
-    #   lr: 6.0e-4
-    #   weight_decay: 0.01
-    # oned_params_defaults:
-    #   lr: 6.0e-4
-    #   weight_decay: 0.0
 
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -90,16 +80,21 @@ train:
   segment_loss:
     _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
     ignore_index: 255
-    ce_weight: null
-    loss_weights: [1.0, 1.0, 0.5]
+    ce_weight: [22.7467, 24.6431,  3.2611, 12.7603, 37.6410, 15.1353, 27.0354, 49.7190,
+                38.1156, 45.3688, 19.8079, 15.6410, 14.6416, 35.8430, 34.6233, 49.8047,
+                45.1986, 17.1660, 50.2263, 50.1459, 22.2144, 46.8094, 48.8383, 48.9092]
+    loss_weights: [1.0, 3.0, 0.2, 0.1]
     mode: multiclass
+    dynamic_mode: null
+    ema_decay: 0.99
 
   log:
     run_comment: ${dataset.dataset_name}_tokenizer_hybrid_adaptor
     log_with_time: true
     log_every: 10
+    log_with: [wandb]
   debug: true
 
 val:
-  val_duration: 50
-  max_val_iters: -1
+  val_duration: 1000
+  max_val_iters: 200 #

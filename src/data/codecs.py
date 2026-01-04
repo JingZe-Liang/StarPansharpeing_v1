@@ -349,7 +349,11 @@ def img_decode_io(img_bytes: bytes):
                 # remove icc profile to avoid libpng print info
                 # see https://github.com/ultralytics/ultralytics/issues/339#issuecomment-1691086802
                 img.info.pop("icc_profile", None)
-                img = np.array(img.convert("RGB"))
+                try:
+                    img = np.array(img.convert("RGB"))
+                except Exception as e:
+                    log_print(f"Error converting image to RGB: {e}", "error")
+                    return None
 
             for warning in w:
                 if issubclass(warning.category, Image.DecompressionBombWarning):

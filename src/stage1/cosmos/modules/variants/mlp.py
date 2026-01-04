@@ -10,6 +10,7 @@ from einops import rearrange
 from loguru import logger
 from timm.layers.helpers import to_2tuple
 
+from src.utilities.network_utils import compile_decorator
 from ..norm import SwiGLUAct
 
 # fmt: off
@@ -116,6 +117,7 @@ class SwiGLU(nn.Module):
             x2 = self.w2(x)
         return x1, x2
 
+    @compile_decorator
     def math_forward(self, x):
         x1, x2 = self._get_x12(x)
         x = self.act(x1) * x2  # silu(x1) * x2

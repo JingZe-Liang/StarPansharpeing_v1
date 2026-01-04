@@ -404,16 +404,10 @@ class SpatialPriorModule(nn.Module):
                     bias=False,
                 ),
                 _create_norm_act(inplanes),
-                # nn.SyncBatchNorm(inplanes),
-                # nn.ReLU(inplace=True),
                 nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 _create_norm_act(inplanes),
-                # nn.SyncBatchNorm(inplanes),
-                # nn.ReLU(inplace=True),
                 nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 _create_norm_act(inplanes),
-                # nn.SyncBatchNorm(inplanes),
-                # nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             ]
         )
@@ -428,8 +422,6 @@ class SpatialPriorModule(nn.Module):
                     bias=False,
                 ),
                 _create_norm_act(2 * inplanes),
-                # nn.SyncBatchNorm(2 * inplanes),
-                # nn.ReLU(inplace=True),
             ]
         )
         self.conv3 = nn.Sequential(
@@ -443,8 +435,6 @@ class SpatialPriorModule(nn.Module):
                     bias=False,
                 ),
                 _create_norm_act(4 * inplanes),
-                # nn.SyncBatchNorm(4 * inplanes),
-                # nn.ReLU(inplace=True),
             ]
         )
 
@@ -461,8 +451,6 @@ class SpatialPriorModule(nn.Module):
                         bias=False,
                     ),
                     _create_norm_act(4 * inplanes),
-                    # nn.SyncBatchNorm(4 * inplanes),
-                    # nn.ReLU(inplace=True),
                 ]
             )
         else:
@@ -478,8 +466,6 @@ class SpatialPriorModule(nn.Module):
                         bias=False,
                     ),
                     _create_norm_act(4 * inplanes),
-                    # nn.SyncBatchNorm(4 * inplanes),
-                    # nn.ReLU(inplace=True),
                 ]
             )
 
@@ -523,7 +509,7 @@ class DINOv3_Adapter(nn.Module):
         pretrain_size=512,
         conv_inplane=64,
         n_points=4,
-        deform_num_heads=16,
+        deform_num_heads=8,
         drop_path_rate=0.3,
         init_values=0.0,
         with_cffn=True,
@@ -545,7 +531,7 @@ class DINOv3_Adapter(nn.Module):
             add_vit_feature,
             freeze_backbone,
         )
-        logger.log("NOTE", "Init backbone")
+        logger.log("NOTE", "setup backbone")
 
         self._setup_interactions(
             in_channels=in_channels,
@@ -599,7 +585,7 @@ class DINOv3_Adapter(nn.Module):
         pretrain_size=512,
         conv_inplane=64,
         n_points=4,
-        deform_num_heads=16,
+        deform_num_heads=8,
         drop_path_rate=0.3,
         init_values=0.0,
         with_cffn=True,
@@ -642,12 +628,14 @@ class DINOv3_Adapter(nn.Module):
         self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
+
         # print(f"[Dinov3 Adapter]: Use norm type {type(self.norm1)}")
         if use_bn:
             # FIXME: bn mismatch
             logger.warning(f"Use BN in module, may cause train/test running mean/var difference.")
 
         self._input_norm = Normalize(*inp_mean_std) if inp_mean_std is not None else nn.Identity()
+        self.norm_backbone_features = True
 
         self.init_weights()
 
@@ -701,7 +689,6 @@ class DINOv3_Adapter(nn.Module):
                 all_layers = self.backbone.get_intermediate_layers(
                     x, n=self.interaction_indexes, return_class_token=True
                 )
-
         return all_layers
 
     def forward(self, x):

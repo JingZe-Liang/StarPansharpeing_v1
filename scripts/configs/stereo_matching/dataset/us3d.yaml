@@ -43,9 +43,9 @@ val:
   input_dir: ${..paths.${..place}.test}
   stream_ds_kwargs:
     shuffle: false
-    is_cycled: true
+    is_cycled: false
     output_size: 512
   loader_kwargs:
-    batch_size: 2
+    batch_size: 4
     num_workers: 2
     persistent_workers: true

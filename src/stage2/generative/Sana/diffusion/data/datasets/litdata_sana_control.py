@@ -150,6 +150,8 @@ class SanaLitdataGenerativeControlDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         sample = self._dataset[idx]
+        if sample is None:
+            return None
         if not isinstance(sample, dict):
             raise ValueError("Litdata GenerativeStreamingDataset must return a dict sample.")
 

@@ -445,6 +445,7 @@ def configure_logger(
 
 if __re_config_logger:
     configure_logger()
+    logger.debug("Configured logger")
 
 
 def set_logger_file(

@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Any, Callable, Literal, Sequence, cast
 
 import accelerate
 import hydra
@@ -18,9 +18,6 @@ from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from einops import rearrange
-from ema_pytorch import EMA
-from jaxtyping import Float, Int
-from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import load_file
 from torch import Tensor
@@ -30,20 +27,23 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchvision.utils import make_grid
 from tqdm import tqdm, trange
+import wandb
 
 from src.data.window_slider import WindowSlider, model_predict_patcher
 from src.stage2.segmentation.data.data_split import SingleImageHyperspectralSegmentationDataset
 from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset, label_background_recover
+from src.stage2.segmentation.loss.seg_loss import boost_strap_update_label
 from src.stage2.segmentation.metrics import HyperSegmentationScore
 from src.stage2.utilities.loss import HyperSegmentationLoss
 from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import dict_round_to_list_str, log
+from src.utilities.logging import dict_round_to_list_str, log, log_any_into_writter, set_logger_file
 from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import get_rgb_image, visualize_segmentation_map
+from loguru import logger
 
 
 @dataclass
@@ -76,7 +76,6 @@ class HyperSegmentationTrainer:
     """
 
     def __init__(self, cfg: DictConfig):
-        cfg = to_easydict_recursive(cfg)
         self.cfg = cfg
         self.train_cfg = cfg.train
         self.dataset_cfg = cfg.dataset
@@ -86,6 +85,7 @@ class HyperSegmentationTrainer:
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
+        self._trackers_name = self.train_cfg.log.log_with
         accelerate.utils.set_seed(2025)
 
         # logger
@@ -147,14 +147,14 @@ class HyperSegmentationTrainer:
         self.train_dataset: SingleMatDataset
         self.val_dataset: SingleMatDataset
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
-        if hasattr(self.train_dataset, "val"):
+        if hasattr(self.dataset_cfg, "val"):
             logger.info(f"[Data]: get independent validation dataset.")
             self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         else:
             logger.info(f"[Data]: use single image dataset.")
             self.val_dataset, self.val_dataloader = self.train_dataset, self.train_dataloader
 
-        self.ds_is_single_image = self.dataset_cfg.consts.is_single_image
+        self.ds_is_single_image = getattr(self.dataset_cfg.consts, "is_single_image", False)
         self._val_unsampled_mask = None  # if is single image training, sampled from one image
         if self.ds_is_single_image:
             self._val_unsampled_mask = self.val_dataset.get_unsampled_area().to(self.device)
@@ -195,6 +195,11 @@ class HyperSegmentationTrainer:
         segment_name = getattr(self.train_cfg, "segment_name", None) or self.model.__class__.__name__
         self.log_msg(f"use segmentation model: {segment_name}")
 
+        # print parameters table
+        from fvcore.nn import parameter_count_table
+
+        self.log_msg("\n" + parameter_count_table(self.model))
+
     def prepare_ema_models(self):
         if self.no_ema:
             return
@@ -225,7 +230,7 @@ class HyperSegmentationTrainer:
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
-        self.logger.remove()
+        # self.logger.remove()
         log_format_in_file = (
             "<green>[{time:MM-DD HH:mm:ss}]</green> "
             "- <level>[{level}]</level> "
@@ -235,22 +240,26 @@ class HyperSegmentationTrainer:
             "{time:HH:mm:ss} - {level.icon} <level>[{level}:{file.name}:{line}]</level>- <level>{message}</level>"
         )
         if not self.train_cfg.debug:
-            self.logger.add(
-                log_file,
-                format=log_format_in_file,
-                level="INFO",
-                rotation="10 MB",
-                enqueue=True,
-                backtrace=True,
-                colorize=False,
+            set_logger_file(log_file, level="info")
+            set_logger_file(
+                log_file.parent / "debug.log", level="debug", filter=lambda record: record["level"].no <= 10
             )
-        self.logger.add(
-            sys.stdout,
-            format=log_format_in_cmd,
-            level="DEBUG",
-            backtrace=True,
-            colorize=True,
-        )
+        #     self.logger.add(
+        #         log_file,
+        #         format=log_format_in_file,
+        #         level="INFO",
+        #         rotation="10 MB",
+        #         enqueue=True,
+        #         backtrace=True,
+        #         colorize=False,
+        #     )
+        # self.logger.add(
+        #     sys.stdout,
+        #     format=log_format_in_cmd,
+        #     level="DEBUG",
+        #     backtrace=True,
+        #     colorize=True,
+        # )
 
         # make log dir
         log_dir = log_file.parent
@@ -273,74 +282,69 @@ class HyperSegmentationTrainer:
         # tensorboard logger
         if not self.train_cfg.debug:
             tenb_dir = log_dir / "tensorboard"
-            self.accelerator.project_configuration.logging_dir = tenb_dir
+            self.accelerator.project_configuration.logging_dir = str(tenb_dir)
             if self.accelerator.is_main_process:
-                self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
+                self.logger.info(f"[Tensorboard]: logger files at {tenb_dir}")
+
                 self.accelerator.init_trackers("train")
-                self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker(  # type: ignore
-                    "tensorboard"
-                )
+                if "tensorboard" in self._trackers_name:
+                    self.tb_logger: TensorBoardTracker = self.accelerator.get_tracker("tensorboard")  # type: ignore
+                    logger.log("NOTE", "will log with tensorboard")
+
+                if "wandb" in self._trackers_name:
+                    import wandb
+
+                    self.wandb_logger: wandb.Run = wandb.init(
+                        project="RS_Hyperspectral_Segmentation",
+                        name=getattr(self.train_cfg.log, "exp_name", None),
+                        config=to_cont(self.cfg),
+                    )
+                    logger.log("NOTE", "will log with wandb")
+
+                if "swanlab" in self._trackers_name:
+                    import swanlab
+
+                    self.swanlab_logger = swanlab.init(
+                        project="RS_Hyperspectral_Segmentation",
+                        workspace="iamzihan",
+                        experiment_name=getattr(self.train_cfg.log, "exp_name", None),  # type: ignore
+                        logdir=str(Path(log_dir) / "swanlab"),
+                        resume="never",
+                        config=to_cont(self.cfg),
+                    )
+                    logger.log("NOTE", "Will log with swanlab")
+
+            #### Log code into dir
+            from src.utilities.logging import get_python_pkg_env, zip_code_into_dir
+
+            code_dir = ["src/data", "src/stage2", "scripts"]
+            zip_code_into_dir(save_dir=log_dir, code_dir=code_dir)
+            get_python_pkg_env(file=str(log_dir / "requirements.txt"))
+
+            logger.info("[Code]: code files are zipped and saved.")
+            logger.info("[Env]: python package environment requirements are saved.")
 
         return log_file
+
+    @property
+    def loggers(self) -> dict[str, Any]:
+        _loggers = {}
+        if hasattr(self, "tb_logger"):
+            _loggers["tensorboard"] = self.tb_logger
+        if hasattr(self, "wandb_logger"):
+            _loggers["wandb"] = self.wandb_logger
+        if hasattr(self, "swanlab_logger"):
+            _loggers["swanlab"] = self.swanlab_logger
+        return _loggers
 
     def tenb_log_any(
         self,
         log_type: Literal["metric", "image", "grad_norm_per_param", "grad_norm_sum"],
         logs: dict,
-        step: int,
+        step: int | None = None,
         **kwargs,
     ):
-        assert log_type in [
-            "metric",
-            "image",
-            "grad_norm_per_param",
-            "grad_norm_sum",
-        ], "log_type must be one of [metric, image, grad_norm_per_param, grad_norm_sum]"
-
-        if log_type == "metric":
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log(logs, step=step)
-        elif log_type == "image":
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log_images(logs, step=step)
-        elif log_type in ("grad_norm_per_param", "grad_norm_sum"):
-            assert "model" in logs, "model name must be in logs"
-            model = logs.pop("model")
-            # take out the grad of norms
-            model_cls_n = model.__class__.__name__
-            norms = {}
-            if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] = 0.0
-                _n_params_sumed = 0
-            for n, p in model.named_parameters():
-                if p.grad is not None:
-                    # must sync grad here, `is_main_process` would cause the ranks do not sync
-                    if isinstance(p.grad, DTensor):
-                        _grad = p.grad._local_tensor
-                        if p.grad._local_tensor.device == torch.device("cpu"):
-                            self.log_msg(
-                                "p.grad is on cpu, this should not happen",
-                                level="WARNING",
-                            )
-                            # ensure the corss rank does not involve cpu bankend
-                            _grad = _grad.cuda()
-                        _p_grad = safe_dtensor_operation(p.grad)
-                        _grad_norm = (_p_grad.data**2).sum() ** 0.5
-                    else:
-                        _grad_norm = p.grad.data.norm()
-
-                    if log_type == "grad_norm_per_param":
-                        norms[f"{model_cls_n}/{n}"] = _grad_norm
-                    else:
-                        norms[f"{model_cls_n}_grad_norm"] += _grad_norm
-                        _n_params_sumed += 1
-            # log
-            if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
-            if hasattr(self, "tb_logger"):
-                self.tb_logger.log(norms, step=step)
-        else:
-            raise NotImplementedError(f"Unknown log_type {log_type}")
+        log_any_into_writter(log_type, self.loggers, logs, step, **kwargs)
 
     def log_msg(self, *msgs, only_rank_zero=True, level="INFO", sep=",", **kwargs):
         assert level.lower() in [
@@ -407,13 +411,13 @@ class HyperSegmentationTrainer:
         if is_heavyball_opt(model_opt):
             import heavyball
 
-            heavyball.utils.compile_mode = None
+            heavyball.utils.compile_mode = None  # type: ignore
             self.log_msg(
                 "use heavyball optimizer, it will compile the optimizer, "
                 "for efficience testing the scripts, disable the compilation."
             )
 
-        return model_opt, model_sched
+        return model_opt, model_sched  # type: ignore
 
     def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module):
         if not self._is_fsdp:
@@ -500,7 +504,7 @@ class HyperSegmentationTrainer:
             # set models with property dtype
             self.model.dtype = torch.float
 
-        self.model = self.accelerator.prepare(self.model)
+        self.model, self.optim = self.accelerator.prepare(self.model, self.optim)
 
         self.train_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader, self.val_dataloader
@@ -564,7 +568,7 @@ class HyperSegmentationTrainer:
             elif (
                 self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
-                FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
+                FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)  # type: ignore
 
     def compute_segmentation_loss(self, out, gt):
         loss = self.segment_loss(out, gt)
@@ -630,6 +634,25 @@ class HyperSegmentationTrainer:
 
         # Reconstruct complete image from patches
         pred_2d, pred_indexed_1d, gt_indexed_1d = self._reconstruct_hypersigma_image()
+
+        # NOTE: Bootstrap for HyperSIGMA mode is tricky because we reconstruct
+        # from patches. If we want to bootstrap, we ideally need the full image
+        # probability map to do entropy selection on the whole image.
+        # But `pred_2d` here IS the full image prediction from patches.
+        # However, `boost_strap_update_label` expects `model` to run separate inference.
+        # Running inference AGAIN on full image might be too heavy or duplicate work.
+        # `prior` implementation of boost_strap_update_label runs model(img).
+        # Here we already have pred_2d.
+        # So we might need to modify boost_strap_update_label or implement similar logic here manually
+        # using the existing `pred_2d`.
+
+        # For now, let's skip bootstrap for HyperSIGMA mode or warn it's not supported fully yet
+        # unless we pass the full image `img` which isn't available here directly
+        # (we only have accumulated preds).
+
+        # Actually, let's ONLY support it for standard `train_segment_step` for now as per user request context.
+        # If needed for HyperSIGMA, we need access to the full image to run `boost_strap_update_label`.
+
         loss = self.compute_segmentation_loss(pred_indexed_1d, gt_indexed_1d)
         self._accumulated_preds.clear()
 
@@ -644,7 +667,7 @@ class HyperSegmentationTrainer:
             accumulated_preds = self._accumulated_preds
         all_preds = torch.cat(accumulated_preds, dim=0)
 
-        ds: SingleImageHyperspectralSegmentationDataset = self.train_dataset if mode == "train" else self.val_dataset
+        ds: SingleImageHyperspectralSegmentationDataset = self.train_dataset if mode == "train" else self.val_dataset  # type: ignore
         index = ds._sampled_index
         gt_indexed_1d = ds.gt_for_loss  # (indices,)
         n_row, n_cols = ds.n_rows, ds.n_cols
@@ -722,6 +745,25 @@ class HyperSegmentationTrainer:
         SegmentationOutput
             Output containing loss and predictions
         """
+        # Bootstrap: generate pseudo-labels if configuredbootstrap_start_step
+        bootstrap_ratio = getattr(self.train_cfg, "bootstrap_ratio", 0.0)
+        if bootstrap_ratio > 0 and self.global_step > getattr(self.train_cfg, "bootstrap_start_step", 0):
+            # Use bootstrap to update the label
+            # Only apply where GT is ignore_index (if you want to keep original labels)
+            # OR just update everything based on confidence if that's the intention.
+            # Based on the function docstring: "Dynamically generate pseudo-labels for unlabeled data"
+            # It returns a new label with ignore_index filled where not selected.
+            # Assuming we want to AUGMENT existing labels or use it on unlabeled data.
+            # If 'gt' passed here is actually partial or has ignores, this fills them.
+            # logger.info('Starting label boost strapping.', once=True)
+            gt = boost_strap_update_label(
+                self.model,
+                img,
+                gt,
+                ratio=bootstrap_ratio,
+                ignore_index=getattr(self.dataset_cfg, "ignore_index", 255),
+            )
+
         out = self.forward_segment_model(img, gt)
         self._optimize_step(out.loss)
         return out
@@ -943,10 +985,17 @@ class HyperSegmentationTrainer:
                     merge_keys=["pred_logits"],
                     **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
                 )
-                pred_seg = model_outputs["pred_logits"].argmax(1)
+                pred_logits = model_outputs["pred_logits"]
             else:
                 logger.info(f"[Val]: using full image validation")
-                pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+                pred_logits = _val_model_closure(batch)["pred_logits"]
+
+            img_h, img_w = batch["img"].shape[-2:]
+            if pred_logits.shape[-2:] != (img_h, img_w):
+                pred_logits = torch.nn.functional.interpolate(
+                    pred_logits, size=(img_h, img_w), mode="bilinear", align_corners=False
+                )
+            pred_seg = pred_logits.argmax(1)
 
         return pred_seg
 
@@ -979,8 +1028,15 @@ class HyperSegmentationTrainer:
     def val_loop(self):
         self.model.eval()
 
-        # Initialize metrics directly
-        seg_metrics: HyperSegmentationScore = hydra.utils.instantiate(self.metric_cfg).to(self.device)
+        # Initialize two metric instances:
+        # 1. Per-class metrics for distributions (per_class=True)
+        seg_metrics_per_class: HyperSegmentationScore = hydra.utils.instantiate(
+            self.metric_cfg, per_class=True, cal_metrics=["dice", "miou"]
+        ).to(self.device)
+        # 2. Overall metrics for OA (per_class=False, reduction="micro")
+        seg_metrics_overall: HyperSegmentationScore = hydra.utils.instantiate(
+            self.metric_cfg, per_class=False, reduction="micro"
+        ).to(self.device)
         loss_metrics = MeanMetric().to(device=self.device)
 
         val_iter = self.get_val_loader_iter()
@@ -1007,35 +1063,74 @@ class HyperSegmentationTrainer:
                     merge_keys=["pred_logits"],
                     **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
                 )
-                pred_seg = model_outputs["pred_logits"].argmax(1)
+                pred_logits = model_outputs["pred_logits"]
             else:
                 self.log_msg("[Val]: using full image validation")
-                pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+                pred_logits = _val_model_closure(batch)["pred_logits"]
 
             # resize to target size if needed
             gt = self._resize_to(gt, mode="nearest")
-            pred_seg = self._resize_to(pred_seg, mode="nearest")
+
+            # Upsample logits to match GT size using bilinear interpolation for smoother results
+            if pred_logits.shape[-2:] != gt.shape[-2:]:
+                pred_logits = torch.nn.functional.interpolate(
+                    pred_logits, size=gt.shape[-2:], mode="bilinear", align_corners=False
+                )
+
+            pred_seg = pred_logits.argmax(1)
 
             # Update metrics directly
             assert self._val_unsampled_mask is None or self._val_unsampled_mask.shape == gt.shape, (
                 "val unsampled mask shape does not match gt shape"
             )
 
-            # gt 255 -> 0, others + 1
-            # pred_seg should also + 1
-            seg_metrics.update(pred_seg, gt, self._val_unsampled_mask)
+            # Update both metric instances
+            seg_metrics_per_class.update(pred_seg, gt)
+            seg_metrics_overall.update(pred_seg, gt)
             self.step_train_state("val")
 
-        # Compute metrics
-        metrics = seg_metrics.compute()
-        loss_val: float = loss_metrics.compute().item()
+        # Compute metrics from both instances
+        metrics_per_class = seg_metrics_per_class.compute()
+        metrics_overall = seg_metrics_overall.compute()
+        loss_val: float = loss_metrics.compute().item()  # type: ignore
 
         if self.accelerator.is_main_process:
+            # For logging display: show OA (micro-average) metrics
             _metric_str = ""
-            for k, v in metrics.items():
-                _metric_str += f"{k}: {v:.4f} - "
-            self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.3e}")
-            self.tenb_log_any("metric", metrics, step=self.global_step)
+            for k, v in metrics_overall.items():
+                if isinstance(v, torch.Tensor):
+                    v_val = v.item()
+                    _metric_str += f"{k}: {v_val:.4f} - "
+                else:
+                    _metric_str += f"{k}: {v:.4f} - "
+            self.log_msg(f"[Val] OA (micro): {_metric_str}loss: {loss_val:.3e}")
+
+            # For wandb/tensorboard: log both OA and per-class distributions
+            log_dict = {}
+
+            # Log OA (micro-average) metrics
+            for k, v in metrics_overall.items():
+                if isinstance(v, torch.Tensor):
+                    log_dict[f"val/{k}"] = v.item()
+                else:
+                    log_dict[f"val/{k}"] = v
+
+            # Log per-class distributions
+            for k, v in metrics_per_class.items():
+                if isinstance(v, torch.Tensor):
+                    if v.numel() > 1:
+                        # Per-class tensor: log mean as macro-average and full tensor as distribution
+                        log_dict[f"val/{k}_macro"] = np.mean(
+                            [vi for vi in v.tolist() if vi != -1]
+                        )  # -1 means redudent class
+                        log_dict[f"val/{k}_per_class"] = v.detach().cpu().numpy().tolist()
+                    else:
+                        # Scalar tensor (e.g., kappa doesn't have per-class version)
+                        log_dict[f"val/{k}"] = v.item()
+                else:
+                    log_dict[f"val/{k}"] = v
+
+            self.tenb_log_any("metric", log_dict, step=self.global_step)
 
             # visualize the last val batch
             self.visualize_segmentation(
@@ -1043,6 +1138,7 @@ class HyperSegmentationTrainer:
                 pred_seg,  # prediction
                 gt,  # gt
                 add_step=True,
+                only_vis_n=2,
                 img_name="val/segmentation",
             )
 
@@ -1066,21 +1162,19 @@ class HyperSegmentationTrainer:
         accelerate.utils.save(self.train_state.state_dict(), _ema_path_state_train)
         self.log_msg(f"[ckpt]: save ema at {ema_path}")
 
-    def load_from_ema(self, ema_path: str | Path, strict: bool = True):
+    def load_from_ema(self, ema_path: str | Path, strict: bool = False):
         ema_path = Path(ema_path)
 
         try:
-            accelerate.load_checkpoint_in_model(self.model, ema_path / "model", strict=strict)
+            accelerate.load_checkpoint_in_model(self.model, ema_path / "seg_ema_model", strict=strict)
             self.log_msg(f"[Load EMA]: successfully loaded from {ema_path}")
         except Exception as e:
             self.log_msg(f"[Load EMA]: standard loading failed: {e}", level="WARNING")
-            model_path = ema_path / "model" / "model.safetensors"
+            model_path = ema_path / "seg_ema_model" / "model.safetensors"
             checkpoint = load_file(model_path, device="cpu")
             result = load_weights_with_shape_check(self.model, checkpoint)
             self.log_msg(f"[Load EMA]: fallback loading completed")
-            self.log_msg(
-                f"[Load EMA]: Loaded {result['loaded_keys']}, Missing {result['missing_keys']}, Unexpected {result['unexpected_keys']}"
-            )
+            self.log_msg(f"[Load EMA]: Missing {result.missing_keys}, Unexpected {result.unexpected_keys}")
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights
@@ -1208,9 +1302,11 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "hybrid_tokenizer_seg"
+_key = "unet_seg"
 _configs_dict = {
     "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
+    "deeplabv3_seg": "deeplabv3_seg",
+    "unet_seg": "unet_seg",
 }
 
 

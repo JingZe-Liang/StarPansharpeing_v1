@@ -1,13 +1,15 @@
 import os
 from pathlib import Path
 from multiprocessing import Queue, Process
+
 from litdata import optimize
 import torch
 import numpy as np
 import tifffile
 from tqdm import tqdm
 import natsort
-from typing import Literal, cast, Any
+from typing import Literal
+import argparse
 
 # Import necessary functions from demo.py
 from scripts.dataset.five_billion_china_earth_seg.demo import (
@@ -174,7 +176,65 @@ TEST_FILES = {
 TEST_FILES_STEMS = {f.split(".")[0] for f in TEST_FILES}
 
 
-def runner(train_sink: Queue, test_sink: Queue):
+def runner(split: Literal["train", "test", "all"], sink: Queue):
+    """
+    Runner function for processing train/test split.
+
+    Parameters
+    ----------
+    split : Literal["train", "test", "all"]
+        Which split to process. If "all", both train and test will be processed
+        and two sinks are required.
+    sink : Queue
+        Queue for putting processed data items.
+    """
+    img_dir = Path(DATASET_ROOT) / "Image_16bit_RGBNir"
+    label_dir = Path(DATASET_ROOT) / "Annotation_Index"
+
+    # List all image files
+    img_files = list(img_dir.glob("*.tiff")) + list(img_dir.glob("*.tif"))
+    img_files = natsort.natsorted(img_files)
+
+    logger.info(f"Found {len(img_files)} images.")
+    logger.info(f"Processing split: {split}")
+
+    total_count = 0
+
+    for img_path in tqdm(img_files):
+        # Derive label path
+        label_name = f"{img_path.stem}_24label.png"
+        label_path = label_dir / label_name
+
+        if not label_path.exists():
+            logger.warning(f"Label file not found for {img_path}, skipping.")
+            continue
+
+        # Determine if it's train or test
+        is_test = img_path.name in TEST_FILES or img_path.stem in TEST_FILES_STEMS
+
+        # Skip files that don't match the split
+        if split == "train" and is_test:
+            continue
+        if split == "test" and not is_test:
+            continue
+
+        count = process_and_save_to_queue(
+            img_path,
+            label_path,
+            sink,
+            IMG_CLIP_SIZE,
+            IMG_STRIDE,
+            SAVE_KWARGS,
+            total_count,
+        )
+
+        total_count += count
+
+    logger.info(f"All files processed. Total patches: {total_count}.")
+    sink.put(ALL_DONE)
+
+
+def runner_all(train_sink: Queue, test_sink: Queue):
     img_dir = Path(DATASET_ROOT) / "Image_16bit_RGBNir"
     label_dir = Path(DATASET_ROOT) / "Annotation_Index"
 
@@ -223,75 +283,121 @@ def runner(train_sink: Queue, test_sink: Queue):
 
 
 @catch_any()
-def main():
+def main(split: Literal["train", "test", "all"]):
+    """
+    Main function to process dataset.
+
+    Parameters
+    ----------
+    split : Literal["train", "test", "all"]
+        Which split to process.
+    """
     if not OUTPUT_DIR:
         raise ValueError("OUTPUT_DIR is not set")
 
     base_output_dir = Path(OUTPUT_DIR)
-    train_output_dir = base_output_dir / "train"
-    test_output_dir = base_output_dir / "test"
 
-    train_output_dir.mkdir(parents=True, exist_ok=True)
-    test_output_dir.mkdir(parents=True, exist_ok=True)
+    # Process based on split
+    if split == "all":
+        train_output_dir = base_output_dir / "train"
+        test_output_dir = base_output_dir / "test"
 
-    # Initialize Queues
-    train_q = Queue(maxsize=1000)
-    test_q = Queue(maxsize=1000)
+        train_output_dir.mkdir(parents=True, exist_ok=True)
+        test_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Start Producer Process
-    # Producer just reads files and pushes to queue, it doesn't spawn children.
-    # We can make it non-daemon to be safe, but daemon=True is fine if we join it.
-    producer = Process(target=runner, args=(train_q, test_q), daemon=True)
-    producer.start()
+        # Initialize Queues
+        train_q: Queue = Queue(maxsize=10)
+        test_q: Queue = Queue(maxsize=10)
 
-    # Start Consumers (LitData Optimize)
-    # litdata.optimize spawns its own worker processes.
-    # Therefore, the process running 'optimize' MUST NOT be a daemon.
+        # Start Producer Process
+        producer = Process(target=runner_all, args=(train_q, test_q), daemon=True)
+        producer.start()
 
-    p_train = Process(
-        target=optimize,
-        kwargs=dict(
+        # Run optimize in main process for train
+        optimize(
             fn=_litdate_identity,
             queue=train_q,
             output_dir=str(train_output_dir),
             num_workers=0,
-            chunk_bytes="512Mb",
+            chunk_bytes="256Mb",
             mode="overwrite",
             start_method="fork",
-        ),
-        daemon=False,  # CRITICAL FIX: Must be False
-    )
-    p_test = Process(
-        target=optimize,
-        kwargs=dict(
+        )
+
+        # Run optimize in main process for test
+        optimize(
             fn=_litdate_identity,
             queue=test_q,
             output_dir=str(test_output_dir),
             num_workers=0,
-            chunk_bytes="512Mb",
+            chunk_bytes="256Mb",
             mode="overwrite",
             start_method="fork",
-        ),
-        daemon=False,  # CRITICAL FIX: Must be False
-    )
+        )
 
-    p_train.start()
-    p_test.start()
+        # Wait for producer to finish
+        producer.join()
 
-    # Wait for producer to finish pushing all data
-    producer.join()
+    elif split == "train":
+        train_output_dir = base_output_dir / "train"
+        train_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wait for consumers to finish writing
-    p_train.join()
-    p_test.join()
+        train_q: Queue = Queue(maxsize=10)  # type: ignore[no-redef]
 
-    logger.success("Dataset creation completed.")
+        producer = Process(target=runner, args=("train", train_q), daemon=True)
+        producer.start()
+
+        optimize(
+            fn=_litdate_identity,
+            queue=train_q,
+            output_dir=str(train_output_dir),
+            num_workers=0,
+            chunk_bytes="256Mb",
+            mode="overwrite",
+            start_method="fork",
+        )
+
+        producer.join()
+
+    elif split == "test":
+        test_output_dir = base_output_dir / "test"
+        test_output_dir.mkdir(parents=True, exist_ok=True)
+
+        test_q: Queue = Queue(maxsize=10)  # type: ignore[no-redef]
+
+        producer = Process(target=runner, args=("test", test_q), daemon=True)
+        producer.start()
+
+        optimize(
+            fn=_litdate_identity,
+            queue=test_q,
+            output_dir=str(test_output_dir),
+            num_workers=0,
+            chunk_bytes="256Mb",
+            mode="overwrite",
+            start_method="fork",
+        )
+
+        producer.join()
+
+    logger.success(f"Dataset creation completed for split: {split}.")
 
 
 if __name__ == "__main__":
     from src.utilities.logging import set_logger_file
 
+    parser = argparse.ArgumentParser(description="Process 5Billion China City Segmentation dataset")
+    parser.add_argument(
+        "--split",
+        type=str,
+        choices=["train", "test", "all"],
+        default="all",
+        help="Which split to process: train, test, or all (default: all)",
+    )
+
+    args = parser.parse_args()
+
     set_logger_file(
         "data/Downstreams/5Billion-ChinaCity-Segmentation/make_litdata_5billion.log", "debug", add_time=False
     )
-    main()
+    main(args.split)

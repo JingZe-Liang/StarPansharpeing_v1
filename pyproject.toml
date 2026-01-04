@@ -200,6 +200,10 @@ warn_unused_configs = true
 python_version = "3.12"
 allow_untyped_globals = true
 disable_error_code = ["import-untyped"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = ["."]
+exclude = '(^|/)(src/stage2/|src/stage1/(WeTok|perception_models|lora/LoRA-Pro|discretization|MoEs|one_d_tokenizer|VAEs|utilities/losses/dinov3)/|scripts/dataset/)'
 
 [[tool.mypy.overrides]]
 module = [

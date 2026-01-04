@@ -21,8 +21,12 @@ class HyperSegmentationScore(nn.Module):
         per_class: bool | None = None,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",
-        use_aggregation: bool = False,
+        cal_metrics: list[str] | None = None,
     ):
+        """
+        'macro' means mean-accuracy/mean-precision. When using 'micro' means over all pixels, that is
+        overall-accuray, etc. And it will cause the accuracy, precision, and recall equals mathematically.
+        """
         super().__init__()
         self.n_classes = n_classes
         self.ignore_index = ignore_index
@@ -31,58 +35,78 @@ class HyperSegmentationScore(nn.Module):
         self.reduction = reduction
 
         # macro means per class; micro means over all classes
-        self.per_class = per_class if isinstance(per_class, bool) else reduction == "macro"
-
+        # FIX: We default per_class=False so MeanIoU returns a scalar (average) by default,
+        # ensuring consistency with Accuracy(average='macro') which also returns a scalar.
+        self.per_class = per_class if per_class is not None else False
+        self.seg_n_classes = n_classes
         if ignore_index is not None:
             if include_bg:
                 logger.warning(
-                    f"include_bg=True is automatically set to False when ignore_index={ignore_index} "
-                    f"is used. This prevents mixing ignored pixels (mapped to class 0) with "
-                    f"real background class 0 in segmentation metrics.",
+                    "include_bg=True might conflict when ignoed_index is set, if class 0 is intended "
+                    "as valid background. Ensure ignore_index is distinct from valid class indices."
                 )
-            self.include_bg = False
-        else:
-            self.include_bg = include_bg
+            self.seg_n_classes = n_classes + 1
+            include_bg = False  # ignored index will be mapped into 0 and ignored by torchmetrics using include_bg=False
 
+        self.include_bg = include_bg
         self.input_format = input_format
 
         # Classification metrics support ignore_index directly
-        self.accuracy = Accuracy(
-            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
-        )
-        self.precision = Precision(
-            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
-        )
-        self.recall = Recall(
-            task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=reduction
-        )
-        self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
-        self.f1_score = F1Score(
-            task=task, num_classes=n_classes, average=reduction, top_k=top_k, ignore_index=ignore_index
+        # If per_class is True, we want to return the metric for each class (average="none")
+        average_arg = "none" if self.per_class else reduction
+        self.cal_metrics = (
+            cal_metrics
+            if cal_metrics is not None
+            else ["accuracy", "precision", "recall", "kappa", "f1", "dict", "miou"]
         )
 
-        # Segmentation metrics need special handling for ignore_index
-        # We map ignore_index to class 0 and shift valid classes by +1,
-        # so total number of classes becomes n_classes + 1.
-        if ignore_index is not None:
-            if ignore_index < n_classes:
-                raise ValueError(f"ignore_index {ignore_index} should exceed number of classes {n_classes}")
-            seg_n_classes = n_classes + 1
-        else:
-            seg_n_classes = n_classes
+        ## Metrics
+        # Init all metrics to None
+        self.accuracy, self.precision, self.recall, self.cohen_kappa, self.f1_score, self.dice_score, self.mean_iou = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
-        self.dice_score = GeneralizedDiceScore(
-            include_background=self.include_bg,
-            num_classes=seg_n_classes,
-            per_class=self.per_class,
-            input_format=input_format,
-        )
-        self.mean_iou = MeanIoU(
-            num_classes=seg_n_classes,
-            per_class=self.per_class,
-            include_background=self.include_bg,
-            input_format=input_format,
-        )
+        if "accuracy" in self.cal_metrics:
+            self.accuracy = Accuracy(
+                task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=average_arg
+            )
+        if "precision" in self.cal_metrics:
+            # if is micro, precision/recall/f1 will equal to accuracy
+            self.precision = Precision(
+                task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average="macro"
+            )
+        if "recall" in self.cal_metrics:
+            self.recall = Recall(
+                task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average="macro"
+            )
+        if "kappa" in self.cal_metrics:
+            self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
+        if "f1" in self.cal_metrics:
+            self.f1_score = F1Score(
+                task=task, num_classes=n_classes, average="macro", top_k=top_k, ignore_index=ignore_index
+            )
+
+        # Segmentation metrics
+        if "dice" in self.cal_metrics:
+            self.dice_score = GeneralizedDiceScore(
+                num_classes=self.seg_n_classes,
+                include_background=self.include_bg,
+                per_class=self.per_class,
+                input_format=input_format,
+            )
+        if "miou" in self.cal_metrics:
+            self.mean_iou = MeanIoU(
+                num_classes=self.seg_n_classes,
+                include_background=self.include_bg,
+                per_class=self.per_class,
+                input_format=input_format,
+            )
 
         self._all_metric_fns = dict(
             accuracy=self.accuracy,
@@ -94,7 +118,19 @@ class HyperSegmentationScore(nn.Module):
             f1_score=self.f1_score,
         )
 
-        # self.use_aggregation = use_aggregation
+    def _infer_metrics_device(self) -> torch.device:
+        for metric in self._all_metric_fns.values():
+            if metric is None:
+                continue
+            for parameter in metric.parameters(recurse=True):
+                return parameter.device
+            for buffer in metric.buffers(recurse=True):
+                return buffer.device
+        return torch.device("cpu")
+
+    def _ensure_metrics_on_device(self, device: torch.device) -> None:
+        if self._infer_metrics_device() != device:
+            self.to(device)
 
     def _update_all_metrics(self, pred, gt):
         """
@@ -102,8 +138,10 @@ class HyperSegmentationScore(nn.Module):
 
         Strategy for handling ignore_index:
         - Classification metrics: Use ignore_index parameter directly
-        - Segmentation metrics: Map ignore_index to 0, with include_bg=False
-          to avoid mixing ignored pixels with real background class
+        - Segmentation metrics: Shift valid classes +1, map ignore_index to 0
+          This way: valid classes [0,1,...,N-1] become [1,2,...,N]
+                    ignore_index (e.g., 255) becomes 0
+          With include_bg=False, class 0 (ignore) is excluded from metrics
         """
         # Classification metrics support ignore_index directly
         classification_metrics = {
@@ -117,36 +155,43 @@ class HyperSegmentationScore(nn.Module):
         # Segmentation metrics need special handling
         segmentation_metrics = {"dice": self.dice_score, "mean_iou": self.mean_iou}
 
+        self._ensure_metrics_on_device(pred.device)
+
         # Update classification metrics directly
         for metric in classification_metrics.values():
-            metric.update(pred, gt)
+            if metric is not None:
+                metric.update(pred, gt)
 
-        # Update segmentation metrics with preprocessing for ignore_index
+        # Update segmentation metrics
         if self.ignore_index is not None:
-            # This ensures ignored pixels don't interfere with real background evaluation
-            pred_processed = pred.clone()
-            gt_processed = gt.clone()
+            # Create masked copies to avoid modifying original tensors
+            ignore_mask = gt == self.ignore_index
+            gt_processed = torch.where(ignore_mask, torch.zeros_like(gt), gt + 1)
+            pred_processed = torch.where(ignore_mask, torch.zeros_like(pred), pred + 1)
 
-            # Replace ignore_index with 0 (background class)
-            # ignore_mask = gt_processed == self.ignore_index
-            # gt_processed[ignore_mask] = 0
-            gt_processed = torch.where(gt_processed == self.ignore_index, 0, gt_processed + 1)
-            pred_processed = pred_processed + 1
+            assert gt_processed.max() < self.seg_n_classes, (
+                f"{gt_processed.max()=} should be less than {self.seg_n_classes=}"
+            )
+            assert pred_processed.max() < self.seg_n_classes, (
+                f"{pred_processed.max()=} should be less than {self.seg_n_classes=}"
+            )
 
-            # Update segmentation metrics with processed data
             for metric in segmentation_metrics.values():
-                metric.update(pred_processed, gt_processed)
+                if metric is not None:
+                    metric.update(pred_processed, gt_processed)
         else:
             # No ignore_index, use original data
             for metric in segmentation_metrics.values():
-                metric.update(pred, gt)
+                if metric is not None:
+                    metric.update(pred, gt)
 
     def _compute_all_metrics(self):
-        return {name: metric.compute() for name, metric in self._all_metric_fns.items()}
+        return {name: metric.compute() for name, metric in self._all_metric_fns.items() if metric is not None}
 
     def _reset_all_metrics(self):
         for metric in self._all_metric_fns.values():
-            metric.reset()
+            if metric is not None:
+                metric.reset()
 
     def update(self, pred, gt, mask=None):
         pred = self._mask_out(pred, mask)
@@ -289,7 +334,7 @@ def test_ignore_index():
     gt = torch.tensor([[[0, 1, 255], [1, 255, 0]]])  # 255 = ignore index
 
     metrics = HyperSegmentationScore(
-        n_classes=256,  # Need to include the ignore index
+        n_classes=3,  # Valid classes 0, 1, 2
         ignore_index=255,
         top_k=1,
         reduction="macro",

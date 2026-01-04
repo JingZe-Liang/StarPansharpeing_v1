@@ -1,5 +1,5 @@
 import math
-from typing import cast
+from typing import Literal, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -65,7 +65,7 @@ RGB_CHANNELS_BY_BANDS = {
 }
 
 
-def get_coco_colors():
+def _get_coco_colors():
     COCO_CATEGORIES = np.array(
         [
             [220, 20, 60],
@@ -152,6 +152,39 @@ def get_coco_colors():
     )
     COCO_CATEGORIES = np.concatenate((COCO_CATEGORIES, np.ones((COCO_CATEGORIES.shape[0], 1))), axis=1)
     return COCO_CATEGORIES / 255.0
+
+
+def _get_gid_colors():
+    gid_colors = np.array(
+        [
+            [200, 0, 0],
+            [0, 200, 0],
+            [150, 250, 0],
+            [150, 200, 150],
+            [200, 0, 200],
+            [150, 0, 250],
+            [150, 150, 250],
+            [200, 150, 200],
+            [250, 200, 0],
+            [200, 200, 0],
+            [0, 0, 200],
+            [250, 0, 150],
+            [0, 150, 200],
+            [0, 200, 250],
+            [150, 200, 250],
+            [250, 250, 250],
+            [200, 200, 200],
+            [200, 150, 150],
+            [250, 200, 150],
+            [150, 150, 0],
+            [250, 150, 150],
+            [250, 150, 0],
+            [250, 200, 250],
+            [200, 150, 0],
+        ]
+    )
+    gid_colors = np.concatenate((gid_colors, np.ones((gid_colors.shape[0], 1))), axis=1)
+    return gid_colors / 255.0
 
 
 @beartype
@@ -361,8 +394,8 @@ def visualize_segmentation_map(
     cmap: str = "tab20",
     n_class: int = 20,
     bg_black=True,
-    colors: Float32[NDArray, "n_class 4"] | list[list[int | float]] | None = None,
-    use_coco_colors=False,
+    colors: Float32[NDArray, "n_class 4"] | list[list[int | float]] | Literal["coco", "gid"] | None = None,
+    use_coco_colors=False,  # deprecated
     alpha: float = 1.0,
     to_rgba=False,
     to_pil=False,
@@ -449,18 +482,28 @@ def visualize_segmentation_map(
     """
     if colors is None:
         if use_coco_colors:
-            colors = get_coco_colors()
+            colors = _get_coco_colors()
         else:
             colors = np.array(plt.get_cmap(cmap)(np.linspace(0, 1, n_class)))
-
-    # Convert 0-class to be black
-    if bg_black:
-        alpha_bg = 1.0
-        colors[0] = [0, 0, 0, alpha_bg]
+    elif colors in ("coco", "gid"):
+        if colors == "coco":
+            colors = _get_coco_colors()
+            assert n_class <= 30, f"n_class {n_class} <= 30, COCO dataset requires `n_class`<=30."
+        elif colors == "gid":
+            colors = _get_gid_colors()
+            assert n_class == 24, (
+                f"n_class {n_class} != 24, `five billion/GID` remote sensing segmentation dataset requires `n_class`=24."
+            )
 
     custom_cmap = ListedColormap(colors)
     custom_cmap.colors = custom_cmap.colors * np.array([1, 1, 1, alpha])
     assert n_class <= custom_cmap.N, f"n_class {n_class} > cmap.N {custom_cmap.N}"
+    assert colors.shape == (n_class, 4), f"colors shape {colors.shape} != (n_class, 4)"
+
+    # Convert 0-class to be black
+    if bg_black:
+        alpha_bg = 1.0
+        colors[0] = [0, 0, 0, alpha_bg]  # the first class is black
 
     norm = BoundaryNorm(boundaries=np.arange(0, n_class), ncolors=n_class)
     if torch.is_tensor(gt_map):

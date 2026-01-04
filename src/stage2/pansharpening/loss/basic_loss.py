@@ -17,8 +17,6 @@ from kornia.losses import SSIMLoss as K_SSIMLoss
 from torch import Tensor
 from torch.autograd import Variable
 
-deepinv_loss = lazy_loader.load("deepinv.loss")
-
 from src.utilities.logging import logger
 
 # *==============================================================

@@ -1,0 +1,70 @@
+train_bs: 4
+val_bs: 2
+
+# Configs
+data_type: null
+label_mode: seg
+dataset_name: FiveBillionChina
+
+img_size: 512
+augmentation_prob: 0
+to_neg_1_1: true
+num_classes: 24 # 24 valid classes (1-24), excluding background/unlabeled (0)
+
+consts:
+  is_single_image: false # compatibility
+  img_size: ${..img_size}
+  augmentation_prob: ${..augmentation_prob}
+  to_neg_1_1: ${..to_neg_1_1}
+  num_classes: ${..num_classes}
+  bands: 4
+  # Batch sizes
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.segmentation.data.five_billion.FiveBillionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/5Billion-ChinaCity-Segmentation/litdata/train
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: ${...consts.augmentation_prob}
+    to_neg_1_1: ${...consts.to_neg_1_1}
+  combined_kwargs:
+    batching_method: per_stream
+    is_cycled: true
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 6
+    shuffle: true
+    pin_memory: true
+
+val:
+  _target_: src.stage2.segmentation.data.five_billion.FiveBillionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/5Billion-ChinaCity-Segmentation/litdata/test
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: 0.0
+    to_neg_1_1: ${...consts.to_neg_1_1}
+  combined_kwargs:
+    batching_method: per_stream
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 2
+    shuffle: false
+    pin_memory: true
+
+test:
+  _target_: src.stage2.segmentation.data.five_billion.FiveBillionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/5Billion-ChinaCity-Segmentation/litdata/test
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: 0.0
+    to_neg_1_1: ${...consts.to_neg_1_1}
+  combined_kwargs:
+    batching_method: per_stream
+    is_cycled: false
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 2
+    shuffle: false
+    pin_memory: true

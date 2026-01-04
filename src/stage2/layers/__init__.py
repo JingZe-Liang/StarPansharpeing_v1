@@ -63,3 +63,6 @@ from .stages import (
 )
 
 from .utils import pack_one, unpack_one
+
+# DPT Heads
+from .hybrid_dpt import DPTSegmentationHead, HybridDPTHead

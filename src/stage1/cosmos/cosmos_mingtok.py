@@ -7,7 +7,10 @@ Mingtok-like three-stage tokenizer with low-level and semantic-level feature ali
 //3. add alpha-flow
 """
 
+import ema_pytorch
 import math
+import random
+from dataclasses import asdict
 from functools import partial
 from typing import Any, List, Optional, cast, no_type_check
 
@@ -17,7 +20,7 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from loguru import logger
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from timm.layers import create_conv2d, create_norm_act_layer
+from timm.layers import create_conv2d, create_norm_act_layer, create_norm_layer
 from timm.layers.helpers import to_2tuple
 from torch import Tensor
 from typing_extensions import (
@@ -26,12 +29,13 @@ from typing_extensions import (
     Literal,
     Self,
     Sequence,
+    TypeGuard,
     TypeAlias,
     TypedDict,
     Union,
 )
 
-from src.utilities.config_utils import to_easydict_recursive
+from src.utilities.config_utils import to_easydict_recursive, function_config_to_basic_types
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.transport.flow_matching.meanflow import MeanFlow
 from src.utilities.transport.flow_matching.transport import Sampler
@@ -39,6 +43,17 @@ from src.utilities.transport.flow_matching.transport import Transport as FM_Tran
 from src.utilities.transport.tim.transition import TransitionSchedule
 from src.utilities.transport.tim.transports import OT_FM
 from src.utilities.transport.tim.transports import Transport as Tim_Transport
+
+from src.stage1.discretization.collections import FSQ
+from src.stage1.discretization.collections import BinarySphericalQuantizer as BSQ
+from src.stage1.discretization.collections.kl_continuous import (
+    DiagonalGaussianDistributionV2 as DiagonalGaussianDistribution,
+)
+from src.stage1.discretization.collections.multiscale_bsq import MultiScaleBSQ
+from src.stage1.discretization.collections.multiscale_leechq import MultiScaleLeechQ
+from src.stage1.discretization.collections.psd import PowerSphericalDistribution
+from src.stage1.utilities.losses.latent_reg import LatentMaskConfig, lmr_apply
+from src.utilities.network_utils import compile_decorator, model_compiled_flag, safe_init_weights
 
 from .modules import TransformerTokenizer
 from .modules.flowhead import (
@@ -48,6 +63,7 @@ from .modules.flowhead import (
     build_tim_scheduler,
 )
 from .modules.layers2d import Encoder as ResEncoder
+from .modules.layers2d import Decoder as ResDecoder
 from .modules.proj import build_mlp
 from .modules.t_transformer import FlowTransformerConditioned
 from .modules.uvit_decoder import UViTDecoder
@@ -57,6 +73,7 @@ LossOutput = TypedDict(
     {"flow_loss": torch.Tensor},
 )
 DecoderOutput: TypeAlias = tuple[Tensor, LossOutput]
+QuantizerOutput: TypeAlias = tuple[Tensor, Tensor, dict[str, Any] | None]
 
 # *==============================================================
 # * Default Configs
@@ -141,13 +158,16 @@ def _create_flow_decoder(
     uvit_flow_cfg = OmegaConf.from_dotlist(uvit_flow_str.split(" "))
     # NOTE: supports tim, fm, and mf flows
     if flow_type == "tim":
+        assert tim_cfgs is not None, "tim_cfgs must be provided when flow_type='tim'"
         tim_schedule_cfg, tim_transport_cfg, _ = tim_cfgs
         uvit_flow_cfg.transition_schedule = tim_schedule_cfg
         uvit_flow_cfg.transport = tim_transport_cfg
     elif flow_type == "fm":
+        assert fm_cfgs is not None, "fm_cfgs must be provided when flow_type='fm'"
         uvit_flow_cfg.transport = fm_cfgs[0]  # transport
         uvit_flow_cfg.sampler = fm_cfgs[1]  # not used
     elif flow_type == "mf":
+        assert mf_cfgs is not None, "mf_cfgs must be provided when flow_type='mf'"
         uvit_flow_cfg.transport = mf_cfgs[0]  # meanflow config
     else:
         raise ValueError(f"Unknown flow type: {flow_type}")
@@ -173,8 +193,10 @@ def _create_flow_decoder(
         flow_head_cfg.fm_kwargs = tim_transport_cfg
         flow_head_cfg.transition_schedule_kwargs = tim_schedule_cfg
     elif flow_type == "fm":
+        assert fm_cfgs is not None, "fm_cfgs must be provided when flow_type='fm'"
         flow_head_cfg.fm_kwargs = fm_cfgs[0]
     elif flow_type == "mf":
+        assert mf_cfgs is not None, "mf_cfgs must be provided when flow_type='mf'"
         flow_head_cfg.fm_kwargs = mf_cfgs[0]
 
     ########## Init the config here
@@ -260,9 +282,13 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
 
     ######## Tokenizer main config
 
-    main_str = f"decoder_type={decoder_type} compile=false straight_through_latent=false"
+    main_str = (
+        f"decoder_type={decoder_type} compile=false straight_through_latent=false "
+        "quantizer_type=null random_quant=0.0 use_latent_mask=false"
+    )
     main_cfg = OmegaConf.from_dotlist(main_str.split(" "))
     main_cfg.sampling_options_default = flow_dec_cfg_dict[flow_type][-1]
+    main_cfg.latent_mask_config = OmegaConf.structured(LatentMaskConfig())
 
     tokenizer_cfg_default = OmegaConf.create(
         {
@@ -278,24 +304,156 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
     return tokenizer_cfg_default
 
 
+def create_default_mingtok_pretrained_cfg() -> DictConfig:
+    cfg = """
+    low_level_encoder:
+        z_dim: 512
+        latent_dim: 16
+        encoder_type: cnn_only
+        res_encoder:
+            in_channels: 512
+            out_channels: 512
+            channels: 128
+            attn_resolutions: [32]
+            channels_mult: [2,4,4]
+            spatial_compression: 8
+            num_res_blocks: 2
+            z_channels: 512
+            act_checkpoint: true
+            norm_type: rmsnorm2d
+            block_name: res_block
+            use_residual_factor: false
+            patch_method: haar
+            patch_size: 1
+            attn_type: null
+            padding_mode: reflect
+            dropout: 0.0
+            resolution: 512
+
+    semantic_decoder:
+        in_chan: 512
+        out_chan: 1024
+        embed_dim: 1024
+        depth: 24
+        num_heads: 16
+        patch_size: 2
+        with_cls_token: true
+        out_patch_size: 1
+        mlp_ratio: 4.0
+        norm_layer: flarmsnorm
+        drop_path: 0.0
+        pe_type: rope_dinov3
+        rope_kwargs:
+            rope_theta: 100.0
+        last_norm: flarmsnorm
+        img_size: 64
+        patcher_type: patch_embedder
+        additional_pe: true
+        n_reg_tokens: 4
+        other_blk_kwargs:
+            use_gate: true
+
+    pixel_decoder:
+        decoder_type: hybrid
+        latent_dim: 16
+        z_dim: 512
+        total_resolutions: 8
+        res_decoder:
+            in_channels: 512
+            out_channels: 512
+            channels: 128
+            attn_resolutions: [32]
+            channels_mult: [2,4,4]
+            spatial_compression: 8
+            num_res_blocks: 2
+            z_channels: 512
+            act_checkpoint: true
+            norm_type: rmsnorm2d
+            block_name: res_block
+            use_residual_factor: false
+            patch_method: haar
+            patch_size: 1
+            attn_type: null
+            padding_mode: reflect
+            dropout: 0.0
+            resolution: 512
+        transformer_decoder:
+            in_chan: 512
+            out_chan: 512
+            embed_dim: 1024
+            depth: 8
+            num_heads: 16
+            patch_size: 2
+            out_patch_size: 2
+            mlp_ratio: 4.0
+            norm_layer: flarmsnorm
+            drop_path: 0.0
+            pe_type: rope_dinov3
+            rope_kwargs:
+                rope_theta: 100.0
+            last_norm: flarmsnorm
+            img_size: 64
+            patcher_type: patch_embedder
+            additional_pe: true
+            n_reg_tokens: 4
+            other_blk_kwargs:
+                use_gate: true
+
+    repa_proj:
+        low_lvl_repa_out_chan: 1024
+        sem_repa_out_chan: 1024
+        low_lvl_cache_layers: [0,1,2,-1]
+        sem_cache_layers: [5,11,17,23]
+        low_lvl_repa_proj_chans: [256,512,512,512]
+        sem_repa_proj_chans: [1024,1024,1024,1024]
+
+    tokenizer:
+        straight_through_latent: false
+        sem_pix_decoder_type: seperated
+        sampling_options_default: {}
+        quantizer_type: null
+        random_quant: 0.0
+        use_latent_mask: false
+        latent_mask_config:
+            mask_ratios: [0.0, 0.25, 0.5, 0.75]
+            block_sizes: {16: [1, 1], 32: [2, 2]}
+            mask_probs: {16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15]}
+        pretrained_task: ['ijepa','contrastive']
+
+    """
+    cfg = OmegaConf.create(cfg)
+    return cfg
+
+
 # *==============================================================
 # * Utilities
 # *==============================================================
+
+
+def _to_memformat_channels_last(x):
+    if not model_compiled_flag:
+        return x
+    if (not x.is_cuda) or x.ndim != 4:
+        return x
+    if x.is_contiguous(memory_format=torch.channels_last):
+        return x
+    return x.contiguous(memory_format=torch.channels_last)
 
 
 def is_tuple_list(x):
     return isinstance(x, (tuple, list, ListConfig))
 
 
-def is_sequence_shape(shape: Any) -> bool:
+def is_sequence_shape(
+    shape: torch.Size | tuple[int, ...] | list[int] | int,
+) -> TypeGuard[torch.Size | tuple[int, ...] | list[int]]:
     return isinstance(shape, (torch.Size, list, tuple))
 
 
 def get_chan_from_shape(shape: torch.Size | tuple[int, ...] | list[int] | int) -> int:
-    if is_sequence_shape(shape):
-        return shape[1]
-    else:
+    if isinstance(shape, int):
         return shape
+    return int(shape[1])
 
 
 def latent1d_to_2d(
@@ -445,85 +603,105 @@ class EncoderLowLevel(nn.Module):
             "cnn_only",
             "transformer_only",
             "hybrid",
-        ), f""
+        ), f"Invalid encoder type {encoder_type}"
         self.encoder_type = encoder_type
         self.latent_dim = cfg.latent_dim
 
         res_cfg = cfg.get("res_encoder", None)
         transf_cfg = cfg.get("transformer_encoder", None)
-        transf_kwargs = dict(
-            **transf_cfg,
-            projections={"input": None, "output": "us_average"},
-            is_causal=False,
-            head="linear",
-        )
+        if transf_cfg is not None:
+            transf_kwargs = dict(
+                **transf_cfg,
+                projections={"input": None, "output": "us_average"},
+                is_causal=False,
+                head="linear",
+            )
+        else:
+            transf_kwargs = {}
 
         if encoder_type == "hybrid":
             assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
             self.res_encoder = ResEncoder(**res_cfg)
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
-            self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
+            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
         elif encoder_type == "cnn_only":
             assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
             self.res_encoder = ResEncoder(**res_cfg)
-            self.z_to_latent = nn.Sequential(
-                nn.Conv2d(cfg.z_dim, cfg.latent_dim, 3, 1, 1),
-                Rearrange("b c h w -> b (h w) c"),
-            )
+            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1)
         else:  # transformer only
             assert transf_cfg is not None, "transformer_encoder config must be provided"
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
-            self.z_to_latent = nn.Linear(cfg.z_dim, cfg.latent_dim)
+            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
 
     def forward(self, x, get_intermidates: list[int] | None = None):
         """Encode the input image into low-level latent tokens."""
+        x = _to_memformat_channels_last(x)
         if self.encoder_type == "hybrid":
             # Hybrid encoder, takes the transformer encoder's intermidates
             res_out = self.res_encoder(x)
-            z, out = self.transformer_encoder(
+            out = self.transformer_encoder(
                 res_out,
-                ret_2d_tokens=False,
+                ret_2d_tokens=True,  # Return 2d tokens
                 ret_all=True,
                 get_intermidates=get_intermidates,
             )
-            h = self.z_to_latent(z)  # to 1d tokens inside
+            z = out["head_out"]  # z is 2d: (b, c, h, w)
+            h = self.z_to_latent(z)  # Conv2d directly on 2d
 
         elif self.encoder_type == "cnn_only":
-            z, intermidates = self.res_encoder(x, ret_interm_feats=get_intermidates)
-            h = self.z_to_latent(z)
-
-            # Intermidates to 1d tokens
-            feats = []
-            for feat in intermidates:
-                assert feat.ndim == 4, f"feat shape {feat.shape} is not 2d"
-                feats.append(rearrange(feat, "b c h w -> b (h w) c"))
-            out = {"intermidates": feats}
+            res_out = self.res_encoder(x, ret_interm_feats=get_intermidates)
+            if get_intermidates is not None:
+                z, intermidates = res_out
+                out = {"intermidates": intermidates}
+            else:
+                z = res_out
+                out = {}
+            # z is already 2d from cnn: (b, c, h, w)
+            h = self.z_to_latent(z)  # Conv2d directly on 2d
 
         else:  # transformer only
-            z, out = self.transformer_encoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates)
-            h = self.z_to_latent(z)
+            out = self.transformer_encoder(x, ret_2d_tokens=True, ret_all=True, get_intermidates=get_intermidates)
+            z = out["head_out"]  # z is 2d: (b, c, h, w)
+            h = self.z_to_latent(z)  # Conv2d directly on 2d
 
-        assert h.shape[-1] == self.latent_dim
+        h = _to_memformat_channels_last(h)
         return dict(latent=h, z=z, **out)
+
+    def get_last_layer(self):
+        # TODO: implem it
+        return None
+
+    def init_weights(self):
+        if hasattr(self, "transformer_encoder"):
+            self.transformer_encoder.init_weights()
+        if hasattr(self, "res_encoder"):
+            self.res_encoder.init_weights()
+        nn.init.trunc_normal_(self.z_to_latent.weight, std=0.01, a=-0.4, b=0.4)
+        nn.init.zeros_(self.z_to_latent.bias)
+        logger.info("init low-level encoder with smaller std conv to latent.")
 
 
 class DecoderSemantic(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.encoder = TransformerTokenizer(
-            patcher_type="linear",
-            projections={"input": "ds_shortcut", "output": None},
-            head="linear",
-            **cfg,
+        self.patch_size = cfg.patch_size
+        self.out_patch_size = cfg.out_patch_size
+        self.decoder = TransformerTokenizer(
+            patch_embeder_with_norm=True, projections={"input": None, "output": None}, head="linear", **cfg
         )
 
-    def forward(self, x, get_intermidates=None):
+    def forward(self, x, masks=None, get_intermidates=None):
         """
         Encode the latent low-level tokens and convert into semantic tokens.
         """
-        h, out = self.encoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates)
-        return dict(sem_tokens=h, **out)
+        out = self.decoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates, masks=masks)
+        x = out["head_out"]
+        assert x.ndim == 3, "1D tokens are needed for pretraining."
+        return dict(sem_tokens=x, **out)
+
+    def init_weights(self):
+        self.decoder.init_weights()
 
 
 class DecoderFlowHead(nn.Module):
@@ -539,6 +717,8 @@ class DecoderFlowHead(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.patch_size = cfg.patch_size
+        self.out_patch_size = 1
         self.total_resolutions = getattr(cfg, "total_resolutions", cfg.patch_size)
         self.transformer_t_conditioned = getattr(cfg, "transformer_t_conditioned", True)
 
@@ -811,14 +991,22 @@ class DecoderFlowHead(nn.Module):
             )
             recon, flow_loss = train_fn_(x, h, inp_shape=inp_shape, ema_model=ema_model, clamp=clamp)
         elif mode == "sample":
-            sample_fn_ = self.flow_sample_all if self.transformer_t_conditioned else self.flow_sample_head_stand_alone
-            recon = sample_fn_(
-                x,
-                h,
-                inp_shape=inp_shape,
-                sample_kwargs=sample_kwargs,
-                clamp=clamp,
-            )
+            if self.transformer_t_conditioned:
+                recon = self.flow_sample_all(
+                    x,
+                    h,
+                    inp_shape=inp_shape,
+                    sample_kwargs=sample_kwargs,
+                    clamp=clamp,
+                    ret_trajectory=ret_trajectory,
+                )
+            else:
+                recon = self.flow_sample_head_stand_alone(
+                    h,
+                    inp_shape=inp_shape,
+                    sample_kwargs=sample_kwargs,
+                    clamp=clamp,
+                )
             flow_loss = None
         else:
             raise ValueError(f"Unknown mode: {mode}")
@@ -831,6 +1019,15 @@ class DecoderFlowHead(nn.Module):
         """Enable or disable gradient checkpointing."""
         self.decoder.grad_checkpointing = enable
 
+    def get_last_layer(self) -> Tensor:
+        """Get last layer's weights for GAN training."""
+        flow_decoder = (
+            self.flow_decoder.flow_decoder if isinstance(self.flow_decoder, TimFlowDecoder) else self.flow_decoder
+        )
+        if flow_decoder.head.head_type.startswith("once"):
+            return flow_decoder.head.unpatcher.weight
+        return flow_decoder.head.unpatcher.unpatchers[-1].weight
+
 
 class DecoderUViT(nn.Module):
     def __init__(self, cfg):
@@ -839,6 +1036,8 @@ class DecoderUViT(nn.Module):
         self.t_res = cfg.total_resolutions
         img_size = cfg.img_size
         grid_size = img_size // self.t_res
+        self.patch_size = cfg.patch_size
+        self.out_patch_size = 1
 
         self.decoder = UViTDecoder(
             # basic
@@ -965,6 +1164,7 @@ class DecoderUViT(nn.Module):
 
         # Decode using the CNN decoder
         flow_loss, loss_dict = None, {}
+        recon: Tensor
         if mode == "train":
             if self.transition_schedule.transport.enhance_target:
                 assert ema_model is not None, "EMA model is required for enhance_target"
@@ -985,12 +1185,12 @@ class DecoderUViT(nn.Module):
                 use_dir_loss=True,  # default as in dde paper
             )
             # back to x_0
-            recon: Tensor = breakdowns["x0_pred"]
+            recon = breakdowns["x0_pred"]
         elif mode == "sample":
             # eval: loop to generate reconstruction image when h is the condition.
             # x_init = torch.randn_like(x)
             x_init = x
-            recon: Tensor = self.transition_schedule.sample(
+            recon = self.transition_schedule.sample(
                 # self.decoder,
                 self._create_model_sampled(chan),
                 # start sampling noise
@@ -1157,59 +1357,379 @@ class DecoderUViT(nn.Module):
         else:
             return self._forward_fm(x, h, inp_shape, mode, *args, **kwargs)
 
+    def init_weights(self) -> None:
+        return
 
-class FlowTokenizer(nn.Module):
+
+class HybridPixelDecoder(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+        decoder_type = cfg.get("decoder_type", "hybrid")
+        assert decoder_type in (
+            "cnn_only",
+            "transformer_only",
+            "hybrid",
+        ), f"Invalid decoder type {decoder_type}"
+
+        self.decoder_type = decoder_type
+        self.latent_dim = cfg.latent_dim
+        res_cfg = cfg.get("res_decoder", None)
+        transf_cfg = cfg.get("transformer_decoder", None)
+        transf_kwargs = dict(**transf_cfg, projections={"input": None, "output": None}, is_causal=False, head="linear")
+
+        if decoder_type == "hybrid":
+            assert res_cfg is not None, "res_decoder config must be provided if use_cnn"
+            self.res_decoder = ResDecoder(**res_cfg)
+            self.transformer_decoder = TransformerTokenizer(**transf_kwargs)
+            self.latent_to_z = nn.Conv2d(cfg.latent_dim, cfg.z_dim, kernel_size=1)
+        elif decoder_type == "cnn_only":
+            assert res_cfg is not None, "res_decoder config must be provided if use_cnn"
+            self.res_decoder = ResDecoder(**res_cfg)
+            self.latent_to_z = nn.Conv2d(cfg.latent_dim, cfg.z_dim, kernel_size=3, padding=1)
+        else:  # transformer only
+            assert transf_cfg is not None, "transformer_decder config must be provided"
+            self.transformer_decoder = TransformerTokenizer(**transf_kwargs)
+            self.latent_to_z = nn.Conv2d(cfg.latent_dim, cfg.z_dim, kernel_size=1)
+
+    def init_weights(self):
+        if hasattr(self, "transformer_decoder"):
+            self.transformer_decoder.init_weights()
+        if hasattr(self, "res_decoder"):
+            self.res_decoder.init_weights()
+        nn.init.trunc_normal_(self.latent_to_z.weight, std=0.01, a=-0.4, b=0.4)
+        nn.init.zeros_(self.latent_to_z.bias)
+
+    def forward(
+        self, latent, inp_shape: torch.Size | tuple, get_intermidates: list[int] | None = None, **_ignored_kwargs
+    ):
+        """Decode the latent to the image patches"""
+        z = self.latent_to_z(latent)
+        z = _to_memformat_channels_last(z)
+        if self.decoder_type == "hybrid":
+            # Hybrid encoder, takes the transformer encoder's intermidates
+            out = self.transformer_decoder(
+                z,
+                ret_2d_tokens=True,  # Return 2d tokens
+                ret_all=True,
+                get_intermidates=get_intermidates,
+            )
+            x = out["head_out"]  # z is 2d: (b, c, h, w)
+            x = self.res_decoder(x, inp_shape[1])
+            x = _to_memformat_channels_last(x)
+
+        elif self.decoder_type == "cnn_only":
+            x, intermidates = self.res_decoder(z, inp_shape[1], ret_interm_feats=get_intermidates)
+            x = _to_memformat_channels_last(x)
+            out = {"intermidates": intermidates}
+
+        else:  # transformer only
+            out = self.transformer_decoder(
+                z, ret_2d_tokens=True, ret_all=True, get_intermidates=get_intermidates, out_shape=inp_shape
+            )
+            x = out["head_out"]  # z is 2d: (b, c, h, w)
+
+        return x
+
+    def get_last_layer(self):
+        if self.decoder_type in ("hybrid", "cnn_only"):
+            return self.res_decoder.get_last_layer()
+        elif self.decoder_type == "transformer_only":
+            return self.transformer_decoder.get_last_layer()
+        else:
+            raise ValueError(f"Unknown decoder type: {self.decoder_type}")
+
+
+class MingtokRSModel(nn.Module):
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        cfg = to_easydict_recursive(cfg)
-
         # Cfgs
         self.low_cfg = cfg.low_level_encoder
         self.sem_cfg = cfg.semantic_decoder
-        self.pix_flow_cfg = cfg.pixel_decoder
+        self.pixel_cfg = cfg.pixel_decoder
         self.tok_cfg = cfg.tokenizer
+        self.sem_pix_decoder_type = self.tok_cfg.sem_pix_decoder_type
+        assert self.sem_pix_decoder_type in ("unified", "seperated")
 
         # Model parts
         logger.info(f"Init low-level encoder.")
-        self.low_level_encoder = EncoderLowLevel(self.low_cfg)
+        self.low_level_encoder: nn.Module = EncoderLowLevel(self.low_cfg)
 
         logger.info(f"Init semantic decoder.")
-        self.semantic_decoder = DecoderSemantic(self.sem_cfg)
+        self.semantic_decoder: nn.Module = DecoderSemantic(self.sem_cfg)
+        self.pretrained_task = getattr(self.tok_cfg, "pretrained_task")
 
-        logger.info(f"Init pixel decoder of type {self.tok_cfg.decoder_type}.")
-        decoder_cls = {"flow_head": DecoderFlowHead, "uvit": DecoderUViT}[self.tok_cfg.decoder_type]
-        self.pixel_decoder = decoder_cls(self.pix_flow_cfg)
+        logger.info(f"Init pixel decoder of type {self.pixel_cfg.decoder_type}.")
+        decoder_cls: type[nn.Module] = {
+            "flow_head": DecoderFlowHead,
+            "uvit": DecoderUViT,
+            "hybrid": HybridPixelDecoder,
+        }[self.pixel_cfg.decoder_type]
+        self._is_flow_matching_pix_decoder = self.pixel_cfg.decoder_type in ("flow_head", "uvit")
+        self.pixel_decoder: nn.Module = decoder_cls(self.pixel_cfg)
 
+        # FIXME: shortcuts for latent, still has bugs.
         self._build_st_cat_lin()
 
-        # Attrs
-        self.total_resolutions: int = self.pix_flow_cfg.total_resolutions
+        # Attributions
+        self.total_resolutions: int = self.pixel_cfg.total_resolutions
         self.sampling_options_default: dict[str, Any] = getattr(self.tok_cfg, "sampling_options_default", {})
-        logger.info(f"Set the sampling options to {self.sampling_options_default}.")
+        if self.sampling_options_default:
+            logger.info(f"Set the sampling options to {self.sampling_options_default}.")
 
         # TODO: add quantizer
+        self._setup_quantizer()
+        self._setup_latent_aug()
 
         # Semantic and low-level caches
         self.proj_cfg = cfg.repa_proj
         self.use_repa: bool = cfg.repa_proj is not None
+
         self.z: Tensor | None = None
         self.sem_z: Tensor | None = None
         self._hw: tuple | list | None = None
+
+        # Low-level and semantic projections for feature distillation
         self.low_lvl_proj_is_multi = False
         self.sem_proj_is_multi = False
         if self.use_repa:
-            self.low_lvl_cache_layers = self.proj_cfg.low_lvl_cache_layers
-            self.sem_cache_layers = self.proj_cfg.sem_cache_layers
+            logger.info(f"Feature distillation with low-level and semantic network features")
+            self.low_lvl_cache_layers = [int(x) for x in list(self.proj_cfg.low_lvl_cache_layers)]
+            self.sem_cache_layers = [int(x) for x in list(self.proj_cfg.sem_cache_layers)]
             self.low_lvl_proj_is_multi = is_tuple_list(self.low_lvl_cache_layers)
             self.sem_proj_is_multi = is_tuple_list(self.sem_cache_layers)
+            self._maybe_fix_repa_proj_chans()
             self._build_repa_projections()
 
         # trainer compatiblity
         self._use_repa_loss = self.use_repa
         self._use_vf_loss = False
 
+        self.init_weights()
+
+        self._compile_modules()
+
+    def _maybe_fix_repa_proj_chans(self) -> None:
+        """对齐`repa_proj.*_repa_proj_chans`与实际cache feature通道数，避免投影层输入维度不匹配。"""
+        if not self.use_repa:
+            return
+
+        inferred_low = self._infer_low_lvl_repa_proj_chans()
+        cfg_low = [int(x) for x in list(getattr(self.proj_cfg, "low_lvl_repa_proj_chans", []))]
+        if len(cfg_low) != len(inferred_low) or any(a != b for a, b in zip(cfg_low, inferred_low)):
+            logger.warning(
+                f"[Mingtok][REPA]: low_lvl_repa_proj_chans与实际feature不匹配，已自动修正：{cfg_low} -> {inferred_low}"
+            )
+            self.proj_cfg.low_lvl_repa_proj_chans = inferred_low
+
+    def _infer_low_lvl_repa_proj_chans(self) -> list[int]:
+        enc_type = str(getattr(self.low_cfg, "encoder_type", "cnn_only"))
+        if enc_type not in ("cnn_only", "hybrid"):
+            return [int(x) for x in list(getattr(self.proj_cfg, "low_lvl_repa_proj_chans", []))]
+
+        res_cfg = getattr(self.low_cfg, "res_encoder", None)
+        if res_cfg is None:
+            return [int(x) for x in list(getattr(self.proj_cfg, "low_lvl_repa_proj_chans", []))]
+
+        base = int(res_cfg.channels)
+        mults = [int(x) for x in list(res_cfg.channels_mult)]
+        inferred: list[int] = []
+        for layer_idx in self.low_lvl_cache_layers:
+            if layer_idx == -1:
+                inferred.append(base * mults[-1])
+            else:
+                inferred.append(base * mults[int(layer_idx)])
+        return inferred
+
+    def _setup_quantizer(self) -> None:
+        latent_channels = int(self.low_cfg.latent_dim)
+        self.latent_channels: int = latent_channels
+
+        self.quantizer_type: str | None = getattr(self.tok_cfg, "quantizer_type", None)
+        self.random_quant: float = float(getattr(self.tok_cfg, "random_quant", 0.0))
+
+        fsq_num_codebooks = int(getattr(self.tok_cfg, "fsq_num_codebooks", 6))
+        fsq_levels = list(getattr(self.tok_cfg, "fsq_levels", [8, 8, 8, 5, 5, 5]))
+        mbsq_codebook_size = int(getattr(self.tok_cfg, "mbsq_codebook_size", 1024))
+        mbsq_schedule_mode = str(getattr(self.tok_cfg, "mbsq_schedule_mode", "original"))
+        mleech_codebook_size = int(getattr(self.tok_cfg, "mleech_codebook_size", 196560))
+        mleech_leech_type = str(getattr(self.tok_cfg, "mleech_leech_type", "full"))
+        mleech_schedule_mode = str(getattr(self.tok_cfg, "mleech_schedule_mode", "original"))
+
+        q_in_chan = latent_channels
+        if self.quantizer_type == "kl":
+            q_in_chan = latent_channels * 2
+        elif self.quantizer_type == "psd":
+            q_in_chan = latent_channels + 1
+
+        if self.quantizer_type is None:
+            self.quantizer = None
+            logger.info("[Mingtok]: use no quantizer (continuous latent).")
+            return
+
+        if self.latent_channels != q_in_chan:
+            self.pre_quant_conv = nn.Conv2d(latent_channels, q_in_chan, kernel_size=1)
+            nn.init.trunc_normal_(self.pre_quant_conv.weight, std=0.01, a=-0.4, b=0.4)
+            nn.init.zeros_(self.pre_quant_conv.bias)
+        else:
+            self.pre_quant_conv = nn.Identity()
+
+        match self.quantizer_type:
+            case "kl":
+                self.quantizer = DiagonalGaussianDistribution  # type: ignore[assignment]
+            case "bsq":
+                if latent_channels % 2 != 0:
+                    raise ValueError("BSQ要求latent_channels为偶数。")
+                self.quantizer = BSQ(
+                    embed_dim=latent_channels,
+                    beta=0.0,
+                    gamma0=1.0,
+                    gamma=1.0,
+                    zeta=1.0,
+                    inv_temperature=1.0,
+                    cb_entropy_compute="group",
+                    l2_norm=True,
+                    input_format="bchw",
+                    persample_entropy_compute="analytical",
+                    group_size=1,
+                )
+            case "fsq":
+                self.quantizer = FSQ(
+                    levels=fsq_levels,
+                    dim=latent_channels,
+                    num_codebooks=fsq_num_codebooks,
+                    channel_first=True,
+                )
+            case "multiscale_bsq":
+                self.quantizer = MultiScaleBSQ(
+                    dim=latent_channels,
+                    codebook_size=mbsq_codebook_size,
+                    schedule_mode=mbsq_schedule_mode,
+                    new_quant=True,
+                )
+            case "multiscale_leechq":
+                self.quantizer = MultiScaleLeechQ(
+                    dim=latent_channels,
+                    codebook_size=mleech_codebook_size,
+                    leech_type=mleech_leech_type,
+                    schedule_mode=mleech_schedule_mode,
+                )
+            case "psd":
+                self.quantizer = PowerSphericalDistribution  # type: ignore[assignment]
+            case _:
+                raise ValueError(f"Unsupported quantizer_type={self.quantizer_type!r}")
+
+        logger.info(f"[Mingtok]: using quantizer={self.quantizer_type}.")
+
+    def _setup_latent_aug(self) -> None:
+        self.use_latent_mask: bool = bool(getattr(self.tok_cfg, "use_latent_mask", False))
+        latent_mask_cfg_raw = getattr(self.tok_cfg, "latent_mask_config", None)
+        latent_mask_cfg = LatentMaskConfig()
+        if latent_mask_cfg_raw is not None:
+            latent_mask_cfg_dict = dict(latent_mask_cfg_raw)
+            latent_mask_cfg = LatentMaskConfig(**latent_mask_cfg_dict)
+        self.latent_mask_cfg: dict[str, Any] = asdict(latent_mask_cfg)
+
+        if self.use_latent_mask:
+            self.mask_token = nn.Parameter(torch.zeros(1, self.latent_channels, 1, 1))
+            nn.init.normal_(self.mask_token, std=0.02)
+            logger.info(f"[Mingtok]: enable latent mask augmentation with cfg={self.latent_mask_cfg}.")
+        else:
+            self.mask_token = None
+
+    def _use_quantizer(self, use_quantizer: bool | None = None) -> bool:
+        if self.quantizer_type is None:
+            return False
+        if self.training and self.random_quant > 0.0:
+            return self.random_quant > random.random()
+        if use_quantizer is None:
+            return True
+        return use_quantizer
+
+    def _apply_quantizer(self, h: Tensor) -> QuantizerOutput:
+        if self.quantizer_type is None or self.quantizer is None:
+            raise RuntimeError("quantizer未初始化，但调用了_apply_quantizer。")
+
+        h_dtype = h.dtype
+        h = h.float()
+
+        if self.quantizer_type == "bsq":
+            h = nn.functional.normalize(h, dim=1)
+            hq, bsq_loss, loss_breakdown = self.quantizer(h)  # type: ignore[misc]
+            return hq.to(h_dtype), bsq_loss, cast(dict[str, Any], loss_breakdown)
+
+        if self.quantizer_type == "kl":
+            m_, logvar_ = h.chunk(2, dim=1)
+            posterior = self.quantizer((m_, logvar_))  # type: ignore[operator]
+            kl_loss = posterior.kl()
+            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            hq = posterior.sample()
+            return hq.to(h_dtype), kl_loss, {"posterior": posterior, "mean": m_, "logvar": logvar_}
+
+        if self.quantizer_type == "fsq":
+            hq, indices = self.quantizer(h)  # type: ignore[misc]
+            fsq_loss = torch.tensor(0.0, device=h.device, dtype=h_dtype)
+            return hq.to(h_dtype), fsq_loss, {"indices": indices}
+
+        if self.quantizer_type in ("multiscale_bsq", "multiscale_leechq"):
+            (
+                hq,
+                all_indices,
+                all_bit_indices,
+                residual_norm_per_scale,
+                all_losses,
+                var_inputs,
+                all_entropies,
+            ) = self.quantizer(h)  # type: ignore[misc]
+            q_loss = all_losses.sum()
+            q_info: dict[str, Any] = {
+                "all_indices": all_indices,
+                "all_bit_indices": all_bit_indices,
+                "residual_norm_per_scale": residual_norm_per_scale,
+                "all_losses": all_losses,
+                "var_inputs": var_inputs,
+                "all_entropies": all_entropies,
+            }
+            return hq.to(h_dtype), q_loss, q_info
+
+        if self.quantizer_type == "psd":
+            mu = h[:, :-1]
+            kappa = h[:, -1]
+            kappa = nn.functional.softplus(kappa) + 1.0
+            dist = self.quantizer(mu, kappa, dim=1)  # type: ignore[operator]
+            loss = dist.kl_to_uniform()
+            hq = dist.rsample()
+            hq = hq * (self.latent_channels**0.5)
+            psd_loss = loss.mean()
+            return hq.to(h_dtype), psd_loss, {"kl_loss": psd_loss}
+
+        raise RuntimeError(f"Unsupported quantizer_type={self.quantizer_type!r}")
+
+    def apply_quantizer(self, h: Tensor, use_quantizer: bool | None = None) -> Tensor | QuantizerOutput:
+        if not self._use_quantizer(use_quantizer):
+            return h
+        return self._apply_quantizer(h)
+
+    def latent_aug(self, h: Tensor) -> Tensor:
+        if (not self.training) or (not self.use_latent_mask):
+            return h
+
+        lmr_res = lmr_apply(h, **self.latent_mask_cfg)
+        if not isinstance(lmr_res, tuple):
+            return lmr_res
+
+        h_masked, mask = lmr_res
+        if self.mask_token is None:
+            return h_masked
+
+        mask_token = self.mask_token.expand(h.shape[0], -1, h.shape[2], h.shape[3])
+        mask = mask.expand_as(h_masked)
+        return torch.where(mask, mask_token, h_masked)
+
+    def _compile_modules(self):
         # compile model parts
-        self._compile = getattr(self.tok_cfg, "compile", False)
+        self._compile = getattr(self.pixel_cfg, "compile", False)
         if self._compile:
             logger.info("Compiling FlowTokenizer model parts...")
             # Only compile the heavy parts - transformer
@@ -1223,7 +1743,7 @@ class FlowTokenizer(nn.Module):
     def _build_st_cat_lin(self):
         # Straight through latent functionality
         self.st_skip_semantic_decoder = False
-        if getattr(self.tok_cfg, "straight_through_latent", False):
+        if getattr(self.tok_cfg, "straight_through_latent", False) and self.sem_pix_decoder_type == "unified":
             self.st_skip_semantic_decoder = True
             # Create skip connection conv for latent
             latent_channels = self.low_cfg.latent_dim  # channels from low-level encoder
@@ -1253,7 +1773,7 @@ class FlowTokenizer(nn.Module):
                         self.proj_cfg.low_lvl_repa_proj_chans[i],
                         self.proj_cfg.low_lvl_repa_out_chan,
                         self.proj_cfg.low_lvl_repa_out_chan,
-                        is_1d=True,
+                        proj_type="norm_first_force_conv",
                     )
                     low_lvl_z_proj.append(proj_)
             else:
@@ -1261,7 +1781,7 @@ class FlowTokenizer(nn.Module):
                     self.proj_cfg.low_lvl_repa_proj_chans,
                     self.proj_cfg.low_lvl_repa_out_chan,
                     self.proj_cfg.low_lvl_repa_out_chan,
-                    is_1d=True,
+                    proj_type="norm_first_force_conv",
                 )
 
             if self.sem_proj_is_multi:
@@ -1271,7 +1791,7 @@ class FlowTokenizer(nn.Module):
                         self.proj_cfg.sem_repa_proj_chans[i],
                         self.proj_cfg.sem_repa_out_chan,
                         self.proj_cfg.sem_repa_out_chan,
-                        is_1d=True,
+                        proj_type="norm_first_force_conv",
                     )
                     sem_z_proj.append(proj_)
             else:
@@ -1279,7 +1799,7 @@ class FlowTokenizer(nn.Module):
                     self.proj_cfg.sem_repa_proj_chans,
                     self.proj_cfg.sem_repa_out_chan,
                     self.proj_cfg.sem_repa_out_chan,
-                    is_1d=True,
+                    proj_type="norm_first_force_conv",
                 )
 
             self._repa_proj = nn.ModuleDict(
@@ -1291,7 +1811,7 @@ class FlowTokenizer(nn.Module):
 
     @staticmethod
     def _to_2d(x, hw: List[int]) -> None | Tensor:
-        if x is None:
+        if x is None or x.ndim == 4:
             return x
         else:
             return rearrange(x, "b (h w) ... -> b ... h w", h=hw[0], w=hw[1])
@@ -1302,16 +1822,16 @@ class FlowTokenizer(nn.Module):
             get_intermidates=self.low_lvl_cache_layers if self.training and self.use_repa else None,
         )
         # Cache low level features
-        self.z = low_lvl_out["intermidates"] if self.low_lvl_proj_is_multi else low_lvl_out["latent"]
+        self.z = low_lvl_out.get("intermidates") if self.low_lvl_proj_is_multi else low_lvl_out["latent"]
         return low_lvl_out
 
-    def _sem_decode(self, latent):
+    def _sem_decode(self, z, masks=None):
+        """Decode the input (pre-down-conv latent or latent) into semantic tokens."""
         sem_out = self.semantic_decoder(
-            latent,
+            z,
+            masks,
             get_intermidates=self.sem_cache_layers if (self.training and self.use_repa) else None,
         )
-        # Cache semantic features
-        self.sem_z = sem_out["intermidates"] if self.sem_proj_is_multi else sem_out["sem_tokens"]
         return sem_out
 
     @no_type_check
@@ -1324,139 +1844,194 @@ class FlowTokenizer(nn.Module):
             f"z and sem_z must be set before get_repa_feature but {self.z=} and {self.sem_z=}"
         )
 
-        to_2d = partial(self._to_2d, hw=self._hw)
-
         # Low-level feature distillation
+        # norm_first_force_conv projector outputs 2d features directly
         if self.low_lvl_proj_is_multi:
-            low_lvl_features = [to_2d(self._repa_proj["low_lvl_repa_proj"][i](feat)) for i, feat in enumerate(self.z)]
+            low_lvl_features = [
+                self._repa_proj["low_lvl_repa_proj"][i](feat, hw=self._hw) for i, feat in enumerate(self.z)
+            ]
         else:
-            low_lvl_features = to_2d(self._repa_proj["low_lvl_repa_proj"](self.z))
+            low_lvl_features = self._repa_proj["low_lvl_repa_proj"](self.z, hw=self._hw)
 
         # Semantic feature distillation
         if self.sem_proj_is_multi:
-            sem_features = [to_2d(self._repa_proj["sem_repa_proj"][i](feat)) for i, feat in enumerate(self.sem_z)]
+            sem_features = [self._repa_proj["sem_repa_proj"][i](feat, hw=self._hw) for i, feat in enumerate(self.sem_z)]
         else:
-            sem_features = to_2d(self._repa_proj["sem_repa_proj"](self.sem_z))
+            sem_features = self._repa_proj["sem_repa_proj"](self.sem_z, hw=self._hw)
 
         return low_lvl_features, sem_features
 
-    def _decode_to_sem(self, x=None, latent=None, hw: Sequence | None = None):
-        mask = None
-        if x is not None:
-            hw = torch.as_tensor(x.shape[-2:]) // self.total_resolutions
-            hw = hw.tolist()
-            low_lvl_out = self._encode_latent(x)
-            latent = low_lvl_out["latent"]
-            mask = low_lvl_out["mask"]
-        elif latent is not None:
-            assert latent.ndim == 3, f"latent must be of shape (bs, n, dim), but got {latent.shape=}"
-            hw_l = latent.shape[1]
-            if hw is None:
-                hw = to_2tuple(int(math.sqrt(hw_l)))
-        else:
-            raise ValueError("Either x or latent must be provided")
+    def _decode_to_sem(
+        self,
+        latent=None,
+        z=None,
+        masks: list[Tensor] | Tensor | None = None,
+        hw: Sequence | None = None,
+        no_cache: bool = False,
+    ):
+        if latent is None or z is None:
+            raise ValueError("Both latent and z must be provided")
 
         # To semantic tokens
-        sem_out = self._sem_decode(latent)
+        # Use z for semantic decoder
+        if z.ndim == 4:
+            # Flatten to 1D sequence if necessary is handled by semantic decoder
+            pass
+
+        sem_out = self._sem_decode(z, masks)
         sem_tokens = sem_out["sem_tokens"]
-        # sem_proj_out = sem_out["sem_proj_out"]
 
-        if self.st_skip_semantic_decoder:
-            assert latent.shape[1] == sem_tokens.shape[1], f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
-            lat_sem_tokens = torch.cat([latent, sem_tokens], dim=-1)
-            sem_tokens = self.st_cat_lin(lat_sem_tokens)  # input into the cnn decoder
+        # if self.st_skip_semantic_decoder:
+        #     assert latent is not None, "latent must be provided for skip connection"
+        #     assert latent.shape[1] == sem_tokens.shape[1], f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
+        #     lat_sem_tokens = torch.cat([latent, sem_tokens], dim=-1)
+        #     sem_tokens = self.st_cat_lin(lat_sem_tokens)  # input into the cnn decoder
 
-        # To 2d
-        assert hw is not None, "hw must be provided"
-        assert math.prod(hw) == latent.shape[1], (
-            f"hw {hw} product does not match latent shape {latent.shape} and total_resolutions={self.total_resolutions}"
-        )
+        # To 2d if masks is None
+        # if sem_tokens.ndim == 3 and masks is None:
+        #     assert hw is not None, "hw must be provided"
+        #     assert math.prod(hw) == sem_tokens.shape[1], (
+        #         f"hw {hw} product does not match latent shape {sem_tokens.shape} and total_resolutions={self.total_resolutions}"
+        #     )
+        #     # for cache into self.sem_z
+        #     sem_tokens = self._to_2d(sem_tokens, hw)
 
-        # output of 2d shape
-        latent, sem_tokens, mask = map(partial(self._to_2d, hw=hw), (latent, sem_tokens, mask))
-        out = dict(latent=latent, sem_tokens=sem_tokens, mask=mask)
+        # Cache semantic features
+        if not no_cache:
+            self.sem_z = sem_out.get("intermidates") if self.sem_proj_is_multi else sem_tokens
+
+        out = dict(latent=latent, sem_tokens=sem_tokens, z=z)
         return out
 
-    def encode(self, x):
-        out = self._encode_latent(x)
+    def encode(self, x: Tensor, use_quantizer: bool | None = None) -> dict[str, Any]:
+        out = dict(self._encode_latent(x))
+        latent = cast(Tensor, out["latent"])
+
+        h_pre_quant = self.pre_quant_conv(latent) if hasattr(self, "pre_quant_conv") else latent
+        h_pre_quant = _to_memformat_channels_last(h_pre_quant)
+        maybe_q = self.apply_quantizer(h_pre_quant, use_quantizer=use_quantizer)
+
+        q_info: dict[str, Any] | None = None
+        if isinstance(maybe_q, tuple):
+            latent_q, q_loss, q_info = maybe_q
+        else:
+            latent_q = maybe_q
+            q_loss = torch.tensor(0.0, device=latent.device, dtype=latent.dtype)
+
+        latent_q = self.latent_aug(latent_q)
+        out["latent"] = latent_q
+        out["q_loss"] = q_loss
+        out["q_info"] = q_info
         return out
 
     def decode(
         self,
-        x: torch.Tensor,
         latent: torch.Tensor,
-        inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
+        inp_shape: Annotated[Union[torch.Size, tuple], "bs,c,h,w"],
+        x: torch.Tensor | None = None,
+        z: torch.Tensor | None = None,
         mode: Literal["train", "sample"] = "train",
         clamp=False,
         ema_model: Optional[Self] = None,
-        sample_kwargs: dict = dict(
-            ## tim sample kwargs
-            # num_steps=8,
-            # stochasticity_ratio=0.0,
-            # sample_type="transition",
-            # cfg_scale=1.0,
-            ## fm sample kwargs
-            # sampling_method="Euler",
-            # diffusion_form="SBDM",
-            # diffusion_norm=1.0,
-            # last_step="Mean",
-            # last_step_size=0.04,
-            # num_steps=250,
-            # temperature=1.0,
-            ## manually sampling kwargs
-            # sample_steps=10,
-            # schedule='linear',
-            # cfg=2.0,
-            # cfg_interval=None,
-            # tbar=True,
-        ),
+        sample_kwargs: dict | None = None,
         ret_trajectory=False,
-    ):
+    ) -> dict:
         """
         Low level encoded latent is decoded into semantic tokens, and then decoded into the reconstructed image or
         velocity. Output dict of losses, recon, semantic tokens and projected semantic tokens.
+
+        If is pixel decoder is generative diffusion heads, sample_kwargs should be set as a dict:
+            # tim sample kwargs
+            num_steps=8,
+            stochasticity_ratio=0.0,
+            sample_type="transition",
+            cfg_scale=1.0,
+            # fm sample kwargs
+            sampling_method="Euler",
+            diffusion_form="SBDM",
+            diffusion_norm=1.0,
+            last_step="Mean",
+            last_step_size=0.04,
+            num_steps=250,
+            temperature=1.0,
+            # manually sampling kwargs
+            sample_steps=10,
+            schedule='linear',
+            cfg=2.0,
+            cfg_interval=None,
+            tbar=True
         """
-        # HW and EMA
-        ema_decoder = ema_model.pixel_decoder if ema_model is not None else None
-        hw = (torch.as_tensor(x.shape[-2:]) // self.total_resolutions).tolist()
-        self._hw = hw
 
         # Decode to semantic tokens
-        sem_decoder_out = self._decode_to_sem(latent=latent, hw=hw)
-        h_sem = sem_decoder_out["sem_tokens"]  # as conditions
+        hw = (
+            torch.tensor(inp_shape[-2:])  # type: ignore
+            // self.total_resolutions
+            // self.semantic_decoder.patch_size
+            * self.semantic_decoder.out_patch_size
+        ).tolist()
+        self._hw = hw
 
-        # To flow UViT or head
-        sample_kwargs = self.sampling_options_default | sample_kwargs
-
-        if mode == "sample":
-            # init the x as the noise
-            logger.trace(f"[flow tokenizer]: init the x with gaussian - mode = {mode}")
-            x_inp = torch.randn_like(x)
-        elif mode == "train":
-            x_inp = x
+        if self.sem_pix_decoder_type == "unified":
+            sem_decoder_out = self._decode_to_sem(latent=latent, z=z, hw=hw)
+            h = sem_tokens = sem_decoder_out["sem_tokens"]  # as conditions if is diffusion decoder
         else:
-            raise ValueError(f"[flow tokenizer]: mode {mode} not supported")
+            # is seperated sematic decoder, do not involved with decoding.
+            if self._use_repa_loss:
+                sem_decoder_out = self._decode_to_sem(latent=latent, z=z, hw=hw)
+                sem_tokens = sem_decoder_out["sem_tokens"]
+            else:
+                sem_tokens = None
+            h = latent
 
-        # Flow decoder
-        out = self.pixel_decoder(
-            x=x_inp,
-            h=h_sem,
-            inp_shape=inp_shape,
-            mode=mode,
-            clamp=clamp,
-            ema_model=ema_decoder,
-            sample_kwargs=sample_kwargs,
-            ret_trajectory=ret_trajectory,
-        )
+        if self._is_flow_matching_pix_decoder:
+            # To flow UViT or head
+            sample_kwargs = self.sampling_options_default | (sample_kwargs or {})
+            # HW and EMA
+            ema_decoder = ema_model.pixel_decoder if ema_model is not None else None
 
-        # Form the output
-        recon, loss_dict = out
-        output = dict(recon=recon, losses=loss_dict, sem_tokens=h_sem)
+            if mode == "sample":
+                # init the x as the noise
+                logger.trace(f"[flow tokenizer]: init the x with gaussian - mode = {mode}")
+                x_inp = torch.randn_like(x)
+            elif mode == "train":
+                x_inp = x
+            else:
+                raise ValueError(f"{mode=} is invalid")
+
+            # Flow decoder or deterministic decoder
+            out = self.pixel_decoder(
+                x=x_inp,
+                h=h,
+                inp_shape=inp_shape,
+                mode=mode,
+                clamp=clamp,
+                ema_model=ema_decoder,
+                sample_kwargs=sample_kwargs,
+                ret_trajectory=ret_trajectory,
+            )
+
+            # Form the output
+            recon, loss_dict = out
+            output = dict(recon=recon, losses=loss_dict, sem_tokens=sem_tokens)
+        else:
+            # is deterministic decoder
+            recon = self.pixel_decoder(
+                x=x,
+                latent=h,
+                inp_shape=inp_shape,
+                mode=mode,
+                clamp=clamp,
+                ema_model=ema_model,
+                sample_kwargs=sample_kwargs,
+                ret_trajectory=ret_trajectory,
+            )
+            output = dict(recon=recon, losses=None, sem_tokens=sem_tokens)
         return output
 
     def forward(
         self,
         input: torch.Tensor,
+        *,
         dec_mode: Literal["train", "sample"] = "train",
         clamp: bool = False,
         ema_model: Optional[Self] = None,
@@ -1465,13 +2040,14 @@ class FlowTokenizer(nn.Module):
     ):
         if input.shape[1] > 512:
             logger.error(f"input shape {input.shape} is too large.")
-            raise
+            raise ValueError("input shape is too large.")
 
         enc_out = self.encode(input)
         dec_out = self.decode(
-            input,
             enc_out["latent"],
             input.shape,
+            input,
+            enc_out["z"],
             dec_mode,
             clamp,
             ema_model,
@@ -1480,15 +2056,43 @@ class FlowTokenizer(nn.Module):
         )
 
         # Compatible with trainer
-        out = (
-            dec_out["recon"],
-            dict(
-                flow_loss=dec_out["losses"]["flow_loss"],
-                q_loss=torch.tensor(0.0).to(input),
-            ),
-            None,
+        flow_loss = dec_out["losses"]["flow_loss"] if self._is_flow_matching_pix_decoder else None
+        recon = dec_out["recon"]
+        return {"recon": recon, "flow_loss": flow_loss, **enc_out}
+
+    def encode_ijepa(self, x, jepa_masks: list[Tensor] | None = None) -> Tensor:
+        hw = (
+            torch.tensor(x.shape[-2:])  # type:ignore
+            // self.total_resolutions
+            * self.semantic_decoder.out_patch_size
+            // self.semantic_decoder.patch_size
         )
-        return out
+        enc_out = self.encode(x)
+        latent = enc_out["latent"]
+        z = enc_out["z"]
+
+        sem_decoder_out = self._decode_to_sem(latent=latent, z=z, masks=jepa_masks, hw=hw.tolist(), no_cache=True)
+        sem_tokens = sem_decoder_out["sem_tokens"]
+
+        return sem_tokens
+
+    def encode_lejepa(self, x) -> Tensor:
+        low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
+        z = low_lvl_out["z"]
+        sem_out = self.semantic_decoder(z, masks=None, get_intermidates=None)
+        cls_tokens = sem_out.get("cls_tokens")
+        if cls_tokens is None:
+            raise ValueError("semantic_decode is initialized without class token.")
+        return cls_tokens.squeeze(1)
+
+    def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
+        low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
+        z = low_lvl_out["z"]
+        sem_out = self.semantic_decoder(z, masks=None, get_intermidates=None)
+        cls_tokens = sem_out.get("cls_tokens")
+        if cls_tokens is None:
+            raise ValueError("semantic_decode is initialized without class token.")
+        return cls_tokens.squeeze(1)
 
     def load_pretrained(self, path: str):
         import accelerate
@@ -1516,22 +2120,32 @@ class FlowTokenizer(nn.Module):
                     )
 
     @classmethod
-    def create_model(cls, cfg, flow_type: str, decoder_type: str):
+    @function_config_to_basic_types
+    def create_model(cls, **overrides):
         """Create a FlowTokenizer model from configuration."""
         # Update the defaults
-        tokenizer_cfg_default = create_default_mingtok_cfg(flow_type, decoder_type)
-        if cfg is not None:
-            cfg = OmegaConf.merge(tokenizer_cfg_default, cfg)
-        else:
-            cfg = tokenizer_cfg_default
-
+        cfg = create_default_mingtok_pretrained_cfg()
+        if overrides is not None:
+            cfg = OmegaConf.merge(cfg, overrides)
         model = cls(cfg)
         return model
 
-    def get_last_layer(self):
-        """Get last layer's weights for GAN training"""
-        # TODO: add flowhead get_last_layer method.
-        return self.pixel_decoder.decoder.get_last_layer()
+    def get_last_layer(self) -> Tensor:
+        """Get last layer's weights for GAN training."""
+        get_last_layer = getattr(self.pixel_decoder, "get_last_layer", None)
+        get_last_layer = cast(Callable[[], Tensor], get_last_layer)
+        if callable(get_last_layer):
+            return get_last_layer()
+        return getattr(self.pixel_decoder, "decoder").get_last_layer()
+
+    def get_last_enc_layer(self):
+        return self.low_level_encoder.get_last_layer()
+
+    def init_weights(self):
+        self.low_level_encoder.init_weights()
+        self.semantic_decoder.init_weights()
+        self.pixel_decoder.init_weights()
+        logger.info("<cyan>[Mingtok]: init weights done.</cyan>")
 
 
 # * --- Test --- #
@@ -1543,7 +2157,7 @@ def test_flow_tokenizer():
     from src.data.litdata_hyperloader import ImageStreamingDataset, StreamingDataLoader
 
     tokenizer_cfg_default = create_default_mingtok_cfg("fm", "uvit")
-    tokenizer = FlowTokenizer(tokenizer_cfg_default).to("cuda", torch.bfloat16)
+    tokenizer = MingtokRSModel(tokenizer_cfg_default).to("cuda", torch.bfloat16)
     tokenizer.set_grad_checkpointing()
 
     from fvcore.nn import FlopCountAnalysis, flop_count_table, parameter_count_table
@@ -1717,11 +2331,150 @@ def test_decoder_flow_head():
     print("DecoderFlowHead test completed successfully!")
 
 
+def test_deterministic_mingtokrs_tokenizer():
+    """Test the full mingtokrs tokenizer with forward-backward pass."""
+    from fvcore.nn import parameter_count_table, parameter_count
+
+    cfg = create_default_mingtok_pretrained_cfg()
+    print("\n" + "=" * 80)
+    print("Testing MingtokRS Tokenizer")
+    print("=" * 80)
+
+    # Initialize full model
+    print("\n[1/4] Initializing model...")
+    print("-" * 80)
+
+    model = MingtokRSModel(cfg).to("cuda", torch.bfloat16)
+    model.train()
+
+    # import re
+
+    # re_p = [
+    #     "patch_embed",
+    #     "pe",
+    #     "norm",
+    #     "ls1",
+    #     "ls2",
+    #     "layer_scale",
+    #     "norm1",
+    #     "norm2",
+    #     "q_norm",
+    #     "k_norm",
+    # ]
+    # re_p = [re.compile(p) for p in re_p]
+    # for n, p in model.named_parameters():
+    #     if p.requires_grad and any([rp.search(n) for rp in re_p]):
+    #         print(n)
+
+    for n, p in model.named_parameters():
+        if p.isnan().any() or p.isinf().any():
+            print(f"{n} has nan/inf values")
+            raise
+        else:
+            print(f"{n} value range: {p.min()} - {p.max()}")
+
+    exit(0)
+    print(f"Total resolutions: {model.total_resolutions}")
+    print(f"Sem-pix decoder type: {model.sem_pix_decoder_type}")
+    print(f"Use REPA: {model.use_repa}")
+    print(f"Pretrained tasks: {model.pretrained_task}")
+    print(parameter_count_table(model))
+    print("Model initialized successfully!")
+
+    # Test forward pass
+    print("\n[2/4] Testing forward pass...")
+    print("-" * 80)
+    batch_size = 3
+    img_size = 512
+    x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
+
+    with torch.no_grad():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            out, info, _ = model(x)
+
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {out.shape}")
+    print(f"Loss keys: {list(info.keys())}")
+    print("Forward pass successful!")
+
+    # Test backward pass
+    print("\n[3/4] Testing backward pass...")
+    print("-" * 80)
+    x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out, info, _ = model(x)
+
+    # Get the first loss for backward
+    loss = out.mean()
+    print(f"Loss value: {loss.item():.4f}")
+    loss.backward()
+
+    # Check gradients
+    for n, p in model.named_parameters():
+        if p.requires_grad and p.grad is None:
+            print(f"name {n} has no grad")
+
+    # Test encode_ijepa method
+    print("\n[4/4] Testing encode_ijepa method...")
+    print("-" * 80)
+    from src.stage1.self_supervised import MaskCollator
+
+    # model.eval()
+    x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
+
+    # Test without masks
+    with torch.no_grad():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            sem_tokens = model.encode_ijepa(x)
+
+    print(f"Input shape: {x.shape}")
+    print(f"Semantic tokens shape (no masks): {sem_tokens.shape}")
+    print(f"Semantic tokens dtype: {sem_tokens.dtype}")
+    print(f"Semantic tokens range: [{sem_tokens.min().item():.4f}, {sem_tokens.max().item():.4f}]")
+
+    # Test with masks
+    mask_collator = MaskCollator(
+        input_size=(img_size, img_size),
+        patch_size=16,
+        enc_mask_scale=[0.8, 1.0],
+        pred_mask_scale=(0.15, 0.2),
+        aspect_ratio=(0.75, 1.5),
+        nenc=1,
+        npred=4,
+        min_keep=10,
+        allow_overlap=False,
+    )
+    x_masked, masks_enc, masks_pred = mask_collator(x)
+    masks_enc = [m.to(x.device, torch.int32) for m in masks_enc]
+
+    print(f"\nMask info:")
+    print(f"  Number of encoder masks: {len(masks_enc)}")
+    print(f"  Encoder mask shapes: {[m.shape for m in masks_enc]}")
+    print(f"  Number of prediction masks: {len(masks_pred)}")
+
+    with torch.no_grad():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            sem_tokens_masked = model.encode_ijepa(x, jepa_masks=masks_enc)
+
+    print(f"\nSemantic tokens shape (with masks): {sem_tokens_masked.shape}")
+    print(f"Semantic tokens dtype: {sem_tokens_masked.dtype}")
+    print(f"Semantic tokens range: [{sem_tokens_masked.min().item():.4f}, {sem_tokens_masked.max().item():.4f}]")
+    print("encode_ijepa method test successful!")
+
+    repa_feats = model.get_repa_feature()
+    print(repa_feats)
+    print("\n" + "=" * 80)
+    print("All tests passed successfully!")
+    print("=" * 80 + "\n")
+
+
 if __name__ == "__main__":
     """
-    MODEL_COMPILED=0 CUDA_VISIBLE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
+    MODEL_COMPILED=0 CUDA_VISIBLE_DEVICES=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
     """
 
     with logger.catch():
         # test_decoder_flow_head()
-        test_flow_tokenizer()
+        # test_flow_tokenizer()
+        test_deterministic_mingtokrs_tokenizer()

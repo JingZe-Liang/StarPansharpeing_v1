@@ -290,9 +290,9 @@ def _visualize_single_sample(
         items.append((agl, "AGL (Height)", "jet", False))
 
     # Disparity
-    items.append((dsp_gt, "DSP (GT)", "RdBu_r", False))
+    items.append((dsp_gt, "DSP (GT)", "RdBu", False))
     if dsp_pred is not None:
-        items.append((dsp_pred, "DSP (Pred)", "RdBu_r", False))
+        items.append((dsp_pred, "DSP (Pred)", "RdBu", False))
 
     # Semantic Segmentation
     if left_seg is not None:
@@ -389,7 +389,7 @@ def _visualize_single_sample(
                 #     plot_kwargs["vmax"] = limit
 
                 # Handle mask visualization - use separate variable to avoid overwriting cmap
-                cmap_name = plot_kwargs.get("cmap", "RdBu_r")
+                cmap_name = plot_kwargs.get("cmap", "RdBu")
                 if isinstance(cmap_name, str):
                     try:
                         # Modern matplotlib (3.5+)

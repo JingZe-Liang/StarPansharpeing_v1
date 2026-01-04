@@ -356,7 +356,7 @@ class AttnBlock(nn.Module):
         self.act_checkpoint = act_checkpoint
         self.use_residual_factor = use_residual_factor
         if self.use_residual_factor:
-            self.residual_factor = nn.Parameter(torch.zeros(1, in_channels, 1, 1))
+            self.residual_factor = nn.Parameter(torch.ones(1, in_channels, 1, 1) * 1e-5)
 
     def forward_fn_math(self, x: torch.Tensor) -> torch.Tensor:
         # TODO (freda): Consider reusing implementations in Attn `imaginaire`,
@@ -647,6 +647,9 @@ class NattenAttention(nn.Module):
 
 def make_attn(in_channels, attn_type="vanilla", act_checkpoint=False):
     logger.debug(f"making attention of type '{attn_type}' with {in_channels=}")
+
+    if attn_type is None:
+        return nn.Identity(in_channels)
 
     if attn_type.startswith("attn"):
         sdpa = attn_type.endswith("sdpa")

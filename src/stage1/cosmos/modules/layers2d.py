@@ -469,7 +469,6 @@ class Decoder(nn.Module):
         block_in = channels * channels_mult[self.num_resolutions - 1]
         curr_res = (resolution // patch_size) // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        logger.info("Working with z of shape {}.".format(self.z_shape))
 
         # z to block_in
         self.conv_in = torch.nn.Conv2d(

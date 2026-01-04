@@ -20,6 +20,7 @@ import time
 from mmengine.registry import Registry, build_from_cfg
 from termcolor import colored
 from torch.utils.data import DataLoader
+from torch.utils.data.dataloader import default_collate
 
 from src.stage2.generative.Sana.diffusion.data.transforms import get_transform
 from src.stage2.generative.Sana.diffusion.utils.logger import get_root_logger
@@ -48,6 +49,33 @@ def get_data_root_and_path(data_dir):
     return DATA_ROOT, os.path.join(DATA_ROOT, data_dir)
 
 
+def collate_fn_sana():
+    """
+    Sana专用的collate函数,处理元组格式的样本并过滤None值。
+
+    Sana dataset返回格式:
+    (img, caption, attention_mask, data_info, idx, caption_type, dataindex_info, clipscore)
+    """
+    def inner(batch: list):
+        # 过滤None样本
+        orig_len = len(batch)
+        batch = [sample for sample in batch if sample is not None]
+
+        if len(batch) == 0:
+            return None
+        elif len(batch) < orig_len:
+            logger = get_root_logger()
+            logger.warning(
+                f"Skipped {orig_len - len(batch)} None samples in batch. "
+                f"Remaining: {len(batch)}/{orig_len}"
+            )
+
+        # 使用default_collate处理元组格式
+        return default_collate(batch)
+
+    return inner
+
+
 def build_dataset(cfg, resolution=224, **kwargs):
     logger = get_root_logger()
 
@@ -73,10 +101,14 @@ def build_dataset(cfg, resolution=224, **kwargs):
 
 
 def build_dataloader(dataset, batch_size=256, num_workers=4, shuffle=True, **kwargs):
+    if "collate_fn" not in kwargs:
+        kwargs["collate_fn"] = collate_fn_sana()
+
     if "batch_sampler" in kwargs:
         dataloader = DataLoader(
             dataset,
             batch_sampler=kwargs["batch_sampler"],
+            collate_fn=kwargs.get("collate_fn"),
             num_workers=num_workers,
             pin_memory=True,
         )

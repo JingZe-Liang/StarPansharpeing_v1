@@ -29,7 +29,7 @@ try:
 except ImportError:
     __url = "https://github.com/nil0x9/flash-muon"
     _flash_muon_cuda_available = False
-    print(
+    logger.debug(
         "Flash-Muon-CUDA not installed, "
         f"please install it from {__url} if you want to use the cuda kernel ns optimization"
     )

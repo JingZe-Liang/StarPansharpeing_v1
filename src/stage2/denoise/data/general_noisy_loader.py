@@ -17,16 +17,14 @@ from torch import Tensor
 from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
-from src.data.hyperspectral_loader import (
+from src.data.litdata_hyperloader import (
     get_hyperspectral_dataloaders,
     get_hyperspectral_img_loaders_with_different_backends_v2,
-)
-from src.data.litdata_hyperloader import (
     IndexedCombinedStreamingDataset,
     SingleCycleStreamingDataset,
     _BaseStreamingDataset,
 )
-from src.stage2.denoise.utils.noise_adder import (
+from ..utils.noise_adder import (
     PredefinedNoiseType,
     UniHSINoiseAdderKornia,
 )
@@ -75,7 +73,7 @@ class GeneralNoisyLoader:
                 loader_kwargs["num_workers"] = 1
             self.dataset, self.dataloader = get_hyperspectral_dataloaders(**loader_kwargs)
         elif get_loader_type == "litdata":
-            raise
+            raise NotImplementedError
 
         self.is_neg_1_1 = loader_kwargs.get("to_neg_1_1", True)
         self.cache = cache

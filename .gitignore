@@ -27,6 +27,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+out/
 
 # Nodejs
 **/node_modules/**

@@ -288,7 +288,9 @@ class LearnableUpsampleBlock(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        self.up2 = nn.ConvTranspose2d(channels, channels, kernel_size=2, stride=2, bias=True)
+        up2_ = nn.Upsample(scale_factor=2)
+        conv_ = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=True)
+        self.up2 = nn.Sequential(up2_, conv_)
 
     def forward(self, x: torch.Tensor, target_size: Tuple[int, int]) -> torch.Tensor:
         h, w = x.shape[2], x.shape[3]
@@ -463,13 +465,17 @@ class UNetDecoder(nn.Module):
             stride_for_transpconv = encoder.strides[-s]
             block_type = block_types[s - 1]
             transpconvs.append(
-                nn.ConvTranspose2d(
-                    input_features_below,
-                    input_features_skip,
-                    stride_for_transpconv,
-                    stride_for_transpconv,
-                    bias=conv_bias,
+                nn.Sequential(
+                    nn.UpsamplingBilinear2d(scale_factor=2),
+                    nn.Conv2d(input_features_below, input_features_skip, 1, 1, 0, bias=conv_bias),
                 )
+                # nn.ConvTranspose2d(
+                #     input_features_below,
+                #     input_features_skip,
+                #     stride_for_transpconv,
+                #     stride_for_transpconv,
+                #     bias=conv_bias,
+                # )
             )
 
             # input features to conv is 2x input_features_skip (concat input_features_skip with transpconv output)
@@ -515,7 +521,7 @@ class UNetDecoder(nn.Module):
                 # add segmentation layer each layer or only at the last layer
                 seg_layers.append(
                     nn.Sequential(
-                        create_norm_act_layer("layernorm2d", input_features_skip, "gelu"),
+                        create_norm_act_layer("layernorm2d", input_features_skip, "silu"),
                         conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
                     )
                 )

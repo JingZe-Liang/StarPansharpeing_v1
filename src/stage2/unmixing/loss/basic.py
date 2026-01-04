@@ -1,9 +1,8 @@
 from typing import TypeAlias
 
-import einx
 import torch
 from beartype import beartype
-from jaxtyping import Array, Float
+from jaxtyping import Float
 from kornia.filters import laplacian
 from torch import Tensor
 

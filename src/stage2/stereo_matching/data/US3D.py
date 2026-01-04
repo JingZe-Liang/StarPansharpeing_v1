@@ -64,7 +64,8 @@ class US3DStreamingDataset(_BaseStreamingDataset):
     ):
         super().__init__(*args, **kwargs)
         self.to_neg_1_1 = to_neg_1_1
-        self.transforms = transforms if transforms is not None else self._get_default_transforms(augmentation_prob)
+        self.transforms = transforms  # if transforms is not None else self._get_default_transforms(augmentation_prob)
+        assert self.transforms is None
         self.resize = RandomResizedCrop(
             size=(output_size, output_size), scale=(0.8, 1.0), ratio=(3 / 4, 4 / 3), p=1, keepdim=True
         )
@@ -210,6 +211,8 @@ def __test_us3d_dataset():
 
     input_dir = data_cfg[data_place][mode]
     ds, dl = US3DStreamingDataset.create_dataloader(input_dir)
+    breakpoint()
+    print(f"length is {len(ds)}")
 
     # Print shapes
     print("Testing dataset and dataloader...")
@@ -237,6 +240,7 @@ def __test_us3d_dataset():
     dsp = sample["dsp"][0].cpu().numpy()  # (H, W)
     agl = sample["agl"][0].cpu().numpy()  # (H, W)
     seg = sample["cls"].cpu().numpy()  # (H, W)
+    breakpoint()
 
     # Transpose RGB images from (C, H, W) to (H, W, C)
     left = left.transpose(1, 2, 0)

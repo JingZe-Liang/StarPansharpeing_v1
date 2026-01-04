@@ -9,14 +9,14 @@ import math
 import os
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable, List, Optional, Tuple, Type, Union
+from typing import Callable, List, Optional, Tuple, Type, Union, cast, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from fvcore.nn import parameter_count
+from einx import get_at
 from jaxtyping import Float
 from loguru import logger
 from timm.layers import (
@@ -51,8 +51,13 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Annotated
 
-from src.utilities.network_utils import null_decorator_no_any_kwgs
+from src.utilities.network_utils import (
+    compile_decorator,
+    model_compiled_flag,
+    null_decorator_no_any_kwgs,
+)
 
+from .value_residual import mix_value_residual
 from .blocks import (
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,
@@ -83,12 +88,15 @@ except ImportError:
     JVP_FLASH_ATTN_ENABLED = False
 
 
-compile_forward_fn = os.getenv("MODEL_COMPILED", "1") in ("1", "true", "True")
-
-if compile_forward_fn:
-    _compile_decorator = torch.compile
-else:
-    _compile_decorator = null_decorator_no_any_kwgs
+# _transformer_compiled_flag = bool(int(os.getenv("TRANSFORMER_COMPILED", "0")))
+# _transformer_compile_decorator = (
+#     compile_decorator if (model_compiled_flag and _transformer_compiled_flag) else null_decorator_no_any_kwgs
+# )
+# if model_compiled_flag and not _transformer_compiled_flag:
+#     logger.warning(
+#         "torch.compile 已启用 (MODEL_COMPILED=1)，但 Transformer 默认不编译以避免 Dynamo/Triton 不兼容；"
+#         "如需启用请设置 TRANSFORMER_COMPILED=1。"
+#     )
 
 
 def _jvp_math_attention(
@@ -145,6 +153,7 @@ class Attention(Attention_):
         jvp=False,
         delta_t_aware: bool = False,
         rotate_half=False,
+        v_residual: bool = False,
     ):
         norm_layer = get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
         super().__init__(
@@ -181,12 +190,35 @@ class Attention(Attention_):
             self._all_attention_functions["jvp_flash_attention"] = _jvp_flash_attention
             self.attn_implem = "jvp_flash_attention"
 
+        self.v_residual: bool = v_residual
+        if self.v_residual:
+            self.v_residual_lamb1 = nn.Parameter(torch.tensor(0.5))
+            self.v_residual_lamb2 = nn.Parameter(torch.tensor(0.5))
+
+    def project_v(self, x: Tensor, *, delta_t_emb: Tensor | None = None) -> Tensor:
+        B, N, C = x.shape
+
+        if self.qkv is not None:
+            qkv = self.qkv(x)
+            qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            _, _, v = qkv.unbind(0)  # B, num_heads, N, head_dim
+        else:
+            v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+
+        if self.delta_t_aware and delta_t_emb is not None:
+            qkv_delta = self.qkv_delta_t(delta_t_emb)
+            _, _, vd = qkv_delta.reshape(B, -1, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            v = v + vd
+
+        return v
+
     def forward(
         self,
         x,
         rope: Tensor | None = None,
         attention_mask: BlockMask | Tensor | None = None,
         delta_t_emb: Tensor | None = None,
+        v_residual_v1: Tensor | None = None,
     ):
         B, N, C = x.shape
 
@@ -205,6 +237,11 @@ class Attention(Attention_):
             qkv_delta = self.qkv_delta_t(delta_t_emb)
             qd, kd, vd = qkv_delta.reshape(B, -1, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k, v = q + qd, k + kd, v + vd
+
+        if self.v_residual:
+            if v_residual_v1 is None:
+                raise ValueError("v_residual requires v_residual_v1")
+            v = mix_value_residual(v, v_residual_v1, self.v_residual_lamb1, self.v_residual_lamb2)
 
         # QK-norm
         q, k = self.q_norm(q), self.k_norm(k)
@@ -292,6 +329,7 @@ class GatedAttention(nn.Module):
         num_prefix_tokens: int = 0,
         attn_type: str = "sdpa",
         layer_idx: Optional[int] = None,
+        v_residual: bool = False,
         *,
         jvp=False,
     ):
@@ -357,7 +395,19 @@ class GatedAttention(nn.Module):
             self._all_attention_functions["jvp_flash_attention"] = _jvp_flash_attention
             self.attn_implem = "jvp_flash_attention"
 
+        self.v_residual: bool = v_residual
+        if self.v_residual:
+            self.v_residual_lamb1 = nn.Parameter(torch.tensor(0.5))
+            self.v_residual_lamb2 = nn.Parameter(torch.tensor(0.5))
+
+    def project_v(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        bsz, q_len, _ = hidden_states.size()
+        value_states = self.v_proj(hidden_states)
+        return value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+
     # Adapted from Qwen3Attention.forward
+    # @_transformer_compile_decorator
+    @compile_decorator
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -368,6 +418,7 @@ class GatedAttention(nn.Module):
         # use_cache: bool = False,
         # cache_position: Optional[torch.LongTensor] = None,
         rope: Annotated[torch.Tensor, "Rope embedding concat"] | None = None,  # necessary, but kept here for BC
+        v_residual_v1: torch.Tensor | None = None,
     ):
         bsz, q_len, _ = hidden_states.size()
 
@@ -417,6 +468,11 @@ class GatedAttention(nn.Module):
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         kv_len = key_states.shape[2]
+
+        if self.v_residual:
+            if v_residual_v1 is None:
+                raise ValueError("v_residual requires v_residual_v1")
+            value_states = mix_value_residual(value_states, v_residual_v1, self.v_residual_lamb1, self.v_residual_lamb2)
 
         ###### QK-norm
         if self.use_qk_norm:
@@ -514,6 +570,28 @@ class GatedAttention(nn.Module):
         return attn_output
 
 
+class _HC_Attention(nn.Module):
+    def __init__(
+        self,
+        norm: nn.Module,
+        attention: nn.Module,
+        layer_scale: nn.Module,
+        drop: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.norm = norm
+        self.attention = attention
+        self.layer_scale = layer_scale
+        self.drop = drop
+
+    def forward(self, x: Tensor, rope: Tensor | None = None, v_residual_v1: Tensor | None = None) -> Tensor:
+        x = self.norm(x)
+        x = self.attention(x, rope=rope, v_residual_v1=v_residual_v1)
+        x = self.layer_scale(x)
+        x = self.drop(x)
+        return x
+
+
 class AttentionBlock(nn.Module):
     def __init__(
         self,
@@ -535,6 +613,8 @@ class AttentionBlock(nn.Module):
         use_gate=False,
         layer_idx=None,
         jvp=False,
+        v_residual: bool = False,
+        hyperconnection_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.use_gate = use_gate
@@ -554,6 +634,7 @@ class AttentionBlock(nn.Module):
                 num_prefix_tokens=num_prefix_tokens,
                 attn_type=attn_type,
                 layer_idx=layer_idx,
+                v_residual=v_residual,
                 jvp=jvp,
             )
         else:
@@ -568,6 +649,7 @@ class AttentionBlock(nn.Module):
                 attn_type=attn_type,
                 num_prefix_tokens=num_prefix_tokens,
                 is_causal=is_causal,
+                v_residual=v_residual,
                 jvp=jvp,
             )
         self.ffn = SwiGLU(
@@ -591,17 +673,54 @@ class AttentionBlock(nn.Module):
             f"FFN {self.ffn.__class__.__name__} with fused_type={fused_type}"
         )
 
-        self._forward_type = "attention_block"
+        self._forward_type = "attention_block" if hyperconnection_kwargs is None else "attention_block_mhc"
 
-    @_compile_decorator
-    def _forward_attention_block(self, x, rope=None):
-        x = x + self.dp1(self.ls1(self.sa(self.norm1(x), rope=rope)))
+        # Hyper-connection mHC from Deepseek
+        self.hyperconnection_kwargs = hyperconnection_kwargs
+        if hyperconnection_kwargs is not None:
+            init_hc_fn = hyperconnection_kwargs.get("init_hc")
+            assert init_hc_fn is not None and layer_idx is not None
+            init_hc_kwargs = dict(
+                mhc=hyperconnection_kwargs.get("mhc", False),
+                sinkhorn_iters=hyperconnection_kwargs.get("sinkhorn_iters", 10),
+                sinkhorn_tau=hyperconnection_kwargs.get("sinkhorn_tau", 0.05),
+                mhc_h_res_proj=hyperconnection_kwargs.get("mhc_h_res_proj", "sinkhorn"),
+                ns_steps=hyperconnection_kwargs.get("ns_steps", 5),
+                ns_eps=hyperconnection_kwargs.get("ns_eps", 1e-7),
+                ns_coeffs=hyperconnection_kwargs.get("ns_coeffs", (3.0, -3.2, 1.2)),
+            )
+            self.hc_attn = init_hc_fn(
+                dim=dim,
+                branch=_HC_Attention(self.norm1, self.sa, self.ls1, self.dp1),
+                layer_index=layer_idx * 2,
+                **init_hc_kwargs,
+            )
+            self.hc_mlp = init_hc_fn(
+                dim=dim,
+                branch=nn.Sequential(self.norm2, self.ffn, self.ls2, self.dp2),
+                layer_index=layer_idx * 2 + 1,
+                **init_hc_kwargs,
+            )
+
+    def _forward_attention_block(self, x, rope=None, v_residual_v1: Tensor | None = None):
+        x = x + self.dp1(self.ls1(self.sa(self.norm1(x), rope=rope, v_residual_v1=v_residual_v1)))
         x = x + self.dp2(self.ls2(self.ffn(self.norm2(x))))
         return x
 
+    def _forward_attention_block_mhc(self, x, rope=None, v_residual_v1: Tensor | None = None):
+        x = self.hc_attn(x, rope=rope, v_residual_v1=v_residual_v1)
+        x = self.hc_mlp(x)
+        return x
+
     def forward(self, *args, **kwargs):
-        forward_fn = f"_forward_{self._forward_type}"
-        return getattr(self, forward_fn)(*args, **kwargs)
+        # forward_fn = f"_forward_{self._forward_type}"
+        # return getattr(self, forward_fn)(*args, **kwargs)
+        if self._forward_type == "attention_block":
+            return self._forward_attention_block(*args, **kwargs)
+        elif self._forward_type == "attention_block_mhc":
+            return self._forward_attention_block_mhc(*args, **kwargs)
+        else:
+            raise ValueError(f"Unknown forward type: {self._forward_type}")
 
 
 class AttentionBlockCondition(AttentionBlock):
@@ -695,8 +814,11 @@ class AttentionBlockCondition(AttentionBlock):
         z_1d = rearrange(z_2d_interp, "b c zh zw -> b (zh zw) c")
         return z_1d
 
-    @_compile_decorator
-    def _forward_condition_attention_block(self, x, c, t=None, inp_shape=None, rope=None):
+    # @_transformer_compile_decorator
+    @compile_decorator
+    def _forward_condition_attention_block(
+        self, x, c, t=None, inp_shape=None, rope=None, v_residual_v1: Tensor | None = None
+    ):
         if not self.fuse_t_z:
             # t, c not fused, should be passed both
             assert t is not None and c is not None
@@ -717,7 +839,7 @@ class AttentionBlockCondition(AttentionBlock):
         x = x * (1 + c_scale) + c_shift
 
         # Attention + FFN
-        x = x + self.dp1(self.ls1(self.sa(x, rope=rope)))
+        x = x + self.dp1(self.ls1(self.sa(x, rope=rope, v_residual_v1=v_residual_v1)))
         x = x + self.dp2(self.ls2(self.ffn(self.norm2(x))))
         return x
 
@@ -960,6 +1082,7 @@ class TransformerTokenizer(nn.Module):
         dropout=0.0,
         attention_dropout=0.0,
         norm_layer="layernorm",
+        patch_embeder_with_norm=False,
         drop_path=0.0,
         attn_type="sdpa",
         attn_blk_type="AttentionBlock",
@@ -970,7 +1093,7 @@ class TransformerTokenizer(nn.Module):
         rope_kwargs={"temperature": 10000.0},
         head: str | None = None,
         other_blk_kwargs: dict = {},
-        ## MAE masks
+        # MAE masks
         mask_train_ratio=0.0,  # MAE encoder
         mask_refill: bool = False,  # MAE decoder
         mask_drop_type: str = "mae",  # MAE drop, or no drop
@@ -978,22 +1101,25 @@ class TransformerTokenizer(nn.Module):
         is_causal: bool = False,
         patcher_type: str = "patch_embedder",
         with_cls_token: bool = False,
+        # mHC
+        hc_streams: int = -1,  # -1 means no HC, only residual connection
+        hc_implem: str = "naive",
+        hc_other_kwargs: dict = {"sinkhorn_iters": 10, "sinkhorn_tau": 0.05},
         # others
         patch_prog_dims: list[int] | None = None,
         unpatch_prog_dims: list[int] | None = None,
+        v_residual: bool = False,
     ):
         super().__init__()
+        self.patch_embed: nn.Module
         self.in_chan = in_chan
         self.embedded_dim = embed_dim
         self.n_reg_tokens: int = n_reg_tokens
+        self.v_residual: bool = v_residual
+        self.num_prefix_tokens: int = n_reg_tokens + int(with_cls_token)  # cls + reg
         self.grad_checkpointing: bool = False
 
-        # Add cls token and register token PE
-        # if pe_type.startswith("rope"):
-        #     self.pe_cls_reg = nn.Parameter(
-        #         torch.zeros(int(with_cls_token) + self.n_reg_tokens, embed_dim)
-        #     )
-
+        self._build_hyperconnection(hc_streams, hc_implem, hc_other_kwargs)
         self._build_patch_embedding(
             patcher_type,
             img_size,
@@ -1001,6 +1127,7 @@ class TransformerTokenizer(nn.Module):
             in_chan,
             embed_dim,
             patch_prog_dims,
+            get_norm_layer(norm_layer) if patch_embeder_with_norm else None,
         )
         self._build_projections(projections, in_chan, embed_dim)
         self._build_positional_embedding(
@@ -1027,14 +1154,65 @@ class TransformerTokenizer(nn.Module):
             dropout,
             attn_type,
             is_causal,
-            n_reg_tokens,
-            other_blk_kwargs,
+            self.num_prefix_tokens,
+            hc_other_kwargs,
+            {**other_blk_kwargs, "v_residual": v_residual},
         )
         self._build_cls_reg_tokens(n_reg_tokens, with_cls_token, embed_dim)
         self._build_head(head, out_chan, out_patch_size, norm_layer, embed_dim, unpatch_prog_dims)
         self._build_mask_tokens(mask_train_ratio, mask_refill, mask_drop_type, embed_dim)
         self._build_last_norm(last_norm, embed_dim)
-        self.init_weights()
+
+        # self.init_weights()
+
+    def _get_value_residual_input(self, block: nn.Module, x: Tensor) -> Tensor:
+        block_any = cast(Any, block)
+        if hasattr(block_any, "hc_attn"):
+            branch_input, _, _ = block_any.hc_attn.width_connection(x)
+            return block_any.norm1(branch_input)
+        return block_any.norm1(x)
+
+    def _compute_value_residual_v1(self, x: Tensor) -> Tensor:
+        if len(self.layers) == 0:
+            raise ValueError("v_residual requires depth >= 1")
+        first_block_any = cast(Any, self.layers[0])
+        x_in = self._get_value_residual_input(first_block_any, x)
+        if not hasattr(first_block_any, "sa") or not hasattr(first_block_any.sa, "project_v"):
+            raise ValueError("v_residual requires an AttentionBlock whose self-attention supports project_v()")
+        return first_block_any.sa.project_v(x_in)
+
+    def _build_hyperconnection(self, hc_streams: int = 1, implem: str = "naive", hc_other_kwargs: dict = {}):
+        self._hc_implem = implem
+        self._hc_streams = hc_streams
+        self.hc_other_kwargs = hc_other_kwargs
+
+        self.init_hc_fn = None
+        if hc_streams < 0:
+            self._use_hc = False
+            return
+        else:
+            assert hc_streams >= 1
+            assert implem in ("naive", "cuda")
+            logger.info(
+                f"Using <green>Hyperconnection</green> - this is experimental, with kwargs: "
+                f"{self._hc_implem=}, {self._hc_streams=}, {self.hc_other_kwargs=}"
+            )
+
+            self._use_hc = True
+
+            from .mHC import (
+                HyperConnections,
+                get_init_and_expand_reduce_stream_functions,
+                HyperConnectionsCUDA,
+                get_init_and_expand_reduce_stream_functions_cuda,
+            )
+
+            hc_cls, init_expand_reduce_fm = {
+                "naive": (HyperConnections, get_init_and_expand_reduce_stream_functions),
+                "cuda": (HyperConnectionsCUDA, get_init_and_expand_reduce_stream_functions_cuda),
+            }[implem]
+
+            self.init_hc_fn, self.hc_expand_stream, self.reduce_stream = init_expand_reduce_fm(hc_streams)
 
     def _build_patch_embedding(
         self,
@@ -1044,6 +1222,7 @@ class TransformerTokenizer(nn.Module):
         in_chan: int,
         embed_dim: int,
         patch_prog_dims: list[int] | None = None,
+        norm_layer: type[nn.Module] | None = None,
     ):
         # Patch embedding
         if patcher_type in ("patch_embedder", "progressive_patch_embedder"):
@@ -1051,7 +1230,7 @@ class TransformerTokenizer(nn.Module):
                 raise NotImplementedError("Bug here.")
 
                 assert patch_prog_dims is not None, "patch_prog_dims must be provided for progressive patch embedding"
-                self.patch_embed = AdaptiveProgressivePatchEmbedding(
+                patch_embed = AdaptiveProgressivePatchEmbedding(
                     img_size=(img_size, img_size),  # placeholder, not used
                     patch_size=patch_size,
                     progressive_dims=patch_prog_dims,
@@ -1060,16 +1239,18 @@ class TransformerTokenizer(nn.Module):
                     output_fmt="NLC",
                 )
             else:
-                self.patch_embed = AdaptivePatchEmbedding(
+                patch_embed = AdaptivePatchEmbedding(
                     img_size=(img_size, img_size),  # placeholder, not used
                     patch_size=patch_size,
                     in_chans=in_chan,
                     embed_dim=embed_dim,
                     output_fmt="NLC",
+                    norm_layer=norm_layer,
                 )
+            self.patch_embed = patch_embed
             self.patch_size = patch_size
-            self.grid_size = self.patch_embed.grid_size
-            self.n_patches = self.patch_embed.num_patches
+            self.grid_size = patch_embed.grid_size
+            self.n_patches = patch_embed.num_patches
         elif patcher_type == "linear":
             # Input tensor is 1D Tensor
             self.patch_embed = nn.Linear(in_chan, embed_dim)
@@ -1107,17 +1288,28 @@ class TransformerTokenizer(nn.Module):
         attn_type: str,
         is_causal: bool,
         num_prefix_tokens: int,
+        hc_kwargs: dict,
         other_blk_kwargs: dict,
     ):
         # Layers
         layers = []
         drop_path_ps = torch.linspace(0, drop_path, depth).tolist()
-        attn_cls = {
+        block_cls = {
             "AttentionBlock": AttentionBlock,
             "AttentionBlockCondition": AttentionBlockCondition,
         }[attn_blk_type]
+
+        if attn_blk_type == "AttentionBlock" and self.init_hc_fn is not None and self._use_hc:
+            hyperconnection_kwargs = {"init_hc": self.init_hc_fn, **hc_kwargs}
+            other_blk_kwargs.update(hyperconnection_kwargs=hyperconnection_kwargs)
+        elif self.init_hc_fn is not None:
+            logger.warning(f"Using block_type={attn_blk_type}, not support hyper connection, ignore hc_kwargs")
+
+        if other_blk_kwargs.get("v_residual", False):
+            logger.info("Using attention value residual")
+
         for i in range(depth):
-            block = attn_cls(
+            block = block_cls(
                 dim=embed_dim,
                 n_heads=num_heads,
                 qkv_bias=qkv_bias,
@@ -1150,8 +1342,8 @@ class TransformerTokenizer(nn.Module):
     ):
         # Positional embeddings
         self.pe_type: str = pe_type
-        self.rope: RotaryEmbeddingCat | RotaryEmbeddingDinoV3 | None
-        self.pe: nn.Parameter | None
+        self.rope: RotaryEmbeddingCat | RotaryEmbeddingDinoV3 | None = None
+        self.pe: nn.Parameter | None = None
         self._rope_is_mixed = False
         self.additional_pe = additional_pe
 
@@ -1161,15 +1353,15 @@ class TransformerTokenizer(nn.Module):
                 embed_dim,
                 grid_size=self.grid_size,
                 pe_interpolation=1.0,
-                # TODO: if the proxy task need cls token (e.g, constrastive learning)
-                # this will need to be changed
-                cls_token=False,  # self.n_reg_tokens > 0 or with_cls_token,
-                extra_tokens=0,  # self.n_reg_tokens + int(with_cls_token),
+                cls_token=self.num_prefix_tokens != 0,
+                extra_tokens=self.num_prefix_tokens,
             )
-            pe_2d = torch.as_tensor(pe_2d)
+            # `get_2d_sincos_pos_embed()` 来自 numpy，内部会用到 float64；
+            # 这里若不显式指定 dtype，会把可学习参数 `self.pe` 变成 float64，导致模型参数混合精度并触发 foreach/dynamo 的 dtype 检查错误。
+            pe_2d = torch.as_tensor(pe_2d, dtype=torch.float32)
             self.pe = nn.Parameter(pe_2d, requires_grad=True)
 
-        elif pe_type.startswith("rope"):
+        if pe_type.startswith("rope"):
             # rope, rope_cat, rope_mixed, rope_dinov3
             if pe_type == "rope":
                 _rope_type_create = "cat"
@@ -1181,17 +1373,18 @@ class TransformerTokenizer(nn.Module):
                 device="cuda",
                 dtype=torch.float32,
                 # from timm repo usage
-                in_pixels=rope_kwargs.get("in_pixels", False),
+                in_pixels=rope_kwargs.get("in_pixels", False) if _rope_type_create != "dinov3" else None,
                 temperature=rope_kwargs.get("rope_theta", 10000.0),
             )
+            if _rope_type_create == "dinov3":
+                _rope_kwargs.pop("in_pixels", None)
+
             if _rope_type_create == "mixed":
                 _rope_kwargs["depth"] = depth
                 self._rope_is_mixed = True
             logger.log("NOTE", f"rope kwargs: {_rope_kwargs}")
             with torch.autocast("cuda", enabled=False):
                 self.rope = create_rope_embed(_rope_type_create, **_rope_kwargs)
-        else:
-            self.rope, self.pe = None, None
 
     def _build_cls_reg_tokens(self, n_reg_tokens: int, with_cls_token: bool, embed_dim: int):
         # Register tokens
@@ -1219,12 +1412,13 @@ class TransformerTokenizer(nn.Module):
         self.head = nn.Identity()
         self.head_required: bool = False
         self.head_type: str | None = head
-        self.out_chan: int = out_chan
+        self.out_chan: int = 0 if out_chan is None else out_chan
         self.out_patch_size: int = out_patch_size
 
         if head is not None:
             assert out_chan is not None, "out_chan must be specified if head is used"
             assert out_patch_size is not None, "out_patch_size must be specified if head is used"
+            self.out_chan = out_chan
             self.head_required = True
             if head == "linear":
                 self.head = nn.Linear(embed_dim, out_chan * (out_patch_size**2))
@@ -1312,6 +1506,41 @@ class TransformerTokenizer(nn.Module):
         x = torch.cat([x[:, : self.n_reg_tokens], x_], dim=1)
         return x
 
+    def _jepa_apply_masks(self, x, masks: list[Tensor]):
+        all_x = []
+        for m in masks:
+            mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
+            all_x += [torch.gather(x, dim=1, index=mask_keep)]
+        return torch.cat(all_x, dim=0)
+
+    def _apply_ijepa_mask(self, x, masks, rope):
+        # Apply masks
+        prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
+
+        # Apply token masks
+        x = self._jepa_apply_masks(x, masks=masks)
+
+        # Re-attach prefix tokens
+        # Note: In IJEPA, typically we process multiple masks, so batch size increases.
+        # We need to repeat prefix tokens to match the new batch size.
+        # masks is a list of tensors, so effective batch size becomes B * len(masks)
+        # n_masks = len(masks)
+        # if n_masks > 1:
+        #     prefixed_tokens = prefixed_tokens.repeat_interleave(n_masks, dim=0)
+
+        x = torch.cat([prefixed_tokens, x], dim=1)
+
+        # Apply RoPE masks
+        if rope is not None:
+            rope_masked = []
+            for m in masks:
+                # m: [B, S_masked] indices
+                assert not self._rope_is_mixed, "mixed rope is not supported in JEPA training"
+                rope_masked += [get_at("[S] ropeD, B S_masked -> B 1 S_masked ropeD", rope, m)]
+            rope = torch.cat(rope_masked, dim=0)  # [B*n_masks, 1, S_masked, ropeD]
+
+        return x, rope
+
     def _get_naflex_rope_embed(
         self,
         B: int,
@@ -1373,7 +1602,7 @@ class TransformerTokenizer(nn.Module):
         with torch.autocast(device_type="cuda", enabled=False):
             rope_embeds = self.rope.get_embed(shape=grid_size)
         # logger.log("NOTE", f"create the rope embeds shaped as {rope_embeds.shape}")
-        return rope_embeds[None, None]  # [1, 1, seq_len, dim_h]
+        return rope_embeds  # [seq_len, dim_h]
 
     def _with_pos_embed(self, x, hw: tuple | None = None):
         hp, wp = hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
@@ -1382,26 +1611,25 @@ class TransformerTokenizer(nn.Module):
         )
         hp, wp = int(hp), int(wp)
         l_cur = hp * wp
-        if hasattr(self, "pe"):
-            # TODO: add naflex mode support
-            assert self.pe is not None, f"PE is None"
+        rope_ret = None
+
+        if getattr(self, "pe", None) is not None:
+            assert self.pe is not None, f"Positional encoding is None"
             pe_1lc = self.pe[None]
             if l_cur != self.n_patches:
-                # TODO: fix it using resample_abs_pos_embed_nhwc
                 pe_1lc = resample_abs_pos_embed(  # type: ignore
                     pe_1lc,  # (1, l, dim)
-                    num_prefix_tokens=0,  # self.n_reg_tokens,
+                    num_prefix_tokens=self.num_prefix_tokens,
                     new_size=(hp, wp),
                     old_size=self.grid_size,
                 )
             x = x + pe_1lc
-            return x, None  # x, and rope is None
-        elif self.pe_type.startswith("rope") and self.rope is not None:
+
+        if self.pe_type.startswith("rope") and self.rope is not None:
             # NOTE: not supports the naflex mode yet.
-            rope_embeds = self._get_standard_rope_embed((hp, wp), l_cur)
-            return x, rope_embeds
-        else:
-            return x, None
+            rope_ret = self._get_standard_rope_embed((hp, wp), l_cur)
+
+        return x, rope_ret
 
     def _forward_proj_out(self, x):
         # Encoder proj out: image -> backbone -> output proj
@@ -1427,11 +1655,18 @@ class TransformerTokenizer(nn.Module):
         else:
             raise ValueError(f"Unsupported input shape: {x.shape}")
 
-        x, rope = self._with_pos_embed(x, hw=(h // self.patch_size, w // self.patch_size))
         # Register tokens get no PE
         if self.n_reg_tokens > 0 and self.reg_tokens is not None:
             reg_tokens = self.reg_tokens.repeat(bs, 1, 1)  # (bs, n_reg, dim)
             x = torch.cat([reg_tokens, x], dim=1)  # (bs, n+n_reg, dim)
+
+        if self.with_cls_token:
+            assert getattr(self, "cls_token", None) is not None
+            cls_tokens = self.cls_token.repeat(bs, 1, 1)
+            x = torch.cat([cls_tokens, x], dim=1)
+
+        x, rope = self._with_pos_embed(x, hw=(h // self.patch_size, w // self.patch_size))
+
         return x, rope
 
     def forward_features(
@@ -1439,6 +1674,7 @@ class TransformerTokenizer(nn.Module):
         x: Float[Tensor, "b c h w or b l c"],
         hw: tuple[int, int] | None = None,
         get_intermidates: list[int] | None = None,
+        masks: list[Tensor] | Tensor | None = None,
     ):
         dtype = x.dtype
 
@@ -1461,11 +1697,22 @@ class TransformerTokenizer(nn.Module):
         # Embed patches
         x, rope = self._forward_get_tokens(x, hw)  # (bs, n+n_reg, dim)
 
+        # HC streaming embeddings
+        if self._use_hc:
+            x = self.hc_expand_stream(x)
+
+        if masks is not None:
+            if not isinstance(masks, list):
+                masks = [masks]
+            x, rope = self._apply_ijepa_mask(x, masks, rope)
+
         # Projection in
         x = self._forward_proj_in(x)
 
-        # Masks
-        x, mask, ids_restore = self._get_masked_x(x)
+        v_residual_v1: Tensor | None = None
+        if self.v_residual:
+            x = x.type(dtype)
+            v_residual_v1 = self._compute_value_residual_v1(x)
 
         # Layers
         intermidates = []
@@ -1486,32 +1733,40 @@ class TransformerTokenizer(nn.Module):
             # Blocks
             x = x.type(dtype)
             if self.grad_checkpointing and self.training:
-                x = checkpoint(blk, x, rope_, use_reentrant=False)
+                if self.v_residual:
+                    x = checkpoint(blk, x, rope_, v_residual_v1, use_reentrant=False)
+                else:
+                    x = checkpoint(blk, x, rope_, use_reentrant=False)
             else:
-                x = blk(x, rope=rope_)
+                if self.v_residual:
+                    x = blk(x, rope=rope_, v_residual_v1=v_residual_v1)
+                else:
+                    x = blk(x, rope=rope_)
 
             if i in index:
-                # TODO: will this return the cls or reg tokens?
-                intermidates.append(x[:, self.n_reg_tokens :])
+                # Only return spatial tokens, drop all prefix tokens (cls + reg)
+                intermidates.append(x[:, self.num_prefix_tokens :])
 
-        # Projection in
+        # HC reduce stream
+        if self._use_hc:
+            x = self.reduce_stream(x)
+
+        # Projection out
         x = self._forward_proj_out(x)
 
         # Norm
         x = x if self.last_norm is None else self.last_norm(x)
-        x_norm = x[:, self.n_reg_tokens :, :]  # remove reg tokens
+        cls_reg_tokens = x[:, : self.num_prefix_tokens]
+        x_norm = x[:, self.num_prefix_tokens :, :]  # remove all prefix tokens (cls + reg)
 
-        # fmt: off
         out = {
-            "x_norm_patch_tokens": x_norm,  # patch tokens
             "x_prenorm": x,
-            "x_reg_tokens": x[:, : self.n_reg_tokens, :] if self.n_reg_tokens > 0 else None,
+            "x_norm_patch_tokens": x_norm,  # spatial patch tokens
+            "cls_tokens": cls_reg_tokens[:, :1] if self.with_cls_token else None,
+            "reg_tokens": cls_reg_tokens[:, 1:] if self.n_reg_tokens > 0 else None,
             "grid_size": (gx_h, gx_w),
-            "mask": mask,
-            "ids_restore": ids_restore,
             "intermidates": intermidates if len(intermidates) > 0 else None,
         }
-        # fmt: on
         return out
 
     def _to_output(
@@ -1519,10 +1774,12 @@ class TransformerTokenizer(nn.Module):
         x,
         grid_size: tuple[int, int] | torch.Tensor | torch.Size,
         ret_2d_tokens=False,
-        out_shape=None,
+        out_shape: torch.Size | tuple | int | None = None,
     ):
         # Reshape into 2d img
         reshape_flag = self.head_required and ret_2d_tokens
+        if isinstance(out_shape, (torch.Size, tuple)):
+            out_shape = out_shape[1]
 
         def to_out_2d(x):
             if ret_2d_tokens:
@@ -1531,8 +1788,8 @@ class TransformerTokenizer(nn.Module):
                     "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
                     h=grid_size[0],
                     w=grid_size[1],
-                    p1=self.patch_size,
-                    p2=self.patch_size,
+                    p1=self.out_patch_size,
+                    p2=self.out_patch_size,
                 )
             return x
 
@@ -1544,7 +1801,7 @@ class TransformerTokenizer(nn.Module):
                 x = to_out_2d(x)
             elif self.head_type == "adaptive_linear":
                 assert out_shape is not None
-                x = self.head(x, out_shape * self.patch_size**2)
+                x = self.head(x, out_shape * self.out_patch_size**2)
                 x = to_out_2d(x)
             elif self.head_type == "adaptive_unpatcher":
                 # Adaptive unpatcher
@@ -1561,10 +1818,10 @@ class TransformerTokenizer(nn.Module):
         ret_all=True,
         get_intermidates: list[int] | None = None,
         out_shape: torch.Size | tuple | None = None,
-        mask: Optional[torch.Tensor] = None,
-        id_store: Optional[torch.Tensor] = None,
-    ):
-        out = self.forward_features(x, get_intermidates=get_intermidates)  # (bs, n, dim)
+        masks: list[Tensor] | Tensor | None = None,
+    ) -> Tensor | dict[str, Any]:
+        out = self.forward_features(x, get_intermidates=get_intermidates, masks=masks)  # (bs, n, dim)
+
         x = out["x_norm_patch_tokens"]
         x = self._to_output(
             x,
@@ -1577,19 +1834,22 @@ class TransformerTokenizer(nn.Module):
             return x
         else:
             out["head_out"] = x
-            return x, out
+            return out
 
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
 
-
-class TransformerTokenizerIJEPA(TransformerTokenizer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def _ijepa_mask_x(self, x, masks_x):
-        # Apply the IJEPA mask to the input tensor x
-        ...
+    def get_last_layer(self):
+        if self.head_type == "linear":
+            return self.head.weight
+        elif self.head_type == "norm_linear":
+            return self.head[0].weight
+        elif self.head_type == "adaptive_linear":
+            return self.head.linear.weight
+        elif self.head_type == "adaptive_unpatcher":
+            return self.head.unpatchers[-1].weight
+        else:
+            raise ValueError(f"Unsupported head type: {self.head_type} to get last layer's weight")
 
 
 if __name__ == "__main__":
@@ -1601,18 +1861,25 @@ if __name__ == "__main__":
             3,
             512,
             3,
+            patch_size=16,
             pe_type="rope_dinov3",
             drop_path=0.2,
             is_causal=False,
             mask_train_ratio=0.0,
+            additional_pe=True,
+            with_cls_token=True,
+            n_reg_tokens=4,
+            other_blk_kwargs={"use_gate": True},
+            # hc_streams=2,
+            # hc_implem="naive",
+            v_residual=True,
         )
         .cuda()
         .to(dtype=torch.bfloat16)
     )
     x = torch.randn(2, 3, 224, 224).cuda()
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        y, out = transformer(x, ret_2d_tokens=True, ret_all=True)
-    print("transformer ouput: ", y)
+        out = transformer(x, ret_2d_tokens=True, ret_all=True)
     for k, v in out.items():
         print("{:<20}: {}".format(k, str(v)))
     # pass

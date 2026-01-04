@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
+from collections.abc import Callable, Iterable
+from typing import Any
 import re
 
 import torch
@@ -79,11 +80,17 @@ def zeropower_via_newtonschulz6_diff_abc(
     if G.size(-2) > G.size(-1):
         X = X.mT
 
-    # Ensure spectral norm is at most 1
+    # Ensure spectral norm is at most 1 (standard Muon).
+    # TurboMuon-style AOL 预条件化通常不做这一步，而是依赖首轮 AOL rescaling 来稳定迭代。
     if not preconditioned:
-        X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)  # epsilon: 1e-7
-        steps = 4  # forcing 4 steps: see TurboMuon paper.
-    consts = muon_abcs[:steps] + max(steps - len(muon_abcs), 0) * muon_abcs[-1:]
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
+    else:
+        # TurboMuon reference implementation uses 4 iterations for the preconditioned variant.
+        steps = min(int(steps), 4)
+
+    # Coefficients: TurboMuon reference uses `ns_consts[-iter:]` (iter=4 => last 4).
+    # 为了对齐该行为，这里取末尾 `steps` 个系数；当 steps 超过可用系数时，用最后一个补齐。
+    consts = muon_abcs[-steps:] + max(steps - len(muon_abcs), 0) * muon_abcs[-1:]
 
     if use_triton:
         X = X.contiguous()
@@ -142,26 +149,31 @@ class MuonFSDP(Muon):
     def __init__(
         self,
         params: ParamsT,
-        distributed_mesh: Optional[Union[DeviceMesh, ProcessGroup]] = None,
+        distributed_mesh: DeviceMesh | ProcessGroup | None = None,
         # defaults
         lr: float = 0.01,
         mu: float = 0.95,
-        betas: Tuple[float, float] = (0.9, 0.95),
+        betas: tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.01,
         cautious_wd: bool = False,
         epsilon: float = 1e-8,
         nesterov: bool = False,
-        adjust_lr: Optional[str] = "rms_norm",
+        adjust_lr: str | None = "rms_norm",
         flatten: bool = True,  # NOTE: set to True by default if using 4D tensors, e.g., Conv2D weights
         use_triton: bool = False,
         use_preconditioned: bool = False,
-        newton_schulz_func: Optional[Callable] = zeropower_via_newtonschulz6_diff_abc,
+        newton_schulz_func: Callable | None = zeropower_via_newtonschulz6_diff_abc,
         muon_steps: int = 5,
         *,
         # muon and adamw/lion param group defaults
-        muon_params_defaults: dict[str, Any] = {},
-        oned_params_defaults: dict[str, Any] = {},
+        muon_params_defaults: dict[str, Any] | None = None,
+        oned_params_defaults: dict[str, Any] | None = None,
     ):
+        muon_params_defaults = {} if muon_params_defaults is None else muon_params_defaults
+        oned_params_defaults = {} if oned_params_defaults is None else oned_params_defaults
+        muon_abcs = gen_muon_consts(
+            MuonConfig(name="turbo_muon" if use_preconditioned else "su"),
+        )
         if newton_schulz_func is not None:
             newton_schulz_func = lambda G, epsilon: zeropower_via_newtonschulz6_diff_abc(
                 G=G,
@@ -169,6 +181,7 @@ class MuonFSDP(Muon):
                 use_triton=use_triton,
                 preconditioned=use_preconditioned,
                 epsilon=epsilon,
+                muon_abcs=muon_abcs,
             )
             logger.log(
                 "NOTE",
@@ -211,8 +224,8 @@ class MuonFSDP(Muon):
     @function_config_to_basic_types
     def clear_muon_adamw_params(
         cls,
-        named_params: Iterable | dict[str, torch.nn.Parameter],
-        ignored_keys_for_muon: tuple | list = (),  # for re to match
+        named_params: Iterable[tuple[str, torch.nn.Parameter]] | dict[str, torch.nn.Parameter],
+        ignored_keys_for_muon: tuple[str, ...] | list[str] = (),  # for re to match
         oned_param_algo: str = "lion",
     ):
         muon_params = []

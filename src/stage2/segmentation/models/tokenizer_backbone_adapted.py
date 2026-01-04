@@ -34,10 +34,10 @@ def _create_default_cfg():
         tokenizer=dict(
             cnn_cfg=dict(
                 model=dict(
-                    resolution=512,
+                    resolution=1024,
                     in_channels=512,
                     out_channels=512,
-                    z_channels=512,
+                    z_channels=768,
                     latent_channels=32,
                     channels=128,
                     channels_mult=[2, 4, 4],
@@ -48,6 +48,7 @@ def _create_default_cfg():
                     patch_size=1,
                     block_name="res_block",
                     norm_type="rmsnorm2d",
+                    act_type="silu",
                     norm_groups=32,
                     adaptive_mode="interp",
                     downsample_kwargs=dict(padconv_use_manually_pad=False),
@@ -59,42 +60,35 @@ def _create_default_cfg():
                 dino_feature_dim=1024,
             ),
             trans_enc_cfg=dict(
-                embed_dim=1024,
-                depth=12,
+                embed_dim=1152,
+                depth=24,
                 num_heads=16,
                 mlp_ratio=4.0,
                 qkv_bias=True,
                 patch_size=2,
-                norm_layer="layernorm",
+                norm_layer="flarmsnorm",
                 pos_embed="learned",
                 rope_type="axial",
                 pos_embed_grid_size=[32, 32],
                 img_size=32,
-                in_chans=512,
-                out_chans=512,
-                unpatch_size=1,
-                reg_tokens=0,
-            ),
-            trans_dec_cfg=dict(
-                embed_dim=1024,
-                depth=12,
-                num_heads=16,
-                mlp_ratio=4.0,
-                qkv_bias=True,
-                patch_size=1,
-                norm_layer="layernorm",
-                pos_embed="learned",
-                rope_type="axial",
-                pos_embed_grid_size=[32, 32],
-                img_size=32,
-                in_chans=512,
-                out_chans=512,
+                in_chans=768,
+                out_chans=768,
                 unpatch_size=2,
-                reg_tokens=0,
+                reg_tokens=4,
+                attn_type="gated",
             ),
+            trans_dec_cfg=None,
             distill_cfg=dict(
                 dino_feature_dim=1024,
                 semantic_feature_dim=1024,
+                cache_layers=dict(
+                    low_level=[0, 1, 2, -1],
+                    semantic=[5, 11, 17, 23],
+                ),
+            ),
+            hybrid_tokenizer_cfg=dict(
+                latent_bottleneck_type="before_semantic",
+                latent_straight_through_skip=True,
             ),
         ),
         tokenizer_feature=dict(
@@ -107,7 +101,7 @@ def _create_default_cfg():
             drop_path_rate=0.3,
             with_cffn=True,
             cffn_ratio=0.25,
-            deform_num_heads=16,
+            deform_num_heads=8,
             deform_ratio=0.5,
             add_vit_feature=True,
             use_extra_extractor=True,
@@ -115,7 +109,7 @@ def _create_default_cfg():
         ),
         adapter=dict(
             adapter_type="default",
-            latent_width=64,
+            latent_width=32,
             n_conv_per_stage=1,
             depth_per_stage=1,
             norm="layernorm2d",
@@ -192,11 +186,22 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
     def _forward_backbone_intermediate_features(self, x):
         # NOTE: cls feature is None
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
+
+        # Ensure eval mode for backbone if frozen to save memory from dropout/norm buffers
+        if self.freeze_backbone:
+            self.backbone.eval()
+
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
                 enc_out = self.backbone.encode(x, get_intermediate_features=True)
-                all_layers = enc_out.sem_z
+                all_layers = enc_out.sem_z  # use semantic z not low-level z
                 final_latent = enc_out.latent
+
+        # IMPORTANT: Clearing the backbone internal cache to free VRAM
+        if hasattr(self.backbone, "z"):
+            self.backbone.z = None
+        if hasattr(self.backbone, "sem_z"):
+            self.backbone.sem_z = None
 
         # reorganize all_layers
         assert all_layers is not None, "all_layers is None"
@@ -205,10 +210,17 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         )
 
         # None stands for cls feature
-        all_layers = [
-            [rearrange(all_layers[i], "b c h w -> b (h w) c"), None] for i in range(len(self.interaction_indexes))
-        ]
+        for i in range(len(self.interaction_indexes)):
+            token_feat = all_layers[i]
+            if token_feat.ndim == 4:
+                token_feat = rearrange(token_feat, "b c h w -> b (h w) c")
 
+            # if getattr(self, "norm_backbone_features", False):
+            #     norm_layer = self.backbone.semantic_enc_transformer.head[0]
+            #     token_feat = norm_layer(token_feat)
+
+            cls_feat = None
+            all_layers[i] = [token_feat, cls_feat]
         return all_layers, final_latent
 
 
@@ -233,28 +245,11 @@ class TokenizerHybridUNet(nn.Module):
         n_stages = cfg.n_stages
         if isinstance(n_conv_per_stage, int):
             n_conv_per_stage = [n_conv_per_stage] * n_stages
-        # if isinstance(n_conv_per_stage_decoder, int):
-        #     n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
 
         # Ensure we have 4 stages to match adapter output
         if cfg.n_stages != 4:
             logger.error(f"Warning: Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4.")
             raise ValueError("n_stages must be 4")
-            # n_stages = 4
-            # if isinstance(self.tok_cfg.feature_per_stage, int):
-            #     self.cfg.tok.features_per_stages = [
-            #         self.tok_cfg.features_per_stage * (2**i) for i in range(4)
-            #     ]
-            # elif len(self.tok_cfg.features_per_stage) != 4:
-            #     # Adjust features_per_stage to 4 stages
-            #     base_features = (
-            #         self.tok_cfg.features_per_stage[0]
-            #         if self.tok_cfg.features_per_stage
-            #         else 32
-            #     )
-            #     self.cfg.dino.features_per_stage = [
-            #         base_features * (2**i) for i in range(4)
-            #     ]
 
         # Create tokenzier encoder
         self.encoder = self._create_tok_encoder()
@@ -293,6 +288,7 @@ class TokenizerHybridUNet(nn.Module):
             trans_enc_cfg=t_cfg.trans_enc_cfg,
             trans_dec_cfg=t_cfg.trans_dec_cfg,
             distillation_cfg=t_cfg.distill_cfg,
+            hybrid_tokenizer_cfg=t_cfg.get("hybrid_tokenizer_cfg", None),
         )
         if self.cfg.tokenizer_pretrained_path is not None:
             tok_backbone.load_pretrained(self.cfg.tokenizer_pretrained_path)
@@ -430,7 +426,7 @@ def __test_model():
 
     cfg = _create_default_cfg()
     cfg._debug = True
-    cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors"
+    cfg.tokenizer_pretrained_path = "runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors"
     unet = TokenizerHybridUNet(cfg).cuda()
     unet.eval()
     with torch.autocast("cuda", torch.bfloat16):

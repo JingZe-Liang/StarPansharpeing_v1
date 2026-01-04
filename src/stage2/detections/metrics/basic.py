@@ -9,7 +9,7 @@ and leverages torchmetrics for efficient computation.
 """
 
 from collections import namedtuple
-from typing import Any, Dict, Optional, TypedDict, Union, no_type_check
+from typing import Any, TypedDict, no_type_check
 
 import numpy as np
 import torch
@@ -89,7 +89,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
 
     def __init__(
         self,
-        compute_kwargs: Optional[Dict[str, Any]] = None,
+        compute_kwargs: dict[str, Any] | None = None,
         prefix: str = "",
         device: str | torch.device = "cuda",
     ):
@@ -134,7 +134,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        anomaly_scores: Optional[torch.Tensor] = None,
+        anomaly_scores: torch.Tensor | None = None,
     ) -> None:
         """
         Update metrics with new predictions and targets.
@@ -176,9 +176,16 @@ class AnomalyDetectionMetricsBase(nn.Module):
 
     def _format_result(self):
         results = {}
-        results[f"{self.prefix}_pr_auc_f1_metrics"] = self._compute_any(self.pr_auc_f1_metrics)
-        results[f"{self.prefix}_auc5"] = self._compute_any(self.auc5)
-        results[f"{self.prefix}_torchmetrics_auc"] = self.auc.compute().item()
+        # Compute nested metrics and flatten them
+        pr_metrics = self._compute_any(self.pr_auc_f1_metrics)
+        for k, v in pr_metrics.items():
+            results[f"{self.prefix}{k}"] = v.item() if isinstance(v, torch.Tensor) else v
+
+        auc5_metrics = self._compute_any(self.auc5)
+        for k, v in auc5_metrics.items():
+            results[f"{self.prefix}{k}"] = v.item() if isinstance(v, torch.Tensor) else v
+
+        results[f"{self.prefix}torchmetrics_auc"] = self.auc.compute().item()
         return results
 
     def _add_prefix(self, d: dict):
@@ -195,7 +202,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
             numpy_metrics = numpy_metrics._asdict()
 
         for key, value in numpy_metrics.items():
-            metrics[key].update(torch.as_tensor(value, self.device))
+            metrics[key].update(torch.as_tensor(value, device=self.device))
 
     def _compute_auc5(self, fpr: np.ndarray, tpr: np.ndarray, thresholds: np.ndarray) -> AUC5_TypedDict:
         """
@@ -287,7 +294,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         else:
             raise ValueError(f"Metrics type {type(metrics)} are not supported to compute")
 
-    def compute(self) -> Dict[str, Any]:
+    def compute(self) -> dict[str, Any]:
         """
         Compute all accumulated metrics.
 
@@ -301,7 +308,7 @@ class AnomalyDetectionMetricsBase(nn.Module):
         self.update(all_preds, all_targets)
         return self._format_result()
 
-    def __old_compute(self, all_preds, all_targets) -> Dict[str, Any]:
+    def __old_compute(self, all_preds, all_targets) -> dict[str, Any]:
         # Convert to numpy for detailed computations
         preds_np = all_preds.detach().cpu().numpy()
         targets_np = all_targets.detach().cpu().numpy()
@@ -380,7 +387,7 @@ class HADDetectionMetrics(nn.Module):
         """
         self.metrics.update(preds, target)
 
-    def forward(self, preds: torch.Tensor, target: torch.Tensor) -> Dict[str, Any]:
+    def forward(self, preds: torch.Tensor, target: torch.Tensor) -> dict[str, Any]:
         """
         Forward method for PyTorch compatibility.
 
@@ -394,7 +401,7 @@ class HADDetectionMetrics(nn.Module):
         self.update(preds, target)
         return self.compute()
 
-    def compute(self) -> Dict[str, float]:
+    def compute(self) -> dict[str, float]:
         """
         Compute all metrics, returning HyperSIGMA-compatible results.
 
@@ -404,12 +411,17 @@ class HADDetectionMetrics(nn.Module):
         results = self.metrics.compute()
 
         # Extract main results in HyperSIGMA format
+        # Extract values from results, handling both tensor and float types
+        def _extract_value(key, default=0.0):
+            val = results.get(key, default)
+            return val.item() if isinstance(val, torch.Tensor) else val
+
         had_results = {
-            "auc1": results.get("had_auc1", 0.0),
-            "auc2": results.get("had_auc2", 0.0),
-            "auc3": results.get("had_auc3", 0.0),
-            "auc4": results.get("had_auc4", 0.0),
-            "auc5": results.get("had_auc5", 0.0),
+            "auc1": _extract_value("had_auc1"),
+            "auc2": _extract_value("had_auc2"),
+            "auc3": _extract_value("had_auc3"),
+            "auc4": _extract_value("had_auc4"),
+            "auc5": _extract_value("had_auc5"),
         }
 
         return had_results

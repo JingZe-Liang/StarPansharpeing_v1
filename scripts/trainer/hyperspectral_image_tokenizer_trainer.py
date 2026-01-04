@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import sys
 import time
 from contextlib import nullcontext
@@ -55,7 +56,7 @@ from src.stage1.utilities.train.network import (
 )
 from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import log_print
+from src.utilities.logging import log_print, set_logger_file, get_python_pkg_env, zip_code_into_dir
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter
@@ -69,6 +70,8 @@ class CosmosHyperspectralTokenizerTrainer:
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
         self.val_cfg = cfg.val
+        self.tokenizer: nn.Module
+        self.proxy_aug_pipeline: LeJEPAAugmentation | None = None
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
@@ -178,6 +181,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # Optimizers and lr schedulers
         self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = self.get_optimizer_lr_scheduler()
+
         # The last layer weight must require grad
         self._ensure_last_layer_requires_grad()
 
@@ -206,6 +210,20 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # Training state counter
         self.train_state = StepsCounter(["train"])
+
+    def _encode_dino_cls(self, model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        encode_fn = getattr(model, "encode_dino_cls", None)
+        if callable(encode_fn):
+            return encode_fn(x)
+
+        # PEFT/PeftModel等wrapper场景：尝试透传到base model
+        base_model = getattr(model, "base_model", None)
+        inner = getattr(base_model, "model", None) if base_model is not None else None
+        encode_fn = getattr(inner, "encode_dino_cls", None)
+        if callable(encode_fn):
+            return encode_fn(x)
+
+        raise AttributeError("tokenizer缺少`encode_dino_cls`方法（或PEFT wrapper未能透传）。")
 
     def _ensure_last_layer_requires_grad(self):
         # Call after the optimizer is initialized
@@ -243,10 +261,21 @@ class CosmosHyperspectralTokenizerTrainer:
         # Init the proxy model/augmentation pipline
         if "ijepa" in self._proxy_tasks:
             # Projector
-            self.proxy_model = hydra.utils.instantiate(cfg.model)
+            self.proxy_model = hydra.utils.instantiate(cfg.ijepa.model)
             self.log_msg(f"Init proxy model for proxy task: {cfg.task}")
             logger.info(f"Model params: \n{parameter_count_table(self.proxy_model)}")
             logger.info("Create <cyan>ijepa</cyan> pretrained proxy task.")
+
+            # Optimizer and scheduler
+            if self.proxy_model is not None:
+                _params_need_name = "muon" in cfg.ijepa.optimizer._target_
+                if _params_need_name:
+                    ps = self.proxy_model.named_parameters()
+                else:
+                    ps = self.proxy_model.parameters()
+
+                self.proxy_optim = hydra.utils.instantiate(cfg.ijepa.optimizer)(ps)
+                self.proxy_sched = hydra.utils.instantiate(cfg.ijepa.scheduler)(optimizer=self.proxy_optim)
 
         if "lejepa" in self._proxy_tasks or "lejepa_latent" in self._proxy_tasks:
             self.proxy_aug_pipeline = _create_aug_pipline()
@@ -268,6 +297,46 @@ class CosmosHyperspectralTokenizerTrainer:
             self.ibot_patch_loss = self.ibot_patch_loss.to(self.device)
             logger.info("Create <cyan>ibot</cyan> pretrained proxy task.")
 
+        if "dino_cls" in self._proxy_tasks:
+            from src.stage1.self_supervised.dino.layers.dino_head import DINOHead
+            from src.stage1.self_supervised.dino.loss.dino_clstoken_loss import DINOLoss
+
+            if self.sep_enc_dec:
+                raise NotImplementedError("当前trainer仅支持在非`seperate_enc_dec`模式下使用dino_cls。")
+
+            # dino_cls 依赖 multi-crop augmentation；当任务组合为 ijepa+dino_cls 时，
+            # 这里需要显式初始化，否则 forward_proxy_task 会找不到 proxy_aug_pipeline。
+            self.proxy_aug_pipeline = _create_aug_pipline()
+
+            dino_cfg = cfg.dino_cls
+            embed_dim = getattr(dino_cfg, "embed_dim", None)
+            if not isinstance(embed_dim, int):
+                raise ValueError("dino_cls需要在配置中显式给定 `proxy_task.dino_cls.embed_dim`。")
+
+            if not hasattr(self.tokenizer, "dino_cls_head"):
+                self.tokenizer.dino_cls_head = DINOHead(  # type: ignore[attr-defined]
+                    in_dim=embed_dim,
+                    out_dim=dino_cfg.head_n_prototypes,
+                    hidden_dim=dino_cfg.head_hidden_dim,
+                    bottleneck_dim=dino_cfg.head_bottleneck_dim,
+                    nlayers=dino_cfg.head_nlayers,
+                    use_bn=getattr(dino_cfg, "head_use_bn", False),
+                    mlp_bias=getattr(dino_cfg, "head_mlp_bias", True),
+                ).to(self.device)
+                self.tokenizer.dino_cls_head.init_weights()  # type: ignore[attr-defined]
+                logger.info(
+                    f"Create <cyan>dino_cls</cyan> head: in_dim={embed_dim}, out_dim={dino_cfg.head_n_prototypes}."
+                )
+
+            self.dino_cls_loss = DINOLoss(
+                out_dim=dino_cfg.head_n_prototypes,
+                student_temp=dino_cfg.student_temp,
+                center_momentum=dino_cfg.center_momentum,
+            )
+            self.dino_cls_loss.init_weights()
+            self.dino_cls_loss = self.dino_cls_loss.to(self.device)
+            logger.info("Create <cyan>dino_cls</cyan> pretrained proxy task.")
+
         if "mae" in self._proxy_tasks or "latent_mae" in self._proxy_tasks or "pixel_mae" in self._proxy_tasks:
             pass
 
@@ -276,16 +345,6 @@ class CosmosHyperspectralTokenizerTrainer:
             # directly inside the tokenizer's transformer using cosine similarity
             # between consecutive embedding positions
             logger.info("Create <cyan>nepa</cyan> (Next Embedding Prediction) pretrained proxy task.")
-
-        # Optimizer and scheduler
-        if self.proxy_model is not None:
-            _params_need_name = "muon" in cfg.optimizer._target_
-            if _params_need_name:
-                ps = self.proxy_model.named_parameters()
-            else:
-                ps = self.proxy_model.parameters()
-            self.proxy_optim = hydra.utils.instantiate(cfg.optimizer)(ps)
-            self.proxy_sched = hydra.utils.instantiate(cfg.scheduler)(optimizer=self.proxy_optim)
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
@@ -375,6 +434,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}")
 
     def setup_aug_pipe_and_anti_degradation_network(self):
+        logger.warning("Using augmentation/degradation network, this is experimental.")
+
         self.use_training_aug = False
         self.aug_pipe = getattr(self.train_cfg, "aug_pipeline", None)
         self.antideg_net = getattr(self.train_cfg, "anti_degradation_network", None)
@@ -447,43 +508,11 @@ class CosmosHyperspectralTokenizerTrainer:
             assert isinstance(log_file, Path), "log_file type should be Path"
 
         # logger
-        self.logger.remove()
-        log_format_in_file = (
-            "<green>[{time:MM-DD HH:mm:ss}]</green> "
-            "- <level>[{level}]</level> "
-            "- <cyan>{file}:{line}</cyan> - <level>{message}</level>"
-        )
-        log_format_in_cmd = (
-            "{time:HH:mm:ss} - {level.icon} <level>[{level}] {file.name}:{line}</level>- <level>{message}</level>"
-        )
         if not self.train_cfg.debug:
-            self.logger.add(
-                log_file,
-                format=log_format_in_file,
-                level="INFO",
-                rotation="10 MB",
-                enqueue=True,
-                backtrace=True,
-                colorize=False,
+            set_logger_file(log_file, level="info")
+            set_logger_file(
+                log_file.parent / "debug.log", level="debug", filter=lambda record: record["level"].no <= 10
             )
-            # including trace and debug
-            self.logger.add(
-                log_file.parent / "debug.log",
-                format=log_format_in_file,
-                level="DEBUG",
-                filter=lambda record: record["level"].no <= 10,
-                rotation="10 MB",
-                enqueue=True,
-                backtrace=True,
-                colorize=False,
-            )
-        self.logger.add(
-            sys.stderr,
-            format=log_format_in_cmd,
-            level=os.getenv("SHELL_LOG_LEVEL", "DEBUG"),
-            backtrace=True,
-            colorize=bool(int(os.getenv("COLOR_LOG", "1"))),
-        )
         logger.disable("ema_pytorch")
 
         # make log dir
@@ -515,7 +544,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
                 if "wandb" in self._trackers_name:
                     self.wandb_logger: wandb.Run = self.accelerator.get_tracker("wandb", unwrap=True)
-                    self.wandb_logger.watch(self.tokenizer, log="gradients", log_freq=200)
+                    # self.wandb_logger.watch(self.tokenizer, log="gradients", log_freq=200)
                     logger.info("Will log to wandb.")
 
                 if "swanlab" in self._trackers_name:
@@ -538,8 +567,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     logger.info("Will log to swanlab.")
 
             #### Log code into dir
-            from src.utilities.logging import get_python_pkg_env, zip_code_into_dir
-
             code_dir = ["src/data", "src/stage1", "scripts"]
             zip_code_into_dir(save_dir=log_dir, code_dir=code_dir)
             get_python_pkg_env(file=str(log_dir / "requirements.txt"))
@@ -593,10 +620,10 @@ class CosmosHyperspectralTokenizerTrainer:
             model: torch.nn.Module = logs.pop("model")
             # take out the grad of norms
             model_cls_n = model.__class__.__name__
-            norms = {}
+            norms: dict[str, torch.Tensor] = {}
             _n_params_sumed = 0
             if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] = 0
+                norms[f"{model_cls_n}_grad_norm"] = torch.tensor(0.0, device=self.device)
 
             for n, p in tqdm(model.named_parameters(), desc="logging grad norms", leave=False):
                 if p.grad is not None:
@@ -616,11 +643,11 @@ class CosmosHyperspectralTokenizerTrainer:
                     if log_type == "grad_norm_per_param":
                         norms[f"{model_cls_n}/{n}"] = _grad_norm
                     elif log_type == "grad_norm_sum":
-                        norms[f"{model_cls_n}_grad_norm"] += _grad_norm
+                        norms[f"{model_cls_n}_grad_norm"] = norms[f"{model_cls_n}_grad_norm"] + _grad_norm
                         _n_params_sumed += 1
             # log
             if log_type == "grad_norm_sum":
-                norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
+                norms[f"{model_cls_n}_grad_norm"] = norms[f"{model_cls_n}_grad_norm"] / max(_n_params_sumed, 1)
             if hasattr(self, "tb_logger"):
                 self.tb_logger.log(norms, step=step)
             if hasattr(self, "wandb_logger"):
@@ -896,6 +923,18 @@ class CosmosHyperspectralTokenizerTrainer:
             return self.vq_loss_fn.discriminator.state_dict()
 
     def get_optimizer_lr_scheduler(self):
+        # heavyball optimizers may trigger torch.compile (which deepcopies the model) during initialization.
+        # If the model is not deepcopy-safe, this will crash before training starts.
+        # Disable heavyball compilation early (before optimizer instantiation) by default.
+        disable_heavyball_compile = getattr(self.train_cfg, "disable_heavyball_compile", True)
+        if disable_heavyball_compile:
+            try:
+                import heavyball
+
+                heavyball.utils.compile_mode = None
+            except Exception:
+                pass
+
         # optimizers
         if (
             self.accelerator.state.deepspeed_plugin is None
@@ -932,16 +971,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
-        if is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim):
-            import heavyball
-
-            self.log_msg(
-                "use heavyball optimizer, it will compile the optimizer, "
-                "for efficience testing the scripts, disable the compilation.",
-                level="WARNING",
-            )
-
-            heavyball.utils.compile_mode = None
+        if (is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim)) and disable_heavyball_compile:
+            self.log_msg("Use heavyball optimizer, disable the optimization", level="WARNING")
 
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
 
@@ -1107,47 +1138,48 @@ class CosmosHyperspectralTokenizerTrainer:
         else:
             raise ValueError(f"Unknown mode {mode}")
 
-    def forward_proxy_task(self, x) -> dict | None:
+    def forward_proxy_task(self, x: torch.Tensor) -> edict:
         """
         Forward pretraining proxy tasks.
         """
-        if not self._has_proxy_task:
-            return None
+        assert self._has_proxy_task
 
-        def _maybe_to_1d(x):
+        def _maybe_to_1d(x: torch.Tensor) -> torch.Tensor:
             if x.ndim == 4:
-                x = x.flatten(2).permute(0, -1, 1)  # BCHW -> BLC
+                return x.flatten(2).permute(0, -1, 1)  # BCHW -> BLC
             return x
 
         cfg = self.cfg.proxy_task
         proxy_tasks = self._proxy_tasks
-        ret = edict()
-        proxy_loss_breakdown = edict()
-        proxy_loss = 0.0
+        ret: edict = edict()
+        proxy_loss_breakdown: edict = edict()
+        proxy_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
         # Proxy vars statements
-        global_views = local_views = global_x = None
+        global_views: list[torch.Tensor] | None = None
+        local_views: list[torch.Tensor] | None = None
+        global_x: torch.Tensor | None = None
 
         #### Forward proxy tasks
         if "ijepa" in proxy_tasks:
             assert self.proxy_model is not None
 
             # Resize to
-            img_size = tuple(cfg.masks.input_size)
-            x = F.interpolate(x, size=img_size, mode="bilinear")
+            ijepa_img_size = tuple(int(v) for v in cfg.ijepa.masks.input_size)
+            x_ijepa = F.interpolate(x, size=ijepa_img_size, mode="bilinear")
 
             # Masks
-            mask_collator = MaskCollator(**to_cont(cfg.masks))
-            x, masks_enc, masks_pred = mask_collator(x)
-            masks_enc = [m.to(x.device, torch.int32) for m in masks_enc]
-            masks_pred = [m.to(x.device, torch.int32) for m in masks_pred]
+            mask_collator = MaskCollator(**to_cont(cfg.ijepa.masks))
+            x_ijepa, masks_enc, masks_pred = mask_collator(x_ijepa)
+            masks_enc = [m.to(x_ijepa.device, torch.int32) for m in masks_enc]
+            masks_pred = [m.to(x_ijepa.device, torch.int32) for m in masks_pred]
 
             # Target
             with self.accelerator.autocast():
                 # Target
                 with torch.no_grad():
                     # z is the tokenizer's pre-quant-conv hidden state
-                    z = self.ema_tokenizer.ema_model.encode_ijepa(x)  # type: ignore
+                    z = self.ema_tokenizer.ema_model.encode_ijepa(x_ijepa)  # type: ignore
                     z = _maybe_to_1d(z)
                     z = torch.nn.functional.layer_norm(z, (z.size(-1),))
                     B = len(z)
@@ -1155,7 +1187,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     h_tgt = repeat_interleave_batch(z, B, repeat=len(masks_enc))
 
                 # Context
-                h_ctx = self.tokenizer.encode_ijepa(x, jepa_masks=masks_enc)  # type: ignore
+                h_ctx = self.tokenizer.encode_ijepa(x_ijepa, jepa_masks=masks_enc)  # type: ignore
                 h_ctx = _maybe_to_1d(h_ctx)
                 h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
 
@@ -1166,14 +1198,15 @@ class CosmosHyperspectralTokenizerTrainer:
             proxy_loss = proxy_loss + loss
 
         if "latent_mae" in proxy_tasks or "pixel_mae" in proxy_tasks:
-            img_size = 224
-            x = F.interpolate(x, size=img_size, mode="bilinear")
+            mae_img_size = 224
+            x_mae = F.interpolate(x, size=mae_img_size, mode="bilinear")
             with self.accelerator.autocast():
-                proxy_loss, mae_recon = self.tokenizer.encode_mae(x)
+                mae_loss, mae_recon = self.tokenizer.encode_mae(x_mae)
             if "latent_mae" in proxy_tasks:
                 # if works on pixel space, the `mae_recon` is the image
                 mae_recon = None
-            proxy_loss_breakdown = {"mae_loss": proxy_loss.detach()}
+            proxy_loss_breakdown.mae_loss = mae_loss.detach()
+            proxy_loss = proxy_loss + mae_loss
             # expose mae_recon at top-level so callers can access it directly
             ret.mae_recon = mae_recon.detach() if mae_recon is not None else None
 
@@ -1181,19 +1214,19 @@ class CosmosHyperspectralTokenizerTrainer:
             from src.stage1.self_supervised.dino.data import MaskingGenerator, generate_ibot_masks
 
             # Resize to
-            img_size = 224  # FIXME: make it flexible at cfg.
+            ibot_img_size = 224  # FIXME: make it flexible at cfg.
             patch_size = 16  # FIXME: get from cfg or model
-            x = F.interpolate(x, size=img_size, mode="bilinear")
+            x_ibot = F.interpolate(x, size=ibot_img_size, mode="bilinear")
 
             # Augmentation pipeline
             # Global and local views has different size
             assert hasattr(self, "proxy_aug_pipeline"), "proxy_aug_pipeline is not defined"
-            global_views, local_views = self.proxy_aug_pipeline(x)  # type: ignore
+            global_views, local_views = self.proxy_aug_pipeline(x_ibot)  # type: ignore
             global_x = torch.cat(global_views, dim=0)
 
             # --- Mask Generation ---
             B = global_x.shape[0]
-            grid_size = img_size // patch_size
+            grid_size = ibot_img_size // patch_size
             N = grid_size**2
 
             if not hasattr(self, "ibot_mask_generator"):
@@ -1261,6 +1294,7 @@ class CosmosHyperspectralTokenizerTrainer:
             # Augmentation pipeline
             # Global and local views has different size
             if global_views is None or local_views is None:
+                assert self.proxy_aug_pipeline is not None, "proxy_aug_pipeline is not initialized"
                 global_views, local_views = self.proxy_aug_pipeline(x)
             global_x = torch.cat(global_views, dim=0)
             ng, nl = len(global_views), len(local_views)
@@ -1295,6 +1329,67 @@ class CosmosHyperspectralTokenizerTrainer:
             proxy_loss = proxy_loss + loss * 0.2
             proxy_loss_breakdown.update(**breakdowns)
 
+        if "dino_cls" in proxy_tasks:
+            assert hasattr(self, "dino_cls_loss"), "dino_cls_loss is not initialized; check proxy_task config"
+            assert hasattr(self.tokenizer, "dino_cls_head"), "tokenizer.dino_cls_head is not initialized"
+            assert not self.no_ema, "dino_cls requires EMA teacher; current training config has no_ema=True"
+            assert not self.sep_enc_dec, "dino_cls currently does not support separate_enc_dec mode"
+
+            dino_cfg = cfg.dino_cls
+            dino_img_size = int(getattr(dino_cfg, "img_size", 224))
+            x_dino = F.interpolate(x, size=dino_img_size, mode="bilinear")
+
+            if global_views is None or local_views is None:
+                assert hasattr(self, "proxy_aug_pipeline"), "proxy_aug_pipeline is not defined"
+                global_views, local_views = self.proxy_aug_pipeline(x_dino)  # type: ignore
+
+            ng, nl = len(global_views), len(local_views)
+            global_x = torch.cat(global_views, dim=0)
+            student_views = [*global_views, *local_views]
+            n_student_crops = len(student_views)
+
+            teacher_temp = dino_cfg.teacher_temp
+            centering: str = getattr(dino_cfg, "centering", "sinkhorn_knopp")
+
+            with torch.no_grad():
+                with self.accelerator.autocast():
+                    # Global views
+                    teacher_cls = self._encode_dino_cls(self.ema_tokenizer.ema_model, global_x)
+                    teacher_logits = self.ema_tokenizer.ema_model.dino_cls_head(  # type: ignore[attr-defined]
+                        teacher_cls
+                    )
+
+                    if centering == "sinkhorn_knopp":
+                        teacher_probs = self.dino_cls_loss.sinkhorn_knopp_teacher(
+                            teacher_logits,
+                            teacher_temp=teacher_temp,
+                            n_iterations=getattr(dino_cfg, "sinkhorn_n_iterations", 3),
+                        )
+                    elif centering == "softmax_center":
+                        teacher_probs = self.dino_cls_loss.softmax_center_teacher(teacher_logits, teacher_temp)
+                        self.dino_cls_loss.update_center(teacher_logits)
+                    else:
+                        raise ValueError(f"Unknown dino_cls centering: {centering}")
+
+                teacher_probs = rearrange(teacher_probs, "(ng bs) k -> ng bs k", ng=ng)
+
+            with self.accelerator.autocast():
+                # Local views
+                student_logits_list: list[torch.Tensor] = []
+                for view in student_views:
+                    student_cls = self._encode_dino_cls(self.tokenizer, view)
+                    student_logits_list.append(self.tokenizer.dino_cls_head(student_cls))  # type: ignore[attr-defined]
+                student_logits = torch.stack(student_logits_list, dim=0)  # [n_student_crops, B, K]
+
+                dino_loss = self.dino_cls_loss(
+                    student_logits,
+                    teacher_probs,
+                    ignore_diagonal=getattr(dino_cfg, "global_ignore_diagonal", True),
+                )
+
+            proxy_loss = proxy_loss + dino_loss * getattr(dino_cfg, "loss_weight", 1.0)
+            proxy_loss_breakdown.dino_cls_loss = dino_loss.detach()
+
         if "nepa" in proxy_tasks:
             # NePA (Next Embedding Prediction) loss
             # Optionally resize to fixed size for stable training
@@ -1317,8 +1412,49 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return ret
 
-    def forward_tokenizer(self, x, ema: bool = False, is_testing: bool = False) -> dict:
-        out_d = edict()
+    def forward_tokenizer(self, x: torch.Tensor, ema: bool = False, is_testing: bool = False) -> edict:
+        out_d: edict = edict()
+        dec_out: dict = {}
+        q_loss = None
+        q_info = None
+
+        def _raise_if_nonfinite_tensor(t: torch.Tensor, *, tensor_name: str, model: nn.Module) -> None:
+            if torch.isfinite(t).all():
+                return
+
+            with torch.no_grad():
+                finite_mask = torch.isfinite(t)
+                n_total = int(t.numel())
+                n_finite = int(finite_mask.sum().item())
+                n_nonfinite = n_total - n_finite
+
+                t_fp32 = t.detach().to(dtype=torch.float32)
+                valid_values = t_fp32[~torch.isnan(t_fp32)]
+                if valid_values.numel() > 0:
+                    t_min = valid_values.min().item()
+                    t_max = valid_values.max().item()
+                else:
+                    # 如果全是 NaN，需要处理这种情况
+                    t_min = "all nan"
+                    t_max = "all nan"
+
+                bad_params: list[str] = []
+                for name, p in model.named_parameters():
+                    if not p.is_floating_point():
+                        continue
+                    if not p.requires_grad:
+                        continue
+                    if not torch.isfinite(p).all():
+                        bad_params.append(f"{name} dtype={p.dtype} shape={tuple(p.shape)}")
+                        if len(bad_params) >= 30:
+                            break
+
+            raise RuntimeError(
+                f"[NonFinite] {tensor_name} contains NaN/Inf: "
+                f"nonfinite={n_nonfinite}/{n_total}, dtype={t.dtype}, shape={tuple(t.shape)}, "
+                f"nanmin={t_min}, nanmax={t_max}. "
+                f"Non-finite params (first {len(bad_params)}): {bad_params}"
+            )
 
         with self.accelerator.autocast():
             # `is_testing` is deprecated, use `ema` instead
@@ -1348,6 +1484,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 else:
                     latent_q = latent
                 recon = to_dec(latent_q)
+                dec_out = {"latent": latent, "q_loss": q_loss, "q_loss_breakdown": q_info}
             else:
                 if not self.no_ema and ema:
                     tokenizer = self.ema_tokenizer.ema_model
@@ -1358,12 +1495,15 @@ class CosmosHyperspectralTokenizerTrainer:
                 # Forward tokenizer
                 dec_out = tokenizer(x)
                 recon = dec_out["recon"]
+                _raise_if_nonfinite_tensor(recon, tensor_name="tokenizer.recon", model=tokenizer)
+                _raise_if_nonfinite_tensor(dec_out["latent"], tensor_name="tokenizer.latent", model=tokenizer)
 
                 # Is deep supervision
                 _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
                 if getattr(_unwrap_tok, "_is_deep_supervision", False):
                     assert isinstance(dec_out, dict), "dec_out must be a dict for deep supervision"
                     out_d.deep_supervision_outputs = dec_out["deep_supervision_outputs"]
+        _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
 
         # basic out
         out_d.update(latent=dec_out["latent"], recon=recon)
@@ -1468,6 +1608,10 @@ class CosmosHyperspectralTokenizerTrainer:
     @no_type_check
     def get_last_layer(self, use_ema: bool = False, mode: str = "dec"):
         def _check_req_grad(w):
+            if w is None:
+                # let the processing fn handle
+                return w
+
             if mode == "enc":
                 if not w.requires_grad and self.train_cfg.finetune_strategy not in ("decoder_only", "peft"):
                     raise ValueError(f"The last layer weight must be enabled requires_grad when {mode=}")
@@ -1492,17 +1636,30 @@ class CosmosHyperspectralTokenizerTrainer:
     def gradient_check(self, model: nn.Module):
         # check nan gradient
         if self.accelerator.sync_gradients and getattr(self.train_cfg, "grad_check", False):
+            # ignore_none_grad_pats = tuple(
+            #     getattr(
+            #         self.train_cfg,
+            #         "ignore_none_grad_pats",
+            #         (
+            #             r"^semantic_decoder\.decoder\.head\.(weight|bias)$",
+            #             r"^semantic_decoder\.decoder\.last_norm\.(weight|bias)$",
+            #         ),
+            #     )
+            # )
+            # ignore_none_grad_res = [re.compile(p) for p in ignore_none_grad_pats]
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     if param.grad is None:
+                        # if any(p.search(name) for p in ignore_none_grad_res):
+                        #     continue
                         self.log_msg(
                             f"step {self.global_step} - {name} has None gradient, shaped as {param.shape}",
                             only_rank_zero=False,
                             level="WARNING",
                         )
-                    elif torch.isnan(param.grad).any():
+                    elif not torch.isfinite(param.grad).all():
                         self.log_msg(
-                            f"step {self.global_step} - {name} has nan gradient, shaped as {param.shape}",
+                            f"step {self.global_step} - {name} has non-finite gradient, shaped as {param.shape}",
                             only_rank_zero=False,
                             level="WARNING",
                         )
@@ -1521,6 +1678,22 @@ class CosmosHyperspectralTokenizerTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
+    def _raise_if_nonfinite_params(self, model: nn.Module, *, model_name: str, max_items: int = 30) -> None:
+        bad_params: list[str] = []
+        for name, p in model.named_parameters():
+            if not p.is_floating_point():
+                continue
+            if not p.requires_grad:
+                continue
+            if torch.isfinite(p).all():
+                continue
+            bad_params.append(f"{name} dtype={p.dtype} shape={tuple(p.shape)}")
+            if len(bad_params) >= max_items:
+                break
+
+        if bad_params:
+            raise RuntimeError(f"[NonFinite] {model_name} has non-finite params: {bad_params}")
+
     def train_tokenizer_step(self, x: torch.Tensor, tok_dict: dict):
         # freeze discriminator
         self.may_freeze(self.vq_loss_fn.discriminator, True)
@@ -1530,7 +1703,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # deep supervision loss
         if "deep_supervision_outputs" in tok_dict:
-            ds_loss = 0.0
+            ds_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
             # downsample the gt into the deep supervision outputs size
             for ds_out in tok_dict["deep_supervision_outputs"]:
                 cur_res = ds_out.shape[2:]
@@ -1563,6 +1736,8 @@ class CosmosHyperspectralTokenizerTrainer:
             else:
                 self.gradient_check(self.tokenizer)
             self.tokenizer_optim.step()
+            if getattr(self.train_cfg, "grad_check", False):
+                self._raise_if_nonfinite_params(self.tokenizer, model_name="tokenizer (after optimizer.step)")
             self.tokenizer_sched.step()
 
             if self.antideg_net is not None:
@@ -1585,6 +1760,10 @@ class CosmosHyperspectralTokenizerTrainer:
             self.accelerator.backward(disc_loss)
             self.gradient_check(self.vq_loss_fn.discriminator)
             self.disc_optim.step()
+            if getattr(self.train_cfg, "grad_check", False):
+                self._raise_if_nonfinite_params(
+                    self.vq_loss_fn.discriminator, model_name="discriminator (after optimizer.step)"
+                )
             self.disc_sched.step()
 
             # ema update
@@ -1592,7 +1771,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return disc_loss, log_disc
 
-    def train_proxy_model_step(self, x: torch.Tensor):
+    def train_proxy_model_step(self, x: torch.Tensor) -> edict | None:
         if not self._has_proxy_task:
             return None
 
@@ -1605,6 +1784,9 @@ class CosmosHyperspectralTokenizerTrainer:
         self.accelerator.backward(out.proxy_loss)
         if self.proxy_model is not None:
             self.gradient_check(self.proxy_model)
+
+        if "dino_cls" in self._proxy_tasks and self.global_step % 10 == 0:
+            logger.debug(f"dino head grad: {self.tokenizer.dino_cls_head.last_layer.weight.grad.abs().mean()}")
 
         # NOTE: set the unused parameters' gradients to zero for DDP
         # _unwrap_model = self.accelerator.unwrap_model(self.tokenizer)
@@ -1624,8 +1806,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return out
 
-    def _filter_item_value_in_dict(self, d: dict, to_item=True):
-        dd = {}
+    def _filter_item_value_in_dict(self, d: dict, to_item: bool = True) -> dict:
+        dd: dict = {}
         for k, v in d.items():
             if torch.is_tensor(v) and v.numel() == 1:
                 dd[k] = v.item() if to_item else v
@@ -2384,7 +2566,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.train_loop()
 
 
-_key = "unicosmos_bsq_f8c36p4"
+_key = "mingtok_f8c16p1"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2397,6 +2579,7 @@ _configs_dict = {
     "unicosmos_f16c16p1": "unicosmos_tokenizer_f16c16p1",
     "unicosmos_f16c16p4": "unicosmos_tokenizer_f16c16p4",
     "unicosmos_f8c16p4_repa_kl": "unicosmos_tokenizer_kl_repa_f8c16p4",
+    "mingtok_f8c16p1": "mingtok_f8c16p1",
     # psd kl vae
     "unicosmos_psd_f8c16p1": "unicosmos_tokenizer_psd_f8c16p1",
     # hybrid ae

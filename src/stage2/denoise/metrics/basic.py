@@ -4,9 +4,9 @@ import numpy as np
 import torch
 from beartype import beartype
 from torch import Tensor
+from torchmetrics import Metric
 from torchmetrics.image import (
     PeakSignalNoiseRatio,
-    SpectralAngleMapper,
     StructuralSimilarityIndexMeasure,
 )
 from torchmetrics.image.sam import SpectralAngleMapper
@@ -24,7 +24,7 @@ DenoisingMetricsOutput = TypedDict(
 
 
 @beartype
-class DenoisingMetrics(torch.nn.Module):
+class DenoisingMetrics(Metric):
     def __init__(
         self,
         data_range: float = 1.0,
@@ -43,7 +43,7 @@ class DenoisingMetrics(torch.nn.Module):
         self.mse = MeanSquaredError()
         self.sam = SpectralAngleMapper(reduction=reduction)
 
-    def update(self, denoised: Tensor, clean: Tensor):
+    def update(self, denoised: Tensor, clean: Tensor):  # type: ignore[override]
         self.psnr.update(denoised, clean)
         self.ssim.update(denoised, clean)
         self.mse.update(denoised, clean)

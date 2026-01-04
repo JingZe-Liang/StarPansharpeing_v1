@@ -1,0 +1,27 @@
+task: dino_cls
+
+aug:
+  n_local: 6
+  n_global: 2
+
+dino_cls:
+  # CLS token embedding dim，用于构建DINOHead(in_dim=embed_dim)；默认从tokenizer配置里取
+  embed_dim: ${tokenizer.semantic_decoder.embed_dim}
+  img_size: 224
+  loss_weight: 0.2
+  global_ignore_diagonal: true
+  centering: sinkhorn_knopp # [sinkhorn_knopp, softmax_center]
+  sinkhorn_n_iterations: 3
+
+  # DINO loss
+  student_temp: 0.1
+  teacher_temp: 0.04
+  center_momentum: 0.9
+
+  # DINO head
+  head_n_prototypes: 8192
+  head_nlayers: 3
+  head_hidden_dim: 2048
+  head_bottleneck_dim: 256
+  head_use_bn: false
+  head_mlp_bias: true

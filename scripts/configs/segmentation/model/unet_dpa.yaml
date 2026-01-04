@@ -1,0 +1,3 @@
+_target_: src.stage2.segmentation.models.baseline_unet.UNet
+n_channels: 4
+n_classes: 24

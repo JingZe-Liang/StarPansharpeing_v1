@@ -37,7 +37,10 @@ def to_tensor_img(
     is_permuted: bool = True,
     repeat_gray_n: int = 3,
     force_to_rgb=False,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
+    if img is None:
+        return None
+
     is_arr = False
     if torch.is_tensor(img) or (is_arr := isinstance(img, np.ndarray)):
         if is_arr:
@@ -187,7 +190,7 @@ class _BaseStreamingDataset(StreamingDataset):
         do nothing check.
         """
 
-        # if any(not isinstance(d, StreamingDataset) for d in datasets):
+        # if any(not isinstance(d, StreamingDaaset) for d in datasets):
         #     raise RuntimeError("The provided datasets should be instances of the StreamingDataset.")
         return
 
@@ -403,6 +406,9 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
     def __getitem__(self, idx):
         d = super().__getitem__(idx)
+        if d is None:
+            logger.warning(f"Caught Exception in __getitem__. Returning None.")
+            return None
 
         d = self._ensure_dict_sample(d)
         d = self._conditions_select_random_one(d)
@@ -433,9 +439,13 @@ class ConditionsStreamingDataset(_BaseStreamingDataset):
 
     def __getitem__(self, idx):
         d = super().__getitem__(idx)
+
         assert len(d) == len(self._condition_keys) + 1, f"Condition keys missing in the data: {d.keys()}"
 
         for k in self._condition_keys:
+            if d[k] is None:
+                # Check if any can not be decoded, or return all the condition as None
+                return None
             d[k] = to_tensor_img(d[k], is_permuted=True)
 
         d = norm_img(d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1)
@@ -450,6 +460,8 @@ class CaptionStreamingDataset(_BaseStreamingDataset):
     def __getitem__(self, idx):
         # {'caption': dict, 'valid_legth': int}
         d = super().__getitem__(idx)
+        if d is None:
+            return None
 
         if isinstance(d["caption"], dict):
             caption = d["caption"]["caption"]
@@ -501,7 +513,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
             RandomResizedCrop(
                 size=(self.resize, self.resize) if isinstance(self.resize, int) else self.resize,
                 p=1.0,
-                scale=(0.6, 1.0),
+                scale=(0.8, 1.0),
                 ratio=(0.75, 1.33),
                 keepdim=True,
                 cropping_mode="resample",
@@ -516,6 +528,8 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
 
     def __getitem__(self, idx: int) -> Any:
         samples = (self.img_ds[idx], self.condition_ds[idx], self.caption_ds[idx])
+        if any(s is None for s in samples):
+            return None
         return self.transform(samples, rng=None)
 
     def _crop_resize(self, d):
@@ -580,9 +594,22 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
             raise ValueError(f"Unknown post process type: {self._post_process_type}")
         return d
 
+    def __check_fully_decoded(self, item: dict[str, Any]):
+        for k, v in item.items():
+            if v is None:
+                logger.warning(f"item {k} is undecoded.")
+                return False
+        return True
+
     def transform(self, samples: tuple[dict, ...], rng) -> Any:
         """Static method to transform a dict sample."""
         img_d, cond_d, caption_d = samples
+
+        # Check if all fully decoded
+        if not all(list(map(self.__check_fully_decoded, [img_d, cond_d, caption_d]))):
+            logger.warning(f"[Gen Streaming Dataset]: found one smaple undecoded. Skip this sample.")
+            return None
+
         # Check is paired
         if not self.__check_is_paired(img_d, cond_d, caption_d):
             raise ValueError(f"Not paired: {img_d['__key__']}, {cond_d['__key__']}, {caption_d['__key__']}")
@@ -834,7 +861,7 @@ def get_dataset_len(ds):
 
 
 def collate_fn_skip_none(
-    check_only_first_n: int = 2000,
+    check_only_first_n: int | None = None,
     size_bs_s: dict[int, int] | None = None,
     raise_if_shape_mismatch=False,
 ):
@@ -860,14 +887,14 @@ def collate_fn_skip_none(
 
         # Check if is None
         _orig_len = len(batch)
-        batch = [d for d in batch if d is not None]
+        batch = [d for d in batch if d is not None]  # skip None
         if len(batch) == 0:
             return None
         elif len(batch) < _orig_len:
             logger.warning(f"Skip {(_orig_len - len(batch))} samples in the batch due to None values.")
 
         # Check shapes are matched
-        if checked_n < check_only_first_n:
+        if check_only_first_n is None or checked_n < check_only_first_n:
             _prev_chans = batch[0]["img"].shape[0]
             _shape_mismatch = False
 
@@ -1245,15 +1272,28 @@ def __test_normal_image_loader():
 
 
 def __test_gen_loader():
+    import lovely_tensors as lt
+
+    lt.monkey_patch()
+
     img_path = "data2/RemoteSAM270k/LitData_hyper_images2"
     caption_path = "data2/RemoteSAM270k/LitData_image_captions"
     condition_path = "data2/RemoteSAM270k/LitData_image_conditions"
 
     ds = GenerativeStreamingDataset.create_dataset(img_path, condition_path, caption_path)
-    # print(len(ds))
-    dl = StreamingDataLoader(ds, batch_size=8, num_workers=0, shuffle=False)
+    from tqdm import trange
+
+    # for i in trange(196100, 220000):
+    #     sample = ds[i]
+    #     if sample is None or any(v is None for v in sample.values()):
+    #         print(f"[Warning]: found sample undecoded - for index {i} - sample is {sample}")
+
+    dl = StreamingDataLoader(ds, batch_size=8, num_workers=4, shuffle=False)
+    print(dl.state_dict())
     for sample in dl:
-        print(sample["img"].shape)
+        # print(sample["img"].shape)
+        if sample is None:
+            print("Found None sample.")
 
 
 def __test_get_item_key():
@@ -1337,10 +1377,10 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
     # __test_normal_image_loader()
-    # __test_gen_loader()
+    __test_gen_loader()
     # __test_ds_len()
     # __test_get_item_key()
-    __test_get_mars_data()
+    # __test_get_mars_data()
 
     # from omegaconf import OmegaConf
 

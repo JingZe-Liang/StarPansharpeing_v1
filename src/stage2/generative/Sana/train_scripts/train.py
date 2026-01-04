@@ -788,6 +788,9 @@ def train(
         for step, batch in enumerate(tqdm(train_dataloader, total=len(train_dataloader))):
             # image, json_info, key = batch
             accelerator.wait_for_everyone()
+            if batch is None:
+                logger.warning(f"Encountered None batch at step {step}, skipping.")
+                continue
             data_time_all += time.time() - data_time_start
             vae_time_start = time.time()
             if state.load_vae_feat:
@@ -1456,7 +1459,13 @@ def main(cfg: SanaConfig) -> None:
             caching=args.caching,
             clipscore_filter_thres=args.data.del_img_clip_thr,
         )
-        train_dataloader = build_dataloader(dataset, batch_sampler=batch_sampler, num_workers=config.train.num_workers)
+        train_dataloader = build_dataloader(
+            dataset,
+            batch_size=config.train.train_batch_size,
+            batch_sampler=batch_sampler,
+            shuffle=True,
+            num_workers=config.train.num_workers,
+        )
         train_dataloader_len = len(train_dataloader)
         logger.info(f"rank-{rank} Cached file len: {len(train_dataloader.batch_sampler.cached_idx)}")
     else:
@@ -1622,41 +1631,45 @@ def main(cfg: SanaConfig) -> None:
 
     # optimizer = build_optimizer(model, config.train.optimizer)
 
-    # from heavyball import ForeachAdamW
+    from heavyball import ForeachAdamW
+    import heavyball
 
-    # optimizer = ForeachAdamW(
-    #     model.parameters(),
-    #     lr=2.0e-4,
-    #     betas=(0.9, 0.95),
-    #     eps=1e-9,
-    #     weight_decay=0.02,
-    #     caution=True,
-    # )
+    heavyball.utils.compile_mode = None
 
-    from src.utilities.optim import MuonFSDP
-
-    optimizer = MuonFSDP.create_muon_optimizer(
-        model.named_parameters(),
-        oned_param_algo="lion",
-        lr=3.0e-4,
-        mu=0.95,
+    optimizer = ForeachAdamW(
+        model.parameters(),
+        lr=2.0e-4,
         betas=(0.9, 0.95),
-        weight_decay=0.1,
-        epsilon=1e-9,
-        adjust_lr="rms_norm",
-        use_preconditioned=True,
-        use_triton=True,
-        ignored_keys_for_muon=(
-            r"control_embedder.*",
-            r"x_embedder.*",
-            r"t_embedder.*",
-            r"final_layer.*",
-            r".*norm\..*",
-            r".*\.bias$",
-        ),
-        oned_params_defaults={"weight_decay": 0.0},
+        eps=1e-9,
+        weight_decay=0.02,
+        caution=True,
+        foreach=True,
     )
-    logger.info("Using Muon optimizer")
+
+    # from src.utilities.optim import MuonFSDP
+
+    # optimizer = MuonFSDP.create_muon_optimizer(
+    #     model.named_parameters(),
+    #     oned_param_algo="lion",
+    #     lr=3.0e-4,
+    #     mu=0.95,
+    #     betas=(0.9, 0.95),
+    #     weight_decay=0.1,
+    #     epsilon=1e-9,
+    #     adjust_lr="rms_norm",
+    #     use_preconditioned=True,
+    #     use_triton=True,
+    #     ignored_keys_for_muon=(
+    #         r"control_embedder.*",
+    #         r"x_embedder.*",
+    #         r"t_embedder.*",
+    #         r"final_layer.*",
+    #         r".*norm\..*",
+    #         r".*\.bias$",
+    #     ),
+    #     oned_params_defaults={"weight_decay": 0.0},
+    # )
+    # logger.info("Using Muon optimizer")
 
     if config.train.lr_schedule_args and config.train.lr_schedule_args.get("num_warmup_steps", None):
         config.train.lr_schedule_args["num_warmup_steps"] = (

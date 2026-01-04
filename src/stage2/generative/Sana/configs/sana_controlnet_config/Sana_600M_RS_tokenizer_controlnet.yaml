@@ -23,7 +23,7 @@ model:
   mixed_precision: bf16
   fp32_attention: false  # true
   # load_from: hf://Efficient-Large-Model/Sana_600M_1024px/checkpoint/Sana_600M_1024px.pth
-  load_from: src/stage2/generative/Sana/output/20251217_215228_Sana_RS_tokenizer_ControlNet/checkpoints/latest.pth
+  load_from: src/stage2/generative/Sana/output/20260102_003537_Sana_RS_tokenizer_ControlNet/checkpoints/latest.pth #src/stage2/generative/Sana/output/20251217_215228_Sana_RS_tokenizer_ControlNet/checkpoints/latest.pth
   resume_from:
   aspect_ratio_type: ASPECT_RATIO_1024
   multi_scale: false
@@ -84,10 +84,10 @@ scheduler:
 # training setting
 train:
   num_workers: 6
-  seed: 1
-  train_batch_size: 6
+  seed: 2025
+  train_batch_size: 1
   num_epochs: 100
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   grad_checkpointing: true
   gradient_clip: 0.1
   optimizer:

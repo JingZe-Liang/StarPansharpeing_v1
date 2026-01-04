@@ -47,29 +47,39 @@ def log_any_into_writter(
     if step is None:
         from ..train_utils import StepsCounter
 
-        step: int = StepsCounter(["train"])
+        try:
+            # StepsCounter is a singleton, it should be initialized in the trainer
+            step = StepsCounter()["train"]
+        except (ValueError, KeyError, AttributeError):
+            # fallback if not initialized or "train" not found
+            step = 0
     step = cast(int, step)
 
-    def _any_writter_log(names: list[str], logs):
-        for name in names:
-            if name in writter:
-                if log_type == "image":
-                    if name == "tensorboard":
-                        writter["tensorboard"].log_images(logs, step=step, dataformats="HWC")
-                    elif name == "wandb":
-                        _keys = list(logs.keys())
-                        for k in _keys:
-                            logs[k] = wandb.Image(logs[k])
-                        writter["wandb"].log(logs, step=step)
-                    elif name == "swanlab":
-                        import swanlab
+    # Early exit if no writers and no collective operations expected
+    # Collective operations (like all-gather for DTensor) are expected for grad_norm if distributed
+    is_distributed = torch.distributed.is_initialized()
+    if not writter and not (is_distributed and log_type in ("grad_norm_per_param", "grad_norm_sum")):
+        return
 
-                        _keys = list(logs.keys())
-                        for k in _keys:
-                            logs[k] = swanlab.Image(logs[k], file_type="jpg")
-                        writter["swanlab"].log(logs, step=step)
-                else:
-                    writter[name].log(logs, step=step)
+    def _any_writter_log(names: list[str], logs: dict[str, Any]):
+        for name in names:
+            if name not in writter:
+                continue
+
+            if log_type == "image":
+                if name == "tensorboard":
+                    writter["tensorboard"].log_images(logs, step=step, dataformats="HWC")
+                elif name == "wandb":
+                    writter["wandb"].log({k: wandb.Image(v) for k, v in logs.items()}, step=step)
+                elif name == "swanlab":
+                    import swanlab
+
+                    writter["swanlab"].log(
+                        {k: swanlab.Image(v, file_type="jpg") for k, v in logs.items()},
+                        step=step,
+                    )
+            else:
+                writter[name].log(logs, step=step)
 
     def _watch_model():
         assert "model" in logs, "model name must be in logs"
@@ -79,22 +89,21 @@ def log_any_into_writter(
         norms = {}
         _n_params_sumed = 0
         if log_type == "grad_norm_sum":
-            norms[f"{model_cls_n}_grad_norm"] = 0
+            norms[f"{model_cls_n}_grad_norm"] = 0.0
 
-        for n, p in tqdm(model.named_parameters(), desc="logging grad norms", leave=False):
+        is_main = not is_distributed or torch.distributed.get_rank() == 0
+        for n, p in tqdm(
+            model.named_parameters(),
+            desc="logging grad norms",
+            leave=False,
+            disable=not is_main,
+        ):
             if p.grad is not None:
-                # must sync grad here, `is_main_process` would cause the ranks do not sync
-                if isinstance(p.grad, DTensor):
-                    _grad = p.grad._local_tensor
-                    if p.grad._local_tensor.device == torch.device("cpu"):
-                        logger.warning("p.grad is on cpu, this should not happen")
-                        # ensure the corss rank does not involve cpu bankend
-                        _grad = _grad.cuda()
-                    from ..network_utils import safe_dtensor_operation
+                from ..network_utils import safe_dtensor_operation
 
-                    # _p_grad = p.grad.full_tensor()  # across all ranks
-                    _grad = safe_dtensor_operation(_grad)
+                _grad = safe_dtensor_operation(p.grad)
                 _grad_norm = (_grad.data**2).sum() ** 0.5
+
                 if log_type == "grad_norm_per_param":
                     norms[f"{model_cls_n}/{n}"] = _grad_norm
                 elif log_type == "grad_norm_sum":
@@ -104,7 +113,7 @@ def log_any_into_writter(
                     raise ValueError(f"Unknown log_type {log_type}")
 
         # Mean the gradient norm
-        if log_type == "grad_norm_sum":
+        if log_type == "grad_norm_sum" and _n_params_sumed > 0:
             norms[f"{model_cls_n}_grad_norm"] /= _n_params_sumed
 
         return norms

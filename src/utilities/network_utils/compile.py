@@ -9,7 +9,6 @@ from loguru import logger
 __all__ = [
     "null_decorator",
     "null_decorator_no_any_kwgs",
-    "compile_forward_fn",
     "compile_decorator",
 ]
 
@@ -34,7 +33,7 @@ def null_decorator_no_any_kwgs(func):
 model_compiled_flag = bool(int(os.getenv("MODEL_COMPILED", "1")))
 # options
 compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
-compile_full_graph = True
+compile_full_graph = bool(int(os.getenv("MODEL_COMPILED_FULL_GRAPH", "0")))
 epilogue_fusion = True
 shape_padding = True
 

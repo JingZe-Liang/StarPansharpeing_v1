@@ -1028,7 +1028,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * lcr loss
         lcr_loss_val = self.zero
-        # breakpoint()
         if self.use_lcr:
             assert latent is not None, "latent (h) is required for lcr_loss"
             local_corr, lcr_loss_val = lcr_loss(latent, **self.lcr_loss_options)

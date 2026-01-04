@@ -182,3 +182,6 @@
 [submodule "src/stage2/stereo_matching/SemStereo"]
 	path = src/stage2/stereo_matching/SemStereo
 	url = https://github.com/chenchen235/SemStereo.git
+[submodule "src/stage2/layers/mHC"]
+	path = src/stage2/layers/mHC
+	url = https://github.com/tokenbender/mHC-manifold-constrained-hyper-connections.git

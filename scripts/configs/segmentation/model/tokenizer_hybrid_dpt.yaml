@@ -1,0 +1,21 @@
+defaults:
+  - tokenizer: hybrid
+  - _self_
+
+_target_: src.stage2.segmentation.models.tokenizer_dpt.TokenizerHybridDPT.create_model
+
+dpt_head:
+  head_type: "hybrid" # "hybrid" for RefineNet fusion, "simple" for concatenation
+  feature_dim: 256
+  norm_layer: layernorm2d
+  n_blocks: 4
+
+cnn_feature_indices: [1, 2]
+vit_feature_indices: [1, 3]
+
+# NOTE: You must provide a valid pretrained path
+tokenizer_pretrained_path: "runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors"
+
+freeze_backbone: true
+num_classes: ${dataset.consts.num_classes}
+_debug: false

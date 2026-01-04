@@ -166,7 +166,7 @@ class EvaBlock(nn.Module):
         super().__init__()
 
         self.norm1 = norm_layer(dim, **dd)
-        logger.debug(f"Layer uses attention type {attn_type}")
+        logger.trace(f"Layer uses attention type {attn_type}")
         attn_cls = {"rope": AttentionRope, "eva": EvaAttention, "gated": GatedAttentionTimmWrapped}[attn_type]
 
         attn_kwargs = {}

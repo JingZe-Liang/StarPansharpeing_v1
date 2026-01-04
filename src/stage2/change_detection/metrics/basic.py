@@ -55,7 +55,6 @@ class ChangeDetectionScore(HyperSegmentationScore):
         per_class: bool = False,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",
-        use_aggregation: bool = False,
     ):
         super().__init__(
             task="binary",
@@ -66,7 +65,6 @@ class ChangeDetectionScore(HyperSegmentationScore):
             per_class=per_class,
             include_bg=include_bg,
             input_format=input_format,
-            use_aggregation=use_aggregation,
         )
 
         # Add custom metrics to _all_metric_fns for forward compatibility

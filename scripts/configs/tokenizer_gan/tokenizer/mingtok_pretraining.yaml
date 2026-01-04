@@ -1,0 +1,125 @@
+_target_: src.stage1.cosmos.cosmos_mingtok.MingtokRSModel.create_model
+low_level_encoder:
+  z_dim: 512
+  latent_dim: 16
+  encoder_type: cnn_only
+  res_encoder:
+    in_channels: 512
+    out_channels: 512
+    channels: 128
+    attn_resolutions: [32]
+    channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    num_res_blocks: 2
+    z_channels: 512
+    act_checkpoint: true
+    norm_type: rmsnorm2d
+    block_name: res_block
+    use_residual_factor: true # layerscale starts at 1e-2
+    patch_method: haar
+    patch_size: 1
+    attn_type: null
+    padding_mode: reflect
+    dropout: 0.0
+    resolution: 512
+
+semantic_decoder:
+  in_chan: 512
+  out_chan: 1024
+  embed_dim: 1024
+  depth: 24
+  num_heads: 16
+  patch_size: 2
+  with_cls_token: true
+  out_patch_size: 1
+  mlp_ratio: 4.0
+  norm_layer: flarmsnorm
+  drop_path: 0.0
+  pe_type: rope_dinov3
+  rope_kwargs:
+    rope_theta: 100.0
+  last_norm: flarmsnorm
+  img_size: 64
+  patcher_type: patch_embedder
+  additional_pe: true
+  n_reg_tokens: 4
+  other_blk_kwargs:
+    use_gate: true
+    v_residual: true
+
+pixel_decoder:
+  decoder_type: hybrid
+  latent_dim: 16
+  z_dim: 512
+  total_resolutions: 8
+  res_decoder:
+    in_channels: 512
+    out_channels: 512
+    channels: 128
+    attn_resolutions: [32]
+    channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    num_res_blocks: 2
+    z_channels: 512
+    act_checkpoint: true
+    norm_type: rmsnorm2d
+    block_name: res_block
+    use_residual_factor: true
+    patch_method: haar
+    patch_size: 1
+    attn_type: null
+    padding_mode: reflect
+    dropout: 0.0
+    resolution: 512
+  transformer_decoder:
+    in_chan: 512
+    out_chan: 512
+    embed_dim: 1024
+    depth: 8
+    num_heads: 16
+    patch_size: 2
+    out_patch_size: 2
+    mlp_ratio: 4.0
+    norm_layer: flarmsnorm
+    drop_path: 0.0
+    pe_type: rope_dinov3
+    rope_kwargs:
+      rope_theta: 100.0
+    last_norm: null
+    img_size: 64
+    patcher_type: patch_embedder
+    additional_pe: true
+    n_reg_tokens: 4
+    other_blk_kwargs:
+      use_gate: true
+      v_residual: true
+
+repa_proj:
+  low_lvl_repa_out_chan: 1024
+  sem_repa_out_chan: 1024
+  low_lvl_cache_layers: [0, 1, 2, -1]
+  sem_cache_layers: [5, 11, 17, 23]
+  low_lvl_repa_proj_chans: [512, 512, 512, 512]
+  sem_repa_proj_chans: [1024, 1024, 1024, 1024]
+
+tokenizer:
+  straight_through_latent: false
+  sem_pix_decoder_type: seperated
+  sampling_options_default: {}
+  # quantizer
+  quantizer_type: null # [kl, bsq, fsq, multiscale_bsq, multiscale_leechq, psd]
+  random_quant: 0.0
+  fsq_num_codebooks: 6
+  fsq_levels: [8, 8, 8, 5, 5, 5]
+  mbsq_codebook_size: 1024
+  mbsq_schedule_mode: original
+  mleech_codebook_size: 196560
+  mleech_leech_type: full
+  mleech_schedule_mode: original
+  # latent mask augmentation
+  use_latent_mask: false
+  latent_mask_config:
+    mask_ratios: [0.0, 0.25, 0.5, 0.75]
+    block_sizes: { 16: [1, 1], 32: [2, 2] }
+    mask_probs: { 16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15] }
+  pretrained_task: ["ijepa"]
