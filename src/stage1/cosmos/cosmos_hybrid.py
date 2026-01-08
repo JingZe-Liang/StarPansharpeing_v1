@@ -407,7 +407,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         h = self.encoder.quant_conv(z_low_lvl)
         h_pool = h.mean(dim=(2, 3))
         h_proj = self.lejepa_projector_latent(h_pool)
-        return h_proj
+        return {"cls_tokens": h_proj, "patch_tokens": None}
 
     def encode_lejepa(self, x, **_ignored_kwargs):
         """
@@ -422,7 +422,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             z_low_lvl, masks=None, pretrained_task=["lejepa"]
         )
 
-        return terms.lejepa_proj
+        return {"cls_tokens": terms.lejepa_proj, "patch_tokens": None}
 
     def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
         """返回semantic encoder输出的normed CLS token (B, D)，用于DINO cls token loss。"""

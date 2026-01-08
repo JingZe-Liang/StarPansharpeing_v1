@@ -25,3 +25,4 @@ from .shaping import (
     reshape_wrapper,
     reverse_einops_pattern,
 )
+from .numerical_check import raise_if_nonfinite_params, raise_if_nonfinite_tensor

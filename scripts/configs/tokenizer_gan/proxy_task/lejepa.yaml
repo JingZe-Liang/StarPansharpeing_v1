@@ -8,3 +8,9 @@ sigreg:
   knots: 17
   rnd_proj_dim: 128
   lam: 0.02
+
+infonce:
+  weight: 0.0
+  type: "all@multi_positive_infonce"
+  temperature: 0.1
+  anchor: "all"

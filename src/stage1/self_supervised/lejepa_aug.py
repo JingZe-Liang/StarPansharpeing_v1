@@ -42,10 +42,11 @@ Each training image is augmented to produce 2 global views and 6 local views wit
 different spatial scales but the same set of color and geometric transformations
 """
 
-from typing import cast
+from typing import Literal, Any
 
 import kornia.augmentation as K
 import kornia.augmentation.random_generator as rg
+import kornia.filters as KF
 import torch
 from easydict import EasyDict as edict
 from jaxtyping import Float
@@ -58,6 +59,7 @@ from torch.distributed.nn import ReduceOp
 from torch.distributed.nn import all_reduce as functional_all_reduce
 
 from src.utilities.train_utils.visualization import get_rgb_image
+from .info_nce import multiview_info_nce_loss
 
 
 class HyperRandomGrayScale(IntensityAugmentationBase2D):
@@ -253,6 +255,51 @@ class SafeNotApply(IntensityAugmentationBase2D):
         return f"SafeNotApply({self.augmentation})"
 
 
+class HyperspectralBandBlur(IntensityAugmentationBase2D):
+    """
+    Apply Gaussian Blur to a random subset of bands for hyperspectral images.
+    """
+
+    def __init__(
+        self,
+        kernel_size: tuple[int, int] = (3, 3),
+        sigma: tuple[float, float] = (0.1, 1.0),
+        band_blur_ratio: float = 0.1,
+        p: float = 0.5,
+        same_on_batch: bool = False,
+    ):
+        super().__init__(p=p, same_on_batch=same_on_batch)
+        self.kernel_size = kernel_size
+        self.sigma_range = sigma
+        self.band_blur_ratio = band_blur_ratio
+
+        self._param_generator = rg.PlainUniformGenerator((self.sigma_range, "sigma", None, None))
+
+    def apply_transform(
+        self, input: Tensor, params: dict[str, Tensor], flags: dict[str, Any], transform: Tensor | None = None
+    ) -> Tensor:
+        if input.shape[1] <= 3:
+            return input
+
+        B, C, H, W = input.shape
+        n_blur = max(int(C * self.band_blur_ratio), 1)
+
+        # Select bands to blur randomly
+        blur_channels = torch.randperm(C, device=input.device)[:n_blur]
+
+        # params["sigma"] is (B,)
+        sigmas = params["sigma"]
+        if isinstance(sigmas, torch.Tensor) and sigmas.ndim == 1:
+            sigmas = sigmas.unsqueeze(1).repeat(1, 2)
+
+        blur_input = input[:, blur_channels, :, :]
+        blurred = KF.gaussian_blur2d(blur_input, self.kernel_size, sigmas)
+
+        out = input.clone()
+        out[:, blur_channels, :, :] = blurred
+        return out
+
+
 def create_global_view_augmentations():
     # Create the color jitter instances
     hp_jitter = HyperspectralColorJitter(
@@ -282,6 +329,7 @@ def create_global_view_augmentations():
         K.RandomResizedCrop(size=(224, 224), scale=(0.3, 1.0), p=1.0),
         K.RandomHorizontalFlip(p=0.5),
         K.RandomGaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0), p=0.5),
+        # HyperspectralBandBlur(p=0.4, kernel_size=(5, 5), sigma=(0.1, 1.0), band_blur_ratio=0.15),
         # Use SafeColorJitterWrapper to handle both hyperspectral and RGB images
         SafeColorJitterWrapper(
             hp_color_jitter=hp_jitter,
@@ -476,42 +524,132 @@ def create_lejepa_projector(
     return mlp_projector
 
 
+_InfoNCEEmbeddings = Literal["all", "global"]
+_InfoNCEObjective = Literal["supcon", "multi_positive_infonce"]
+
+
+def _parse_infonce_type(infonce_type: str) -> tuple[_InfoNCEEmbeddings, _InfoNCEObjective]:
+    parts = infonce_type.split("@", maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"`infonce_type` should be 'all@supcon' / 'all@multi_positive_infonce' / "
+            f"'global@supcon' / 'global@multi_positive_infonce', but got: {infonce_type!r}"
+        )
+
+    emb_t, obj_t = parts[0], parts[1]
+    if emb_t not in ("all", "global"):
+        raise ValueError(f"Embedding side of `infonce_type` should be 'all' or 'global', but got: {emb_t!r}")
+    if obj_t not in ("supcon", "multi_positive_infonce"):
+        raise ValueError(f"Objective side of `infonce_type` is invalid, but got: {obj_t!r}")
+
+    return emb_t, obj_t  # type: ignore[return-value]
+
+
+def _is_none_or(x, t: Any):
+    return x in (None, t)
+
+
+def sigreg_loss(
+    emb: Float[Tensor, "V B D"],
+    sigreg: torch.nn.Module | SIGReg | None = None,
+):
+    if sigreg is None:
+        sigreg = SIGReg(17, 256).to(emb.device)
+    return sigreg(emb)
+
+
+def invariance_loss(
+    global_emb: Float[Tensor, "V B D"],
+    local_emb: Float[Tensor, "V B D"] | None = None,
+) -> tuple[Tensor, Tensor]:
+    if local_emb is not None:
+        nl_views, *_ = local_emb.shape
+        embeddings = torch.cat([global_emb, local_emb], dim=0)
+    else:
+        embeddings = global_emb
+    centers = global_emb.mean(0, keepdim=True)
+    return (centers - embeddings).square().mean(), embeddings
+
+
 def lejepa_loss(
     global_emb: Float[Tensor, "V B D"],
     local_emb: Float[Tensor, "V B D"] | None = None,
-    sigreg: torch.nn.Module | SIGReg | None = None,
     lam: float = 0.02,
+    *,
+    lejepa_loss_type: str | None = None,
+    infonce_weight: float | None = None,
+    infonce_type: str = "all@multi_positive_infonce",
+    infonce_temp: float | None = None,
+    infonce_anchor: Literal["all", "global"] = "global",
 ) -> tuple[Tensor, dict]:
     """
     from the minimal lejepa implementation.
 
     embeddings: Tensor of shape [n_views, batch_size, feature_dim]
     """
+    assert lejepa_loss_type in ("invariance", "sigreg", None), (
+        f"`lejepa_loss_type` should be 'invariance', 'sigreg' or None (as default), but got: {lejepa_loss_type!r}"
+    )
+
     ng_views, batch_size, feature_dim = global_emb.shape
-    if local_emb is not None:
-        nl_views, *_ = local_emb.shape
-        embeddings = torch.cat([global_emb, local_emb], dim=0)
-    else:
-        embeddings = global_emb
-
-    if sigreg is None:
-        sigreg = SIGReg(17, 256).to(global_emb.device)
-
-    # Regularization loss for lejepa
-    sigreg_loss = sigreg(embeddings)  # proj: (V, B, D)
-
-    # Center of the views
-    centers = global_emb.mean(0, keepdim=True)
 
     # Losses
-    inv_loss = (centers - embeddings).square().mean()
+    inv_loss = torch.tensor(0.0).to(global_emb)
+    sigreg_l = torch.tensor(0.0).to(global_emb)
+
+    if _is_none_or(lejepa_loss_type, "invariance"):
+        inv_loss, embeddings = invariance_loss(global_emb, local_emb)
+    if _is_none_or(lejepa_loss_type, "sigreg"):
+        # Regularization loss for lejepa
+        if local_emb is not None:
+            # if all patches sigreg, global_emb and local_emb shape[1] (L-dim) does not equal
+            if global_emb.shape[1] == local_emb.shape[1]:
+                embeddings = torch.cat([global_emb, local_emb], dim=0)
+                sigreg_l = sigreg_loss(embeddings)  # proj: (V, B, D)
+            else:
+                # Do per-tensor sigreg loss calculation
+                gb_sigreg_l = sigreg_loss(global_emb)
+                lc_sigreg_l = sigreg_loss(local_emb)
+                sigreg_l = gb_sigreg_l + lc_sigreg_l
+
+                # HACK: when global_emb and local_emb has not equal shape[1] shape,
+                # `embeddings` will not be used in InfoNCE loss.
+                embeddings = global_emb
+                if lejepa_loss_type == "sigreg" and infonce_weight not in (None, 0.0):
+                    raise ValueError(f"{lejepa_loss_type=} will not support compute InfoNCE")
+                infonce_weight = None
+        else:
+            sigreg_l = sigreg_loss(global_emb)
+            embeddings = global_emb
 
     # Total loss and loss breakdowns
-    loss = inv_loss * (1 - lam) + sigreg_loss * lam
+    loss = inv_loss * (1 - lam) + sigreg_l * lam
+
+    # InfoNCE loss
+    info_nce_loss = torch.tensor(0.0).to(global_emb)
+    if infonce_weight is not None and infonce_weight > 0.0:
+        emb_t, obj_t = _parse_infonce_type(infonce_type)
+        info_nce_emb = embeddings if emb_t == "all" else global_emb
+        temp = infonce_temp if infonce_temp is not None else 0.1
+        anchor_views = None
+        if infonce_anchor == "global" and emb_t == "all":
+            anchor_views = list(range(ng_views))
+        elif infonce_anchor != "all":
+            raise ValueError(f"`infonce_anchor` should be 'all' or 'global', but got: {infonce_anchor!r}")
+
+        info_nce_loss = multiview_info_nce_loss(
+            info_nce_emb,
+            temperature=temp,
+            objective=obj_t,
+            anchor_views=anchor_views,
+        )
+        loss = loss + info_nce_loss * infonce_weight
+
     breakdowns = edict(
         {
             "inv_loss": inv_loss,
-            "sigreg_loss": sigreg_loss,
+            "sigreg_loss": sigreg_l,
+            "info_nce_loss": info_nce_loss,
             "lejepa_loss": loss,
         }
     )

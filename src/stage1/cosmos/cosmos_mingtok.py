@@ -310,6 +310,8 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
         z_dim: 512
         latent_dim: 16
         encoder_type: cnn_only
+        norm_latent_type: null
+        clip_latent_value: null
         res_encoder:
             in_channels: 512
             out_channels: 512
@@ -378,7 +380,7 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             dropout: 0.0
             resolution: 512
         transformer_decoder:
-            in_chan: 512
+            in_chan: 512  # if taken z is 512 else is latent, in_chan is 16
             out_chan: 512
             embed_dim: 1024
             depth: 8
@@ -410,6 +412,7 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
     tokenizer:
         straight_through_latent: false
         sem_pix_decoder_type: seperated
+        sem_decoder_take: z
         sampling_options_default: {}
         quantizer_type: null
         random_quant: 0.0
@@ -633,6 +636,23 @@ class EncoderLowLevel(nn.Module):
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
             self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
 
+        # self.latent_scale = nn.Parameter(torch.ones(cfg.latent_dim))
+        # nn.init.trunc_normal_(self.latent_scale, std=0.01, a=-1e-2, b=1e-2)
+
+        # norm the latent
+        self.norm_latent = nn.Identity()
+        if getattr(cfg, "norm_latent_type", None) is not None:
+            if cfg.norm_latent_type == "norm_no_affine":
+                self.norm = create_norm_layer("layernorm2d", cfg.latent_dim, affine=False)
+            elif cfg.norm_latent_type == "norm":
+                self.norm = create_norm_layer("layernorm2d", cfg.latent_dim)
+            else:
+                raise ValueError(f"Invalid norm_latent_type {cfg.norm_latent_type}")
+
+        self.clip_latent_value = getattr(cfg, "clip_latent_value", None)
+        if self.clip_latent_value is not None:
+            assert isinstance(self.clip_latent_value, (tuple, list))
+
     def forward(self, x, get_intermidates: list[int] | None = None):
         """Encode the input image into low-level latent tokens."""
         x = _to_memformat_channels_last(x)
@@ -664,6 +684,10 @@ class EncoderLowLevel(nn.Module):
             z = out["head_out"]  # z is 2d: (b, c, h, w)
             h = self.z_to_latent(z)  # Conv2d directly on 2d
 
+        # h = h * self.latent_scale.view(1, h.shape[1], 1, 1)
+        h = self.norm_latent(h)
+        if self.clip_latent_value is not None:
+            h = h.clip(*self.clip_latent_value)
         h = _to_memformat_channels_last(h)
         return dict(latent=h, z=z, **out)
 
@@ -1450,7 +1474,11 @@ class MingtokRSModel(nn.Module):
         self.pixel_cfg = cfg.pixel_decoder
         self.tok_cfg = cfg.tokenizer
         self.sem_pix_decoder_type = self.tok_cfg.sem_pix_decoder_type
+        self.sem_decoder_take = self.tok_cfg.sem_decoder_take
         assert self.sem_pix_decoder_type in ("unified", "seperated")
+        assert self.sem_decoder_take in ("z", "h")
+        logger.info(f"Sem-pix decoder type: <green>{self.sem_pix_decoder_type}</>")
+        logger.info(f"Sem-decoder take: <green>{self.sem_decoder_take}</>")
 
         # Model parts
         logger.info(f"Init low-level encoder.")
@@ -1458,7 +1486,7 @@ class MingtokRSModel(nn.Module):
 
         logger.info(f"Init semantic decoder.")
         self.semantic_decoder: nn.Module = DecoderSemantic(self.sem_cfg)
-        self.pretrained_task = getattr(self.tok_cfg, "pretrained_task")
+        self.pretrained_task: list[str] = getattr(self.tok_cfg, "pretrained_task")
 
         logger.info(f"Init pixel decoder of type {self.pixel_cfg.decoder_type}.")
         decoder_cls: type[nn.Module] = {
@@ -1481,6 +1509,9 @@ class MingtokRSModel(nn.Module):
         # TODO: add quantizer
         self._setup_quantizer()
         self._setup_latent_aug()
+
+        # Proxy task modules
+        self._setup_pretrained_proxy_module()
 
         # Semantic and low-level caches
         self.proj_cfg = cfg.repa_proj
@@ -1506,9 +1537,19 @@ class MingtokRSModel(nn.Module):
         self._use_repa_loss = self.use_repa
         self._use_vf_loss = False
 
+        # Initialize the weights
         self.init_weights()
 
+        # TODO: need test, compile the modules
         self._compile_modules()
+
+    def _setup_pretrained_proxy_module(self):
+        if "lejepa" in self.pretrained_task:
+            from torchvision.ops import MLP as MLP_TV
+
+            lejepa_proj_dim = 512
+            self.lejepa_proj = MLP_TV(self.sem_cfg.out_chan, [2048, 2048, lejepa_proj_dim], norm_layer=nn.BatchNorm1d)
+            logger.info("Setup the LeJEPA projector")
 
     def _maybe_fix_repa_proj_chans(self) -> None:
         """对齐`repa_proj.*_repa_proj_chans`与实际cache feature通道数，避免投影层输入维度不匹配。"""
@@ -1878,7 +1919,9 @@ class MingtokRSModel(nn.Module):
             # Flatten to 1D sequence if necessary is handled by semantic decoder
             pass
 
-        sem_out = self._sem_decode(z, masks)
+        sem_taken = latent if self.sem_decoder_take == "h" else z
+        assert torch.is_tensor(sem_taken), f"Sematic decoder takes only Tensor but got {type(sem_taken)}"
+        sem_out = self._sem_decode(sem_taken, masks)
         sem_tokens = sem_out["sem_tokens"]
 
         # if self.st_skip_semantic_decoder:
@@ -2073,17 +2116,21 @@ class MingtokRSModel(nn.Module):
 
         sem_decoder_out = self._decode_to_sem(latent=latent, z=z, masks=jepa_masks, hw=hw.tolist(), no_cache=True)
         sem_tokens = sem_decoder_out["sem_tokens"]
-
         return sem_tokens
 
-    def encode_lejepa(self, x) -> Tensor:
+    def encode_lejepa(self, x, *, lejepa_on: str = "cls") -> dict[str, Tensor]:
         low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
         z = low_lvl_out["z"]
         sem_out = self.semantic_decoder(z, masks=None, get_intermidates=None)
-        cls_tokens = sem_out.get("cls_tokens")
+        cls_tokens = sem_out.get("cls_tokens")  # b,c
         if cls_tokens is None:
             raise ValueError("semantic_decode is initialized without class token.")
-        return cls_tokens.squeeze(1)
+        cls_t1d = cls_tokens.squeeze(1)
+        patch_t1d = rearrange(sem_out["sem_tokens"], "b l c -> (b l) c")  # for full-patch-tokens sigreg
+        # project the tokens
+        cls_t1d = self.lejepa_proj(cls_t1d)
+        patch_t1d = self.lejepa_proj(patch_t1d)
+        return {"cls_tokens": cls_t1d, "patch_tokens": patch_t1d}
 
     def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
         low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
@@ -2145,7 +2192,7 @@ class MingtokRSModel(nn.Module):
         self.low_level_encoder.init_weights()
         self.semantic_decoder.init_weights()
         self.pixel_decoder.init_weights()
-        logger.info("<cyan>[Mingtok]: init weights done.</cyan>")
+        logger.info("<green>[Mingtok]: init weights done.</green>")
 
 
 # * --- Test --- #
@@ -2366,14 +2413,14 @@ def test_deterministic_mingtokrs_tokenizer():
     #     if p.requires_grad and any([rp.search(n) for rp in re_p]):
     #         print(n)
 
-    for n, p in model.named_parameters():
-        if p.isnan().any() or p.isinf().any():
-            print(f"{n} has nan/inf values")
-            raise
-        else:
-            print(f"{n} value range: {p.min()} - {p.max()}")
+    # for n, p in model.named_parameters():
+    #     if p.isnan().any() or p.isinf().any():
+    #         print(f"{n} has nan/inf values")
+    #         raise
+    #     else:
+    #         print(f"{n} value range: {p.min()} - {p.max()}")
 
-    exit(0)
+    # exit(0)
     print(f"Total resolutions: {model.total_resolutions}")
     print(f"Sem-pix decoder type: {model.sem_pix_decoder_type}")
     print(f"Use REPA: {model.use_repa}")
@@ -2390,11 +2437,10 @@ def test_deterministic_mingtokrs_tokenizer():
 
     with torch.no_grad():
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            out, info, _ = model(x)
+            out = model(x)
 
     print(f"Input shape: {x.shape}")
-    print(f"Output shape: {out.shape}")
-    print(f"Loss keys: {list(info.keys())}")
+    print(f"Output shape: {out['recon'].shape}")
     print("Forward pass successful!")
 
     # Test backward pass
@@ -2403,10 +2449,10 @@ def test_deterministic_mingtokrs_tokenizer():
     x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
 
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        out, info, _ = model(x)
+        out = model(x)
 
     # Get the first loss for backward
-    loss = out.mean()
+    loss = out["recon"].mean()
     print(f"Loss value: {loss.item():.4f}")
     loss.backward()
 

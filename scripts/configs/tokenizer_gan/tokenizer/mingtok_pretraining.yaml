@@ -3,6 +3,8 @@ low_level_encoder:
   z_dim: 512
   latent_dim: 16
   encoder_type: cnn_only
+  norm_latent_type: null
+  clip_latent_value: null
   res_encoder:
     in_channels: 512
     out_channels: 512
@@ -11,20 +13,42 @@ low_level_encoder:
     channels_mult: [2, 4, 4]
     spatial_compression: 8
     num_res_blocks: 2
-    z_channels: 512
+    z_channels: ${..z_dim}
     act_checkpoint: true
     norm_type: rmsnorm2d
     block_name: res_block
-    use_residual_factor: true # layerscale starts at 1e-2
+    use_residual_factor: false # layerscale starts at 1e-2
     patch_method: haar
     patch_size: 1
     attn_type: null
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
+  # transformer_encoder:
+  #   in_chan: 512
+  #   out_chan: 512
+  #   embed_dim: 1024
+  #   depth: 4
+  #   num_heads: 16
+  #   patch_size: 2
+  #   out_patch_size: 2
+  #   mlp_ratio: 4.0
+  #   norm_layer: flarmsnorm
+  #   drop_path: 0.0
+  #   pe_type: rope_dinov3
+  #   rope_kwargs:
+  #     rope_theta: 100.0
+  #   last_norm: null
+  #   img_size: 64
+  #   patcher_type: patch_embedder
+  #   additional_pe: true
+  #   n_reg_tokens: 4
+  #   other_blk_kwargs:
+  #     use_gate: true
+  #     v_residual: false
 
 semantic_decoder:
-  in_chan: 512
+  in_chan: 512 # 16 if sem_tokens=h else 512
   out_chan: 1024
   embed_dim: 1024
   depth: 24
@@ -45,12 +69,12 @@ semantic_decoder:
   n_reg_tokens: 4
   other_blk_kwargs:
     use_gate: true
-    v_residual: true
+    v_residual: false
 
 pixel_decoder:
   decoder_type: hybrid
-  latent_dim: 16
-  z_dim: 512
+  latent_dim: ${..low_level_encoder.latent_dim}
+  z_dim: ${..low_level_encoder.z_dim}
   total_resolutions: 8
   res_decoder:
     in_channels: 512
@@ -64,7 +88,7 @@ pixel_decoder:
     act_checkpoint: true
     norm_type: rmsnorm2d
     block_name: res_block
-    use_residual_factor: true
+    use_residual_factor: false
     patch_method: haar
     patch_size: 1
     attn_type: null
@@ -92,19 +116,20 @@ pixel_decoder:
     n_reg_tokens: 4
     other_blk_kwargs:
       use_gate: true
-      v_residual: true
+      v_residual: false
 
 repa_proj:
   low_lvl_repa_out_chan: 1024
   sem_repa_out_chan: 1024
   low_lvl_cache_layers: [0, 1, 2, -1]
   sem_cache_layers: [5, 11, 17, 23]
-  low_lvl_repa_proj_chans: [512, 512, 512, 512]
+  low_lvl_repa_proj_chans: [256, 512, 512, 512]
   sem_repa_proj_chans: [1024, 1024, 1024, 1024]
 
 tokenizer:
-  straight_through_latent: false
+  sem_decoder_take: z
   sem_pix_decoder_type: seperated
+  straight_through_latent: false
   sampling_options_default: {}
   # quantizer
   quantizer_type: null # [kl, bsq, fsq, multiscale_bsq, multiscale_leechq, psd]
@@ -122,4 +147,4 @@ tokenizer:
     mask_ratios: [0.0, 0.25, 0.5, 0.75]
     block_sizes: { 16: [1, 1], 32: [2, 2] }
     mask_probs: { 16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15] }
-  pretrained_task: ["ijepa"]
+  pretrained_task: ["ijepa", "lejepa"]

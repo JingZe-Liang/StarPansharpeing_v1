@@ -84,6 +84,11 @@ def block_basic_init(
             else:
                 std = trunc_std
             nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
+        elif init_type == "lecun_normal":
+            # LeCun normal: std = sqrt(1 / fan_in), suitable for SELU activation
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            std = trunc_std if trunc_std is not None else math.sqrt(1.0 / fan_in)
+            nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
         elif init_type == "kaiming_normal":
             nn.init.kaiming_normal_(module.weight, mode=mode, nonlinearity=nonlinearity)
         elif init_type == "kaiming_uniform":

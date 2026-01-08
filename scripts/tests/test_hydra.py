@@ -58,5 +58,17 @@ def main_compose():
     print(cfg.train.input_dir)
 
 
-main()
-# main_compose()
+# cfg_string = """
+# cfg: ???
+# name: test
+
+# dataset:
+#     ds_name: ${..name}
+
+# """
+
+# cfg = OmegaConf.create(cfg_string)
+# print(cfg.dataset.ds_name)
+
+# main()
+main_compose()

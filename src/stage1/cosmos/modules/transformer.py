@@ -1760,7 +1760,7 @@ class TransformerTokenizer(nn.Module):
         x_norm = x[:, self.num_prefix_tokens :, :]  # remove all prefix tokens (cls + reg)
 
         out = {
-            "x_prenorm": x,
+            "x_norm": x,
             "x_norm_patch_tokens": x_norm,  # spatial patch tokens
             "cls_tokens": cls_reg_tokens[:, :1] if self.with_cls_token else None,
             "reg_tokens": cls_reg_tokens[:, 1:] if self.n_reg_tokens > 0 else None,

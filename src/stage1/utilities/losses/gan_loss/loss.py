@@ -3,6 +3,7 @@ GAN, diffusion tokenizer loss functions.
 GAN loss, REPA, VF losses.
 """
 
+from transformers.data.processors.utils import SingleSentenceClassificationProcessor
 import warnings
 from collections import namedtuple
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from kornia.losses import SSIMLoss
 from loguru import logger
 
 from src.utilities.config_utils import function_config_to_basic_types
+from src.stage1.self_supervised.lejepa_aug import SIGReg
 
 from ..model import (
     DinoDiscV2,
@@ -335,7 +337,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
         lecam_loss_weight: float | None = None,
         lcr_loss_weight: float | None = None,
         lcr_loss_options: dict = {},
-        ssim_weight: float = 0.1,
+        # latent regularization loss - penalize large activation values
+        latent_reg_weight: float | None = None,
+        latent_reg_type: Literal["l2", "abs"] = "l2",
+        ssim_weight: float | None = None,
+        # sigreg regularization loss
+        sigreg_weight: float | None = None,
+        sigreg_options: dict = {"knots": 17, "rnd_proj_dim": 64},
         # if is video
         num_frames: int = 1,
         # not reconstruction loss if using diffusion slots
@@ -385,13 +393,25 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.discriminator_weight = disc_weight
         self.disc_network_type = disc_network_type
         self.disc_conditional = disc_conditional
-        self.use_ssim = ssim_weight > 0.0
         self.num_frames = num_frames
         self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
         self.lcr_loss_weight = lcr_loss_weight
         self.lcr_loss_options = lcr_loss_options
         self.use_lcr = lcr_loss_weight is not None and lcr_loss_weight > 0.0
+        # latent regularization
+        self.latent_reg_weight = latent_reg_weight
+        self.latent_reg_type = latent_reg_type
+        self.use_latent_reg = latent_reg_weight is not None and latent_reg_weight > 0.0
+        self.use_sigreg = sigreg_weight is not None and sigreg_weight > 0.0
+        self.sigreg_weight = sigreg_weight
+        if self.use_latent_reg:
+            logger.info(
+                f"[VQ fn loss]: latent regularization enabled, type={latent_reg_type}, weight={latent_reg_weight}"
+            )
+        if self.use_sigreg:
+            logger.info(f"[VQ fn loss]: sigreg from lejepa is enabled, weight={sigreg_weight}")
+            self.sigreg_fn = SIGReg(**sigreg_options)
         if force_not_use_recon_loss:
             logger.info(
                 "[VQ fn loss]: not use reconstruction loss, make sure you will compute this main loss elsewhere"
@@ -582,7 +602,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * SSIM loss
         self.ssim_weight = ssim_weight
-        if ssim_weight > 0:
+        self.use_ssim = ssim_weight is not None and ssim_weight > 0.0
+        if self.use_ssim:
             self.ssim_loss = SSIMLoss(window_size=11)
             logger.info("SSIM Loss is used in VAE losses")
 
@@ -855,6 +876,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         lcr_loss: torch.Tensor | None = None,
+        latent_value_reg_loss: torch.Tensor | None = None,
+        sigreg_loss: torch.Tensor | None = None,
         # weights ======
         disc_weight: torch.Tensor | None = None,
         # other =======
@@ -865,18 +888,32 @@ class VQLPIPSWithDiscriminator(nn.Module):
         if disc_factor == 0:
             log = {
                 "total_loss": total_loss.clone().detach(),
+                # Reconstructions loss
                 "nll_loss": nll_loss.detach(),
                 "reconstruct_loss": reconstruction_loss.detach().mean(),
                 "ssim_loss": ssim_loss.detach().mean() if ssim_loss is not None else self.zero,
+                # Perceptual loss
                 "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
+                # Feature distillation loss
                 "repa_loss": repa_loss.detach().mean() if repa_loss is not None else self.zero,
                 "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
                 "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
+                # Latent regularization loss
                 "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
+                "h_value_reg_loss": latent_value_reg_loss.detach().mean()
+                if latent_value_reg_loss is not None and self.use_latent_reg
+                else self.zero,
+                "sigreg_loss": sigreg_loss.detach().mean()
+                if sigreg_loss is not None and self.use_sigreg
+                else self.zero,
+                # ---------------
+                # Generator loss
+                "g_loss": self.zero,
+                # Deprecation
                 "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
+                # Others
                 "d_weight": self.zero,
                 "disc_factor": self.zero,
-                "g_loss": self.zero,
             }
         else:
             if self.training:
@@ -892,6 +929,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
                     "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
                     "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
+                    "h_value_reg_loss": latent_value_reg_loss.detach().mean()
+                    if latent_value_reg_loss is not None
+                    else self.zero,
+                    "sigreg_loss": sigreg_loss.detach().mean() if sigreg_loss is not None else self.zero,
                     # discriminator loss
                     "d_weight": disc_weight,
                     "disc_factor": torch.tensor(disc_factor),
@@ -946,7 +987,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         else:
             raise NotImplementedError(f"Reconstruction loss type {self.recon_loss_type} not implemented.")
 
-        if self.ssim_weight > 0.0 and self.use_ssim:
+        if self.use_ssim:
             ssim_loss = self.ssim_loss(inputs, targets)
         else:
             ssim_loss = self.zero
@@ -1035,6 +1076,29 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 lcr_weight = self._calculate_adaptive_weight(nll_loss, lcr_loss_val, last_layer=enc_last_layer)
                 lcr_loss_val = lcr_loss_val * lcr_weight * self.lcr_loss_weight
 
+        # * latent regularization loss
+        # penalize large activation values in latent space
+        latent_value_reg_loss = self.zero
+        if self.use_latent_reg:
+            assert latent is not None, "latent is required for latent regularization"
+            if self.latent_reg_type == "l2":
+                # L2 regularization: penalize squared values
+                latent_value_reg_loss = (latent**2).mean()
+            elif self.latent_reg_type == "abs":
+                # Absolute regularization: penalize absolute values
+                latent_value_reg_loss = latent.abs().mean()
+            latent_value_reg_loss = latent_value_reg_loss * self.latent_reg_weight
+
+        # * sigreg loss
+        sigreg_loss = self.zero
+        if self.use_sigreg:
+            assert self.sigreg_fn is not None, f"SIGReg class should be a attribution in VQ loss class."
+            assert latent is not None, "latent is required for sigreg"
+            # sigreg loss on all patches
+            latent_1d = rearrange(latent, "b c h w -> (b h w) c").unsqueeze(0)  # 1,BHW,C
+            sigreg_loss = self.sigreg_fn(latent_1d)
+            sigreg_loss = sigreg_loss * self.sigreg_weight
+
         # * (un)conditional gan loss
         disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.disc_iter_start_for_g)
         d_weight = 1.0
@@ -1065,7 +1129,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         q_loss, q_loss_logs = self._q_loss(q_loss_total, q_loss_breakdown, global_step)
 
         # * basic losses
-        loss = nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss + lcr_loss_val
+        loss = (
+            nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss + lcr_loss_val + latent_value_reg_loss + sigreg_loss
+        )
 
         # * form logs
         log = self._train_generator_log_form(
@@ -1079,6 +1145,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             lcr_loss=lcr_loss_val,
+            latent_value_reg_loss=latent_value_reg_loss,
+            sigreg_loss=sigreg_loss,
             ssim_loss=ssim_loss,
             percep_loss=p_loss,
             gram_loss=gram_loss,

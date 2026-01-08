@@ -319,7 +319,7 @@ class DINOv3EncoderAdapter(nn.Module):
         nonlin: Union[None, Type[torch.nn.Module], str] = nn.ReLU,
         nonlin_kwargs: dict | None = None,
         conv_bias: bool = False,
-        keys: list[str] = None,
+        keys: list[str] | None = None,
     ):
         super().__init__()
         self.dinov3_adapter = dinov3_adapter

@@ -26,6 +26,9 @@ accelerator:
 proxy_task:
   task: ["ijepa"] #"lejepa_latent"
 
+  loss_weight:
+    ijepa: 1.
+
   aug:
     n_local: 6
     n_global: 2

@@ -76,6 +76,16 @@ def get_model_learnable_params(model: th.nn.Module, with_name=True):
         return list(trainable_ps.values())
 
 
+def split_no_weight_decay_params(named_params: dict, names_to_split: list[str]):
+    patterns = [re.compile(pattern) for pattern in names_to_split]
+    no_wd_params = {}
+    for n, p in named_params.items():
+        if any(pattern.search(n) for pattern in patterns):
+            no_wd_params[n] = p
+            named_params.pop(n)
+    return named_params, no_wd_params
+
+
 # * --- partials --- #
 
 import functools
