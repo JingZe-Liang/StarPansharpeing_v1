@@ -461,7 +461,7 @@ class PansharpeningNAFNet(nn.Module):
 
         @torch.no_grad()
         def _apply(module, name):
-            logger.debug(f"init module: {name}")
+            # logger.debug(f"init module: {name}")
             if hasattr(module, "init_weights"):
                 module.init_weights()
             elif isinstance(module, nn.Conv2d):

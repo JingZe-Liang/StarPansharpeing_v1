@@ -1,63 +1,37 @@
 _target_: src.stage2.layers.wrapper.tokenizer_wrapper.DownstreamModelTokenizerWrapper
 
-# Tokenizer configuration (from cosmos_f8c16p1_lora.yaml)
 tokenizer:
-  # _target_: src.stage1.cosmos.lora_mixin.TokenizerLoRAMixin  # if is diffbands lora tokenizer
-  # tokenizer:
-  _target_: peft.PeftModel.from_pretrained # basic nested lora tokenizer
+  _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
   model:
-    _target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
-    model:
-      attn_resolutions: [32]
-      channels: 128
-      channels_mult: [2, 4, 4]
-      dropout: 0.0
-      in_channels: 512 # nested max channels
-      out_channels: 512 # nested max channels
-      spatial_compression: 8
-      num_res_blocks: 2
-      resolution: 1024
-      z_channels: 256
-      latent_channels: 16
-      act_checkpoint: false
-      norm_type: gn
-      norm_groups: 32
-      block_name: res_block
-      moe_token_mixer_type: res_block
-      hidden_factor: 4
-      use_residual_factor: false
-      # others
-      patch_method: haar
-      patch_size: 1
-      attn_type: none
-      padding_mode: reflect # for boundary?
-      adaptive_mode: interp
-      # wrap_fsdp_last_layer: false
-    # repa
-    use_repa_loss: false
-    use_vf_loss: false
-    hook_module: decoder.decoder.mid.block_2
-    vf_on_z_or_module: z # [z, module]
-    dino_feature_dim: 1024
-    # loading
-    enc_path: ""
-    dec_path: ""
-    uni_path: "runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors"
-    loading_type: pretrained
-    # quant
-    norm_in_quant_conv: false
-  # lora_weights:
-  #   WV3: runs/stage1_cosmos_lora/2025-09-14_23-31-37_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3/adapter_model.safetensors
-  #   QB: runs/stage1_cosmos_lora/2025-09-14_23-27-18_cosmos_lora=lora_r=32_f8c16p1_QB/peft_ckpt/QB/adapter_model.safetensors
-  # lora_hyper_chans:
-  #   WV3: 8
-  #   QB: 4
-  # active_lora: ${dataset.cfgs.used}
-
-  # Nested LoRA weights
-  model_id: "runs/stage1_cosmo_nested_lora/2025-11-10_21-59-31_cosmos_lora=lora_r=32_f8c16p1_WV3/peft_ckpt/WV3"
-  adapter_name: "default" # for non-diffbands lora tokenizer
-  ignore_mismatched_sizes: true
+    attn_resolutions: [32]
+    channels: 128
+    in_channels: 512
+    out_channels: 512
+    channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    dropout: 0.0
+    num_res_blocks: 2
+    resolution: 1024
+    z_channels: 256
+    latent_channels: 16
+    act_checkpoint: false
+    norm_type: rmsnorm2d
+    act_type: silu
+    block_name: res_block
+    use_residual_factor: false
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
+    padding_mode: reflect
+    adaptive_mode: interp
+  uni_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
+  loading_type: pretrained
+  qunatizer_type: null
+  hook_for_repa: false
+  use_repa_loss: false
+  use_vf_loss: false
+  vf_on_z_or_module: z
+  z_factor: 1
 
 # Pansharpening model configuration (from nafnet.yaml)
 downstream_model:
@@ -95,7 +69,7 @@ downstream_model:
   pixel_model:
     _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNet.create_model
     pan_channel: 1
-    ms_channel: ${dataset.consts.bands}
+    ms_channel: 4 #${dataset.consts.bands}
     width: 128
     middle_blk_num: 2
     enc_blk_nums: [1, 2, 2]
@@ -127,5 +101,5 @@ downstream_model:
 # Wrapper configuration
 froze_tokenizer: true
 n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
-tokenizer_scale_shift: [6.5, 0.0] # std, mean from cosmos_f8c16p1_lora.yaml
+tokenizer_scale_shift: [0.613, -0.48] # std, mean from cosmos_f8c16p1_lora.yaml
 img_is_neg_1_1: false # Pansharpening use 0-1 range images

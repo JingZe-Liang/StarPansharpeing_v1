@@ -24,7 +24,7 @@ https://github.com/CompVis/stable-diffusion/blob/
 
 import math
 from functools import partial
-from typing import Any, Callable, Literal, Optional, Sequence, Union, no_type_check
+from typing import Any, Callable, Literal, Optional, Sequence, Union, cast, no_type_check
 
 import numpy as np
 
@@ -58,7 +58,8 @@ from .blocks import (
     nonlinearity,
 )
 from .patching import Patcher, UnPatcher
-from .resample import build_downsample_block, build_upsample_block
+from .resample import UpsampleRepeatConv, build_downsample_block, build_upsample_block
+from .utils import extract_needed_kwargs
 
 
 def is_list_tuple(x: Any) -> bool:
@@ -217,7 +218,8 @@ class Encoder(nn.Module):
         norm_type: str = "gn",
         norm_groups: int = 32,
         resample_norm_keep: bool = False,
-        adaptive_mode: str = "slice",
+        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_conv_kwargs: dict = {},
         **ignore_kwargs,
     ):
         super().__init__()
@@ -248,25 +250,27 @@ class Encoder(nn.Module):
         )
 
         # input conv
-        self.use_diffbands_input = isinstance(in_channels, Sequence)
+        self.use_diffbands_input = isinstance(in_channels, (list, tuple))
         if self.use_diffbands_input:
-            in_channels = [c * patch_size * patch_size for c in in_channels]
+            assert isinstance(in_channels, (list, tuple))
+            in_channels_list = [c * patch_size * patch_size for c in in_channels]
             self.conv_in = DiffBandsInputConvIn(
-                band_lst=in_channels,
+                band_lst=in_channels_list,
                 hidden_dim=channels,
                 basic_module=conv_in_module,
                 padding_mode=padding_mode,
             )
         else:
-            in_channels = in_channels * patch_size * patch_size
+            in_channels_int = in_channels * patch_size * patch_size
 
             # Use a nested conv here
-            assert isinstance(in_channels, int)
+            assert isinstance(in_channels_int, int)
             self.conv_in = AdaptiveInputConvLayer(
-                in_channels=in_channels,
+                in_channels=in_channels_int,
                 out_channels=channels,
                 use_bias=True,
                 mode=adaptive_mode,
+                **extract_needed_kwargs(adaptive_conv_kwargs, AdaptiveInputConvLayer),
             )
 
         # downsampling
@@ -438,7 +442,8 @@ class Decoder(nn.Module):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
-        adaptive_mode: str = "slice",
+        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_conv_kwargs: dict = {},
         **ignore_kwargs,
     ):
         super().__init__()
@@ -544,6 +549,7 @@ class Decoder(nn.Module):
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
 
+        out_ch: int | list[int]
         if isinstance(out_channels, list):
             logger.info("[Decoder]: use diffbands input")
             out_ch = [c * patch_size * patch_size for c in out_channels]
@@ -557,6 +563,7 @@ class Decoder(nn.Module):
                 out_channels=out_ch,
                 use_bias=True,
                 mode=adaptive_mode,
+                **extract_needed_kwargs(adaptive_conv_kwargs, AdaptiveOutputConvLayer),
             )
 
         # Ignore it: fsdp warpper, but not used
@@ -688,7 +695,8 @@ class GenerativeDecoder(Decoder):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
-        adaptive_mode: str = "slice",
+        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_conv_kwargs: dict = {},
         per_layer_noise: bool = False,
         **ignore_kwargs,
     ):
@@ -723,6 +731,7 @@ class GenerativeDecoder(Decoder):
             patch_method=patch_method,
             resample_norm_keep=resample_norm_keep,
             adaptive_mode=adaptive_mode,
+            adaptive_conv_kwargs=adaptive_conv_kwargs,
             **ignore_kwargs,
         )
 
@@ -905,6 +914,7 @@ class DecoderDiff(nn.Module):
         self.t_embedder = TimestepEmbedder(t_in, time_scale=time_scale)  # base channels
 
         # block class
+        block_class: Callable[..., nn.Module]
         if diff_cond_inject_strategy in ("inject_part", "inject_full"):
             block_class = partial(
                 ResnetBlockSlotsInjected,
@@ -929,6 +939,7 @@ class DecoderDiff(nn.Module):
             act_checkpoint=act_checkpoint,
         )
         # self.mid.attn_1 = AttnBlock(block_in, act_checkpoint=act_checkpoint)
+        mid_blk_2_cls: Callable[..., nn.Module]
         if diff_cond_inject_strategy == "inject_part":
             mid_blk_2_cls = ResnetBlock
         elif diff_cond_inject_strategy == "inject_full":

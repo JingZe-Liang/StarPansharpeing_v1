@@ -34,7 +34,7 @@ from src.stage1.discretization.collections.kl_continuous import (
 )
 from src.stage1.discretization.collections.psd import PowerSphericalDistribution, l2_norm
 
-# other utils
+# other utilities
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
@@ -163,12 +163,15 @@ class EncoderDecoderConfig:
     norm_groups: int = 32
     resample_norm_keep: bool = False
     # adaptive conv
-    adaptive_mode: str = "interp"
+    adaptive_mode: str = "mix"
+    adaptive_conv_kwargs: Any = field(
+        default_factory=lambda: {"router_condition": "per_channel_dw_pool", "router_dw_kernel_size": 3}
+    )
     # generative decoder specific
     per_layer_noise: bool = False
 
     def __post_init__(self):
-        self.adaptive_mode in ("interp", "slice")
+        self.adaptive_mode in ("interp", "slice", "mix")
 
 
 @dataclass

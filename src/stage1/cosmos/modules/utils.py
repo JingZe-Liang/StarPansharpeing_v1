@@ -217,37 +217,6 @@ def __register_adaptive_norm():
 __register_adaptive_norm()
 
 
-# class AdaptiveGroupNorm32(nn.Module):
-#     def __init__(self, z_channel, in_filters, eps=1e-6):
-#         super().__init__()
-#         self.gn = nn.GroupNorm(
-#             num_groups=32, num_channels=in_filters, eps=eps, affine=False
-#         )
-#         # self.lin = nn.Linear(z_channels, in_filters * 2)
-#         self.gamma = nn.Linear(z_channel, in_filters)
-#         self.beta = nn.Linear(z_channel, in_filters)
-#         self.eps = eps
-
-#     def forward(self, x, quantizer):
-#         B, C, _, _ = x.shape
-#         # quantizer = F.adaptive_avg_pool2d(quantizer, (1, 1))
-#         # calcuate var for scale
-#         scale = rearrange(quantizer, "b c h w -> b c (h w)")
-#         scale = scale.var(dim=-1) + self.eps  # not unbias
-#         scale = scale.sqrt()
-#         scale = self.gamma(scale).view(B, C, 1, 1)
-
-#         # calculate mean for bias
-#         bias = rearrange(quantizer, "b c h w -> b c (h w)")
-#         bias = bias.mean(dim=-1)
-#         bias = self.beta(bias).view(B, C, 1, 1)
-
-#         x = self.gn(x)
-#         x = scale * x + bias
-
-#         return x
-
-
 def unit_magnitude_normalize(x, dim=None, eps=1e-4):
     if dim is None:
         dim = list(range(1, x.ndim))

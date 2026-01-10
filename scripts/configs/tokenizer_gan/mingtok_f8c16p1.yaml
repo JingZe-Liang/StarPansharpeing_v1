@@ -38,36 +38,36 @@ proxy_task:
     model:
       embed_dim: 1024
     optimizer:
-      # _target_: heavyball.AdamW
-      # _partial_: true
-      # lr: 4.0e-4
-      # weight_decay: 0.01
-      # caution: true
-      # mars: false
-      # betas: ${tuple:[0.9,0.95]}
-
-      _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+      _target_: heavyball.AdamW
       _partial_: true
-      betas: [0.9, 0.95]
-      mu: 0.95
-      oned_param_algo: lion
-      use_triton: true
-      use_preconditioned: true # turbo-muon style preconditioning
-      muon_params_defaults:
-        lr: 3.0e-4
-        weight_decay: 0.02
-      oned_params_defaults:
-        lr: 3.0e-4
-        weight_decay: 0.0
-      ignored_keys_for_muon:
-        - patch_embed
-        - pe
-        - norm
-        - ls1
-        - ls2
-        - layer_scale
-        - norm1
-        - norm2
+      lr: 3.0e-4
+      weight_decay: 0.01
+      caution: true
+      mars: false
+      betas: ${tuple:[0.9,0.95]}
+
+      # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+      # _partial_: true
+      # betas: [0.9, 0.95]
+      # mu: 0.95
+      # oned_param_algo: lion
+      # use_triton: true
+      # use_preconditioned: true # turbo-muon style preconditioning
+      # muon_params_defaults:
+      #   lr: 3.0e-4
+      #   weight_decay: 0.02
+      # oned_params_defaults:
+      #   lr: 3.0e-4
+      #   weight_decay: 0.0
+      # ignored_keys_for_muon:
+      #   - patch_embed
+      #   - pe
+      #   - norm
+      #   - ls1
+      #   - ls2
+      #   - layer_scale
+      #   - norm1
+      #   - norm2
     scheduler:
       _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
       _partial_: true
@@ -231,13 +231,13 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   grad_checkpoint: false # model activation checkpoint
-  resume_path: runs/stage1_cosmos_mingtok/2026-01-08_18-57-12_mingtok_RS_tokenizer_f8c16p1/checkpoints/checkpoint_3
-  ema_load_path: #runs/stage1_cosmos_mingtok/2026-01-07_16-55-20_mingtok_RS_tokenizer_f8c16p1/ema
+  resume_path:
+  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-09_01-09-44_mingtok_RS_tokenizer_f8c16p1/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
   grad_check: false # check per-step gradients
-  proxy_task_train_type: unified
+  proxy_task_train_type: seperated
 
   # augmentations
   aug_pipeline_train_obj: #decoder_deg
@@ -251,30 +251,30 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    _partial_: true
-    betas: [0.9, 0.95]
-    mu: 0.95
-    oned_param_algo: lion
-    use_triton: true
-    use_preconditioned: true # turbo-muon style preconditioning
-    muon_params_defaults:
-      lr: 3.0e-4
-      weight_decay: 0.01
-    oned_params_defaults:
-      lr: 3.0e-4
-      weight_decay: 0.0
-    ignored_keys_for_muon:
-      - patch_embed
-      - pe
-      - norm
-      - ls1
-      - ls2
-      - layer_scale
-      - norm1
-      - norm2
-      - q_norm
-      - k_norm
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _partial_: true
+    # betas: [0.9, 0.95]
+    # mu: 0.95
+    # oned_param_algo: lion
+    # use_triton: true
+    # use_preconditioned: true # turbo-muon style preconditioning
+    # muon_params_defaults:
+    #   lr: 3.0e-4
+    #   weight_decay: 0.01
+    # oned_params_defaults:
+    #   lr: 3.0e-4
+    #   weight_decay: 0.0
+    # ignored_keys_for_muon:
+    #   - patch_embed
+    #   - pe
+    #   - norm
+    #   - ls1
+    #   - ls2
+    #   - layer_scale
+    #   - norm1
+    #   - norm2
+    #   - q_norm
+    #   - k_norm
 
     # _target_: torch.optim.AdamW
     # _partial_: true
@@ -285,13 +285,12 @@ train:
     # # foreach: true
     # fused: true
 
-    # Adamw seems make the std too large
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 4.0e-4
-    # weight_decay: 0.01
-    # caution: true
-    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
+    _target_: heavyball.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 0.01
+    caution: true
+    betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
 
   disc_optimizer:
     _target_: torch.optim.AdamW

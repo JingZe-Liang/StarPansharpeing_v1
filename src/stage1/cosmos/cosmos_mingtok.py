@@ -230,6 +230,8 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
         "use_residual_factor=false patch_method=haar patch_size=1 attn_type='none' padding_mode=zeros"
     )
     res_enc_cfg = OmegaConf.from_dotlist(res_enc_str.split(" "))
+    res_enc_cfg.adaptive_mode = "mix"
+    res_enc_cfg.adaptive_conv_kwargs = {"router_condition": "per_channel_dw_pool", "router_dw_kernel_size": 3}
     transf_enc_str: str = (
         "in_chan=512 embed_dim=768 depth=8 num_heads=8 patch_size=2 out_patch_size=1 mlp_ratio=4.0 "
         "norm_layer='layernorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
@@ -310,7 +312,8 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
         z_dim: 512
         latent_dim: 16
         encoder_type: cnn_only
-        norm_latent_type: null
+        norm_latent_type: norm_no_affine
+        latent_proj_type: norm_act_conv3x3
         clip_latent_value: null
         res_encoder:
             in_channels: 512
@@ -322,13 +325,19 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             num_res_blocks: 2
             z_channels: 512
             act_checkpoint: true
-            norm_type: rmsnorm2d
+            norm_type: gn
             block_name: res_block
             use_residual_factor: false
             patch_method: haar
             patch_size: 1
             attn_type: null
             padding_mode: reflect
+            adaptive_mode: mix
+            adaptive_conv_kwargs:
+                router_condition: per_channel_dw_pool
+                router_dw_kernel_size: 3
+                always_use_router: true
+                router_hidden_dim: 128
             dropout: 0.0
             resolution: 512
 
@@ -370,13 +379,19 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             num_res_blocks: 2
             z_channels: 512
             act_checkpoint: true
-            norm_type: rmsnorm2d
+            norm_type: gn
             block_name: res_block
             use_residual_factor: false
             patch_method: haar
             patch_size: 1
             attn_type: null
             padding_mode: reflect
+            adaptive_mode: mix
+            adaptive_conv_kwargs:
+                router_condition: per_channel_dw_pool
+                router_dw_kernel_size: 3
+                always_use_router: true
+                router_hidden_dim: 128
             dropout: 0.0
             resolution: 512
         transformer_decoder:
@@ -626,15 +641,30 @@ class EncoderLowLevel(nn.Module):
             assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
             self.res_encoder = ResEncoder(**res_cfg)
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
-            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
         elif encoder_type == "cnn_only":
             assert res_cfg is not None, "res_encoder config must be provided if use_cnn"
             self.res_encoder = ResEncoder(**res_cfg)
-            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1)
         else:  # transformer only
             assert transf_cfg is not None, "transformer_encoder config must be provided"
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
+
+        latent_proj_type = getattr(cfg, "latent_proj_type", None)
+        if latent_proj_type is None:
+            latent_proj_type = "conv_3x3" if encoder_type == "cnn_only" else "conv_1x1"
+
+        if latent_proj_type == "conv_1x1":
             self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
+        elif latent_proj_type == "conv_3x3":
+            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1)
+        elif latent_proj_type == "norm_act_conv3x3":
+            gn_groups = int(getattr(cfg, "latent_proj_norm_groups", 32))
+            self.z_to_latent = nn.Sequential(
+                create_norm_layer("groupnorm", cfg.z_dim, num_groups=gn_groups),
+                nn.SiLU(),
+                nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1),
+            )
+        else:
+            raise ValueError(f"Invalid latent_proj_type {latent_proj_type}")
 
         # self.latent_scale = nn.Parameter(torch.ones(cfg.latent_dim))
         # nn.init.trunc_normal_(self.latent_scale, std=0.01, a=-1e-2, b=1e-2)
@@ -643,9 +673,9 @@ class EncoderLowLevel(nn.Module):
         self.norm_latent = nn.Identity()
         if getattr(cfg, "norm_latent_type", None) is not None:
             if cfg.norm_latent_type == "norm_no_affine":
-                self.norm = create_norm_layer("layernorm2d", cfg.latent_dim, affine=False)
+                self.norm_latent = create_norm_layer("layernorm2d", cfg.latent_dim, affine=False)
             elif cfg.norm_latent_type == "norm":
-                self.norm = create_norm_layer("layernorm2d", cfg.latent_dim)
+                self.norm_latent = create_norm_layer("layernorm2d", cfg.latent_dim)
             else:
                 raise ValueError(f"Invalid norm_latent_type {cfg.norm_latent_type}")
 
@@ -2394,33 +2424,6 @@ def test_deterministic_mingtokrs_tokenizer():
     model = MingtokRSModel(cfg).to("cuda", torch.bfloat16)
     model.train()
 
-    # import re
-
-    # re_p = [
-    #     "patch_embed",
-    #     "pe",
-    #     "norm",
-    #     "ls1",
-    #     "ls2",
-    #     "layer_scale",
-    #     "norm1",
-    #     "norm2",
-    #     "q_norm",
-    #     "k_norm",
-    # ]
-    # re_p = [re.compile(p) for p in re_p]
-    # for n, p in model.named_parameters():
-    #     if p.requires_grad and any([rp.search(n) for rp in re_p]):
-    #         print(n)
-
-    # for n, p in model.named_parameters():
-    #     if p.isnan().any() or p.isinf().any():
-    #         print(f"{n} has nan/inf values")
-    #         raise
-    #     else:
-    #         print(f"{n} value range: {p.min()} - {p.max()}")
-
-    # exit(0)
     print(f"Total resolutions: {model.total_resolutions}")
     print(f"Sem-pix decoder type: {model.sem_pix_decoder_type}")
     print(f"Use REPA: {model.use_repa}")
@@ -2431,7 +2434,7 @@ def test_deterministic_mingtokrs_tokenizer():
     # Test forward pass
     print("\n[2/4] Testing forward pass...")
     print("-" * 80)
-    batch_size = 3
+    batch_size = 2
     img_size = 512
     x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
 
@@ -2499,14 +2502,17 @@ def test_deterministic_mingtokrs_tokenizer():
     print(f"  Encoder mask shapes: {[m.shape for m in masks_enc]}")
     print(f"  Number of prediction masks: {len(masks_pred)}")
 
-    with torch.no_grad():
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            sem_tokens_masked = model.encode_ijepa(x, jepa_masks=masks_enc)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        sem_tokens_masked = model.encode_ijepa(x, jepa_masks=masks_enc)
 
     print(f"\nSemantic tokens shape (with masks): {sem_tokens_masked.shape}")
     print(f"Semantic tokens dtype: {sem_tokens_masked.dtype}")
     print(f"Semantic tokens range: [{sem_tokens_masked.min().item():.4f}, {sem_tokens_masked.max().item():.4f}]")
     print("encode_ijepa method test successful!")
+
+    # backward
+    print("------- do semantic encoder backward test.")
+    sem_tokens_masked.mean().backward()
 
     repa_feats = model.get_repa_feature()
     print(repa_feats)
@@ -2517,7 +2523,7 @@ def test_deterministic_mingtokrs_tokenizer():
 
 if __name__ == "__main__":
     """
-    MODEL_COMPILED=0 CUDA_VISIBLE_DEVICES=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
+    MODEL_COMPILED=1 CUDA_VISIBLE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_mingtok
     """
 
     with logger.catch():

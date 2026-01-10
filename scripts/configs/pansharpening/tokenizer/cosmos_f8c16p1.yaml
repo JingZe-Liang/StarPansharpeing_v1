@@ -1,0 +1,31 @@
+_target_: src.stage1.cosmos.cosmos_tokenizer.ContinuousImageTokenizer.create_model
+model:
+  attn_resolutions: [32]
+  channels: 128
+  in_channels: 512
+  out_channels: 512
+  channels_mult: [2, 4, 4]
+  spatial_compression: 8
+  dropout: 0.0
+  num_res_blocks: 2
+  resolution: 1024
+  z_channels: 256
+  latent_channels: 16
+  act_checkpoint: false
+  norm_type: rmsnorm2d
+  act_type: silu
+  block_name: res_block
+  use_residual_factor: false
+  patch_method: haar
+  patch_size: 1
+  attn_type: none
+  padding_mode: reflect
+  adaptive_mode: interp
+uni_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
+loading_type: pretrained
+qunatizer_type: null
+hook_for_repa: false
+use_repa_loss: false
+use_vf_loss: false
+vf_on_z_or_module: z
+z_factor: 1

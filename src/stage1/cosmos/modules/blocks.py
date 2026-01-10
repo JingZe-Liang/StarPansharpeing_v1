@@ -254,7 +254,7 @@ class ResidualBlock(nn.Module):
         self.shortcut = shortcut
         self.post_act = create_act_layer(post_act)
 
-    @compile_decorator
+    # @compile_decorator
     def forward_main(self, x: torch.Tensor) -> torch.Tensor:
         if self.pre_norm is None:
             return self.main(x)
@@ -579,7 +579,7 @@ class LiteMLA(nn.Module):
         out = torch.reshape(out, (B, -1, H, W))
         return out
 
-    @compile_decorator
+    # @compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # generate multi-scale q, k, v
         qkv = self.qkv(x)
@@ -930,7 +930,7 @@ class DiffBandsInputConvIn(nn.Module):
         self.band_lst = band_lst
         self.hidden_dim = hidden_dim
         self.is_ddp = PartialState().use_distributed or check_grads
-        self._in_module_partial_kwargs = {
+        self._in_module_partial_kwargs: dict[str, Any] = {
             "basic_module": basic_module,
             "hidden_dim": hidden_dim,
             "padding_mode": padding_mode,
@@ -1017,7 +1017,7 @@ class DiffBandsInputConvOut(nn.Module):
         self.hidden_dim = hidden_dim
         self.basic_module = basic_module
         self.is_ddp = PartialState().use_distributed or check_grads
-        self._out_module_partial_kwargs = {
+        self._out_module_partial_kwargs: dict[str, Any] = {
             "basic_module": basic_module,
             "hidden_dim": hidden_dim,
             "padding_mode": padding_mode,
@@ -1030,7 +1030,7 @@ class DiffBandsInputConvOut(nn.Module):
             self.in_modules["conv_out_{}".format(c)] = module
             logger.debug(f"[DiffBandsInputConvOut] set conv to hidden module for channel {c}")
 
-        self.out_channel = None
+        self.out_channel: int | None = None
 
     def add_or_drop_modules(self, add_chans: list[int] | None = None, drop_chans: list[int] | None = None):
         """
@@ -1158,6 +1158,160 @@ def _kernel_norm(
         raise ValueError(f"Unknown kernel_norm type: {kernel_norm}")
 
 
+def _normalized_channel_coords(n: int, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+    if n <= 1:
+        return torch.zeros((n,), device=device, dtype=dtype)
+    return torch.linspace(0.0, 1.0, n, device=device, dtype=dtype)
+
+
+def _sincos_channel_index_embedding(
+    n_channels: int,
+    dim: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    base: float = 10000.0,
+) -> Tensor:
+    if dim <= 0:
+        raise ValueError(f"{dim=} must be > 0")
+    if n_channels <= 0:
+        raise ValueError(f"{n_channels=} must be > 0")
+    if base <= 0:
+        raise ValueError(f"{base=} must be > 0")
+
+    pos = torch.arange(n_channels, device=device, dtype=dtype)
+    half_dim = (dim + 1) // 2
+    div_term = torch.exp(torch.arange(half_dim, device=device, dtype=dtype) * (-math.log(base) / dim))
+
+    emb = torch.zeros((n_channels, dim), device=device, dtype=dtype)
+    sin_inp = pos[:, None] * div_term[None, :]
+    emb[:, 0::2] = torch.sin(sin_inp)[:, : emb[:, 0::2].shape[1]]
+    if dim > 1:
+        emb[:, 1::2] = torch.cos(sin_inp)[:, : emb[:, 1::2].shape[1]]
+    return emb
+
+
+class _ChannelMixRouter(nn.Module):
+    def __init__(
+        self,
+        *,
+        base_channels: int,
+        condition: Literal[
+            "none",
+            "per_channel_mean",
+            "per_channel_dw_pool",
+            "per_channel_mean_dw_pool",
+        ] = "none",
+        hidden_dim: int = 128,
+        temperature: float = 1.0,
+        use_bias: bool = True,
+    ) -> None:
+        super().__init__()
+        if temperature <= 0:
+            raise ValueError(f"{temperature=} must be > 0")
+
+        self.base_channels = base_channels
+        self.condition = condition
+        self.temperature = float(temperature)
+
+        match condition:
+            case "none":
+                in_features = 1
+            case "per_channel_mean" | "per_channel_dw_pool":
+                in_features = 2
+            case "per_channel_mean_dw_pool":
+                in_features = 3
+            case _:
+                raise ValueError(f"Unknown condition: {condition}")
+        if hidden_dim <= 0:
+            self.proj = nn.Linear(in_features, base_channels, bias=use_bias)
+        else:
+            self.proj = nn.Sequential(
+                nn.Linear(in_features, hidden_dim, bias=use_bias),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, base_channels, bias=use_bias),
+            )
+
+    def forward(
+        self,
+        coords: Tensor,
+        *,
+        channel_mean: Tensor | None = None,
+        channel_dw_pool: Tensor | None = None,
+    ) -> Tensor:
+        """
+        Args:
+            coords: (c,) normalized coordinates in [0, 1]
+            channel_mean: if condition == 'per_channel_mean', expects (b, c)
+            channel_dw_pool: if condition includes 'dw_pool', expects (b, c)
+
+        Returns:
+            mixing weights:
+              - (c, base_channels) when condition == 'none'
+              - (b, c, base_channels) when condition == 'per_channel_mean'
+        """
+        if coords.ndim != 1:
+            raise ValueError(f"coords must be 1D, got shape {tuple(coords.shape)}")
+
+        match self.condition:
+            case "none":
+                x = coords[:, None]
+            case "per_channel_mean":
+                if channel_mean is None:
+                    raise ValueError("channel_mean is required when condition='per_channel_mean'")
+                if channel_mean.ndim != 2 or channel_mean.shape[1] != coords.shape[0]:
+                    raise ValueError(
+                        f"channel_mean must be (b, c={coords.shape[0]}), got shape {tuple(channel_mean.shape)}"
+                    )
+                x = torch.stack(
+                    [
+                        coords[None, :].expand(channel_mean.shape[0], -1),
+                        channel_mean,
+                    ],
+                    dim=-1,
+                )
+            case "per_channel_dw_pool":
+                if channel_dw_pool is None:
+                    raise ValueError("channel_dw_pool is required when condition='per_channel_dw_pool'")
+                if channel_dw_pool.ndim != 2 or channel_dw_pool.shape[1] != coords.shape[0]:
+                    raise ValueError(
+                        f"channel_dw_pool must be (b, c={coords.shape[0]}), got shape {tuple(channel_dw_pool.shape)}"
+                    )
+                x = torch.stack(
+                    [
+                        coords[None, :].expand(channel_dw_pool.shape[0], -1),
+                        channel_dw_pool,
+                    ],
+                    dim=-1,
+                )
+            case "per_channel_mean_dw_pool":
+                if channel_mean is None:
+                    raise ValueError("channel_mean is required when condition='per_channel_mean_dw_pool'")
+                if channel_dw_pool is None:
+                    raise ValueError("channel_dw_pool is required when condition='per_channel_mean_dw_pool'")
+                if channel_mean.ndim != 2 or channel_mean.shape[1] != coords.shape[0]:
+                    raise ValueError(
+                        f"channel_mean must be (b, c={coords.shape[0]}), got shape {tuple(channel_mean.shape)}"
+                    )
+                if channel_dw_pool.ndim != 2 or channel_dw_pool.shape[1] != coords.shape[0]:
+                    raise ValueError(
+                        f"channel_dw_pool must be (b, c={coords.shape[0]}), got shape {tuple(channel_dw_pool.shape)}"
+                    )
+                x = torch.stack(
+                    [
+                        coords[None, :].expand(channel_mean.shape[0], -1),
+                        channel_mean,
+                        channel_dw_pool,
+                    ],
+                    dim=-1,
+                )
+            case _:
+                raise ValueError(f"Unknown condition: {self.condition}")
+
+        logits = self.proj(x)
+        return F.softmax(logits / self.temperature, dim=-1)
+
+
 class AdaptiveInputConvLayer(nn.Module):
     def __init__(
         self,
@@ -1169,19 +1323,41 @@ class AdaptiveInputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp", "interp_proj"] = "slice",
+        mode: Literal["slice", "interp", "interp_proj", "mix", "sitok"] = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
+        router_condition: Literal[
+            "none",
+            "per_channel_mean",
+            "per_channel_dw_pool",
+            "per_channel_mean_dw_pool",
+        ] = "none",
+        router_hidden_dim: int = 128,
+        router_temperature: float = 1.0,
+        always_use_router: bool = False,
+        router_dw_kernel_size: int = 3,
+        sitok_reduce: Literal["none", "sum", "mean"] = "none",
+        sitok_embed_scale: float = 1.0,
+        sitok_embed_base: float = 10000.0,
     ):
         super().__init__()
-        conv_kwargs = dict(stride=stride, groups=groups, dilation=dilation, bias=use_bias)
+        conv_groups = groups
+        if mode == "sitok":
+            if groups != 1:
+                raise ValueError("AdaptiveInputConvLayer(mode='sitok') currently requires groups=1")
+            conv_groups = 1
+        conv_kwargs = dict(stride=stride, groups=conv_groups, dilation=dilation, bias=use_bias)
         if padding is not None:
             # if padding not set, the create_conv2d will use same padding
             conv_kwargs["padding"] = padding
 
-        self.conv = create_conv2d(in_channels, out_channels, kernel_size, **conv_kwargs)
+        self.conv = create_conv2d((1 if mode == "sitok" else in_channels), out_channels, kernel_size, **conv_kwargs)
         self.mode = mode
         self.kernel_norm = kernel_norm
+        self.always_use_router = always_use_router
+        self.sitok_reduce = sitok_reduce
+        self.sitok_embed_scale = float(sitok_embed_scale)
+        self.sitok_embed_base = float(sitok_embed_base)
 
         if mode == "interp_proj":
             # (bs, c, k1, k2) img -> (c_out, c_in, k1, k2) kernel
@@ -1193,12 +1369,38 @@ class AdaptiveInputConvLayer(nn.Module):
                     nn.Linear(k_hidden, in_channels),
                 ]
             )
+        elif mode == "mix":
+            if groups != 1:
+                raise ValueError("AdaptiveInputConvLayer(mode='mix') currently requires groups=1")
+            self.in_router = _ChannelMixRouter(
+                base_channels=in_channels,
+                condition=router_condition,
+                hidden_dim=router_hidden_dim,
+                temperature=router_temperature,
+                use_bias=use_bias,
+            )
+            if "dw_pool" in router_condition:
+                if router_dw_kernel_size <= 0 or (router_dw_kernel_size % 2) != 1:
+                    raise ValueError(f"{router_dw_kernel_size=} must be a positive odd number")
+                k = router_dw_kernel_size
+                kernel = torch.zeros((k, k), dtype=torch.float32)
+                kernel[k // 2, k // 2] = 1.0
+                self.router_dw_kernel = nn.Parameter(kernel)
+        elif mode == "sitok":
+            if sitok_reduce not in ("none", "sum", "mean"):
+                raise ValueError(f"Unknown sitok_reduce: {sitok_reduce}")
+            if self.sitok_embed_scale < 0:
+                raise ValueError(f"{sitok_embed_scale=} must be >= 0")
+            if self.sitok_embed_base <= 0:
+                raise ValueError(f"{sitok_embed_base=} must be > 0")
 
-        self.forward_mappings = dict(
-            slice=self._slice_forward,
-            interp=self._interp_forward,
-            interp_proj=self._interp_proj_forward,
-        )
+        self.forward_mappings: dict[str, Callable[..., Tensor]] = {
+            "slice": self._slice_forward,
+            "interp": self._interp_forward,
+            "interp_proj": self._interp_proj_forward,
+            "mix": self._mix_forward,
+            "sitok": self._sitok_forward,
+        }
 
     def _forward_conv_with_wb(self, x, w, b):
         x = nn.functional.conv2d(  # type: ignore
@@ -1221,7 +1423,8 @@ class AdaptiveInputConvLayer(nn.Module):
     def _interp_forward(self, x, w: Tensor | None = None):
         in_channels = x.shape[1]
         if w is None:
-            w: Tensor = self.conv.weight
+            w = self.conv.weight
+        assert w is not None
 
         c_out, c_in, k1, k2 = w.shape
         # c_in -> in_channels
@@ -1250,11 +1453,127 @@ class AdaptiveInputConvLayer(nn.Module):
         # Interpolation
         return self._interp_forward(x, w)
 
+    def _mix_forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_channels = x.shape[1]
+        base_in = self.conv.weight.shape[1]
+        if base_in == 0:
+            raise ValueError("base_in_channels must be > 0")
+
+        coords = _normalized_channel_coords(in_channels, device=x.device, dtype=x.dtype)
+
+        channel_mean: torch.Tensor | None = None
+        channel_dw_pool: torch.Tensor | None = None
+        if self.in_router.condition in ("per_channel_mean", "per_channel_mean_dw_pool"):
+            channel_mean = x.mean(dim=(2, 3))
+        if self.in_router.condition in ("per_channel_dw_pool", "per_channel_mean_dw_pool"):
+            if not hasattr(self, "router_dw_kernel"):
+                raise RuntimeError("router_dw_kernel is missing while condition requires dw_pool")
+            k = int(self.router_dw_kernel.shape[0])
+            # NOTE: avoid branching on x.is_cuda during torch.compile; keep the layout stable for Inductor/AOTAutograd.
+            x_stats = x.contiguous()
+            w_dw = self.router_dw_kernel.to(dtype=x.dtype, device=x.device)[None, None].repeat(in_channels, 1, 1, 1)
+            dw = F.conv2d(x_stats, w_dw, bias=None, stride=1, padding=k // 2, groups=in_channels)
+            channel_dw_pool = dw.abs().mean(dim=(2, 3))
+
+        coeff = self.in_router(coords, channel_mean=channel_mean, channel_dw_pool=channel_dw_pool)
+
+        w_base = self.conv.weight
+        k1, k2 = w_base.shape[-2:]
+        w_base_flat = rearrange(w_base, "c_out c_in k1 k2 -> c_out c_in (k1 k2)")
+
+        if coeff.ndim == 2:
+            # (c_in, base_in)
+            w_flat = torch.einsum("ocp,ic->oip", w_base_flat, coeff)
+            w = rearrange(w_flat, "c_out c_in (k1 k2) -> c_out c_in k1 k2", k1=k1, k2=k2)
+            w = _kernel_norm(w, self.kernel_norm, "c_in")
+            y = self._forward_conv_with_wb(x, w, self.conv.bias)
+            return y.contiguous(memory_format=torch.channels_last)
+
+        # Per-sample dynamic weights: (b, c_in, base_in)
+        bsz = x.shape[0]
+        w_flat_b = torch.einsum("ocp,bic->boip", w_base_flat, coeff)
+        w_b = rearrange(w_flat_b, "b c_out c_in (k1 k2) -> b c_out c_in k1 k2", k1=k1, k2=k2)
+        w_b_flat = w_b.reshape(bsz * w_b.shape[1], in_channels, k1, k2)
+        w_b_flat = _kernel_norm(w_b_flat, self.kernel_norm, "c_in")
+        w_b = w_b_flat.reshape(bsz, -1, in_channels, k1, k2)
+
+        bias = self.conv.bias
+        bias_b = bias.repeat(bsz) if bias is not None else None
+
+        # Force a stable NCHW contiguous layout for the grouped-conv trick, then restore channels_last on output.
+        x_cf = x.contiguous()
+        x_g = x_cf.reshape(1, bsz * in_channels, *x.shape[2:])
+        w_g = w_b.reshape(bsz * w_b.shape[1], in_channels, k1, k2)
+        y = F.conv2d(  # type: ignore
+            x_g,
+            w_g,
+            bias_b,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=bsz,
+        )
+        y = y.reshape(bsz, -1, *y.shape[2:])
+        return y.contiguous(memory_format=torch.channels_last)
+
+    def _sitok_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        SiTok-style spectrum-independent patch embedding:
+          - apply the SAME 2D conv kernel to each spectral channel independently
+          - add a sinusoidal channel index embedding to mark spectral position
+
+        Output:
+          - sitok_reduce == "none": (b, c_in * c_out, h, w)
+          - sitok_reduce in {"sum","mean"}: (b, c_out, h, w)
+        """
+        bsz, in_channels, h, w = x.shape
+        w_shared = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
+        w_rep = w_shared.repeat(in_channels, 1, 1, 1)
+        b_rep: Tensor | None
+        if self.conv.bias is None:
+            b_rep = None
+        else:
+            b_rep = self.conv.bias.repeat(in_channels)
+
+        y = F.conv2d(
+            x,
+            w_rep,
+            b_rep,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=in_channels,
+        )
+
+        c_out = self.conv.weight.shape[0]
+        y = y.reshape(bsz, in_channels, c_out, y.shape[-2], y.shape[-1])
+        if self.sitok_embed_scale != 0:
+            ch_emb = _sincos_channel_index_embedding(
+                in_channels,
+                c_out,
+                device=y.device,
+                dtype=y.dtype,
+                base=self.sitok_embed_base,
+            )
+            y = y + self.sitok_embed_scale * ch_emb[None, :, :, None, None]
+
+        if self.sitok_reduce == "none":
+            y = y.reshape(bsz, in_channels * c_out, y.shape[-2], y.shape[-1])
+            return y.contiguous(memory_format=torch.channels_last)
+        if self.sitok_reduce == "sum":
+            y = y.sum(dim=1)
+        elif self.sitok_reduce == "mean":
+            y = y.mean(dim=1)
+        else:
+            raise ValueError(f"Unknown sitok_reduce: {self.sitok_reduce}")
+
+        return y.contiguous(memory_format=torch.channels_last)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         in_channels = x.shape[1]
 
         # Native case
-        if in_channels == self.conv.weight.shape[1]:
+        if (not self.always_use_router) and in_channels == self.conv.weight.shape[1]:
             w = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
             return self._forward_conv_with_wb(x, w, self.conv.bias)
 
@@ -1291,9 +1610,18 @@ class AdaptiveOutputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp", "interp_proj"] = "slice",
+        mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
+        router_condition: Literal[
+            "none",
+            "per_channel_mean",
+            "per_channel_dw_pool",
+            "per_channel_mean_dw_pool",
+        ] = "none",
+        router_hidden_dim: int = 128,
+        router_temperature: float = 1.0,
+        router_dw_kernel_size: int = 3,
     ):
         super().__init__()
         conv_kwargs = dict(
@@ -1324,12 +1652,30 @@ class AdaptiveOutputConvLayer(nn.Module):
                     nn.Linear(k_hidden, out_channels),
                 ]
             )
+        elif mode == "mix":
+            if groups != 1:
+                raise ValueError("AdaptiveOutputConvLayer(mode='mix') currently requires groups=1")
+            self.out_router = _ChannelMixRouter(
+                base_channels=out_channels,
+                condition=router_condition,
+                hidden_dim=router_hidden_dim,
+                temperature=router_temperature,
+                use_bias=use_bias,
+            )
+            if "dw_pool" in router_condition:
+                if router_dw_kernel_size <= 0 or (router_dw_kernel_size % 2) != 1:
+                    raise ValueError(f"{router_dw_kernel_size=} must be a positive odd number")
+                k = router_dw_kernel_size
+                kernel = torch.zeros((k, k), dtype=torch.float32)
+                kernel[k // 2, k // 2] = 1.0
+                self.router_dw_kernel = nn.Parameter(kernel)
 
         # Initialize forward mappings
-        self.forward_mappings = {
+        self.forward_mappings: dict[str, Callable[..., Tensor]] = {
             "slice": self._slice_forward,
             "interp": self._interp_forward,
             "interp_proj": self._interp_proj_forward,
+            "mix": self._mix_forward,
         }
 
     def _forward_conv_with_wb(self, x, w, b):
@@ -1418,6 +1764,70 @@ class AdaptiveOutputConvLayer(nn.Module):
         w = _kernel_norm(w, self.kernel_norm, "c_out")
 
         return self._forward_conv_with_wb(x, w, b)
+
+    def _mix_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        base_out = self.conv.weight.shape[0]
+        if base_out == 0:
+            raise ValueError("base_out_channels must be > 0")
+
+        coords = _normalized_channel_coords(out_channels, device=x.device, dtype=x.dtype)
+        channel_mean: torch.Tensor | None = None
+        channel_dw_pool: torch.Tensor | None = None
+        if self.out_router.condition in ("per_channel_mean", "per_channel_mean_dw_pool"):
+            channel_mean = x.mean(dim=(2, 3)).mean(dim=1, keepdim=True).repeat(1, out_channels)
+        if self.out_router.condition in ("per_channel_dw_pool", "per_channel_mean_dw_pool"):
+            if not hasattr(self, "router_dw_kernel"):
+                raise RuntimeError("router_dw_kernel is missing while condition requires dw_pool")
+            k = int(self.router_dw_kernel.shape[0])
+            w_dw = self.router_dw_kernel.to(dtype=x.dtype, device=x.device)[None, None].repeat(x.shape[1], 1, 1, 1)
+            dw = F.conv2d(x, w_dw, bias=None, stride=1, padding=k // 2, groups=x.shape[1])
+            channel_dw_pool = dw.abs().mean(dim=(2, 3)).mean(dim=1, keepdim=True).repeat(1, out_channels)
+
+        coeff = self.out_router(coords, channel_mean=channel_mean, channel_dw_pool=channel_dw_pool)
+
+        w_base = self.conv.weight
+        k1, k2 = w_base.shape[-2:]
+        w_base_flat = rearrange(w_base, "c_out c_in k1 k2 -> c_out c_in (k1 k2)")
+        if coeff.ndim == 2:
+            w_flat = torch.einsum("oip,uo->uip", w_base_flat, coeff)
+            w = rearrange(w_flat, "c_out c_in (k1 k2) -> c_out c_in k1 k2", k1=k1, k2=k2)
+
+            b = self.conv.bias
+            if b is not None:
+                b = torch.einsum("o,uo->u", b, coeff)
+
+            w = _kernel_norm(w, self.kernel_norm, "c_out")
+            y = self._forward_conv_with_wb(x, w, b)
+            return y.contiguous(memory_format=torch.channels_last)
+
+        # Per-sample dynamic weights: (b, out_channels, base_out)
+        bsz = x.shape[0]
+        w_flat_b = torch.einsum("oip,buo->buip", w_base_flat, coeff)
+        w_b = rearrange(w_flat_b, "b c_out c_in (k1 k2) -> b c_out c_in k1 k2", k1=k1, k2=k2)
+        w_b_flat = w_b.reshape(bsz * w_b.shape[1], x.shape[1], k1, k2)
+        w_b_flat = _kernel_norm(w_b_flat, self.kernel_norm, "c_out")
+        w_b = w_b_flat.reshape(bsz, -1, x.shape[1], k1, k2)
+
+        bias = self.conv.bias
+        if bias is None:
+            bias_b = None
+        else:
+            bias_b = torch.einsum("o,buo->bu", bias, coeff).reshape(-1)
+
+        x_cf = x.contiguous()
+        x_g = x_cf.reshape(1, bsz * x.shape[1], *x.shape[2:])
+        w_g = w_b.reshape(bsz * out_channels, x.shape[1], k1, k2)
+        y = F.conv2d(  # type: ignore
+            x_g,
+            w_g,
+            bias_b,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=bsz,
+        )
+        y = y.reshape(bsz, out_channels, *y.shape[2:])
+        return y.contiguous(memory_format=torch.channels_last)
 
     def forward(self, x: torch.Tensor, out_channels: Optional[int] = None) -> torch.Tensor:
         if out_channels is None:
@@ -1600,7 +2010,7 @@ class MoE2DBlock(nn.Module):
         else:
             raise ValueError(f"[MoE2DBlockTC] Unknown moe_type={self.moe_type}")
 
-    @compile_decorator
+    # @compile_decorator
     def _forward_fn(self, x: torch.Tensor):
         # x: (B, C, H, W)
         h, w = x.shape[-2:]
@@ -1831,7 +2241,7 @@ class DiCoBlock(nn.Module):
                 if m.bias is not None:
                     m.bias.data.zero_()
 
-    @compile_decorator
+    # @compile_decorator
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
         h = x
 
@@ -1931,7 +2341,7 @@ class ResnetBlock(nn.Module):
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
 
-    @compile_decorator
+    # @compile_decorator
     def forward_fn(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         h = x
         h = self.norm1(h)
@@ -2095,7 +2505,7 @@ class ConvNeXtBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.act_checkpoint = act_checkpoint
 
-    @compile_decorator
+    # @compile_decorator
     def forward_fn(self, x):
         input = x
 

@@ -250,8 +250,13 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # only return latent
         if isinstance(latent_ret_, (tuple, list)):  # latent, q_loss, loss_breakdown
             latent = latent_ret_[0]
-        else:
+        elif isinstance(latent_ret_, dict):
+            latent = latent_ret_["latent"]
+        elif torch.is_tensor(latent_ret_):
             latent = latent_ret_
+        else:
+            raise ValueError(f"latent_ret_ should be dict, list, or tuple, bu got {type(latent_ret_)}")
+
         # scale and shift latent
         if self.is_scale_latent:
             latent = scale_shift_latent(latent, self.scale, self.shift)
@@ -262,15 +267,22 @@ class DownstreamModelTokenizerWrapper(nn.Module):
         # un-scale and un-shift latent
         if self.is_scale_latent:
             latent = un_scale_shift_latent(latent, self.scale, self.shift)
+
         ctx = torch.no_grad() if not self.downstream_model.learn_decoder else torch.enable_grad()
         with ctx:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 decoded = self._decode_fn(latent, input_shape)
 
-        if isinstance(decoded, tuple):
+        if isinstance(decoded, (tuple, list)):
             return decoded[0]
-
-        return decoded
+        elif isinstance(decoded, dict):
+            return decoded["recon"]
+        elif torch.is_tensor(decoded):
+            return decoded
+        else:
+            raise ValueError(
+                f"decoded should be tuple, dict contains reconstruction, or a Tensor, but got {type(decoded)}"
+            )
 
     def _forward_tokenizer_encode(
         self,

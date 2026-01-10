@@ -10,7 +10,6 @@ defaults:
   - pansharp_model: pansharp_wrapper_nafnet_cosmos
   # self ===============
   - _self_
-
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
@@ -37,7 +36,7 @@ train:
   grad_check: false
   proj_dir: runs/stage2_pansharpening_wrapper/
   finetune_strategy: finetune_all
-  max_grad_norm: 0.03
+  max_grad_norm: 0.1
 
   track_metrics_duration: -1
   track_metrics_after: 1000
@@ -80,17 +79,6 @@ train:
     #   lr: 6.0e-4
     #   weight_decay: 0.0
 
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 6.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.95, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
     _target_: heavyball.ForeachAdamW
     _partial_: true
     lr: 2.0e-4
@@ -108,13 +96,6 @@ train:
     # eps: 1.0e-9
     # betas: ${tuple:[0.95, 0.99]}
     # foreach: true
-
-    # _target_: heavyball.ForeachSOAP
-    # _partial_: true
-    # lr: 1.0e-3
-    # eps: 1e-10
-    # betas: ${tuple:[0.9, 0.99]}
-    # weight_decay: 0.
 
   pansharp_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup

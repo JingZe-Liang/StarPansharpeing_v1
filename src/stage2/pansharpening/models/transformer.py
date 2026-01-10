@@ -4,7 +4,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from einops import rearrange
-from jaxtyping import Array, Float
+from jaxtyping import Float
 from timm.layers import get_act_layer, get_norm_layer
 from timm.layers.patch_embed import PatchEmbed
 from timm.layers.pos_embed import resample_abs_pos_embed

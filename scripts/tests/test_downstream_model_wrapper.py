@@ -10,7 +10,7 @@ from src.stage1.cosmos.cosmos_tokenizer import (
     ContinuousTokenizerConfig,
     EncoderDecoderConfig,
 )
-from src.stage2.change_detection.model.dinov3_adapted import (
+from src.stage2.change_detection.models.dinov3_adapted import (
     AdapterConfig,
     DinoConfig,
     DinoUnetConfig,
@@ -349,8 +349,27 @@ def test_cd_dino_adapted_model():
     return wrapped_model
 
 
+def test_init_from_cfg():
+    from omegaconf import OmegaConf
+    import hydra
+
+    cfg = OmegaConf.load("scripts/configs/pansharpening/pansharp_model/pansharp_wrapper_nafnet_cosmos.yaml")
+    print(cfg)
+
+    print("Init model")
+    model = hydra.utils.instantiate(cfg)
+    print(model)
+
+    print("Forward model")
+    ms = torch.randn(1, 4, 256, 256)
+    pan = torch.randn(1, 1, 256, 256)
+    output = model.forward([ms, pan])["pixel_out"]
+    print(f"Output shape: {output.shape}")
+
+
 if __name__ == "__main__":
     print("\nTesting DownstreamModelTokenizerWrapper with DinoV3 adapted model...")
-    test_cd_dino_adapted_model()
+    # test_cd_dino_adapted_model()
+    test_init_from_cfg()
 
     print("\n✓ All tests passed!")

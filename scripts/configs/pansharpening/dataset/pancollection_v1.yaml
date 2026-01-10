@@ -4,9 +4,9 @@ cfgs:
   batch_size_val: 4
   num_workers: 1
   prefetch_factor: 2
-  train_name: ${dataset.cfgs.used}_h5_train
-  val_name: ${dataset.cfgs.used}_h5_val
-  val_full_name: ${dataset.cfgs.used}_h5_val_full
+  train_name: ${.used}_h5_train
+  val_name: ${.used}_h5_val
+  val_full_name: ${.used}_h5_val_full
   train_drop_last: true
   val_drop_last: false
   dataset_type: h5

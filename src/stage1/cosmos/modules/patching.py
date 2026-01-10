@@ -46,6 +46,132 @@ _WAVELETS = {
     "rearrange": torch.tensor([1.0, 1.0]),
 }
 _PERSISTENT = False
+_DTYPE_INTERMEDIATE = torch.float32
+
+
+def _sincos_channel_index_embedding(
+    n_channels: int,
+    dim: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    base: float = 10000.0,
+) -> Tensor:
+    if dim <= 0:
+        raise ValueError(f"{dim=} must be > 0")
+    if n_channels <= 0:
+        raise ValueError(f"{n_channels=} must be > 0")
+    if base <= 0:
+        raise ValueError(f"{base=} must be > 0")
+
+    pos = torch.arange(n_channels, device=device, dtype=dtype)
+    half_dim = (dim + 1) // 2
+    div_term = torch.exp(torch.arange(half_dim, device=device, dtype=dtype) * (-math.log(base) / dim))
+
+    emb = torch.zeros((n_channels, dim), device=device, dtype=dtype)
+    sin_inp = pos[:, None] * div_term[None, :]
+    emb[:, 0::2] = torch.sin(sin_inp)[:, : emb[:, 0::2].shape[1]]
+    if dim > 1:
+        emb[:, 1::2] = torch.cos(sin_inp)[:, : emb[:, 1::2].shape[1]]
+    return emb
+
+
+def _compute_resize_matrix(
+    old_size: tuple[int, int],
+    new_size: tuple[int, int],
+    *,
+    interpolation: str = "bicubic",
+    antialias: bool = True,
+    device: torch.device,
+    dtype: torch.dtype = _DTYPE_INTERMEDIATE,
+) -> Tensor:
+    """Compute a resize matrix for PI-resize (Moore-Penrose) patch kernel resampling."""
+    old_h, old_w = old_size
+    new_h, new_w = new_size
+    old_total = old_h * old_w
+    new_total = new_h * new_w
+
+    eye_matrix = torch.eye(old_total, device=device, dtype=dtype)
+    basis = eye_matrix.reshape(old_total, 1, old_h, old_w)
+    resized_basis = F.interpolate(
+        basis,
+        size=new_size,
+        mode=interpolation,
+        antialias=antialias,
+        align_corners=False,
+    )
+    resize_matrix = resized_basis.squeeze(1).permute(1, 2, 0).reshape(new_total, old_total)
+    return resize_matrix
+
+
+def _apply_pinv_resampling(
+    kernel: Tensor,
+    pinv_matrix: Tensor,
+    new_size: tuple[int, int],
+    *,
+    intermediate_dtype: torch.dtype = _DTYPE_INTERMEDIATE,
+) -> Tensor:
+    """Resample conv kernel weights by multiplying pseudoinverse matrix (PI-resize)."""
+    c_out, c_in, _, _ = kernel.shape
+    orig_dtype = kernel.dtype
+    k_flat = kernel.reshape(c_out, c_in, -1).to(dtype=intermediate_dtype)
+    pinv_matrix = pinv_matrix.to(dtype=intermediate_dtype)
+    k_new = k_flat @ pinv_matrix
+    return k_new.reshape(c_out, c_in, *new_size).to(dtype=orig_dtype)
+
+
+class PatchKernelResamplerFixedOrigSize(nn.Module):
+    """Cache PI-resize pseudoinverse matrices for a fixed orig patch kernel size."""
+
+    def __init__(
+        self,
+        orig_size: tuple[int, int],
+        *,
+        interpolation: str = "bicubic",
+        antialias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.orig_size = orig_size
+        self.interpolation = interpolation
+        self.antialias = antialias
+        self._pinv_cache_map: dict[tuple[int, int], str] = {}
+
+    def _get_or_create_pinv_matrix(
+        self,
+        new_size: tuple[int, int],
+        *,
+        device: torch.device,
+        dtype: torch.dtype = _DTYPE_INTERMEDIATE,
+    ) -> Tensor:
+        buffer_name = self._pinv_cache_map.get(new_size)
+        if buffer_name and hasattr(self, buffer_name):
+            pinv_matrix = getattr(self, buffer_name)
+            if pinv_matrix.device == device and pinv_matrix.dtype == dtype:
+                return pinv_matrix
+
+        resize_mat = _compute_resize_matrix(
+            self.orig_size,
+            new_size,
+            interpolation=self.interpolation,
+            antialias=self.antialias,
+            device=device,
+            dtype=dtype,
+        )
+        pinv_matrix = torch.linalg.pinv(resize_mat)
+        buffer_name = f"pinv_{self.orig_size[0]}x{self.orig_size[1]}__{new_size[0]}x{new_size[1]}"
+        if hasattr(self, buffer_name):
+            delattr(self, buffer_name)
+        self.register_buffer(buffer_name, pinv_matrix, persistent=_PERSISTENT)
+        self._pinv_cache_map[new_size] = buffer_name
+        return pinv_matrix
+
+    def forward(self, kernel: Tensor, new_size: tuple[int, int]) -> Tensor:
+        if tuple(kernel.shape[-2:]) != self.orig_size:
+            raise ValueError(f"Expected orig kernel size {self.orig_size}, got {tuple(kernel.shape[-2:])}")
+        if new_size == self.orig_size:
+            return kernel
+        pinv_matrix = self._get_or_create_pinv_matrix(new_size, device=kernel.device)
+        return _apply_pinv_resampling(kernel, pinv_matrix, new_size)
 
 
 class Patcher(torch.nn.Module):
@@ -497,6 +623,128 @@ class AdaptiveProgressivePatchUnembedding(nn.Module):
                     nn.init.constant_(m.bias, 0)
         # last adaptive layer
         patcher_adaptive_last.init_weights(zero_out=zero_out_adaptive_layer)
+
+
+class SiTokMAPEPatchEmbedding(nn.Module):
+    """SiTok-style spectrum-independent patch embedding with MAPE (multi-scale kernel bank + PI-resize)."""
+
+    def __init__(
+        self,
+        *,
+        img_size: tuple[int, int] | None = None,
+        patch_size: int = 16,
+        embed_dim: int = 768,
+        base_patch_sizes: list[int] | tuple[int, ...] = (16, 32, 64),
+        flatten: bool = True,
+        bias: bool = True,
+        strict_img_size: bool = False,
+        dynamic_img_pad: bool = False,
+        interpolation: str = "bicubic",
+        antialias: bool = True,
+        channel_embed_scale: float = 1.0,
+        channel_embed_base: float = 10000.0,
+        norm_layer: type[nn.Module] | None = None,
+    ) -> None:
+        super().__init__()
+        if patch_size <= 0:
+            raise ValueError(f"{patch_size=} must be > 0")
+        if embed_dim <= 0:
+            raise ValueError(f"{embed_dim=} must be > 0")
+        if not base_patch_sizes:
+            raise ValueError("base_patch_sizes must be non-empty")
+        if any(p <= 0 for p in base_patch_sizes):
+            raise ValueError(f"Invalid base_patch_sizes: {base_patch_sizes}")
+        if channel_embed_base <= 0:
+            raise ValueError(f"{channel_embed_base=} must be > 0")
+
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.flatten = flatten
+        self.strict_img_size = strict_img_size
+        self.dynamic_img_pad = dynamic_img_pad
+        self.interpolation = interpolation
+        self.antialias = antialias
+        self.channel_embed_scale = float(channel_embed_scale)
+        self.channel_embed_base = float(channel_embed_base)
+        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+
+        self.base_patch_sizes = sorted({int(p) for p in base_patch_sizes})
+        self.kernel_bank = nn.ParameterDict(
+            {str(p): nn.Parameter(torch.empty(embed_dim, 1, p, p)) for p in self.base_patch_sizes}
+        )
+        self.bias = nn.Parameter(torch.zeros(embed_dim)) if bias else None
+        for p in self.base_patch_sizes:
+            nn.init.trunc_normal_(self.kernel_bank[str(p)], std=0.02)
+
+        self._resamplers = nn.ModuleDict(
+            {
+                str(p): PatchKernelResamplerFixedOrigSize((p, p), interpolation=interpolation, antialias=antialias)
+                for p in self.base_patch_sizes
+            }
+        )
+
+        self.img_size = img_size
+        if img_size is None:
+            self.grid_size = None
+            self.num_patches = None
+        else:
+            self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
+            self.num_patches = self.grid_size[0] * self.grid_size[1]
+
+    def _choose_base_patch_size(self, patch_size: int) -> int:
+        return min(self.base_patch_sizes, key=lambda p: abs(p - patch_size))
+
+    def get_kernel(self, patch_size: int, *, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+        base_p = self._choose_base_patch_size(patch_size)
+        w = self.kernel_bank[str(base_p)].to(device=device, dtype=dtype)
+        if base_p != patch_size:
+            resampler = self._resamplers[str(base_p)]
+            w = resampler(w, (patch_size, patch_size))
+        b = self.bias
+        if b is not None:
+            b = b.to(device=device, dtype=dtype)
+        return w, b
+
+    def forward(self, x: Tensor) -> Tensor:
+        bsz, in_chans, h, w = x.shape
+        if self.img_size is not None and self.strict_img_size:
+            if (h, w) != self.img_size:
+                raise ValueError(f"Input size {(h, w)} doesn't match model {self.img_size}")
+
+        patch_size = self.patch_size
+        if not self.dynamic_img_pad:
+            if (h % patch_size) != 0 or (w % patch_size) != 0:
+                raise ValueError(f"Input {(h, w)} must be divisible by patch_size {patch_size}")
+        else:
+            pad_h = (patch_size - h % patch_size) % patch_size
+            pad_w = (patch_size - w % patch_size) % patch_size
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+
+        w_shared, b_shared = self.get_kernel(patch_size, device=x.device, dtype=x.dtype)
+        w_rep = w_shared.repeat(in_chans, 1, 1, 1)
+        if b_shared is None:
+            b_rep = None
+        else:
+            b_rep = b_shared.repeat(in_chans)
+
+        y = F.conv2d(x, w_rep, b_rep, stride=patch_size, padding=0, groups=in_chans)
+        y = y.reshape(bsz, in_chans, self.embed_dim, y.shape[-2], y.shape[-1])
+
+        if self.channel_embed_scale != 0:
+            ch_emb = _sincos_channel_index_embedding(
+                in_chans,
+                self.embed_dim,
+                device=y.device,
+                dtype=y.dtype,
+                base=self.channel_embed_base,
+            )
+            y = y + self.channel_embed_scale * ch_emb[None, :, :, None, None]
+
+        if not self.flatten:
+            raise ValueError("SiTokMAPEPatchEmbedding currently expects flatten=True (NLC tokens).")
+        y = rearrange(y, "b c d gh gw -> b (c gh gw) d")
+        y = self.norm(y)
+        return y
 
 
 # * --- Test --- #

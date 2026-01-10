@@ -88,6 +88,20 @@ except ImportError:
     JVP_FLASH_ATTN_ENABLED = False
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """Repeat key/value heads for Grouped Query Attention (GQA).
+
+    This is the equivalent of torch.repeat_interleave(x, n_rep, dim=1).
+    The hidden states go from (batch, num_kv_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim).
+    """
+    if n_rep == 1:
+        return hidden_states
+    batch, num_kv_heads, slen, head_dim = hidden_states.shape
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_kv_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
+
+
 # _transformer_compiled_flag = bool(int(os.getenv("TRANSFORMER_COMPILED", "0")))
 # _transformer_compile_decorator = (
 #     compile_decorator if (model_compiled_flag and _transformer_compiled_flag) else null_decorator_no_any_kwgs
@@ -464,6 +478,7 @@ class GatedAttention(nn.Module):
             # q: bs, l, n_kvh * n_kvg, hd = bs, l, nh, hd
             query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         else:
+            gate_score = None  # no gate when neither headwise nor elementwise gate is used
             query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
@@ -517,9 +532,9 @@ class GatedAttention(nn.Module):
         #         key_states, value_states, self.layer_idx, cache_kwargs
         #     )
 
-        # key_states: bs, head, q_len, head_dim
-        # key_states = repeat_kv(key_states, self.num_key_value_groups)
-        # value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # GQA: repeat K/V to match Q heads when num_key_value_heads != num_heads
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         # causal_mask = attn_mask
         # if attn_mask is not None:  # no matter the length, we just slice it
@@ -1605,10 +1620,13 @@ class TransformerTokenizer(nn.Module):
         return rope_embeds  # [seq_len, dim_h]
 
     def _with_pos_embed(self, x, hw: tuple | None = None):
-        hp, wp = hw if hw is not None else (math.sqrt(x.shape[1]), math.sqrt(x.shape[1]))
-        assert hp.is_integer() and wp.is_integer(), (
-            f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
-        )
+        if hw is not None:
+            hp, wp = hw[0], hw[1]
+        else:
+            hp = wp = math.sqrt(x.shape[1])
+            assert hp.is_integer() and wp.is_integer(), (
+                f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
+            )
         hp, wp = int(hp), int(wp)
         l_cur = hp * wp
         rope_ret = None

@@ -3,7 +3,12 @@ low_level_encoder:
   z_dim: 512
   latent_dim: 16
   encoder_type: cnn_only
-  norm_latent_type: null
+  # latent projection before post-norm/clip
+  # choices: [conv_1x1, conv_3x3, norm_act_conv3x3]
+  latent_proj_type: conv_3x3
+  # only used when latent_proj_type == norm_act_conv3x3
+  latent_proj_norm_groups: 32
+  norm_latent_type: norm_no_affine
   clip_latent_value: null
   res_encoder:
     in_channels: 512
@@ -15,7 +20,7 @@ low_level_encoder:
     num_res_blocks: 2
     z_channels: ${..z_dim}
     act_checkpoint: true
-    norm_type: rmsnorm2d
+    norm_type: gn
     block_name: res_block
     use_residual_factor: false # layerscale starts at 1e-2
     patch_method: haar
@@ -24,6 +29,12 @@ low_level_encoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
+    adaptive_mode: mix
+    adaptive_conv_kwargs:
+      router_condition: per_channel_dw_pool
+      router_dw_kernel_size: 3
+      always_use_router: true
+      router_hidden_dim: 128
   # transformer_encoder:
   #   in_chan: 512
   #   out_chan: 512
@@ -48,7 +59,7 @@ low_level_encoder:
   #     v_residual: false
 
 semantic_decoder:
-  in_chan: 512 # 16 if sem_tokens=h else 512
+  in_chan: 16 # 16 if sem_tokens=h else 512
   out_chan: 1024
   embed_dim: 1024
   depth: 24
@@ -58,10 +69,10 @@ semantic_decoder:
   out_patch_size: 1
   mlp_ratio: 4.0
   norm_layer: flarmsnorm
-  drop_path: 0.0
-  pe_type: rope_dinov3
+  drop_path: 0.2
+  pe_type: rope
   rope_kwargs:
-    rope_theta: 100.0
+    rope_theta: 10000.0
   last_norm: flarmsnorm
   img_size: 64
   patcher_type: patch_embedder
@@ -86,7 +97,7 @@ pixel_decoder:
     num_res_blocks: 2
     z_channels: 512
     act_checkpoint: true
-    norm_type: rmsnorm2d
+    norm_type: gn
     block_name: res_block
     use_residual_factor: false
     patch_method: haar
@@ -95,6 +106,12 @@ pixel_decoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
+    adaptive_mode: mix
+    adaptive_conv_kwargs:
+      router_condition: per_channel_dw_pool
+      router_dw_kernel_size: 3
+      always_use_router: true
+      router_hidden_dim: 128
   transformer_decoder:
     in_chan: 512
     out_chan: 512
@@ -105,10 +122,10 @@ pixel_decoder:
     out_patch_size: 2
     mlp_ratio: 4.0
     norm_layer: flarmsnorm
-    drop_path: 0.0
-    pe_type: rope_dinov3
+    drop_path: 0.1
+    pe_type: rope
     rope_kwargs:
-      rope_theta: 100.0
+      rope_theta: 10000.0
     last_norm: null
     img_size: 64
     patcher_type: patch_embedder
@@ -127,7 +144,7 @@ repa_proj:
   sem_repa_proj_chans: [1024, 1024, 1024, 1024]
 
 tokenizer:
-  sem_decoder_take: z
+  sem_decoder_take: h
   sem_pix_decoder_type: seperated
   straight_through_latent: false
   sampling_options_default: {}
