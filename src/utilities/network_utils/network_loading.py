@@ -1,7 +1,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Literal
+from typing import Literal, cast
 
 import accelerate
 import torch
@@ -33,6 +33,11 @@ def load_weights_with_shape_check(
         - missing_keys: List of parameter names not found in weights
         - unexpected_keys: List of weight names not found in module
     """
+    # if model has some rigional compiled modules, unwrap the model first and then load the weight
+    # may meet the __dict__['_orig_mod'] bug, see merge: https://github.com/huggingface/accelerate/pull/3881
+    # make sure install the leatest accelerate package
+    module = accelerate.utils.extract_model_from_parallel(module)
+
     missing_keys = []
     unexpected_keys = list(weights.keys())  # Start with all keys, remove matched ones
 
@@ -459,3 +464,43 @@ def safe_init_weights(func):
         return r
 
     return _wrapper
+
+
+def get_unwrapped_state_dict(model: nn.Module):
+    model: nn.Module = accelerate.utils.extract_model_from_parallel(model)
+    state_dict = model.state_dict()
+    # keep ordered
+    state_dict_clear = {}
+    for k in state_dict.keys():
+        if "_orig_mod" in k:  # compiled submodule
+            state_dict_clear[k.replace("_orig_mod", "")] = state_dict[k]
+        else:
+            state_dict_clear[k] = state_dict[k]
+    return state_dict_clear
+
+
+def unwrap_model_recursive(
+    model: nn.Module | torch._dynamo.OptimizedModule,
+    keep_submodule_compiled: bool = False,
+) -> nn.Module | torch._dynamo.OptimizedModule:
+    model = accelerate.utils.extract_model_from_parallel(
+        model,
+        keep_torch_compile=keep_submodule_compiled,
+        recursive=True,
+    )
+    if keep_submodule_compiled:
+        return model
+
+    return _unwrap_torch_compile_submodules(cast(nn.Module, model))
+
+
+def _unwrap_torch_compile_submodules(module: nn.Module) -> nn.Module:
+    if isinstance(module, torch._dynamo.OptimizedModule):
+        return cast(nn.Module, module._orig_mod)
+
+    for name, child in module.named_children():
+        unwrapped_child = _unwrap_torch_compile_submodules(child)
+        if unwrapped_child is not child:
+            module._modules[name] = unwrapped_child
+
+    return module

@@ -43,6 +43,7 @@ different spatial scales but the same set of color and geometric transformations
 """
 
 from typing import Literal, Any
+from abc import abstractmethod
 
 import kornia.augmentation as K
 import kornia.augmentation.random_generator as rg
@@ -59,6 +60,8 @@ from torch.distributed.nn import ReduceOp
 from torch.distributed.nn import all_reduce as functional_all_reduce
 
 from src.utilities.train_utils.visualization import get_rgb_image
+from src.utilities.train_utils.time import time_recorder
+
 from .info_nce import multiview_info_nce_loss
 
 
@@ -403,7 +406,7 @@ def forward_augmentation_pipelines(
     return global_views, local_views
 
 
-class LeJEPAAugmentation:
+class AugmentatioBase:
     def __init__(
         self,
         n_locals: int = 6,
@@ -418,9 +421,34 @@ class LeJEPAAugmentation:
         self.stack = stack
         self.is_neg_1_1 = is_neg_1_1
 
+        self.global_view_pipe = global_view_pipe
+        self.local_view_pipe = local_view_pipe
+
+    def _check_pipes_valid(self):
+        assert self.global_view_pipe is not None, f"Global view pipe should not be None"
+
+    @abstractmethod
+    def __call__(self, x: torch.Tensor): ...
+
+
+class LeJEPAAugmentation(AugmentatioBase):
+    def __init__(
+        self,
+        n_locals: int = 6,
+        n_globals: int = 2,
+        stack: bool = False,
+        global_view_pipe=None,
+        local_view_pipe=None,
+        is_neg_1_1: bool = True,
+    ):
+        super().__init__(n_locals, n_globals, stack, global_view_pipe, local_view_pipe, is_neg_1_1)
+
         self.global_view_pipe = global_view_pipe if global_view_pipe is not None else create_global_view_augmentations()
         self.local_view_pipe = local_view_pipe if local_view_pipe is not None else create_local_view_augmentations()
 
+        self._check_pipes_valid()
+
+    @time_recorder.record("call_lejepa_aug")
     def __call__(self, x: torch.Tensor) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]]:
         if self.is_neg_1_1:
             x = (x + 1) / 2

@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: mingtok_pretraining # Y-shape SSL tokenizer
+  - tokenizer: mingtok_pretraining
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
@@ -23,102 +23,82 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
-proxy_task:
-  task: ["ijepa", "lejepa"]
+tokenizer:
+  tokenizer:
+    pretrained_task: []
 
-  loss_weights:
-    ijepa: 1.
-    lejepa: 0.4
+proxy_task: null
+  # task: ["ijepa"]
 
-  aug:
-    n_local: 6
-    n_global: 2
+  # loss_weights:
+  #   ijepa: 1.
+  #   lejepa: 0.4
 
-  ijepa:
-    model:
-      embed_dim: 1024
-    optimizer:
-      _target_: heavyball.AdamW
-      _partial_: true
-      lr: 3.0e-4
-      weight_decay: 0.01
-      caution: true
-      mars: false
-      betas: ${tuple:[0.9,0.95]}
+  # aug:
+  #   n_local: 6
+  #   n_global: 2
 
-      # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-      # _partial_: true
-      # betas: [0.9, 0.95]
-      # mu: 0.95
-      # oned_param_algo: lion
-      # use_triton: true
-      # use_preconditioned: true # turbo-muon style preconditioning
-      # muon_params_defaults:
-      #   lr: 3.0e-4
-      #   weight_decay: 0.02
-      # oned_params_defaults:
-      #   lr: 3.0e-4
-      #   weight_decay: 0.0
-      # ignored_keys_for_muon:
-      #   - patch_embed
-      #   - pe
-      #   - norm
-      #   - ls1
-      #   - ls2
-      #   - layer_scale
-      #   - norm1
-      #   - norm2
-    scheduler:
-      _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-      _partial_: true
-      num_warmup_steps: 0
-      num_training_steps: 1_000_000
-      num_cycles: 1
-      reduced_factor: 2
-      min_lr: 1.0e-5
+  # ijepa:
+  #   model:
+  #     embed_dim: 1024
+  #   optimizer:
+  #     # _target_: torch.optim.AdamW
+  #     # _partial_: true
+  #     # lr: 3.0e-4
+  #     # weight_decay: 1.0e-5
+  #     # eps: 1.0e-8
+  #     # betas: [0.95, 0.99] #[0.9, 0.95]
+  #     # foreach: true
 
-  sigreg:
-    knots: 17
-    rnd_proj_dim: 128
-    lam: 0.02
-    sigreg_type: patch_tokens
+  #     # _target_: heavyball.AdamW
+  #     # _partial_: true
+  #     # lr: 3.0e-4
+  #     # weight_decay: 0.01
+  #     # caution: true
+  #     # mars: false
+  #     # betas: ${tuple:[0.9,0.95]}
 
-  infonce:
-    # do InfoNCE inside `lejepa_fn` call
-    weight: 0.1
-    type: "all@multi_positive_infonce"
-    temperature: 0.1
-    anchor: global
+  #     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+  #     _partial_: true
+  #     betas: [0.95, 0.99]
+  #     mu: 0.95
+  #     oned_param_algo: lion
+  #     use_triton: true
+  #     use_preconditioned: true # turbo-muon style preconditioning
+  #     muon_params_defaults:
+  #       lr: 3.0e-4
+  #       weight_decay: 0.02
+  #     oned_params_defaults:
+  #       lr: 3.0e-4
+  #       weight_decay: 0.0
+  #   scheduler:
+  #     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+  #     _partial_: true
+  #     num_warmup_steps: 0
+  #     num_training_steps: 1_000_000
+  #     num_cycles: 1
+  #     reduced_factor: 2
+  #     min_lr: 1.0e-5
 
-  # TODO: make dino_cls pretraining work
-  # dino_cls 需要该子配置：trainer会访问 cfg.proxy_task.dino_cls
-  # dino_cls:
-  #   embed_dim: 1024
-  #   img_size: 224
-  #   loss_weight: 0.2
-  #   global_ignore_diagonal: true
-  #   centering: softmax_center #sinkhorn_knopp # [sinkhorn_knopp, softmax_center]
-  #   sinkhorn_n_iterations: 3
+  # sigreg:
+  #   knots: 17
+  #   rnd_proj_dim: 128
+  #   lam: 0.02
+  #   sigreg_type: patch_tokens
 
-  #   # DINO loss
-  #   student_temp: 0.1
-  #   teacher_temp: 0.04
-  #   center_momentum: 0.9
-
-  #   # DINO head
-  #   head_n_prototypes: 1024 #8192
-  #   head_nlayers: 3
-  #   head_hidden_dim: 2048
-  #   head_bottleneck_dim: 256
-  #   head_use_bn: false
-  #   head_mlp_bias: true
+  # infonce:
+  #   # do InfoNCE inside `lejepa_fn` call
+  #   weight: 0.1
+  #   type: "all@multi_positive_infonce"
+  #   temperature: 0.1
+  #   anchor: global
 
 dataset:
   train_loader:
     macro_sampled_batch_size:
       128: 20
       256: 14
-      512: 8
+      512: 6
 
   weights:
     [30, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 16, 10, 16, 10, 11, 20]
@@ -126,7 +106,7 @@ dataset:
 vq_loss:
   # l2 latent regularization loss
   latent_reg_weight: null
-  sigreg_weight: 0.0
+  sigreg_weight: 1.0e-5
   sigreg_options:
     knots: 17
     rnd_proj_dim: 64
@@ -214,7 +194,7 @@ ema:
   _partial_: true
   beta: 0.995
   update_after_step: 0
-  update_every: 2
+  update_every: 1
   use_foreach: true
   allow_different_devices: true
   # update_model_with_ema_every: 5_000
@@ -223,7 +203,7 @@ train:
   tokenizer_name: hybrid_cosmos_f8c32_ijepa
   proj_dir: runs/stage1_cosmos_mingtok
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
-  max_grad_norm: 1.0
+  max_grad_norm: 0.3
   track_metrics: true
   track_metrics_duration: -1
   track_metrics_after: 2000
@@ -232,12 +212,16 @@ train:
   save_every: 1000
   grad_checkpoint: false # model activation checkpoint
   resume_path:
-  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-09_01-09-44_mingtok_RS_tokenizer_f8c16p1/ema
+  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-12_22-13-40_mingtok_RS_tokenizer_f8c16p1/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
   grad_check: false # check per-step gradients
   proxy_task_train_type: seperated
+
+  # profile
+  time_recorder_enable: false
+  time_recorder_duration: 20
 
   # augmentations
   aug_pipeline_train_obj: #decoder_deg
@@ -251,46 +235,50 @@ train:
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    # _partial_: true
-    # betas: [0.9, 0.95]
-    # mu: 0.95
-    # oned_param_algo: lion
-    # use_triton: true
-    # use_preconditioned: true # turbo-muon style preconditioning
-    # muon_params_defaults:
-    #   lr: 3.0e-4
-    #   weight_decay: 0.01
-    # oned_params_defaults:
-    #   lr: 3.0e-4
-    #   weight_decay: 0.0
-    # ignored_keys_for_muon:
-    #   - patch_embed
-    #   - pe
-    #   - norm
-    #   - ls1
-    #   - ls2
-    #   - layer_scale
-    #   - norm1
-    #   - norm2
-    #   - q_norm
-    #   - k_norm
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 3.0e-4
+    weight_decay: 0.0
 
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 3.0e-4
+    # lr: 4.0e-4
     # weight_decay: 1.0e-5
     # eps: 1.0e-8
-    # betas: [0.95, 0.99]
-    # # foreach: true
-    # fused: true
+    # betas: [0.9, 0.95]
+    # foreach: true
 
-    _target_: heavyball.AdamW
-    _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.01
-    caution: true
-    betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 6.0e-4
+    # weight_decay: 0.01
+    # caution: true
+    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
+
+    # _target_: bitsandbytes.optim.AdamW8bit
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.01
+    # min_8bit_size: 15999
+    # betas: ${tuple:[0.95,0.99]}
+    # is_paged: false
+
+    # _target_: adam_mini.Adam_mini
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.01
+    # betas: ${tuple:[0.95,0.99]}
+    # n_heads: 16
+    # n_kv_heads: 16
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -300,14 +288,6 @@ train:
     eps: 1.0e-8
     betas: [0.5, 0.9] #[0.9, 0.95]
     foreach: true
-
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 4.0e-4
-    # weight_decay: 0.01
-    # caution: true
-    # mars: false
-    # betas: ${tuple:[0.5,0.9]}
 
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

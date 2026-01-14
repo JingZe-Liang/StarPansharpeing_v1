@@ -185,3 +185,9 @@
 [submodule "src/stage2/layers/mHC"]
 	path = src/stage2/layers/mHC
 	url = https://github.com/tokenbender/mHC-manifold-constrained-hyper-connections.git
+[submodule "src/stage2/generative/SpeedrunDiT"]
+	path = src/stage2/generative/SpeedrunDiT
+	url = https://github.com/SwayStar123/SpeedrunDiT.git
+[submodule "src/stage2/cloud_removal/third_party/EMRDM"]
+	path = src/stage2/cloud_removal/third_party/EMRDM
+	url = https://github.com/Ly403/EMRDM.git

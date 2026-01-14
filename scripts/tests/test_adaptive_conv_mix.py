@@ -7,6 +7,7 @@ import torch
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.stage1.cosmos.modules.blocks import AdaptiveInputConvLayer, AdaptiveOutputConvLayer
+from src.stage1.cosmos.modules.blocks import AdaptiveInputLinearLayer, AdaptiveOutputLinearLayer
 
 
 class TestAdaptiveConvMix(unittest.TestCase):
@@ -222,6 +223,164 @@ class TestAdaptiveConvMix(unittest.TestCase):
         )
         y2 = layer2(x)
         self.assertEqual(tuple(y2.shape), (2, 4, 8, 8))
+
+        layer3 = AdaptiveInputConvLayer(
+            in_channels=8,
+            out_channels=4,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            use_bias=False,
+            mode="sitok",
+            sitok_reduce="pointwise",
+            sitok_embed_scale=1.0,
+        )
+        assert isinstance(layer3.sitok_reduce_head, torch.nn.Sequential)
+        with torch.no_grad():
+            lin0 = layer3.sitok_reduce_head[0]
+            lin1 = layer3.sitok_reduce_head[2]
+            assert isinstance(lin0, torch.nn.Linear)
+            assert isinstance(lin1, torch.nn.Linear)
+            lin0.weight.zero_()
+            lin0.bias.zero_()
+            lin0.weight.copy_(torch.eye(lin0.out_features))
+            lin1.weight.zero_()
+            lin1.bias.zero_()
+            lin1.weight[0, 0] = 1.0
+
+        x0 = torch.zeros(2, 5, 8, 8)
+        x0[:, 0] = 1.0
+        x1 = torch.zeros(2, 5, 8, 8)
+        x1[:, 1] = 1.0
+        y3 = layer3(x0)
+        y4 = layer3(x1)
+        self.assertEqual(tuple(y3.shape), (2, 4, 8, 8))
+        self.assertFalse(torch.allclose(y3, y4))
+
+    def test_adaptive_output_conv_sitok_film_shape(self) -> None:
+        layer = AdaptiveOutputConvLayer(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            use_bias=True,
+            mode="sitok_film",
+            sitok_embed_dim=8,
+            sitok_hidden_dim=0,
+        )
+        with torch.no_grad():
+            layer.sitok_head.weight.zero_()
+            layer.sitok_head.bias.zero_()
+            layer.sitok_head.bias[0] = 1.0  # gamma base
+            layer.sitok_head.weight[0, 0] = 1.0  # gamma depends on embedding dim 0
+
+        x = torch.randn(2, 8, 8, 8)
+        y = layer(x, out_channels=5)
+        self.assertEqual(tuple(y.shape), (2, 5, 8, 8))
+        # Different output channels should not be identical (FiLM is index-dependent).
+        self.assertFalse(torch.allclose(y[:, 0], y[:, 1]))
+
+    def test_adaptive_output_conv_sitok_pointwise_shape(self) -> None:
+        layer = AdaptiveOutputConvLayer(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            use_bias=True,
+            mode="sitok_pointwise",
+            sitok_embed_dim=8,
+            sitok_hidden_dim=0,
+            sitok_basis_dim=4,
+        )
+        with torch.no_grad():
+            layer.sitok_head.weight.zero_()
+            layer.sitok_head.bias.zero_()
+            layer.sitok_head.weight[0, 0] = 1.0  # basis weight 0 depends on embedding dim 0
+
+        x = torch.randn(2, 8, 8, 8)
+        y = layer(x, out_channels=5)
+        self.assertEqual(tuple(y.shape), (2, 5, 8, 8))
+        self.assertFalse(torch.allclose(y[:, 0], y[:, 1]))
+
+    def test_adaptive_input_linear_sitok_pointwise_shape(self) -> None:
+        layer = AdaptiveInputLinearLayer(
+            in_features=12,
+            out_features=6,
+            bias=True,
+            mode="sitok",
+            sitok_group_size=4,
+            sitok_reduce="pointwise",
+            sitok_embed_scale=1.0,
+        )
+        assert isinstance(layer.sitok_reduce_head, torch.nn.Linear)
+        with torch.no_grad():
+            layer.sitok_reduce_head.weight.zero_()
+            layer.sitok_reduce_head.bias.zero_()
+            layer.sitok_reduce_head.weight[0, 0] = 1.0
+
+        x0 = torch.zeros(2, 3 * 4)
+        x0[:, 0:4] = 1.0
+        x1 = torch.zeros(2, 3 * 4)
+        x1[:, 4:8] = 1.0
+        y0 = layer(x0)
+        y1 = layer(x1)
+        self.assertEqual(tuple(y0.shape), (2, 6))
+        self.assertFalse(torch.allclose(y0, y1))
+
+    def test_adaptive_output_linear_sitok_film_shape(self) -> None:
+        layer = AdaptiveOutputLinearLayer(
+            in_features=5,
+            out_features=12,
+            bias=True,
+            mode="sitok_film",
+            sitok_group_size=3,
+            sitok_embed_dim=8,
+            sitok_hidden_dim=0,
+        )
+        with torch.no_grad():
+            layer.linear.weight.fill_(0.1)
+            if layer.linear.bias is not None:
+                layer.linear.bias.zero_()
+            assert isinstance(layer.sitok_head, torch.nn.Linear)
+            layer.sitok_head.weight.zero_()
+            layer.sitok_head.bias.zero_()
+            layer.sitok_head.bias[:3] = 1.0
+            layer.sitok_head.weight[0, 0] = 1.0
+
+        x = torch.ones(2, 5)
+        y = layer(x, out_features=2 * 3)
+        self.assertEqual(tuple(y.shape), (2, 6))
+        y2 = y.reshape(2, 2, 3)
+        self.assertFalse(torch.allclose(y2[:, 0], y2[:, 1]))
+
+    def test_adaptive_output_linear_sitok_pointwise_shape(self) -> None:
+        layer = AdaptiveOutputLinearLayer(
+            in_features=5,
+            out_features=12,
+            bias=True,
+            mode="sitok_pointwise",
+            sitok_group_size=3,
+            sitok_embed_dim=8,
+            sitok_hidden_dim=0,
+            sitok_basis_dim=4,
+        )
+        with torch.no_grad():
+            layer.linear.weight.zero_()
+            if layer.linear.bias is not None:
+                layer.linear.bias.zero_()
+                layer.linear.bias[0] = 1.0
+            assert isinstance(layer.sitok_head, torch.nn.Linear)
+            layer.sitok_head.weight.zero_()
+            layer.sitok_head.bias.zero_()
+            layer.sitok_head.weight[0, 0] = 1.0
+
+        x = torch.ones(2, 5)
+        y = layer(x, out_features=2 * 3)
+        self.assertEqual(tuple(y.shape), (2, 6))
+        y2 = y.reshape(2, 2, 3)
+        self.assertFalse(torch.allclose(y2[:, 0], y2[:, 1]))
 
 
 if __name__ == "__main__":

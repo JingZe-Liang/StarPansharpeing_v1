@@ -116,14 +116,43 @@ class DeepGlobeRoadExtractionStreamingDataset(_BaseStreamingDataset):
 
 def __test_dataloader():
     import lovely_tensors as lt
+    import matplotlib.pyplot as plt
 
     lt.monkey_patch()
     ds = DeepGlobeRoadExtractionStreamingDataset(input_dir="data/Downstreams/RoadExtraction/DeepGlobe_Litdata/train")
     print(len(ds))
 
-    sample = ds[0]
+    sample = ds[100]
     print(sample["img"].shape)
     print(sample["mask"].shape)
+    print(sample["mask"].unique())
+
+    # 绘制图像和掩码
+    img = sample["img"]  # (C, H, W)
+    mask = sample["mask"]  # (H, W)
+
+    # 转换为 numpy 并调整维度 (C, H, W) -> (H, W, C)
+    img_np = img.permute(1, 2, 0).numpy()
+    # 反归一化: 从 (-1, 1) 到 (0, 1)
+    img_np = (img_np + 1) / 2
+    img_np = img_np.clip(0, 1)
+
+    mask_np = mask.numpy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+    axes[0].imshow(img_np)
+    axes[0].set_title("Image")
+    axes[0].axis("off")
+
+    axes[1].imshow(mask_np, cmap="gray")
+    axes[1].set_title("Mask")
+    axes[1].axis("off")
+
+    plt.tight_layout()
+    plt.savefig("deep_globe_sample.webp", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("Saved to deep_globe_sample.webp")
 
 
 if __name__ == "__main__":

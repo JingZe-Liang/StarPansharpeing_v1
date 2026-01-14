@@ -1,16 +1,17 @@
 from loguru import logger
-from typing import Callable, Any, Tuple
+from collections.abc import Callable
+from typing import Any
 
 import inspect
 
 
 def _validate_callable_arguments(
-    func: Callable,
-    args: tuple,
-    kwargs: dict,
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
     func_name: str,
     print_warning: bool = True,
-) -> Tuple[bool, dict]:
+) -> tuple[bool, dict[str, Any]]:
     """
     Validate arguments against a callable's signature.
 
@@ -49,42 +50,27 @@ def _validate_callable_arguments(
             logger.warning(f"Cannot get signature for {func_name}: {e}")
         return False, {}
 
-    func_params = sig.parameters
+    parameters = sig.parameters
 
-    # Filter kwargs to only include parameters that the function accepts
-    filtered_kwargs = {k: v for k, v in kwargs.items() if k in func_params.keys()}
+    # If the callable accepts **kwargs, keep all keyword arguments.
+    accepts_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    if accepts_var_keyword:
+        filtered_kwargs = dict(kwargs)
+    else:
+        # Only keep keyword-passable parameters; drop POSITIONAL_ONLY even if name matches.
+        allowed_keyword_names = {
+            p.name
+            for p in parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keyword_names}
 
-    # Check if positional arguments are acceptable
-    param_count = len(func_params)
-    args_count = len(args)
-
-    # Get the number of required positional parameters
-    required_params = sum(
-        1
-        for param in func_params.values()
-        if param.default == inspect.Parameter.empty
-        and param.kind
-        in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-    )
-
-    # Validate positional argument count
-    if args_count < required_params:
+    try:
+        sig.bind(*args, **filtered_kwargs)
+    except TypeError as e:
         if print_warning:
-            logger.warning(
-                f"{func_name} requires at least {required_params} positional arguments, but got {args_count}"
-            )
+            logger.warning(f"{func_name} argument validation failed: {e}")
         return False, filtered_kwargs
-
-    if args_count > param_count:
-        # Check if function accepts *args
-        has_var_args = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in func_params.values())
-        if not has_var_args:
-            if print_warning:
-                logger.warning(f"{func_name} accepts at most {param_count} positional arguments, but got {args_count}")
-            return False, filtered_kwargs
 
     return True, filtered_kwargs
 
@@ -211,3 +197,44 @@ def maybe_call(
         if print_warning:
             logger.warning("Both cls and func are None, nothing to call")
         return None
+
+
+def extract_needed_kwargs(kwargs: dict, cls: Callable | type, include_default: bool = False) -> dict:
+    """
+    Extracts the subset of `kwargs` that match the parameters of a given class's __init__ method or a function.
+
+    If a parameter is not provided in `kwargs` but has a default value, the default is used.
+    Missing required parameters will raise a ValueError.
+
+    Args:
+        kwargs (dict): A dictionary of keyword arguments to filter.
+        cls (type or function): A class or function whose signature is used to extract the needed kwargs.
+
+    Returns:
+        dict: A dictionary containing only the relevant keyword arguments.
+
+    Raises:
+        AssertionError: If `cls` is a class without an __init__ method.
+        ValueError: If a required argument is missing or an unsupported type is passed.
+    """
+    needed_kwargs = {}
+    if inspect.isclass(cls):
+        assert hasattr(cls, "__init__"), f"{cls} does not have an __init__ method."
+        sig = inspect.signature(cls.__init__)
+    elif inspect.isfunction(cls):
+        sig = inspect.signature(cls)
+    else:
+        raise ValueError(f"Expected a class or function, got {type(cls)}.")
+
+    for param in sig.parameters.values():
+        if param.name == "self":
+            continue
+        if param.name in kwargs:
+            needed_kwargs[param.name] = kwargs[param.name]
+        elif include_default and param.default is not inspect.Parameter.empty:
+            needed_kwargs[param.name] = param.default
+        # else:
+        #     raise ValueError(
+        #         f"Missing required argument '{param.name}' for {cls.__name__}."
+        #     )
+    return needed_kwargs

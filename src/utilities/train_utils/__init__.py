@@ -14,7 +14,11 @@ from .state import (
     object_all_gather,
     object_scatter,
 )
+from .time import TimeRecorder, time_recorder
 from .visualization import get_rgb_image
+
+
+# ------ Lovely tensor hook -------- #
 
 LT_ENABLED = False
 try:

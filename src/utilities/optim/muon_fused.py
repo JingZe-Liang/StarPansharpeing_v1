@@ -171,9 +171,10 @@ class MuonFSDP(Muon):
     ):
         muon_params_defaults = {} if muon_params_defaults is None else muon_params_defaults
         oned_params_defaults = {} if oned_params_defaults is None else oned_params_defaults
-        muon_abcs = gen_muon_consts(
-            MuonConfig(name="turbo_muon" if use_preconditioned else "su"),
-        )
+        # muon_abcs = gen_muon_consts(
+        #     MuonConfig(name="turbo_muon" if use_preconditioned else "su"),
+        # )
+        muon_abcs = gen_muon_consts(MuonConfig(name="turbo_muon"))
         if newton_schulz_func is not None:
             newton_schulz_func = lambda G, epsilon: zeropower_via_newtonschulz6_diff_abc(
                 G=G,

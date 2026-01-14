@@ -5,6 +5,7 @@ Features:
 2. Masked Autoencoder (no drop tokens)
 """
 
+from functools import partial
 import math
 import os
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ from typing_extensions import Annotated
 from src.utilities.network_utils import (
     compile_decorator,
     model_compiled_flag,
-    null_decorator_no_any_kwgs,
+    null_decorator,
 )
 
 from .value_residual import mix_value_residual
@@ -62,6 +63,7 @@ from .blocks import (
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,
     AdaptiveOutputLinearLayer,
+    block_basic_init,
 )
 from .mask import random_masking_mae, random_masking_no_drop
 from .patching import (
@@ -226,6 +228,7 @@ class Attention(Attention_):
 
         return v
 
+    @compile_decorator
     def forward(
         self,
         x,
@@ -309,7 +312,7 @@ class Attention(Attention_):
         assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
         x, _ = attention_function_(self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p)
 
-        x = x.transpose(1, 2).reshape(B, N, C)
+        # x = x.transpose(1, 2).reshape(B, N, C)
         x = self.norm(x)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -420,7 +423,6 @@ class GatedAttention(nn.Module):
         return value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
     # Adapted from Qwen3Attention.forward
-    # @_transformer_compile_decorator
     @compile_decorator
     def forward(
         self,
@@ -677,8 +679,8 @@ class AttentionBlock(nn.Module):
         )
         self.norm1 = create_norm_layer(norm_layer, dim)
         self.norm2 = create_norm_layer(norm_layer, dim)
-        self.ls1 = LayerScale(dim, 1e-5)
-        self.ls2 = LayerScale(dim, 1e-5)
+        self.ls1 = LayerScale(dim, 1e-2)
+        self.ls2 = LayerScale(dim, 1e-2)
         self.dp1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.dp2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -728,8 +730,6 @@ class AttentionBlock(nn.Module):
         return x
 
     def forward(self, *args, **kwargs):
-        # forward_fn = f"_forward_{self._forward_type}"
-        # return getattr(self, forward_fn)(*args, **kwargs)
         if self._forward_type == "attention_block":
             return self._forward_attention_block(*args, **kwargs)
         elif self._forward_type == "attention_block_mhc":
@@ -829,7 +829,6 @@ class AttentionBlockCondition(AttentionBlock):
         z_1d = rearrange(z_2d_interp, "b c zh zw -> b (zh zw) c")
         return z_1d
 
-    # @_transformer_compile_decorator
     @compile_decorator
     def _forward_condition_attention_block(
         self, x, c, t=None, inp_shape=None, rope=None, v_residual_v1: Tensor | None = None
@@ -1495,7 +1494,8 @@ class TransformerTokenizer(nn.Module):
 
     def init_weights(self):
         # Initialize weights
-        named_apply(get_init_weights_vit("moco", head_bias=0.0), self)
+        named_apply(partial(block_basic_init, init_type="trunc_normal"), self)
+        # named_apply(get_init_weights_vit("jax"), self)
         logger.debug("[Transformer Tokenizer]: Model initialized with MoCo Vit weights")
 
     def _get_masked_x(self, x):
@@ -1538,10 +1538,13 @@ class TransformerTokenizer(nn.Module):
         # Re-attach prefix tokens
         # Note: In IJEPA, typically we process multiple masks, so batch size increases.
         # We need to repeat prefix tokens to match the new batch size.
-        # masks is a list of tensors, so effective batch size becomes B * len(masks)
-        # n_masks = len(masks)
-        # if n_masks > 1:
-        #     prefixed_tokens = prefixed_tokens.repeat_interleave(n_masks, dim=0)
+        # IMPORTANT: `_jepa_apply_masks` concatenates masks on batch dim as:
+        #   [mask0(B), mask1(B), ..., maskK(B)]
+        # so prefix tokens must be repeated in the same order (repeat whole batch per mask),
+        # not interleaved per sample.
+        n_masks = len(masks)
+        if n_masks > 1:
+            prefixed_tokens = prefixed_tokens.repeat(n_masks, 1, 1)
 
         x = torch.cat([prefixed_tokens, x], dim=1)
 

@@ -144,12 +144,12 @@ train_loader:
   macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
 
   loader_kwargs:
-    num_workers: 14
+    num_workers: 20
     pin_memory: true
     drop_last: true
     persistent_workers: true
     batch_size: 6
-    prefetch_factor: 1
+    prefetch_factor: null
     shuffle: false
 
   weights:

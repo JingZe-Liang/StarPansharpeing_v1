@@ -1150,7 +1150,7 @@ def test_model_forward_backward(
 
     cfg = hybrid_ijepa_f8_config(
         # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
-        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_05-34-15_hybrid_cosmos_f16c64_ijepa_pretrained_sem/ema/tokenizer/model.safetensors",
+        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors",
         latent_chans=32,
         use_repa_loss=True,
     )
@@ -1420,6 +1420,6 @@ if __name__ == "__main__":
     """
     with logger.catch():
         test_model_forward_backward(
-            real_data="RS5M", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
+            real_data="SAM270k", compute_mean_std=False, max_iters=20, save_pca_vis=True, pca_type="proj"
         )
         # test_forward_pca()

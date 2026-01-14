@@ -14,13 +14,13 @@ from timm.layers.create_norm_act import create_norm_act_layer
 from timm.layers.weight_init import lecun_normal_, trunc_normal_
 from torch import Tensor
 
-from src.utilities.network_utils import null_decorator_no_any_kwgs
+from src.utilities.network_utils import null_decorator
 
 compile_forward_fn = False
 if compile_forward_fn:
     _compile_decorator = torch.compile
 else:
-    _compile_decorator = null_decorator_no_any_kwgs
+    _compile_decorator = null_decorator
 
 
 def _kernel_norm(

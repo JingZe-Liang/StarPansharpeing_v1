@@ -1,7 +1,7 @@
 import functools
 import os
 import warnings
-from typing import Callable, Optional
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -68,7 +68,7 @@ class SwiGLU(nn.Module):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        bias = to_2tuple(bias)  # type: ignore
+        bias = cast(tuple[int, int], to_2tuple(bias))  # type: ignore
         drop_probs: tuple[float, float] = to_2tuple(drop)  # type: ignore
         self.use_conv = use_conv
         self.is_fused = is_fused is not None

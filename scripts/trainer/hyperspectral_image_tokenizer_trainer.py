@@ -1,13 +1,16 @@
+import importlib.util
 import os
 import random
 import re
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast, no_type_check
+from typing import Any, Callable, Iterable, Literal, Sequence, cast, no_type_check
 
 import accelerate
 import accelerate.utils
@@ -59,9 +62,246 @@ from src.stage1.utilities.train.network import (
 from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import log_print, set_logger_file, get_python_pkg_env, zip_code_into_dir
+from src.utilities.network_utils.compile import model_compiled_flag
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter
+from src.utilities.train_utils.time import TimeRecorder, time_recorder
+
+
+@dataclass(slots=True)
+class _ProxyAugPrefetchResult:
+    global_views: list[torch.Tensor]
+    local_views: list[torch.Tensor]
+    done_event: Any | None
+    image_size: int
+
+
+class ProxyAugFuture:
+    def __init__(
+        self,
+        *,
+        device: torch.device,
+        image_size: int,
+        future: Future[_ProxyAugPrefetchResult] | None = None,
+        result: _ProxyAugPrefetchResult | None = None,
+    ) -> None:
+        if (future is None) == (result is None):
+            raise ValueError("Exactly one of `future` or `result` must be provided.")
+
+        self._device = device
+        self.image_size = image_size
+        self._future = future
+        self._result = result
+        self._event_waited = False
+
+    @classmethod
+    def from_future(
+        cls,
+        future: Future[_ProxyAugPrefetchResult],
+        *,
+        device: torch.device,
+        image_size: int,
+    ) -> "ProxyAugFuture":
+        return cls(device=device, image_size=image_size, future=future)
+
+    @classmethod
+    def from_result(
+        cls,
+        result: _ProxyAugPrefetchResult,
+        *,
+        device: torch.device,
+        image_size: int,
+    ) -> "ProxyAugFuture":
+        return cls(device=device, image_size=image_size, result=result)
+
+    def wait(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        if self._result is None:
+            assert self._future is not None
+            self._result = self._future.result()
+
+        if (
+            not self._event_waited
+            and self._result.done_event is not None
+            and self._device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            torch.cuda.current_stream(self._device).wait_event(self._result.done_event)
+            self._event_waited = True
+
+        return self._result.global_views, self._result.local_views
+
+    def __del__(self) -> None:  # noqa: PLW1641
+        try:
+            if self._device.type != "cuda" or self._event_waited or not torch.cuda.is_available():
+                return
+
+            if self._result is None:
+                if self._future is None or not self._future.done():
+                    return
+                self._result = self._future.result()
+
+            if self._result.done_event is not None:
+                torch.cuda.current_stream(self._device).wait_event(self._result.done_event)
+                self._event_waited = True
+        except Exception:
+            return
+
+
+class ProxyAugManager:
+    def __init__(
+        self,
+        *,
+        proxy_aug_async=True,
+        proxy_aug_async_cpu=False,
+        proxy_aug_pipeline: LeJEPAAugmentation | None = None,
+        time_recorder: TimeRecorder | None = None,
+    ) -> None:
+        self._proxy_aug_async = proxy_aug_async
+        self._proxy_aug_async_cpu = proxy_aug_async_cpu
+        self._proxy_aug_async_workers = 1
+        self._proxy_aug_pipeline = proxy_aug_pipeline
+        self._executor: ThreadPoolExecutor | None = None
+        self._stream: Any | None = None
+        self._time_recorder = time_recorder
+
+    def set_pipeline(self, proxy_aug_pipeline: LeJEPAAugmentation | None) -> None:
+        self._proxy_aug_pipeline = proxy_aug_pipeline
+
+    def set_time_recorder(self, time_recorder: TimeRecorder | None) -> None:
+        self._time_recorder = time_recorder
+
+    @staticmethod
+    def _to_view_list(views: torch.Tensor | list[torch.Tensor]) -> list[torch.Tensor]:
+        if isinstance(views, torch.Tensor):
+            return [views]
+        return views
+
+    def _need_aug(self, proxy_tasks: Sequence[str]) -> bool:
+        if self._proxy_aug_pipeline is None:
+            return False
+        return any(t in proxy_tasks for t in ("ibot", "lejepa", "lejepa_latent", "dino_cls"))
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            max_workers = self._proxy_aug_async_workers
+            max_workers = max(1, max_workers)
+            self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="proxy_aug")
+        return self._executor
+
+    def _get_stream(self, device: torch.device) -> Any:
+        if self._stream is None:
+            self._stream = torch.cuda.Stream(device=device)
+        return self._stream
+
+    def _record(self, name: str):
+        if self._time_recorder is None:
+            return nullcontext()
+        return self._time_recorder.record(name)
+
+    def shutdown(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
+        self._stream = None
+
+    def _run_sync(self, x: torch.Tensor, *, img_size: int) -> _ProxyAugPrefetchResult:
+        assert self._proxy_aug_pipeline is not None, "proxy_aug_pipeline is not initialized"
+        x_resized = F.interpolate(x, size=img_size, mode="bilinear")
+        global_views, local_views = self._proxy_aug_pipeline(x_resized)
+        return _ProxyAugPrefetchResult(
+            global_views=self._to_view_list(global_views),
+            local_views=self._to_view_list(local_views),
+            done_event=None,
+            image_size=img_size,
+        )
+
+    def _run_async(self, x: torch.Tensor, *, img_size: int) -> _ProxyAugPrefetchResult:
+        if x.device.type != "cuda" or not torch.cuda.is_available():
+            return self._run_sync(x, img_size=img_size)
+
+        assert self._proxy_aug_pipeline is not None, "proxy_aug_pipeline is not initialized"
+
+        device_index = x.device.index
+        if device_index is not None:
+            torch.cuda.set_device(device_index)
+
+        stream = self._get_stream(x.device)
+        done_event: Any = torch.cuda.Event()
+        with torch.cuda.stream(stream):
+            x_resized = F.interpolate(x, size=img_size, mode="bilinear")
+            global_views, local_views = self._proxy_aug_pipeline(x_resized)
+            global_views_list = self._to_view_list(global_views)
+            local_views_list = self._to_view_list(local_views)
+            done_event.record(stream)
+
+        return _ProxyAugPrefetchResult(
+            global_views=global_views_list,
+            local_views=local_views_list,
+            done_event=done_event,
+            image_size=img_size,
+        )
+
+    def maybe_prefetch(
+        self,
+        x: torch.Tensor,
+        *,
+        proxy_tasks: Sequence[str],
+        img_size: int = 224,
+    ) -> ProxyAugFuture | None:
+        if not self._need_aug(proxy_tasks):
+            return None
+
+        async_enabled = self._proxy_aug_async
+        cpu_async_enabled = self._proxy_aug_async_cpu
+
+        if x.device.type != "cuda" and not (async_enabled and cpu_async_enabled):
+            return ProxyAugFuture.from_result(
+                self._run_sync(x, img_size=img_size), device=x.device, image_size=img_size
+            )
+
+        if not async_enabled:
+            return ProxyAugFuture.from_result(
+                self._run_sync(x, img_size=img_size), device=x.device, image_size=img_size
+            )
+
+        executor = self._get_executor()
+        future = executor.submit(self._run_async, x, img_size=img_size)
+        return ProxyAugFuture.from_future(future, device=x.device, image_size=img_size)
+
+    def get_views(
+        self,
+        x_resized: torch.Tensor,
+        *,
+        img_size: int,
+        proxy_tasks: Sequence[str],
+        proxy_aug_future: ProxyAugFuture | None,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        if not self._need_aug(proxy_tasks):
+            raise ValueError(f"Proxy tasks do not need aug, but `get_views` is called: {list(proxy_tasks)!r}")
+
+        if proxy_aug_future is not None and proxy_aug_future.image_size == img_size:
+            return proxy_aug_future.wait()
+
+        assert self._proxy_aug_pipeline is not None, "proxy_aug_pipeline is not initialized"
+        global_views, local_views = self._proxy_aug_pipeline(x_resized)
+        return self._to_view_list(global_views), self._to_view_list(local_views)
+
+
+class _TimedLoaderIterator:
+    def __init__(self, dataloader: Iterable[Any], recorder: TimeRecorder | None, name: str) -> None:
+        self._iter = iter(dataloader)
+        self._recorder = recorder
+        self._name = name
+
+    def __iter__(self) -> "_TimedLoaderIterator":
+        return self
+
+    def __next__(self) -> Any:
+        if self._recorder is None:
+            return next(self._iter)
+        with self._recorder.record(self._name):
+            return next(self._iter)
 
 
 class CosmosHyperspectralTokenizerTrainer:
@@ -72,13 +312,18 @@ class CosmosHyperspectralTokenizerTrainer:
         self.dataset_cfg = cfg.dataset
         self.ema_cfg = cfg.ema
         self.val_cfg = cfg.val
-        self.tokenizer: nn.Module
+
         self.proxy_aug_pipeline: LeJEPAAugmentation | None = None
+        self.proxy_aug_manager: ProxyAugManager | None = None
+        self._time_recorder_enabled = False
+        self._time_recorder_duration = int(getattr(self.train_cfg, "time_recorder_duration", -1))
 
         # accelerator
         self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
         self._trackers_name = self.train_cfg.log.log_with
         accelerate.utils.set_seed(2025)
+
+        self._init_time_recorder()
 
         # logger
         log_file = self.configure_logger()
@@ -175,6 +420,11 @@ class CosmosHyperspectralTokenizerTrainer:
         # Visual pretraining proxy task models, e.g, contrastive learning teacher model;
         # JEPA predictor model ...
         self.setup_proxy_task_model_and_optim_scheduler()
+        self.proxy_aug_manager = ProxyAugManager(
+            proxy_aug_async=False,
+            proxy_aug_pipeline=self.proxy_aug_pipeline,
+            time_recorder=self._get_time_recorder(),
+        )
 
         # Augmentation pipelines and anti-degradation network / losses
         self.setup_aug_pipe_and_anti_degradation_network()
@@ -216,7 +466,6 @@ class CosmosHyperspectralTokenizerTrainer:
         if callable(encode_fn):
             return encode_fn(x)
 
-        # PEFT/PeftModel等wrapper场景：尝试透传到base model
         base_model = getattr(model, "base_model", None)
         inner = getattr(base_model, "model", None) if base_model is not None else None
         encode_fn = getattr(inner, "encode_dino_cls", None)
@@ -224,6 +473,31 @@ class CosmosHyperspectralTokenizerTrainer:
             return encode_fn(x)
 
         raise AttributeError("tokenizer has not function `encode_dino_cls`.")
+
+    def _init_time_recorder(self) -> None:
+        self._time_recorder_enabled = (
+            getattr(self.train_cfg, "time_recorder_enable", False) and self.accelerator.is_main_process
+        )
+        time_recorder.configure(enabled=self._time_recorder_enabled)
+
+    def _get_time_recorder(self) -> TimeRecorder | None:
+        if not self._time_recorder_enabled:
+            return None
+        return time_recorder
+
+    def _record_time(self, name: str):
+        if not self._time_recorder_enabled:
+            return nullcontext()
+        return time_recorder.record(name)
+
+    def _maybe_flush_time_recorder(self) -> None:
+        if not self._time_recorder_enabled:
+            return
+        if self._time_recorder_duration <= 0:
+            return
+        if self.global_step % self._time_recorder_duration == 0:
+            time_recorder.print_table()
+            time_recorder.reset()
 
     def _ensure_last_layer_requires_grad(self):
         # Call after the optimizer is initialized
@@ -243,6 +517,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         self._has_proxy_task = True
         self._proxy_tasks: list[str] = cfg.task.split("+") if isinstance(cfg.task, str) else cfg.task
+        if self._proxy_tasks is None:
+            self._proxy_tasks = []
         assert len(self._proxy_tasks) > 0, f"proxy tasks got no tasks: {self._proxy_tasks=}, but {cfg.task=}"
 
         def _create_aug_pipline():
@@ -276,6 +552,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
                 self.proxy_optim = hydra.utils.instantiate(cfg.ijepa.optimizer)(ps)
                 self.proxy_sched = hydra.utils.instantiate(cfg.ijepa.scheduler)(optimizer=self.proxy_optim)
+                self.mask_collator = MaskCollator(**to_cont(cfg.ijepa.masks))
 
         if "lejepa" in self._proxy_tasks or "lejepa_latent" in self._proxy_tasks:
             self.proxy_aug_pipeline = _create_aug_pipline()
@@ -941,10 +1218,12 @@ class CosmosHyperspectralTokenizerTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter: Callable, no_wd_param_names: list[str] | None):
-                if "muon" in optimizer_cfg._target_:
-                    self.log_msg("[Optimizer]: using muon optimizer")
+                if "muon" in optimizer_cfg._target_ or "adam_mini" in optimizer_cfg._target_:
+                    self.log_msg(f"[Optimizer]: using {optimizer_cfg._target_} optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
+                    if "adam_mini" in optimizer_cfg._target_:
+                        named_params = [(k, v) for k, v in named_params.items()]
                     return hydra.utils.instantiate(optimizer_cfg)(
                         named_parameters=named_params
                     )  # set no weight decay params in function
@@ -1150,7 +1429,18 @@ class CosmosHyperspectralTokenizerTrainer:
         else:
             raise ValueError(f"Unknown mode {mode}")
 
-    def forward_proxy_task(self, x: torch.Tensor) -> edict:
+    def _ema_teacher_ready(self) -> bool:
+        if self.no_ema:
+            return False
+        update_after_step = int(getattr(self.ema_cfg, "update_after_step", 0) or 0)
+        return self.global_step >= update_after_step
+
+    def forward_proxy_task(
+        self,
+        x: torch.Tensor,
+        *,
+        proxy_aug_future: ProxyAugFuture | None = None,
+    ) -> edict:
         """
         Forward pretraining proxy tasks.
         """
@@ -1176,38 +1466,47 @@ class CosmosHyperspectralTokenizerTrainer:
         if "ijepa" in proxy_tasks:
             assert self.proxy_model is not None
 
-            # Resize to
-            ijepa_img_size = tuple(int(v) for v in cfg.ijepa.masks.input_size)
-            x_ijepa = F.interpolate(x, size=ijepa_img_size, mode="bilinear")
+            if not self._ema_teacher_ready():
+                update_after_step = int(getattr(self.ema_cfg, "update_after_step", 0) or 0)
+                self.log_msg(
+                    f"[Proxy/IJEPA]: skip (EMA teacher not ready: no_ema={self.no_ema} or global_step<{update_after_step})",
+                    level="WARNING",
+                    warn_once=True,
+                )
+            else:
+                # Resize to
+                ijepa_img_size = tuple(int(v) for v in cfg.ijepa.masks.input_size)
+                x_ijepa = F.interpolate(x, size=ijepa_img_size, mode="bilinear")
 
-            # Masks
-            mask_collator = MaskCollator(**to_cont(cfg.ijepa.masks))
-            x_ijepa, masks_enc, masks_pred = mask_collator(x_ijepa)
-            masks_enc = [m.to(x_ijepa.device, torch.int32) for m in masks_enc]
-            masks_pred = [m.to(x_ijepa.device, torch.int32) for m in masks_pred]
+                # Masks
+                x_ijepa, masks_enc, masks_pred = self.mask_collator(x_ijepa)
+                masks_enc = [m.to(x_ijepa.device, torch.int32) for m in masks_enc]
+                masks_pred = [m.to(x_ijepa.device, torch.int32) for m in masks_pred]
 
-            # Target
-            with self.accelerator.autocast():
                 # Target
-                with torch.no_grad():
-                    # z is the tokenizer's pre-quant-conv hidden state
-                    z = self.ema_tokenizer.ema_model.encode_ijepa(x_ijepa)  # type: ignore
-                    z = _maybe_to_1d(z)
-                    z = torch.nn.functional.layer_norm(z, (z.size(-1),))
-                    B = len(z)
-                    z = apply_masks(z, masks_pred)
-                    h_tgt = repeat_interleave_batch(z, B, repeat=len(masks_enc))
+                with self.accelerator.autocast():
+                    # Target
+                    with torch.no_grad():
+                        # z is the tokenizer's pre-quant-conv hidden state
+                        with self._record_time("forward_tokenizer_ijepa_tgt"):
+                            z = self.ema_tokenizer.ema_model.encode_ijepa(x_ijepa)  # type: ignore
+                            z = _maybe_to_1d(z)
+                            z = torch.nn.functional.layer_norm(z, (z.size(-1),))
+                            B = len(z)
+                            z = apply_masks(z, masks_pred)
+                            h_tgt = repeat_interleave_batch(z, B, repeat=len(masks_enc))
 
-                # Context
-                h_ctx = self.tokenizer.encode_ijepa(x_ijepa, jepa_masks=masks_enc)  # type: ignore
-                h_ctx = _maybe_to_1d(h_ctx)
-                h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
+                    # Context
+                    with self._record_time("forward_tokenizer_ijepa_pred"):
+                        h_ctx = self.tokenizer.encode_ijepa(x_ijepa, jepa_masks=masks_enc)  # type: ignore
+                        h_ctx = _maybe_to_1d(h_ctx)
+                        h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
 
-                # Loss
-                loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
+                    # Loss
+                    loss = torch.nn.functional.smooth_l1_loss(h_pred, h_tgt)
 
-            proxy_loss_breakdown.ijepa_loss = loss.detach()
-            proxy_loss = proxy_loss + loss * cfg.loss_weights["ijepa"]
+                proxy_loss_breakdown.ijepa_loss = loss.detach()
+                proxy_loss = proxy_loss + loss * cfg.loss_weights["ijepa"]
 
         if "latent_mae" in proxy_tasks or "pixel_mae" in proxy_tasks:
             mae_img_size = 224
@@ -1232,8 +1531,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # Augmentation pipeline
             # Global and local views has different size
-            assert hasattr(self, "proxy_aug_pipeline"), "proxy_aug_pipeline is not defined"
-            global_views, local_views = self.proxy_aug_pipeline(x_ibot)  # type: ignore
+            assert self.proxy_aug_manager is not None
+            global_views, local_views = self.proxy_aug_manager.get_views(
+                x_ibot,
+                img_size=ibot_img_size,
+                proxy_tasks=proxy_tasks,
+                proxy_aug_future=proxy_aug_future,
+            )
             global_x = torch.cat(global_views, dim=0)
 
             # --- Mask Generation ---
@@ -1306,8 +1610,13 @@ class CosmosHyperspectralTokenizerTrainer:
             # Augmentation pipeline
             # Global and local views has different size
             if global_views is None or local_views is None:
-                assert self.proxy_aug_pipeline is not None, "proxy_aug_pipeline is not initialized"
-                global_views, local_views = self.proxy_aug_pipeline(x)
+                assert self.proxy_aug_manager is not None
+                global_views, local_views = self.proxy_aug_manager.get_views(
+                    x,
+                    img_size=img_size,
+                    proxy_tasks=proxy_tasks,
+                    proxy_aug_future=proxy_aug_future,
+                )
             global_x = torch.cat(global_views, dim=0)
             ng, nl = len(global_views), len(local_views)
 
@@ -1334,7 +1643,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 lc_cls = lc_patches = None
                 if local_views is not None:
                     local_x = torch.cat(local_views, dim=0)
-                    local_dict = lejepa_fn(local_x)
+                    with self._record_time("forward_tokenizer_lejepa"):
+                        local_dict = lejepa_fn(local_x)
                     lc_cls, lc_patches = map(
                         partial(split_view_out, n_v=nl), [local_dict["cls_tokens"], local_dict["patch_tokens"]]
                     )
@@ -1382,8 +1692,13 @@ class CosmosHyperspectralTokenizerTrainer:
             x_dino = F.interpolate(x, size=dino_img_size, mode="bilinear")
 
             if global_views is None or local_views is None:
-                assert hasattr(self, "proxy_aug_pipeline"), "proxy_aug_pipeline is not defined"
-                global_views, local_views = self.proxy_aug_pipeline(x_dino)  # type: ignore
+                assert self.proxy_aug_manager is not None
+                global_views, local_views = self.proxy_aug_manager.get_views(
+                    x_dino,
+                    img_size=dino_img_size,
+                    proxy_tasks=proxy_tasks,
+                    proxy_aug_future=proxy_aug_future,
+                )
 
             ng, nl = len(global_views), len(local_views)
             global_x = torch.cat(global_views, dim=0)
@@ -1455,8 +1770,8 @@ class CosmosHyperspectralTokenizerTrainer:
         return ret
 
     def forward_tokenizer(self, x: torch.Tensor, ema: bool = False, is_testing: bool = False) -> edict:
-        out_d: edict = edict()
-        dec_out: dict = {}
+        out_d = edict()
+        dec_out = {}
         q_loss = None
         q_info = None
 
@@ -1569,26 +1884,27 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # loss
         with self.accelerator.autocast():
-            # self.vq_loss_fn.forward
-            disc_train_loss_d, log_disc = self.vq_loss_fn(
-                inputs=x,
-                reconstructions=out_d["recon"],
-                q_loss_total=out_d.get("q_loss", None),
-                q_loss_breakdown=out_d.get("q_info", None),
-                latent=out_d.get("latent", None),
-                tokenizer_feat=repa_low_lvl_feat,
-                tokenizer_feat2=semantic_feat,
-                last_layer=self.get_last_layer(mode="dec"),
-                enc_last_layer=self.get_last_layer(mode="enc"),
-                global_step=self.global_step,
-                optimizer_idx=optim_idx,
-                add_prefix=False,
-                split=split,
-            )
-            if train_tokenizer:
-                loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
-            else:
-                loss = disc_train_loss_d["disc_loss"]
+            with self._record_time("disc_loss_forward"):
+                # self.vq_loss_fn.forward
+                disc_train_loss_d, log_disc = self.vq_loss_fn(
+                    inputs=x,
+                    reconstructions=out_d["recon"],
+                    q_loss_total=out_d.get("q_loss", None),
+                    q_loss_breakdown=out_d.get("q_info", None),
+                    latent=out_d.get("latent", None),
+                    tokenizer_feat=repa_low_lvl_feat,
+                    tokenizer_feat2=semantic_feat,
+                    last_layer=self.get_last_layer(mode="dec"),
+                    enc_last_layer=self.get_last_layer(mode="enc"),
+                    global_step=self.global_step,
+                    optimizer_idx=optim_idx,
+                    add_prefix=False,
+                    split=split,
+                )
+                if train_tokenizer:
+                    loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
+                else:
+                    loss = disc_train_loss_d["disc_loss"]
 
         # back
         if ema:
@@ -1685,7 +2001,13 @@ class CosmosHyperspectralTokenizerTrainer:
         if bad_params:
             raise RuntimeError(f"[NonFinite] {model_name} has non-finite params: {bad_params}")
 
-    def train_tokenizer_step(self, x: torch.Tensor, tok_dict: dict):
+    def train_tokenizer_step(
+        self,
+        x: torch.Tensor,
+        tok_dict: dict,
+        *,
+        proxy_aug_future: ProxyAugFuture | None = None,
+    ):
         # freeze discriminator
         self.may_freeze(self.vq_loss_fn.discriminator, True)
 
@@ -1717,12 +2039,17 @@ class CosmosHyperspectralTokenizerTrainer:
             log_losses["recovery_loss"] = recovery_loss.item()
 
         proxy_out = None
+        proxy_has_grad = False
         # if is unified proxy task training
         _is_unified_proxy_task_forward = self.train_cfg.proxy_task_train_type == "unified" and self._has_proxy_task
         if _is_unified_proxy_task_forward:
             # forward the proxy_task inside the `train_tokenizer_step`
-            proxy_out = self.forward_proxy_task(x)
+            proxy_out = self.forward_proxy_task(
+                x,
+                proxy_aug_future=proxy_aug_future,
+            )
             proxy_loss = proxy_out.proxy_loss
+            proxy_has_grad = proxy_loss.grad_fn is not None
             gen_loss = gen_loss + proxy_loss
 
         # step the optimizer and lr scheduler
@@ -1734,7 +2061,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 if self.proxy_optim is not None:
                     self.proxy_optim.zero_grad()
 
-            self.accelerator.backward(gen_loss)
+            with self._record_time("backward_tokenizer"):
+                self.accelerator.backward(gen_loss)
 
             # gradient check
             if self.sep_enc_dec:
@@ -1745,7 +2073,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # optimizer step
             self.tokenizer_optim.step()
-            if _is_unified_proxy_task_forward:
+
+            if _is_unified_proxy_task_forward and proxy_has_grad:
                 if self.proxy_optim is not None:
                     self.proxy_optim.step()
                 if self.proxy_sched is not None:
@@ -1762,7 +2091,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # ema update
             self.ema_update(mode="tokenizer")
-            if _is_unified_proxy_task_forward:
+            if _is_unified_proxy_task_forward and proxy_has_grad:
                 self.ema_update(mode="proxy")
 
         return gen_loss, log_losses, proxy_out
@@ -1789,17 +2118,27 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return disc_loss, log_disc
 
-    def train_proxy_model_step(self, x: torch.Tensor) -> edict | None:
+    def train_proxy_model_step(
+        self,
+        x: torch.Tensor,
+        *,
+        proxy_aug_future: ProxyAugFuture | None = None,
+    ) -> edict | None:
         if not self._has_proxy_task:
             return None
 
-        out = self.forward_proxy_task(x)
+        out = self.forward_proxy_task(x, proxy_aug_future=proxy_aug_future)
+        if out.proxy_loss.grad_fn is None:
+            return out
+
         # Update the tokenizer and proxy model
         if self.proxy_optim is not None:
             self.proxy_optim.zero_grad()
         self.tokenizer_optim.zero_grad()
 
-        self.accelerator.backward(out.proxy_loss)
+        with self._record_time("backward_proxy_loss"):
+            self.accelerator.backward(out.proxy_loss)
+
         if self.proxy_model is not None:
             self.gradient_check(self.proxy_model)
 
@@ -1820,6 +2159,7 @@ class CosmosHyperspectralTokenizerTrainer:
         # no tokenizer lr scheduler step ...
 
         # EMA update
+        self.ema_update(mode="tokenizer")
         self.ema_update(mode="proxy")
 
         return out
@@ -1876,36 +2216,67 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.aug_pipe = cast(Callable, self.aug_pipe)
                 x_deg = self.aug_pipe(x.float()).to(x.device, x.dtype)
 
+                proxy_aug_future: ProxyAugFuture | None = None
+                if self.train_cfg.proxy_task_train_type == "unified" and self._has_proxy_task:
+                    proxy_x = x_deg if self.aug_pipeline_train_obj == "decoder_deg" else x
+                    assert self.proxy_aug_manager is not None
+                proxy_aug_future = self.proxy_aug_manager.maybe_prefetch(proxy_x, proxy_tasks=self._proxy_tasks)
+
                 # forward the tokenizer using degraded images
-                out_d = self.forward_tokenizer(x_deg)
+                with self._record_time("forward_tokenizer"):
+                    out_d = self.forward_tokenizer(x_deg)
 
                 if self.aug_pipeline_train_obj == "decoder_clean":
                     # x: clean image
-                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(x, out_d)
+                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(
+                        x,
+                        out_d,
+                        proxy_aug_future=proxy_aug_future,
+                    )
                     # train discriminator on clean image
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
                 elif self.aug_pipeline_train_obj == "decoder_deg":
-                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(x_deg, out_d)
+                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(
+                        x_deg,
+                        out_d,
+                        proxy_aug_future=proxy_aug_future,
+                    )
                     # train discriminator on degraded image
                     disc_loss, log_disc_loss = self.train_disc_step(x_deg, out_d)
 
                 else:
                     # The case for "anti_deg_network" is handled inside train_tokenizer_step
                     out_d["aug_x"] = x_deg
-                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(x, out_d)
+                    tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(
+                        x,
+                        out_d,
+                        proxy_aug_future=proxy_aug_future,
+                    )
                     disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
 
             else:  # normal AE training pipeline
-                out_d = self.forward_tokenizer(x)  # no augmentation
+                proxy_aug_future: ProxyAugFuture | None = None
+                if self._has_proxy_task and self.train_cfg.proxy_task_train_type in ("unified", "seperated"):
+                    assert self.proxy_aug_manager is not None
+                    proxy_aug_future = self.proxy_aug_manager.maybe_prefetch(x, proxy_tasks=self._proxy_tasks)
+
+                with self._record_time("forward_tokenizer"):
+                    out_d = self.forward_tokenizer(x)  # no augmentation
+
                 # train tokenizer and discriminator
-                tokenizer_loss, log_token_loss, proxy_out_ = self.train_tokenizer_step(x, out_d)
+                tokenizer_loss, log_token_loss, proxy_out_ = self.train_tokenizer_step(
+                    x,
+                    out_d,
+                    proxy_aug_future=proxy_aug_future,
+                )
                 if proxy_out_ is not None:
                     proxy_out = proxy_out_
+
                 disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
                 # Proxy model train step (pretraining task)
                 if self.train_cfg.proxy_task_train_type == "seperated":
-                    proxy_out = self.train_proxy_model_step(x)
+                    proxy_out = self.train_proxy_model_step(x, proxy_aug_future=proxy_aug_future)
 
             # track reconstruction quality
             if check_quality is not None:
@@ -2108,7 +2479,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def infinity_train_loader(self):
         while True:
-            for batch in self.train_dataloader:
+            for batch in _TimedLoaderIterator(self.train_dataloader, self._get_time_recorder(), "train_loader_fetch"):
                 batch = self._randomly_batch_sample_key(batch)
                 if batch is None or batch.get("img", None) is None:
                     continue
@@ -2119,11 +2490,13 @@ class CosmosHyperspectralTokenizerTrainer:
         self.accelerator.wait_for_everyone()
 
         self.log_msg("[Train]: start training", only_rank_zero=False)
+
         for batch in self.infinity_train_loader():
             # train step
             self.train_step(batch)
+            self._maybe_flush_time_recorder()
 
-            if self.global_step % self.val_cfg.val_duration == 0:  # and self.accelerator.sync_gradients:
+            if self.global_step % self.val_cfg.val_duration == 0:
                 self.log_msg("[Train]: start validation ...")
                 self.val_loop()
 
@@ -2603,7 +2976,16 @@ class CosmosHyperspectralTokenizerTrainer:
             self.load_from_ema_or_lora(self.train_cfg.ema_load_path)
 
         # train !
-        self.train_loop()
+        if self._time_recorder_enabled:
+            time_recorder.reset()
+        try:
+            self.train_loop()
+        finally:
+            if self._time_recorder_enabled:
+                time_recorder.print_table()
+                time_recorder.reset()
+            if self.proxy_aug_manager is not None:
+                self.proxy_aug_manager.shutdown()
 
 
 _key = "mingtok_f8c16p1"

@@ -36,7 +36,7 @@ train:
   grad_check: false
   proj_dir: runs/stage2_pansharpening_wrapper/
   finetune_strategy: finetune_all
-  max_grad_norm: 0.1
+  max_grad_norm: 0.3
 
   track_metrics_duration: -1
   track_metrics_after: 1000
@@ -63,31 +63,31 @@ train:
     is_neg_1_1: false
 
   pansharp_optim:
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
-    # _partial_: true
-    # lr: 6.0e-4
-    # mu: 0.95
-    # betas: [0.95, 0.99]
-    # adjust_lr: rms_norm
-    # use_triton: false
-    # nesterov: true
-    # oned_param_algo: lion
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    lr: 5.0e-4
+    mu: 0.98
+    betas: [0.99, 0.995]
+    adjust_lr: rms_norm
+    use_triton: true
+    nesterov: true
+    oned_param_algo: lion
     # muon_params_defaults:
-    #   lr: 6.0e-4
+    #   lr: 4.0e-4
     #   weight_decay: 0.1
     # oned_params_defaults:
-    #   lr: 6.0e-4
+    #   lr: 4.0e-4
     #   weight_decay: 0.0
 
-    _target_: heavyball.ForeachAdamW
-    _partial_: true
-    lr: 2.0e-4
-    weight_decay: 1.0e-4
-    betas: ${tuple:[0.95, 0.99]}
-    caution: true
-    mars: false
-    foreach: true
-    eps: 1.0e-9
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 1e-3
+    # weight_decay: 1.0e-4
+    # betas: ${tuple:[0.95, 0.99]}
+    # caution: true
+    # mars: false
+    # foreach: true
+    # eps: 1.0e-9
 
     # _target_: torch.optim.AdamW
     # _partial_: true
@@ -106,7 +106,7 @@ train:
 
   log:
     run_comment: f8c16p1_${dataset.cfgs.used}_nafnet_wrapper
-    log_with_time: True
+    log_with_time: true
     log_every: 10
 
   debug: true

@@ -1511,55 +1511,55 @@ def test_tokenizer_forward_backward(
             y.clamp_(-1, 1)
 
             # debug:
-            scaling_factor = torch.tensor(
-                [
-                    0.46484375,
-                    0.94140625,
-                    0.62109375,
-                    0.443359375,
-                    0.7265625,
-                    0.53125,
-                    0.8203125,
-                    0.6640625,
-                    0.6171875,
-                    0.369140625,
-                    0.50390625,
-                    0.69140625,
-                    0.435546875,
-                    0.6484375,
-                    0.63671875,
-                    0.51953125,
-                ],
-                device=device,
-            ).view(1, 16, 1, 1)
-            shift_factor = torch.tensor(
-                [
-                    -1.2734375,
-                    0.197265625,
-                    -1.1328125,
-                    -1.0625,
-                    -1.765625,
-                    -0.5078125,
-                    0.388671875,
-                    -0.51953125,
-                    -0.474609375,
-                    -0.09912109375,
-                    0.1669921875,
-                    -0.37890625,
-                    -0.796875,
-                    0.466796875,
-                    -0.62890625,
-                    -0.263671875,
-                ],
-                device=device,
-            ).view(1, 16, 1, 1)
-            # norm the latent
-            h_norm = (h - shift_factor) / scaling_factor
-            logger.debug(f"Normed latent value range {h_norm.min().item(), h_norm.max().item()}")
+            # scaling_factor = torch.tensor(
+            #     [
+            #         0.46484375,
+            #         0.94140625,
+            #         0.62109375,
+            #         0.443359375,
+            #         0.7265625,
+            #         0.53125,
+            #         0.8203125,
+            #         0.6640625,
+            #         0.6171875,
+            #         0.369140625,
+            #         0.50390625,
+            #         0.69140625,
+            #         0.435546875,
+            #         0.6484375,
+            #         0.63671875,
+            #         0.51953125,
+            #     ],
+            #     device=device,
+            # ).view(1, 16, 1, 1)
+            # shift_factor = torch.tensor(
+            #     [
+            #         -1.2734375,
+            #         0.197265625,
+            #         -1.1328125,
+            #         -1.0625,
+            #         -1.765625,
+            #         -0.5078125,
+            #         0.388671875,
+            #         -0.51953125,
+            #         -0.474609375,
+            #         -0.09912109375,
+            #         0.1669921875,
+            #         -0.37890625,
+            #         -0.796875,
+            #         0.466796875,
+            #         -0.62890625,
+            #         -0.263671875,
+            #     ],
+            #     device=device,
+            # ).view(1, 16, 1, 1)
+            # # norm the latent
+            # h_norm = (h - shift_factor) / scaling_factor
+            # logger.debug(f"Normed latent value range {h_norm.min().item(), h_norm.max().item()}")
 
             # Compute mean and std of the latent
             if compute_mean_std:
-                mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
+                mean_c, std_c = h.mean(), h.std()  # per-channel value
                 mean_lst.append(mean_c)
                 std_lst.append(std_c)
 
@@ -1641,13 +1641,13 @@ if __name__ == "__main__":
         base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
         save_pca_vis=True,
         pca_type="z",
-        real_data="SAM270k",
+        real_data="fmow_MS",
         is_lora=False,
         save_img_dir=None,  # "tmp/vis_pansharpening_loras",
         rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=1000,
+        max_iters=200,
         compute_mean_std=True,
         use_optim=False,
         check_grad=False,

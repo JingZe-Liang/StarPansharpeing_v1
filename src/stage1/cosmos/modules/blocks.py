@@ -24,6 +24,7 @@ from einops.layers.torch import Rearrange
 from loguru import logger
 from timm.layers import LayerScale2d, create_act_layer, create_conv2d, create_norm
 from timm.layers.drop import DropPath
+from timm.layers.weight_init import lecun_normal_
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
@@ -86,9 +87,10 @@ def block_basic_init(
             nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
         elif init_type == "lecun_normal":
             # LeCun normal: std = sqrt(1 / fan_in), suitable for SELU activation
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            std = trunc_std if trunc_std is not None else math.sqrt(1.0 / fan_in)
-            nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
+            # fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            # std = trunc_std if trunc_std is not None else math.sqrt(1.0 / fan_in)
+            # nn.init.trunc_normal_(module.weight, std=std, a=trunc_bounds[0], b=trunc_bounds[1])
+            lecun_normal_(module.weight)
         elif init_type == "kaiming_normal":
             nn.init.kaiming_normal_(module.weight, mode=mode, nonlinearity=nonlinearity)
         elif init_type == "kaiming_uniform":
@@ -134,9 +136,7 @@ def _pad2d_like_conv(x: Tensor, pad: int, padding_mode: str) -> Tensor:
     else:
         x = F.pad(x, padding, mode=padding_mode)
 
-    if model_compiled_flag and x.is_cuda and x.ndim == 4:
-        x = _to_conv_channels_last_memformat(x)
-    return x
+    return _to_conv_channels_last_memformat(x)
 
 
 # * --- Convolutional Layers --- #
@@ -1323,7 +1323,7 @@ class AdaptiveInputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp", "interp_proj", "mix", "sitok"] = "slice",
+        mode: Literal["slice", "interp", "interp_proj", "mix", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
         router_condition: Literal[
@@ -1336,11 +1336,38 @@ class AdaptiveInputConvLayer(nn.Module):
         router_temperature: float = 1.0,
         always_use_router: bool = False,
         router_dw_kernel_size: int = 3,
-        sitok_reduce: Literal["none", "sum", "mean"] = "none",
+        sitok_reduce: Literal["none", "sum", "mean", "pointwise"] = "none",
         sitok_embed_scale: float = 1.0,
         sitok_embed_base: float = 10000.0,
     ):
+        """
+        Adaptive 2D convolution with a variable number of input channels.
+
+        This layer is meant for inputs where the spectral/channel count can vary between runs
+        (e.g., hyperspectral data with different band counts). It keeps a single "base" kernel
+        (initialized with `in_channels`) and adapts it to the runtime `x.shape[1]` by slicing,
+        interpolation, mixing, or a SiTok-style per-channel shared kernel.
+
+        Key args:
+        - `in_channels` / `out_channels`: base kernel in/out channels; runtime input channels come from `x.shape[1]`.
+        - `mode`:
+          - `"slice"`: use `weight[:, :in_channels]` (only makes sense when runtime `C_in <= base_in`).
+          - `"interp"`: interpolate the kernel along the input-channel dimension to match runtime `C_in`.
+          - `"interp_proj"`: project (two linear layers) then interpolate to runtime `C_in`.
+          - `"mix"`: router-generated coefficients mix base input channels into runtime `C_in` (requires `groups=1`).
+          - `"sitok"`: apply the SAME kernel to each input channel independently and add a sinusoidal channel-index
+            embedding; `sitok_reduce` controls whether to aggregate across channels (requires `groups=1`).
+        - `always_use_router`: if False and runtime `C_in == base_in`, use the native conv path (faster).
+        - `kernel_norm`: passed to `_kernel_norm` (normalized over `"c_in"`).
+        - `router_*`: used only in `mode="mix"`; optionally conditions on per-channel statistics.
+        - `sitok_*`: used only in `mode="sitok"`; controls channel-index embedding scale/frequency and reduction.
+
+        Shapes: input `x` is `(B, C_in, H, W)`. Output channels are `out_channels`, except when
+        `mode="sitok" and sitok_reduce="none"`, where output is `(B, C_in * out_channels, H, W)`.
+        """
         super().__init__()
+        if mode in ("sitok_film", "sitok_pointwise"):
+            mode = "sitok"
         conv_groups = groups
         if mode == "sitok":
             if groups != 1:
@@ -1358,6 +1385,7 @@ class AdaptiveInputConvLayer(nn.Module):
         self.sitok_reduce = sitok_reduce
         self.sitok_embed_scale = float(sitok_embed_scale)
         self.sitok_embed_base = float(sitok_embed_base)
+        self.sitok_reduce_head: nn.Module | None = None
 
         if mode == "interp_proj":
             # (bs, c, k1, k2) img -> (c_out, c_in, k1, k2) kernel
@@ -1387,12 +1415,18 @@ class AdaptiveInputConvLayer(nn.Module):
                 kernel[k // 2, k // 2] = 1.0
                 self.router_dw_kernel = nn.Parameter(kernel)
         elif mode == "sitok":
-            if sitok_reduce not in ("none", "sum", "mean"):
+            if sitok_reduce not in ("none", "sum", "mean", "pointwise"):
                 raise ValueError(f"Unknown sitok_reduce: {sitok_reduce}")
             if self.sitok_embed_scale < 0:
                 raise ValueError(f"{sitok_embed_scale=} must be >= 0")
             if self.sitok_embed_base <= 0:
                 raise ValueError(f"{sitok_embed_base=} must be > 0")
+            if sitok_reduce == "pointwise":
+                self.sitok_reduce_head = nn.Sequential(
+                    nn.Linear(out_channels, out_channels, bias=True),
+                    nn.SiLU(),
+                    nn.Linear(out_channels, out_channels, bias=True),
+                )
 
         self.forward_mappings: dict[str, Callable[..., Tensor]] = {
             "slice": self._slice_forward,
@@ -1470,9 +1504,8 @@ class AdaptiveInputConvLayer(nn.Module):
                 raise RuntimeError("router_dw_kernel is missing while condition requires dw_pool")
             k = int(self.router_dw_kernel.shape[0])
             # NOTE: avoid branching on x.is_cuda during torch.compile; keep the layout stable for Inductor/AOTAutograd.
-            x_stats = x.contiguous()
             w_dw = self.router_dw_kernel.to(dtype=x.dtype, device=x.device)[None, None].repeat(in_channels, 1, 1, 1)
-            dw = F.conv2d(x_stats, w_dw, bias=None, stride=1, padding=k // 2, groups=in_channels)
+            dw = F.conv2d(x, w_dw, bias=None, stride=1, padding=k // 2, groups=in_channels)
             channel_dw_pool = dw.abs().mean(dim=(2, 3))
 
         coeff = self.in_router(coords, channel_mean=channel_mean, channel_dw_pool=channel_dw_pool)
@@ -1487,7 +1520,7 @@ class AdaptiveInputConvLayer(nn.Module):
             w = rearrange(w_flat, "c_out c_in (k1 k2) -> c_out c_in k1 k2", k1=k1, k2=k2)
             w = _kernel_norm(w, self.kernel_norm, "c_in")
             y = self._forward_conv_with_wb(x, w, self.conv.bias)
-            return y.contiguous(memory_format=torch.channels_last)
+            return y
 
         # Per-sample dynamic weights: (b, c_in, base_in)
         bsz = x.shape[0]
@@ -1514,7 +1547,7 @@ class AdaptiveInputConvLayer(nn.Module):
             groups=bsz,
         )
         y = y.reshape(bsz, -1, *y.shape[2:])
-        return y.contiguous(memory_format=torch.channels_last)
+        return y
 
     def _sitok_forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1524,50 +1557,104 @@ class AdaptiveInputConvLayer(nn.Module):
 
         Output:
           - sitok_reduce == "none": (b, c_in * c_out, h, w)
-          - sitok_reduce in {"sum","mean"}: (b, c_out, h, w)
+          - sitok_reduce in {"sum","mean","pointwise"}: (b, c_out, h, w)
         """
         bsz, in_channels, h, w = x.shape
         w_shared = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
-        w_rep = w_shared.repeat(in_channels, 1, 1, 1)
-        b_rep: Tensor | None
-        if self.conv.bias is None:
-            b_rep = None
-        else:
-            b_rep = self.conv.bias.repeat(in_channels)
-
-        y = F.conv2d(
-            x,
-            w_rep,
-            b_rep,
-            stride=self.conv.stride,
-            padding=self.conv.padding,
-            dilation=self.conv.dilation,
-            groups=in_channels,
-        )
-
         c_out = self.conv.weight.shape[0]
-        y = y.reshape(bsz, in_channels, c_out, y.shape[-2], y.shape[-1])
-        if self.sitok_embed_scale != 0:
+        ch_emb_scaled: Tensor | None = None
+        if self.sitok_embed_scale != 0 or self.sitok_reduce == "pointwise":
             ch_emb = _sincos_channel_index_embedding(
                 in_channels,
                 c_out,
-                device=y.device,
-                dtype=y.dtype,
+                device=x.device,
+                dtype=x.dtype,
                 base=self.sitok_embed_base,
             )
-            y = y + self.sitok_embed_scale * ch_emb[None, :, :, None, None]
+            ch_emb_scaled = ch_emb * self.sitok_embed_scale
 
         if self.sitok_reduce == "none":
+            w_rep = w_shared.repeat(in_channels, 1, 1, 1)
+            b_rep: Tensor | None
+            if self.conv.bias is None:
+                b_rep = None
+            else:
+                b_rep = self.conv.bias.repeat(in_channels)
+            y = F.conv2d(  # type: ignore
+                x,
+                w_rep,
+                b_rep,
+                stride=self.conv.stride,
+                padding=self.conv.padding,
+                dilation=self.conv.dilation,
+                groups=in_channels,
+            )
+            y = y.reshape(bsz, in_channels, c_out, y.shape[-2], y.shape[-1])
+            if ch_emb_scaled is not None and self.sitok_embed_scale != 0:
+                y = y + ch_emb_scaled[None, :, :, None, None]
             y = y.reshape(bsz, in_channels * c_out, y.shape[-2], y.shape[-1])
-            return y.contiguous(memory_format=torch.channels_last)
-        if self.sitok_reduce == "sum":
-            y = y.sum(dim=1)
-        elif self.sitok_reduce == "mean":
-            y = y.mean(dim=1)
-        else:
-            raise ValueError(f"Unknown sitok_reduce: {self.sitok_reduce}")
+            return y
 
-        return y.contiguous(memory_format=torch.channels_last)
+        if self.sitok_reduce == "pointwise":
+            if self.sitok_reduce_head is None:
+                raise RuntimeError("sitok_reduce_head is missing while sitok_reduce='pointwise'")
+            if ch_emb_scaled is None:
+                raise RuntimeError("ch_emb_scaled is missing while sitok_reduce='pointwise'")
+            logits = self.sitok_reduce_head(ch_emb_scaled).float()
+            weights = logits.softmax(dim=0).to(dtype=x.dtype)
+            x_mix = torch.einsum("bchw,cd->bdhw", x, weights)
+
+            bias_eff = self.conv.bias
+            if self.sitok_embed_scale != 0:
+                bias_add = (weights.float() * ch_emb_scaled.float()).sum(dim=0).to(dtype=x.dtype)
+                if bias_eff is None:
+                    bias_eff = bias_add
+                else:
+                    bias_eff = bias_eff + bias_add
+
+            y = F.conv2d(  # type: ignore
+                x_mix,
+                w_shared,
+                bias_eff,
+                stride=self.conv.stride,
+                padding=self.conv.padding,
+                dilation=self.conv.dilation,
+                groups=c_out,
+            )
+            return y
+
+        if self.sitok_reduce in ("sum", "mean"):
+            if self.sitok_reduce == "sum":
+                x_agg = x.sum(dim=1, keepdim=True)
+            else:
+                x_agg = x.mean(dim=1, keepdim=True)
+
+            bias_eff = self.conv.bias
+            if bias_eff is not None and self.sitok_reduce == "sum":
+                bias_eff = bias_eff * in_channels
+
+            if ch_emb_scaled is not None and self.sitok_embed_scale != 0:
+                emb_agg = (ch_emb_scaled.sum(dim=0) if self.sitok_reduce == "sum" else ch_emb_scaled.mean(dim=0)).to(
+                    dtype=x.dtype
+                )
+                if bias_eff is None:
+                    bias_eff = emb_agg
+                else:
+                    bias_eff = bias_eff + emb_agg
+
+            y = F.conv2d(  # type: ignore
+                x_agg,
+                w_shared,
+                bias_eff,
+                stride=self.conv.stride,
+                padding=self.conv.padding,
+                dilation=self.conv.dilation,
+                groups=1,
+            )
+            return y
+
+        y = None
+        raise ValueError(f"Unknown sitok_reduce: {self.sitok_reduce}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         in_channels = x.shape[1]
@@ -1610,7 +1697,15 @@ class AdaptiveOutputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        mode: Literal[
+            "slice",
+            "interp",
+            "interp_proj",
+            "mix",
+            "sitok",
+            "sitok_film",
+            "sitok_pointwise",
+        ] = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
         router_condition: Literal[
@@ -1622,8 +1717,51 @@ class AdaptiveOutputConvLayer(nn.Module):
         router_hidden_dim: int = 128,
         router_temperature: float = 1.0,
         router_dw_kernel_size: int = 3,
+        sitok_embed_dim: int = 16,
+        sitok_hidden_dim: int = 64,
+        sitok_basis_dim: int = 32,
+        sitok_embed_scale: float = 1.0,
+        sitok_embed_base: float = 10000.0,
     ):
+        """
+        Adaptive 2D convolution with a variable number of output channels.
+
+        Unlike `AdaptiveInputConvLayer`, this layer keeps the input channel count fixed to the initialized
+        `in_channels`, while allowing the output channels to be selected at runtime via `forward(..., out_channels=...)`.
+        The constructor `out_channels` defines the base kernel size and is also the default when `out_channels=None`.
+
+        Key args:
+        - `in_channels`: input channels (must match `x.shape[1]`).
+        - `out_channels`: base output channels (and the default output channels).
+        - `mode`:
+          - `"slice"`: slice `weight[:out_channels]` / `bias[:out_channels]` (requires `out_channels <= base_out`).
+          - `"interp"`: interpolate kernel (and bias) along the output-channel dimension to the target `out_channels`.
+          - `"interp_proj"`: project (two linear layers) then interpolate to the target `out_channels`.
+          - `"mix"`: router-generated coefficients mix base output channels into target `out_channels` (requires `groups=1`).
+          - `"sitok_film"`: shared conv -> base feature map, then FiLM `(gamma, beta)` per output channel from a
+            channel-index embedding (requires `groups=1`).
+          - `"sitok_pointwise"`: shared conv -> `D` basis features, then per-output-channel basis weights and bias from
+            a channel-index embedding (requires `groups=1`).
+          - `"sitok"`: backward-compatible alias for `"sitok_film"`.
+        - `kernel_norm`: passed to `_kernel_norm` (normalized over `"c_out"`).
+        - `router_*`: used only in `mode="mix"`; optionally conditions on input statistics.
+        - `sitok_*`: used only in `mode in {"sitok_film","sitok_pointwise"}`; `sitok_basis_dim` only applies to pointwise.
+
+        Shapes: input `x` is `(B, C_in, H, W)`, output is `(B, out_channels, H, W)`.
+        """
         super().__init__()
+        if mode == "sitok":
+            mode = "sitok_film"
+        self.mode = mode
+        self.default_out_channels = out_channels
+
+        conv_out_channels = out_channels
+        if mode == "sitok_film":
+            conv_out_channels = 1
+        elif mode == "sitok_pointwise":
+            if sitok_basis_dim <= 0:
+                raise ValueError(f"{sitok_basis_dim=} must be > 0")
+            conv_out_channels = int(sitok_basis_dim)
         conv_kwargs = dict(
             stride=stride,
             groups=groups,
@@ -1635,11 +1773,10 @@ class AdaptiveOutputConvLayer(nn.Module):
 
         self.conv = create_conv2d(
             in_channels,
-            out_channels,
+            conv_out_channels,
             kernel_size,
             **conv_kwargs,
         )
-        self.mode = mode
         self.kernel_norm = kernel_norm
 
         if mode == "interp_proj":
@@ -1669,6 +1806,45 @@ class AdaptiveOutputConvLayer(nn.Module):
                 kernel = torch.zeros((k, k), dtype=torch.float32)
                 kernel[k // 2, k // 2] = 1.0
                 self.router_dw_kernel = nn.Parameter(kernel)
+        elif mode in ("sitok_film", "sitok_pointwise"):
+            if groups != 1:
+                raise ValueError("AdaptiveOutputConvLayer(mode='sitok_*') currently requires groups=1")
+            if sitok_embed_dim <= 0:
+                raise ValueError(f"{sitok_embed_dim=} must be > 0")
+            if sitok_hidden_dim < 0:
+                raise ValueError(f"{sitok_hidden_dim=} must be >= 0")
+            if sitok_embed_scale < 0:
+                raise ValueError(f"{sitok_embed_scale=} must be >= 0")
+            if sitok_embed_base <= 0:
+                raise ValueError(f"{sitok_embed_base=} must be > 0")
+
+            self.sitok_embed_dim = int(sitok_embed_dim)
+            self.sitok_embed_scale = float(sitok_embed_scale)
+            self.sitok_embed_base = float(sitok_embed_base)
+
+            if mode == "sitok_film":
+                self.sitok_variant = "film"
+                head_out_dim = 2  # gamma, beta
+            else:
+                self.sitok_variant = "pointwise"
+                self.sitok_basis_dim = int(sitok_basis_dim)
+                head_out_dim = self.sitok_basis_dim + 1  # weights over basis + bias
+
+            if sitok_hidden_dim == 0:
+                self.sitok_head = nn.Linear(self.sitok_embed_dim, head_out_dim, bias=True)
+            else:
+                self.sitok_head = nn.Sequential(
+                    nn.Linear(self.sitok_embed_dim, sitok_hidden_dim),
+                    nn.SiLU(),
+                    nn.Linear(sitok_hidden_dim, head_out_dim),
+                )
+
+            last = self.sitok_head[-1] if isinstance(self.sitok_head, nn.Sequential) else self.sitok_head
+            assert isinstance(last, nn.Linear)
+            nn.init.trunc_normal_(last.weight, std=0.02)
+            nn.init.zeros_(last.bias)
+            if self.sitok_variant == "film":
+                last.bias.data[0] = 1.0
 
         # Initialize forward mappings
         self.forward_mappings: dict[str, Callable[..., Tensor]] = {
@@ -1676,6 +1852,9 @@ class AdaptiveOutputConvLayer(nn.Module):
             "interp": self._interp_forward,
             "interp_proj": self._interp_proj_forward,
             "mix": self._mix_forward,
+            "sitok_film": self._sitok_film_forward,
+            "sitok_pointwise": self._sitok_pointwise_forward,
+            "sitok": self._sitok_film_forward,  # backward-compatible alias
         }
 
     def _forward_conv_with_wb(self, x, w, b):
@@ -1798,7 +1977,7 @@ class AdaptiveOutputConvLayer(nn.Module):
 
             w = _kernel_norm(w, self.kernel_norm, "c_out")
             y = self._forward_conv_with_wb(x, w, b)
-            return y.contiguous(memory_format=torch.channels_last)
+            return y
 
         # Per-sample dynamic weights: (b, out_channels, base_out)
         bsz = x.shape[0]
@@ -1827,11 +2006,63 @@ class AdaptiveOutputConvLayer(nn.Module):
             groups=bsz,
         )
         y = y.reshape(bsz, out_channels, *y.shape[2:])
-        return y.contiguous(memory_format=torch.channels_last)
+        return y
+
+    def _sitok_film_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        """SiTok output (FiLM): shared conv -> base, per-channel (gamma, beta) from channel index embedding."""
+        y_base = self._forward_conv_with_wb(x, self.conv.weight, self.conv.bias)
+        if out_channels == 1:
+            # return _to_conv_channels_last_memformat(y_base)
+            return y_base
+
+        emb = _sincos_channel_index_embedding(
+            out_channels,
+            self.sitok_embed_dim,
+            device=y_base.device,
+            dtype=y_base.dtype,
+            base=self.sitok_embed_base,
+        )
+        film = self.sitok_head(emb)  # (out_channels, 2)
+        gamma = film[:, 0]
+        beta = film[:, 1]
+        if self.sitok_embed_scale != 1.0:
+            gamma = 1.0 + (gamma - 1.0) * self.sitok_embed_scale
+            beta = beta * self.sitok_embed_scale
+
+        y = y_base * gamma[None, :, None, None] + beta[None, :, None, None]
+        return y
+
+    def _sitok_pointwise_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        """
+        SiTok output (dynamic pointwise):
+          - shared conv generates basis feature map h (B, D, H, W)
+          - channel index embedding -> weights over basis (out_channels, D) and bias (out_channels,)
+          - y[b,o,h,w] = sum_d h[b,d,h,w] * w[o,d] + b[o]
+        """
+        h = self._forward_conv_with_wb(x, self.conv.weight, self.conv.bias)  # (b, D, h, w)
+        emb = _sincos_channel_index_embedding(
+            out_channels,
+            self.sitok_embed_dim,
+            device=h.device,
+            dtype=h.dtype,
+            base=self.sitok_embed_base,
+        )
+        params = self.sitok_head(emb)  # (out_channels, D+1)
+        w = params[:, : self.sitok_basis_dim]
+        b = params[:, self.sitok_basis_dim]
+        if self.sitok_embed_scale != 1.0:
+            w = w * self.sitok_embed_scale
+            b = b * self.sitok_embed_scale
+
+        y = torch.einsum("bdhw,od->bohw", h, w) + b[None, :, None, None]
+        return y
 
     def forward(self, x: torch.Tensor, out_channels: Optional[int] = None) -> torch.Tensor:
         if out_channels is None:
-            out_channels = self.conv.out_channels
+            out_channels = self.default_out_channels if self.mode.startswith("sitok") else self.conv.out_channels
+
+        if self.mode in ("sitok_film", "sitok_pointwise"):
+            return self.forward_mappings[self.mode](x, out_channels)
 
         # Native case - if output channels match, use direct convolution
         if out_channels == self.conv.weight.shape[0]:
@@ -1862,36 +2093,177 @@ class AdaptiveOutputConvLayer(nn.Module):
                 torch.nn.init.trunc_normal_(lin.weight, std=0.02)
                 if lin.bias is not None:
                     torch.nn.init.zeros_(lin.bias)
+        elif self.mode.startswith("sitok"):
+            for m in self.sitok_head.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.trunc_normal_(m.weight, std=0.02)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+            if getattr(self, "sitok_variant", None) == "film":
+                last = self.sitok_head[-1] if isinstance(self.sitok_head, nn.Sequential) else self.sitok_head
+                assert isinstance(last, nn.Linear)
+                last.bias.data[0] = 1.0
 
 
 class AdaptiveInputLinearLayer(nn.Module):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True, mode="slice"):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        mode: Literal["slice", "interp", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
+        *,
+        sitok_group_size: int | None = None,
+        sitok_reduce: Literal["none", "sum", "mean", "pointwise"] = "none",
+        sitok_embed_scale: float = 1.0,
+        sitok_embed_base: float = 10000.0,
+    ) -> None:
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        if mode in ("slice_lin", "interp_lin"):
+            mode = "slice" if mode == "slice_lin" else "interp"
+
         self.mode = mode
+        self.sitok_group_size = sitok_group_size
+        self.sitok_reduce = sitok_reduce
+        self.sitok_embed_scale = float(sitok_embed_scale)
+        self.sitok_embed_base = float(sitok_embed_base)
+        self.sitok_reduce_head: nn.Module | None = None
+
+        if mode == "sitok":
+            if sitok_group_size is None or sitok_group_size <= 0:
+                raise ValueError(f"{sitok_group_size=} must be a positive int when mode='sitok'")
+            if sitok_reduce not in ("none", "sum", "mean", "pointwise"):
+                raise ValueError(f"Unknown sitok_reduce: {sitok_reduce}")
+            if self.sitok_embed_scale < 0:
+                raise ValueError(f"{sitok_embed_scale=} must be >= 0")
+            if self.sitok_embed_base <= 0:
+                raise ValueError(f"{sitok_embed_base=} must be > 0")
+            self.linear = nn.Linear(int(sitok_group_size), out_features, bias=bias)
+            if sitok_reduce == "pointwise":
+                self.sitok_reduce_head = nn.Linear(out_features, out_features, bias=True)
+        else:
+            self.linear = nn.Linear(in_features, out_features, bias=bias)
+
+        self.forward_mappings: dict[str, Callable[..., Tensor]] = {
+            "slice": self._slice_forward,
+            "interp": self._interp_forward,
+            "sitok": self._sitok_forward,
+        }
+
+    def _sitok_forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.sitok_group_size is None:
+            raise RuntimeError("sitok_group_size is missing while mode='sitok'")
+        group_size = int(self.sitok_group_size)
+        total_in = x.shape[-1]
+        if total_in % group_size != 0:
+            raise ValueError(f"Expected last dim {total_in} divisible by {group_size=}")
+        n_channels = total_in // group_size
+
+        w = self.linear.weight
+        b = self.linear.bias
+
+        ch_emb_scaled: Tensor | None = None
+        if self.sitok_embed_scale != 0 or self.sitok_reduce == "pointwise":
+            ch_emb = _sincos_channel_index_embedding(
+                n_channels,
+                w.shape[0],
+                device=x.device,
+                dtype=x.dtype,
+                base=self.sitok_embed_base,
+            )
+            ch_emb_scaled = ch_emb * self.sitok_embed_scale
+
+        x_cg = x.reshape(*x.shape[:-1], n_channels, group_size)
+
+        if self.sitok_reduce == "none":
+            y = F.linear(x_cg, w, b)
+            if ch_emb_scaled is not None and self.sitok_embed_scale != 0:
+                y = y + ch_emb_scaled
+            y = y.reshape(*x.shape[:-1], n_channels * w.shape[0])
+            return y
+
+        if self.sitok_reduce == "pointwise":
+            if self.sitok_reduce_head is None:
+                raise RuntimeError("sitok_reduce_head is missing while sitok_reduce='pointwise'")
+            if ch_emb_scaled is None:
+                raise RuntimeError("ch_emb_scaled is missing while sitok_reduce='pointwise'")
+            logits = self.sitok_reduce_head(ch_emb_scaled).float()
+            weights = logits.softmax(dim=0).to(dtype=x.dtype)  # (c_in, c_out)
+            x_mix = torch.einsum("...cg,cd->...dg", x_cg, weights)
+
+            y = (x_mix * w).sum(dim=-1)
+            bias_eff = b
+            if self.sitok_embed_scale != 0:
+                bias_add = torch.einsum("cd,cd->d", weights.float(), ch_emb_scaled.float()).to(dtype=x.dtype)
+                if bias_eff is None:
+                    bias_eff = bias_add
+                else:
+                    bias_eff = bias_eff + bias_add
+            if bias_eff is not None:
+                y = y + bias_eff
+            return y
+
+        if self.sitok_reduce == "sum":
+            x_agg = x_cg.sum(dim=-2)
+            bias_eff = b
+            if bias_eff is not None:
+                bias_eff = bias_eff * n_channels
+            if ch_emb_scaled is not None and self.sitok_embed_scale != 0:
+                emb_agg = ch_emb_scaled.sum(dim=0).to(dtype=x.dtype)
+                if bias_eff is None:
+                    bias_eff = emb_agg
+                else:
+                    bias_eff = bias_eff + emb_agg
+            return F.linear(x_agg, w, bias_eff)
+
+        if self.sitok_reduce == "mean":
+            x_agg = x_cg.mean(dim=-2)
+            bias_eff = b
+            if ch_emb_scaled is not None and self.sitok_embed_scale != 0:
+                emb_agg = ch_emb_scaled.mean(dim=0).to(dtype=x.dtype)
+                if bias_eff is None:
+                    bias_eff = emb_agg
+                else:
+                    bias_eff = bias_eff + emb_agg
+            return F.linear(x_agg, w, bias_eff)
+
+        raise ValueError(f"Unknown sitok_reduce: {self.sitok_reduce}")
+
+    def _slice_forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_features = x.shape[-1]
+        w = self.linear.weight[:, :in_features]
+        b = self.linear.bias
+        return F.linear(x, w, b)
+
+    def _interp_forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_features = x.shape[-1]
+        out_f, _ = (w := self.linear.weight).shape
+        w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
+        w_i = torch.nn.functional.interpolate(w_i, size=(out_f, in_features), mode="bicubic", align_corners=False)
+        w = w_i.squeeze(0, 1)
+        b = self.linear.bias
+        return F.linear(x, w, b)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mode == "sitok":
+            return self.forward_mappings[self.mode](x)
+
         in_features = x.shape[-1]
         if in_features == self.linear.weight.shape[1]:
             return self.linear(x)
 
-        if self.mode == "slice":
-            w = self.linear.weight[:, :in_features]
-        elif self.mode == "interp":
-            out_f, in_f = (w := self.linear.weight).shape
-            w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
-            w_i = torch.nn.functional.interpolate(w_i, size=(out_f, in_features), mode="bicubic", align_corners=False)
-            w = w_i.squeeze(0, 1)
-        else:
-            raise ValueError(f"Unknown mode {self.mode}")
+        return self.forward_mappings[self.mode](x)
 
-        b = self.linear.bias
-        return F.linear(x, w, b)
-
-    def init_weight(self):
+    def init_weight(self) -> None:
         nn.init.trunc_normal_(self.linear.weight, 0.02)
         if self.linear.bias is not None:
             nn.init.zeros_(self.linear.bias)
+        if self.sitok_reduce_head is not None:
+            for m in self.sitok_reduce_head.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.trunc_normal_(m.weight, std=0.02)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
 
 
 class AdaptiveOutputLinearLayer(nn.Module):
@@ -1900,48 +2272,170 @@ class AdaptiveOutputLinearLayer(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        mode: str = "slice",
+        mode: Literal["slice", "interp", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
+        *,
+        sitok_group_size: int | None = None,
+        sitok_embed_dim: int = 16,
+        sitok_hidden_dim: int = 64,
+        sitok_basis_dim: int = 32,
+        sitok_embed_scale: float = 1.0,
+        sitok_embed_base: float = 10000.0,
     ):
         super().__init__()
-        self.mode = mode
-        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        if mode == "sitok":
+            mode = "sitok_film"
 
-        assert mode in ("slice", "interp"), f'mode must be one of "slice", "interp""'
+        self.mode = mode
+        self.sitok_group_size = sitok_group_size
+
+        self.sitok_embed_dim = int(sitok_embed_dim)
+        self.sitok_hidden_dim = int(sitok_hidden_dim)
+        self.sitok_basis_dim = int(sitok_basis_dim)
+        self.sitok_embed_scale = float(sitok_embed_scale)
+        self.sitok_embed_base = float(sitok_embed_base)
+        self.sitok_variant: Literal["film", "pointwise"] | None = None
+        self.sitok_head: nn.Module | None = None
+
+        if mode in ("sitok_film", "sitok_pointwise"):
+            if sitok_group_size is None or sitok_group_size <= 0:
+                raise ValueError(f"{sitok_group_size=} must be a positive int when mode='sitok_*'")
+            if self.sitok_embed_dim <= 0:
+                raise ValueError(f"{sitok_embed_dim=} must be > 0")
+            if self.sitok_hidden_dim < 0:
+                raise ValueError(f"{sitok_hidden_dim=} must be >= 0")
+            if self.sitok_embed_scale < 0:
+                raise ValueError(f"{sitok_embed_scale=} must be >= 0")
+            if self.sitok_embed_base <= 0:
+                raise ValueError(f"{sitok_embed_base=} must be > 0")
+
+            group_size_int = int(sitok_group_size)
+            if mode == "sitok_film":
+                self.sitok_variant = "film"
+                self.linear = nn.Linear(in_features, group_size_int, bias=bias)
+                head_out_dim = 2 * group_size_int
+            else:
+                self.sitok_variant = "pointwise"
+                if sitok_basis_dim <= 0:
+                    raise ValueError(f"{sitok_basis_dim=} must be > 0")
+                self.linear = nn.Linear(in_features, int(sitok_basis_dim), bias=bias)
+                head_out_dim = group_size_int * (int(sitok_basis_dim) + 1)
+
+            if self.sitok_hidden_dim == 0:
+                self.sitok_head = nn.Linear(self.sitok_embed_dim, head_out_dim, bias=True)
+            else:
+                self.sitok_head = nn.Sequential(
+                    nn.Linear(self.sitok_embed_dim, self.sitok_hidden_dim),
+                    nn.SiLU(),
+                    nn.Linear(self.sitok_hidden_dim, head_out_dim),
+                )
+        else:
+            assert mode in ("slice", "interp"), f'mode must be one of "slice", "interp", "sitok_*"'
+            self.linear = nn.Linear(in_features, out_features, bias=bias)
+
+        self.forward_mappings: dict[str, Callable[..., Tensor]] = {
+            "slice": self._slice_forward,
+            "interp": self._interp_forward,
+            "sitok_film": self._sitok_film_forward,
+            "sitok_pointwise": self._sitok_pointwise_forward,
+            "sitok": self._sitok_film_forward,
+        }
+
+    def _sitok_film_forward(self, x: torch.Tensor, out_features: int) -> torch.Tensor:
+        if self.sitok_group_size is None:
+            raise RuntimeError("sitok_group_size is missing while mode='sitok_*'")
+        if self.sitok_head is None:
+            raise RuntimeError("sitok_head is missing while mode='sitok_*'")
+
+        group_size = int(self.sitok_group_size)
+        if out_features % group_size != 0:
+            raise ValueError(f"Expected {out_features=} divisible by {group_size=}")
+        n_channels = out_features // group_size
+
+        emb = _sincos_channel_index_embedding(
+            n_channels,
+            self.sitok_embed_dim,
+            device=x.device,
+            dtype=x.dtype,
+            base=self.sitok_embed_base,
+        )
+        params = self.sitok_head(emb)
+
+        base = self.linear(x)
+        gamma = params[:, :group_size]
+        beta = params[:, group_size:]
+        if self.sitok_embed_scale != 1.0:
+            gamma = 1.0 + (gamma - 1.0) * self.sitok_embed_scale
+            beta = beta * self.sitok_embed_scale
+        y = base.unsqueeze(-2) * gamma + beta
+        return y.reshape(*x.shape[:-1], out_features)
+
+    def _sitok_pointwise_forward(self, x: torch.Tensor, out_features: int) -> torch.Tensor:
+        if self.sitok_group_size is None:
+            raise RuntimeError("sitok_group_size is missing while mode='sitok_*'")
+        if self.sitok_head is None:
+            raise RuntimeError("sitok_head is missing while mode='sitok_*'")
+
+        group_size = int(self.sitok_group_size)
+        if out_features % group_size != 0:
+            raise ValueError(f"Expected {out_features=} divisible by {group_size=}")
+        n_channels = out_features // group_size
+
+        emb = _sincos_channel_index_embedding(
+            n_channels,
+            self.sitok_embed_dim,
+            device=x.device,
+            dtype=x.dtype,
+            base=self.sitok_embed_base,
+        )
+        params = self.sitok_head(emb)
+
+        basis_dim = int(self.sitok_basis_dim)
+        h = self.linear(x)
+        w_flat = params[:, : group_size * basis_dim].reshape(n_channels, group_size, basis_dim)
+        b = params[:, group_size * basis_dim :].reshape(n_channels, group_size)
+        if self.sitok_embed_scale != 1.0:
+            w_flat = w_flat * self.sitok_embed_scale
+            b = b * self.sitok_embed_scale
+        y = torch.einsum("...d,cgd->...cg", h, w_flat) + b
+        return y.reshape(*x.shape[:-1], out_features)
+
+    def _slice_forward(self, x: torch.Tensor, out_features: int) -> torch.Tensor:
+        w = self.linear.weight[:out_features]
+        b = self.linear.bias
+        if b is not None:
+            b = b[:out_features]
+        return F.linear(x, w, b)
+
+    def _interp_forward(self, x: torch.Tensor, out_features: int) -> torch.Tensor:
+        w = self.linear.weight
+        b = self.linear.bias
+
+        out_f, in_f = w.shape
+        w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
+        w_i = torch.nn.functional.interpolate(w_i, size=(out_features, in_f), mode="bicubic", align_corners=False)
+        w = w_i.squeeze(0, 1)
+
+        if b is not None:
+            b = torch.nn.functional.interpolate(
+                b[None, :, None].contiguous(),  # (1, out_f, 1)
+                size=(out_features,),
+                mode="linear",
+                align_corners=False,
+            )[0, :, 0]
+        return F.linear(x, w, b)
 
     def forward(self, x: torch.Tensor, out_features: int | None = None) -> torch.Tensor:
+        if self.mode in ("sitok_film", "sitok_pointwise", "sitok"):
+            if out_features is None:
+                raise ValueError("AdaptiveOutputLinearLayer(mode='sitok_*') requires explicit out_features")
+            return self.forward_mappings[self.mode](x, out_features)
+
         if out_features is None:
             out_features = self.linear.out_features
 
         if out_features == self.linear.weight.shape[0]:
             return self.linear(x)
-
-        w = self.linear.weight
-        b = self.linear.bias
-
-        if self.mode == "slice":
-            # Slice the weights and bias to desired output size
-            w = w[:out_features]
-            if b is not None:
-                b = b[:out_features]
-        elif self.mode == "interp":
-            # Interpolate weights to desired output size
-            out_f, in_f = w.shape
-            w_i = w.unsqueeze(0).unsqueeze(0).contiguous()  # 1, 1, out_f, in_f
-            w_i = torch.nn.functional.interpolate(w_i, size=(out_features, in_f), mode="bicubic", align_corners=False)
-            w = w_i.squeeze(0, 1)
-
-            # Interpolate bias if present
-            if b is not None:
-                b = torch.nn.functional.interpolate(
-                    b[None, :, None].contiguous(),  # (1, out_f, 1)
-                    size=(out_features,),
-                    mode="linear",
-                    align_corners=False,
-                )[0, :, 0]
-        else:
-            raise ValueError(f"Unknown mode {self.mode}")
-
-        return F.linear(x, w, b)
+        return self.forward_mappings[self.mode](x, out_features)
 
     @safe_init_weights
     def init_weights(self, zero_out=False):
@@ -1951,6 +2445,18 @@ class AdaptiveOutputLinearLayer(nn.Module):
             nn.init.trunc_normal_(self.linear.weight, 0.02)
         if self.linear.bias is not None:
             nn.init.zeros_(self.linear.bias)
+        if self.mode in ("sitok_film", "sitok_pointwise"):
+            assert self.sitok_head is not None
+            for m in self.sitok_head.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.trunc_normal_(m.weight, std=0.02)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+            if self.sitok_variant == "film":
+                last = self.sitok_head[-1] if isinstance(self.sitok_head, nn.Sequential) else self.sitok_head
+                assert isinstance(last, nn.Linear)
+                assert self.sitok_group_size is not None
+                last.bias.data[: int(self.sitok_group_size)] = 1.0
 
     @property
     def weight(self):
@@ -2241,7 +2747,6 @@ class DiCoBlock(nn.Module):
                 if m.bias is not None:
                     m.bias.data.zero_()
 
-    # @compile_decorator
     def forward_fn(self, x: torch.Tensor) -> torch.Tensor:
         h = x
 
@@ -2296,27 +2801,13 @@ class ResnetBlock(nn.Module):
         self.norm1 = Normalize(in_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act1 = ACT2FN[act_type[0]]
         self.conv1 = nn.Conv2d(
-            in_channels,
-            self.out_channels,
-            kernel_size=3,
-            stride=1,
-            # padding=1,
-            # padding_mode=self.padding_mode,
-            padding=0,
-            padding_mode="zeros",
+            in_channels, self.out_channels, kernel_size=3, stride=1, padding=1, padding_mode=self.padding_mode
         )
         self.norm2 = Normalize(out_channels, num_groups=gn_norm_groups, norm_type=norm_type)
         self.act2 = ACT2FN[act_type[1]]
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(
-            self.out_channels,
-            out_channels,
-            kernel_size=3,
-            stride=1,
-            # padding=1,
-            # padding_mode=self.padding_mode,
-            padding=0,
-            padding_mode="zeros",
+            self.out_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode=self.padding_mode
         )
         self._conv_pad = 1
 
@@ -2346,7 +2837,6 @@ class ResnetBlock(nn.Module):
         h = x
         h = self.norm1(h)
         h = self.act1(h)
-        h = _pad2d_like_conv(h, self._conv_pad, self.padding_mode)
         h = self.conv1(h)
 
         if self.use_dico_cca:
@@ -2355,7 +2845,6 @@ class ResnetBlock(nn.Module):
         h = self.norm2(h)
         h = self.act2(h)
         h = self.dropout(h)
-        h = _pad2d_like_conv(h, self._conv_pad, self.padding_mode)
         h = self.conv2(h)
 
         x = self.nin_shortcut(x)
@@ -2374,13 +2863,9 @@ class ResnetBlock(nn.Module):
 
     def init_weights(self):
         def _inner(m):
-            block_basic_init(m)
+            block_basic_init(m, init_type="lecun_normal")
 
         self.apply(_inner)
-
-        # to channels last memory format
-        if model_compiled_flag and self.training:
-            self = self.to(memory_format=torch.channels_last)
 
 
 class ResnetBlockSlotsInjected(ResnetBlock):
@@ -2450,7 +2935,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         h = self.dropout(h)
         h = self.conv2(h)
 
-        x = self.nin_shortcut(x)
+        x = self._forward_shortcut(x)
 
         if self.use_residual_factor:
             h = h * self.residual_factor
@@ -2481,8 +2966,7 @@ class ConvNeXtBlock(nn.Module):
     ):
         super().__init__()
 
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=0, groups=dim, padding_mode="zeros")
-        self._conv_padding = 3
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim, padding_mode=padding_mode)
         self.padding_mode = padding_mode
         self.norm = Normalize(dim, norm_type=norm_type, num_groups=num_groups)
 
@@ -2509,7 +2993,6 @@ class ConvNeXtBlock(nn.Module):
     def forward_fn(self, x):
         input = x
 
-        x = _pad2d_like_conv(x, self._conv_padding, self.padding_mode)
         x = self.dwconv(x)
         x = self.norm(x)
 
@@ -2531,7 +3014,7 @@ class ConvNeXtBlock(nn.Module):
         return self.forward_fn(x)
 
     def init_weights(self):
-        self.apply(block_basic_init)
+        self.apply(partial(block_basic_init, init_type="lecun_normal"))
 
 
 # * --- Diffusion blocks --- #

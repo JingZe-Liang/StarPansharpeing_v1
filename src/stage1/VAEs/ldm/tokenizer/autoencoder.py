@@ -10,6 +10,7 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.activations import ACT2FN
 
+from src.utilities.network_utils import null_decorator
 from src.utilities.logging import log_print
 
 compile_forward_fn = False
@@ -17,17 +18,7 @@ if compile_forward_fn:
     _compile_decorator = torch.compile
     log_print("will compile the forward function", "debug")
 else:
-
-    def _null_decorator(**any_kwargs) -> Callable[..., Any]:
-        def _inner_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            return func
-
-        return _inner_decorator
-
-    def _null_decorator_no_any_kwgs(func: Callable[..., Any]) -> Callable[..., Any]:
-        return func
-
-    _compile_decorator = _null_decorator_no_any_kwgs
+    _compile_decorator = null_decorator
     log_print("not compile the forward function", "debug")
 
 

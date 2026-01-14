@@ -21,7 +21,8 @@ from contextlib import ContextDecorator
 from functools import lru_cache, partial, wraps
 from pathlib import Path
 from types import FunctionType, MethodType
-from typing import Any, Callable, Dict, Literal, LiteralString, Optional, Union
+from collections.abc import Callable
+from typing import Any, Literal, LiteralString, Optional, Union
 
 import loguru
 import torch.distributed as dist
@@ -31,7 +32,7 @@ from rich.console import Console
 
 from .functions import default, once
 
-type Record = Dict[str, Any]
+type Record = dict[str, Any]
 
 # Define a type hint for allowed log levels
 LogLevel = Literal["trace", "debug", "info", "warning", "error", "critical"] | str

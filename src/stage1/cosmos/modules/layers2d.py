@@ -37,8 +37,15 @@ from timm.layers import LayerScale2d, create_conv2d, create_norm_layer
 from timm.layers.weight_init import init_weight_jax
 from timm.models._manipulate import named_apply
 from typing_extensions import deprecated
+import accelerate
 
-from src.utilities.network_utils import safe_init_weights
+from src.utilities.network_utils import (
+    safe_init_weights,
+    compile_decorator,
+    may_dynamo_module_hasattr,
+    get_unwrapped_state_dict,
+    unwrap_model_recursive,
+)
 
 from .blocks import (
     AdaptiveInputConvLayer,
@@ -301,11 +308,14 @@ class Encoder(nn.Module):
             block_out = channels * channels_mult[i_level]
             for _ in range(self.num_res_blocks):
                 res_block = block_fn(block_in, block_out, dropout, curr_res)
+                # res_block = compile_decorator(res_block)  # may compile the block
                 block.append(res_block)
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     logger.info(f"[Encoder]: use attn at {curr_res}")
-                    attn.append(make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint))
+                    attn_block = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
+                    # attn_block = compile_decorator(attn_block)
+                    attn.append(attn_block)
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -328,6 +338,7 @@ class Encoder(nn.Module):
         self.mid.block_1 = block_fn(block_in, block_out, dropout, curr_res)
         self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
         self.mid.block_2 = block_fn(block_in, block_out, dropout, curr_res)
+
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
         self.conv_out = torch.nn.Conv2d(
@@ -399,7 +410,8 @@ class Encoder(nn.Module):
                 downsample_block.apply(block_basic_init)
 
         self.mid.block_1.init_weights()
-        if not isinstance(self.mid.attn_1, nn.Identity):
+        attn_can_init, _ = may_dynamo_module_hasattr(self.mid.attn_1, "init_weights")
+        if attn_can_init:
             self.mid.attn_1.init_weights()
         self.mid.block_2.init_weights()
 
@@ -442,7 +454,7 @@ class Decoder(nn.Module):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
-        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "interp",
         adaptive_conv_kwargs: dict = {},
         **ignore_kwargs,
     ):
@@ -505,11 +517,7 @@ class Decoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = block_fn(block_in, block_in, dropout, curr_res)
-        self.mid.attn_1 = make_attn(
-            block_in,
-            attn_type=attn_type,
-            act_checkpoint=act_checkpoint,
-        )
+        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
         self.mid.block_2 = block_fn(block_in, block_in, dropout, curr_res)
 
         # upsampling
@@ -519,17 +527,15 @@ class Decoder(nn.Module):
             attn = nn.ModuleList()
             block_out = channels * channels_mult[i_level]
             for _ in range(self.num_res_blocks + 1):
-                block.append(block_fn(block_in, block_out, dropout, curr_res))
+                res_block = block_fn(block_in, block_out, dropout, curr_res)
+                # res_block = compile_decorator(res_block)
+                block.append(res_block)
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     logger.info(f"[Decoder]: use attn at {curr_res}")
-                    attn.append(
-                        make_attn(
-                            block_in,
-                            attn_type=attn_type,
-                            act_checkpoint=act_checkpoint,
-                        )
-                    )
+                    attn_block = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
+                    # attn_block = compile_decorator(attn_block)
+                    attn.append(attn_block)
             up = nn.Module()
             up.block = block
             up.attn = attn
@@ -646,7 +652,8 @@ class Decoder(nn.Module):
                 upsample_block.apply(block_basic_init)
 
         self.mid.block_1.init_weights()
-        if not isinstance(self.mid.attn_1, nn.Identity):
+        attn_can_init, _ = may_dynamo_module_hasattr(self.mid.attn_1, "init_weights")
+        if attn_can_init:
             self.mid.attn_1.init_weights()
         self.mid.block_2.init_weights()
 
@@ -1494,6 +1501,35 @@ if __name__ == "__main__":
             else:
                 print(f"{n} grad sum: {p.grad.shape}")
 
+    def test_encoder():
+        encoder = Encoder(
+            in_channels=512,
+            channels=128,
+            channels_mult=[2, 4, 4],
+            num_res_blocks=2,
+            attn_resolutions=[32],
+            dropout=0.0,
+            resolution=512,
+            z_channels=16,
+            spatial_compression=8,
+            act_checkpoint=True,
+            use_residual_factor=False,
+            patch_method="haar",
+            patch_size=1,
+            attn_type=None,
+            padding_mode="reflect",
+            adaptive_mode="sitok_pointwise",
+            adaptive_conv_kwargs={"sitok_reduce": "pointwise"},
+            norm_type="gn",
+            block_name="res_block",
+        )
+        import accelerate
+
+        encoder_ = accelerate.utils.extract_model_from_parallel(encoder, keep_torch_compile=False, recursive=True)
+        sd = encoder_.state_dict()
+        for n, p in sd.items():
+            print(n, p.shape)
+
     """
         python -m src.stage1.cosmos.modules.layers2d
     """
@@ -1502,7 +1538,8 @@ if __name__ == "__main__":
     # test_diff_enc_dec()
     # test_multi_bands_enc_dec(True)
     # test_generative_decoder()
+    test_encoder()
 
-    test_nested_conv()
+    # test_nested_conv()
 
     # test_moe_layer()

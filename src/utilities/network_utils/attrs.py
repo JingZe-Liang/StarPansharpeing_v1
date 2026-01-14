@@ -2,6 +2,7 @@ import inspect
 from typing import TypeVar
 
 import torch.nn as nn
+import torch
 
 from ..config_utils import dataclass_from_dict, function_config_to_basic_types
 from ..logging import log
@@ -37,3 +38,9 @@ def register_network_init(
     # Set the register_init_fn as model's from_config class method
     setattr(model, "from_config", classmethod(register_init_fn))
     log(f'Set classmethod for Class {model.__name__}: "from_config"')
+
+
+def may_dynamo_module_hasattr(module: torch._dynamo.OptimizedModule | nn.Module, attr_name: str):
+    if isinstance(module, torch._dynamo.OptimizedModule):
+        return hasattr(module._orig_mod, attr_name), module._orig_mod
+    return hasattr(module, attr_name), module

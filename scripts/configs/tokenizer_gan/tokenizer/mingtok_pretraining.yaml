@@ -1,15 +1,14 @@
 _target_: src.stage1.cosmos.cosmos_mingtok.MingtokRSModel.create_model
 low_level_encoder:
-  z_dim: 512
-  latent_dim: 16
+  z_dim: 768
+  latent_dim: 32
   encoder_type: cnn_only
   # latent projection before post-norm/clip
   # choices: [conv_1x1, conv_3x3, norm_act_conv3x3]
-  latent_proj_type: conv_3x3
-  # only used when latent_proj_type == norm_act_conv3x3
-  latent_proj_norm_groups: 32
-  norm_latent_type: norm_no_affine
+  norm_latent_type: null
+  latent_proj_type: null
   clip_latent_value: null
+  skip_z_to_latent: true
   res_encoder:
     in_channels: 512
     out_channels: 512
@@ -20,7 +19,7 @@ low_level_encoder:
     num_res_blocks: 2
     z_channels: ${..z_dim}
     act_checkpoint: true
-    norm_type: gn
+    norm_type: rmsnorm2dfp32
     block_name: res_block
     use_residual_factor: false # layerscale starts at 1e-2
     patch_method: haar
@@ -29,58 +28,37 @@ low_level_encoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
-    adaptive_mode: mix
-    adaptive_conv_kwargs:
-      router_condition: per_channel_dw_pool
-      router_dw_kernel_size: 3
-      always_use_router: true
-      router_hidden_dim: 128
-  # transformer_encoder:
-  #   in_chan: 512
-  #   out_chan: 512
-  #   embed_dim: 1024
-  #   depth: 4
-  #   num_heads: 16
-  #   patch_size: 2
-  #   out_patch_size: 2
-  #   mlp_ratio: 4.0
-  #   norm_layer: flarmsnorm
-  #   drop_path: 0.0
-  #   pe_type: rope_dinov3
-  #   rope_kwargs:
-  #     rope_theta: 100.0
-  #   last_norm: null
-  #   img_size: 64
-  #   patcher_type: patch_embedder
-  #   additional_pe: true
-  #   n_reg_tokens: 4
-  #   other_blk_kwargs:
-  #     use_gate: true
-  #     v_residual: false
+    adaptive_mode: interp
+    # adaptive_conv_kwargs:
+    #   sitok_reduce: pointwise
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
 
 semantic_decoder:
-  in_chan: 16 # 16 if sem_tokens=h else 512
-  out_chan: 1024
+  in_chan: 768
+  out_chan: 1024  #${..low_level_encoder.z_dim}
   embed_dim: 1024
   depth: 24
   num_heads: 16
   patch_size: 2
   with_cls_token: true
-  out_patch_size: 1
+  out_patch_size: 2
   mlp_ratio: 4.0
-  norm_layer: flarmsnorm
-  drop_path: 0.2
+  norm_layer: rmsnormfp32
+  drop_path: 0.0
   pe_type: rope
   rope_kwargs:
     rope_theta: 10000.0
-  last_norm: flarmsnorm
+  last_norm: rmsnormfp32
   img_size: 64
   patcher_type: patch_embedder
   additional_pe: true
   n_reg_tokens: 4
   other_blk_kwargs:
     use_gate: true
-    v_residual: false
+    v_residual: true
 
 pixel_decoder:
   decoder_type: hybrid
@@ -88,16 +66,16 @@ pixel_decoder:
   z_dim: ${..low_level_encoder.z_dim}
   total_resolutions: 8
   res_decoder:
-    in_channels: 512
-    out_channels: 512
+    in_channels: 768
+    out_channels: 768
     channels: 128
     attn_resolutions: [32]
     channels_mult: [2, 4, 4]
     spatial_compression: 8
     num_res_blocks: 2
-    z_channels: 512
+    z_channels: ${..z_dim}
     act_checkpoint: true
-    norm_type: gn
+    norm_type: rmsnorm2dfp32
     block_name: res_block
     use_residual_factor: false
     patch_method: haar
@@ -106,34 +84,38 @@ pixel_decoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
-    adaptive_mode: mix
-    adaptive_conv_kwargs:
-      router_condition: per_channel_dw_pool
-      router_dw_kernel_size: 3
-      always_use_router: true
-      router_hidden_dim: 128
+    adaptive_mode: interp
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
+    # adaptive_conv_kwargs:
+    #   sitok_embed_dim: 64
+    #   sitok_hidden_dim: 64
+    #   sitok_basis_dim: 64
   transformer_decoder:
-    in_chan: 512
-    out_chan: 512
+    in_chan: 768
+    out_chan: 768
     embed_dim: 1024
     depth: 8
     num_heads: 16
     patch_size: 2
     out_patch_size: 2
     mlp_ratio: 4.0
-    norm_layer: flarmsnorm
-    drop_path: 0.1
+    norm_layer: rmsnormfp32
+    drop_path: 0.0
     pe_type: rope
     rope_kwargs:
       rope_theta: 10000.0
-    last_norm: null
+    last_norm: rmsnormfp32
     img_size: 64
     patcher_type: patch_embedder
     additional_pe: true
-    n_reg_tokens: 4
+    with_cls_token: false
+    n_reg_tokens: 0
     other_blk_kwargs:
       use_gate: true
-      v_residual: false
+      v_residual: true
 
 repa_proj:
   low_lvl_repa_out_chan: 1024
@@ -145,8 +127,11 @@ repa_proj:
 
 tokenizer:
   sem_decoder_take: h
-  sem_pix_decoder_type: seperated
+  sem_pix_decoder_type: unified
   straight_through_latent: false
+  path_unify:
+    uni_type: cat
+    hidden_dim: null
   sampling_options_default: {}
   # quantizer
   quantizer_type: null # [kl, bsq, fsq, multiscale_bsq, multiscale_leechq, psd]
@@ -164,4 +149,4 @@ tokenizer:
     mask_ratios: [0.0, 0.25, 0.5, 0.75]
     block_sizes: { 16: [1, 1], 32: [2, 2] }
     mask_probs: { 16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15] }
-  pretrained_task: ["ijepa", "lejepa"]
+  pretrained_task: []

@@ -7,15 +7,15 @@ Mingtok-like three-stage tokenizer with low-level and semantic-level feature ali
 //3. add alpha-flow
 """
 
-import ema_pytorch
 import math
 import random
 from dataclasses import asdict
 from functools import partial
-from typing import Any, List, Optional, cast, no_type_check
+from typing import Any, Optional, cast, no_type_check
 
 import torch
 import torch.nn as nn
+import accelerate
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from loguru import logger
@@ -38,6 +38,7 @@ from typing_extensions import (
 from src.utilities.config_utils import to_easydict_recursive, function_config_to_basic_types
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.transport.flow_matching.meanflow import MeanFlow
+from src.stage1.cosmos.modules.blocks import block_basic_init
 from src.utilities.transport.flow_matching.transport import Sampler
 from src.utilities.transport.flow_matching.transport import Transport as FM_Transport
 from src.utilities.transport.tim.transition import TransitionSchedule
@@ -232,6 +233,7 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
     res_enc_cfg = OmegaConf.from_dotlist(res_enc_str.split(" "))
     res_enc_cfg.adaptive_mode = "mix"
     res_enc_cfg.adaptive_conv_kwargs = {"router_condition": "per_channel_dw_pool", "router_dw_kernel_size": 3}
+    res_enc_cfg.downsample_kwargs = {"padconv_use_manually_pad": True}
     transf_enc_str: str = (
         "in_chan=512 embed_dim=768 depth=8 num_heads=8 patch_size=2 out_patch_size=1 mlp_ratio=4.0 "
         "norm_layer='layernorm' drop_path=0.0 pe_type='rope' rope_kwargs.rope_theta=10000.0 "
@@ -309,12 +311,13 @@ def create_default_mingtok_cfg(flow_type: str = "fm", decoder_type: str = "uvit"
 def create_default_mingtok_pretrained_cfg() -> DictConfig:
     cfg = """
     low_level_encoder:
-        z_dim: 512
-        latent_dim: 16
+        z_dim: 768
+        latent_dim: 32
         encoder_type: cnn_only
-        norm_latent_type: norm_no_affine
-        latent_proj_type: norm_act_conv3x3
+        norm_latent_type: null
+        latent_proj_type: null
         clip_latent_value: null
+        skip_z_to_latent: true
         res_encoder:
             in_channels: 512
             out_channels: 512
@@ -322,41 +325,40 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             attn_resolutions: [32]
             channels_mult: [2,4,4]
             spatial_compression: 8
-            num_res_blocks: 2
-            z_channels: 512
+            num_res_blocks: 1
+            z_channels: ${..z_dim}
             act_checkpoint: true
-            norm_type: gn
+            norm_type: rmsnorm2dfp32
             block_name: res_block
             use_residual_factor: false
             patch_method: haar
             patch_size: 1
             attn_type: null
             padding_mode: reflect
-            adaptive_mode: mix
+            adaptive_mode: interp
             adaptive_conv_kwargs:
-                router_condition: per_channel_dw_pool
-                router_dw_kernel_size: 3
-                always_use_router: true
-                router_hidden_dim: 128
+                sitok_reduce: pointwise
+            downsample_kwargs:
+                padconv_use_manually_pad: true
             dropout: 0.0
             resolution: 512
 
     semantic_decoder:
-        in_chan: 512
-        out_chan: 1024
+        in_chan: 768
+        out_chan: 1024  #${..low_level_encoder.z_dim}
         embed_dim: 1024
         depth: 24
         num_heads: 16
         patch_size: 2
         with_cls_token: true
-        out_patch_size: 1
+        out_patch_size: 2
         mlp_ratio: 4.0
-        norm_layer: flarmsnorm
+        norm_layer: rmsnormfp32
         drop_path: 0.0
-        pe_type: rope_dinov3
+        pe_type: rope
         rope_kwargs:
-            rope_theta: 100.0
-        last_norm: flarmsnorm
+            rope_theta: 10000.0
+        last_norm: rmsnormfp32
         img_size: 64
         patcher_type: patch_embedder
         additional_pe: true
@@ -366,49 +368,48 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
 
     pixel_decoder:
         decoder_type: hybrid
-        latent_dim: 16
-        z_dim: 512
+        latent_dim: ${..low_level_encoder.latent_dim}
+        z_dim: ${..low_level_encoder.z_dim}
         total_resolutions: 8
         res_decoder:
-            in_channels: 512
-            out_channels: 512
+            in_channels: 768
+            out_channels: 768
             channels: 128
             attn_resolutions: [32]
             channels_mult: [2,4,4]
             spatial_compression: 8
             num_res_blocks: 2
-            z_channels: 512
+            z_channels: ${..z_dim}
             act_checkpoint: true
-            norm_type: gn
+            norm_type: rmsnorm2dfp32
             block_name: res_block
             use_residual_factor: false
             patch_method: haar
             patch_size: 1
             attn_type: null
             padding_mode: reflect
-            adaptive_mode: mix
+            adaptive_mode: interp
             adaptive_conv_kwargs:
-                router_condition: per_channel_dw_pool
-                router_dw_kernel_size: 3
-                always_use_router: true
-                router_hidden_dim: 128
+                sitok_embed_dim: 64
+                sitok_hidden_dim: 64
+                sitok_basis_dim: 64
             dropout: 0.0
             resolution: 512
         transformer_decoder:
-            in_chan: 512  # if taken z is 512 else is latent, in_chan is 16
-            out_chan: 512
+            in_chan: 768  # if taken z is 512 else is latent, in_chan is 16
+            out_chan: 768
             embed_dim: 1024
             depth: 8
             num_heads: 16
             patch_size: 2
             out_patch_size: 2
             mlp_ratio: 4.0
-            norm_layer: flarmsnorm
+            norm_layer: rmsnormfp32
             drop_path: 0.0
-            pe_type: rope_dinov3
+            pe_type: rope
             rope_kwargs:
-                rope_theta: 100.0
-            last_norm: flarmsnorm
+                rope_theta: 10000.0
+            last_norm: rmsnorm
             img_size: 64
             patcher_type: patch_embedder
             additional_pe: true
@@ -426,8 +427,11 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
 
     tokenizer:
         straight_through_latent: false
-        sem_pix_decoder_type: seperated
-        sem_decoder_take: z
+        sem_pix_decoder_type: unified
+        sem_decoder_take: h
+        path_unify:
+            uni_type: cat
+            hidden_dim: null
         sampling_options_default: {}
         quantizer_type: null
         random_quant: 0.0
@@ -624,6 +628,7 @@ class EncoderLowLevel(nn.Module):
         ), f"Invalid encoder type {encoder_type}"
         self.encoder_type = encoder_type
         self.latent_dim = cfg.latent_dim
+        self.skip_z_to_latent: bool = getattr(cfg, "skip_z_to_latent", False)
 
         res_cfg = cfg.get("res_encoder", None)
         transf_cfg = cfg.get("transformer_encoder", None)
@@ -648,23 +653,25 @@ class EncoderLowLevel(nn.Module):
             assert transf_cfg is not None, "transformer_encoder config must be provided"
             self.transformer_encoder = TransformerTokenizer(**transf_kwargs)
 
-        latent_proj_type = getattr(cfg, "latent_proj_type", None)
-        if latent_proj_type is None:
-            latent_proj_type = "conv_3x3" if encoder_type == "cnn_only" else "conv_1x1"
-
-        if latent_proj_type == "conv_1x1":
-            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
-        elif latent_proj_type == "conv_3x3":
-            self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1)
-        elif latent_proj_type == "norm_act_conv3x3":
-            gn_groups = int(getattr(cfg, "latent_proj_norm_groups", 32))
-            self.z_to_latent = nn.Sequential(
-                create_norm_layer("groupnorm", cfg.z_dim, num_groups=gn_groups),
-                nn.SiLU(),
-                nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1),
-            )
+        if self.skip_z_to_latent:
+            self.z_to_latent = nn.Identity()
         else:
-            raise ValueError(f"Invalid latent_proj_type {latent_proj_type}")
+            latent_proj_type = getattr(cfg, "latent_proj_type", None)
+            if latent_proj_type is None:
+                latent_proj_type = "conv_3x3" if encoder_type == "cnn_only" else "conv_1x1"
+
+            if latent_proj_type == "conv_1x1":
+                self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=1)
+            elif latent_proj_type == "conv_3x3":
+                self.z_to_latent = nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1)
+            elif latent_proj_type == "norm_act_conv3x3":
+                self.z_to_latent = nn.Sequential(
+                    create_norm_layer("groupnorm", cfg.z_dim, num_groups=32),
+                    nn.SiLU(),
+                    nn.Conv2d(cfg.z_dim, cfg.latent_dim, kernel_size=3, padding=1),
+                )
+            else:
+                raise ValueError(f"Invalid latent_proj_type {latent_proj_type}")
 
         # self.latent_scale = nn.Parameter(torch.ones(cfg.latent_dim))
         # nn.init.trunc_normal_(self.latent_scale, std=0.01, a=-1e-2, b=1e-2)
@@ -685,7 +692,7 @@ class EncoderLowLevel(nn.Module):
 
     def forward(self, x, get_intermidates: list[int] | None = None):
         """Encode the input image into low-level latent tokens."""
-        x = _to_memformat_channels_last(x)
+        # x = _to_memformat_channels_last(x)
         if self.encoder_type == "hybrid":
             # Hybrid encoder, takes the transformer encoder's intermidates
             res_out = self.res_encoder(x)
@@ -718,7 +725,8 @@ class EncoderLowLevel(nn.Module):
         h = self.norm_latent(h)
         if self.clip_latent_value is not None:
             h = h.clip(*self.clip_latent_value)
-        h = _to_memformat_channels_last(h)
+
+        # h = _to_memformat_channels_last(h)
         return dict(latent=h, z=z, **out)
 
     def get_last_layer(self):
@@ -730,8 +738,14 @@ class EncoderLowLevel(nn.Module):
             self.transformer_encoder.init_weights()
         if hasattr(self, "res_encoder"):
             self.res_encoder.init_weights()
-        nn.init.trunc_normal_(self.z_to_latent.weight, std=0.01, a=-0.4, b=0.4)
-        nn.init.zeros_(self.z_to_latent.bias)
+        if self.skip_z_to_latent:
+            return
+        if isinstance(self.z_to_latent, nn.Sequential):
+            block_basic_init(self.z_to_latent[-1], trunc_std=0.02, init_type="lecun_normal")
+            norm = self.z_to_latent[1]
+            block_basic_init(norm)
+        else:
+            block_basic_init(self.z_to_latent, init_type="lecun_normal")
         logger.info("init low-level encoder with smaller std conv to latent.")
 
 
@@ -745,13 +759,19 @@ class DecoderSemantic(nn.Module):
             patch_embeder_with_norm=True, projections={"input": None, "output": None}, head="linear", **cfg
         )
 
-    def forward(self, x, masks=None, get_intermidates=None):
+    def forward(self, x, masks=None, get_intermidates=None, ret_2d_tokens=None):
         """
         Encode the latent low-level tokens and convert into semantic tokens.
         """
-        out = self.decoder(x, ret_2d_tokens=False, ret_all=True, get_intermidates=get_intermidates, masks=masks)
+        out = self.decoder(
+            x,
+            # if has masks, the tokens can not be rearranged
+            ret_2d_tokens=ret_2d_tokens or masks is None,
+            ret_all=True,
+            get_intermidates=get_intermidates,
+            masks=masks,
+        )
         x = out["head_out"]
-        assert x.ndim == 3, "1D tokens are needed for pretraining."
         return dict(sem_tokens=x, **out)
 
     def init_weights(self):
@@ -1452,7 +1472,7 @@ class HybridPixelDecoder(nn.Module):
             self.transformer_decoder.init_weights()
         if hasattr(self, "res_decoder"):
             self.res_decoder.init_weights()
-        nn.init.trunc_normal_(self.latent_to_z.weight, std=0.01, a=-0.4, b=0.4)
+        block_basic_init(self.latent_to_z.weight, init_type="lecun_normal")
         nn.init.zeros_(self.latent_to_z.bias)
 
     def forward(
@@ -1460,7 +1480,7 @@ class HybridPixelDecoder(nn.Module):
     ):
         """Decode the latent to the image patches"""
         z = self.latent_to_z(latent)
-        z = _to_memformat_channels_last(z)
+
         if self.decoder_type == "hybrid":
             # Hybrid encoder, takes the transformer encoder's intermidates
             out = self.transformer_decoder(
@@ -1471,11 +1491,9 @@ class HybridPixelDecoder(nn.Module):
             )
             x = out["head_out"]  # z is 2d: (b, c, h, w)
             x = self.res_decoder(x, inp_shape[1])
-            x = _to_memformat_channels_last(x)
 
         elif self.decoder_type == "cnn_only":
-            x, intermidates = self.res_decoder(z, inp_shape[1], ret_interm_feats=get_intermidates)
-            x = _to_memformat_channels_last(x)
+            x, intermidates = self.res_decoder(z, inp_shape[1], ret_all_res_features=get_intermidates)
             out = {"intermidates": intermidates}
 
         else:  # transformer only
@@ -1495,6 +1513,59 @@ class HybridPixelDecoder(nn.Module):
             raise ValueError(f"Unknown decoder type: {self.decoder_type}")
 
 
+class PathUnify(nn.Module):
+    def __init__(
+        self,
+        low_lvl_chans: int,
+        sem_chans: int,
+        *,
+        uni_type: str = "sem",
+        hidden_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.uni_type = uni_type
+
+        self.low_proj: nn.Module | None = None
+        low_proj_chans = low_lvl_chans
+        if low_lvl_chans != sem_chans:
+            self.low_proj = nn.Conv2d(low_lvl_chans, sem_chans, kernel_size=1)
+            low_proj_chans = sem_chans
+
+        cat_chans = low_proj_chans + sem_chans
+        if hidden_dim in (None, 0):
+            hidden_dim = cat_chans
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(cat_chans, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, sem_chans, kernel_size=1),
+        )
+
+    def _align_sem_to_low(self, sem_2d: Tensor, z_low: Tensor) -> Tensor:
+        if sem_2d.shape[-2:] == z_low.shape[-2:]:
+            return sem_2d
+
+        return nn.functional.interpolate(
+            sem_2d,
+            size=z_low.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    def forward(self, *, sem_2d: Tensor, z_low: Tensor) -> Tensor:
+        if self.uni_type == "sem":
+            return sem_2d
+        if self.uni_type != "cat":
+            raise ValueError(f"Invalid uni_type={self.uni_type!r}, expected 'sem' or 'cat'")
+        if sem_2d.ndim != 4 or z_low.ndim != 4:
+            raise ValueError(f"PathUnify expects 4D tensors, got {sem_2d.ndim=} and {z_low.ndim=}")
+
+        sem_aligned = self._align_sem_to_low(sem_2d, z_low)
+        low_proj = z_low if self.low_proj is None else self.low_proj(z_low)
+        fused = self.fuse(torch.cat([sem_aligned, low_proj], dim=1))
+        return fused
+
+
 class MingtokRSModel(nn.Module):
     def __init__(self, cfg: DictConfig):
         super().__init__()
@@ -1504,11 +1575,13 @@ class MingtokRSModel(nn.Module):
         self.pixel_cfg = cfg.pixel_decoder
         self.tok_cfg = cfg.tokenizer
         self.sem_pix_decoder_type = self.tok_cfg.sem_pix_decoder_type
-        self.sem_decoder_take = self.tok_cfg.sem_decoder_take
+        self.sem_decoder_take = getattr(self.tok_cfg, "sem_decoder_take", "h")
         assert self.sem_pix_decoder_type in ("unified", "seperated")
         assert self.sem_decoder_take in ("z", "h")
         logger.info(f"Sem-pix decoder type: <green>{self.sem_pix_decoder_type}</>")
         logger.info(f"Sem-decoder take: <green>{self.sem_decoder_take}</>")
+        if self.sem_pix_decoder_type == "seperated":
+            self.low_cfg.skip_z_to_latent = True
 
         # Model parts
         logger.info(f"Init low-level encoder.")
@@ -1517,6 +1590,9 @@ class MingtokRSModel(nn.Module):
         logger.info(f"Init semantic decoder.")
         self.semantic_decoder: nn.Module = DecoderSemantic(self.sem_cfg)
         self.pretrained_task: list[str] = getattr(self.tok_cfg, "pretrained_task")
+        if self.pretrained_task is None:
+            self.pretrained_task = []
+        self._setup_seperated_encode()
 
         logger.info(f"Init pixel decoder of type {self.pixel_cfg.decoder_type}.")
         decoder_cls: type[nn.Module] = {
@@ -1536,7 +1612,6 @@ class MingtokRSModel(nn.Module):
         if self.sampling_options_default:
             logger.info(f"Set the sampling options to {self.sampling_options_default}.")
 
-        # TODO: add quantizer
         self._setup_quantizer()
         self._setup_latent_aug()
 
@@ -1573,25 +1648,50 @@ class MingtokRSModel(nn.Module):
         # TODO: need test, compile the modules
         self._compile_modules()
 
+    def _setup_seperated_encode(self) -> None:
+        # using `seperated` means Y-shape
+        # x ----> low-level encoder ---> decoder ---> recon pixels
+        #                           |---> semantic decoder --> semantic tokens --> proxy task
+
+        # using `unified` means semantic 'decoder' serves as a part of encoder
+        # x ---> low-level encoder --> semantic decoder -> latent ----> decoder ----> recon pixels
+        #                                           |----> semantic tokens ---> proxy task
+        self._seperated_encode_chain: bool = self.sem_pix_decoder_type == "seperated"
+        if self._seperated_encode_chain:
+            return
+
+        sem_out_chan = getattr(self.sem_cfg, "out_chan")
+        latent_dim = getattr(self.low_cfg, "latent_dim")
+        self.sem_to_latent = nn.Sequential(
+            create_norm_layer("layernorm2dfp32", sem_out_chan),
+            nn.SiLU(),
+            nn.Conv2d(sem_out_chan, latent_dim, kernel_size=3, padding=1),
+        )
+        self.sem_to_latent.apply(partial(block_basic_init, init_type="lecun_normal"))
+
+        path_cfg = self.tok_cfg.path_unify
+        uni_type = path_cfg.uni_type
+        hidden_dim = path_cfg.hidden_dim
+        self.path_unify = PathUnify(
+            low_lvl_chans=self.low_cfg.z_dim, sem_chans=sem_out_chan, uni_type=uni_type, hidden_dim=hidden_dim
+        )
+
     def _setup_pretrained_proxy_module(self):
         if "lejepa" in self.pretrained_task:
             from torchvision.ops import MLP as MLP_TV
 
             lejepa_proj_dim = 512
-            self.lejepa_proj = MLP_TV(self.sem_cfg.out_chan, [2048, 2048, lejepa_proj_dim], norm_layer=nn.BatchNorm1d)
+            self.lejepa_proj = MLP_TV(self.sem_cfg.embed_dim, [2048, 2048, lejepa_proj_dim], norm_layer=nn.BatchNorm1d)
             logger.info("Setup the LeJEPA projector")
 
     def _maybe_fix_repa_proj_chans(self) -> None:
-        """对齐`repa_proj.*_repa_proj_chans`与实际cache feature通道数，避免投影层输入维度不匹配。"""
         if not self.use_repa:
             return
 
         inferred_low = self._infer_low_lvl_repa_proj_chans()
         cfg_low = [int(x) for x in list(getattr(self.proj_cfg, "low_lvl_repa_proj_chans", []))]
         if len(cfg_low) != len(inferred_low) or any(a != b for a, b in zip(cfg_low, inferred_low)):
-            logger.warning(
-                f"[Mingtok][REPA]: low_lvl_repa_proj_chans与实际feature不匹配，已自动修正：{cfg_low} -> {inferred_low}"
-            )
+            logger.warning(f"[Mingtok][REPA]: channels changed {cfg_low} -> {inferred_low}")
             self.proj_cfg.low_lvl_repa_proj_chans = inferred_low
 
     def _infer_low_lvl_repa_proj_chans(self) -> list[int]:
@@ -1620,10 +1720,15 @@ class MingtokRSModel(nn.Module):
         self.quantizer_type: str | None = getattr(self.tok_cfg, "quantizer_type", None)
         self.random_quant: float = float(getattr(self.tok_cfg, "random_quant", 0.0))
 
+        # FSQ specifics
         fsq_num_codebooks = int(getattr(self.tok_cfg, "fsq_num_codebooks", 6))
         fsq_levels = list(getattr(self.tok_cfg, "fsq_levels", [8, 8, 8, 5, 5, 5]))
+
+        # MBSQ specifics
         mbsq_codebook_size = int(getattr(self.tok_cfg, "mbsq_codebook_size", 1024))
         mbsq_schedule_mode = str(getattr(self.tok_cfg, "mbsq_schedule_mode", "original"))
+
+        # Mleech specifics
         mleech_codebook_size = int(getattr(self.tok_cfg, "mleech_codebook_size", 196560))
         mleech_leech_type = str(getattr(self.tok_cfg, "mleech_leech_type", "full"))
         mleech_schedule_mode = str(getattr(self.tok_cfg, "mleech_schedule_mode", "original"))
@@ -1804,11 +1909,9 @@ class MingtokRSModel(nn.Module):
         if self._compile:
             logger.info("Compiling FlowTokenizer model parts...")
             # Only compile the heavy parts - transformer
-            self.low_level_encoder.encoder = torch.compile(  # type: ignore
-                self.low_level_encoder.encoder
-            )
-            self.semantic_decoder.encoder = torch.compile(self.semantic_decoder.encoder)
-            self.pixel_decoder.decoder = torch.compile(self.pixel_decoder.decoder)  # type: ignore
+            self.low_level_encoder.encoder = self.low_level_encoder.encoder.compile()  # type: ignore
+            self.semantic_decoder.encoder = self.semantic_decoder.encoder.compile()  # type: ignore
+            self.pixel_decoder.decoder = self.pixel_decoder.decoder.compile()  # type: ignore
             logger.info("Compilation done.")
 
     def _build_st_cat_lin(self):
@@ -1828,7 +1931,7 @@ class MingtokRSModel(nn.Module):
             )
             logger.log(
                 "NOTE",
-                f"Will skip the semantic decoder latent through cat conv, "
+                f"Experimental --- Will skip the semantic decoder latent through cat conv, "
                 f"latent_channels={latent_channels}, semantic_channels={semantic_channels}",
             )
 
@@ -1880,14 +1983,27 @@ class MingtokRSModel(nn.Module):
                 }
             )
 
+    def _infer_sem_hw(self, x=None, inp_shape=None) -> list[int]:
+        assert x is not None or inp_shape is not None
+        if inp_shape is None:
+            inp_shape = x.shape
+        hw = (
+            torch.as_tensor(inp_shape[-2:])  # type: ignore
+            // self.total_resolutions
+            // self.semantic_decoder.patch_size
+        )
+        self._hw = hw.tolist()  # grid size
+        hw = (hw * self.semantic_decoder.out_patch_size).tolist()
+        return hw
+
     @staticmethod
-    def _to_2d(x, hw: List[int]) -> None | Tensor:
+    def _to_2d(x, hw: Sequence[int]) -> None | Tensor:
         if x is None or x.ndim == 4:
             return x
         else:
             return rearrange(x, "b (h w) ... -> b ... h w", h=hw[0], w=hw[1])
 
-    def _encode_latent(self, x):
+    def _forward_low_level(self, x):
         low_lvl_out = self.low_level_encoder(
             x,
             get_intermidates=self.low_lvl_cache_layers if self.training and self.use_repa else None,
@@ -1896,12 +2012,13 @@ class MingtokRSModel(nn.Module):
         self.z = low_lvl_out.get("intermidates") if self.low_lvl_proj_is_multi else low_lvl_out["latent"]
         return low_lvl_out
 
-    def _sem_decode(self, z, masks=None):
+    def _forward_sem_decoder(self, z, masks=None, **kwargs):
         """Decode the input (pre-down-conv latent or latent) into semantic tokens."""
         sem_out = self.semantic_decoder(
             z,
             masks,
             get_intermidates=self.sem_cache_layers if (self.training and self.use_repa) else None,
+            **kwargs,
         )
         return sem_out
 
@@ -1937,51 +2054,88 @@ class MingtokRSModel(nn.Module):
         latent=None,
         z=None,
         masks: list[Tensor] | Tensor | None = None,
-        hw: Sequence | None = None,
+        hw: Sequence[int] | None = None,
         no_cache: bool = False,
     ):
         if latent is None or z is None:
             raise ValueError("Both latent and z must be provided")
 
-        # To semantic tokens
-        # Use z for semantic decoder
-        if z.ndim == 4:
-            # Flatten to 1D sequence if necessary is handled by semantic decoder
-            pass
-
         sem_taken = latent if self.sem_decoder_take == "h" else z
         assert torch.is_tensor(sem_taken), f"Sematic decoder takes only Tensor but got {type(sem_taken)}"
-        sem_out = self._sem_decode(sem_taken, masks)
+        sem_out = self._forward_sem_decoder(sem_taken, masks)
         sem_tokens = sem_out["sem_tokens"]
 
-        # if self.st_skip_semantic_decoder:
-        #     assert latent is not None, "latent must be provided for skip connection"
-        #     assert latent.shape[1] == sem_tokens.shape[1], f"Mismatched shape: {latent.shape=}, {sem_tokens.shape=}"
-        #     lat_sem_tokens = torch.cat([latent, sem_tokens], dim=-1)
-        #     sem_tokens = self.st_cat_lin(lat_sem_tokens)  # input into the cnn decoder
-
         # To 2d if masks is None
-        # if sem_tokens.ndim == 3 and masks is None:
-        #     assert hw is not None, "hw must be provided"
-        #     assert math.prod(hw) == sem_tokens.shape[1], (
-        #         f"hw {hw} product does not match latent shape {sem_tokens.shape} and total_resolutions={self.total_resolutions}"
-        #     )
-        #     # for cache into self.sem_z
-        #     sem_tokens = self._to_2d(sem_tokens, hw)
+        if sem_tokens.ndim == 3 and masks is None:
+            assert hw is not None, "hw must be provided"
+            assert math.prod(hw) == sem_tokens.shape[1], (
+                f"hw {hw} product does not match latent shape {sem_tokens.shape} and total_resolutions={self.total_resolutions}"
+            )
+            # for cache into self.sem_z
+            sem_tokens = self._to_2d(sem_tokens, hw)
 
         # Cache semantic features
         if not no_cache:
             self.sem_z = sem_out.get("intermidates") if self.sem_proj_is_multi else sem_tokens
 
-        out = dict(latent=latent, sem_tokens=sem_tokens, z=z)
-        return out
+        sem_out.update(latent=latent, sem_tokens=sem_tokens, z=z)
+        return sem_out
+
+    def _encode_unified(
+        self,
+        *,
+        latent_low: Tensor,
+        z_low: Tensor,
+        inp_shape: torch.Size | tuple[int, ...],
+        no_cache: bool = False,
+    ):
+        sem_inp = latent_low if self.sem_decoder_take == "h" else z_low
+        sem_out = self._forward_sem_decoder(sem_inp, masks=None)
+        sem_tokens = cast(Tensor, sem_out["sem_tokens"])
+
+        hw = self._infer_sem_hw(inp_shape=inp_shape)
+
+        if sem_tokens.ndim == 3 and math.prod(hw) != sem_tokens.shape[1]:
+            raise ValueError(f"semantic tokens length mismatch: {sem_tokens.shape=}, {hw=}, {inp_shape=}")
+
+        sem_2d = self._to_2d(sem_tokens, hw)
+        if sem_2d is None:
+            raise ValueError("sem_tokens is None")
+
+        # To 2d if masks is None
+        if sem_tokens.ndim == 3:
+            assert hw is not None, "hw must be provided"
+            assert math.prod(hw) == sem_tokens.shape[1], (
+                f"hw {hw} product does not match latent shape {sem_tokens.shape} and total_resolutions={self.total_resolutions}"
+            )
+            # for cache into self.sem_z
+            sem_tokens = self._to_2d(sem_tokens, hw)
+        else:
+            assert sem_tokens.ndim == 4
+            assert tuple(hw) == tuple(sem_tokens.shape[-2:])
+
+        # Cache semantic features
+        if not no_cache:
+            self.sem_z = sem_out.get("intermidates", None) if self.sem_proj_is_multi else sem_tokens
+            assert not self.training or self.sem_z is not None, f"Can not cache sematic tokens"
+
+        sem_latent_inp = self.path_unify(sem_2d=sem_2d, z_low=z_low)
+        sem_latent = self.sem_to_latent(sem_latent_inp)
+        out_ = dict(sem_tokens=sem_tokens, latent=sem_latent)
+        sem_out.update(out_)
+        return sem_out
 
     def encode(self, x: Tensor, use_quantizer: bool | None = None) -> dict[str, Any]:
-        out = dict(self._encode_latent(x))
-        latent = cast(Tensor, out["latent"])
+        out = self._forward_low_level(x)
+
+        if not self._seperated_encode_chain:
+            sem_out = self._encode_unified(latent_low=out["latent"], z_low=out["z"], inp_shape=x.shape)
+            latent = sem_out["latent"]
+        else:
+            latent = out["latent"]
+            sem_out = {}
 
         h_pre_quant = self.pre_quant_conv(latent) if hasattr(self, "pre_quant_conv") else latent
-        h_pre_quant = _to_memformat_channels_last(h_pre_quant)
         maybe_q = self.apply_quantizer(h_pre_quant, use_quantizer=use_quantizer)
 
         q_info: dict[str, Any] | None = None
@@ -1992,9 +2146,10 @@ class MingtokRSModel(nn.Module):
             q_loss = torch.tensor(0.0, device=latent.device, dtype=latent.dtype)
 
         latent_q = self.latent_aug(latent_q)
-        out["latent"] = latent_q
-        out["q_loss"] = q_loss
-        out["q_info"] = q_info
+        sem_out["latent"] = latent_q
+        sem_out["q_loss"] = q_loss
+        sem_out["q_info"] = q_info
+        out.update(sem_out)
         return out
 
     def decode(
@@ -2034,27 +2189,19 @@ class MingtokRSModel(nn.Module):
             cfg_interval=None,
             tbar=True
         """
+        # Decode to semantic tokens if needed
+        hw = self._infer_sem_hw(inp_shape=inp_shape)
 
-        # Decode to semantic tokens
-        hw = (
-            torch.tensor(inp_shape[-2:])  # type: ignore
-            // self.total_resolutions
-            // self.semantic_decoder.patch_size
-            * self.semantic_decoder.out_patch_size
-        ).tolist()
-        self._hw = hw
-
-        if self.sem_pix_decoder_type == "unified":
-            sem_decoder_out = self._decode_to_sem(latent=latent, z=z, hw=hw)
-            h = sem_tokens = sem_decoder_out["sem_tokens"]  # as conditions if is diffusion decoder
-        else:
+        # if self.sem_pix_decoder_type == "unified":
+        #     sem_decoder_out = self._decode_to_sem(latent=latent, z=z, hw=hw)
+        #     h = sem_tokens = sem_decoder_out["sem_tokens"]  # as conditions if is diffusion decoder
+        sem_tokens = None
+        if self.sem_pix_decoder_type == "seperated":
             # is seperated sematic decoder, do not involved with decoding.
             if self._use_repa_loss:
                 sem_decoder_out = self._decode_to_sem(latent=latent, z=z, hw=hw)
                 sem_tokens = sem_decoder_out["sem_tokens"]
-            else:
-                sem_tokens = None
-            h = latent
+        h = latent
 
         if self._is_flow_matching_pix_decoder:
             # To flow UViT or head
@@ -2065,8 +2212,12 @@ class MingtokRSModel(nn.Module):
             if mode == "sample":
                 # init the x as the noise
                 logger.trace(f"[flow tokenizer]: init the x with gaussian - mode = {mode}")
+                if x is None:
+                    raise ValueError("x must be provided when mode='sample'")
                 x_inp = torch.randn_like(x)
             elif mode == "train":
+                if x is None:
+                    raise ValueError("x must be provided when mode='train'")
                 x_inp = x
             else:
                 raise ValueError(f"{mode=} is invalid")
@@ -2111,6 +2262,9 @@ class MingtokRSModel(nn.Module):
         sample_kwargs: dict = {},
         ret_trajectory: bool = False,
     ):
+        if model_compiled_flag:
+            torch.compiler.cudagraph_mark_step_begin()
+
         if input.shape[1] > 512:
             logger.error(f"input shape {input.shape} is too large.")
             raise ValueError("input shape is too large.")
@@ -2133,42 +2287,60 @@ class MingtokRSModel(nn.Module):
         recon = dec_out["recon"]
         return {"recon": recon, "flow_loss": flow_loss, **enc_out}
 
-    def encode_ijepa(self, x, jepa_masks: list[Tensor] | None = None) -> Tensor:
-        hw = (
-            torch.tensor(x.shape[-2:])  # type:ignore
-            // self.total_resolutions
-            * self.semantic_decoder.out_patch_size
-            // self.semantic_decoder.patch_size
+    def encode_ijepa(self, x: Tensor, jepa_masks: list[Tensor] | Tensor | None = None):
+        hw = self._infer_sem_hw(x)
+        low_out = self._forward_low_level(x)
+        latent_low = cast(Tensor, low_out["latent"])
+        z_low = cast(Tensor, low_out["z"])
+
+        sem_decoder_out = self._decode_to_sem(
+            latent=latent_low,
+            z=z_low,
+            masks=jepa_masks,
+            hw=hw,
+            no_cache=True,
         )
-        enc_out = self.encode(x)
-        latent = enc_out["latent"]
-        z = enc_out["z"]
+        y_norm_patch = sem_decoder_out["x_norm_patch_tokens"]  # no head project c=embed_dim
+        assert y_norm_patch.ndim == 3, (
+            f"Encoding for IJEPA needs sem_tokens into 3D Tensor, bot got {y_norm_patch.shape}"
+        )
+        return y_norm_patch
 
-        sem_decoder_out = self._decode_to_sem(latent=latent, z=z, masks=jepa_masks, hw=hw.tolist(), no_cache=True)
-        sem_tokens = sem_decoder_out["sem_tokens"]
-        return sem_tokens
-
-    def encode_lejepa(self, x, *, lejepa_on: str = "cls") -> dict[str, Tensor]:
+    def encode_lejepa(self, x: Tensor, *, lejepa_on: str = "cls") -> dict[str, Tensor]:
         low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
-        z = low_lvl_out["z"]
-        sem_out = self.semantic_decoder(z, masks=None, get_intermidates=None)
+        latent_low = cast(Tensor, low_lvl_out["latent"])
+        z_low = cast(Tensor, low_lvl_out["z"])
+
+        sem_inp = latent_low if self.sem_decoder_take == "h" else z_low
+        # force to 3D tensor
+        sem_out = self.semantic_decoder(sem_inp, masks=None, get_intermidates=None, ret_2d_tokens=False)
+
         cls_tokens = sem_out.get("cls_tokens")  # b,c
         if cls_tokens is None:
             raise ValueError("semantic_decode is initialized without class token.")
+
         cls_t1d = cls_tokens.squeeze(1)
-        patch_t1d = rearrange(sem_out["sem_tokens"], "b l c -> (b l) c")  # for full-patch-tokens sigreg
+        patch_t1d = rearrange(sem_out["x_norm_patch_tokens"], "b l c -> (b l) c")  # for full-patch-tokens sigreg
+
         # project the tokens
         cls_t1d = self.lejepa_proj(cls_t1d)
         patch_t1d = self.lejepa_proj(patch_t1d)
+
         return {"cls_tokens": cls_t1d, "patch_tokens": patch_t1d}
 
     def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
         low_lvl_out = self.low_level_encoder(x, get_intermidates=None)
-        z = low_lvl_out["z"]
-        sem_out = self.semantic_decoder(z, masks=None, get_intermidates=None)
+
+        latent_low = cast(Tensor, low_lvl_out["latent"])
+        z_low = cast(Tensor, low_lvl_out["z"])
+
+        sem_inp = latent_low if self.sem_decoder_take == "h" else z_low
+        sem_out = self.semantic_decoder(sem_inp, masks=None, get_intermidates=None)
+
         cls_tokens = sem_out.get("cls_tokens")
         if cls_tokens is None:
             raise ValueError("semantic_decode is initialized without class token.")
+
         return cls_tokens.squeeze(1)
 
     def load_pretrained(self, path: str):
@@ -2411,6 +2583,8 @@ def test_decoder_flow_head():
 def test_deterministic_mingtokrs_tokenizer():
     """Test the full mingtokrs tokenizer with forward-backward pass."""
     from fvcore.nn import parameter_count_table, parameter_count
+    import contextlib
+    from torch.nn.attention import SDPBackend, sdpa_kernel
 
     cfg = create_default_mingtok_pretrained_cfg()
     print("\n" + "=" * 80)
@@ -2421,8 +2595,12 @@ def test_deterministic_mingtokrs_tokenizer():
     print("\n[1/4] Initializing model...")
     print("-" * 80)
 
-    model = MingtokRSModel(cfg).to("cuda", torch.bfloat16)
+    model = MingtokRSModel(cfg).to("cuda")
     model.train()
+    for n, p in model.named_parameters():
+        if p.requires_grad and p.data.isnan().any():
+            print(f"name {n} param is nan")
+    print("------------------- Init model and check params -------------------")
 
     print(f"Total resolutions: {model.total_resolutions}")
     print(f"Sem-pix decoder type: {model.sem_pix_decoder_type}")
@@ -2443,6 +2621,7 @@ def test_deterministic_mingtokrs_tokenizer():
             out = model(x)
 
     print(f"Input shape: {x.shape}")
+    print(f"Latent shape: {out['latent'].shape}")
     print(f"Output shape: {out['recon'].shape}")
     print("Forward pass successful!")
 
@@ -2451,18 +2630,112 @@ def test_deterministic_mingtokrs_tokenizer():
     print("-" * 80)
     x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
 
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        out = model(x)
+    def _register_nan_grad_hooks(mod: nn.Module) -> list[Any]:
+        handles: list[Any] = []
 
-    # Get the first loss for backward
-    loss = out["recon"].mean()
-    print(f"Loss value: {loss.item():.4f}")
-    loss.backward()
+        def _hook(grad: torch.Tensor, *, name: str) -> torch.Tensor:
+            if not torch.isfinite(grad).all():
+                raise RuntimeError(f"[NaNGrad] {name} grad has non-finite values.")
+            return grad
+
+        for name, p in mod.named_parameters():
+            if not p.requires_grad:
+                continue
+            handles.append(p.register_hook(partial(_hook, name=name)))
+
+        return handles
+
+    def _register_module_nan_hooks(mod: nn.Module, module_names: list[str]) -> list[Any]:
+        handles: list[Any] = []
+
+        def _has_nonfinite(grads: tuple[object, ...]) -> bool:
+            for g in grads:
+                if torch.is_tensor(g) and not torch.isfinite(g).all():
+                    return True
+            return False
+
+        def _mk_hook(name: str):
+            def _hook(_m: nn.Module, grad_input: tuple[object, ...], grad_output: tuple[object, ...]) -> None:
+                if _has_nonfinite(grad_output):
+                    raise RuntimeError(f"[NaNGrad] non-finite grad_output in module={name}")
+                if _has_nonfinite(grad_input):
+                    raise RuntimeError(f"[NaNGrad] non-finite grad_input in module={name}")
+
+            return _hook
+
+        for name in module_names:
+            submod = dict(mod.named_modules()).get(name)
+            if submod is None:
+                continue
+            handles.append(submod.register_full_backward_hook(_mk_hook(name)))
+
+        return handles
+
+    def _register_conv_nan_hooks(mod: nn.Module) -> list[Any]:
+        handles: list[Any] = []
+
+        def _has_nonfinite(grads: tuple[object, ...]) -> bool:
+            for g in grads:
+                if torch.is_tensor(g) and not torch.isfinite(g).all():
+                    return True
+            return False
+
+        def _mk_hook(name: str):
+            def _hook(_m: nn.Module, grad_input: tuple[object, ...], grad_output: tuple[object, ...]) -> None:
+                if _has_nonfinite(grad_output):
+                    raise RuntimeError(f"[NaNGrad][Conv2d] non-finite grad_output in {name}")
+                if _has_nonfinite(grad_input):
+                    raise RuntimeError(f"[NaNGrad][Conv2d] non-finite grad_input in {name}")
+
+            return _hook
+
+        for name, submod in mod.named_modules():
+            if isinstance(submod, nn.Conv2d):
+                handles.append(submod.register_full_backward_hook(_mk_hook(name)))
+
+        return handles
+
+    grad_handles = _register_nan_grad_hooks(model)
+    mod_handles = _register_module_nan_hooks(
+        model,
+        module_names=[
+            "low_level_encoder.res_encoder",
+            "semantic_decoder.decoder",
+            "pixel_decoder.transformer_decoder",
+            "pixel_decoder.res_decoder",
+            "sem_to_latent",
+        ],
+    )
+    conv_handles = _register_conv_nan_hooks(model)
+    try:
+        # NOTE: `check_nan=False` so we can rely on our hooks to pinpoint the first module that emits NaNs,
+        # otherwise PyTorch may abort inside a kernel (e.g. ConvolutionBackward0) before hooks run.
+        with torch.autograd.set_detect_anomaly(True, check_nan=False):
+            with sdpa_kernel(SDPBackend.MATH):
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    out = model(x)
+
+            recon = out["recon"]
+            if not torch.isfinite(recon).all():
+                raise RuntimeError("[NaN] recon has non-finite values before backward.")
+
+            loss = torch.nn.functional.mse_loss(recon.float(), x.float())
+            print(f"Loss value: {loss.item():.4f}")
+            loss.backward()
+    finally:
+        for h in (*grad_handles, *mod_handles, *conv_handles):
+            with contextlib.suppress(Exception):
+                h.remove()
 
     # Check gradients
     for n, p in model.named_parameters():
-        if p.requires_grad and p.grad is None:
-            print(f"name {n} has no grad")
+        if p.requires_grad:
+            if p.grad is None:
+                print(f"name {n} has no grad")
+            elif p.grad.isnan().any():
+                print(f"name {n} got nan grad")
+            elif p.data.isnan().any():
+                print(f"name {n} param is nan")
 
     # Test encode_ijepa method
     print("\n[4/4] Testing encode_ijepa method...")
@@ -2496,6 +2769,7 @@ def test_deterministic_mingtokrs_tokenizer():
     )
     x_masked, masks_enc, masks_pred = mask_collator(x)
     masks_enc = [m.to(x.device, torch.int32) for m in masks_enc]
+    masks_pred = [m.to(x.device, torch.int32) for m in masks_pred]
 
     print(f"\nMask info:")
     print(f"  Number of encoder masks: {len(masks_enc)}")
@@ -2513,6 +2787,20 @@ def test_deterministic_mingtokrs_tokenizer():
     # backward
     print("------- do semantic encoder backward test.")
     sem_tokens_masked.mean().backward()
+
+    # Test masks_pred (target-style masking)
+    print("------- do masks_pred target masking test.")
+    from src.stage1.self_supervised import apply_masks, repeat_interleave_batch
+
+    x = torch.randn(batch_size, 202, img_size, img_size).to("cuda", torch.bfloat16)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        h_full = model.encode_ijepa(x)  # [B, S, D]
+        h_full = torch.nn.functional.layer_norm(h_full, (h_full.size(-1),))
+        B = len(h_full)
+        h_tgt = apply_masks(h_full, masks_pred)  # [B*npred, S_masked, D]
+        h_tgt = repeat_interleave_batch(h_tgt, B, repeat=len(masks_enc))
+        print(f"Target tokens shape (masks_pred): {h_tgt.shape}")
+        h_tgt.mean().backward()
 
     repa_feats = model.get_repa_feature()
     print(repa_feats)

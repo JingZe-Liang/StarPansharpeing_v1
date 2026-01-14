@@ -1,5 +1,5 @@
-from .compile import null_decorator, null_decorator_no_any_kwgs, compile_decorator, model_compiled_flag
-from .dataclass_config_compact import register_network_init
+from .compile import null_decorator, compile_decorator, model_compiled_flag
+from .attrs import register_network_init, may_dynamo_module_hasattr
 from .Dtensor import get_tensor_info, safe_dtensor_operation, to_full_tensor
 from .network_loading import (
     load_diffbands_tokenizer_then_peft_lora,
@@ -8,6 +8,8 @@ from .network_loading import (
     load_weights_with_shape_check,
     remap_peft_model_state_dict,
     safe_init_weights,
+    get_unwrapped_state_dict,
+    unwrap_model_recursive,
 )
 from .pack import one_d_to_two_d, two_d_to_one_d
 from .perf_utils import (

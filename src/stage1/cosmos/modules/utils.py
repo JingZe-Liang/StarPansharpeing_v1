@@ -250,10 +250,11 @@ def Normalize(in_channels, norm_type: str | None = "gn", **norm_kwargs) -> nn.Mo
     elif norm_type in (None, "none"):
         return torch.nn.Identity()
     else:
-        raise ValueError(
-            f"Unknown normalization type: {norm_type}. Supported types are: 'gn', 'bn2d', 'ln2d', 'rms_native', "
-            "'rms_triton', None or 'none'."
-        )
+        try:
+            cls = create_norm.get_norm_layer(norm_type)
+        except Exception as e:
+            logger.error(f"Failed to create norm layer: {norm_type}")
+            raise e
 
     return cls(in_channels, **extract_needed_kwargs(norm_kwargs, cls))
 

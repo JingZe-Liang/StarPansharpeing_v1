@@ -55,8 +55,8 @@ downstream_model:
     drop_path: 0.2
     patch_size: 1
     out_channels: 256
-    norm_layer: "rmsnorm"
-    mlp_norm_layer: "rmsnorm"
+    norm_layer: "rmsnormfp32"
+    mlp_norm_layer: "rmsnormfp32"
     act_layer: "silu"
     pos_embed_type: "sincos"
     input_size: 8 # 64 / 8 = 8
@@ -69,7 +69,7 @@ downstream_model:
   pixel_model:
     _target_: src.stage2.pansharpening.models.naf.PansharpeningNAFNet.create_model
     pan_channel: 1
-    ms_channel: 4 #${dataset.consts.bands}
+    ms_channel: ${dataset.consts.bands}
     width: 128
     middle_blk_num: 2
     enc_blk_nums: [1, 2, 2]
@@ -80,7 +80,7 @@ downstream_model:
     patch_size: 1
     dw_expand: 2
     ffn_expand: 2
-    block_drop: 0.2
+    block_drop: 0.0
     condition_on_decoder: true
     residual_type: ms
     is_neg_1_1: false
@@ -93,13 +93,13 @@ downstream_model:
       - { "k_size": 4, "stride": 1, "dilation": 2 } # 64 / 4 = 16
     nat_mid_kwargs: { "k_size": 4, "stride": 1, "dilation": 2 }
     nat_dec_kwargs:
-      - { "k_size": 8, "stride": 1, "dilation": 2 }
-      - null #{ "k_size": 4, "stride": 2, "dilation": 2 }
+      - { "k_size": 4, "stride": 1, "dilation": 2 }
+      - { "k_size": 4, "stride": 2, "dilation": 2 }
       # - { "k_size": 8, "stride": 2, "dilation": 2 }
       - null
 
 # Wrapper configuration
 froze_tokenizer: true
 n_img_encoded: 3 # For pansharpening, we have 3 images: LRMS, PAN, and HRMS
-tokenizer_scale_shift: [0.613, -0.48] # std, mean from cosmos_f8c16p1_lora.yaml
+tokenizer_scale_shift: [1.234, -0.391] # std, mean from cosmos_f8c16p1_lora.yaml
 img_is_neg_1_1: false # Pansharpening use 0-1 range images

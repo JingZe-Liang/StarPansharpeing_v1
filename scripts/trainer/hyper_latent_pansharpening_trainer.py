@@ -18,7 +18,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
-from accelerate.utils import DummyOptim, DummyScheduler  # ty: ignore
+from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from kornia.contrib import combine_tensor_patches, extract_tensor_patches
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf

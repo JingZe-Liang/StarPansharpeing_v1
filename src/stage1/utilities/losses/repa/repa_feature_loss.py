@@ -45,6 +45,7 @@ from src.stage1.utilities.losses.repa.feature_pca import (
     feature_pca_sk,
     feature_pca_torch,
 )
+from src.utilities.train_utils import time_recorder
 from src.utilities.config_utils import function_config_to_basic_types
 
 # Dino collections
@@ -115,7 +116,8 @@ def interpolate_features_2d(x: Tensor, tgt_size: InterpType) -> Tensor:
     if H == H_tgt and W == W_tgt:
         return x
     else:
-        return F.interpolate(x, size=(H_tgt, W_tgt), mode="bicubic", align_corners=False)
+        # use bicubic may cause low GPU utilitzaiton
+        return F.interpolate(x, size=(H_tgt, W_tgt), mode="bilinear", align_corners=False)
 
 
 def interpolate_features_1d(x, target_len: int):
@@ -138,7 +140,7 @@ def interpolate_features_1d(x, target_len: int):
         x = x.reshape(B, H1, W1, D).permute(0, 3, 1, 2)
 
         # Interpolate
-        x = F.interpolate(x, size=(H2, W2), mode="bicubic", align_corners=False)
+        x = F.interpolate(x, size=(H2, W2), mode="bilinear", align_corners=False)
 
         # Reshape back to sequence
         return x.permute(0, 2, 3, 1).reshape(B, target_len, D)
@@ -1109,7 +1111,7 @@ class REPALoss(torch.nn.Module):
         encoder = self._get_encoder()
 
         # resize images
-        _interp_kwargs = {"input": img, "mode": "bicubic", "align_corners": False}
+        _interp_kwargs = {"input": img, "mode": "bilinear", "align_corners": False}
         if tuple([encoder.image_size] * 2) != size:
             if self.img_resize == "dino":  # to 224 x 224 pretrained size
                 _interp_kwargs["size"] = encoder.image_size
@@ -1127,6 +1129,7 @@ class REPALoss(torch.nn.Module):
         img = self._norm_img_before_repa(img)
         return img
 
+    @time_recorder.record("repa_encode_img")
     @torch.no_grad()
     def _encode_img(
         self,
@@ -1267,6 +1270,7 @@ class REPALoss(torch.nn.Module):
         # multiple layer feature case: [n_layers, bs, c, h, w] or [n_layers, bs, l, c] or list of which
         return teacher_feat, student_feat
 
+    @time_recorder.record("call_repa_loss")
     def repa_loss(self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]):
         # [bs, l, c] or [bs, c, h, w]
         # 1. interpolate
@@ -1350,6 +1354,7 @@ class REPALoss(torch.nn.Module):
 
         return repa_loss
 
+    @time_recorder.record("repa_forward")
     def forward(self, img: Tensor, student_feature: Tensor | list[Tensor]):
         teacher_feat = self._encode_img(img, get_interm_feats=self.get_hier_teacher_feature)
         teacher_feat = teacher_feat.detach() if is_tensor(teacher_feat) else [f.detach() for f in teacher_feat]

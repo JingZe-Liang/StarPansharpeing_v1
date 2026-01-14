@@ -1243,30 +1243,38 @@ def __test_index_file_litdata_loader():
 
 
 def __test_normal_image_loader():
+    from omegaconf import OmegaConf
+    import hydra
     from litdata.streaming.serializers import BytesSerializer, StringSerializer
 
-    path = "data2/RemoteSAM270k/LitData_hyper_images2"
-    stream_ds_kwargs = {
-        "transform_prob": 0.0,
-        "resize_before_transform": 512,
-        "is_cycled": False,
-    }
+    # path = "data2/RemoteSAM270k/LitData_hyper_images2"
+    # stream_ds_kwargs = {
+    #     "transform_prob": 0.0,
+    #     "resize_before_transform": 512,
+    #     "is_cycled": False,
+    # }
     # serializers = {
     #     "__key__": StringSerializer(),
     #     "img": BytesSerializer(),
     # }
-    ds = ImageStreamingDataset.create_dataset(
-        input_dir=path,
-        combined_kwargs={"batching_method": "per_stream"},
-        # serializers=serializers,
-        **stream_ds_kwargs,
-    )
-    loader_kwargs = {
-        "batch_size": 4,
-        "num_workers": 2,
-    }
+    # ds = ImageStreamingDataset.create_dataset(
+    #     input_dir=path,
+    #     combined_kwargs={"batching_method": "per_stream"},
+    #     # serializers=serializers,
+    #     **stream_ds_kwargs,
+    # )
+    # loader_kwargs = {
+    #     "batch_size": 4,
+    #     "num_workers": 2,
+    # }
 
-    dl = StreamingDataLoader(ds, **loader_kwargs)
+    # dl = StreamingDataLoader(ds, **loader_kwargs)
+
+    cfg = OmegaConf.load(
+        "/home/user/zihancao/Project/hyperspectral-1d-tokenizer/scripts/configs/tokenizer_gan/dataset/litdata_one_loader.yaml"
+    )
+    ds, dl = hydra.utils.instantiate(cfg.train_loader)
+
     for sample in dl:
         print(sample["__key__"], sample["img"].shape)
 
@@ -1376,8 +1384,8 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # test_index_file_litdata_loader()
-    # __test_normal_image_loader()
-    __test_gen_loader()
+    __test_normal_image_loader()
+    # __test_gen_loader()
     # __test_ds_len()
     # __test_get_item_key()
     # __test_get_mars_data()

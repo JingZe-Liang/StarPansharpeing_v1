@@ -19,6 +19,7 @@ from kornia.losses import SSIMLoss
 from loguru import logger
 
 from src.utilities.config_utils import function_config_to_basic_types
+from src.utilities.train_utils.time import time_recorder
 from src.stage1.self_supervised.lejepa_aug import SIGReg
 
 from ..model import (
@@ -33,6 +34,7 @@ from ..model import (
 from ..repa import LatentGramLoss, REPALoss, VFLoss
 from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
 from ..latent_reg import lcr_loss
+
 
 # * --- utilities --- #
 
@@ -994,6 +996,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return dict(recon_loss=recon_loss, ssim_loss=ssim_loss)
 
+    @time_recorder.record("vqloss_call_gen_loss")
     def gen_loss(
         self,
         inputs: torch.Tensor,
@@ -1161,6 +1164,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         )
         return gen_loss_for_bkwd, log
 
+    @time_recorder.record("vqloss_call_disc")
     def disc_loss(
         self,
         inputs: torch.Tensor,
