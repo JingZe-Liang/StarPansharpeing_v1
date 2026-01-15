@@ -3,6 +3,7 @@ Type stubs for src.data module.
 Provides type hints for lazy-loaded functions and classes.
 """
 
+from collections.abc import Iterator
 from typing import Any, Callable, Generator, Iterable, Literal, Sequence, Union
 
 # Forward declarations for type hints
@@ -51,6 +52,25 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
 
 class SingleCycleStreamingDataset:
     """Single cycle streaming dataset class."""
+
+    ...
+
+class _TimedLoaderIterator:
+    """Timed loader iterator for performance tracking."""
+
+    def __init__(
+        self,
+        dataloader: Iterable[Any],
+        recorder: Any | None = None,
+        name: str = 'loader_iter'
+    ) -> None: ...
+
+    def __iter__(self) -> "_TimedLoaderIterator": ...
+
+    def __next__(self) -> Any: ...
+
+class SizeBasedBatchsizeStreamingDataloader:
+    """Size-based batch size streaming dataloader."""
 
     ...
 
@@ -113,6 +133,8 @@ __all__: list[str] = [
     "IndexedCombinedStreamingDataset",
     "SingleCycleStreamingDataset",
     "_BaseStreamingDataset",
+    "_TimedLoaderIterator",
+    "SizeBasedBatchsizeStreamingDataloader",
     "MultimodalityDataloader",
     "get_mm_chained_loaders",
     "WindowSlider",

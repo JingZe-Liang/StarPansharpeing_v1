@@ -1825,7 +1825,7 @@ class MingtokRSModel(nn.Module):
 
     def _apply_quantizer(self, h: Tensor) -> QuantizerOutput:
         if self.quantizer_type is None or self.quantizer is None:
-            raise RuntimeError("quantizer未初始化，但调用了_apply_quantizer。")
+            raise RuntimeError("quantizer is not initiliazed, but call `_apply_quantizer`")
 
         h_dtype = h.dtype
         h = h.float()

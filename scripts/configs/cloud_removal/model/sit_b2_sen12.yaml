@@ -1,0 +1,9 @@
+_target_: src.stage2.cloud_removal.model.sit.SiT_B_2
+# SEN12MS-CR is typically 256x256 patches; must match your dataset H/W
+input_size: 256
+# S2 clean / cloudy channels
+in_channels: 13
+# optional conditioning dropout (CFG-style)
+cond_drop_prob: 0.0
+# attention options
+qk_norm: false

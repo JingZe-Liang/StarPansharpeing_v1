@@ -2,6 +2,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Literal
+from collections.abc import Iterable
 
 import numpy as np
 import PIL.Image as Image
@@ -27,6 +28,7 @@ from src.stage2.denoise.utils.noise_adder import (
     get_tokenizer_trainer_noise_adder,
 )
 from src.utilities.config_utils import function_config_to_basic_types, set_defaults
+from src.utilities.train_utils import time_recorder, TimeRecorder
 
 from .augmentations import hyper_transform
 from .utils import large_image_resizer_clipper, norm_img
@@ -695,6 +697,24 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
     #     for mk in self._modality_ds_keys:
     #         sd[mk] = getattr(self, mk).state_dict(**kwargs)
     #     return sd
+
+
+class _TimedLoaderIterator:
+    def __init__(
+        self, dataloader: Iterable[Any], recorder: TimeRecorder | None = time_recorder, name: str = "loader_iter"
+    ) -> None:
+        self._iter = iter(dataloader)
+        self._recorder = recorder
+        self._name = name
+
+    def __iter__(self) -> "_TimedLoaderIterator":
+        return self
+
+    def __next__(self) -> Any:
+        if self._recorder is None:
+            return next(self._iter)
+        with self._recorder.record(self._name):
+            return next(self._iter)
 
 
 class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):

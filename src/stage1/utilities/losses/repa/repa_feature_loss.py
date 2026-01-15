@@ -246,7 +246,7 @@ def token_relation_loss(
         feature_teacher = feature_teacher.flatten(0, 1)  # (bs * l, c)
         feature_student = feature_student.flatten(0, 1)  # (bs * l, c)
 
-    # Normalize features before computing Gram matrix (consistent with DINOv3 GramLoss)
+    # Normalize features before computing Gram matrix (consistent with DINOv3 anchor gram loss)
     if norm:
         feature_teacher = F.normalize(feature_teacher, dim=-1)
         feature_student = F.normalize(feature_student, dim=-1)
@@ -294,9 +294,9 @@ def hier_distillation_loss(
     feature_student,
     dim: int = -2,
     beta: float = 2.0,
-    implem: str = "new",
-    loss_type: str = "cosine",
-    layer_weight_type: str = "softmax",
+    implem: Literal["new", "legacy"] = "new",
+    loss_type: Literal["cosine", "gram"] = "cosine",
+    layer_weight_type: Literal["softmax", "equal", "linear"] = "softmax",
 ):
     """Hierarchical distillation loss for multi-layer feature alignment.
 
@@ -317,6 +317,10 @@ def hier_distillation_loss(
         the influence of dissimilarity on weights. Default is 2.0.
     implem : str, optional
         Implementation method: "legacy" or "new". Default is "new".
+    loss_type: str, optional
+        Loss type: "cosine" or "gram". Default is "cosine".
+    layer_weight_type: str, optional
+        Layer weight type: "softmax", "equal", or "linear". Default is "softmax".
 
     Returns
     -------

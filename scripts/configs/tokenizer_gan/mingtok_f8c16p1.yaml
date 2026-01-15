@@ -212,7 +212,7 @@ train:
   save_every: 1000
   grad_checkpoint: false # model activation checkpoint
   resume_path:
-  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-12_22-13-40_mingtok_RS_tokenizer_f8c16p1/ema
+  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-14_05-31-08_mingtok_RS_tokenizer_f8c16p1/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false

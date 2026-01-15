@@ -470,7 +470,7 @@ def create_unpatcher(
 
 
 class AdaptivePatchEmbedding(PatchEmbed):
-    def __init__(self, in_chans, embed_dim, patch_size: int, **kwargs):
+    def __init__(self, in_chans, embed_dim, patch_size: int, mode: str = "interp", **kwargs):
         super().__init__(
             in_chans=in_chans,
             embed_dim=embed_dim,
@@ -485,7 +485,7 @@ class AdaptivePatchEmbedding(PatchEmbed):
             patch_size,
             padding=0,
             use_bias=kwargs.get("bias", True),
-            mode="interp",  # ['slice', 'interp']
+            mode=mode,  # type: ignore
         )
 
 

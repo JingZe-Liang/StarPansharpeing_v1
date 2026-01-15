@@ -1,0 +1,3 @@
+_target_: src.stage2.cloud_removal.diffusion.vae.CosmosRSVAE
+model_path: runs/pretrained/VAEInterp-f8c16.safetensors
+dtype: bf16

@@ -1,0 +1,7 @@
+_target_: src.stage2.cloud_removal.model.sit.SiT_B_2
+# latent settings for Cosmos_RS VAE (spatial_compression=8, latent_channels=16)
+in_channels: 16
+input_size: 32
+patch_size: 2
+cond_drop_prob: 0.0
+qk_norm: false

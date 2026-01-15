@@ -406,7 +406,7 @@ def forward_augmentation_pipelines(
     return global_views, local_views
 
 
-class AugmentatioBase:
+class AugmentationBase:
     def __init__(
         self,
         n_locals: int = 6,
@@ -431,7 +431,7 @@ class AugmentatioBase:
     def __call__(self, x: torch.Tensor): ...
 
 
-class LeJEPAAugmentation(AugmentatioBase):
+class LeJEPAAugmentation(AugmentationBase):
     def __init__(
         self,
         n_locals: int = 6,

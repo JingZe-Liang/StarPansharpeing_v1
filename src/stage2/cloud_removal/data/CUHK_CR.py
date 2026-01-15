@@ -34,7 +34,7 @@ class CUHK_CR_StreamingDataset(_BaseStreamingDataset):
             img = img * 2 - 1
             gt = gt * 2 - 1
 
-        return {"img": img, "gt": gt, "target": gt, "conditions": img}
+        return {"img": img, "gt": gt, "conditions": img}
 
 
 _TEST = True

@@ -96,6 +96,8 @@ class JsonlSerializer(serializers.Serializer):
 
 
 class TiffFileSerializer(serializers.TIFFSerializer):
+    _transpose = True
+
     def deserialize(self, bytes_data: bytes) -> torch.Tensor | None:
         """Deserialize bytes into an object."""
         bytes_data, valid = _check_valid_obj(bytes_data)
@@ -104,7 +106,7 @@ class TiffFileSerializer(serializers.TIFFSerializer):
 
         arr = super().deserialize(bytes_data)
         # additional transport like in JPEGSerializer
-        if arr.ndim == 3:
+        if arr.ndim == 3 and self._transpose:
             arr = arr.transpose([-1, 0, 1])
         return torch.from_numpy(arr)
 

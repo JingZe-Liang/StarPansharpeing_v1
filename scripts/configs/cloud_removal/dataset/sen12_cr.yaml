@@ -1,0 +1,30 @@
+cfgs:
+  used: sen12_cr
+
+batch_size_train: 8
+batch_size_val: 4
+num_workers: 8
+
+train_loader:
+  _target_: src.stage2.cloud_removal.data.SEN12_CR.SEN12_CR_StreamingDataset.create_dataloader
+  input_dir: data/SEN12MS-CR
+  split: train
+  batch_size: ${dataset.batch_size_train}
+  num_workers: ${dataset.num_workers}
+  shuffle: true
+  return_meta: false
+  to_neg_1_1: true
+  rescale_method: default
+  sar_log1p: false
+
+val_loader:
+  _target_: src.stage2.cloud_removal.data.SEN12_CR.SEN12_CR_StreamingDataset.create_dataloader
+  input_dir: data/SEN12MS-CR
+  split: val
+  batch_size: ${dataset.batch_size_val}
+  num_workers: ${dataset.num_workers}
+  shuffle: false
+  return_meta: false
+  to_neg_1_1: true
+  rescale_method: default
+  sar_log1p: false

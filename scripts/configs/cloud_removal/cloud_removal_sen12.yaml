@@ -1,0 +1,88 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: sen12_cr
+  - accelerator: base
+  - vae: cosmos_rs
+  - model: sit_b2_latent16_ps2
+  - _self_
+
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  mixed_precision: bf16
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.999
+  update_after_step: 1000
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  move_ema_to_online_device: true
+
+loss:
+  _target_: src.stage2.cloud_removal.diffusion.loss.CloudRemovalSILoss
+  prediction: v
+  path_type: ${train.path_type}
+  weighting: ${train.time_weighting}
+  apply_time_shift: ${train.time_shifting}
+  shift_base: ${train.shift_base}
+
+train:
+  proj_dir: runs/stage2_cloud_removal/
+  max_steps: 200_000
+  save_every: 2_000
+  visualize_every: 1_000
+  max_grad_norm: 1.0
+  compile_model: false
+
+  # diffusion settings
+  path_type: linear # [linear, cosine]
+  time_weighting: uniform # [uniform, lognormal]
+  time_shifting: false
+  shift_base: 4096
+
+  # which field to use as condition when VAE is enabled:
+  # - auto/img: use batch["img"] (cloudy) only
+  # - conditions: use batch["conditions"] (may include SAR; must be VAE-encodable)
+  condition_source: auto
+
+  # visualization (S2 default RGB)
+  is_neg_1_1: true
+  visualize_rgb_channels: [4, 3, 2]
+
+  resume_path:
+  ema_load_path:
+
+  cloud_removal_optim:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 1.0e-4
+    weight_decay: 0.01
+    betas: ${tuple:[0.9, 0.999]}
+    eps: 1.0e-8
+    foreach: true
+
+  cloud_removal_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 500
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+
+  log:
+    run_comment: sit_b2_sen12
+    log_with_time: true
+    log_every: 20
+
+  debug: false
+
+val:
+  val_duration: 2_000
+  max_val_iters: 100

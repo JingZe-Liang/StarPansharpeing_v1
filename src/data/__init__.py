@@ -16,6 +16,8 @@ __getattr__, __dir__, __all__ = lazy_loader.attach(
             "IndexedCombinedStreamingDataset",
             "SingleCycleStreamingDataset",
             "_BaseStreamingDataset",
+            "_TimedLoaderIterator",
+            "SizeBasedBatchsizeStreamingDataloader",
         ],
         "multimodal_loader": [
             "MultimodalityDataloader",

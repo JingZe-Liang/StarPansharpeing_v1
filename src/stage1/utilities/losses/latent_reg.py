@@ -25,6 +25,8 @@ __all__ = [
     "lcr_loss",
     "LatentMaskConfig",
     "lmr_apply",
+    "LatentSparsityLoss",
+    "ls_loss",
 ]
 
 
@@ -303,6 +305,106 @@ def lmr_apply(
     return z_masked, mask
 
 
+class LatentSparsityLoss(nn.Module):
+    def __init__(
+        self,
+        dim_z: int,
+        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
+        lambda_v: float = 25.0,
+        lambda_c: float = 1.0,
+        lambda_m: float = 1.0,
+        eps: float = 1e-6,
+    ):
+        """
+        dim_z (int): latent z 的维度 D
+        lambda_l1: L1 范数惩罚权重
+        lambda_l2: L2 hinge 惩罚权重 (使用 sqrt(D) - ||z||_2^2)
+        lambda_v: 方差项权重 (防止维度坍塌)
+        lambda_c: 协方差项权重 (特征去相关)
+        lambda_m: 均值项权重 (公式: (1/ND) sum Z_ij)
+        """
+        super().__init__()
+        self.dim_z = dim_z
+        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
+        self.lambda_v = lambda_v
+        self.lambda_c = lambda_c
+        self.lambda_m = lambda_m
+        self.eps = eps
+
+        # 常量/掩码注册为 buffer，自动跟随 device/dtype
+        self.register_buffer("sqrt_D", torch.sqrt(torch.tensor(float(dim_z))))
+        self.register_buffer("off_diag_mask", ~torch.eye(dim_z, dtype=torch.bool), persistent=False)
+
+    def forward(self, z: torch.Tensor):
+        if z.dim() == 4:
+            z = rearrange(z, "b c h w -> (b h w) c")
+
+        N, D = z.shape
+        if D != self.dim_z:
+            raise ValueError(f"Input dimension {D} doesn't match initialized dimension {self.dim_z}")
+
+        # =====================================================
+        # 1) Energy term: E(z) = λl2 * max(sqrt(D) - ||z||_2^2, 0) + λl1 * ||z||_1
+        # =====================================================
+        z_l1 = torch.norm(z, p=1, dim=1)  # (N,)
+        z_l2_sq = (z**2).sum(dim=1)  # ||z||_2^2, (N,)
+
+        loss_l1 = z_l1.mean()
+
+        sqrt_D = self.sqrt_D.to(device=z.device, dtype=z.dtype)
+        loss_l2 = F.relu(sqrt_D - z_l2_sq).mean()
+
+        energy_loss = self.lambda_l1 * loss_l1 + self.lambda_l2 * loss_l2
+
+        # =====================================================
+        # 2) VCM regularization:
+        #   Mean:  (1/ND) sum_{i,j} Z_ij
+        #   Var:   (1/D) sum_d max(1 - sqrt(Var(Z·,d)), 0)
+        #   Cov:   (1/(D(D-1))) sum_{i!=j} Cov(Z)^2_{i,j}
+        # =====================================================
+
+        # --- Mean (严格按公式) ---
+        loss_mean = z.mean()
+
+        # 中心化（不 detach mean，更贴 VICReg 的梯度路径）
+        mean_z = z.mean(dim=0)  # (D,)
+        z_centered = z - mean_z
+
+        # --- Variance ---
+        # 公式里是 sqrt(Var)（即 std）
+        var_z = z_centered.var(dim=0, unbiased=False)  # (D,)
+        std_z = torch.sqrt(var_z + self.eps)
+        loss_var = F.relu(1.0 - std_z).mean()
+
+        # --- Covariance ---
+        if N > 1:
+            cov = (z_centered.T @ z_centered) / (N - 1)  # (D, D)
+            loss_cov = (cov[self.off_diag_mask] ** 2).mean()
+        else:
+            loss_cov = z.new_tensor(0.0)
+
+        vcm_loss = (self.lambda_v * loss_var) + (self.lambda_c * loss_cov) + (self.lambda_m * loss_mean)
+
+        total_loss = energy_loss + vcm_loss
+
+        logs = {
+            "l1": loss_l1.detach().item(),
+            "l2": loss_l2.detach().item(),
+            "var": loss_var.detach().item(),
+            "cov": loss_cov.detach().item(),
+            "mean": loss_mean.detach().item(),
+        }
+        return total_loss, logs
+
+
+def ls_loss(z: torch.Tensor, **loss_weights):
+    dim = z.shape[1] if z.ndim == 4 else z.shape[-1]  # bchw or bc
+    loss_fn = LatentSparsityLoss(dim_z=dim, **loss_weights).to(z.device)
+    return loss_fn(z)
+
+
 # ------ Tests ------ #
 
 
@@ -323,6 +425,17 @@ def __test_lcr_loss():
     print("lcr_loss:", lcr)
 
 
+def __test_latent_spa_loss():
+    b, c, h, w = 2, 16, 32, 32
+    z = torch.randn(b, c, h, w)
+
+    loss_fn = LatentSparsityLoss(dim_z=c)
+    loss, logs = loss_fn(z)
+    print("loss:", loss)
+    print("logs:", logs)
+
+
 if __name__ == "__main__":
-    __test_lmr_apply()
-    __test_lcr_loss()
+    # __test_lmr_apply()
+    # __test_lcr_loss()
+    __test_latent_spa_loss()

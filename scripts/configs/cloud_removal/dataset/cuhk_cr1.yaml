@@ -1,0 +1,32 @@
+cfgs:
+  used: cuhk_cr1
+
+batch_size_train: 16
+batch_size_val: 16
+num_workers: 8
+
+train_loader:
+  _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset.create_dataloader
+  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  loader_kwargs:
+    batch_size: ${dataset.batch_size_train}
+    num_workers: ${dataset.num_workers}
+    pin_memory: true
+  stream_ds_kwargs:
+    name: cr1
+    split: train
+    shuffle: true
+    to_neg_1_1: true
+
+val_loader:
+  _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset.create_dataloader
+  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  loader_kwargs:
+    batch_size: ${dataset.batch_size_val}
+    num_workers: ${dataset.num_workers}
+    pin_memory: true
+  stream_ds_kwargs:
+    name: cr1
+    split: test
+    shuffle: false
+    to_neg_1_1: true

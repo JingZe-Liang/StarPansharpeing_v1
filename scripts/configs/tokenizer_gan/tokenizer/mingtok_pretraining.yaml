@@ -28,9 +28,9 @@ low_level_encoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
-    adaptive_mode: interp
-    # adaptive_conv_kwargs:
-    #   sitok_reduce: pointwise
+    adaptive_mode: sitok_pointwise
+    adaptive_conv_kwargs:
+      sitok_reduce: pointwise
     downsample_kwargs:
       padconv_use_manually_pad: false
     upsample_kwargs:
@@ -48,9 +48,9 @@ semantic_decoder:
   mlp_ratio: 4.0
   norm_layer: rmsnormfp32
   drop_path: 0.0
-  pe_type: rope
+  pe_type: rope_dinov3
   rope_kwargs:
-    rope_theta: 10000.0
+    rope_theta: 100.0
   last_norm: rmsnormfp32
   img_size: 64
   patcher_type: patch_embedder
@@ -84,15 +84,15 @@ pixel_decoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
-    adaptive_mode: interp
     downsample_kwargs:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
-    # adaptive_conv_kwargs:
-    #   sitok_embed_dim: 64
-    #   sitok_hidden_dim: 64
-    #   sitok_basis_dim: 64
+    adaptive_mode: sitok_pointwise
+    adaptive_conv_kwargs:
+      sitok_embed_dim: 128
+      sitok_hidden_dim: 128
+      sitok_basis_dim: 128
   transformer_decoder:
     in_chan: 768
     out_chan: 768
@@ -104,9 +104,9 @@ pixel_decoder:
     mlp_ratio: 4.0
     norm_layer: rmsnormfp32
     drop_path: 0.0
-    pe_type: rope
+    pe_type: rope_dinov3
     rope_kwargs:
-      rope_theta: 10000.0
+      rope_theta: 100.0
     last_norm: rmsnormfp32
     img_size: 64
     patcher_type: patch_embedder
