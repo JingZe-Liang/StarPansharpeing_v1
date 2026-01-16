@@ -33,7 +33,7 @@ from ..model import (
 )
 from ..repa import LatentGramLoss, REPALoss, VFLoss
 from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
-from ..latent_reg import lcr_loss
+from ..latent_reg import LatentSparsityLoss, lcr_loss
 
 
 # * --- utilities --- #
@@ -339,6 +339,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         lecam_loss_weight: float | None = None,
         lcr_loss_weight: float | None = None,
         lcr_loss_options: dict = {},
+        latent_sparsity_weight: float | None = None,
+        latent_sparsity_options: dict = {},
         # latent regularization loss - penalize large activation values
         latent_reg_weight: float | None = None,
         latent_reg_type: Literal["l2", "abs"] = "l2",
@@ -401,6 +403,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.lcr_loss_weight = lcr_loss_weight
         self.lcr_loss_options = lcr_loss_options
         self.use_lcr = lcr_loss_weight is not None and lcr_loss_weight > 0.0
+        self.latent_sparsity_weight = latent_sparsity_weight
+        self.latent_sparsity_options = latent_sparsity_options
+        self.use_latent_sparsity = latent_sparsity_weight is not None and latent_sparsity_weight > 0.0
+        self.latent_sparsity_fn: LatentSparsityLoss | None = None
         # latent regularization
         self.latent_reg_weight = latent_reg_weight
         self.latent_reg_type = latent_reg_type
@@ -410,6 +416,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
         if self.use_latent_reg:
             logger.info(
                 f"[VQ fn loss]: latent regularization enabled, type={latent_reg_type}, weight={latent_reg_weight}"
+            )
+        if self.use_latent_sparsity:
+            logger.info(
+                f"[VQ fn loss]: latent sparsity enabled, weight={latent_sparsity_weight}, "
+                f"options={latent_sparsity_options}"
             )
         if self.use_sigreg:
             logger.info(f"[VQ fn loss]: sigreg from lejepa is enabled, weight={sigreg_weight}")
@@ -672,6 +683,28 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return d_weight
 
+    def _latent_sparsity_loss(
+        self,
+        latent: torch.Tensor,
+        nll_loss: torch.Tensor,
+        enc_last_layer: nn.Parameter | None,
+    ) -> torch.Tensor:
+        if not self.use_latent_sparsity:
+            return nll_loss.new_tensor(0.0)
+
+        dim_z = latent.shape[1]
+        if self.latent_sparsity_fn is None or self.latent_sparsity_fn.dim_z != dim_z:
+            sparsity_options = dict(self.latent_sparsity_options)
+            sparsity_options.pop("dim_z", None)
+            self.latent_sparsity_fn = LatentSparsityLoss(dim_z=dim_z, **sparsity_options).to(latent.device)
+
+        latent_sparsity_loss, _ = self.latent_sparsity_fn(latent)
+        if latent_sparsity_loss > 0:
+            sparsity_weight = self._calculate_adaptive_weight(nll_loss, latent_sparsity_loss, last_layer=enc_last_layer)
+            latent_sparsity_loss = latent_sparsity_loss * sparsity_weight * self.latent_sparsity_weight
+
+        return latent_sparsity_loss
+
     def _q_loss(
         self,
         q_loss_total: torch.Tensor,
@@ -878,6 +911,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         lcr_loss: torch.Tensor | None = None,
+        latent_sparsity_loss: torch.Tensor | None = None,
         latent_value_reg_loss: torch.Tensor | None = None,
         sigreg_loss: torch.Tensor | None = None,
         # weights ======
@@ -902,6 +936,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
                 # Latent regularization loss
                 "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
+                "latent_sparsity_loss": latent_sparsity_loss.detach().mean()
+                if latent_sparsity_loss is not None
+                else self.zero,
                 "h_value_reg_loss": latent_value_reg_loss.detach().mean()
                 if latent_value_reg_loss is not None and self.use_latent_reg
                 else self.zero,
@@ -931,6 +968,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
                     "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
                     "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
+                    "latent_sparsity_loss": latent_sparsity_loss.detach().mean()
+                    if latent_sparsity_loss is not None
+                    else self.zero,
                     "h_value_reg_loss": latent_value_reg_loss.detach().mean()
                     if latent_value_reg_loss is not None
                     else self.zero,
@@ -1092,6 +1132,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 latent_value_reg_loss = latent.abs().mean()
             latent_value_reg_loss = latent_value_reg_loss * self.latent_reg_weight
 
+        # * latent sparsity loss
+        latent_sparsity_loss = self.zero
+        if self.use_latent_sparsity:
+            assert latent is not None, "latent is required for latent sparsity loss"
+            latent_sparsity_loss = self._latent_sparsity_loss(latent, nll_loss, enc_last_layer)
+
         # * sigreg loss
         sigreg_loss = self.zero
         if self.use_sigreg:
@@ -1133,7 +1179,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * basic losses
         loss = (
-            nll_loss + g_loss + repa_loss + vf_loss + sem_dist_loss + lcr_loss_val + latent_value_reg_loss + sigreg_loss
+            nll_loss
+            + g_loss
+            + repa_loss
+            + vf_loss
+            + sem_dist_loss
+            + lcr_loss_val
+            + latent_sparsity_loss
+            + latent_value_reg_loss
+            + sigreg_loss
         )
 
         # * form logs
@@ -1148,6 +1202,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             lcr_loss=lcr_loss_val,
+            latent_sparsity_loss=latent_sparsity_loss,
             latent_value_reg_loss=latent_value_reg_loss,
             sigreg_loss=sigreg_loss,
             ssim_loss=ssim_loss,
