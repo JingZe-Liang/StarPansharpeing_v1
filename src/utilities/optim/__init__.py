@@ -34,6 +34,8 @@ from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
 from .muon_fused import MuonFSDP
+from .muon_ball_fused import MuonBallFused
+from .spectral_ball_fused import SpectralBallFused
 from .normuon_fused import NorMuonFSDP
 from .muon_triton import Muon as MuonTriton
 from .sana_came import CAME8BitWrapper, CAMEWrapper, Lion
@@ -55,6 +57,8 @@ torch.serialization.add_safe_globals(
         Muon,
         MuonTriton,
         MuonFSDP,
+        MuonBallFused,
+        SpectralBallFused,
         MounFSDP_v1,
         MounFSDP_v2,
         NorMuonFSDP,
