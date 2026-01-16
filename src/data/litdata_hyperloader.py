@@ -31,6 +31,7 @@ from src.utilities.config_utils import function_config_to_basic_types, set_defau
 from src.utilities.train_utils import time_recorder, TimeRecorder
 
 from .augmentations import hyper_transform
+from .cycled_dataset import CycledDataset
 from .utils import large_image_resizer_clipper, norm_img
 
 
@@ -139,24 +140,34 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
 class SingleCycleStreamingDataset(ParallelStreamingDataset):
     def __init__(
         self,
-        dataset: StreamingDataset,  # must be one dataset to cycle
+        dataset: Any,  # can be a wrapper dataset as well
+        *,
         length: int | float | None = float("inf"),
-        *args,
-        **kwargs,
-    ):
-        kwargs.setdefault("seed", 2025)
-        super().__init__([dataset], length=length, transform=self.transform, *args, **kwargs)
+        seed: int = 2025,
+        resume: bool = True,
+        reset_rngs: bool = False,
+        force_override_state_dict: bool = False,
+    ) -> None:
+        super().__init__(
+            cast(list[StreamingDataset], [dataset]),
+            length=length,
+            force_override_state_dict=force_override_state_dict,
+            transform=cast(Any, self._transform),
+            seed=seed,
+            resume=resume,
+            reset_rngs=reset_rngs,
+        )
 
-    def _check_datasets(self, dataset):
+    def _check_datasets(self, datasets: list[StreamingDataset]) -> None:
         # do nothing check
-        return None
+        return
 
-    def transform(self, zipped_samples: zip):
-        (sample_d,) = zipped_samples
+    def _transform(self, samples: tuple[Any, ...], rngs: Any = None) -> Any:
+        (sample_d,) = samples
         return sample_d
 
-    def __getitem__(self, index: int):
-        return self.transform(self.dataset[index])
+    def __getitem__(self, index: int) -> Any:
+        return self._datasets[0][index]
 
 
 class _BaseStreamingDataset(StreamingDataset):
@@ -164,28 +175,28 @@ class _BaseStreamingDataset(StreamingDataset):
     Fixed index file name support.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        input_dir = Path(kwargs.pop("input_dir"))
+    def __init__(self, *, input_dir: str, index_file_name: str | None = None, **kwargs: Any) -> None:
+        input_dir_path = Path(input_dir)
         index_file_name = None
-        if input_dir.is_dir():
+        if input_dir_path.is_dir():
             pass
-        elif Path(input_dir).is_file() and Path(input_dir).suffix == ".json":
-            index_file_name = input_dir.stem
-            input_dir = input_dir.parent
+        elif input_dir_path.is_file() and input_dir_path.suffix == ".json":
+            index_file_name = input_dir_path.stem
+            input_dir_path = input_dir_path.parent
         else:
-            raise ValueError(f"input_dir must be a directory or a index json file, got: {input_dir}")
+            raise ValueError(f"input_dir must be a directory or a index json file, got: {input_dir_path}")
 
         # FIXME: I don't know why the 'index_path' args does not work
-        index_file_name = kwargs.pop("index_file_name", index_file_name)
+        index_file_name = index_file_name or kwargs.pop("index_file_name", None) or index_file_name
         if index_file_name is not None:
-            litdata_utils._INDEX_FILENAME = f"{index_file_name}.json"
+            setattr(litdata_utils, "_INDEX_FILENAME", f"{index_file_name}.json")
 
         kwargs.setdefault("seed", 2025)
-        super().__init__(input_dir=input_dir, *args, **kwargs)
+        super().__init__(input_dir=str(input_dir_path), **kwargs)
 
         # change back
         if index_file_name is not None:
-            litdata_utils._INDEX_FILENAME = "index.json"
+            setattr(litdata_utils, "_INDEX_FILENAME", "index.json")
 
     def _check_datasets(self, datasets: list[StreamingDataset]) -> None:
         """override the original method
@@ -203,8 +214,7 @@ class _BaseStreamingDataset(StreamingDataset):
         other_ds: StreamingDataLoader | list[StreamingDataLoader] | None = None,
         combined_kwargs: dict = {"batching_method": "stratified"},
         is_cycled: bool = False,
-        *args,
-        **kwargs,
+        **kwargs: Any,
     ):
         """
         combined_kwargs: dict
@@ -214,11 +224,11 @@ class _BaseStreamingDataset(StreamingDataset):
             force_override_state_dict: bool = False,
         """
         if isinstance(input_dir, str):
-            ds = cls(input_dir=input_dir, *args, **kwargs)
+            ds = cls(input_dir=input_dir, **kwargs)
         elif isinstance(input_dir, list) and len(input_dir) == 1:
-            ds = cls(input_dir=input_dir[0], *args, **kwargs)
+            ds = cls(input_dir=input_dir[0], **kwargs)
         else:
-            streams = [cls(input_dir=d, *args, **kwargs) for d in input_dir]
+            streams = [cls(input_dir=d, **kwargs) for d in input_dir]
             ds = IndexedCombinedStreamingDataset(datasets=streams, **combined_kwargs)
 
         if other_ds is not None:
@@ -275,10 +285,13 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         ),
         index_file_name: str | None = None,
         check_chans: bool = False,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(index_file_name=index_file_name, *args, **kwargs)
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            input_dir=cast(str, kwargs.pop("input_dir")),
+            index_file_name=index_file_name,
+            **kwargs,
+        )
 
         self.is_hwc = is_hwc
         self.constraint_filtering_size = constraint_filtering_size
@@ -292,9 +305,10 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         self.resize_before_transform = resize_before_transform
         self.use_resize_clip = resize_before_transform is not None
         if self.use_resize_clip:
+            tgt_size = cast(int, resize_before_transform)
             self.resize_clip_fn = large_image_resizer_clipper(
                 img_key=self._img_key,
-                tgt_size=resize_before_transform,
+                tgt_size=tgt_size,
                 op_for_large="clip",
             )
 
@@ -302,7 +316,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         self.use_aug = hyper_transforms_lst is not None and len(hyper_transforms_lst) > 0 and transform_prob > 0.0
         if self.use_aug:
             self.augmentation: Callable = hyper_transform(
-                op_list=hyper_transforms_lst,
+                op_list=cast(tuple[str, ...], hyper_transforms_lst),
                 probs=transform_prob,
                 random_apply=random_apply,
             )
@@ -434,8 +448,8 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
 
 class ConditionsStreamingDataset(_BaseStreamingDataset):
-    def __init__(self, to_neg_1_1=True, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, to_neg_1_1: bool = True, **kwargs: Any) -> None:
+        super().__init__(input_dir=cast(str, kwargs.pop("input_dir")), **kwargs)
         self._condition_keys = ["hed", "segmentation", "sketch", "mlsd"]
         self.to_neg_1_1 = to_neg_1_1
 
@@ -456,8 +470,8 @@ class ConditionsStreamingDataset(_BaseStreamingDataset):
 
 
 class CaptionStreamingDataset(_BaseStreamingDataset):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(input_dir=cast(str, kwargs.pop("input_dir")), **kwargs)
 
     def __getitem__(self, idx):
         # {'caption': dict, 'valid_legth': int}
@@ -490,10 +504,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         self._post_process_type = post_process_type
 
         # patch __init__
-        super().__init__(
-            [img_ds, condition_ds, caption_ds],
-            transform=self.transform,
-        )
+        super().__init__([img_ds, condition_ds, caption_ds], transform=cast(Any, self.transform))
 
         # datasets
         self.img_ds = img_ds
@@ -532,7 +543,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         samples = (self.img_ds[idx], self.condition_ds[idx], self.caption_ds[idx])
         if any(s is None for s in samples):
             return None
-        return self.transform(samples, rng=None)
+        return self.transform(samples, rngs=None)
 
     def _crop_resize(self, d):
         cond_imgs = [d[k] for k in self._condition_keys]
@@ -603,9 +614,9 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
                 return False
         return True
 
-    def transform(self, samples: tuple[dict, ...], rng) -> Any:
+    def transform(self, samples: tuple[Any, ...], rngs: Any = None) -> Any:
         """Static method to transform a dict sample."""
-        img_d, cond_d, caption_d = samples
+        img_d, cond_d, caption_d = cast(tuple[dict[str, Any], dict[str, Any], dict[str, Any]], samples)
 
         # Check if all fully decoded
         if not all(list(map(self.__check_fully_decoded, [img_d, cond_d, caption_d]))):
@@ -780,6 +791,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
                 if collected_keys is None:
                     collected_keys = list(batch.keys())
                     collected_samples = {k: [] for k in collected_keys}
+                assert collected_keys is not None
 
                 needed = target_bs - samples_collected
                 take = min(needed, batch_samples)
@@ -797,6 +809,7 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
 
             if samples_collected == target_bs:
                 final_batch = {}
+                assert collected_keys is not None
                 for k in collected_keys:
                     if torch.is_tensor(collected_samples[k][0]):
                         final_batch[k] = torch.cat(collected_samples[k], dim=0)
@@ -902,7 +915,7 @@ def collate_fn_skip_none(
     """
     checked_n = 0
 
-    def inner(batch: list):
+    def inner(batch: list[Any]) -> Any:
         nonlocal checked_n
 
         # Check if is None
@@ -939,12 +952,9 @@ def collate_fn_skip_none(
                 raise ValueError("Different channel size in the batch.")
             checked_n += 1
 
-        if len(batch) > 0:
-            batch = default_collate(batch)
-        else:
-            batch = None
-
-        return batch
+        if len(batch) == 0:
+            return None
+        return default_collate(batch)
 
     return inner
 
@@ -991,28 +1001,62 @@ def create_hyper_image_litdata_flatten_paths_loader(
         # If it's already a flat list or other type, wrap it
         paths_dict = {"default": [paths, {}]}
 
-    dataset = []
-    for name, (ds_paths, ds_kwargs) in paths_dict.items():
-        ds_kwargs = set_defaults(ds_kwargs, stream_ds_kwargs)
-        ds = ImageStreamingDataset.create_dataset(
-            input_dir=ds_paths,
-            combined_kwargs={"batching_method": "per_stream"},
-            **ds_kwargs,
-        )
-        dataset.append(ds)
+    def _as_paths_list(ds_paths: Any) -> list[str]:
+        if isinstance(ds_paths, str):
+            return [ds_paths]
+        if isinstance(ds_paths, list):
+            if not all(isinstance(p, str) for p in ds_paths):
+                raise TypeError(f"`ds_paths` must be list[str], got: {ds_paths}")
+            return ds_paths
+        raise TypeError(f"`ds_paths` must be str or list[str], got: {type(ds_paths)}")
 
-        logger.info(f"Create dataset for {name} with paths: {ds_paths}")
-        logger.info(f"Dataset has {get_dataset_len(ds)} samples.")
+    grouped_datasets: list[list[Any]] = []
+    expanded_datasets: list[Any] = []
+    expanded_weights: list[float] = []
+
+    if weights is not None and len(weights) != len(paths_dict):
+        raise ValueError(f"`weights` length must match number of datasets: {len(weights)} vs {len(paths_dict)}")
+
+    for group_idx, (name, (ds_paths, ds_kwargs)) in enumerate(paths_dict.items()):
+        ds_kwargs = set_defaults(ds_kwargs, stream_ds_kwargs)
+        is_cycled = bool(ds_kwargs.pop("is_cycled", False))
+        ds_paths_list = _as_paths_list(ds_paths)
+
+        group_leaf: list[Any] = []
+        for p in ds_paths_list:
+            leaf = ImageStreamingDataset.create_dataset(
+                input_dir=p,
+                combined_kwargs={"batching_method": "per_stream"},
+                is_cycled=False,
+                **ds_kwargs,
+            )
+            group_leaf.append(CycledDataset(leaf) if is_cycled else leaf)
+
+        grouped_datasets.append(group_leaf)
+
+        group_weight = 1.0 if weights is None else float(weights[group_idx])
+        expanded_datasets.extend(group_leaf)
+
+        leaf_lens = [float(get_dataset_len(ds)) for ds in group_leaf]
+        total_leaf_len = sum(leaf_lens)
+        if total_leaf_len > 0:
+            expanded_weights.extend([group_weight * (l / total_leaf_len) for l in leaf_lens])
+        else:
+            per_leaf_weight = group_weight / max(1, len(group_leaf))
+            expanded_weights.extend([per_leaf_weight] * len(group_leaf))
+
+        group_len = sum(get_dataset_len(ds) for ds in group_leaf)
+        logger.info(f"Create dataset for {name} with paths: {ds_paths_list}")
+        logger.info(f"Dataset has {group_len} samples.")
         logger.info("---------" * 6 + "\n")
 
-    ds_total = sum(get_dataset_len(ds) for ds in dataset)
-    logger.info(f"Total number of samples: {ds_total}")
+    ds_total_len = sum(get_dataset_len(ds) for ds in expanded_datasets)
+    logger.info(f"Total number of samples: {ds_total_len}")
 
-    # composite
     ds_total = IndexedCombinedStreamingDataset(
         combined_is_cycled=True,
-        datasets=dataset,
-        weights=[1.0] * len(dataset) if weights is None else weights,
+        datasets=expanded_datasets,
+        weights=expanded_weights,
         iterate_over_all=False,
         seed=2025,
         batching_method="per_stream",
@@ -1052,7 +1096,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
                     tqdm=True,
                 )
 
-    return dataset, dataloader
+    return grouped_datasets, dataloader
 
 
 def get_fast_test_hyper_litdata_load(
@@ -1191,29 +1235,29 @@ def __test_create_hyper_image_litdata_loader():
         "num_workers": 16,
         "persistent_workers": False,
         "prefetch_factor": None,
-        "collate_fn": collate_fn_skip_none,
+        "collate_fn": collate_fn_skip_none(),
         "shuffle": False,
     }
 
     # RGB dataset
     stream_ds_kwargs_ = stream_ds_kwargs.copy()
     rgb_paths, kwargs = list(RGB_PATHS.values())[0]
-    stream_ds_kwargs_.update(kwargs)
-    rgb_ds = ImageStreamingDataset.create_dataset(
-        input_dir=rgb_paths,
+    stream_ds_kwargs_.update(kwargs)  # ty: ignore[no-matching-overload]
+    rgb_ds = ImageStreamingDataset.create_dataset(  # ty: ignore[invalid-argument-type]
+        input_dir=rgb_paths,  # ty: ignore[invalid-argument-type]
         combined_kwargs={"batching_method": "stratified"},
-        **stream_ds_kwargs_,
+        **stream_ds_kwargs_,  # ty: ignore[invalid-argument-type]
     )
 
     # Multispectral dataset
     multi_ds = []
     for name, (paths, kwargs) in MULTISPECTRAL_PATHS.items():
         stream_ds_kwargs_ = stream_ds_kwargs.copy()
-        stream_ds_kwargs_.update(kwargs)
-        ds = ImageStreamingDataset.create_dataset(
-            input_dir=paths,
+        stream_ds_kwargs_.update(kwargs)  # ty: ignore[no-matching-overload]
+        ds = ImageStreamingDataset.create_dataset(  # ty: ignore[invalid-argument-type]
+            input_dir=paths,  # ty: ignore[invalid-argument-type]
             combined_kwargs={"batching_method": "stratified"},
-            **stream_ds_kwargs_,
+            **stream_ds_kwargs_,  # ty: ignore[invalid-argument-type]
         )
         multi_ds.append(ds)
 
@@ -1221,11 +1265,11 @@ def __test_create_hyper_image_litdata_loader():
     hyper_ds = []
     for name, (paths, kwargs) in HYPERSPECTRAL_PATHS.items():
         stream_ds_kwargs_ = stream_ds_kwargs.copy()
-        stream_ds_kwargs_.update(kwargs)
-        ds = ImageStreamingDataset.create_dataset(
-            input_dir=paths,
+        stream_ds_kwargs_.update(kwargs)  # ty: ignore[no-matching-overload]
+        ds = ImageStreamingDataset.create_dataset(  # ty: ignore[invalid-argument-type]
+            input_dir=paths,  # ty: ignore[invalid-argument-type]
             combined_kwargs={"batching_method": "stratified"},
-            **stream_ds_kwargs_,
+            **stream_ds_kwargs_,  # ty: ignore[invalid-argument-type]
         )
         hyper_ds.append(ds)
 
@@ -1239,7 +1283,11 @@ def __test_create_hyper_image_litdata_loader():
         iterate_over_all=False,
         batching_method="per_stream",
     )
-    dl = SizeBasedBatchsizeStreamingDataloader(ds, size_based_batch_sizes={128: 16, 256: 12, 512: 6}, **loader_kwargs)
+    dl = SizeBasedBatchsizeStreamingDataloader(  # ty: ignore[invalid-argument-type]
+        ds,
+        size_based_batch_sizes={128: 16, 256: 12, 512: 6},
+        **loader_kwargs,  # ty: ignore[invalid-argument-type]
+    )
 
     return ds, dl
 
@@ -1248,17 +1296,14 @@ def __test_index_file_litdata_loader():
     index_file = "data/RS5M/LitData_images_val/val_index.json"
     input_dir = "data/RS5M/LitData_images_val/"
 
-    stream_ds_kwargs = {
-        "transform_prob": 0.0,
-        "resize_before_transform": 256,
-        "is_cycled": False,
-        "index_file_name": "val_index",
-    }
     ds = ImageStreamingDataset.create_dataset(
         input_dir=input_dir,
         combined_kwargs={"batching_method": "stratified"},
         index_path=index_file,
-        **stream_ds_kwargs,
+        transform_prob=0.0,
+        resize_before_transform=256,
+        is_cycled=False,
+        index_file_name="val_index",
     )
 
 
@@ -1295,8 +1340,19 @@ def __test_normal_image_loader():
     )
     ds, dl = hydra.utils.instantiate(cfg.train_loader)
 
+    print("try to get one sample")
     for sample in dl:
         print(sample["__key__"], sample["img"].shape)
+        break
+
+    print("test get state dict and load state dict")
+    with logger.catch():
+        sd = dl.state_dict()
+        dl.load_state_dict(sd)
+        print("can load state dict.")
+
+    del ds, dl
+    exit(0)
 
 
 def __test_gen_loader():
@@ -1326,16 +1382,13 @@ def __test_gen_loader():
 
 def __test_get_item_key():
     path = "data2/RemoteSAM270k/LitData_hyper_images"
-    stream_ds_kwargs = {
-        "transform_prob": 0.0,
-        "resize_before_transform": 128,
-        "is_cycled": False,
-    }
     ds = ImageStreamingDataset.create_dataset(
         input_dir=path,
         combined_kwargs={"batching_method": "per_stream"},
         # serializers=serializers,
-        **stream_ds_kwargs,
+        transform_prob=0.0,
+        resize_before_transform=128,
+        is_cycled=False,
     )
 
     for i in range(len(ds)):
