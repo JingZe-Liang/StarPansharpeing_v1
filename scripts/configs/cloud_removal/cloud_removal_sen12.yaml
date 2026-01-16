@@ -29,10 +29,10 @@ ema:
 loss:
   _target_: src.stage2.cloud_removal.diffusion.loss.CloudRemovalSILoss
   prediction: v
-  path_type: ${train.path_type}
-  weighting: ${train.time_weighting}
-  apply_time_shift: ${train.time_shifting}
-  shift_base: ${train.shift_base}
+  path_type: linear
+  weighting: uniform
+  apply_time_shift: false
+  shift_base: 4096
 
 train:
   proj_dir: runs/stage2_cloud_removal/
@@ -43,10 +43,10 @@ train:
   compile_model: false
 
   # diffusion settings
-  path_type: linear # [linear, cosine]
-  time_weighting: uniform # [uniform, lognormal]
-  time_shifting: false
-  shift_base: 4096
+  path_type: ${loss.path_type} # [linear, cosine]
+  time_weighting: ${loss.weighting} # [uniform, lognormal]
+  time_shifting: ${loss.apply_time_shift}
+  shift_base: ${loss.shift_base}
 
   # which field to use as condition when VAE is enabled:
   # - auto/img: use batch["img"] (cloudy) only

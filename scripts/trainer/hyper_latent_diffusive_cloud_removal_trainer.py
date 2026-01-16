@@ -35,8 +35,6 @@ from src.utilities.logging import dict_round_to_list_str
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, object_scatter
 from src.utilities.train_utils.visualization import visualize_hyperspectral_image
 
-logger.disable("ema_pytorch")
-
 
 @dataclass(frozen=True)
 class TrainCloudRemovalStepOutput:
@@ -105,7 +103,6 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         self.loss_fn: CloudRemovalSILoss = self._build_loss_fn()
 
         self.train_state = StepsCounter(["train", "val"])
-        torch.cuda.empty_cache()
 
     def _build_vae(self) -> CosmosRSVAE | None:
         if not hasattr(self.cfg, "vae") or self.cfg.vae is None:

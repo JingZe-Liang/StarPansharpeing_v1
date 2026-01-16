@@ -127,7 +127,7 @@ vq_loss:
     repa_model_name: "PE-Spatial-L14-448"
     repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
-    loss_type: hier_distillation
+    loss_type: hier_distillation@gram
     feature_normalize: spatial
     get_hier_teacher_feature: true
   # semantic distillatin loss
@@ -141,7 +141,7 @@ vq_loss:
     repa_model_type: siglip2
     repa_model_name: "google/siglip2-large-patch16-512"
     feature_resample_type: match_teacher
-    loss_type: hier_distillation
+    loss_type: hier_distillation@gram
     feature_normalize: spatial
     get_hier_teacher_feature: true
   # vf loss

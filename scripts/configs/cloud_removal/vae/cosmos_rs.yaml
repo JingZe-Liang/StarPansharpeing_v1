@@ -1,3 +1,3 @@
 _target_: src.stage2.cloud_removal.diffusion.vae.CosmosRSVAE
-model_path: runs/pretrained/VAEInterp-f8c16.safetensors
+model_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
 dtype: bf16

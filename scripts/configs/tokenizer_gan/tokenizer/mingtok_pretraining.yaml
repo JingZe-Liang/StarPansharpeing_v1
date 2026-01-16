@@ -28,9 +28,9 @@ low_level_encoder:
     padding_mode: reflect
     dropout: 0.0
     resolution: 512
-    adaptive_mode: sitok_pointwise
-    adaptive_conv_kwargs:
-      sitok_reduce: pointwise
+    adaptive_mode: interp
+    # adaptive_conv_kwargs:
+    #   sitok_reduce: pointwise
     downsample_kwargs:
       padconv_use_manually_pad: false
     upsample_kwargs:
@@ -88,11 +88,11 @@ pixel_decoder:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
-    adaptive_mode: sitok_pointwise
-    adaptive_conv_kwargs:
-      sitok_embed_dim: 128
-      sitok_hidden_dim: 128
-      sitok_basis_dim: 128
+    adaptive_mode: interp
+    # adaptive_conv_kwargs:
+    #   sitok_embed_dim: 128
+    #   sitok_hidden_dim: 128
+    #   sitok_basis_dim: 128
   transformer_decoder:
     in_chan: 768
     out_chan: 768
