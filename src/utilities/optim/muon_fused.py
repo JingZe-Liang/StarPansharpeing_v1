@@ -23,20 +23,15 @@ class MuonConfig:
 
 def gen_muon_consts(cfg: MuonConfig) -> list[tuple]:
     if cfg.name == "su":
-        abc_s = torch.tensor(
-            [
-                (8.287212018145622, -23.59588651909882, 17.300387312530923),
-                (4.107059111542197, -2.9478499167379084, 0.54484310829266),
-                (3.9486908534822938, -2.908902115962947, 0.5518191394370131),
-                (3.3184196573706055, -2.488488024314878, 0.5100489401237208),
-                (2.3006520199548186, -1.6689039845747518, 0.4188073119525678),
-                (1.8913014077874002, -1.2679958271945908, 0.37680408948524996),
-                (1.875, -1.25, 0.375),
-            ]
-        ).to(torch.float64)
-        denorm = torch.tensor([1.01, 1.01**3, 1.01**5])
-        abc_s = abc_s / denorm[None]
-        abc_s = abc_s.detach().cpu().numpy().tolist()
+        abc_s = [
+            (8.205160841660083, -22.901935266050053, 16.46072465627276),
+            (4.066395089804725, -2.8611542266844125, 0.5183995687182832),
+            (3.909594978763042, -2.823351854742293, 0.5250370015984781),
+            (3.2855640853802908, -2.4153019551207473, 0.4852940692752496),
+            (2.2778733156966533, -1.6198217682227882, 0.39848078792166197),
+            (1.8725756548189942, -1.230704294480799, 0.3585161692646899),
+            (1.8564356610934158, -1.2132377145299476, 0.35679964557408256),
+        ]
     elif cfg.name == "turbo_muon":
         abc_s = [
             (4.0848, -6.8946, 2.9270),
@@ -174,7 +169,7 @@ class MuonFSDP(Muon):
         # muon_abcs = gen_muon_consts(
         #     MuonConfig(name="turbo_muon" if use_preconditioned else "su"),
         # )
-        muon_abcs = gen_muon_consts(MuonConfig(name="turbo_muon"))
+        muon_abcs = gen_muon_consts(MuonConfig(name="su"))
         if newton_schulz_func is not None:
             newton_schulz_func = lambda G, epsilon: zeropower_via_newtonschulz6_diff_abc(
                 G=G,

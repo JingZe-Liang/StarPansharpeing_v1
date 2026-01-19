@@ -120,11 +120,15 @@ class CosmosRSVAE(nn.Module):
             -0.2578125,
         ]
 
-        self.register_buffer("scaling_factor", torch.tensor(sf).view(1, self.latent_channels, 1, 1), persistent=False)
-        self.register_buffer("shift_factor", torch.tensor(sh).view(1, self.latent_channels, 1, 1), persistent=False)
+        self.register_buffer(
+            "scaling_factor", torch.tensor(list(sf)).view(1, self.latent_channels, 1, 1), persistent=False
+        )
+        self.register_buffer(
+            "shift_factor", torch.tensor(list(sh)).view(1, self.latent_channels, 1, 1), persistent=False
+        )
 
     @torch.no_grad()
-    def encode(self, images: Tensor) -> Tensor:
+    def encode(self, images: Tensor, no_std: bool = False) -> Tensor:
         scaling_factor_buf = cast(Tensor, self.scaling_factor)
         shift_factor_buf = cast(Tensor, self.shift_factor)
 
@@ -143,12 +147,12 @@ class CosmosRSVAE(nn.Module):
             z = z["latent"]
         else:
             raise TypeError(f"Unexpected encode output type: {type(z)}")
-
-        z = z.sub(shift_factor.to(z)).div(scaling_factor.to(z))
+        if not no_std:
+            z = z.sub(shift_factor.to(z)).div(scaling_factor.to(z))
         return z
 
     @torch.no_grad()
-    def decode(self, latent: Tensor, *, input_shape: torch.Size | int) -> Tensor:
+    def decode(self, latent: Tensor, *, input_shape: torch.Size | int, no_std: bool = False) -> Tensor:
         scaling_factor_buf = cast(Tensor, self.scaling_factor)
         shift_factor_buf = cast(Tensor, self.shift_factor)
 
@@ -156,7 +160,8 @@ class CosmosRSVAE(nn.Module):
         scaling_factor = _match_dim(scaling_factor_buf.to(latent))
         shift_factor = _match_dim(shift_factor_buf.to(latent))
 
-        latent = latent.mul(scaling_factor.to(latent)).add(shift_factor.to(latent))
+        if not no_std:
+            latent = latent.mul(scaling_factor.to(latent)).add(shift_factor.to(latent))
         with torch.autocast(
             device_type=str(latent.device), dtype=torch.bfloat16 if self._dtype == torch.bfloat16 else torch.float32
         ):

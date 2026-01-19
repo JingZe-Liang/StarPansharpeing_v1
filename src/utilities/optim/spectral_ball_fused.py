@@ -100,11 +100,11 @@ class SpectralBallFused(Optimizer):
         use_nesterov: bool = True,
         weight_decay_method: str = "decoupled",
         fp32_matmul_prec: str = "medium",
-        power_iteration_steps: int = 10,
-        msign_steps: int = 5,
+        power_iteration_steps: int = 10,  # 100 in orignal paper
+        msign_steps: int = 6,
         solver: str = "bisection",
-        solver_tolerance_f: float = 1e-8,
-        solver_max_iterations: int = 100,
+        solver_tolerance_f: float = 2e-4,
+        solver_max_iterations: int = 20,
         radius_mode: str = "spectral_mup",
         radius_scaler: float = 1.0,
         scale_mode: str = "align_adamw_rms",
@@ -223,6 +223,7 @@ class SpectralBallFused(Optimizer):
         retract_mode = cast(str, group["retract_mode"])
         retract_alpha = float(group["retract_alpha"])
         weight_decay_method = cast(str, group.get("weight_decay_method", "decoupled"))
+        m_type = cast(str, group.get("muon_type", "small"))
 
         wd_mult = float(group.get("wd_mult", 1.0))
         weight_decay = float(group.get("weight_decay", 0.0)) * wd_mult
@@ -272,6 +273,7 @@ class SpectralBallFused(Optimizer):
                 retract_mode=retract_mode,
                 retract_alpha=retract_alpha,
                 current_lr=lr,
+                muon_type=m_type,
             )
 
             scale_factor = get_spectral_ball_scale_factor(p.shape[0], p.shape[1], mode=scale_mode)

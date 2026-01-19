@@ -59,7 +59,7 @@ def s2_to_rgb_for_display(
 def s1_to_gray_for_display(
     s1: torch.Tensor,
     *,
-    channel: Literal["vv", "vh", "mean"] = "vv",
+    channel: Literal["vv", "vh", "mean"] = "mean",
     domain: Literal["db", "db10"] = "db",
     linear_compress: Literal["none", "log1p", "sqrt"] = "log1p",
     q_low: float = 0.02,

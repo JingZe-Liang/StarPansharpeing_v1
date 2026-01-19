@@ -6,7 +6,7 @@ hydra:
 defaults:
   # tokenizer ==========
   - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
-  - tokenizer: mingtok_pretraining
+  - tokenizer: mingtok_pretraining_f8
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
@@ -27,8 +27,9 @@ tokenizer:
   tokenizer:
     pretrained_task: []
 
-proxy_task: null
-  # task: ["ijepa"]
+proxy_task:
+  null
+  # task: ["ijepa", "lejepa"]
 
   # loss_weights:
   #   ijepa: 1.
@@ -104,13 +105,24 @@ dataset:
     [30, 25, 15, 10, 10, 10, 15, 10, 5, 15, 15, 15, 16, 10, 16, 10, 11, 20]
 
 vq_loss:
-  # l2 latent regularization loss
+  # l2 latent regularization (sparsity) loss
   latent_reg_weight: null
+  latent_reg_type: l2
+  # Sigreg loss
   sigreg_weight: 1.0e-5
   sigreg_options:
     knots: 17
     rnd_proj_dim: 64
-  latent_reg_type: l2
+  # VICReg loss
+  latent_sparsity_weight: null
+  latent_sparsity_options:
+    dim_z: 64
+    lambda_l1: 0.0
+    lambda_l2: 0.0
+    lambda_v: 25.0
+    lambda_c: 1.0
+    lambda_m: 0.0
+    eps: 1.0e-6
   # perceptual loss
   perceptual_weight: 0.1
   # repa loss
@@ -127,7 +139,7 @@ vq_loss:
     repa_model_name: "PE-Spatial-L14-448"
     repa_model_load_path: "/Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt"
     feature_resample_type: match_teacher
-    loss_type: hier_distillation@gram
+    loss_type: hier_distillation
     feature_normalize: spatial
     get_hier_teacher_feature: true
   # semantic distillatin loss
@@ -141,7 +153,7 @@ vq_loss:
     repa_model_type: siglip2
     repa_model_name: "google/siglip2-large-patch16-512"
     feature_resample_type: match_teacher
-    loss_type: hier_distillation@gram
+    loss_type: hier_distillation
     feature_normalize: spatial
     get_hier_teacher_feature: true
   # vf loss
@@ -212,12 +224,12 @@ train:
   save_every: 1000
   grad_checkpoint: false # model activation checkpoint
   resume_path:
-  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-14_05-31-08_mingtok_RS_tokenizer_f8c16p1/ema
+  ema_load_path: runs/stage1_cosmos_mingtok/2026-01-17_22-13-10_mingtok_RS_tokenizer_f8c16p1/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
   grad_check: false # check per-step gradients
-  proxy_task_train_type: seperated
+  proxy_task_train_type: seperated # ['seperated', 'unified']
 
   # profile
   time_recorder_enable: false

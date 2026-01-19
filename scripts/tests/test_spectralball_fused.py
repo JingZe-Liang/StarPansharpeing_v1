@@ -86,3 +86,42 @@ def test_spectralball_fused_all_oned_when_ignored() -> None:
     optimizer.step()
 
     assert not torch.allclose(linear0.weight.detach(), before)
+
+
+def test_spectralball_fused_conv2d_step_runs() -> None:
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(
+        torch.nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=True),
+        torch.nn.BatchNorm2d(16),
+        torch.nn.Conv2d(16, 8, kernel_size=3, padding=1, bias=True),
+    )
+    conv0 = cast(torch.nn.Conv2d, model[0])
+    conv2 = cast(torch.nn.Conv2d, model[2])
+
+    optimizer = SpectralBallFused.create_spectralball_optimizer(
+        model.named_parameters(),
+        spectralball_params_defaults={
+            "lr": 1e-3,
+            "momentum_beta": 0.9,
+            "weight_decay": 0.0,
+            "power_iteration_steps": 1,
+            "msign_steps": 1,
+            "solver_tolerance_f": 1e-2,
+            "solver_max_iterations": 2,
+            "radius_mode": "identity",
+            "retract_mode": "hard",
+        },
+        oned_params_defaults={"lr": 1e-3, "weight_decay": 0.0},
+        oned_param_algo="adamw",
+    )
+
+    x = torch.randn(2, 3, 8, 8)
+    before_conv0 = conv0.weight.detach().clone()
+    before_conv2 = conv2.weight.detach().clone()
+    loss = model(x).sum()
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    assert not torch.allclose(conv0.weight.detach(), before_conv0)
+    assert not torch.allclose(conv2.weight.detach(), before_conv2)

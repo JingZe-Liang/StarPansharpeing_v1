@@ -325,7 +325,7 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             attn_resolutions: [32]
             channels_mult: [2,4,4]
             spatial_compression: 8
-            num_res_blocks: 1
+            num_res_blocks: 2
             z_channels: ${..z_dim}
             act_checkpoint: true
             norm_type: rmsnorm2dfp32
@@ -339,14 +339,16 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             adaptive_conv_kwargs:
                 sitok_reduce: pointwise
             downsample_kwargs:
-                padconv_use_manually_pad: true
-            dropout: 0.0
+                padconv_use_manually_pad: false
+            upsample_kwargs:
+            interp_type: nearest_interp
+            dropout: 0.1
             resolution: 512
 
     semantic_decoder:
         in_chan: 768
-        out_chan: 1024  #${..low_level_encoder.z_dim}
-        embed_dim: 1024
+        out_chan: 1152  #${..low_level_encoder.z_dim}
+        embed_dim: 1152
         depth: 24
         num_heads: 16
         patch_size: 2
@@ -359,15 +361,16 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
         rope_kwargs:
             rope_theta: 10000.0
         last_norm: rmsnormfp32
-        img_size: 64
+        img_size: 32
         patcher_type: patch_embedder
         additional_pe: true
         n_reg_tokens: 4
         other_blk_kwargs:
             use_gate: true
+            v_residual: false
 
     pixel_decoder:
-        decoder_type: hybrid
+        decoder_type: cnn_only
         latent_dim: ${..low_level_encoder.latent_dim}
         z_dim: ${..low_level_encoder.z_dim}
         total_resolutions: 8
@@ -378,7 +381,7 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
             attn_resolutions: [32]
             channels_mult: [2,4,4]
             spatial_compression: 8
-            num_res_blocks: 2
+            num_res_blocks: 3
             z_channels: ${..z_dim}
             act_checkpoint: true
             norm_type: rmsnorm2dfp32
@@ -393,42 +396,47 @@ def create_default_mingtok_pretrained_cfg() -> DictConfig:
                 sitok_embed_dim: 64
                 sitok_hidden_dim: 64
                 sitok_basis_dim: 64
+            downsample_kwargs:
+                padconv_use_manually_pad: false
+            upsample_kwargs:
+                interp_type: nearest_interp
             dropout: 0.0
             resolution: 512
-        transformer_decoder:
-            in_chan: 768  # if taken z is 512 else is latent, in_chan is 16
-            out_chan: 768
-            embed_dim: 1024
-            depth: 8
-            num_heads: 16
-            patch_size: 2
-            out_patch_size: 2
-            mlp_ratio: 4.0
-            norm_layer: rmsnormfp32
-            drop_path: 0.0
-            pe_type: rope
-            rope_kwargs:
-                rope_theta: 10000.0
-            last_norm: rmsnorm
-            img_size: 64
-            patcher_type: patch_embedder
-            additional_pe: true
-            n_reg_tokens: 4
-            other_blk_kwargs:
-                use_gate: true
+        # transformer_decoder:
+        #     in_chan: 768  # if taken z is 512 else is latent, in_chan is 16
+        #     out_chan: 768
+        #     embed_dim: 1024
+        #     depth: 8
+        #     num_heads: 16
+        #     patch_size: 2
+        #     out_patch_size: 2
+        #     mlp_ratio: 4.0
+        #     norm_layer: rmsnormfp32
+        #     drop_path: 0.0
+        #     pe_type: rope
+        #     rope_kwargs:
+        #         rope_theta: 10000.0
+        #     last_norm: rmsnorm
+        #     img_size: 64
+        #     patcher_type: patch_embedder
+        #     additional_pe: true
+        #     n_reg_tokens: 4
+        #     other_blk_kwargs:
+        #         use_gate: true
 
     repa_proj:
         low_lvl_repa_out_chan: 1024
-        sem_repa_out_chan: 1024
+        sem_repa_out_chan: 1152
         low_lvl_cache_layers: [0,1,2,-1]
         sem_cache_layers: [5,11,17,23]
         low_lvl_repa_proj_chans: [256,512,512,512]
-        sem_repa_proj_chans: [1024,1024,1024,1024]
+        sem_repa_proj_chans: [1152,1152,1152,1152]
 
     tokenizer:
+        sem_decoder_take: h
         straight_through_latent: false
         sem_pix_decoder_type: unified
-        sem_decoder_take: h
+        pix_decoder_type: deterministic
         path_unify:
             uni_type: cat
             hidden_dim: null
@@ -1449,8 +1457,8 @@ class HybridPixelDecoder(nn.Module):
 
         self.decoder_type = decoder_type
         self.latent_dim = cfg.latent_dim
-        res_cfg = cfg.get("res_decoder", None)
-        transf_cfg = cfg.get("transformer_decoder", None)
+        res_cfg = cfg.get("res_decoder", {})
+        transf_cfg = cfg.get("transformer_decoder", {})
         transf_kwargs = dict(**transf_cfg, projections={"input": None, "output": None}, is_causal=False, head="linear")
 
         if decoder_type == "hybrid":
@@ -1493,8 +1501,8 @@ class HybridPixelDecoder(nn.Module):
             x = self.res_decoder(x, inp_shape[1])
 
         elif self.decoder_type == "cnn_only":
-            x, intermidates = self.res_decoder(z, inp_shape[1], ret_all_res_features=get_intermidates)
-            out = {"intermidates": intermidates}
+            x = self.res_decoder(z, inp_shape[1], ret_all_res_features=get_intermidates)
+            # out = {"intermidates": intermidates}
 
         else:  # transformer only
             out = self.transformer_decoder(
@@ -1598,9 +1606,9 @@ class MingtokRSModel(nn.Module):
         decoder_cls: type[nn.Module] = {
             "flow_head": DecoderFlowHead,
             "uvit": DecoderUViT,
-            "hybrid": HybridPixelDecoder,
-        }[self.pixel_cfg.decoder_type]
-        self._is_flow_matching_pix_decoder = self.pixel_cfg.decoder_type in ("flow_head", "uvit")
+            "deterministic": HybridPixelDecoder,
+        }[self.tok_cfg.pix_decoder_type]
+        self._is_flow_matching_pix_decoder = self.tok_cfg.pix_decoder_type in ("flow_head", "uvit")
         self.pixel_decoder: nn.Module = decoder_cls(self.pixel_cfg)
 
         # FIXME: shortcuts for latent, still has bugs.

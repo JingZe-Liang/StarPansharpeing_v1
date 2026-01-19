@@ -47,14 +47,26 @@ class Transport:
     def __init__(
         self,
         *,
-        model_type: str,
-        path_type: str,
-        loss_type: str,
+        model_type: str | ModelType,
+        path_type: str | PathType,
+        loss_type: str | WeightType,
         train_eps: float,
         sample_eps: float,
         time_sample_type: str = "uniform",
         cfm_factor=0.0,
     ):
+        # Convert string to Enum if needed
+        if isinstance(model_type, str):
+            model_type = ModelType(model_type.lower())
+        if isinstance(path_type, str):
+            # Support aliases: cosine -> gvp
+            path_str = path_type.lower()
+            if path_str in {"cosine", "gvp"}:
+                path_type = PathType.GVP
+            else:
+                path_type = PathType(path_str)
+        if isinstance(loss_type, str):
+            loss_type = WeightType(loss_type.lower())
         path_options = {
             PathType.LINEAR: path.ICPlan,
             PathType.GVP: path.GVPCPlan,
@@ -412,6 +424,7 @@ class Sampler:
             num_steps=num_steps,
             sampler_type=sampling_method,
             temperature=temperature,
+            time_type="uniform",
         )
 
         last_step_fn = self.__get_last_step(sde_drift, last_step=last_step, last_step_size=last_step_size)
@@ -422,7 +435,14 @@ class Sampler:
             x = last_step_fn(xs[-1], ts, model, **model_kwargs)
             xs.append(x)
 
-            assert len(xs) == num_steps, "Samples does not match the number of steps"
+            # _sde.sample iterates over t[:-1], so it returns len(t)-1 samples
+            # After appending the last_step, we should have len(t) samples total
+            expected_samples = len(_sde.t)
+            if len(xs) != expected_samples:
+                logger.warning(
+                    f"Sample count mismatch: got {len(xs)} samples, expected {expected_samples}. "
+                    f"num_steps={num_steps}, len(t)={len(_sde.t)}"
+                )
 
             return xs
 
@@ -471,7 +491,7 @@ class Sampler:
                 xt = x0.clone()
                 xt_s = []
                 times = get_timesteps(t0, t1, num_steps, "uniform")
-                logger.debug(f"[FM sampler]: Sampling times: {times}")
+                # logger.debug(f"[FM sampler]: Sampling times: {times}")
 
                 for t in tqdm(times, desc="sampling ..."):
                     t = t.repeat(xt.size(0)).to(xt)

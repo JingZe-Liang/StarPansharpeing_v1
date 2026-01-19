@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -21,19 +24,103 @@ from ema_pytorch import EMA
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.functional.image import peak_signal_noise_ratio
 from tqdm import tqdm, trange
 
+from src.utilities.logging import configure_logger, log
 from src.stage2.cloud_removal.data.sen12_vis import s1_to_gray_for_display
-from src.stage2.cloud_removal.diffusion.loss import (
-    CloudRemovalSILoss,
-    apply_time_shift,
-    estimate_x0_from_v,
-    pack_conditions,
-)
+from src.stage2.cloud_removal.diffusion.loss import apply_time_shift, pack_conditions
 from src.stage2.cloud_removal.diffusion.vae import CosmosRSVAE
 from src.utilities.logging import dict_round_to_list_str
+from src.utilities.transport.flow_matching import Sampler, Transport
+
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, object_scatter
 from src.utilities.train_utils.visualization import visualize_hyperspectral_image
+
+
+def compute_gradient_loss(pred: Tensor, target: Tensor) -> Tensor:
+    """Compute gradient (edge) loss using Sobel operators.
+
+    Args:
+        pred: Predicted tensor [B, C, H, W]
+        target: Target tensor [B, C, H, W]
+
+    Returns:
+        Gradient loss value
+    """
+    # Sobel filters
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=pred.dtype, device=pred.device)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=pred.dtype, device=pred.device)
+
+    sobel_x = sobel_x.view(1, 1, 3, 3).repeat(pred.shape[1], 1, 1, 1)
+    sobel_y = sobel_y.view(1, 1, 3, 3).repeat(pred.shape[1], 1, 1, 1)
+
+    # Compute gradients
+    pred_grad_x = torch.nn.functional.conv2d(pred, sobel_x, padding=1, groups=pred.shape[1])
+    pred_grad_y = torch.nn.functional.conv2d(pred, sobel_y, padding=1, groups=pred.shape[1])
+
+    target_grad_x = torch.nn.functional.conv2d(target, sobel_x, padding=1, groups=target.shape[1])
+    target_grad_y = torch.nn.functional.conv2d(target, sobel_y, padding=1, groups=target.shape[1])
+
+    # L1 loss on gradients
+    loss_x = torch.abs(pred_grad_x - target_grad_x).mean()
+    loss_y = torch.abs(pred_grad_y - target_grad_y).mean()
+
+    return (loss_x + loss_y) / 2.0
+
+
+def compute_fft_high_freq_loss(pred: Tensor, target: Tensor, high_freq_ratio: float = 0.3) -> Tensor:
+    """Compute FFT high-frequency loss.
+
+    Args:
+        pred: Predicted tensor [B, C, H, W]
+        target: Target tensor [B, C, H, W]
+        high_freq_ratio: Ratio of high frequency components to penalize (default 0.3 = top 30%)
+
+    Returns:
+        High-frequency loss value
+    """
+    # FFT on spatial dimensions
+    pred_fft = torch.fft.fft2(pred, dim=(-2, -1))
+    target_fft = torch.fft.fft2(target, dim=(-2, -1))
+
+    # Shift zero frequency to center
+    pred_fft = torch.fft.fftshift(pred_fft, dim=(-2, -1))
+    target_fft = torch.fft.fftshift(target_fft, dim=(-2, -1))
+
+    # Create high-pass mask (keep outer regions, zero center)
+    B, C, H, W = pred.shape
+    center_h, center_w = H // 2, W // 2
+    mask_h = int(H * (1 - high_freq_ratio) / 2)
+    mask_w = int(W * (1 - high_freq_ratio) / 2)
+
+    mask = torch.ones_like(pred_fft.real)
+    mask[..., center_h - mask_h : center_h + mask_h, center_w - mask_w : center_w + mask_w] = 0
+
+    # Apply mask to keep only high frequencies
+    pred_fft_high = pred_fft * mask
+    target_fft_high = target_fft * mask
+
+    # L1 loss on magnitude of high-frequency components
+    pred_mag = torch.abs(pred_fft_high)
+    target_mag = torch.abs(target_fft_high)
+
+    return torch.abs(pred_mag - target_mag).mean()
+
+
+class ModelOutputWrapper(nn.Module):
+    """Wrapper that extracts first element from model tuple output for transport.training_losses."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: Tensor, t: Tensor, **kwargs) -> Tensor:
+        output = self.model(x, t, **kwargs)
+        if isinstance(output, tuple):
+            return output[0]
+        return output
 
 
 @dataclass(frozen=True)
@@ -98,9 +185,11 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
 
         self.vae: CosmosRSVAE | None = self._build_vae()
         self.prepare_for_training()
+        self._initialize_lazy_modules()
         self.prepare_ema_models()
 
-        self.loss_fn: CloudRemovalSILoss = self._build_loss_fn()
+        self.fm_transport: Transport = self._build_flow_matching_transport()
+        self.fm_sampler: Sampler = self._build_flow_matching_sampler(self.fm_transport)
 
         self.train_state = StepsCounter(["train", "val"])
 
@@ -117,19 +206,26 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         self.log_msg(f"[VAE]: loaded {vae.__class__.__name__}")
         return vae
 
-    def _build_loss_fn(self) -> CloudRemovalSILoss:
-        if hasattr(self.cfg, "loss"):
-            loss = hydra.utils.instantiate(self.cfg.loss)
-            if not isinstance(loss, CloudRemovalSILoss):
-                raise TypeError(f"cfg.loss must be CloudRemovalSILoss, got {type(loss)}")
-            return loss
-
-        return CloudRemovalSILoss(
+    def _build_flow_matching_transport(self) -> Transport:
+        return Transport(
+            model_type=getattr(self.train_cfg, "model_type", "x1"),
             path_type=getattr(self.train_cfg, "path_type", "linear"),
-            weighting=getattr(self.train_cfg, "time_weighting", "uniform"),
-            apply_time_shift=bool(getattr(self.train_cfg, "time_shifting", False)),
-            shift_base=int(getattr(self.train_cfg, "shift_base", 4096)),
+            loss_type=getattr(self.train_cfg, "loss_type", "none"),
+            train_eps=float(getattr(self.train_cfg, "train_eps", 1e-4)),
+            sample_eps=float(getattr(self.train_cfg, "sample_eps", 1e-4)),
+            time_sample_type=str(getattr(self.train_cfg, "time_weighting", "uniform")),
         )
+
+    def _build_flow_matching_sampler(self, transport: Transport) -> Sampler:
+        time_type = str(getattr(getattr(self.cfg, "sampler", None), "sampling_time_type", "uniform"))
+        return Sampler(transport, time_type=time_type)
+
+    def _maybe_apply_time_shift(self, t: Tensor, *, x: Tensor) -> Tensor:
+        if not bool(getattr(self.train_cfg, "time_shifting", False)):
+            return t
+        shift_base = int(getattr(self.train_cfg, "shift_base", 4096))
+        shift_dim = int(math.prod(x.shape[1:]))
+        return apply_time_shift(t, shift_dim=shift_dim, shift_base=shift_base)
 
     def setup_cloud_removal_model(self) -> None:
         model_cfg: Any | None = None
@@ -150,10 +246,42 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             self.model = torch.compile(self.model)
             self.log_msg(f"[Model]: compiled {model_name}")
 
+        # Wrap model for transport.training_losses (which expects tensor output)
+        self.model_for_fm = ModelOutputWrapper(self.model)
+
+    def _initialize_lazy_modules(self) -> None:
+        """Initialize any LazyLinear/LazyConv2d modules with a dummy forward pass.
+
+        This is necessary when using lazy_init_ema=True, because EMA will deepcopy
+        the model on first update(), and lazy modules can't be deepcopied until initialized.
+        """
+        self.log_msg("[Model]: initializing lazy modules with dummy forward pass")
+
+        # Get model's expected input channels and size
+        model_unwrapped = self.accelerator.unwrap_model(self.model)
+        in_channels = getattr(model_unwrapped, "in_channels", 16)
+        input_size = getattr(model_unwrapped, "input_size", 64)
+
+        # Create dummy inputs
+        dummy_x = torch.randn(1, in_channels, input_size, input_size, device=self.device, dtype=self.dtype)
+        dummy_t = torch.tensor([0.5], device=self.device, dtype=self.dtype)
+        dummy_cond = torch.randn(1, in_channels, input_size, input_size, device=self.device, dtype=self.dtype)
+
+        # Run a forward pass to initialize lazy modules
+        with torch.no_grad():
+            try:
+                _ = model_unwrapped(dummy_x, dummy_t, conditions=dummy_cond)
+                self.log_msg("[Model]: lazy modules initialized successfully")
+            except Exception as e:
+                self.log_msg(f"[Model]: failed to initialize lazy modules: {e}", level="WARNING")
+
     def prepare_ema_models(self) -> None:
         if self.no_ema:
             return
-        self.ema_model: EMA = hydra.utils.instantiate(self.ema_cfg)(self.model)
+        # Pass the unwrapped model to EMA, because accelerator-wrapped models
+        # may have hooks/buffers that can't be deepcopied
+        model_unwrapped = self.accelerator.unwrap_model(self.model)
+        self.ema_model: EMA = hydra.utils.instantiate(self.ema_cfg)(model_unwrapped)
         self.ema_model.to(self.device)
         self.log_msg("[EMA]: create EMA model")
 
@@ -219,7 +347,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             if self.accelerator.is_main_process:
                 self.logger.info(f"[Tensorboard]: tensorboard saved to {tenb_dir}")
                 self.accelerator.init_trackers("train")
-                self.tb_logger = self.accelerator.get_tracker("tensorboard")  # type: ignore[assignment]
+                self.tb_logger: Unknown = self.accelerator.get_tracker("tensorboard")  # type: ignore[assignment]
 
         return log_file
 
@@ -276,9 +404,9 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg: Any):
-                if "get_muon_optimizer" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_.lower():
                     self.log_msg("[Optimizer]: using muon optimizer")
-                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=self.model.named_parameters())
+                    return hydra.utils.instantiate(optimizer_cfg)(named_parameters=list(self.model.named_parameters()))
                 self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
                 return hydra.utils.instantiate(optimizer_cfg)(self.model.parameters())
 
@@ -365,12 +493,24 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             return tuple(self._encode_if_needed(xx) for xx in x)  # type: ignore[return-value]
         if self.vae is None:
             return x
-        return self.vae.encode(x)
+        with torch.no_grad():
+            if getattr(self, "_check_vae_recon", True):
+                h_ = self.vae.encode(x)
+                recon_ = self.vae.decode(h_, input_shape=x.shape[1])
+                psnr_value = peak_signal_noise_ratio(self.to_rgb(recon_), self.to_rgb(x), data_range=1.0).item()
+                logger.debug(
+                    f"[Check VAE correctness]: PSNR {psnr_value} - latent range {(h_.min().item(), h_.max().item())}"
+                )
+                self._check_vae_recon = False
+                return h_
+            else:
+                return self.vae.encode(x)
 
     def _decode_if_needed(self, z: Tensor, *, input_shape: torch.Size | int) -> Tensor:
         if self.vae is None:
             return z
-        return self.vae.decode(z, input_shape=input_shape)
+        with torch.no_grad():
+            return self.vae.decode(z, input_shape=input_shape)
 
     def train_cloud_removal_step(self, batch: dict[str, Any]) -> TrainCloudRemovalStepOutput:
         gt_px = batch["gt"]
@@ -378,10 +518,40 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
 
         gt = self._encode_if_needed(gt_px)
         conditions = self._encode_if_needed(cond_px) if cond_px is not None else None
+        cond_tensor = pack_conditions(conditions)
 
         with self.accelerator.autocast():
-            loss_vec, t, _, _ = self.loss_fn(self.model, gt, conditions=conditions)
-            loss = loss_vec.mean()
+            t, _, _ = self.fm_transport.sample(gt)
+            t = self._maybe_apply_time_shift(t, x=gt)
+
+            terms = self.fm_transport.training_losses(
+                self.model_for_fm,
+                gt,
+                model_kwargs={"conditions": cond_tensor},
+                t_forced=t,
+            )
+            fm_loss = cast(Tensor, terms["loss"]).mean()
+
+            # Add high-frequency losses if enabled
+            grad_loss_weight = float(getattr(self.train_cfg, "grad_loss_weight", 0.0))
+            fft_loss_weight = float(getattr(self.train_cfg, "fft_loss_weight", 0.0))
+
+            loss = fm_loss
+            grad_loss_val = torch.tensor(0.0, device=fm_loss.device)
+            fft_loss_val = torch.tensor(0.0, device=fm_loss.device)
+
+            if grad_loss_weight > 0 or fft_loss_weight > 0:
+                # Get predicted x1 from terms
+                pred_x1 = cast(Tensor, terms.get("pred_x_clean", terms["pred"]))
+
+                if grad_loss_weight > 0:
+                    grad_loss_val = compute_gradient_loss(pred_x1, gt)
+                    loss = loss + grad_loss_weight * grad_loss_val
+
+                if fft_loss_weight > 0:
+                    high_freq_ratio = float(getattr(self.train_cfg, "fft_high_freq_ratio", 0.3))
+                    fft_loss_val = compute_fft_high_freq_loss(pred_x1, gt, high_freq_ratio=high_freq_ratio)
+                    loss = loss + fft_loss_weight * fft_loss_val
 
         if self.accelerator.sync_gradients:
             self.optim.zero_grad()
@@ -393,7 +563,10 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             self.ema_update()
 
         log_losses = {
-            "denoise_loss": loss.detach(),
+            "loss/total": loss.detach(),
+            "loss/fm": fm_loss.detach(),
+            "loss/grad": grad_loss_val.detach(),
+            "loss/fft": fft_loss_val.detach(),
             "t_mean": t.mean().detach(),
         }
         return TrainCloudRemovalStepOutput(loss=loss, log_losses=log_losses)
@@ -415,6 +588,9 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         only_vis_n: int = 8,
     ) -> None:
         rgb_channels = getattr(self.train_cfg, "visualize_rgb_channels", None)
+        # Convert OmegaConf ListConfig to native Python list for beartype compatibility
+        if rgb_channels is not None and not isinstance(rgb_channels, (list, str)):
+            rgb_channels = list(rgb_channels)
 
         def to_uint8_grid(x: Tensor, text: str = "") -> np.ndarray:
             # Special handling for 2-channel SAR
@@ -474,43 +650,91 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             img_name = f"{img_name}.webp"
         save_path = save_dir / img_name
         if self.accelerator.is_main_process:
+            # Ensure parent directory exists (img_name may contain subdirs like "val/...")
+            save_path.parent.mkdir(parents=True, exist_ok=True)
             from PIL import Image
 
             Image.fromarray(img).save(save_path, quality=95)
             self.log_msg(f"[Visualize]: save visualization at {save_path}")
 
-    def simple_euler_sampler(
+    def general_sampler(
         self,
         model: nn.Module,
         shape: torch.Size,
         conditions: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
-        num_steps: int = 25,
+        sampling_type: str | None = None,
     ) -> Tensor:
-        # Initial noise
-        x = torch.randn(shape, device=self.device, dtype=self.dtype)
+        sampler_cfg = getattr(self.cfg, "sampler", None)
+        if sampling_type is None:
+            if sampler_cfg is None:
+                sampling_type = "ode"
+            else:
+                sampling_type = str(getattr(sampler_cfg, "type", "ode"))
 
-        # Prepare conditions
+        if sampler_cfg is None:
+            # Fallback to defaults if not present
+            num_steps = 25
+            cfg_scale = 1.0
+            time_shifting = bool(getattr(self.train_cfg, "time_shifting", False))
+            shift_base = int(getattr(self.train_cfg, "shift_base", 4096))
+            sampling_time_type = "uniform"
+            progress = False
+            clip_for_x1_pred = False
+        else:
+            num_steps = sampler_cfg.num_steps
+            cfg_scale = sampler_cfg.cfg_scale
+            time_shifting = bool(getattr(sampler_cfg, "time_shifting", False))
+            shift_base = int(getattr(sampler_cfg, "shift_base", 4096))
+            sampling_time_type = str(getattr(sampler_cfg, "sampling_time_type", "uniform"))
+            progress = bool(getattr(sampler_cfg, "progress", False))
+            clip_for_x1_pred = bool(getattr(sampler_cfg, "clip_for_x1_pred", False))
+
+        x0 = torch.randn(shape, device=self.device, dtype=self.dtype)
         cond_tensor = pack_conditions(conditions)
+        do_cfg = cfg_scale > 1.0
 
-        dt = 1.0 / num_steps
+        # Wrap model for sampling
+        model_wrapped = ModelOutputWrapper(model)
 
-        for i in range(num_steps):
-            t_curr = 1.0 - i * dt
-            t_vec = torch.full((x.shape[0],), t_curr, device=x.device, dtype=x.dtype)
-
-            # Apply time shift if usually applied
-            if getattr(self.train_cfg, "time_shifting", False):
-                shift_base = int(getattr(self.train_cfg, "shift_base", 4096))
-                shift_dim = x.shape[1] * x.shape[2] * x.shape[3]
+        def _model_forward(x_in: Tensor, t_vec: Tensor, cond: Tensor | None, uncond: bool) -> Tensor:
+            if time_shifting:
+                shift_dim = int(math.prod(shape[1:]))
                 t_vec = apply_time_shift(t_vec, shift_dim=shift_dim, shift_base=shift_base)
+            return model_wrapped(x_in, t_vec, conditions=cond, uncond=uncond)
 
-            # Model prediction (v)
-            v_pred = model(x, t_vec, conditions=cond_tensor)[0]
+        def _model_fn(x_t: Tensor, t_vec: Tensor, **model_kwargs: Any) -> Tensor:
+            conditions = cast(Tensor | None, model_kwargs.get("conditions"))
+            if do_cfg:
+                x1_cond = _model_forward(x_in=x_t, t_vec=t_vec, cond=conditions, uncond=False)
+                x1_uncond = _model_forward(x_in=x_t, t_vec=t_vec, cond=conditions, uncond=True)
+                return x1_uncond + cfg_scale * (x1_cond - x1_uncond)
+            return _model_forward(x_in=x_t, t_vec=t_vec, cond=conditions, uncond=False)
 
-            # Euler step: x_{t-dt} = x_t - v_t * dt
-            x = x - v_pred * dt
+        if sampling_type == "ode":
+            sample_fn = self.fm_sampler.sample_ode(
+                num_steps=num_steps,
+                sampling_time_type=sampling_time_type,
+                progress=progress,
+                clip_for_x1_pred=clip_for_x1_pred,
+            )
+        elif sampling_type == "sde":
+            sde_kwargs = {}
+            if sampler_cfg is not None:
+                sde_kwargs = {
+                    "sampling_method": str(getattr(sampler_cfg, "sde_sampling_method", "Euler")),
+                    "diffusion_form": str(getattr(sampler_cfg, "sde_diffusion_form", "SBDM")),
+                    "diffusion_norm": float(getattr(sampler_cfg, "sde_diffusion_norm", 1.0)),
+                    "last_step": str(getattr(sampler_cfg, "sde_last_step", "Mean")),
+                    "last_step_size": float(getattr(sampler_cfg, "sde_last_step_size", 0.04)),
+                    "temperature": float(getattr(sampler_cfg, "temperature", 1.0)),
+                }
 
-        return x
+            sample_fn = self.fm_sampler.sample_sde(num_steps=num_steps, **sde_kwargs)
+        else:
+            raise ValueError(f"Unknown sampling type: {sampling_type}")
+
+        samples = sample_fn(x0, _model_fn, conditions=cond_tensor)
+        return cast(Tensor, samples[-1])
 
     def train_step(self, batch: dict[str, Any]) -> None:
         batch = self.to_device_dtype(batch)
@@ -534,18 +758,22 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             model_for_vis = self._get_eval_model()
 
             with torch.no_grad(), self.accelerator.autocast():
-                gt = self._encode_if_needed(gt_px)
+                gt = cast(Tensor, self._encode_if_needed(gt_px))
                 conditions = self._encode_if_needed(cond_px) if cond_px is not None else None
+                cond_tensor = pack_conditions(conditions)
+                t, _, _ = self.fm_transport.sample(gt)
+                t = self._maybe_apply_time_shift(t, x=gt)
 
-                _, t, x_t, v_t = self.loss_fn(model_for_vis, gt, conditions=conditions)
-                x0_hat = estimate_x0_from_v(
-                    x_t,
-                    v_t,
-                    t,
-                    path_type=getattr(self.train_cfg, "path_type", "linear"),
+                # Wrap eval model for transport.training_losses
+                model_for_fm_eval = ModelOutputWrapper(model_for_vis)
+                terms = self.fm_transport.training_losses(
+                    model_for_fm_eval,
+                    gt,
+                    model_kwargs={"conditions": cond_tensor},
+                    t_forced=t,
                 )
-
-                pred_px = self._decode_if_needed(x0_hat, input_shape=gt_px.shape)
+                pred_latent = cast(Tensor, terms.get("pred_x_clean", terms["pred"]))
+                pred_px = self._decode_if_needed(pred_latent, input_shape=gt_px.shape)
 
             self.visualize_triplet(
                 cloudy=cloudy_px,
@@ -615,43 +843,54 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         model_for_eval = self._get_eval_model()
         model_for_eval.eval()
 
-        loss_sum = torch.tensor(0.0, device=self.device)
-        loss_count = 0
+        psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+        ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
+
         last_batch: dict[str, Any] | None = None
+        last_pred_px: Tensor | None = None
         for batch in self.get_val_loader_iter():
             batch = self.to_device_dtype(batch)
             gt_px = batch["gt"]
             cond_px = self._extract_conditions(batch)
-            gt = self._encode_if_needed(gt_px)
-            conditions = self._encode_if_needed(cond_px) if cond_px is not None else None
 
             with self.accelerator.autocast():
-                loss_vec, _, _, _ = self.loss_fn(model_for_eval, gt, conditions=conditions)
-                loss_batch = loss_vec.mean().detach()
-                loss_batch = self.accelerator.gather(loss_batch)
-                loss_sum += loss_batch.sum()
-                loss_count += int(loss_batch.numel())
+                gt_latent = self._encode_if_needed(gt_px)
+                conditions = self._encode_if_needed(cond_px) if cond_px is not None else None
+                pred_latent = self.general_sampler(model_for_eval, gt_latent.shape, conditions=conditions)
+                pred_px = self._decode_if_needed(pred_latent, input_shape=gt_px.shape)
+
+            # torchmetrics expects float tensors; we normalize/clamp into [0, 1]
+            pred_metric = self.to_rgb(pred_px).float()
+            gt_metric = self.to_rgb(gt_px).float()
+            psnr_metric.update(pred_metric, gt_metric)  # type: ignore
+            ssim_metric.update(pred_metric, gt_metric)  # type: ignore
+
             self.step_train_state("val")
             last_batch = batch
+            last_pred_px = pred_px
 
-        loss_val = loss_sum / max(1, loss_count)
+        psnr_val = psnr_metric.compute().detach()  # type: ignore
+        ssim_val = ssim_metric.compute().detach()  # type: ignore
+        psnr_val = self.accelerator.gather(psnr_val).mean()
+        ssim_val = self.accelerator.gather(ssim_val).mean()
+
         if self.accelerator.is_main_process:
-            self.log_msg(f"[Val]: denoise_loss={loss_val.item():.4e}")
-            self.tenb_log_any("metric", {"val/denoise_loss": loss_val.item()}, step=self.global_step)
+            self.log_msg(f"[Val]: psnr={psnr_val.item():.4f} | ssim={ssim_val.item():.4f}")
+            self.tenb_log_any(
+                "metric",
+                {
+                    "val/psnr": float(psnr_val.item()),
+                    "val/ssim": float(ssim_val.item()),
+                },
+                step=self.global_step,
+            )
 
-        if last_batch is not None and self.accelerator.is_main_process:
+        if last_batch is not None and last_pred_px is not None and self.accelerator.is_main_process:
             gt_px = last_batch["gt"]
             cloudy_px = last_batch.get("img", gt_px)
-            cond_px = self._extract_conditions(last_batch)
-            with self.accelerator.autocast():
-                gt = self._encode_if_needed(gt_px)
-                conditions = self._encode_if_needed(cond_px) if cond_px is not None else None
-
-                pred_latent = self.simple_euler_sampler(model_for_eval, gt.shape, conditions=conditions)
-                pred_px = self._decode_if_needed(pred_latent, input_shape=gt_px.shape)
             self.visualize_triplet(
                 cloudy=cloudy_px,
-                pred=pred_px,
+                pred=last_pred_px,
                 gt=gt_px,
                 sar=last_batch.get("s1", None),
                 img_name="val/cloud_removal",
@@ -691,9 +930,10 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         self.train_loop()
 
 
-_key = "cloud_removal_sen12"
+_key = "cuhk_cr1"
 _configs_dict = {
-    "cloud_removal_sen12": "cloud_removal_sen12",
+    "cuhk_cr1": "cloud_removal_cuhk_cr1",
+    "sen12": "cloud_removal_sen12",
 }[_key]
 
 

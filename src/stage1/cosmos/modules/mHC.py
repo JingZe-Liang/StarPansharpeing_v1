@@ -280,7 +280,7 @@ class HyperConnections(Module):
         init_alpha0 = torch.zeros((num_residual_streams_fracs, num_input_views_fracs))
         init_alpha0[init_residual_index, :] = 1.0
 
-        self.static_alpha = nn.Parameter(cat((init_alpha0, torch.eye(num_residual_streams_fracs)), dim=1))
+        self.static_alpha = nn.Parameter(torch.cat((init_alpha0, torch.eye(num_residual_streams_fracs)), dim=1))
 
         self.dynamic_alpha_fn = nn.Parameter(torch.zeros(dim, num_residual_streams_fracs + num_input_views_fracs))
         self.dynamic_alpha_scale = nn.Parameter(torch.ones(()) * 1e-2)

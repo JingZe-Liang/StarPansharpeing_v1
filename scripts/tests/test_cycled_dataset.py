@@ -59,3 +59,10 @@ def test_cycled_dataset_load_state_dict_forwards() -> None:
     cyc.load_state_dict({"dataset": {"hello": "world"}, "current_epoch": 7})
     assert ds.loaded_state_dict == {"hello": "world"}
     assert cyc.current_epoch == 7
+
+
+def test_cycled_dataset_empty_iter_yields_none() -> None:
+    ds = _DummyFiniteIterable(0)
+    cyc = CycledDataset(ds)
+    it = iter(cyc)
+    assert next(it) is None

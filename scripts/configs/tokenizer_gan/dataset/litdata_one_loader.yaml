@@ -48,6 +48,7 @@ train_loader:
             "data/RSCaptions/LitData_conditions",
           ]
         - resize_before_transform: 512
+          force_to_rgb: true
 
     multispectral_paths:
       4bands_512:
@@ -144,7 +145,7 @@ train_loader:
   macro_sampled_batch_size: {128: 12, 256: 12, 512: 6}
 
   loader_kwargs:
-    num_workers: 20
+    num_workers: 16
     pin_memory: true
     drop_last: true
     persistent_workers: true

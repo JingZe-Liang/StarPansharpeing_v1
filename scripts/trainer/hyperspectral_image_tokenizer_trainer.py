@@ -4,7 +4,6 @@ import random
 import re
 import sys
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
@@ -88,7 +87,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self._time_recorder_duration = int(getattr(self.train_cfg, "time_recorder_duration", -1))
 
         # accelerator
-        self.accelerator: Accelerator = hydra.utils.instantiate(cfg.accelerator)
+        self.accelerator = cast(Accelerator, hydra.utils.instantiate(cfg.accelerator))
         self._trackers_name = self.train_cfg.log.log_with
         accelerate.utils.set_seed(2025)
 
@@ -228,6 +227,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # Training state counter
         self.train_state = StepsCounter(["train"])
+
+        self.accelerator.prepare_model
 
     def _encode_dino_cls(self, model: nn.Module, x: torch.Tensor) -> torch.Tensor:
         encode_fn = getattr(model, "encode_dino_cls", None)
@@ -986,7 +987,8 @@ class CosmosHyperspectralTokenizerTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg, params_getter: Callable, no_wd_param_names: list[str] | None):
-                if "muon" in optimizer_cfg._target_ or "adam_mini" in optimizer_cfg._target_:
+                # if "muon" in optimizer_cfg._target_ or "adam_mini" in optimizer_cfg._target_:
+                if any(x in optimizer_cfg._target_ for x in ["muon", "adam_mini", "muonball", "spectralball"]):
                     self.log_msg(f"[Optimizer]: using {optimizer_cfg._target_} optimizer")
                     # is muon optimizer function
                     named_params = params_getter(with_name=True)
@@ -1676,7 +1678,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # back
         if ema:
-            self.vq_loss_fn.discriminator = _non_ema_disc
+            self.vq_loss_fn.discriminator = _non_ema_disc  # type: ignore
 
         return loss, log_disc
 
@@ -2163,6 +2165,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 _selects.append("lcr_loss")
             if self.vq_loss_fn.use_sigreg:
                 _selects.append("sigreg_loss")
+            if self.vq_loss_fn.use_latent_sparsity:
+                _selects.append("latent_sparsity_loss")
             if self.vq_loss_fn.use_latent_reg:
                 _selects.append("h_value_reg_loss")
             if self.vq_loss_fn.use_ssim:
@@ -2756,7 +2760,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.proxy_aug_manager.shutdown()
 
 
-_key = "mingtok_f8c16p1"
+_key = "ijepa_cosmos_f8c32_mHC"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2797,6 +2801,7 @@ _configs_dict = {
     # pretraining tokenizer
     "ijepa_cosmos_f16c64": "ijepa_hybrid_tokenizer_f16c64",
     "ijepa_cosmos_f16c64_pure_cnn_decoder": "ijepa_hybrid_tokenizer_cnn_decoder_f16c64",
+    "ijepa_cosmos_f8c32_mHC": "ijepa_hybrid_tokenizer_f8_mHC",
     "lejepa_cosmos_f16c64": "lejepa_hybrid_tokenizer_f16c64",
     "mae_cosmos_f8c64": "mae_hybrid_tokenizer_f8c64",
     "ibot_lejepa_cosmos_f8c32": "ibot_lejepa_hybrid_tokenizer_f8c32",  # OOM !

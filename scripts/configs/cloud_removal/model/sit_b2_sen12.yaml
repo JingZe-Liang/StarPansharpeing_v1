@@ -4,6 +4,6 @@ input_size: 256
 # S2 clean / cloudy channels
 in_channels: 13
 # optional conditioning dropout (CFG-style)
-cond_drop_prob: 0.0
+cond_drop_prob: 0.1
 # attention options
 qk_norm: false

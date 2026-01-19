@@ -26,11 +26,16 @@ class CycledDataset(torch.utils.data.IterableDataset):
     def __iter__(self) -> Iterator[Any]:
         while True:
             iterator = iter(self._dataset)
+            yielded_any = False
             while True:
                 try:
-                    yield next(iterator)
+                    item = next(iterator)
                 except StopIteration:
                     break
+                yielded_any = True
+                yield item
+            if not yielded_any:
+                yield None
 
     def set_epoch(self, current_epoch: int) -> None:
         self.current_epoch = current_epoch
@@ -59,7 +64,11 @@ class CycledDataset(torch.utils.data.IterableDataset):
 
     def state_dict(self, num_samples_yielded: int, num_workers: int, batch_size: int) -> dict[str, Any]:
         cycle_length = len(self)
-        in_cycle = _samples_in_cycle(num_samples_yielded=num_samples_yielded, cycle_length=cycle_length)
+        in_cycle = (
+            0
+            if cycle_length <= 0
+            else _samples_in_cycle(num_samples_yielded=num_samples_yielded, cycle_length=cycle_length)
+        )
 
         dataset_state = {}
         if hasattr(self._dataset, "state_dict"):

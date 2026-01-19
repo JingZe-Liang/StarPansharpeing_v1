@@ -41,7 +41,7 @@ def get_timesteps(
             t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
         return t
 
-    if time_type == "uniform":
+    if time_type in ("uniform", "linear"):
         t = th.linspace(t0, t1, num_steps)
     else:
         t_typ = time_type.split("_")
@@ -72,10 +72,13 @@ def get_timesteps(
         else:
             raise NotImplementedError(f"Time type {time_type} is not supported.")
 
-    # Ensure the last timestep is 1.
-    if float(t[-1]) != 1.0:
+    # Ensure the last timestep is 1.0 (with tolerance for floating point precision)
+    if abs(float(t[-1]) - 1.0) > 1e-6:
         logger.warning(f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0.")
         t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
+    else:
+        # Ensure exact 1.0 for the last timestep
+        t[-1] = 1.0
 
     return t
 
@@ -90,7 +93,7 @@ class sde:
         *,
         t0,
         t1,
-        time_type="linear",
+        time_type="uniform",
         num_steps,
         sampler_type,
         temperature=1.0,
@@ -146,9 +149,24 @@ class sde:
         mean_x = init
         samples = []
         sampler = self.__forward_fn()
-        for ti in self.t[:-1]:
+        for i, ti in enumerate(self.t[:-1]):
             with th.no_grad():
                 x, mean_x = sampler(x, mean_x, ti, model, **model_kwargs)
+
+                # Check for numerical instability
+                if th.isnan(x).any() or th.isinf(x).any():
+                    logger.error(
+                        f"[SDE Sampling] Numerical instability detected at step {i}/{len(self.t) - 1}, t={ti:.4f}\\n"
+                        f"  - x has NaN: {th.isnan(x).any()}, Inf: {th.isinf(x).any()}\n"
+                        f"  - x range: [{x.min():.4f}, {x.max():.4f}]\n"
+                        f"  - mean_x range: [{mean_x.min():.4f}, {mean_x.max():.4f}]\n"
+                        f"  - dt: {self.dt:.6f}, temperature: {self.temperature}"
+                    )
+                    raise ValueError(
+                        f"SDE sampling diverged at step {i}. "
+                        "Try reducing temperature, increasing num_steps, or checking model outputs."
+                    )
+
                 samples.append(x)
 
         return samples

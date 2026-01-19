@@ -2,7 +2,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Literal
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 import numpy as np
 import PIL.Image as Image
@@ -136,6 +136,60 @@ class IndexedCombinedStreamingDataset(CombinedStreamingDataset):
 
         return self._datasets[ds_idx][sample_idx]
 
+    def _split_num_samples_yielded(self, total: int) -> list[int]:
+        if total <= 0 or len(self._datasets) == 0:
+            return [0 for _ in range(len(self._datasets))]
+
+        weights = list(self._weights) if self._weights is not None else []
+        clean_weights = [float(w) if w is not None and float(w) > 0 else 0.0 for w in weights]
+
+        if len(clean_weights) != len(self._datasets):
+            clean_weights = [0.0 for _ in range(len(self._datasets))]
+
+        weight_sum = sum(clean_weights)
+        if weight_sum <= 0:
+            lens = [max(int(get_dataset_len(ds)), 0) for ds in self._datasets]
+            len_sum = sum(lens)
+            if len_sum <= 0:
+                per = total // max(1, len(self._datasets))
+                out = [per for _ in range(len(self._datasets))]
+                out[0] += total - sum(out)
+                return out
+            clean_weights = [l / len_sum for l in lens]
+        else:
+            clean_weights = [w / weight_sum for w in clean_weights]
+
+        raw = [total * w for w in clean_weights]
+        counts = [int(v) for v in raw]
+        remainder = total - sum(counts)
+        if remainder > 0:
+            frac = [rv - int(rv) for rv in raw]
+            for idx in sorted(range(len(frac)), key=lambda i: frac[i], reverse=True)[:remainder]:
+                counts[idx] += 1
+        return counts
+
+    def state_dict(
+        self,
+        num_workers: int,
+        batch_size: int,
+        num_samples_yielded: int | list[int] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(num_samples_yielded, int):
+            num_samples_yielded = self._split_num_samples_yielded(num_samples_yielded)
+        return super().state_dict(num_workers, batch_size, num_samples_yielded)
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if not state_dict:
+            return
+        if "dataset" in state_dict:
+            super().load_state_dict(state_dict)
+            return
+
+        for dataset_idx, dataset in enumerate(self._datasets):
+            key = str(dataset_idx)
+            if key in state_dict:
+                dataset.load_state_dict(state_dict[key])
+
 
 class SingleCycleStreamingDataset(ParallelStreamingDataset):
     def __init__(
@@ -168,6 +222,66 @@ class SingleCycleStreamingDataset(ParallelStreamingDataset):
 
     def __getitem__(self, index: int) -> Any:
         return self._datasets[0][index]
+
+    def __iter__(self) -> Iterator[Any]:
+        while True:
+            iterator = super().__iter__()
+            yielded_any = False
+            while True:
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                yielded_any = True
+                yield item
+
+            if not yielded_any:
+                yield None
+
+    def state_dict(
+        self,
+        num_workers: int,
+        batch_size: int,
+        num_samples_yielded: int | list[int] | None = None,
+    ) -> dict[str, Any]:
+        inner = self._datasets[0]
+        if isinstance(num_samples_yielded, list):
+            total_yielded = int(num_samples_yielded[0]) if len(num_samples_yielded) > 0 else 0
+        elif isinstance(num_samples_yielded, int):
+            total_yielded = int(num_samples_yielded)
+        else:
+            total_yielded = 0
+
+        if hasattr(inner, "state_dict"):
+            cycle_length = int(len(inner)) if hasattr(inner, "__len__") else 0
+            in_cycle = 0 if cycle_length <= 0 else (total_yielded % cycle_length)
+            return {
+                "0": inner.state_dict(
+                    num_samples_yielded=in_cycle,
+                    num_workers=num_workers,
+                    batch_size=batch_size,
+                )
+            }
+
+        return {
+            "0": {"num_samples_yielded": total_yielded, "num_workers": int(num_workers), "batch_size": int(batch_size)}
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        inner = self._datasets[0]
+        if not state_dict:
+            return
+
+        if "dataset" in state_dict:
+            super().load_state_dict(state_dict)
+            return
+
+        if "0" in state_dict and hasattr(inner, "load_state_dict"):
+            inner.load_state_dict(state_dict["0"])
+            return
+
+        if hasattr(inner, "load_state_dict"):
+            inner.load_state_dict(state_dict)
 
 
 class _BaseStreamingDataset(StreamingDataset):
@@ -844,6 +958,8 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
 
     def __iter__(self):
         for batch in super().__iter__():
+            if batch is None:
+                continue
             img = batch["img"]
             size = img.shape[-1]  # bs, c, h, w
             channel = img.shape[1]  # bs, c, h, w
@@ -982,6 +1098,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
         256: 12,
         512: 6,
     },
+    use_itered_cycle: bool = True,
     _collect_stats: bool = False,
 ):
     def _flatten_paths(d: dict[str, Any]) -> dict[str, list]:
@@ -1010,7 +1127,6 @@ def create_hyper_image_litdata_flatten_paths_loader(
             return ds_paths
         raise TypeError(f"`ds_paths` must be str or list[str], got: {type(ds_paths)}")
 
-    grouped_datasets: list[list[Any]] = []
     expanded_datasets: list[Any] = []
     expanded_weights: list[float] = []
 
@@ -1022,30 +1138,45 @@ def create_hyper_image_litdata_flatten_paths_loader(
         is_cycled = bool(ds_kwargs.pop("is_cycled", False))
         ds_paths_list = _as_paths_list(ds_paths)
 
-        group_leaf: list[Any] = []
-        for p in ds_paths_list:
-            leaf = ImageStreamingDataset.create_dataset(
-                input_dir=p,
+        group_weight = 1.0 if weights is None else float(weights[group_idx])
+        logger.debug(f"Dataset group: {name}, weight: {group_weight}")
+
+        if use_itered_cycle:
+            #  use itered cycle dataset
+            group_ds = ImageStreamingDataset.create_dataset(
+                input_dir=ds_paths_list,
                 combined_kwargs={"batching_method": "per_stream"},
-                is_cycled=False,
+                is_cycled=is_cycled,
                 **ds_kwargs,
             )
-            group_leaf.append(CycledDataset(leaf) if is_cycled else leaf)
 
-        grouped_datasets.append(group_leaf)
-
-        group_weight = 1.0 if weights is None else float(weights[group_idx])
-        expanded_datasets.extend(group_leaf)
-
-        leaf_lens = [float(get_dataset_len(ds)) for ds in group_leaf]
-        total_leaf_len = sum(leaf_lens)
-        if total_leaf_len > 0:
-            expanded_weights.extend([group_weight * (l / total_leaf_len) for l in leaf_lens])
+            expanded_datasets.append(group_ds)
+            expanded_weights.append(group_weight)
+            group_len = int(get_dataset_len(group_ds))
         else:
-            per_leaf_weight = group_weight / max(1, len(group_leaf))
-            expanded_weights.extend([per_leaf_weight] * len(group_leaf))
+            # use flatten dataset and then combined dataset
+            group_leaf: list[Any] = []
+            for p in ds_paths_list:
+                leaf = ImageStreamingDataset.create_dataset(
+                    input_dir=p,
+                    combined_kwargs={"batching_method": "per_stream"},
+                    is_cycled=False,
+                    **ds_kwargs,
+                )
+                group_leaf.append(CycledDataset(leaf) if is_cycled else leaf)
 
-        group_len = sum(get_dataset_len(ds) for ds in group_leaf)
+            expanded_datasets.extend(group_leaf)
+
+            leaf_lens = [float(get_dataset_len(ds)) for ds in group_leaf]
+            total_leaf_len = sum(leaf_lens)
+            if total_leaf_len > 0:
+                expanded_weights.extend([group_weight * (l / total_leaf_len) for l in leaf_lens])
+            else:
+                per_leaf_weight = group_weight / max(1, len(group_leaf))
+                expanded_weights.extend([per_leaf_weight] * len(group_leaf))
+
+            group_len = sum(get_dataset_len(ds) for ds in group_leaf)
+
         logger.info(f"Create dataset for {name} with paths: {ds_paths_list}")
         logger.info(f"Dataset has {group_len} samples.")
         logger.info("---------" * 6 + "\n")
@@ -1053,6 +1184,8 @@ def create_hyper_image_litdata_flatten_paths_loader(
     ds_total_len = sum(get_dataset_len(ds) for ds in expanded_datasets)
     logger.info(f"Total number of samples: {ds_total_len}")
 
+    # logger.info(f"Expanded datasets: {expanded_datasets}")
+    logger.info(f"Expanded weights: {expanded_weights}")
     ds_total = IndexedCombinedStreamingDataset(
         combined_is_cycled=True,
         datasets=expanded_datasets,
@@ -1096,7 +1229,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
                     tqdm=True,
                 )
 
-    return grouped_datasets, dataloader
+    return expanded_datasets, dataloader
 
 
 def get_fast_test_hyper_litdata_load(
@@ -1341,9 +1474,19 @@ def __test_normal_image_loader():
     ds, dl = hydra.utils.instantiate(cfg.train_loader)
 
     print("try to get one sample")
-    for sample in dl:
-        print(sample["__key__"], sample["img"].shape)
-        break
+
+    from tqdm import tqdm
+
+    _break_i = 1000
+    c_d = {}
+    for i, sample in enumerate(dl):
+        # print(sample["img"].shape)
+        b, c = sample["img"].shape[:2]
+
+        c_d[c] = c_d.get(c, 0) + b
+        print(f"{c_d}")
+        if i >= _break_i:
+            break
 
     print("test get state dict and load state dict")
     with logger.catch():

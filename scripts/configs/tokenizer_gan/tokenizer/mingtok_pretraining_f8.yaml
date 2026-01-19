@@ -1,0 +1,153 @@
+_target_: src.stage1.cosmos.cosmos_mingtok.MingtokRSModel.create_model
+low_level_encoder:
+  z_dim: 768
+  latent_dim: 32
+  encoder_type: cnn_only
+  # latent projection before post-norm/clip
+  # choices: [conv_1x1, conv_3x3, norm_act_conv3x3]
+  norm_latent_type: null
+  latent_proj_type: null
+  clip_latent_value: null
+  skip_z_to_latent: true
+  res_encoder:
+    in_channels: 512
+    out_channels: 512
+    channels: 128
+    attn_resolutions: [32]
+    channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    num_res_blocks: 2
+    z_channels: ${..z_dim}
+    act_checkpoint: true
+    norm_type: rmsnorm2dfp32
+    block_name: res_block
+    use_residual_factor: false # layerscale starts at 1e-2
+    patch_method: haar
+    patch_size: 1
+    attn_type: null
+    padding_mode: reflect
+    dropout: 0.1
+    resolution: 512
+    adaptive_mode: interp
+    # adaptive_conv_kwargs:
+    #   sitok_reduce: pointwise
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
+
+semantic_decoder:
+  in_chan: 768
+  out_chan: 1152 #${..low_level_encoder.z_dim}
+  embed_dim: 1152
+  depth: 24
+  num_heads: 16
+  patch_size: 2
+  out_patch_size: 2
+  mlp_ratio: 4.0
+  norm_layer: rmsnormfp32
+  drop_path: 0.2
+  pe_type: rope
+  rope_kwargs:
+    rope_theta: 10000.0
+  last_norm: rmsnormfp32
+  img_size: 32
+  patcher_type: patch_embedder
+  additional_pe: true
+  with_cls_token: true
+  n_reg_tokens: 4
+  other_blk_kwargs:
+    use_gate: true
+    v_residual: false
+
+pixel_decoder:
+  decoder_type: cnn_only
+  latent_dim: ${..low_level_encoder.latent_dim}
+  z_dim: ${..low_level_encoder.z_dim}
+  total_resolutions: 8
+  res_decoder:
+    in_channels: 768
+    out_channels: 768
+    channels: 128
+    attn_resolutions: [32]
+    channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    num_res_blocks: 3
+    z_channels: ${..z_dim}
+    act_checkpoint: true
+    norm_type: rmsnorm2dfp32
+    block_name: res_block
+    use_residual_factor: false
+    patch_method: haar
+    patch_size: 1
+    attn_type: null
+    padding_mode: reflect
+    dropout: 0.0
+    resolution: 512
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
+    adaptive_mode: interp
+    # adaptive_conv_kwargs:
+    #   sitok_embed_dim: 128
+    #   sitok_hidden_dim: 128
+    #   sitok_basis_dim: 128
+  # transformer_decoder:
+  #   in_chan: 768
+  #   out_chan: 768
+  #   embed_dim: 1024
+  #   depth: 8
+  #   num_heads: 16
+  #   patch_size: 2
+  #   out_patch_size: 2
+  #   mlp_ratio: 4.0
+  #   norm_layer: rmsnormfp32
+  #   drop_path: 0.0
+  #   pe_type: rope
+  #   rope_kwargs:
+  #     rope_theta: 10000.0
+  #   last_norm: rmsnormfp32
+  #   img_size: 64
+  #   patcher_type: patch_embedder
+  #   additional_pe: true
+  #   with_cls_token: false
+  #   n_reg_tokens: 0
+  #   other_blk_kwargs:
+  #     use_gate: true
+  #     v_residual: false
+
+repa_proj:
+  low_lvl_repa_out_chan: 1024
+  sem_repa_out_chan: 1024
+  low_lvl_cache_layers: [0, 1, 2, -1]
+  sem_cache_layers: [5, 11, 17, 23]
+  low_lvl_repa_proj_chans: [256, 512, 512, 512]
+  sem_repa_proj_chans: [1152, 1152, 1152, 1152]
+
+tokenizer:
+  sem_decoder_take: h
+  sem_pix_decoder_type: unified
+  pix_decoder_type: deterministic
+  straight_through_latent: false
+  path_unify:
+    uni_type: cat
+    hidden_dim: null
+  sampling_options_default: {}
+  # quantizer
+  quantizer_type: null # [kl, bsq, fsq, multiscale_bsq, multiscale_leechq, psd]
+  random_quant: 0.0
+  fsq_num_codebooks: 6
+  fsq_levels: [8, 8, 8, 5, 5, 5]
+  mbsq_codebook_size: 1024
+  mbsq_schedule_mode: original
+  mleech_codebook_size: 196560
+  mleech_leech_type: full
+  mleech_schedule_mode: original
+  # latent mask augmentation
+  use_latent_mask: false
+  latent_mask_config:
+    mask_ratios: [0.0, 0.25, 0.5, 0.75]
+    block_sizes: { 16: [1, 1], 32: [2, 2] }
+    mask_probs: { 16: [0.7, 0.1, 0.1, 0.1], 32: [0.6, 0.1, 0.15, 0.15] }
+  pretrained_task: []  # set if has any pretraining task

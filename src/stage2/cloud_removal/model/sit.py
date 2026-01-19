@@ -13,7 +13,9 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Mlp
+from timm.layers import resample_abs_pos_embed
 import torch.nn.functional as F
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl, checkpoint_wrapper
 
 from .pos_embed import VisionRotaryEmbeddingFast
 
@@ -168,7 +170,6 @@ class Attention(nn.Module):
 
         if use_v1_residual:
             self.v1_lambda = nn.Parameter(torch.tensor(0.5))
-        self.v_last: torch.Tensor | None = None
 
         # for API compatibility with timm Attention
         self.fused_attn = False
@@ -179,7 +180,7 @@ class Attention(nn.Module):
         rope: Optional[VisionRotaryEmbeddingFast] = None,
         rope_ids: Optional[torch.Tensor] = None,
         v1: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Multi-head self-attention with optional 2D RoPE.
 
         x: (B, N, C)
@@ -190,7 +191,7 @@ class Attention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)  # (3, B, H, N, Dh)
         q, k, v = qkv.unbind(0)
-        self.v_last = v
+        v_out = v  # Save v to return (for v1 residual), keep gradient
         q, k = self.q_norm(q), self.k_norm(k)
 
         if v1 is not None:
@@ -210,7 +211,7 @@ class Attention(nn.Module):
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, v_out  # Return both output and v for v1 residual
 
 
 class SiTBlock(nn.Module):
@@ -244,7 +245,7 @@ class SiTBlock(nn.Module):
         feat_rope: Optional[VisionRotaryEmbeddingFast] = None,
         rope_ids: Optional[torch.Tensor] = None,
         v1: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         shift_msa_t, scale_msa_t, gate_msa, shift_mlp_t, scale_mlp_t, gate_mlp = self.adaLN_modulation(c).chunk(
             6, dim=-1
         )
@@ -257,15 +258,16 @@ class SiTBlock(nn.Module):
         else:
             shift_msa, scale_msa = shift_msa_t, scale_msa_t
             shift_mlp, scale_mlp = shift_mlp_t, scale_mlp_t
-        x = x + gate_msa.unsqueeze(1) * self.attn(
+        attn_out, v_current = self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
             rope=feat_rope,
             rope_ids=rope_ids,
             v1=v1,
         )
+        x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
 
-        return x
+        return x, v_current
 
 
 class FinalLayer(nn.Module):
@@ -304,6 +306,8 @@ class SiT(nn.Module):
         z_dims=[768],
         projector_dim=2048,
         cond_drop_prob: float = 0.0,
+        use_checkpoint: bool = False,
+        use_repa: bool = False,
         **block_kwargs,  # fused_attn
     ):
         super().__init__()
@@ -316,6 +320,9 @@ class SiT(nn.Module):
         self.encoder_depth = encoder_depth
         self.depth = depth
         self.cond_drop_prob = cond_drop_prob
+        self.input_size = input_size
+        self.use_checkpoint = use_checkpoint
+        self.use_repa = use_repa
 
         # ----------------- SPRINT configuration -----------------
         # fθ / gθ / hθ split: default 2 / (D-4) / 2 as in the paper.
@@ -337,7 +344,9 @@ class SiT(nn.Module):
         self.fusion_proj = nn.Linear(2 * hidden_size, hidden_size, bias=True)
         # --------------------------------------------------------
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(
+            input_size, patch_size, in_channels, hidden_size, bias=True, strict_img_size=False, output_fmt="NLC"
+        )
         self.cond_embedder = LazyPatchEmbed2d(patch_size=patch_size, embed_dim=hidden_size)
         self.t_embedder = TimestepEmbedder(hidden_size)  # timestep embedding type
         num_patches = self.x_embedder.num_patches
@@ -347,17 +356,22 @@ class SiT(nn.Module):
         blocks = []
         for i in range(depth):
             use_v1_residual = i > 0
-            blocks.append(
-                SiTBlock(
-                    hidden_size,
-                    num_heads,
-                    mlp_ratio=mlp_ratio,
-                    use_v1_residual=use_v1_residual,
-                    **block_kwargs,
-                )
+            block = SiTBlock(
+                hidden_size,
+                num_heads,
+                mlp_ratio=mlp_ratio,
+                use_v1_residual=use_v1_residual,
+                **block_kwargs,
             )
+            # Wrap with checkpoint if enabled
+            if use_checkpoint:
+                block = checkpoint_wrapper(block, checkpoint_impl=CheckpointImpl.NO_REENTRANT)
+            blocks.append(block)
         self.blocks = nn.ModuleList(blocks)
-        self.projectors = nn.ModuleList([build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims])
+        if self.use_repa:
+            self.projectors = nn.ModuleList([build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims])
+        else:
+            self.projectors = nn.ModuleList()
 
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
@@ -520,8 +534,14 @@ class SiT(nn.Module):
         """
 
         # Patch embedding
+        H, W = x.shape[-2:]
         x = self.x_embedder(x)  # (B, P, D), where P = H * W / patch_size ** 2
-        x = x + self.pos_embed
+        x = x + resample_abs_pos_embed(
+            self.pos_embed,
+            new_size=[H // self.patch_size, W // self.patch_size],
+            old_size=[self.input_size // self.patch_size, self.input_size // self.patch_size],
+            num_prefix_tokens=0,
+        )
 
         cond_tokens: torch.Tensor | None = None
         if conditions is not None:
@@ -537,7 +557,7 @@ class SiT(nn.Module):
 
         # RoPE position ids for full sequence (CLS + spatial tokens)
         hw = int(self.x_embedder.num_patches**0.5)
-        assert hw * hw == self.x_embedder.num_patches
+        # assert hw * hw == self.x_embedder.num_patches
         device = x.device
         flat_pos = torch.arange(hw * hw, device=device, dtype=torch.long).view(1, -1)
         flat_pos = flat_pos.expand(N, -1)  # (N, HW)
@@ -555,19 +575,20 @@ class SiT(nn.Module):
 
         v1_full = None
         for i in range(self.num_f):
-            block = cast(SiTBlock, self.blocks[i])
-            x_enc = block(x_enc, c, cond_tokens, self.feat_rope, rope_ids_enc, v1=v1_full)  # (N, T, D)
-
+            x_enc, v_current = self.blocks[i](x_enc, c, cond_tokens, self.feat_rope, rope_ids_enc, v1=v1_full)
             if v1_full is None:
-                v1_full = block.attn.v_last
+                v1_full = v_current
 
         assert v1_full is not None
 
         # Use encoder output for z-projections (REPA / SPRINT z_t)
-        zs = [
-            projector(x_enc.reshape(-1, D)).reshape(N, -1, z_dim)
-            for projector, z_dim in zip(self.projectors, self.z_dims)
-        ]
+        if self.use_repa:
+            zs = [
+                projector(x_enc.reshape(-1, D)).reshape(N, -1, z_dim)
+                for projector, z_dim in zip(self.projectors, self.z_dims)
+            ]
+        else:
+            zs = []
 
         # ------------------------------------------------------------------
         # 2) Drop tokens to build sparse input to gθ (SPRINT sparse path)
@@ -601,14 +622,7 @@ class SiT(nn.Module):
         # ------------------------------------------------------------------
         x_mid = x_sparse
         for i in range(self.num_f, self.num_f + self.num_g):
-            x_mid = self.blocks[i](
-                x_mid,
-                c,
-                cond_tokens_sparse,
-                self.feat_rope,
-                rope_ids_sparse,
-                v1=v1_sparse,
-            )  # (N, T_keep, D)
+            x_mid, _ = self.blocks[i](x_mid, c, cond_tokens_sparse, self.feat_rope, rope_ids_sparse, v1=v1_sparse)
 
         # ------------------------------------------------------------------
         # 4) Pad back to full length with [MASK] to get g_pad
@@ -642,7 +656,7 @@ class SiT(nn.Module):
         # ------------------------------------------------------------------
         x_dec = h_in
         for i in range(self.num_f + self.num_g, self.depth):
-            x_dec = self.blocks[i](x_dec, c, cond_tokens, self.feat_rope, rope_ids_full, v1=v1_full)
+            x_dec, _ = self.blocks[i](x_dec, c, cond_tokens, self.feat_rope, rope_ids_full, v1=v1_full)
 
         x_out = self.final_layer(x_dec, c)
         x_out = self.unpatchify(x_out)

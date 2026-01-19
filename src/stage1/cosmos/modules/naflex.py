@@ -2,7 +2,7 @@ from timm.layers.create_norm import create_norm_layer
 import math
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast, TypedDict
 
 import einops
 import torch
@@ -39,6 +39,11 @@ from src.utilities.network_utils import compile_decorator
 
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
+
+
+class _DeviceDTypeKwargs(TypedDict, total=False):
+    device: torch.device | None
+    dtype: torch.dtype | None
 
 
 def nepa_prediction_loss(h_in: Tensor, h_out: Tensor, shift: bool = True) -> Tensor:
@@ -114,6 +119,60 @@ class GatedAttentionTimmWrapped(GatedAttention):
         )
 
 
+class _HC_EvaAttention(nn.Module):
+    """Helper class to wrap EvaBlock attention branch for mHC."""
+
+    def __init__(
+        self,
+        norm: nn.Module,
+        attention: nn.Module,
+        gamma: nn.Parameter | None,
+        drop_path: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.norm = norm
+        self.attention = attention
+        self.gamma = gamma
+        self.drop_path = drop_path
+
+    def forward(
+        self,
+        x: Tensor,
+        rope: Tensor | None = None,
+        attn_mask: Tensor | None = None,
+        v_residual_v1: Tensor | None = None,
+    ) -> Tensor:
+        x_normed = self.norm(x)
+        attn_out = self.attention(x_normed, rope=rope, attn_mask=attn_mask)
+        if self.gamma is not None:
+            attn_out = self.gamma * attn_out
+        return self.drop_path(attn_out)
+
+
+class _HC_EvaMLP(nn.Module):
+    """Helper class to wrap EvaBlock MLP branch for mHC."""
+
+    def __init__(
+        self,
+        norm: nn.Module,
+        mlp: nn.Module,
+        gamma: nn.Parameter | None,
+        drop_path: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.norm = norm
+        self.mlp = mlp
+        self.gamma = gamma
+        self.drop_path = drop_path
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_normed = self.norm(x)
+        mlp_out = self.mlp(x_normed)
+        if self.gamma is not None:
+            mlp_out = self.gamma * mlp_out
+        return self.drop_path(mlp_out)
+
+
 class EvaBlock(nn.Module):
     def __init__(
         self,
@@ -133,12 +192,15 @@ class EvaBlock(nn.Module):
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
         init_values: Optional[float] = None,
-        act_layer: Callable = nn.GELU,
-        norm_layer: Callable = nn.LayerNorm,
+        act_layer: type[nn.Module] = nn.GELU,
+        norm_layer: type[nn.Module] = nn.LayerNorm,
         attn_head_dim: Optional[int] = None,
         is_causal: bool = False,
-        device=None,
-        dtype=None,
+        v_residual: bool = False,
+        layer_idx: int | None = None,
+        hyperconnection_kwargs: dict[str, Any] | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
         **kwargs,
     ):
         """Initialize the EVA transformer block.
@@ -161,9 +223,15 @@ class EvaBlock(nn.Module):
             act_layer: Activation layer constructor
             norm_layer: Normalization layer constructor
             attn_head_dim: Dimension of each attention head (if None, computed as dim // num_heads)
+            v_residual: Whether to use value residual connections
+            layer_idx: Layer index for mHC initialization
+            hyperconnection_kwargs: Hyperconnection (mHC) configuration
         """
-        dd = {"device": device, "dtype": dtype}
+        dd: _DeviceDTypeKwargs = {"device": device, "dtype": dtype}
         super().__init__()
+
+        self.layer_idx = layer_idx
+        self.v_residual = v_residual
 
         self.norm1 = norm_layer(dim, **dd)
         logger.trace(f"Layer uses attention type {attn_type}")
@@ -227,12 +295,42 @@ class EvaBlock(nn.Module):
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    @compile_decorator
-    def forward(
+        # Determine forward type
+        self._forward_type = "eva_block" if hyperconnection_kwargs is None else "eva_block_mhc"
+
+        # Hyper-connection mHC
+        self.hyperconnection_kwargs = hyperconnection_kwargs
+        if hyperconnection_kwargs is not None:
+            init_hc_fn = hyperconnection_kwargs.get("init_hc")
+            assert init_hc_fn is not None and layer_idx is not None, "init_hc and layer_idx required for mHC"
+            init_hc_kwargs = dict(
+                mhc=hyperconnection_kwargs.get("mhc", False),
+                sinkhorn_iters=hyperconnection_kwargs.get("sinkhorn_iters", 10),
+                sinkhorn_tau=hyperconnection_kwargs.get("sinkhorn_tau", 0.05),
+                mhc_h_res_proj=hyperconnection_kwargs.get("mhc_h_res_proj", "sinkhorn"),
+                ns_steps=hyperconnection_kwargs.get("ns_steps", 5),
+                ns_eps=hyperconnection_kwargs.get("ns_eps", 1e-7),
+                ns_coeffs=hyperconnection_kwargs.get("ns_coeffs", (3.0, -3.2, 1.2)),
+            )
+            self.hc_attn = init_hc_fn(
+                dim=dim,
+                branch=_HC_EvaAttention(self.norm1, self.attn, self.gamma_1, self.drop_path1),
+                layer_index=layer_idx * 2,
+                **init_hc_kwargs,
+            )
+            self.hc_mlp = init_hc_fn(
+                dim=dim,
+                branch=_HC_EvaMLP(self.norm2, self.mlp, self.gamma_2, self.drop_path2),
+                layer_index=layer_idx * 2 + 1,
+                **init_hc_kwargs,
+            )
+
+    def _forward_eva_block(
         self,
         x: torch.Tensor,
         rope: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        v_residual_v1: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.gamma_1 is None:
             x = x + self.drop_path1(self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
@@ -241,6 +339,32 @@ class EvaBlock(nn.Module):
             x = x + self.drop_path1(self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
             x = x + self.drop_path2(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
+
+    def _forward_eva_block_mhc(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        v_residual_v1: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        x = self.hc_attn(x, rope=rope, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+        x = self.hc_mlp(x)
+        return x
+
+    @compile_decorator
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        v_residual_v1: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self._forward_type == "eva_block":
+            return self._forward_eva_block(x, rope, attn_mask, v_residual_v1)
+        elif self._forward_type == "eva_block_mhc":
+            return self._forward_eva_block_mhc(x, rope, attn_mask, v_residual_v1)
+        else:
+            raise ValueError(f"Unknown forward type: {self._forward_type}")
 
 
 eva.EvaBlock = EvaBlock  # type: ignore[invalid-assignment]
@@ -425,16 +549,24 @@ class NaFlexVitCfg:
     nepa_attn_mask_type: Optional[str] = "explicit"
     is_causal: bool = False  # Global model causality (if True, applies to all tasks)
 
+    # Hyper-connection (mHC) configuration
+    hc_streams: int = -1  # -1 means no HC, only residual connection
+    hc_implem: str = "naive"  # "naive" or "cuda"
+    hc_other_kwargs: Any = None  # sinkhorn_iters, sinkhorn_tau, etc.
+
+    # Value residual configuration
+    v_residual: bool = False  # Whether to use attention value residual
+
 
 def ffn_init_fn(module: nn.Module, d_model: int, d_ffn: int, layer_id: int | None = None):
     std = 1.0 / math.sqrt(d_model)
-    torch.nn.init.trunc_normal_(module.layer1.weight, std=std, a=-3 * std, b=3 * std)
+    torch.nn.init.trunc_normal_(module.layer1.weight, std=std, a=-3 * std, b=3 * std)  # ty: ignore error[invalid-argument-type]
 
     # scale init by depth as in https://arxiv.org/abs/1908.11365 -- worked slightly better.
     std = 1.0 / math.sqrt(d_ffn)
     if layer_id is not None:
         std = std / math.sqrt(2 * (layer_id + 1))
-    torch.nn.init.trunc_normal_(module.layer2.weight, std=std, a=-3 * std, b=3 * std)
+    torch.nn.init.trunc_normal_(module.layer2.weight, std=std, a=-3 * std, b=3 * std)  # ty: ignore error[invalid-argument-type]
 
 
 def attention_init_fn(module, layer_id: int | None = None):
@@ -454,15 +586,93 @@ def attention_init_fn(module, layer_id: int | None = None):
 
 class Transformer(NaFlexVit):
     def __init__(self, cfg: NaFlexVitCfg):
-        super().__init__(cfg, in_chans=cfg.in_chans, img_size=cfg.img_size)
+        super().__init__(cfg, in_chans=cfg.in_chans, img_size=cfg.img_size)  # ty: ignore error[invalid-argument-type]
         self.cfg = cfg
         self._build_head(cfg)
+
+        # Build hyperconnections if enabled
+        self._use_hc = False
+        self._hc_streams = cfg.hc_streams
+        self.v_residual = cfg.v_residual
+        if cfg.hc_streams > 0:
+            self._build_hyperconnection(cfg.hc_streams, cfg.hc_implem, cfg.hc_other_kwargs or {})
+            self._rebuild_blocks_with_hc(cfg)
 
         if cfg.compile_model:
             logger.log("NOTE", f"[Naflex Transformer]: Compiling model ...")
             for i in range(len(self.blocks)):
-                self.blocks[i] = torch.compile(self.blocks[i])
+                self.blocks[i] = torch.compile(self.blocks[i])  # ty: ignore error[invalid-assignment]
             # self.head = torch.compile(self.head)
+
+    def _build_hyperconnection(self, hc_streams: int, implem: str, hc_other_kwargs: dict):
+        """Build hyperconnection (mHC) infrastructure."""
+        self._hc_implem = implem
+        self._hc_streams = hc_streams
+        self.hc_other_kwargs = hc_other_kwargs
+
+        self.init_hc_fn = None
+        if hc_streams < 0:
+            self._use_hc = False
+            return
+        else:
+            assert hc_streams >= 1
+            assert implem in ("naive", "cuda")
+            logger.info(
+                f"Using <green>Hyperconnection</green> - this is experimental, with kwargs: "
+                f"{self._hc_implem=}, {self._hc_streams=}, {self.hc_other_kwargs=}"
+            )
+
+            self._use_hc = True
+
+            from .mHC import (
+                HyperConnections,
+                get_init_and_expand_reduce_stream_functions,
+                HyperConnectionsCUDA,
+                get_init_and_expand_reduce_stream_functions_cuda,
+            )
+
+            hc_cls, init_expand_reduce_fm = {
+                "naive": (HyperConnections, get_init_and_expand_reduce_stream_functions),
+                "cuda": (HyperConnectionsCUDA, get_init_and_expand_reduce_stream_functions_cuda),
+            }[implem]
+
+            self.init_hc_fn, self.hc_expand_stream, self.reduce_stream = init_expand_reduce_fm(hc_streams)
+
+    def _rebuild_blocks_with_hc(self, cfg: NaFlexVitCfg):
+        """Rebuild blocks with hyperconnection kwargs."""
+        if not self._use_hc or self.init_hc_fn is None:
+            return
+
+        hyperconnection_kwargs = {"init_hc": self.init_hc_fn, **self.hc_other_kwargs}
+        block_fn = get_block_fn(cfg)
+        norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
+        act_layer = get_act_layer(cfg.act_layer) or nn.GELU
+        dpr = calculate_drop_path_rates(cfg.drop_path_rate, cfg.depth)
+        dd: _DeviceDTypeKwargs = {"device": None, "dtype": None}
+
+        new_blocks = nn.ModuleList()
+        for i in range(cfg.depth):
+            blk = block_fn(
+                dim=cfg.embed_dim,
+                num_heads=cfg.num_heads,
+                mlp_ratio=cfg.mlp_ratio,
+                qkv_bias=cfg.qkv_bias,
+                qk_norm=cfg.qk_norm,
+                proj_bias=cfg.proj_bias,
+                init_values=cfg.init_values,
+                proj_drop=cfg.proj_drop_rate,
+                attn_drop=cfg.attn_drop_rate,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                v_residual=cfg.v_residual,
+                layer_idx=i,
+                hyperconnection_kwargs=hyperconnection_kwargs,
+                **dd,
+            )
+            new_blocks.append(blk)
+        self.blocks = new_blocks
+        logger.info(f"[Naflex Transformer]: Rebuilt {cfg.depth} blocks with mHC support")
 
     def _build_head(self, cfg: NaFlexVitCfg):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
@@ -516,6 +726,86 @@ class Transformer(NaFlexVit):
             out_hw = hw
         return out_hw
 
+    def forward_features(
+        self,
+        patches: torch.Tensor,
+        patch_coord: Optional[torch.Tensor] = None,
+        patch_valid: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> Any:
+        """Override forward_features to add mHC stream expand and value residual."""
+        naflex_mode = patch_coord is not None
+
+        # Pass through patch & abs position embedding module with patch coordinate/type support
+        embeds = self._forward_embeds(
+            patches,
+            patch_coord=patch_coord,
+            patch_valid=patch_valid,
+            attn_mask=attn_mask,
+        )
+        x = embeds["patches"]
+        rope_embeds = embeds.get("rope_embeds", None)
+        keep_indices = embeds.get("keep_indices", None)
+        attn_mask = embeds.get("attn_mask", None)
+
+        # mHC expansion
+        if self._use_hc:
+            x = self.hc_expand_stream(x)
+
+        # Value residual initialization
+        v_residual_v1 = None
+        if self.v_residual:
+            v_residual_v1 = x.clone()
+
+        # Apply transformer blocks
+        do_checkpointing = getattr(self, "grad_checkpointing", False) and not torch.jit.is_scripting()
+
+        if self.rope_is_mixed and rope_embeds is not None:
+            # Mixed mode with per-layer embeddings (list or iterator)
+            for i, (blk, rope_embed) in enumerate(zip(self.blocks, rope_embeds)):
+                if self.training and self.patch_drop is not None and keep_indices is not None:
+                    # Apply patch dropout to rope_embed if needed
+                    from timm.models.naflexvit import apply_keep_indices_nlc
+
+                    rope_embed = apply_keep_indices_nlc(
+                        x,
+                        rope_embed,
+                        keep_indices,
+                        pos_embed_has_batch=naflex_mode,
+                    )
+                if do_checkpointing:
+                    x = torch_checkpoint(
+                        blk, x, rope=rope_embed, attn_mask=attn_mask, v_residual_v1=v_residual_v1, use_reentrant=False
+                    )
+                else:
+                    x = blk(x, rope=rope_embed, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+        elif rope_embeds is not None:
+            # Axial ROPE mode with shared embeddings
+            for blk in self.blocks:
+                if do_checkpointing:
+                    x = torch_checkpoint(
+                        blk, x, rope=rope_embeds, attn_mask=attn_mask, v_residual_v1=v_residual_v1, use_reentrant=False
+                    )
+                else:
+                    x = blk(x, rope=rope_embeds, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+        else:
+            for blk in self.blocks:
+                if do_checkpointing:
+                    x = torch_checkpoint(blk, x, attn_mask=attn_mask, v_residual_v1=v_residual_v1, use_reentrant=False)
+                else:
+                    x = blk(x, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+
+        x = self.norm(x)
+
+        if naflex_mode:
+            return {
+                "patches": x,
+                "patch_valid": embeds["patch_valid"],
+                "keep_indices": keep_indices,
+            }
+
+        return x
+
     def forward(self, x, output_type: str | None = None, **_ignored_kwargs):
         # Output HW
         if output_type in (None, "2d"):
@@ -523,9 +813,14 @@ class Transformer(NaFlexVit):
         else:
             out_hw = None  # keep the output to be 1D tensor
 
-        # Features
+        # Features with mHC stream handling
         x = self.forward_features(x)
         x = cast(torch.Tensor, x)
+
+        # Reduce mHC streams if enabled
+        if self._use_hc:
+            x = self.reduce_stream(x)
+
         x = x[:, self.num_prefix_tokens :]
 
         # Head
@@ -563,6 +858,134 @@ class Transformer(NaFlexVit):
 
         model = cls(cfg)
         return model
+
+    def forward_intermediates(
+        self,
+        x: Union[torch.Tensor, dict[str, torch.Tensor]],
+        indices: Optional[Union[int, List[int]]] = None,
+        return_prefix_tokens: bool = False,
+        norm: bool = False,
+        stop_early: bool = False,
+        output_fmt: str = "NCHW",
+        intermediates_only: bool = False,
+        output_dict: bool = False,
+        patch_coord: Optional[torch.Tensor] = None,
+        patch_valid: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> Union[List[torch.Tensor], Tuple[torch.Tensor, List[torch.Tensor]], dict[str, Any]]:
+        """Override forward_intermediates to add mHC stream expand and value residual."""
+        assert output_fmt in ("NCHW", "NLC"), "Output format must be one of NCHW or NLC."
+        reshape = output_fmt == "NCHW"
+        intermediates = []
+        take_indices, max_index = feature_take_indices(len(self.blocks), indices)
+
+        if isinstance(x, dict):
+            # Handle dictionary input from NaFlex collator
+            patch_coord = x["patch_coord"]
+            patch_valid = x["patch_valid"]
+            patches = x["patches"]
+        else:
+            patches = x
+            height, width = x.shape[-2:]
+            H, W = self.embeds.dynamic_feat_size((height, width))
+
+        # Pass through patch & abs position embedding module
+        embeds = self._forward_embeds(
+            patches,
+            patch_coord=patch_coord,
+            patch_valid=patch_valid,
+            attn_mask=attn_mask,
+        )
+        x = embeds["patches"]
+        rope_embeds = embeds.get("rope_embeds", None)
+        keep_indices = embeds.get("keep_indices", None)
+        attn_mask = embeds.get("attn_mask", None)
+        naflex_mode = patch_coord is not None
+
+        # mHC expansion
+        if self._use_hc:
+            x = self.hc_expand_stream(x)
+
+        # Value residual initialization
+        v_residual_v1 = None
+        if self.v_residual:
+            v_residual_v1 = x.clone()
+
+        # Forward pass through blocks
+        if torch.jit.is_scripting() or not stop_early:
+            blocks: list[nn.Module] = list(self.blocks)
+        else:
+            blocks = list(self.blocks[: max_index + 1])  # ty: ignore error[invalid-argument-type]
+
+        do_checkpointing = getattr(self, "grad_checkpointing", False) and not torch.jit.is_scripting()
+
+        if self.rope_is_mixed and rope_embeds is not None:
+            # Mixed mode with per-layer embeddings (list or iterator)
+            for i, (blk, rope_embed) in enumerate(zip(self.blocks, rope_embeds)):
+                if self.training and self.patch_drop is not None and keep_indices is not None:
+                    from timm.models.naflexvit import apply_keep_indices_nlc
+
+                    rope_embed = apply_keep_indices_nlc(
+                        x,
+                        rope_embed,
+                        keep_indices,
+                        pos_embed_has_batch=naflex_mode,
+                    )
+                if do_checkpointing:
+                    x = torch_checkpoint(
+                        blk, x, rope=rope_embed, attn_mask=attn_mask, v_residual_v1=v_residual_v1, use_reentrant=False
+                    )
+                else:
+                    x = blk(x, rope=rope_embed, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+                if i in take_indices:
+                    intermediates.append(self.norm(x) if norm else x)
+        else:
+            for i, blk in enumerate(blocks):
+                # Axial ROPE mode or no ROPE
+                r = rope_embeds if rope_embeds is not None else None
+                if do_checkpointing:
+                    x = torch_checkpoint(
+                        blk, x, rope=r, attn_mask=attn_mask, v_residual_v1=v_residual_v1, use_reentrant=False
+                    )
+                else:
+                    x = blk(x, rope=r, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+                if i in take_indices:
+                    intermediates.append(self.norm(x) if norm else x)
+
+        # Reduce mHC streams if enabled
+        if self._use_hc:
+            x = self.reduce_stream(x)
+            intermediates = [self.reduce_stream(y) for y in intermediates]
+
+        # Process intermediates
+        if self.num_prefix_tokens:
+            prefix_tokens = [y[:, 0 : self.num_prefix_tokens] for y in intermediates]
+            intermediates = [y[:, self.num_prefix_tokens :] for y in intermediates]
+        else:
+            prefix_tokens = None
+
+        if reshape:
+            intermediates = [y.reshape(y.shape[0], H, W, -1).permute(0, 3, 1, 2).contiguous() for y in intermediates]
+
+        # For dictionary output
+        if output_dict:
+            result_dict = {}
+            result_dict["image_intermediates"] = intermediates
+            if prefix_tokens is not None and return_prefix_tokens:
+                result_dict["image_intermediates_prefix"] = prefix_tokens
+            if not intermediates_only:
+                x_final = self.norm(x)
+                result_dict["image_features"] = x_final
+            return result_dict
+
+        if not torch.jit.is_scripting() and return_prefix_tokens and prefix_tokens is not None:
+            intermediates = list(zip(intermediates, prefix_tokens))
+
+        if intermediates_only:
+            return intermediates
+
+        x = self.norm(x)
+        return x, intermediates
 
     def init_weights(self, mode="jax"):
         super().init_weights(mode=mode)
@@ -615,7 +1038,7 @@ class IJEPANaFlexViT(Transformer):
         norm_layer = get_norm_layer(cfg.norm_layer) or nn.LayerNorm
         act_layer = get_act_layer(cfg.act_layer) or nn.GELU
         mlp_layer = cfg.mlp_layer or Mlp
-        dd: dict = {"device": None, "dtype": None}
+        dd: _DeviceDTypeKwargs = {"device": None, "dtype": None}
         self.mae_decoder = nn.ModuleList(
             [
                 block_fn(
@@ -774,17 +1197,18 @@ class IJEPANaFlexViT(Transformer):
 
         return h_in, h_out
 
-    def _prepare_masks(self, masks=None):
-        """Ensure the masks are list of tensors"""
-        if masks is not None and not isinstance(masks, list):
-            masks = [masks]
+    def _prepare_masks(self, masks: Tensor | list[Tensor] | None = None) -> list[Tensor] | None:
+        """Ensure the masks are a list of tensors."""
+        if masks is None:
+            return None
+        if isinstance(masks, list):
+            return list(masks)
+        assert torch.is_tensor(masks)
+        return [masks]
 
-        return masks
-
-    def _ibot_apply_masks(self, x, masks: torch.BoolTensor):
-        if masks is not None:
-            assert torch.is_tensor(masks)
-            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
+    def _ibot_apply_masks(self, x: Tensor, masks: Tensor) -> Tensor:
+        assert masks.dtype is torch.bool
+        x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
         return x
 
     def _jepa_apply_masks(self, x, masks: list[Tensor]):
@@ -794,9 +1218,10 @@ class IJEPANaFlexViT(Transformer):
             all_x += [torch.gather(x, dim=1, index=mask_keep)]
         return torch.cat(all_x, dim=0)
 
-    def _mae_apply_masks(self, x, masks: torch.IntTensor):
+    def _mae_apply_masks(self, x: Tensor, masks: Tensor) -> Tensor:
         """masks is a Tensor of indices of [B, S_masked]"""
         D = x.size(-1)
+        assert masks.dtype in (torch.int32, torch.int64)
         x = torch.gather(x, dim=1, index=masks.unsqueeze(-1).repeat(1, 1, D))
         return x
 
@@ -806,7 +1231,7 @@ class IJEPANaFlexViT(Transformer):
         patch_coord,
         patch_valid,
         attn_mask,
-        masks: List[Tensor] | Tensor | None = None,
+        masks: list[Tensor] | Tensor | None = None,
     ):
         """Forward pass through patch / abs pos / rope pos embeds and patch dropout
 
@@ -842,20 +1267,21 @@ class IJEPANaFlexViT(Transformer):
                 rope_embeds = self._generate_rope_naflex(x, patch_coord)
             elif grid_size is not None:
                 # Standard mode - fixed grid size
-                rope_embeds = self.rope.get_embed(shape=grid_size)
+                rope_embeds = self.rope.get_embed(shape=grid_size)  # ty: ignore error[call-non-callable]
             else:
                 assert False, "Expected one of patch_coord or grid_size to be valid"
 
         # Apply patch dropout with coordinated updates
         keep_indices: Optional[torch.Tensor] = None
         if self.training and self.patch_drop is not None:
-            x, keep_indices = self.patch_drop(x)
+            x, keep_indices = self.patch_drop(x)  # ty: ignore error[call-non-callable]
             # keep_indices excludes prefix tokens, can use directly on patch_valid & rope embeds
             if patch_valid is not None:
                 patch_valid = patch_valid.gather(1, keep_indices)
             if rope_embeds is not None and not self.rope_is_mixed:
                 # Update ROPE embeddings to match dropped tokens (only for axial mode)
                 # Batch dim already present in NaFlex mode, but will be added in standard mode.
+                assert torch.is_tensor(rope_embeds)
                 rope_embeds = apply_keep_indices_nlc(x, rope_embeds, keep_indices, pos_embed_has_batch=naflex_mode)
                 if not naflex_mode:
                     # B, N, dim -> B, 1, N, dim. Need head dim added for standard mode, already added in NaFlex.
@@ -870,10 +1296,15 @@ class IJEPANaFlexViT(Transformer):
             # Apply masks
             prefixed_tokens, x = x[:, : self.num_prefix_tokens], x[:, self.num_prefix_tokens :]
             if "ibot" in self.pretrained_type:
+                assert torch.is_tensor(masks)
                 x = self._ibot_apply_masks(x, masks=masks)
             elif "ijepa" in self.pretrained_type:
-                x = self._jepa_apply_masks(x, masks=masks)
+                if not isinstance(masks, list):
+                    raise TypeError("IJEPA expects a list of index tensors.")
+                masks_list = masks
+                x = self._jepa_apply_masks(x, masks=masks_list)  # ty: ignore error[invalid-argument-type]
             elif self._is_mae():
+                assert torch.is_tensor(masks)
                 x = self._mae_apply_masks(x, masks=masks)
 
             x = torch.cat([prefixed_tokens, x], dim=1)
@@ -883,7 +1314,7 @@ class IJEPANaFlexViT(Transformer):
                 ##### IJEPA masking strategy: mask out
                 if "ijepa" in self.pretrained_type:
                     rope_masked = []
-                    for m in masks:
+                    for m in masks_list:
                         # m: [B, S_masked] indices
                         assert not self.rope_is_mixed, "mixed rope is not supported in JEPA training"
                         rope_masked += [get_at("[S] ropeD, B S_masked -> B 1 S_masked ropeD", rope_embeds, m)]
@@ -970,28 +1401,32 @@ class IJEPANaFlexViT(Transformer):
 
     def forward(  # type: ignore[invalid-method-override]
         self,
-        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        x: torch.Tensor | dict[str, torch.Tensor],
         patch_coord: Optional[torch.Tensor] = None,
         patch_valid: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         output_type: str | None = None,
-        masks: Optional[Tensor | List[Tensor]] = None,  # IJEPA masks
+        masks: Tensor | list[Tensor] | None = None,  # IJEPA masks
     ):
         """Forward with JEPA masks support"""
         if masks is not None and self.pretrained_type == "ijepa":
             masks = self._prepare_masks(masks=masks)
 
-        input_is_dict = isinstance(x, Dict)
-        naflex_mode = input_is_dict or patch_coord is not None
+        naflex_mode = isinstance(x, dict) or patch_coord is not None
         if naflex_mode:
             assert masks is None, "JEPA does not support naflex mode."
 
-            if input_is_dict:
+            if isinstance(x, dict):
                 # Handle dictionary input from NaFlex collator, dict inputs take priority over args
                 patches = x["patches"]
-                patch_valid = x.get("patch_valid", patch_valid)
-                patch_coord = x.get("patch_coord", patch_coord)
-                attn_mask = x.get("attn_mask", attn_mask)
+                if "patch_valid" in x:
+                    patch_valid = x["patch_valid"]
+
+                if "patch_coord" in x:
+                    patch_coord = x["patch_coord"]
+
+                if "attn_mask" in x:
+                    attn_mask = x["attn_mask"]
             else:
                 patches = x
             assert patch_coord is not None, "patch_coord is required in naflex mode"
@@ -1006,9 +1441,11 @@ class IJEPANaFlexViT(Transformer):
             )
 
             # Pass patches & patch_valid to forward_head for masked pooling
-            x = self.forward_head(**features)
+            assert isinstance(features, dict)
+            x = self.forward_head(**features)  # ty: ignore error[invalid-argument-type]
         else:
             # * This is the Tensor input x forward pass, not naflex mode ##################
+            assert torch.is_tensor(x)
 
             if output_type in (None, "2d"):
                 out_hw = self._get_output_shape(x)
@@ -1025,7 +1462,7 @@ class IJEPANaFlexViT(Transformer):
 
         return x
 
-    def _forward_after_backbone(self, x, hw: list | None) -> tuple[Tensor, Optional[Dict[str, Tensor]]] | Tensor:
+    def _forward_after_backbone(self, x: Tensor, hw: list | None) -> Tensor:
         head_out = self.head(x)
         if self.cfg.out_2d_latent and hw is not None:
             out = self.unpatchify(head_out, hw)
@@ -1138,6 +1575,11 @@ class IJEPANaFlexViT(Transformer):
             terms["lejepa_proj"] = lejepa_proj
             # spatial tokens only
             terms["prefixed_tokens"] = x[:, : self.num_prefix_tokens]
+
+            # Patch tokens projection for sigreg
+            x_patches = x[:, self.num_prefix_tokens :]
+            patch_t1d = einops.rearrange(x_patches, "b l c -> (b l) c")
+            terms["lejepa_proj_patch"] = self.lejepa_projector(patch_t1d)
 
         ########## IBOT projector ##########
         if hasattr(self, "ibot_head") and "ibot" in self.cfg.pretrained_type and "ibot" in pretrained_task:

@@ -59,7 +59,7 @@ class BaseFlowLoss(nn.Module):
     Base class: Provides common Transport Solver and utility functions
     """
 
-    def __init__(self, transport_solver):
+    def __init__(self, transport_solver: TransportSolver):
         super().__init__()
         self.transport = transport_solver
 
@@ -83,7 +83,7 @@ class FlowMatchingLoss(BaseFlowLoss):
     Target is Ground Truth Velocity (z - x).
     """
 
-    def __init__(self, transport_solver):
+    def __init__(self, transport_solver: TransportSolver):
         super().__init__(transport_solver)
 
     def compute_loss(self, model, x, y):

@@ -191,3 +191,9 @@
 [submodule "src/stage2/cloud_removal/third_party/EMRDM"]
 	path = src/stage2/cloud_removal/third_party/EMRDM
 	url = https://github.com/Ly403/EMRDM.git
+[submodule "src/utilities/transport/transition_matching/transition_matching"]
+	path = src/utilities/transport/transition_matching/transition_matching
+	url = https://github.com/294coder/transition-matching.git
+[submodule "src/stage2/cloud_removal/third_party/UniDB"]
+	path = src/stage2/cloud_removal/third_party/UniDB
+	url = https://github.com/UniDB-SOC/UniDB.git

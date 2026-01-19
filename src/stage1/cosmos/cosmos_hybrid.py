@@ -407,7 +407,12 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         h = self.encoder.quant_conv(z_low_lvl)
         h_pool = h.mean(dim=(2, 3))
         h_proj = self.lejepa_projector_latent(h_pool)
-        return {"cls_tokens": h_proj, "patch_tokens": None}
+
+        # Patch tokens
+        h_flat = rearrange(h, "b c h w -> (b h w) c")
+        h_proj_patch = self.lejepa_projector_latent(h_flat)
+
+        return {"cls_tokens": h_proj, "patch_tokens": h_proj_patch}
 
     def encode_lejepa(self, x, **_ignored_kwargs):
         """
@@ -422,7 +427,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             z_low_lvl, masks=None, pretrained_task=["lejepa"]
         )
 
-        return {"cls_tokens": terms.lejepa_proj, "patch_tokens": None}
+        return {"cls_tokens": terms.lejepa_proj, "patch_tokens": terms.lejepa_proj_patch}
 
     def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
         """返回semantic encoder输出的normed CLS token (B, D)，用于DINO cls token loss。"""
@@ -894,97 +899,86 @@ def hybrid_distillation_f16_config(
     use_repa_loss: bool = True,
     pretrained_path: str = "",
 ):
-    cnn_cfg = dict(
-        model=dict(
-            resolution=512,
-            in_channels=in_chans,
-            out_channels=in_chans,
-            z_channels=z_chans,
-            latent_channels=latent_chans,
-            channels=128,
-            channels_mult=[2, 4, 4],
-            num_res_blocks=2,
-            attn_resolutions=[],
-            dropout=0.0,
-            spatial_compression=8,
-            patch_size=1,
-            block_name="res_block",
-            norm_type="gn",
-            norm_groups=32,
-            adaptive_mode="interp",
-            downsample_kwargs=dict(padconv_use_manually_pad=False),
-            upsample_kwargs=dict(interp_type="nearest_interp"),
-            per_layer_noise=False,
-        ),
-        quantizer_type=None,
-        vf_on_z_or_module="z",
-        use_repa_loss=use_repa_loss,
-        dino_feature_dim=1024,
-        decoder_type="default",
-        use_channel_drop=False,
-        channel_drop_config=dict(
-            drop_type=[16, 32, 48],
-            max_channels=64,
-            drop_prob=0.5,
-        ),
-        loading_type="hybrid_pretrained",
-        uni_path=pretrained_path,
-    )
+    yml = f"""
+    cnn_cfg:
+      model:
+        resolution: 512
+        in_channels: {in_chans}
+        out_channels: {in_chans}
+        z_channels: {z_chans}
+        latent_channels: {latent_chans}
+        channels: 128
+        channels_mult: [2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        spatial_compression: 8
+        patch_size: 1
+        block_name: res_block
+        norm_type: gn
+        norm_groups: 32
+        adaptive_mode: interp
+        downsample_kwargs:
+            padconv_use_manually_pad: false
+        upsample_kwargs:
+            interp_type: nearest_interp
+        per_layer_noise: false
+      quantizer_type: null
+      vf_on_z_or_module: z
+      use_repa_loss: {str(use_repa_loss).lower()}
+      dino_feature_dim: 1024
+      decoder_type: default
+      use_channel_drop: false
+      channel_drop_config:
+        drop_type: [16, 32, 48]
+        max_channels: 64
+        drop_prob: 0.5
+      loading_type: hybrid_pretrained
+      uni_path: {pretrained_path}
 
-    trans_enc_cfg = dict(
-        embed_dim=backbone_embed_dim,
-        depth=backbone_enc_n_layers,
-        num_heads=16,
-        mlp_ratio=4.0,
-        qkv_bias=True,
-        patch_size=2,
-        norm_layer=norm_layer,
-        pos_embed="learned",
-        pos_embed_grid_size=[32, 32],
-        rope_type="axial",
-        img_size=32,
-        in_chans=z_chans,
-        out_chans=z_chans,
-        unpatch_size=1,
-        reg_tokens=0,
-        compile_model=False,
-    )
+    trans_enc_cfg:
+      embed_dim: {backbone_embed_dim}
+      depth: {backbone_enc_n_layers}
+      num_heads: 16
+      mlp_ratio: 4.0
+      qkv_bias: true
+      patch_size: 2
+      norm_layer: {norm_layer}
+      pos_embed: learned
+      pos_embed_grid_size: [32, 32]
+      rope_type: axial
+      img_size: 32
+      in_chans: {z_chans}
+      out_chans: {z_chans}
+      unpatch_size: 1
+      reg_tokens: 0
+      compile_model: false
 
-    trans_dec_cfg = dict(
-        embed_dim=backbone_embed_dim,
-        depth=backbone_dec_n_layers,
-        num_heads=16,
-        mlp_ratio=4.0,
-        qkv_bias=True,
-        patch_size=1,
-        norm_layer=norm_layer,
-        pos_embed="learned",
-        pos_embed_grid_size=[32, 32],
-        rope_type="axial",
-        img_size=32,
-        in_chans=512,
-        out_chans=512,
-        unpatch_size=2,
-        reg_tokens=0,
-        compile_model=False,
-    )
+    trans_dec_cfg:
+      embed_dim: {backbone_embed_dim}
+      depth: {backbone_dec_n_layers}
+      num_heads: 16
+      mlp_ratio: 4.0
+      qkv_bias: true
+      patch_size: 1
+      norm_layer: {norm_layer}
+      pos_embed: learned
+      pos_embed_grid_size: [32, 32]
+      rope_type: axial
+      img_size: 32
+      in_chans: 512
+      out_chans: 512
+      unpatch_size: 2
+      reg_tokens: 0
+      compile_model: false
 
-    distillation_cfg = dict(
-        dino_feature_dim=1024,
-        semantic_feature_dim=1024,
-    )
+    distillation_cfg:
+      dino_feature_dim: 1024
+      semantic_feature_dim: 1024
 
-    cfg = OmegaConf.create(
-        dict(
-            cnn_cfg=cnn_cfg,
-            trans_enc_cfg=trans_enc_cfg,
-            trans_dec_cfg=trans_dec_cfg,
-            hybrid_tokenizer_cfg=None,
-            distillation_cfg=distillation_cfg,
-        )
-    )
-
-    return cfg
+    hybrid_tokenizer_cfg: null
+    """
+    return OmegaConf.create(yml)
 
 
 def hybrid_ijepa_f8_config(
@@ -1000,84 +994,161 @@ def hybrid_ijepa_f8_config(
 ):
     """
     Configuration for hybrid IJEPA tokenizer model.
-
-    Returns configuration dictionary with CNN, transformer encoder/decoder,
-    and distillation settings.
-
-    Network config of hybrid CNN and transformer (as decoder actually)
-    Latent is from the CNN encoder, and transformer decoder and CNN decoder
-    are used for semantic feature distillation and image reconstruction.
     """
-    # Create the model with correct configuration structure
-    cnn_cfg = {
-        "model": {
-            "resolution": 1024,
-            "in_channels": in_chans,
-            "out_channels": in_chans,
-            "z_channels": z_chans,  # Connect encoder and decoder
-            "latent_channels": latent_chans,
-            "channels": 128,  # Base channels
-            "channels_mult": [2, 4, 4],  # Channel multiplier
-            "num_res_blocks": 2,
-            "attn_resolutions": [],
-            "dropout": 0.0,
-            "spatial_compression": 8,  # Default spatial compression
-            "patch_size": 1,  # Default patch size
-            "block_name": "res_block",  # Default block type
-            "norm_type": "rmsnorm2d",  # Default normalization
-            "act_type": "silu",
-            "norm_groups": 32,  # Default number of groups
-            "adaptive_mode": "interp",
-            "downsample_kwargs": {"padconv_use_manually_pad": False},
-            "upsample_kwargs": {"interp_type": "nearest_interp"},
-        },
-        "quantizer_type": None,  # No quantizer for basic test
-        "vf_on_z_or_module": "z",  # Visual feature on z
-        "use_repa_loss": use_repa_loss,
-        "dino_feature_dim": 1024,
-        "loading_type": "hybrid_pretrained",
-        "uni_path": pretrained_path,
-    }
+    yml = f"""
+    cnn_cfg:
+      model:
+        resolution: 1024
+        in_channels: {in_chans}
+        out_channels: {in_chans}
+        z_channels: {z_chans}
+        latent_channels: {latent_chans}
+        channels: 128
+        channels_mult: [2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        spatial_compression: 8
+        patch_size: 1
+        block_name: res_block
+        norm_type: rmsnorm2d
+        act_type: silu
+        norm_groups: 32
+        adaptive_mode: interp
+        downsample_kwargs:
+            padconv_use_manually_pad: false
+        upsample_kwargs:
+            interp_type: nearest_interp
+      quantizer_type: null
+      vf_on_z_or_module: z
+      use_repa_loss: {str(use_repa_loss).lower()}
+      dino_feature_dim: 1024
+      loading_type: hybrid_pretrained
+      uni_path: {pretrained_path}
 
-    trans_enc_cfg = {
-        "embed_dim": 1152,
-        "depth": 24,  # vit intern 300m -> embed_dim=1024, depth=24, num_heads=16
-        "num_heads": 16,
-        "mlp_ratio": 4.0,
-        "qkv_bias": True,
-        "patch_size": 2,
-        "norm_layer": norm_layer,  # Use Flash RMSNorm for compatibility
-        "pos_embed": "learned",  # Use learned position embeddings
-        "pos_embed_grid_size": (32, 32),  # Grid size for position embedding
-        # Additional required fields from merged configuration
-        "img_size": 32,  # Expected by NaFlexVitCfg
-        "in_chans": z_chans,  # Should match z_channels from transformer
-        "out_chans": z_chans,  # Output channels
-        "unpatch_size": 2,  # 2->1
-        "reg_tokens": 4,
-        "rope_type": "axial",
-        "attn_type": "gated",
-        "pretrained_type": ["ijepa"],
-    }
+    trans_enc_cfg:
+      embed_dim: 1152
+      depth: 24
+      num_heads: 16
+      mlp_ratio: 4.0
+      qkv_bias: true
+      patch_size: 2
+      norm_layer: {norm_layer}
+      pos_embed: learned
+      pos_embed_grid_size: [32, 32]
+      img_size: 32
+      in_chans: {z_chans}
+      out_chans: {z_chans}
+      unpatch_size: 2
+      reg_tokens: 4
+      rope_type: axial
+      attn_type: gated
+      pretrained_type: [ijepa]
 
-    cfg = OmegaConf.create(
-        dict(
-            cnn_cfg=cnn_cfg,
-            trans_enc_cfg=trans_enc_cfg,
-            trans_dec_cfg=None,
-            distillation_cfg={
-                "dino_feature_dim": 1024,
-                "semantic_feature_dim": 1024,
-                "cache_layers": {"low_level": [0, 1, 2, -1], "semantic": [5, 11, 17, 23]},
-            },
-            hybrid_tokenizer_cfg={
-                "latent_bottleneck_type": "before_semantic",
-                "latent_straight_through_skip": True,
-            },
-        )
-    )
+    trans_dec_cfg: null
 
-    return cfg
+    distillation_cfg:
+      dino_feature_dim: 1024
+      semantic_feature_dim: 1024
+      cache_layers:
+        low_level: [0, 1, 2, -1]
+        semantic: [5, 11, 17, 23]
+
+    hybrid_tokenizer_cfg:
+      latent_bottleneck_type: before_semantic
+      latent_straight_through_skip: true
+    """
+    return OmegaConf.create(yml)
+
+
+def hyrbid_lejea_iejepa_f8_config():
+    """
+    Configuration for hybrid LeJEPA + IJEPA tokenizer model with mHC and value residual.
+    """
+    yml = f"""
+    cnn_cfg:
+      model:
+        resolution: 1024
+        in_channels: 512
+        out_channels: 512
+        z_channels: 768
+        latent_channels: 32
+        channels: 128
+        channels_mult: [2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        spatial_compression: 8
+        patch_size: 1
+        block_name: res_block
+        norm_type: rmsnorm2d
+        act_type: silu
+        adaptive_mode: interp
+        downsample_kwargs:
+            padconv_use_manually_pad: false
+        upsample_kwargs:
+            interp_type: nearest_interp
+      quantizer_type: null
+      vf_on_z_or_module: z
+      use_repa_loss: true
+      dino_feature_dim: 1024
+      loading_type: hybrid_pretrained
+      uni_path: ""
+
+    trans_enc_cfg:
+      embed_dim: 1152
+      depth: 24
+      num_heads: 16
+      mlp_ratio: 4.0
+      qkv_bias: true
+      patch_size: 2
+      norm_layer: flarmsnorm
+      pos_embed: learned
+      pos_embed_grid_size: [32, 32]
+      img_size: 32
+      in_chans: 768
+      out_chans: 768
+      unpatch_size: 2
+      reg_tokens: 4
+      rope_type: axial
+      attn_type: gated
+      pretrained_type: [ijepa, lejepa]
+      hc_streams: 4
+      hc_implem: naive
+      v_residual: true
+      hc_other_kwargs:
+        sinkhorn_iters: 10
+
+    trans_dec_cfg:
+      embed_dim: 1152
+      depth: 6
+      num_heads: 16
+      mlp_ratio: 4.0
+      qkv_bias: true
+      patch_size: 1
+      norm_layer: flarmsnorm
+      pos_embed: learned
+      pos_embed_grid_size: [32, 32]
+      rope_type: axial
+      img_size: 32
+      in_chans: 768
+      out_chans: 768
+      unpatch_size: 1
+      reg_tokens: 4
+      compile_model: false
+
+    distillation_cfg:
+      dino_feature_dim: 1024
+      semantic_feature_dim: 1152
+      cache_layers:
+        low_level: [0, 1, 2, -1]
+        semantic: [5, 11, 17, 23]
+
+    hybrid_tokenizer_cfg:
+      latent_bottleneck_type: after_semantic
+      latent_straight_through_skip: true
+    """
+    return OmegaConf.create(yml)
 
 
 ###### Tests ##########
@@ -1087,7 +1158,7 @@ def test_model_forward_backward(
     model_type: str = "hybrid_enc_dec_transformer",
     real_data: str | None = None,
     use_optim: bool = False,
-    device: str = "cuda",
+    device: str | torch.device = "cuda",
     save_img_dir: str | None = None,
     rgb_chans: list[int] = [4, 2, 0],
     dtype: torch.dtype = torch.bfloat16,
@@ -1158,6 +1229,7 @@ def test_model_forward_backward(
     #     pretrained_path="runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors",
     #     use_repa_loss=True,
     # )
+    # cfg = hyrbid_lejea_iejepa_f8_config()
     model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
         cfg.cnn_cfg,
         cfg.trans_enc_cfg,
@@ -1420,6 +1492,6 @@ if __name__ == "__main__":
     """
     with logger.catch():
         test_model_forward_backward(
-            real_data="SAM270k", compute_mean_std=False, max_iters=20, save_pca_vis=True, pca_type="proj"
+            real_data="SAM270k", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
         )
         # test_forward_pca()

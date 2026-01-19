@@ -306,6 +306,9 @@ def lmr_apply(
 
 
 class LatentSparsityLoss(nn.Module):
+    sqrt_D: torch.Tensor
+    off_diag_mask: torch.Tensor
+
     def __init__(
         self,
         dim_z: int,
@@ -313,7 +316,7 @@ class LatentSparsityLoss(nn.Module):
         lambda_l2: float = 1.0,
         lambda_v: float = 25.0,
         lambda_c: float = 1.0,
-        lambda_m: float = 1.0,
+        lambda_m: float = 0.0,
         eps: float = 1e-6,
     ):
         """
@@ -322,7 +325,7 @@ class LatentSparsityLoss(nn.Module):
         lambda_l2: L2 hinge 惩罚权重 (使用 sqrt(D) - ||z||_2^2)
         lambda_v: 方差项权重 (防止维度坍塌)
         lambda_c: 协方差项权重 (特征去相关)
-        lambda_m: 均值项权重 (公式: (1/ND) sum Z_ij)
+        lambda_m: 均值项权重 (使用 per-dim mean 的平方: mean(mean(Z,0)^2))
         """
         super().__init__()
         self.dim_z = dim_z
@@ -337,7 +340,7 @@ class LatentSparsityLoss(nn.Module):
         self.register_buffer("sqrt_D", torch.sqrt(torch.tensor(float(dim_z))))
         self.register_buffer("off_diag_mask", ~torch.eye(dim_z, dtype=torch.bool), persistent=False)
 
-    def forward(self, z: torch.Tensor):
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         if z.dim() == 4:
             z = rearrange(z, "b c h w -> (b h w) c")
 
@@ -360,16 +363,16 @@ class LatentSparsityLoss(nn.Module):
 
         # =====================================================
         # 2) VCM regularization:
-        #   Mean:  (1/ND) sum_{i,j} Z_ij
+        #   Mean:  (1/D) sum_d (mean(Z·,d))^2
         #   Var:   (1/D) sum_d max(1 - sqrt(Var(Z·,d)), 0)
         #   Cov:   (1/(D(D-1))) sum_{i!=j} Cov(Z)^2_{i,j}
         # =====================================================
 
-        # --- Mean (严格按公式) ---
-        loss_mean = z.mean()
-
-        # 中心化（不 detach mean，更贴 VICReg 的梯度路径）
+        # --- Mean (VICReg 风格：对每一维的均值做平方惩罚，保证非负) ---
         mean_z = z.mean(dim=0)  # (D,)
+        loss_mean = mean_z.pow(2).mean()
+
+        # 中心化（不 detach mean，保持 VICReg 风格的梯度路径）
         z_centered = z - mean_z
 
         # --- Variance ---
@@ -381,7 +384,8 @@ class LatentSparsityLoss(nn.Module):
         # --- Covariance ---
         if N > 1:
             cov = (z_centered.T @ z_centered) / (N - 1)  # (D, D)
-            loss_cov = (cov[self.off_diag_mask] ** 2).mean()
+            # VICReg: off_diagonal(cov).pow(2).sum() / D
+            loss_cov = (cov[self.off_diag_mask] ** 2).sum() / D
         else:
             loss_cov = z.new_tensor(0.0)
 

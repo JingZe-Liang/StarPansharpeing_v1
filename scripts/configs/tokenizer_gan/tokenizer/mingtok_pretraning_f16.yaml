@@ -1,7 +1,7 @@
 _target_: src.stage1.cosmos.cosmos_mingtok.MingtokRSModel.create_model
 low_level_encoder:
   z_dim: 768
-  latent_dim: 32
+  latent_dim: 64
   encoder_type: cnn_only
   # latent projection before post-norm/clip
   # choices: [conv_1x1, conv_3x3, norm_act_conv3x3]
@@ -14,8 +14,8 @@ low_level_encoder:
     out_channels: 512
     channels: 128
     attn_resolutions: [32]
-    channels_mult: [2, 4, 4]
-    spatial_compression: 8
+    channels_mult: [2, 2, 4, 4]
+    spatial_compression: 16
     num_res_blocks: 2
     z_channels: ${..z_dim}
     act_checkpoint: true
@@ -38,21 +38,21 @@ low_level_encoder:
 
 semantic_decoder:
   in_chan: 768
-  out_chan: 1024  #${..low_level_encoder.z_dim}
-  embed_dim: 1024
+  out_chan: 1152 #${..low_level_encoder.z_dim}
+  embed_dim: 1152
   depth: 24
   num_heads: 16
-  patch_size: 2
+  patch_size: 1
   with_cls_token: true
-  out_patch_size: 2
+  out_patch_size: 1
   mlp_ratio: 4.0
   norm_layer: rmsnormfp32
-  drop_path: 0.0
+  drop_path: 0.1
   pe_type: rope_dinov3
   rope_kwargs:
     rope_theta: 100.0
   last_norm: rmsnormfp32
-  img_size: 64
+  img_size: 32
   patcher_type: patch_embedder
   additional_pe: true
   n_reg_tokens: 4
@@ -61,18 +61,18 @@ semantic_decoder:
     v_residual: true
 
 pixel_decoder:
-  decoder_type: hybrid
+  decoder_type: cnn_only
   latent_dim: ${..low_level_encoder.latent_dim}
   z_dim: ${..low_level_encoder.z_dim}
-  total_resolutions: 8
+  total_resolutions: 16
   res_decoder:
     in_channels: 768
     out_channels: 768
     channels: 128
     attn_resolutions: [32]
-    channels_mult: [2, 4, 4]
-    spatial_compression: 8
-    num_res_blocks: 2
+    channels_mult: [2, 2, 4, 4]
+    spatial_compression: 16
+    num_res_blocks: 3
     z_channels: ${..z_dim}
     act_checkpoint: true
     norm_type: rmsnorm2dfp32
@@ -93,41 +93,42 @@ pixel_decoder:
     #   sitok_embed_dim: 128
     #   sitok_hidden_dim: 128
     #   sitok_basis_dim: 128
-  transformer_decoder:
-    in_chan: 768
-    out_chan: 768
-    embed_dim: 1024
-    depth: 8
-    num_heads: 16
-    patch_size: 2
-    out_patch_size: 2
-    mlp_ratio: 4.0
-    norm_layer: rmsnormfp32
-    drop_path: 0.0
-    pe_type: rope_dinov3
-    rope_kwargs:
-      rope_theta: 100.0
-    last_norm: rmsnormfp32
-    img_size: 64
-    patcher_type: patch_embedder
-    additional_pe: true
-    with_cls_token: false
-    n_reg_tokens: 0
-    other_blk_kwargs:
-      use_gate: true
-      v_residual: true
+  # transformer_decoder:
+  #   in_chan: 768
+  #   out_chan: 768
+  #   embed_dim: 1024
+  #   depth: 8
+  #   num_heads: 16
+  #   patch_size: 1
+  #   out_patch_size: 1
+  #   mlp_ratio: 4.0
+  #   norm_layer: rmsnormfp32
+  #   drop_path: 0.0
+  #   pe_type: rope_dinov3
+  #   rope_kwargs:
+  #     rope_theta: 100.0
+  #   last_norm: rmsnormfp32
+  #   img_size: 64
+  #   patcher_type: patch_embedder
+  #   additional_pe: true
+  #   with_cls_token: false
+  #   n_reg_tokens: 0
+  #   other_blk_kwargs:
+  #     use_gate: true
+  #     v_residual: true
 
 repa_proj:
   low_lvl_repa_out_chan: 1024
   sem_repa_out_chan: 1024
-  low_lvl_cache_layers: [0, 1, 2, -1]
+  low_lvl_cache_layers: [1, 2, 3, -1]
   sem_cache_layers: [5, 11, 17, 23]
   low_lvl_repa_proj_chans: [256, 512, 512, 512]
-  sem_repa_proj_chans: [1024, 1024, 1024, 1024]
+  sem_repa_proj_chans: [1152, 1152, 1152, 1152]
 
 tokenizer:
   sem_decoder_take: h
   sem_pix_decoder_type: unified
+  pix_decoder_type: deterministic
   straight_through_latent: false
   path_unify:
     uni_type: cat

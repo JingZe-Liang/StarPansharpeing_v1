@@ -1,0 +1,19 @@
+accelerate launch \
+  --num_processes=1 \
+  train_dtm.py \
+  --exp-name="GF2" \
+  --report-to="wandb" \
+  --allow-tf32 \
+  --mixed-precision="fp16" \
+  --seed=0 \
+  --output-dir="exps" \
+  --batch-size=32 \
+  --learning-rate=1e-5 \
+  --sampling-steps=500 \
+  --epochs=1000 \
+  --gradient-accumulation-steps=2
+
+  --jvp-fn="autograd"
+
+conda activate cpya
+cd /home/liu/CPY/DTM

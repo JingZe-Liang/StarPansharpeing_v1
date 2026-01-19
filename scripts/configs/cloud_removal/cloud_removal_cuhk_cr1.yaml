@@ -7,7 +7,7 @@ defaults:
   - dataset: cuhk_cr1
   - accelerator: base
   - vae: cosmos_rs
-  - model: sit_b2_latent16_ps2
+  - model: lightning_dit_b2_latent16_ps2
   - _self_
 
   - override hydra/hydra_logging: disabled
@@ -16,61 +16,123 @@ defaults:
 accelerator:
   mixed_precision: bf16
 
+vae:
+  shift_factor:
+    [
+      -1.7176,
+      -1.2699,
+      -0.3963,
+      -1.3627,
+      -0.9565,
+      -0.8860,
+      1.6123,
+      0.1804,
+      -1.3202,
+      0.0888,
+      0.9877,
+      -1.0387,
+      -0.3203,
+      1.5062,
+      -1.6827,
+      -1.1545,
+    ]
+  scaling_factor:
+    [
+      0.4591,
+      0.8704,
+      0.5787,
+      0.4559,
+      0.9427,
+      0.4625,
+      0.6896,
+      0.6280,
+      0.4874,
+      0.7455,
+      0.3850,
+      0.7473,
+      0.8721,
+      0.6540,
+      0.8891,
+      0.8272,
+    ]
+
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.999
-  update_after_step: 1000
+  beta: 0.995
+  update_after_step: 0
   update_every: 2
   use_foreach: true
   allow_different_devices: true
   move_ema_to_online_device: true
-
-loss:
-  _target_: src.stage2.cloud_removal.diffusion.loss.CloudRemovalSILoss
-  prediction: v
-  path_type: linear
-  weighting: uniform
-  apply_time_shift: false
-  shift_base: 4096
+  lazy_init_ema: true
 
 train:
   proj_dir: runs/stage2_cloud_removal/
-  max_steps: 200_000
-  save_every: 2_000
-  visualize_every: 1_000
+  max_steps: 300_000
+  save_every: 1_000
+  visualize_every: 500
   max_grad_norm: 1.0
   compile_model: false
 
-  # diffusion settings
-  # diffusion settings
-  path_type: ${loss.path_type} # [linear, cosine]
-  time_weighting: ${loss.weighting} # [uniform, lognormal]
-  time_shifting: ${loss.apply_time_shift}
-  shift_base: ${loss.shift_base}
+  # Flow Matching / Transport settings
+  model_type: x1 # [noise, score, velocity, x1]
+  path_type: linear # [linear, cosine/gvp, vp]
+  loss_type: none # [none, velocity, likelihood]
+  time_weighting: uniform # [uniform, sigmoid, lognormal, or discrete list like "[0.1, 0.5, 0.9]"]
+  train_eps: 1.0e-4
+  sample_eps: 1.0e-4
+  time_shifting: false
+  shift_base: 4096
 
   condition_source: auto
+
+  # High-frequency loss weights (to preserve details)
+  grad_loss_weight: 0.1  # Gradient (Sobel edge) loss weight
+  fft_loss_weight: 0.0   # FFT high-frequency loss weight (optional, can try 0.05)
+  fft_high_freq_ratio: 0.3  # Ratio of high-freq components in FFT (0.3 = top 30%)
 
   # visualization (RGB)
   is_neg_1_1: true
   visualize_rgb_channels: [0, 1, 2]
 
   resume_path:
-  ema_load_path:
+  ema_load_path: #runs/stage2_cloud_removal/2026-01-18_20-27-40_sit_b2_cuhk_cr1/ema
 
   cloud_removal_optim:
-    _target_: torch.optim.AdamW
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 1.0e-4
+    # weight_decay: 0.01
+    # betas: ${tuple:[0.9, 0.999]}
+    # eps: 1.0e-8
+    # foreach: true
+
+    # _target_: heavyball.AdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.0
+    # caution: true
+    # betas: ${tuple:[0.95,0.999]}
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 1.0e-4
-    weight_decay: 0.01
-    betas: ${tuple:[0.9, 0.999]}
-    eps: 1.0e-8
-    foreach: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 3.0e-4
+    weight_decay: 0.0
 
   cloud_removal_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
     _partial_: true
-    num_warmup_steps: 500
+    num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
     num_cycles: 1
 
@@ -79,8 +141,18 @@ train:
     log_with_time: true
     log_every: 20
 
-  debug: false
+  debug: true
 
 val:
-  val_duration: 2_000
-  max_val_iters: 200
+  val_duration: 500
+  max_val_iters: 20
+
+sampler:
+  type: ode
+  num_steps: 20
+  cfg_scale: 1.0
+  sampling_time_type: uniform
+  progress: false
+  clip_for_x1_pred: false
+  time_shifting: false
+  shift_base: 4096

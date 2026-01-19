@@ -170,6 +170,7 @@ src/stage1/sana_dcae/pretrained
 src/stage2/generative/tools/conditions/caption/Qwen25_VL
 src/stage2/generative/tools/conditions/caption/caption_weights
 src/stage2/generative/Sana/weights
+**/paper/
 
 # AI related
 QWEN.md

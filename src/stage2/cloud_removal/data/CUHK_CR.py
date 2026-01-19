@@ -28,6 +28,20 @@ class CUHK_CR_StreamingDataset(_BaseStreamingDataset):
     def __getitem__(self, idx):
         sample = super().__getitem__(idx)
         img, gt = sample["img"].float(), sample["gt"].float()
+
+        # interpolation to 256
+        # match the baseline (EMRDM uses bicubic 1/2 resize for 512x512 CUHK)
+        img = (
+            torch.nn.functional.interpolate(img.unsqueeze(0), size=(256, 256), mode="bilinear", antialias=False)
+            .squeeze(0)
+            .clamp(0, 255)
+        )
+        gt = (
+            torch.nn.functional.interpolate(gt.unsqueeze(0), size=(256, 256), mode="bilinear", antialias=False)
+            .squeeze(0)
+            .clamp(0, 255)
+        )
+
         img /= 255.0
         gt /= 255.0
         if self.to_neg_1_1:

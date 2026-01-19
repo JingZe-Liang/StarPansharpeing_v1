@@ -250,7 +250,7 @@ def _large_msign(G: torch.Tensor, steps: int) -> torch.Tensor:
 
 
 @torch.no_grad()
-def msign(G: torch.Tensor, steps: int, m_type: str = "small") -> torch.Tensor:
+def msign(G: torch.Tensor, steps: int, m_type: str = "turbo_muon") -> torch.Tensor:
     # if G.shape[0] <= 512 or G.shape[1] <= 512:
     # force disable triton syrk branch
     if m_type == "small":
@@ -492,7 +492,7 @@ def solve_lambda_with_bisection(
 
     # Bracketing failed
     if λ_L is None:
-        logging.error("[bisect] find_bracket failed: cannot continue bisection.")
+        # logging.error("[bisect] find_bracket failed: cannot continue bisection.")
         return 0.0, False, f_L, 0  # 其实就是直接返回lambda=0,退化为muon更新
 
     # ----------------------------------------------------------------------

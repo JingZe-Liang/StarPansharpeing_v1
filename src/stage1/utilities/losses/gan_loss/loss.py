@@ -699,7 +699,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.latent_sparsity_fn = LatentSparsityLoss(dim_z=dim_z, **sparsity_options).to(latent.device)
 
         latent_sparsity_loss, _ = self.latent_sparsity_fn(latent)
-        if latent_sparsity_loss > 0:
+        if enc_last_layer is not None:
             sparsity_weight = self._calculate_adaptive_weight(nll_loss, latent_sparsity_loss, last_layer=enc_last_layer)
             latent_sparsity_loss = latent_sparsity_loss * sparsity_weight * self.latent_sparsity_weight
 
@@ -1002,6 +1002,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         return log
 
     def _reconstruction_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
+        # DEBUG: print shapes to diagnose mismatch
+        # logger.error(f"[DEBUG] _reconstruction_loss - inputs.shape: {inputs.shape}, targets.shape: {targets.shape}")
+
         # recon loss
         if self.reconstruction_loss_type == "mse":
             recon_loss = F.mse_loss(inputs, targets)

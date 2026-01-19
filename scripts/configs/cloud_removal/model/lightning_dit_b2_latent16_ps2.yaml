@@ -1,0 +1,11 @@
+_target_: src.stage2.cloud_removal.model.lightning_dit.LightningDiT
+# latent settings for Cosmos_RS VAE (spatial_compression=8, latent_channels=16)
+in_channels: 16
+cond_drop_prob: 0.0
+input_size: 32
+patch_size: 1
+depth: 14
+hidden_size: 512
+mlp_ratio: 4.0
+qk_norm: true
+use_checkpoint: false

@@ -80,6 +80,7 @@ from .rope import (
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
+from .moe import MoEFFN
 
 JVP_FLASH_ATTN_ENABLED = False
 try:
@@ -172,6 +173,9 @@ class Attention(Attention_):
         v_residual: bool = False,
     ):
         norm_layer = get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
+        if norm_layer is None:
+            norm_layer = nn.Identity
+        norm_layer = cast(Type[nn.Module], norm_layer)
         super().__init__(
             dim,
             num_heads,
@@ -219,6 +223,7 @@ class Attention(Attention_):
             qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             _, _, v = qkv.unbind(0)  # B, num_heads, N, head_dim
         else:
+            assert self.v_proj is not None
             v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
 
         if self.delta_t_aware and delta_t_emb is not None:
@@ -245,6 +250,9 @@ class Attention(Attention_):
             q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
         else:
             # B, num_heads, N, C
+            assert self.q_proj is not None
+            assert self.k_proj is not None
+            assert self.v_proj is not None
             q = self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
             k = self.k_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
             v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
@@ -301,7 +309,7 @@ class Attention(Attention_):
             k_patches = rope(k_patches, transpose=True)
             q = torch.cat([q_prefixed, q_patches], dim=2)
             k = torch.cat([k_prefixed, k_patches], dim=2)
-        else:
+        elif rope is not None:
             raise ValueError("Invalid rope type")
 
         if self.attn_implem != "flex_attention" and isinstance(attention_mask, BlockMask):
@@ -312,7 +320,17 @@ class Attention(Attention_):
         assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
         x, _ = attention_function_(self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p)
 
-        # x = x.transpose(1, 2).reshape(B, N, C)
+        if x.ndim == 4:
+            # Most SDPA/flash attention implementations return [B, heads, N, head_dim].
+            if x.shape[1] == self.num_heads:
+                x = x.transpose(1, 2).reshape(B, N, C)
+            elif x.shape[2] == self.num_heads:
+                x = x.reshape(B, N, C)
+            else:
+                raise ValueError(f"Unexpected attention output shape {tuple(x.shape)} for num_heads={self.num_heads}")
+        elif x.ndim != 3:
+            raise ValueError(f"Unexpected attention output ndim={x.ndim}, shape={tuple(x.shape)}")
+
         x = self.norm(x)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -578,6 +596,8 @@ class GatedAttention(nn.Module):
         )
 
         if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
+            if gate_score is None:
+                raise ValueError("gate_score must be provided when attention output gate is enabled")
             attn_output = attn_output * torch.sigmoid(gate_score)
 
         # attn_output = attn_output.transpose(1, 2).contiguous()
@@ -622,6 +642,7 @@ class AttentionBlock(nn.Module):
         proj_drop=0.0,
         fused_type=None,
         attn_type="sdpa",
+        ffn_type="swiglu",
         qk_norm=True,
         is_causal=False,
         mlp_ratio=4,
@@ -631,6 +652,7 @@ class AttentionBlock(nn.Module):
         layer_idx=None,
         jvp=False,
         v_residual: bool = False,
+        moe_kwargs: dict[str, Any] | None = None,
         hyperconnection_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
@@ -669,14 +691,33 @@ class AttentionBlock(nn.Module):
                 v_residual=v_residual,
                 jvp=jvp,
             )
-        self.ffn = SwiGLU(
-            in_features=dim,
-            hidden_features=int(dim * mlp_ratio),
-            norm_layer=None,
-            bias=True,
-            drop=ffn_drop,
-            is_fused=fused_type,
-        )
+
+        if ffn_type == "swiglu":
+            self.ffn = SwiGLU(
+                in_features=dim,
+                hidden_features=int(dim * mlp_ratio),
+                norm_layer=None,
+                bias=True,
+                drop=ffn_drop,
+                is_fused=fused_type,
+            )
+        elif ffn_type == "moe":
+            moe_kwargs = moe_kwargs or {}
+            # num_layers is required by MoEFFN/TransformerConfig
+            num_layers = moe_kwargs.pop("num_layers", 12)
+
+            self.ffn = MoEFFN(
+                dim=dim,
+                n_heads=n_heads,
+                mlp_ratio=mlp_ratio,
+                num_layers=num_layers,
+                layer_idx=layer_idx if layer_idx is not None else 0,
+                ffn_drop=ffn_drop,
+                fused_type=fused_type,
+                assume_bsh=True,
+                **moe_kwargs,
+            )
+
         self.norm1 = create_norm_layer(norm_layer, dim)
         self.norm2 = create_norm_layer(norm_layer, dim)
         self.ls1 = LayerScale(dim, 1e-2)
@@ -1381,7 +1422,7 @@ class TransformerTokenizer(nn.Module):
                 _rope_type_create = "cat"
             else:
                 _rope_type_create = pe_type.split("_")[1]
-            _rope_kwargs = dict(
+            _rope_kwargs: dict[str, Any] = dict(
                 dim=embed_dim,
                 num_heads=num_heads,
                 device="cuda",
@@ -1594,9 +1635,10 @@ class TransformerTokenizer(nn.Module):
 
         # create the rope embeddings with different grid sizes
         rope_embeds = torch.zeros(B, l_cur, self.rope.dim * 2, dtype=dtype, device=device)
-        if hasattr(self.rope, "get_batch_embeds"):
+        get_batch_embeds = getattr(self.rope, "get_batch_embeds", None)
+        if callable(get_batch_embeds):
             # Rope cat
-            unique_embeds = self.rope.get_batch_embeds(unique_sizes)
+            unique_embeds = get_batch_embeds(unique_sizes)
             for grid_size, embed, batch_indices in zip(unique_sizes, unique_embeds, size_to_indices.values()):
                 h, w = grid_size
                 actual_len = h * w
@@ -1606,7 +1648,7 @@ class TransformerTokenizer(nn.Module):
             # Rope dinov3
             # Generate each unique size separately and assign
             for grid_size, batch_indices in size_to_indices.items():
-                rope_embed = self.rope.get_embed(shape=grid_size)
+                rope_embed = self.rope.get_embed(shape=[grid_size[0], grid_size[1]])
                 h, w = grid_size
                 actual_len = h * w
                 for bi in batch_indices:
@@ -1618,7 +1660,7 @@ class TransformerTokenizer(nn.Module):
         """Per-batch generate the rope embeddings"""
         assert self.rope is not None
         with torch.autocast(device_type="cuda", enabled=False):
-            rope_embeds = self.rope.get_embed(shape=grid_size)
+            rope_embeds = self.rope.get_embed(shape=[grid_size[0], grid_size[1]])
         # logger.log("NOTE", f"create the rope embeds shaped as {rope_embeds.shape}")
         return rope_embeds  # [seq_len, dim_h]
 
@@ -1664,7 +1706,9 @@ class TransformerTokenizer(nn.Module):
 
     def _forward_get_tokens(self, x, hw=None):
         if x.ndim == 4:
-            bs, c, h, w = x.shape if hw is None else (*x.shape[:2], *hw)
+            bs, c, h, w = x.shape
+            if hw is not None:
+                h, w = hw
             x = self.patch_embed(x)  # (bs, n, dim)
         elif x.ndim == 3:
             bs, l, c = x.shape
@@ -1862,12 +1906,17 @@ class TransformerTokenizer(nn.Module):
 
     def get_last_layer(self):
         if self.head_type == "linear":
+            assert isinstance(self.head, nn.Linear)
             return self.head.weight
         elif self.head_type == "norm_linear":
+            if not isinstance(self.head, nn.Sequential):
+                raise TypeError("head must be nn.Sequential when head_type='norm_linear'")
             return self.head[0].weight
         elif self.head_type == "adaptive_linear":
+            assert isinstance(self.head, AdaptiveOutputLinearLayer)
             return self.head.linear.weight
         elif self.head_type == "adaptive_unpatcher":
+            assert isinstance(self.head, AdaptiveProgressivePatchUnembedding)
             return self.head.unpatchers[-1].weight
         else:
             raise ValueError(f"Unsupported head type: {self.head_type} to get last layer's weight")
