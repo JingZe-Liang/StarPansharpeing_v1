@@ -62,11 +62,13 @@ def dump_config(config, path, log_config=True):
         f.write(yaml_dump)
 
 
-def set_defaults(cfg: dict | None, defaults: dict[str, Any], use_edict=True) -> dict | edict:
+def set_defaults(cfg: dict | None, defaults: dict[str, Any] = {}, use_edict=True, **kwargs) -> dict | edict:
     """set defaults for dict/edict config"""
     if cfg is None:
         cfg = {}
     for k, v in defaults.items():
+        cfg.setdefault(k, v)
+    for k, v in kwargs.items():
         cfg.setdefault(k, v)
     return edict(cfg) if use_edict else cfg
 

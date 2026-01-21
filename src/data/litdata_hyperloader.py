@@ -1,8 +1,8 @@
 import random
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Literal
 from collections.abc import Iterable, Iterator
+from typing import Callable, Literal
 
 import numpy as np
 import PIL.Image as Image
@@ -15,7 +15,7 @@ from litdata import (
     StreamingDataLoader,
     StreamingDataset,
 )
-from litdata.utilities import dataset_utilities as litdata_utils
+import litdata as ld
 from loguru import logger
 from torch import Tensor
 from torch.utils.data.dataloader import default_collate
@@ -33,6 +33,77 @@ from src.utilities.train_utils import time_recorder, TimeRecorder
 from .augmentations import hyper_transform
 from .cycled_dataset import CycledDataset
 from .utils import large_image_resizer_clipper, norm_img
+
+
+def _get_index_file_state() -> dict[str, str]:
+    return {
+        "constants": ld.constants._INDEX_FILENAME,
+        "dataset_utilities": ld.utilities.dataset_utilities._INDEX_FILENAME,
+        "streaming_dataset": ld.streaming.dataset._INDEX_FILENAME,
+        "streaming_cache": ld.streaming.cache._INDEX_FILENAME,
+        "streaming_reader": ld.streaming.reader._INDEX_FILENAME,
+        "streaming_config": ld.streaming.config._INDEX_FILENAME,
+    }
+
+
+def _apply_index_file_state(state: dict[str, str]) -> None:
+    targets = {
+        "constants": ld.constants,
+        "dataset_utilities": ld.utilities.dataset_utilities,
+        "streaming_dataset": ld.streaming.dataset,
+        "streaming_cache": ld.streaming.cache,
+        "streaming_reader": ld.streaming.reader,
+        "streaming_config": ld.streaming.config,
+    }
+    for key, module in targets.items():
+        setattr(module, "_INDEX_FILENAME", state[key])
+
+
+def _set_index_file(file_name: str = "index.json") -> None:
+    _apply_index_file_state(
+        {
+            "constants": file_name,
+            "dataset_utilities": file_name,
+            "streaming_dataset": file_name,
+            "streaming_cache": file_name,
+            "streaming_reader": file_name,
+            "streaming_config": file_name,
+        }
+    )
+
+
+def _reset_index_file():
+    ld.constants._INDEX_FILENAME = "index.json"
+    ld.utilities.dataset_utilities._INDEX_FILENAME = "index.json"
+    ld.streaming.dataset._INDEX_FILENAME = "index.json"
+    ld.streaming.cache._INDEX_FILENAME = "index.json"
+    ld.streaming.reader._INDEX_FILENAME = "index.json"
+    ld.streaming.config._INDEX_FILENAME = "index.json"
+
+
+def _as_index_filename(index_file_name: str | None) -> str | None:
+    if index_file_name is None:
+        return None
+    if index_file_name.endswith(".json"):
+        return index_file_name
+    return f"{index_file_name}.json"
+
+
+class _IndexFileOverride:
+    def __init__(self, index_file_name: str | None) -> None:
+        self.index_file_name = _as_index_filename(index_file_name)
+        self._prev: dict[str, str] | None = None
+
+    def __enter__(self) -> "_IndexFileOverride":
+        if self.index_file_name is None:
+            return self
+        self._prev = _get_index_file_state()
+        _set_index_file(self.index_file_name)
+        return self
+
+    def __exit__(self, exc_type, exc, exc_tb) -> None:
+        if self._prev is not None:
+            _apply_index_file_state(self._prev)
 
 
 def to_tensor_img(
@@ -289,28 +360,48 @@ class _BaseStreamingDataset(StreamingDataset):
     Fixed index file name support.
     """
 
-    def __init__(self, *, input_dir: str, index_file_name: str | None = None, **kwargs: Any) -> None:
-        input_dir_path = Path(input_dir)
-        index_file_name = None
-        if input_dir_path.is_dir():
-            pass
-        elif input_dir_path.is_file() and input_dir_path.suffix == ".json":
-            index_file_name = input_dir_path.stem
-            input_dir_path = input_dir_path.parent
-        else:
-            raise ValueError(f"input_dir must be a directory or a index json file, got: {input_dir_path}")
-
-        # FIXME: I don't know why the 'index_path' args does not work
-        index_file_name = index_file_name or kwargs.pop("index_file_name", None) or index_file_name
-        if index_file_name is not None:
-            setattr(litdata_utils, "_INDEX_FILENAME", f"{index_file_name}.json")
-
+    def __init__(self, *, input_dir: str, **kwargs: Any) -> None:
+        input_dir, index_file_name = self._change_litdata_index_file(input_dir, kwargs)
         kwargs.setdefault("seed", 2025)
-        super().__init__(input_dir=str(input_dir_path), **kwargs)
+        super().__init__(input_dir=str(input_dir), **kwargs)
+
+        self.index_file_name = index_file_name
 
         # change back
+        # hacky: call __len__ to cache first and then reset the original index file name
+        if self.__len__() > 0:
+            try:
+                _ = self[0]
+            except Exception as e:
+                logger.warning(f"Failed to pre-load the first item for {input_dir}: {e}")
+
         if index_file_name is not None:
-            setattr(litdata_utils, "_INDEX_FILENAME", "index.json")
+            _reset_index_file()
+
+    def _change_litdata_index_file(self, path: str | Path, kwargs: dict[str, Any]):
+        """
+        Change the index file name of litdata.
+        """
+        path = Path(path)
+        index_file_name = None
+        if path.is_dir():
+            pass
+        elif path.is_file() and path.suffix == ".json":
+            index_file_name = path.stem
+            path = path.parent
+        else:
+            raise ValueError(f"input_dir must be a directory or a index json file, got: {path}")
+
+        index_file_name = kwargs.pop("index_file_name", None) or index_file_name
+        if index_file_name is not None:
+            index_filename = _as_index_filename(index_file_name)
+            _set_index_file(cast(str, index_filename))
+            assert (path / cast(str, index_filename)).exists(), (
+                f"Index file not found: {path / cast(str, index_filename)}"
+            )
+            logger.debug(f"Set litdata index file name to: {index_filename}")
+
+        return path, index_file_name
 
     def _check_datasets(self, datasets: list[StreamingDataset]) -> None:
         """override the original method
@@ -320,6 +411,10 @@ class _BaseStreamingDataset(StreamingDataset):
         # if any(not isinstance(d, StreamingDaaset) for d in datasets):
         #     raise RuntimeError("The provided datasets should be instances of the StreamingDataset.")
         return
+
+    def _create_cache(self, worker_env: Any):
+        with _IndexFileOverride(self.index_file_name):
+            return super()._create_cache(worker_env=worker_env)
 
     @classmethod
     def create_dataset(
@@ -1100,7 +1195,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
     },
     use_itered_cycle: bool = True,
     _collect_stats: bool = False,
-):
+) -> tuple[list[StreamingDataset], StreamingDataLoader]:
     def _flatten_paths(d: dict[str, Any]) -> dict[str, list]:
         res: dict[str, list] = {}
         for k, v in d.items():

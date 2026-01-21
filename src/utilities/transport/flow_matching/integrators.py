@@ -74,7 +74,10 @@ def get_timesteps(
 
     # Ensure the last timestep is 1.0 (with tolerance for floating point precision)
     if abs(float(t[-1]) - 1.0) > 1e-6:
-        logger.warning(f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0.")
+        logger.warning(
+            f"Timesteps are: {t}, the last timestep is {float(t[-1])}, set to 1.0.",
+            warn_pattern=r"Timesteps are: .*, the last timestep is",
+        )
         t = th.cat([t, th.tensor([1.0]).to(t.device)], dim=0)
     else:
         # Ensure exact 1.0 for the last timestep

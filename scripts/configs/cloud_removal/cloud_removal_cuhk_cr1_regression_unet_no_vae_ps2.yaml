@@ -4,10 +4,9 @@ hydra:
     dir: .
 
 defaults:
-  - dataset: cuhk_cr1
+  - dataset: cuhk_cr12
   - accelerator: base
-  - vae: cosmos_rs
-  - model: lightning_dit_b2_latent16_ps2
+  - model: image_condition_unet_rgb_ps2_regression #image_condition_unet_rgb_ps2_regression
   - _self_
 
   - override hydra/hydra_logging: disabled
@@ -16,45 +15,15 @@ defaults:
 accelerator:
   mixed_precision: bf16
 
-vae:
-  shift_factor:
-    [
-      -1.7176,
-      -1.2699,
-      -0.3963,
-      -1.3627,
-      -0.9565,
-      -0.8860,
-      1.6123,
-      0.1804,
-      -1.3202,
-      0.0888,
-      0.9877,
-      -1.0387,
-      -0.3203,
-      1.5062,
-      -1.6827,
-      -1.1545,
-    ]
-  scaling_factor:
-    [
-      0.4591,
-      0.8704,
-      0.5787,
-      0.4559,
-      0.9427,
-      0.4625,
-      0.6896,
-      0.6280,
-      0.4874,
-      0.7455,
-      0.3850,
-      0.7473,
-      0.8721,
-      0.6540,
-      0.8891,
-      0.8272,
-    ]
+vae: null
+
+dataset:
+  train_loader:
+    stream_ds_kwargs:
+      interp_to: 256
+  val_loader:
+    stream_ds_kwargs:
+      interp_to: 256
 
 ema:
   _target_: ema_pytorch.EMA
@@ -74,8 +43,9 @@ train:
   visualize_every: 500
   max_grad_norm: 1.0
   compile_model: false
+  train_mode: regression
 
-  # Flow Matching / Transport settings
+  # Flow Matching / Transport settings (unused in regression mode)
   model_type: x1 # [noise, score, velocity, x1]
   path_type: linear # [linear, cosine/gvp, vp]
   loss_type: none # [none, velocity, likelihood]
@@ -84,36 +54,30 @@ train:
   sample_eps: 1.0e-4
   time_shifting: false
   shift_base: 4096
+  x0_source: noise # [noise, cloud]
 
   condition_source: auto
 
   # High-frequency loss weights (to preserve details)
-  grad_loss_weight: 0.1  # Gradient (Sobel edge) loss weight
-  fft_loss_weight: 0.0   # FFT high-frequency loss weight (optional, can try 0.05)
-  fft_high_freq_ratio: 0.3  # Ratio of high-freq components in FFT (0.3 = top 30%)
+  grad_loss_weight: 0.0 # Gradient (Sobel edge) loss weight
+  fft_loss_weight: 0.0 # FFT high-frequency loss weight (optional, can try 0.05)
+  ssim_loss_weight: 0.1 # SSIM loss weight
+  fft_high_freq_ratio: 0.3 # Ratio of high-freq components in FFT (0.3 = top 30%)
 
   # visualization (RGB)
   is_neg_1_1: true
   visualize_rgb_channels: [0, 1, 2]
 
   resume_path:
-  ema_load_path: #runs/stage2_cloud_removal/2026-01-18_20-27-40_sit_b2_cuhk_cr1/ema
+  ema_load_path: #runs/stage2_cloud_removal/2026-01-20_18-23-41_unet_regression_cuhk_cr1_no_vae_ps2/ema
 
   cloud_removal_optim:
     # _target_: torch.optim.AdamW
     # _partial_: true
-    # lr: 1.0e-4
-    # weight_decay: 0.01
-    # betas: ${tuple:[0.9, 0.999]}
-    # eps: 1.0e-8
-    # foreach: true
-
-    # _target_: heavyball.AdamW
-    # _partial_: true
     # lr: 3.0e-4
+    # betas: [0.99, 0.999]
     # weight_decay: 0.0
-    # caution: true
-    # betas: ${tuple:[0.95,0.999]}
+    # foreach: true
 
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
@@ -123,7 +87,7 @@ train:
     use_triton: true
     use_preconditioned: true # turbo-muon style preconditioning
     muon_params_defaults:
-      lr: 4.0e-4
+      lr: 6.0e-4
       weight_decay: 0.01
     oned_params_defaults:
       lr: 3.0e-4
@@ -137,7 +101,7 @@ train:
     num_cycles: 1
 
   log:
-    run_comment: sit_b2_cuhk_cr1
+    run_comment: unet_regression_cuhk_cr1_no_vae_ps2
     log_with_time: true
     log_every: 20
 
@@ -145,7 +109,8 @@ train:
 
 val:
   val_duration: 500
-  max_val_iters: 20
+  max_val_iters: -1
+  metrics_interp_to: 256
 
 sampler:
   type: ode

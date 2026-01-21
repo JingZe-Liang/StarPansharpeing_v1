@@ -973,12 +973,9 @@ class CosmosHyperspectralTokenizerTrainer:
         # Disable heavyball compilation early (before optimizer instantiation) by default.
         disable_heavyball_compile = getattr(self.train_cfg, "disable_heavyball_compile", True)
         if disable_heavyball_compile:
-            try:
-                import heavyball
+            import heavyball
 
-                heavyball.utils.compile_mode = None
-            except Exception:
-                pass
+            heavyball.utils.compile_mode = None
 
         # optimizers
         if (
@@ -1823,46 +1820,46 @@ class CosmosHyperspectralTokenizerTrainer:
             gen_loss = gen_loss + proxy_loss
 
         # step the optimizer and lr scheduler
+        # backward
+        self.tokenizer_optim.zero_grad()
+
+        if _is_unified_proxy_task_forward:
+            if self.proxy_optim is not None:
+                self.proxy_optim.zero_grad()
+
+        with self._record_time("backward_tokenizer"):
+            self.accelerator.backward(gen_loss)
+
+        # gradient check
         if self.accelerator.sync_gradients:
-            # backward
-            self.tokenizer_optim.zero_grad()
-
-            if _is_unified_proxy_task_forward:
-                if self.proxy_optim is not None:
-                    self.proxy_optim.zero_grad()
-
-            with self._record_time("backward_tokenizer"):
-                self.accelerator.backward(gen_loss)
-
-            # gradient check
             if self.sep_enc_dec:
                 self.gradient_check(self.tokenizer_encoder)
                 self.gradient_check(self.tokenizer_decoder)
             else:
                 self.gradient_check(self.tokenizer)
 
-            # optimizer step
-            self.tokenizer_optim.step()
+        # optimizer step
+        self.tokenizer_optim.step()
 
-            if _is_unified_proxy_task_forward and proxy_has_grad:
-                if self.proxy_optim is not None:
-                    self.proxy_optim.step()
-                if self.proxy_sched is not None:
-                    self.proxy_sched.step()
-            if getattr(self.train_cfg, "grad_check", False):
-                self._raise_if_nonfinite_params(self.tokenizer, model_name="tokenizer (after optimizer.step)")
+        if _is_unified_proxy_task_forward and proxy_has_grad:
+            if self.proxy_optim is not None:
+                self.proxy_optim.step()
+            if self.proxy_sched is not None:
+                self.proxy_sched.step()
+        if getattr(self.train_cfg, "grad_check", False):
+            self._raise_if_nonfinite_params(self.tokenizer, model_name="tokenizer (after optimizer.step)")
 
-            # scheduler step
-            self.tokenizer_sched.step()
+        # scheduler step
+        self.tokenizer_sched.step()
 
-            if self.antideg_net is not None:
-                self.antideg_net_optim.step()
-                # self.gradient_check(self.antideg_net)
+        if self.antideg_net is not None:
+            self.antideg_net_optim.step()
+            # self.gradient_check(self.antideg_net)
 
-            # ema update
-            self.ema_update(mode="tokenizer")
-            if _is_unified_proxy_task_forward and proxy_has_grad:
-                self.ema_update(mode="proxy")
+        # ema update
+        self.ema_update(mode="tokenizer")
+        if _is_unified_proxy_task_forward and proxy_has_grad:
+            self.ema_update(mode="proxy")
 
         return gen_loss, log_losses, proxy_out
 
@@ -1871,20 +1868,21 @@ class CosmosHyperspectralTokenizerTrainer:
 
         disc_loss, log_disc = self.forward_discriminator(x, tokenizer_out, train_tokenizer=False, split="train")
 
+        # backward
+        self.disc_optim.zero_grad()
+        self.accelerator.backward(disc_loss)
         if self.accelerator.sync_gradients:
-            # backward
-            self.disc_optim.zero_grad()
-            self.accelerator.backward(disc_loss)
             self.gradient_check(self.vq_loss_fn.discriminator)
-            self.disc_optim.step()
-            if getattr(self.train_cfg, "grad_check", False):
-                self._raise_if_nonfinite_params(
-                    self.vq_loss_fn.discriminator, model_name="discriminator (after optimizer.step)"
-                )
-            self.disc_sched.step()
 
-            # ema update
-            self.ema_update(mode="disc")
+        self.disc_optim.step()
+        if getattr(self.train_cfg, "grad_check", False):
+            self._raise_if_nonfinite_params(
+                self.vq_loss_fn.discriminator, model_name="discriminator (after optimizer.step)"
+            )
+        self.disc_sched.step()
+
+        # ema update
+        self.ema_update(mode="disc")
 
         return disc_loss, log_disc
 
@@ -2688,10 +2686,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # * --- hyperspectral image to rgb images --- #
         def hyperspectral_to_rgb(x):
+            from omegaconf import ListConfig
+
             # is rgb or gray images
             if c in (1, 3):
                 x_np = to_img(x)
-            elif isinstance(self.dataset_cfg.rgb_channels, (list, tuple)):
+            elif isinstance(self.dataset_cfg.rgb_channels, (ListConfig, list, tuple)):
                 rgb_channels = to_cont(self.dataset_cfg.rgb_channels)
                 x_np = to_img(x[:, rgb_channels])
             elif callable(self.dataset_cfg.rgb_channels):
@@ -2760,7 +2760,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.proxy_aug_manager.shutdown()
 
 
-_key = "ijepa_cosmos_f8c32_mHC"
+_key = "unicosmos_lora_f8c16p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

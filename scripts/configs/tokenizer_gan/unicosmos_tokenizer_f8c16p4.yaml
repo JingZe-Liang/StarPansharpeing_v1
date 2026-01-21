@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral]
+  - dataset: cuhk_cr # [cuhk_cr, mars, hyperspectral, unified_hyperspectral]
   - tokenizer: uni_cosmos_f8c16p1_nested # [uni_cosmos_f8c16p4, uni_cosmos_f8c16p1_nested]
   - quantizer: quant
   - accelerator: base
@@ -22,22 +22,22 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
-dataset:
-  train_loader:
-    macro_sampled_batch_size: { 128: 16, 256: 10, 512: 4 }
-    loader_kwargs:
-      num_workers: 6
-      batch_size: 6
-      prefetch_factor: 2
-      persistent_workers: true
-  val_loader:
-    macro_sampled_batch_size: { 128: 8, 256: 8, 512: 6 }
-    loader_kwargs:
-      num_workers: 2
-      batch_size: 4
-      pin_memory: false
-      drop_last: true
-      persistent_workers: false
+# dataset:
+#   train_loader:
+#     macro_sampled_batch_size: { 128: 16, 256: 10, 512: 4 }
+#     loader_kwargs:
+#       num_workers: 6
+#       batch_size: 6
+#       prefetch_factor: 2
+#       persistent_workers: true
+#   val_loader:
+#     macro_sampled_batch_size: { 128: 8, 256: 8, 512: 6 }
+#     loader_kwargs:
+#       num_workers: 2
+#       batch_size: 4
+#       pin_memory: false
+#       drop_last: true
+#       persistent_workers: false
 
 vq_loss:
   # disc_in_channels: ${dataset.channels}
@@ -110,16 +110,16 @@ tokenizer:
   dino_feature_dim: 1024
 
   # loading
-  uni_path: "" #"runs/pretrained/model.safetensors"
-  loading_type: "" #"pretrained"
+  uni_path: "" #"runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors"
+  loading_type: null #"pretrained"
 
   # augmentations
-  latent_noise_prob: 0.2
+  latent_noise_prob: 0.0
   use_channel_drop: false
 
   # blocks
   model:
-    norm_type: rmsnorm2d
+    norm_type: rmsnorm2dfp32
     norm_groups: 32
     block_name: res_block
     moe_token_mixer_type: res_block
@@ -205,13 +205,6 @@ train:
       lr: 3.0e-4
       weight_decay: 0.
 
-    # _target_: heavyball.AdamW
-    # _partial_: true
-    # lr: 3.0e-4
-    # weight_decay: 0.02
-    # caution: true
-    # betas: ${tuple:[0.9,0.95]} # big model, small beta2 for stability
-
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
@@ -246,7 +239,7 @@ train:
     # num_warmup_steps: 1000
 
   log:
-    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_irepa-spatial-norm_noisy_latent_aug
+    run_comment: cosmos_f8c${tokenizer.model.latent_channels}p${tokenizer.model.patch_size}_${dataset.used}_lora
     log_with_time: true
     visualize_every: 500
     log_every: 10

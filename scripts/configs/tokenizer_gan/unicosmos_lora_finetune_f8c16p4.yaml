@@ -5,7 +5,7 @@ hydra:
 
 defaults:
   # tokenizer ==========
-  - dataset: hyperspectral # [hyperspectral, HAD100]
+  - dataset: cuhk_cr # [hyperspectral, HAD100]
   - tokenizer: uni_cosmos_f8c16p1_nested
   - quantizer: quant
   - accelerator: base
@@ -17,36 +17,36 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-dataset:
-  used: ARIS_Universe_Melas
-  prefetch_factor: 2
-  num_workers: 1
-  shuffle_size: -1
-  loader_type: webdataset
-  shuffle_within_workers: false
-  rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
-  # For loading the pretrained multi-channels head
-  channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
-  batch_size_val: 4
-  # dataset_names_to_bs:
-  #   MMSeg_YREB: 16
-  #   DCF_2019: 7
-  #   DFC_2020: 18
-  #   GID_GF2: 12
-  #   Houston: 7
-  #   DryadHyper: 5
-  #   MUSLI: 2
-  #   OHS: 5
-  #   WV3: 5
-  #   QB: 5
-  #   GF1: 5
-  #   IKONOS: 5
-  #   WDC: 4
-  #   Xiongan: 4
-  #   WHU_Hi: 6
-  #   CD_224: 4
-  #   CD_242: 4
-  #   OSCD: 5
+# dataset:
+#   used: ARIS_Universe_Melas
+#   prefetch_factor: 2
+#   num_workers: 1
+#   shuffle_size: -1
+#   loader_type: webdataset
+#   shuffle_within_workers: false
+#   rgb_channels: ${function:src.utilities.train_utils.visualization.get_rgb_image}
+#   # For loading the pretrained multi-channels head
+#   channels: ${list:[3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369, 285]}
+#   batch_size_val: 4
+#   # dataset_names_to_bs:
+#   #   MMSeg_YREB: 16
+#   #   DCF_2019: 7
+#   #   DFC_2020: 18
+#   #   GID_GF2: 12
+#   #   Houston: 7
+#   #   DryadHyper: 5
+#   #   MUSLI: 2
+#   #   OHS: 5
+#   #   WV3: 5
+#   #   QB: 5
+#   #   GF1: 5
+#   #   IKONOS: 5
+#   #   WDC: 4
+#   #   Xiongan: 4
+#   #   WHU_Hi: 6
+#   #   CD_224: 4
+#   #   CD_242: 4
+#   #   OSCD: 5
 
 #   transform_prob: 0.0
 
@@ -56,14 +56,14 @@ accelerator:
 
 tokenizer:
   # repa
-  use_repa_loss: true
+  use_repa_loss: false
   use_vf_loss: false
   hook_module: decoder.decoder.mid.block_2
   vf_on_z_or_module: z # [z, module]
   dino_feature_dim: 1024
 
   # loading
-  uni_path: runs/stage1_cosmos_nested/2025-10-22_19-23-25_cosmos_f8c16p1_unified_hyperspectral_latent_noise=0.0_channel_drop=False/ema/tokenizer/model.safetensors
+  uni_path: "runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors"
   loading_type: pretrained
 
   # augmentations
@@ -72,7 +72,7 @@ tokenizer:
 
   # blocks
   model:
-    norm_type: gn
+    norm_type: rmsnorm2dfp32
     norm_groups: 32
     block_name: res_block
     moe_token_mixer_type: res_block
@@ -99,30 +99,46 @@ tokenizer:
     drop_prob: 0.5
 
 vq_loss:
+  # disc_in_channels: ${dataset.channels}
   # perceptual loss
-  perceptual_weight: 0.05
-  repa_loss_weight: 0.02
+  # repa loss
+  repa_loss_weight: 0
   repa_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean
     img_resize: 512 # null for no resize
     repa_img_size: 512
+    repa_model_type: dinov3
     repa_model_name: "dinov3_vitl16"
-    loss_type: am_radio
+    feature_resample_type: match_teacher
+    get_hier_teacher_feature: true
+    loss_type: hier_distillation
     feature_normalize: spatial
+  # vf loss
   vf_loss_weight:
   vf_loss_options:
     c_dim_first: true
     build_proj: false
     rgb_channels: mean #${dataset.rgb_channels}
-    img_resize: 224
-    repa_img_size: 224
+    img_resize: 384
+    repa_img_size: 384
     distmat_margin: 0.25
     cos_margin: 0.5
     repa_model_name: "dinov3_vitl16"
+  # gram loss
+  gram_loss_weight:
+  gram_loss_options:
+    c_dim_first: true
+    build_proj: false
+    rgb_channels: mean
+    img_resize: 384 # null for no resize
+    repa_img_size: 384
+    repa_model_name: "dinov3_vitl16"
+  # quantizer loss
   quantizer_type:
   quantizer_options:
+  # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
   disc_ndf: 128
   disc_num_layers: 3
@@ -131,13 +147,18 @@ vq_loss:
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
-  ssim_weight: 0.2 # if OOM, set to 0
-  disc_weight: 0.1
+  ssim_weight: 0
+  disc_weight: 0.4
   reconstruction_loss_type: mse
   # r1, r2 loss seems not necessary
   # disc_reg_gamma: 1
   # disc_reg_type: r1r2
   # disc_reg_freq: 2
+  # lcr loss
+  lcr_loss_weight: 0.0
+  lcr_loss_options:
+    thresh: 0.75
+    windows_size: [2, 2]
 
 ema:
   _target_: ema_pytorch.EMA
@@ -175,7 +196,7 @@ peft:
 
 train:
   tokenizer_name: cosmos_lora
-  proj_dir: runs/stage1_cosmo_nested_lora/
+  proj_dir: runs/stage1_cosmos_nested_lora/
   finetune_strategy: peft
   max_grad_norm: 0.03
   track_metrics_duration: -1
@@ -195,22 +216,29 @@ train:
   resume_path:
   ema_load_path:
   grad_checkpoint: true
+  proxy_task_train_type: seperated
 
   finetune_cfg:
     refine_decoder_head_n_layers: all
     adapt_latent_n_layers: 0
 
   tokenizer_optimizer:
-    _target_: src.utilities.optim.get_muon_optimizer
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 2.0e-4
-    weight_decay: 0.1
-    adamw_eps: 1.0e-8
-    ns_diff_abc: true
-    ns_norm: false
-    momentum: 0.9
-    adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    adamw_wd: 0.
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    adjust_lr: rms_norm
+    cautious_wd: true
+    use_triton: true
+    epsilon: 1.0e-9
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.02
+    oned_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.
 
     # _target_: torch.optim.AdamW
     # _partial_: true
@@ -220,17 +248,6 @@ train:
     # betas: [0.9, 0.995]
 
   disc_optimizer:
-    # _target_: src.utilities.optim.get_muon_optimizer
-    # _partial_: true
-    # lr: 2.0e-4
-    # weight_decay: 0.1
-    # adamw_eps: 1.0e-8
-    # ns_diff_abc: true
-    # ns_norm: false
-    # momentum: 0.9
-    # adamw_betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    # adamw_wd: 0.
-
     _target_: torch.optim.AdamW
     _partial_: true
     lr: 2.0e-4
@@ -262,7 +279,7 @@ train:
     log_with_time: true
     visualize_every: 200
     log_every: 10
-
+    log_with: ["swanlab"]
   debug: true
 
 val:

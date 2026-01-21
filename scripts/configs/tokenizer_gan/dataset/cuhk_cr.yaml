@@ -1,0 +1,35 @@
+used: cuhr_c1_2
+dataset_names_to_img_size:
+  mars_images: 512
+
+dataset_channel: 4
+img_size: 512
+rgb_channels: [0, 1, 2]
+
+train_loader:
+  _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset_RandomKey_For_tokenizerPEFT.create_dataloader
+  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  stream_ds_kwargs:
+    to_neg_1_1: True
+  loader_kwargs:
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
+    batch_size: 8
+    prefetch_factor: null
+    shuffle: false
+
+val_loader:
+  _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset_RandomKey_For_tokenizerPEFT.create_dataloader
+  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  stream_ds_kwargs:
+    to_neg_1_1: True
+  loader_kwargs:
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
+    batch_size: 8
+    prefetch_factor: null
+    shuffle: false

@@ -153,6 +153,7 @@ tmp/
 .vscode/
 wandb/
 **/papers
+logs/
 
 *.png
 *.jpg

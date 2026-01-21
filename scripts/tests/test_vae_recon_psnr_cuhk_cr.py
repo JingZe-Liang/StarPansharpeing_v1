@@ -1,4 +1,5 @@
 from __future__ import annotations
+from duckdb.experimental.spark.sql.functions import printf
 
 import os
 from pathlib import Path
@@ -13,12 +14,19 @@ from torchmetrics.functional.image import peak_signal_noise_ratio
 
 _IMPORT_ERROR: Exception | None = None
 # try:
-from src.stage2.cloud_removal.data.CUHK_CR import CUHK_CR_StreamingDataset
+from src.stage2.cloud_removal.data.CUHK_CR import (
+    CUHK_CR_StreamingDataset,
+    CUHK_CR_StreamingDataset_RandomKey_For_tokenizerPEFT,
+)
 from src.stage2.cloud_removal.diffusion.vae import CosmosRSVAE
 # except PermissionError as exc:
 #     _IMPORT_ERROR = exc
 #     CUHK_CR_StreamingDataset = None  # type: ignore[assignment]
 #     CosmosRSVAE = None  # type: ignore[assignment]
+
+from loguru import logger
+
+logger.disable("src.stage1.cosmos")
 
 
 def _skip_if_import_failed() -> None:
@@ -136,7 +144,7 @@ def _save_batch_recon_figure(
 
 
 @torch.no_grad()
-def test_vae_recon_psnr_cuhk_cr1() -> None:
+def test_v1() -> None:
     # _skip_if_import_failed()
     repo_root = _find_repo_root(Path(__file__).resolve())
 
@@ -162,15 +170,17 @@ def test_vae_recon_psnr_cuhk_cr1() -> None:
         pytest.skip(f"CUHK-CR litdata not found: {data_root}")
 
     batch_size = int(os.getenv("CUHK_CR_VAE_PSNR_BATCH", "8"))
-    max_batches = int(os.getenv("CUHK_CR_VAE_PSNR_NUM_BATCHES", "1"))
+    max_batches = int(os.getenv("CUHK_CR_VAE_PSNR_NUM_BATCHES", "3"))
 
-    _, dataloader = CUHK_CR_StreamingDataset.create_dataloader(
+    _, dataloader = CUHK_CR_StreamingDataset_RandomKey_For_tokenizerPEFT.create_dataloader(
         input_dir=str(data_root),
         stream_ds_kwargs={
-            "name": "cr1",
-            "split": "train",
+            # "name": "cr1",
+            # "split": "train",
             "shuffle": False,
             "to_neg_1_1": True,
+            "getitem_random": False,
+            "interp_to": 512,
         },
         loader_kwargs={
             "batch_size": batch_size,
@@ -191,17 +201,18 @@ def test_vae_recon_psnr_cuhk_cr1() -> None:
         if device.type == "cuda":
             torch.cuda.empty_cache()
         x_in = batch["gt"].to(device=device)
+        x_cloudy = batch["img"].to(device=device)
 
         z = vae.encode(x_in)
         x_rec = vae.decode(z, input_shape=x_in.shape)
 
         x_01 = _to_0_1(x_in, is_neg_1_1=True)
         x_rec_01 = _to_0_1(x_rec, is_neg_1_1=True)
+        x_cloudy_01 = _to_0_1(x_cloudy, is_neg_1_1=True)
 
         psnr_batch = peak_signal_noise_ratio(x_rec_01, x_01, data_range=1.0)
         psnr_sum += float(psnr_batch.mean().detach().cpu().item())
         psnr_batches += 1
-
         seen_batches += 1
 
     if seen_batches == 0:
@@ -211,28 +222,24 @@ def test_vae_recon_psnr_cuhk_cr1() -> None:
     assert psnr_val == psnr_val, "PSNR is NaN"
     print(f"[CUHK-CR1] VAE recon PSNR: {psnr_val:.4f} dB (avg over {seen_batches} batches, bs={batch_size})")
 
+    # vis the last batch
+    out_path = f"cuhk_vis_bs={batch_size}_px={x_01.shape[-1]}.png"
+    _save_batch_recon_figure(
+        out_path=Path(out_path),
+        img_01=x_cloudy_01,
+        gt_01=x_01,
+        rec_01=x_rec_01,
+        rgb_channels=None,
+    )
+    print(f"save path at {out_path}")
+
 
 @torch.no_grad()
-def test_vae_recon_vis_cuhk_cr1() -> None:
-    # _skip_if_import_failed()
+def test_v2() -> None:
     repo_root = _find_repo_root(Path(__file__).resolve())
-
-    # out_dir_env = os.getenv("CUHK_CR_VAE_VIS_OUT", "").strip()
-    # if not out_dir_env:
-    #     pytest.skip("Set CUHK_CR_VAE_VIS_OUT to enable visualization output")
-
-    # out_dir = Path(out_dir_env)
-    # if not out_dir.is_absolute():
-    #     out_dir = repo_root / out_dir
 
     vae_cfg_path = repo_root / "scripts" / "configs" / "cloud_removal" / "vae" / "cosmos_rs.yaml"
     vae_cfg = cast(DictConfig, OmegaConf.load(vae_cfg_path))
-
-    model_path = Path(str(vae_cfg["model_path"]))
-    if not model_path.is_absolute():
-        model_path = repo_root / model_path
-    if not model_path.exists():
-        pytest.skip(f"VAE checkpoint not found: {model_path}")
 
     device = _choose_device()
 
@@ -253,10 +260,11 @@ def test_vae_recon_vis_cuhk_cr1() -> None:
     _, dataloader = CUHK_CR_StreamingDataset.create_dataloader(
         input_dir=str(data_root),
         stream_ds_kwargs={
-            "name": "cr1",
+            "name": "cr2",
             "split": "train",
             "shuffle": False,
             "to_neg_1_1": True,
+            "interp_to": None,
         },
         loader_kwargs={
             "batch_size": batch_size,
@@ -264,11 +272,7 @@ def test_vae_recon_vis_cuhk_cr1() -> None:
             "pin_memory": device.type == "cuda",
         },
     )
-
-    try:
-        batch = next(iter(dataloader))
-    except StopIteration:
-        pytest.skip("No batches were read from dataloader")
+    batch = next(iter(dataloader))
 
     x_img = batch["img"].to(device=device)
     x_gt = batch["gt"].to(device=device)
@@ -280,7 +284,7 @@ def test_vae_recon_vis_cuhk_cr1() -> None:
     gt_01 = _to_0_1(x_gt, is_neg_1_1=True)
     rec_01 = _to_0_1(x_rec, is_neg_1_1=True)
 
-    out_path = f"cuhk_cr1_vae_recon_bs{batch_size}.png"
+    out_path = f"cuhk_cr2_vae_recon_bs{batch_size}.png"
     _save_batch_recon_figure(
         out_path=Path(out_path),
         img_01=img_01,
@@ -288,3 +292,9 @@ def test_vae_recon_vis_cuhk_cr1() -> None:
         rec_01=rec_01,
         rgb_channels=rgb_channels,
     )
+    print(f"save path at {out_path}")
+
+
+if __name__ == "__main__":
+    test_v1()
+    # test_v2()

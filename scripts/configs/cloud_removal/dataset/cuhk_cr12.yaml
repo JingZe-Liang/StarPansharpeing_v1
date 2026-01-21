@@ -1,5 +1,5 @@
 cfgs:
-  used: cuhk_cr1
+  used: cuhk_cr12
 
 batch_size_train: 8
 batch_size_val: 8
@@ -7,15 +7,15 @@ num_workers: 8
 
 train_loader:
   _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset.create_dataloader
-  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  input_dir: /home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/Downstreams/CUHK-CR/litdata_out/all_train.json
   loader_kwargs:
     batch_size: ${dataset.batch_size_train}
     num_workers: ${dataset.num_workers}
     pin_memory: true
   stream_ds_kwargs:
-    name: cr1
-    split: train
-    shuffle: false
+    name: null
+    split: null
+    shuffle: true
     to_neg_1_1: true
     interp_to: null
 

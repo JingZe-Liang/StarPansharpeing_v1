@@ -9,6 +9,7 @@ from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
 from timm.layers.create_norm_act import create_norm_act_layer, get_norm_act_layer
 from timm.layers.drop import DropPath
+from timm.layers import EcaModule, CecaModule, SEModule
 from timm.layers.helpers import make_divisible, to_2tuple, to_3tuple, to_ntuple
 from timm.models import checkpoint_seq, named_apply
 from timm.models.convnext import ConvNeXtBlock
@@ -737,6 +738,8 @@ class ChannelAttentionResBlock(nn.Module):
             self.channel_attention = SEModule_(out_channels, reduction=4)
         elif channel_attention_operation == "CoordAttnModule":
             self.channel_attention = CoordAttnModule_(out_channels, out_channels, groups=4)
+        elif channel_attention_operation == "CECAModule":
+            self.channel_attention = CecaModule(out_channels, 3, 2, 1)
         else:
             raise ValueError(f"channel_attention_operation {channel_attention_operation} is not supported")
         self.channel_attention_position = channel_attention_position

@@ -1,0 +1,19 @@
+_target_: src.stage2.cloud_removal.model.uvit.UViT
+in_channels: 4
+out_channels: 4
+cond_channels: 4
+embed_dim: 1024
+depth: 12
+num_heads: 8
+mlp_ratio: 4.0
+patch_size: 4
+dropout: 0.1
+norm_layer: rmsnorm2dfp32
+mixer_type: nat
+use_time_embed: false
+act_checkpoint: false
+nat_cfg:
+  k_size: 7
+  num_heads: 16
+  dilation: 1
+  stride: 1

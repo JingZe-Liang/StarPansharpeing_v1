@@ -882,7 +882,7 @@ class ContinuousImageTokenizer(nn.Module):
 
     def encode(self, x: Tensor, use_quantizer: bool | None = None):
         enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
-        x = self._maybe_channels_last_4d(x)
+        # x = self._maybe_channels_last_4d(x)
 
         need_repa_cache = self.training and (hasattr(self, "_repa_proj") or hasattr(self, "_vf_proj"))
         interms: list[Tensor] | None = None
@@ -895,10 +895,12 @@ class ContinuousImageTokenizer(nn.Module):
             z, interms = self.encoder.encoder(x, ret_interm_feats=repa_layers)
             self.z = interms
             # To latent (before quantizer)
-            h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
+            # h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
+            h_pre_quant = self.encoder.quant_conv(z)
         else:
             z = self.encoder.encoder(x)
-            h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
+            # h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
+            h_pre_quant = self.encoder.quant_conv(z)
             self.z = h_pre_quant
 
         # Quantization
@@ -911,7 +913,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # z augmentions
         h = self.latent_aug(h)
-        h = self._maybe_channels_last_4d(h)
+        # h = self._maybe_channels_last_4d(h)
         enc_out.latent = h
 
         return enc_out
@@ -931,7 +933,8 @@ class ContinuousImageTokenizer(nn.Module):
         clamp: Clamp decoded values to (-1, 1).
         """
         dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)
-        h = self._maybe_channels_last_4d(dec_out["latent"])
+        # h = self._maybe_channels_last_4d(dec_out["latent"])
+        h = dec_out["latent"]
         dec_out["latent"] = h
 
         # Decoder

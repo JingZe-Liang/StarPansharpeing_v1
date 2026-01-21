@@ -55,7 +55,8 @@ class EDMPrecond(nn.Module):
         weight = 1 / (c_out**2)
 
         c_noise = 0.25 * t.log()
-        model_out = self.model(x=c_in * x_t, timesteps=c_noise.flatten(0), **model_kwargs)
+        # Use positional arguments to match our model interface (x, t, **kwargs)
+        model_out = self.model(c_in * x_t, c_noise.flatten(0), **model_kwargs)
         if isinstance(model_out, tuple):
             aux_loss = model_out[1]
             model_out = model_out[0]

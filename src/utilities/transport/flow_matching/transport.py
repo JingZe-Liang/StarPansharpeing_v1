@@ -11,6 +11,8 @@ from . import path
 from .integrators import get_timesteps, ode, sde
 from .utils import mean_flat
 
+from ...config_utils import log  # register logger
+
 
 class ModelType(str, enum.Enum):
     """
@@ -50,8 +52,8 @@ class Transport:
         model_type: str | ModelType,
         path_type: str | PathType,
         loss_type: str | WeightType,
-        train_eps: float,
-        sample_eps: float,
+        train_eps: float | None = None,
+        sample_eps: float | None = None,
         time_sample_type: str = "uniform",
         cfm_factor=0.0,
     ):
@@ -72,6 +74,17 @@ class Transport:
             PathType.GVP: path.GVPCPlan,
             PathType.VP: path.VPCPlan,
         }
+
+        # fix the eps: from DCGen
+        if path_type in [PathType.VP]:
+            train_eps = 1e-5 if train_eps is None else train_eps
+            sample_eps = 1e-3 if train_eps is None else sample_eps
+        elif path_type in [PathType.GVP, PathType.LINEAR] and model_type != ModelType.VELOCITY:
+            train_eps = 1e-3 if train_eps is None else train_eps
+            sample_eps = 1e-3 if train_eps is None else sample_eps
+        else:  # velocity & [GVP, LINEAR] is stable everywhere
+            train_eps = 0
+            sample_eps = 0
 
         self.loss_type = loss_type
         self.model_type = model_type
@@ -120,13 +133,24 @@ class Transport:
 
         return t0, t1
 
-    def sample(self, x1, *, t_forced: th.Tensor | None = None):
+    def sample(
+        self,
+        x1,
+        *,
+        t_forced: th.Tensor | None = None,
+        x0_forced: th.Tensor | None = None,
+    ):
         """Sampling x0 & t based on shape of x1 (if needed)
         Args:
           x1 - data point; [batch, *dim]
+          x0_forced - optional fixed x0 to use instead of random noise
         """
-
-        x0 = th.randn_like(x1)
+        if x0_forced is not None:
+            if x0_forced.shape != x1.shape:
+                raise ValueError(f"x0_forced shape {x0_forced.shape} must match x1 shape {x1.shape}.")
+            x0 = x0_forced.to(x1)
+        else:
+            x0 = th.randn_like(x1)
         t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
 
         if t_forced is not None:
@@ -176,6 +200,7 @@ class Transport:
         get_pred_x_clean: bool = True,
         *,
         t_forced: th.Tensor | None = None,
+        x0_forced: th.Tensor | None = None,
     ):
         """Loss for training the score model
         Args:
@@ -186,7 +211,7 @@ class Transport:
         if model_kwargs is None:
             model_kwargs = {}
 
-        t, x0, x1 = self.sample(x1, t_forced=t_forced)
+        t, x0, x1 = self.sample(x1, t_forced=t_forced, x0_forced=x0_forced)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
 

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, no_type_check
+from typing import Any, Callable, Optional, no_type_check, Union, Tuple
 
 import torch
 import torch as torch
@@ -19,12 +19,14 @@ from timm.layers import (
     get_act_layer,
     get_norm_layer,
 )
+from timm.models.convnext import ConvNeXtBlock
+from timm.layers import EcaModule, CecaModule
 from timm.layers.drop import DropPath
 from timm.layers.weight_init import trunc_normal_
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from src.utilities.network_utils import safe_init_weights
+from src.utilities.network_utils import safe_init_weights, compile_decorator
 
 from .attention import (
     Attention,
@@ -194,6 +196,328 @@ class AttentionBlock(nn.Module):
             return self.forward_(x, mask, pe)
 
 
+def _pick_num_groups(num_channels: int, max_groups: int) -> int:
+    for groups in range(min(max_groups, num_channels), 0, -1):
+        if num_channels % groups == 0:
+            return groups
+    return 1
+
+
+def _resize_like(source: Tensor, target: Tensor) -> Tensor:
+    if source.shape[-2:] == target.shape[-2:]:
+        return source
+    return F.interpolate(source, size=target.shape[-2:], mode="bilinear", align_corners=False)
+
+
+def _zero_init(module: nn.Linear | nn.Conv2d | None) -> None:
+    if module is None:
+        return
+    if module.weight is not None:
+        nn.init.zeros_(module.weight)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+class TimeCondResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        time_embed_dim: int | None,
+        cond_channels: int | None,
+        dropout: float,
+        num_groups: int,
+        output_scale_factor: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.output_scale_factor = output_scale_factor
+        self.norm1 = nn.GroupNorm(_pick_num_groups(in_channels, num_groups), in_channels)
+        self.norm2 = nn.GroupNorm(_pick_num_groups(out_channels, num_groups), out_channels)
+        self.act = nn.SiLU()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(dropout)
+
+        # FiLM-style conditioning: produces (scale, shift)
+        self.time_proj = self.cond_proj = None
+        if time_embed_dim is not None:
+            self.time_proj = nn.Linear(time_embed_dim, out_channels * 2)
+        if cond_channels is not None:
+            self.cond_proj = nn.Conv2d(cond_channels, out_channels * 2, kernel_size=1)
+
+        self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else None
+
+        self.init_weights()
+
+    def init_weights(self):
+        _zero_init(self.cond_proj)
+        _zero_init(self.time_proj)
+
+    # @torch.compile
+    def forward(self, x: Tensor, temb: Tensor | None, cond: Tensor | None) -> Tensor:
+        h = self.norm1(x)
+        h = self.act(h)
+        h = self.conv1(h)
+
+        h = self.norm2(h)
+
+        # Scale and Shift components
+        scale: float | Tensor = 0.0
+        shift: float | Tensor = 0.0
+
+        if self.time_proj is not None:
+            if temb is None:
+                raise ValueError("temb must be provided when time embedding is enabled")
+            # t_params: [B, C*2, 1, 1]
+            t_params = self.time_proj(self.act(temb))[:, :, None, None]
+            t_scale, t_shift = t_params.chunk(2, dim=1)
+            scale = scale + t_scale
+            shift = shift + t_shift
+
+        if self.cond_proj is not None and cond is not None:
+            cond = _resize_like(cond, h)
+            # c_params: [B, C*2, H, W]
+            c_params = self.cond_proj(cond)
+            c_scale, c_shift = c_params.chunk(2, dim=1)
+            scale = scale + c_scale
+            shift = shift + c_shift
+
+        # FiLM modulation: h = h * (1 + scale) + shift
+        h = h * (1.0 + scale) + shift
+
+        h = self.act(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        if self.skip is not None:
+            x = self.skip(x)
+        return (x + h) / self.output_scale_factor
+
+
+class TimeCondNatBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        time_embed_dim: int | None,
+        cond_channels: int | None,
+        k_size: int = 8,
+        stride: int = 2,
+        dilation: int = 2,
+        num_heads: int = 8,
+        ffn_ratio: float | int = 2,
+        qkv_bias: bool = True,
+        qk_norm: str = "layernorm2d",
+        norm_layer: str = "layernorm2d",
+        norm_eps: float = 1e-6,
+        drop_path: float = 0.0,
+        latent_cond_type: str = "adaln3",
+        ms_cond_chans: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.in_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else None
+        self.requires_cond = cond_channels is not None
+        self.cond_channels = cond_channels
+        self.time_proj = None if time_embed_dim is None else nn.Linear(time_embed_dim, out_channels)
+        if cond_channels is None:
+            self.block = Spatial2DNATBlock(
+                dim=out_channels,
+                k_size=k_size,
+                stride=stride,
+                dilation=dilation,
+                n_heads=num_heads,
+                ffn_ratio=ffn_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                norm_layer=norm_layer,
+                norm_eps=norm_eps,
+                drop_path=drop_path,
+            )
+        else:
+            self.block = Spatial2DNATBlockConditional(
+                dim=out_channels,
+                cond_chs=cond_channels,
+                ms_cond_chans=ms_cond_chans,
+                k_size=k_size,
+                stride=stride,
+                dilation=dilation,
+                n_heads=num_heads,
+                ffn_ratio=ffn_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                norm_layer=norm_layer,
+                norm_eps=norm_eps,
+                drop_path=drop_path,
+                latent_cond_type=latent_cond_type,
+            )
+
+    def forward(self, x: Tensor, temb: Tensor | None, cond: Tensor | None) -> Tensor:
+        if self.in_proj is not None:
+            x = self.in_proj(x)
+
+        if self.time_proj is None:
+            if temb is not None:
+                raise ValueError("temb must be None when time embedding is disabled.")
+        else:
+            if temb is None:
+                raise ValueError("temb must be provided when time embedding is enabled.")
+            x = x + self.time_proj(temb)[:, :, None, None]
+
+        if self.requires_cond:
+            if cond is None:
+                cond_channels = self.cond_channels
+                if cond_channels is None:
+                    raise ValueError("cond_channels must be set when conditional NAT block is enabled.")
+                cond = torch.zeros(
+                    x.shape[0],
+                    cond_channels,
+                    x.shape[2],
+                    x.shape[3],
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+            return self.block(x, cond)
+
+        return self.block(x)
+
+
+class _TimeCondAdapter(nn.Module):
+    def __init__(self, block: nn.Module, *, expect_cond: bool) -> None:
+        super().__init__()
+        self.block = block
+        self.expect_cond = expect_cond
+
+    def forward(self, x: Tensor, temb: Tensor | None, cond: Tensor | None) -> Tensor:
+        _ = temb
+        if self.expect_cond:
+            if cond is None:
+                raise ValueError("cond must be provided for conditional blocks.")
+            return self.block(x, cond)
+        return self.block(x)
+
+
+class TimeCondConvNextBlock(ConvNeXtBlock):
+    def __init__(
+        self,
+        in_chs: int,
+        time_embed_dim: int | None,
+        cond_channels: int | None,
+        out_chs: Optional[int] = None,
+        kernel_size: int = 7,
+        stride: int = 1,
+        dilation: Union[int, Tuple[int, int]] = (1, 1),
+        mlp_ratio: float = 4,
+        conv_mlp: bool = False,
+        conv_bias: bool = True,
+        use_grn: bool = False,
+        use_channel_attention: bool = False,
+        ls_init_value: Optional[float] = 1e-6,
+        act_layer: Union[str, Callable] = "gelu",
+        norm_layer: Optional[Callable] = None,
+        drop_path: float = 0.0,
+        device=None,
+        dtype=None,
+    ):
+        actual_out_chs = out_chs or in_chs
+
+        super().__init__(
+            actual_out_chs,
+            actual_out_chs,
+            kernel_size,
+            stride,
+            dilation,
+            mlp_ratio,
+            conv_mlp,
+            conv_bias,
+            use_grn,
+            ls_init_value,
+            act_layer,
+            norm_layer,
+            drop_path,
+            device,
+            dtype,
+        )
+        self.in_proj = nn.Conv2d(in_chs, actual_out_chs, kernel_size=1) if in_chs != actual_out_chs else None
+        self.use_ca = use_channel_attention
+        self.cond_channels = cond_channels
+        self.time_embed_dim = time_embed_dim
+        self.act = nn.SiLU()
+
+        if use_channel_attention:
+            self.ca = CecaModule(actual_out_chs, 3, 2, 1)
+
+        # FiLM-style conditioning: produces (scale, shift)
+        self.time_proj = self.cond_proj = None
+        if time_embed_dim is not None:
+            self.time_proj = nn.Linear(time_embed_dim, actual_out_chs * 2)
+        if cond_channels is not None:
+            self.cond_proj = nn.Conv2d(cond_channels, actual_out_chs * 2, kernel_size=1)
+
+        self.init_weights()
+
+    def init_weights(self):
+        _zero_init(self.cond_proj)
+        _zero_init(self.time_proj)
+
+    def forward(self, x: torch.Tensor, temb: Tensor | None = None, cond: Tensor | None = None) -> torch.Tensor:
+        """Forward pass."""
+        if self.in_proj is not None:
+            x = self.in_proj(x)
+
+        shortcut = x
+        x = self.conv_dw(x)
+
+        if self.use_conv_mlp:
+            x = self.norm(x)
+        else:
+            x = x.permute(0, 2, 3, 1)
+            x = self.norm(x)
+            x = x.permute(0, 3, 1, 2)
+
+        # Scale and Shift components for FiLM
+        scale: float | Tensor = 0.0
+        shift: float | Tensor = 0.0
+
+        if self.time_proj is not None:
+            if temb is None:
+                raise ValueError("temb must be provided when time embedding is enabled")
+            # t_params: [B, C*2, 1, 1]
+            t_params = self.time_proj(self.act(temb))[:, :, None, None]
+            t_scale, t_shift = t_params.chunk(2, dim=1)
+            scale = scale + t_scale
+            shift = shift + t_shift
+
+        if self.cond_proj is not None and cond is not None:
+            cond = _resize_like(cond, x)
+            # c_params: [B, C*2, H, W]
+            c_params = self.cond_proj(cond)
+            c_scale, c_shift = c_params.chunk(2, dim=1)
+            scale = scale + c_scale
+            shift = shift + c_shift
+
+        # FiLM modulation: x = x * (1 + scale) + shift
+        x = x * (1.0 + scale) + shift
+
+        if self.use_conv_mlp:
+            x = self.mlp(x)
+        else:
+            x = x.permute(0, 2, 3, 1)
+            x = self.mlp(x)
+            x = x.permute(0, 3, 1, 2)
+
+        # add channel attention
+        if self.use_ca:
+            x = self.ca(x)
+
+        if self.gamma is not None:
+            x = x.mul(self.gamma.reshape(1, -1, 1, 1))
+
+        x = self.drop_path(x) + self.shortcut(shortcut)
+        return x
+
+
 class MbConvStages(nn.Module):
     """MobileConv for stage 1 and stage 2 of ViTamin"""
 
@@ -266,13 +590,15 @@ class Spatial2DNATBlock(nn.Module):
         qkv_bias=True,
         qk_norm="layernorm2d",
         norm_layer="layernorm2d",
+        norm_eps: float = 1e-6,
         drop_path: float = 0.0,
         **_kwargs,
     ) -> None:
         super().__init__()
         self.grad_checkpointing = False
-        qk_norm = get_norm_layer(qk_norm)
+        qk_norm_layer = get_norm_layer(qk_norm) if qk_norm is not None else None
         norm_layer = get_norm_layer(norm_layer)
+        norm_layer_fn: Callable[..., nn.Module] = norm_layer
         self.attn = NatAttention2d(
             dim,
             k_size,
@@ -280,7 +606,7 @@ class Spatial2DNATBlock(nn.Module):
             dilation,
             n_heads,
             qkv_bias,
-            qk_norm=qk_norm,
+            qk_norm=qk_norm_layer,
             norm_layer=norm_layer,
         )
         self.cffn = ConvMlp(
@@ -295,9 +621,16 @@ class Spatial2DNATBlock(nn.Module):
 
         self.drop_path = DropPath(drop_path)
 
-        self.norm1 = norm_layer(dim)
-        self.norm2 = norm_layer(dim)
+        self.norm1: nn.Module
+        self.norm2: nn.Module
+        if norm_eps is None:
+            self.norm1 = norm_layer_fn(dim)
+            self.norm2 = norm_layer_fn(dim)
+        else:
+            self.norm1 = norm_layer_fn(dim, eps=norm_eps)
+            self.norm2 = norm_layer_fn(dim, eps=norm_eps)
 
+    # @compile_decorator
     def forward(self, x, *args, **kwargs):
         def _closure(x):
             x = x + self.drop_path(self.ls1(self.attn(self.norm1(x))))
@@ -346,6 +679,7 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
         qkv_bias=True,
         qk_norm="layernorm2d",
         norm_layer="layernorm2d",
+        norm_eps: float = 1e-6,
         drop_path: float = 0.0,
         latent_cond_type: str = "adaln3",
         **_kwargs,
@@ -360,6 +694,7 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
             qkv_bias,
             qk_norm,
             norm_layer,
+            norm_eps,
             drop_path,
         )
 
@@ -371,7 +706,7 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
         assert latent_cond_type in ("adaln3", "adaln6"), "latent_cond_type must be adaln3 or adaln6"
         self.modulation = nn.Sequential(
             create_conv2d(cond_chs, dim // mod_factor, 1, bias=True),
-            create_norm_act_layer(norm_layer, dim // mod_factor, act_layer="silu", eps=1e-6),
+            create_norm_act_layer(norm_layer, dim // mod_factor, act_layer="silu", eps=norm_eps),
             create_conv2d(
                 dim // mod_factor,
                 dim * 3 if latent_cond_type == "adaln3" else dim * 6,
@@ -388,6 +723,7 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
     def _modulate(self, x, scale, shift):
         return x * (scale + 1) + shift
 
+    # @compile_decorator
     def forward(self, x, latent, ms_cond=None, **kwargs):
         def _closure(x, latent, ms_cond=None):
             if hasattr(self, "ms_conv_before_add") and ms_cond is not None:
@@ -565,6 +901,7 @@ class LiteLA_GLUMB_Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size**0.5)
 
+    @compile_decorator
     def forward(self, x, mask=None, HW=None, pe=None, **kwargs):
         def _closure(x, HW):
             x = x + self.drop_path(self.attn(self.norm1(x), HW=HW))
@@ -577,9 +914,9 @@ class LiteLA_GLUMB_Block(nn.Module):
             return _closure(x, HW)
 
 
-# * --- interface --- #
-
 IdentityLayer = nn.Identity  # alias
+
+# * --- interface --- #
 
 
 # effiecient vit interface
@@ -667,6 +1004,7 @@ class EfficientViTBlock(nn.Module):
         out_channels = out_channels or in_channels
         self.proj = nn.Conv2d(in_channels, out_channels, 1)
 
+    # @compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.context_module(x)
         x = self.local_module(x)
@@ -851,6 +1189,113 @@ def _create_conv_out_blk(in_channels: int, out_channels: int):
         return nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
 
+def build_spatial_block(
+    block_type: str,
+    *,
+    in_channels: int,
+    out_channels: int,
+    cond_channels: int | None,
+    use_time_block: bool,
+    time_embed_dim: int | None,
+    dropout: float,
+    num_groups: int,
+    resblock_cfg: dict[str, Any] | None = None,
+    nat_cfg: dict[str, Any] | None = None,
+    convnext_cfg: dict[str, Any] | None = None,
+) -> nn.Module:
+    block_key = block_type.lower()
+
+    # cfgs
+    resblock_cfg = resblock_cfg or {}
+    nat_cfg = nat_cfg or {}
+    convnext_cfg = convnext_cfg or {}
+
+    if block_key in {"resblock", "res"}:
+        resblock_norm_layer = str(resblock_cfg.get("norm_layer", "layernorm2d"))
+        resblock_act_layer = str(resblock_cfg.get("act_layer", "relu6"))
+        if use_time_block:
+            return TimeCondResBlock(
+                in_channels,
+                out_channels,
+                time_embed_dim=time_embed_dim,
+                cond_channels=cond_channels,
+                dropout=dropout,
+                num_groups=num_groups,
+            )
+        else:
+            base_block = build_block(
+                "ResBlock@2",
+                in_channels,
+                out_channels,
+                norm=resblock_norm_layer,
+                act=resblock_act_layer,
+                cond_channels=cond_channels,
+            )
+            return _TimeCondAdapter(base_block, expect_cond=cond_channels is not None)
+    elif block_key in {"natblock", "nat"}:
+        nat_k_size = int(nat_cfg.get("k_size", 8))
+        nat_stride = int(nat_cfg.get("stride", 2))
+        nat_dilation = int(nat_cfg.get("dilation", 2))
+        nat_num_heads = int(nat_cfg.get("num_heads", 8))
+        nat_ffn_ratio = nat_cfg.get("ffn_ratio", 2)
+        nat_qkv_bias = bool(nat_cfg.get("qkv_bias", True))
+        nat_qk_norm = str(nat_cfg.get("qk_norm", "layernorm2d"))
+        nat_norm_layer = str(nat_cfg.get("norm_layer", "layernorm2d"))
+        nat_norm_eps = float(nat_cfg.get("norm_eps", 1e-6))
+        nat_drop_path = float(nat_cfg.get("drop_path", 0.0))
+        nat_latent_cond_type = str(nat_cfg.get("latent_cond_type", "adaln3"))
+        nat_ms_cond_chans = nat_cfg.get("ms_cond_chans", None)
+        if nat_ms_cond_chans is not None:
+            nat_ms_cond_chans = int(nat_ms_cond_chans)
+        return TimeCondNatBlock(
+            in_channels,
+            out_channels,
+            time_embed_dim=time_embed_dim,
+            cond_channels=cond_channels,
+            k_size=nat_k_size,
+            stride=nat_stride,
+            dilation=nat_dilation,
+            num_heads=nat_num_heads,
+            ffn_ratio=nat_ffn_ratio,
+            qkv_bias=nat_qkv_bias,
+            qk_norm=nat_qk_norm,
+            norm_layer=nat_norm_layer,
+            norm_eps=nat_norm_eps,
+            drop_path=nat_drop_path,
+            latent_cond_type=nat_latent_cond_type,
+            ms_cond_chans=nat_ms_cond_chans,
+        )
+    elif block_key in {"convnext", "convnextblock"}:
+        convnext_kernel_size = int(convnext_cfg.get("kernel_size", 7))
+        convnext_mlp_ratio = float(convnext_cfg.get("mlp_ratio", 4.0))
+        convnext_use_grn = bool(convnext_cfg.get("use_grn", False))
+        convnext_use_ca = bool(convnext_cfg.get("use_channel_attention", False))
+        convnext_drop_path = float(convnext_cfg.get("drop_path", 0.0))
+        convnext_ls_init = convnext_cfg.get("ls_init_value", 1e-6)
+        convnext_conv_mlp = bool(convnext_cfg.get("conv_mlp", False))
+        convnext_norm_layer = convnext_cfg.get("norm_layer", None)
+        convnext_act_layer = str(convnext_cfg.get("act_layer", "gelu"))
+
+        return TimeCondConvNextBlock(
+            in_chs=in_channels,
+            time_embed_dim=time_embed_dim if use_time_block else None,
+            cond_channels=cond_channels,
+            out_chs=out_channels,
+            kernel_size=convnext_kernel_size,
+            stride=1,
+            mlp_ratio=convnext_mlp_ratio,
+            conv_mlp=convnext_conv_mlp,
+            use_grn=convnext_use_grn,
+            use_channel_attention=convnext_use_ca,
+            ls_init_value=convnext_ls_init,
+            act_layer=convnext_act_layer,
+            norm_layer=convnext_norm_layer,
+            drop_path=convnext_drop_path,
+        )
+    else:
+        raise ValueError(f"Unsupported block_type: {block_type}")
+
+
 def build_block(
     block_type: str,
     in_channels: int,
@@ -944,42 +1389,50 @@ def build_block(
         )
     elif block_name == "EViTGLU":
         # assert in_channels == out_channels
+        norm_name = norm or "bn2d"
+        act_name = act or "hswish"
         block = EfficientViTBlock(
             in_channels,
             out_channels,
-            norm=norm,
-            act_func=act,
+            norm=norm_name,
+            act_func=act_name,
             local_module="GLUMBConv",
             scales=(),
         )
     elif block_name == "EViTNormQKGLU":
         # assert in_channels == out_channels
+        norm_name = norm or "bn2d"
+        act_name = act or "hswish"
         block = EfficientViTBlock(
             in_channels,
             out_channels,
-            norm=norm,
-            act_func=act,
+            norm=norm_name,
+            act_func=act_name,
             local_module="GLUMBConv",
             scales=(),
             norm_qk=True,
         )
     elif block_name == "EViTS5GLU":
         # assert in_channels == out_channels
+        norm_name = norm or "bn2d"
+        act_name = act or "hswish"
         block = EfficientViTBlock(
             in_channels,
             out_channels,
-            norm=norm,
-            act_func=act,
+            norm=norm_name,
+            act_func=act_name,
             local_module="GLUMBConv",
             scales=(5,),
         )
     elif block_name == "ViTGLU":
         # assert in_channels == out_channels
+        norm_name = norm or "bn2d"
+        act_name = act or "hswish"
         block = EfficientViTBlock(
             in_channels,
             out_channels,
-            norm=norm,
-            act_func=act,
+            norm=norm_name,
+            act_func=act_name,
             context_module="SoftmaxAttention",
             local_module="GLUMBConv",
         )
@@ -989,11 +1442,13 @@ def build_block(
         if len(cfg) == 1:
             # k_size, stride, dilation, n_heads, ffn_ratio
             cfg = ["ViTNAT", "8", "1", "1", "8", "4"]  # defaults
+        norm_name = norm or "bn2d"
+        act_name = act or "hswish"
         block = EfficientViTBlock(
             in_channels,
             out_channels,
-            norm=norm,
-            act_func=act,
+            norm=norm_name,
+            act_func=act_name,
             context_module="Spatial2DNAT",
             local_module="GLUMBConv",
             k_size=int(cfg[1]),
@@ -1003,12 +1458,12 @@ def build_block(
             ffn_ratio=int(cfg[5]),
         )
     elif block_name == "ConvNext":
-        from timm.models.convnext import ConvNeXtBlock
-
         # ConvNext@7@4@1
-        block = ConvNeXtBlock(
-            in_channels,
-            out_channels,
+        block = TimeCondConvNextBlock(
+            in_chs=in_channels,
+            time_embed_dim=None,
+            cond_channels=cond_channels,
+            out_chs=out_channels,
             kernel_size=int(cfg[1]),
             stride=1,
             mlp_ratio=float(cfg[2]),

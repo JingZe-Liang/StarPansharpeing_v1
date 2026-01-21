@@ -41,12 +41,14 @@ train:
   visualize_every: 1_000
   max_grad_norm: 1.0
   compile_model: false
+  train_mode: diffusion # [diffusion, regression]
 
   # diffusion settings
   path_type: ${loss.path_type} # [linear, cosine]
   time_weighting: ${loss.weighting} # [uniform, lognormal]
   time_shifting: ${loss.apply_time_shift}
   shift_base: ${loss.shift_base}
+  x0_source: noise # [noise, cloud]
 
   # which field to use as condition when VAE is enabled:
   # - auto/img: use batch["img"] (cloudy) only

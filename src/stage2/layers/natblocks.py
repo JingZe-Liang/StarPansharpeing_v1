@@ -1,11 +1,10 @@
-import functools
+from typing import Any
 
 import torch
 import torch.nn as nn
-from loguru import logger
 from torch.utils.checkpoint import checkpoint
 
-from .blocks import Spatial2DNATBlock, Spatial2DNATBlockConditional
+from .blocks import build_spatial_block
 
 
 class Spatial2DNatStage(nn.Module):
@@ -16,44 +15,37 @@ class Spatial2DNatStage(nn.Module):
         depths: list[int],
         cond_width: int | None,
         out_chans: int | None,
-        norm_layer: str = "layernorm2d",
-        drop_path: float = 0.0,
-        norm_eps: float = 1e-6,
-        k_size=8,
-        stride=2,
-        dilation=2,
-        n_heads=8,
-        ffn_ratio: float | int = 2,
-        qkv_bias=True,
-        qk_norm="layernorm2d",
+        block_type: str = "natblock",
+        resblock_cfg: dict[str, Any] | None = None,
+        nat_cfg: dict[str, Any] | None = None,
+        **block_kwargs: Any,
     ):
         super().__init__()
-        n_layers = len(depths)
         self.grad_checkpointing = False
         self._use_condition = cond_width is not None
+        resblock_cfg = resblock_cfg or {}
+        nat_cfg = nat_cfg or {}
+        if block_kwargs:
+            if block_type.lower() in {"resblock", "res"}:
+                resblock_cfg = {**block_kwargs, **resblock_cfg}
+            else:
+                nat_cfg = {**block_kwargs, **nat_cfg}
 
         layers = nn.ModuleList()
         for s, dim in enumerate(embed_dim):
             stage_in_chs = embed_dim[s - 1] if s > 0 else in_chans
-            block_kwargs = dict(
-                k_size=k_size,
-                stride=stride,
-                dilation=dilation,
-                n_heads=n_heads,
-                ffn_ratio=ffn_ratio,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
-                norm_layer=norm_layer,
-                norm_eps=norm_eps,
-                drop_path=drop_path,
-            )
-            block_cls = Spatial2DNATBlockConditional if self._use_condition else Spatial2DNATBlock
             blocks = [
-                block_cls(
+                build_spatial_block(
+                    block_type=block_type,
                     in_channels=stage_in_chs if i == 0 else dim,
                     out_channels=dim,
-                    cond_chs=cond_width,
-                    **block_kwargs,
+                    cond_channels=cond_width,
+                    use_time_block=False,
+                    time_embed_dim=None,
+                    dropout=0.0,
+                    num_groups=32,
+                    resblock_cfg=resblock_cfg,
+                    nat_cfg=nat_cfg,
                 )
                 for i in range(depths[s])
             ]
@@ -71,20 +63,16 @@ class Spatial2DNatStage(nn.Module):
         if cond is not None:
             cond = nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
 
-        def _closure(x, cond):
-            for stage in self.layers:
-                for block in stage:
-                    if self._use_condition:
-                        x = block(x, cond)
-                    else:
-                        x = block(x)
-            return x
+        def _apply_block(block: nn.Module, x_in: torch.Tensor, cond_in: torch.Tensor | None) -> torch.Tensor:
+            if self.grad_checkpointing and self.training:
+                if cond_in is None:
+                    return checkpoint(lambda x_: block(x_, None, None), x_in, use_reentrant=False)
+                return checkpoint(lambda x_, cond_: block(x_, None, cond_), x_in, cond_in, use_reentrant=False)
+            return block(x_in, None, cond_in)
 
-        # Checkpointing
-        if self.grad_checkpointing and self.training:
-            x = checkpoint(_closure, x, cond, use_reentrant=False)
-        else:
-            x = _closure(x, cond)
+        for stage in self.layers:
+            for block in stage:  # type: ignore[not-iterable]
+                x = _apply_block(block, x, cond)
 
         x = self.out_conv(x)
         return x

@@ -1,4 +1,5 @@
 _target_: src.stage2.cloud_removal.diffusion.vae.CosmosRSVAE
 # model_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
+# lora_path: runs/stage1_cosmos_nested_lora/2026-01-19_18-37-59_cosmos_lora=lora_r=32_f8c16p1_cuhr_c1_2/peft_ckpt/cuhr_c1_2
 model_path: runs/stage1_cosmos_nested/pretrained/2025-12-20-nested-no-lcr-iter_470k/tokenizer/model.safetensors
 dtype: bf16

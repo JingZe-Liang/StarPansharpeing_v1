@@ -1,0 +1,112 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: cuhk_cr1
+  - accelerator: base
+  - vae: cosmos_rs
+  - model: image_condition_unet_latent16
+  - _self_
+
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  mixed_precision: bf16
+
+vae:
+  shift_factor: 0.
+  scaling_factor: 1.
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 0
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  move_ema_to_online_device: true
+  lazy_init_ema: true
+
+train:
+  proj_dir: runs/stage2_cloud_removal/
+  max_steps: 300_000
+  save_every: 1_000
+  visualize_every: 500
+  max_grad_norm: 1.0
+  compile_model: false
+  train_mode: diffusion
+
+  # SDB Transport settings
+  transport_backend: sdb
+  sdb_x1_source: cloud  # cloud image as x1 (source)
+  sdb_loss_type: mse    # loss type for SDB training
+
+  sdb:
+    plan_tgt: x_0           # predict x_0 (cloud-free image)
+    gamma_max: 0.2          # max noise std at t=0.5
+    eps_eta: 1.0            # stochasticity parameter
+    alpha_beta_type: linear # [linear, sin]
+    diffusion_type: bridge  # [bridge, quad, sin, sin_one_side]
+    t_train_type: edm       # [uniform, edm, cosh]
+    t_sample_type: edm      # [uniform, edm, sigmoid]
+    sample_noisy_x1_b: 0.0  # noise added to x1 during sampling
+    precond: null           # [null, none, edm] - null/none: no preconditioning (weight=1), edm: EDM preconditioning
+    t_train_kwargs:
+      clip_t_min_max: [1.0e-4, 0.9999]
+
+  condition_source: auto
+
+  # High-frequency loss weights (to preserve details)
+  grad_loss_weight: 0.0
+  fft_loss_weight: 0.0
+  fft_high_freq_ratio: 0.3
+
+  # visualization (RGB)
+  is_neg_1_1: true
+  visualize_rgb_channels: [0, 1, 2]
+
+  resume_path:
+  ema_load_path:
+
+  cloud_removal_optim:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true  # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.0
+
+  cloud_removal_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+
+  log:
+    run_comment: sdb_unet_cuhk_cr1
+    log_with_time: true
+    log_every: 20
+
+  debug: true
+
+val:
+  val_duration: 500
+  max_val_iters: 20
+
+sampler:
+  type: sde               # [ode, sde]
+  num_steps: 8
+  progress: false
+  clip_for_x1_pred: false
