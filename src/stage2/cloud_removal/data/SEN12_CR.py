@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import csv
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,8 +9,14 @@ from typing import Literal
 import numpy as np
 import torch
 import litdata as ld
+from loguru import logger
+from torch.utils.data import Dataset
+from litdata import ParallelStreamingDataset
 
 from src.data import _BaseStreamingDataset
+
+
+logger = logger.bind(_name_="SEN12_CR")
 
 type SplitName = Literal["train", "val", "test"]
 type RescaleMethod = Literal["default", "resnet", "default_per_channel", "quantile"]
@@ -59,17 +66,20 @@ def _rescale(
 
 
 def _process_ms(
-    img: torch.Tensor, method: RescaleMethod, quantile_percents: tuple[float, float] | None = None
+    img: torch.Tensor,
+    method: RescaleMethod,
+    quantile_percents: tuple[float, float] | None = None,
+    intensity_min_max: tuple = (0, 10000),
 ) -> torch.Tensor:
     if method in ("default", "default_per_channel"):
-        intensity_min, intensity_max = 0.0, 10000.0
+        intensity_min, intensity_max = intensity_min_max
         img = torch.clamp(img, intensity_min, intensity_max)
         per_channel = "per_channel" in method
         img = _rescale(img, per_channel=per_channel)  # , intensity_min, intensity_max)
     elif method == "quantile":
         assert quantile_percents is not None
         q1, q2 = quantile_percents
-        intensity_min, intensity_max = 0.0, 10000.0
+        intensity_min, intensity_max = intensity_min_max
         img = torch.clamp(img, intensity_min, intensity_max)
         c = img.shape[0]
         flat = img.reshape(c, -1)
@@ -78,7 +88,7 @@ def _process_ms(
         img = torch.clamp(img, q1v[:, None, None], q2v[:, None, None])
         img = _rescale(img, per_channel=True)
     elif method == "resnet":
-        intensity_min, intensity_max = 0.0, 10000.0
+        intensity_min, intensity_max = intensity_min_max
         img = torch.clamp(img, intensity_min, intensity_max)
         img = img / 2000.0
     else:
@@ -172,7 +182,11 @@ def _to_chw(img: torch.Tensor) -> torch.Tensor:
     return img
 
 
-class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
+_inherited_from = os.getenv("SEN12_DATA_CLS", "litdata")
+_inherited_cls = ParallelStreamingDataset if _inherited_from == "litdata" else Dataset
+
+
+class SEN12_CR_StreamingDataset(_inherited_cls):
     def __init__(
         self,
         input_dir: str,
@@ -187,7 +201,10 @@ class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
         s2_dir_name: str = "litdata_s2_clean",
         s2_cloudy_dir_name: str = "litdata_s2_cloudy",
         meta_dir_name: str = "litdata_meta",
+        intensity_min_max: tuple[int, int] = (0, 10000),
         use_quantile: bool = True,
+        quantile_kwargs: dict[str, tuple[float, float]] | None = None,
+        no_s1: bool = False,
         **stream_kwargs,
     ):
         base_dir = Path(input_dir)
@@ -206,9 +223,17 @@ class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
         self.s2_ds = _BaseStreamingDataset.create_dataset(s2_dir.as_posix(), **stream_kwargs)
         self.s2_cloudy_ds = _BaseStreamingDataset.create_dataset(s2_cloudy_dir.as_posix(), **stream_kwargs)
 
+        self.no_s1 = no_s1
+        self.no_metainfo = not return_meta
+        self.intensity_min_max = intensity_min_max
+
         # mro init
-        # super().__init__([self.s1_ds, self.s2_ds, self.s2_cloudy_ds], transform=self.transform)
-        super().__init__()
+        global _inherited_from
+        if _inherited_from == "litdata":
+            super().__init__([self.s1_ds, self.s2_ds, self.s2_cloudy_ds], transform=self.transform)  # type: ignore
+            self.no_metainfo = True
+        else:
+            super().__init__()  # type: ignore
 
         lengths = (len(self.s1_ds), len(self.s2_ds), len(self.s2_cloudy_ds))
         if len(set(lengths)) != 1:
@@ -224,8 +249,11 @@ class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
             "s2": (0.01, 0.99),
             "s2_cloudy": (0.01, 0.99),
         }
+        self._quantile_percents.update(quantile_kwargs or {})
         if not use_quantile:
             self._quantile_percents = {"s1": None, "s2": None, "s2_cloudy": None}
+        else:
+            logger.info(f"Using quantile normalization with percents: {self._quantile_percents}")
 
         self._meta_rows: list[MetaRow] | None = None
         if return_meta:
@@ -247,7 +275,9 @@ class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
 
     def _normalize_ms(self, img: torch.Tensor | np.ndarray, quantile_percents=None) -> torch.Tensor:
         img = _to_chw(_ensure_tensor(img)).float()
-        img = _process_ms(img, self.rescale_method, quantile_percents=quantile_percents)
+        img = _process_ms(
+            img, self.rescale_method, quantile_percents=quantile_percents, intensity_min_max=self.intensity_min_max
+        )
         if self.to_neg_1_1 and self.rescale_method == "default":
             img = img * 2.0 - 1.0
         return img
@@ -265,39 +295,49 @@ class SEN12_CR_StreamingDataset(torch.utils.data.Dataset):
         return img
 
     def __getitem__(self, idx: int):
-        s1 = self._normalize_sar(self.s1_ds[idx]["img"], quantile_percents=self._quantile_percents["s1"])
+        sample: dict[str, torch.Tensor | str | MetaRow | list[torch.Tensor]] = {}
+        if not self.no_s1:
+            s1 = self._normalize_sar(self.s1_ds[idx]["img"], quantile_percents=self._quantile_percents["s1"])
+            sample["s1"] = s1
         s2 = self._normalize_ms(self.s2_ds[idx]["img"], quantile_percents=self._quantile_percents["s2"])
         s2_cloudy = self._normalize_ms(
             self.s2_cloudy_ds[idx]["img"], quantile_percents=self._quantile_percents["s2_cloudy"]
         )
 
-        sample: dict[str, torch.Tensor | MetaRow | list[torch.Tensor]] = {
-            "s1": s1,
-            "s2": s2,
-            "s2_cloudy": s2_cloudy,
-            # ----- compactibility with trainer ------ #
-            "img": s2_cloudy,
-            "gt": s2,
-            "conditions": [s2_cloudy, s1],
-        }
-        if self._meta_rows is not None:
+        sample.update(
+            {
+                "dataset_name": "sen12cr",
+                "img": s2_cloudy,
+                "gt": s2,
+                "conditions": s2_cloudy if self.no_s1 else [s2_cloudy, s1],
+            }
+        )
+        if self._meta_rows is not None and not self.no_metainfo:
             sample["meta"] = self._meta_rows[idx]
         return sample
 
     def transform(self, samples: tuple[dict, ...], rng):
-        s1, s2, s2_cloudy = samples
-        s1 = self._normalize_sar(s1["img"], quantile_percents=self._quantile_percents["s1"])
-        s2 = self._normalize_ms(s2["img"], quantile_percents=self._quantile_percents["s2"])
-        s2_cloudy = self._normalize_ms(s2_cloudy["img"], quantile_percents=self._quantile_percents["s2_cloudy"])
-        sample = {
-            "s1": s1,
-            "s2": s2,
-            "s2_cloudy": s2_cloudy,
-            # ----- compactibility with trainer ------ #
-            "img": s2_cloudy,
-            "gt": s2,
-            "conditions": [s2_cloudy, s1],
-        }
+        if self.no_s1:
+            s2, s2_cloudy = samples
+            s2 = self._normalize_ms(s2["img"], quantile_percents=self._quantile_percents["s2"])
+            s2_cloudy = self._normalize_ms(s2_cloudy["img"], quantile_percents=self._quantile_percents["s2_cloudy"])
+            sample = {
+                "dataset_name": "sen12cr",
+                "img": s2_cloudy,
+                "gt": s2,
+                "conditions": s2_cloudy,
+            }
+        else:
+            s1, s2, s2_cloudy = samples
+            s1 = self._normalize_sar(s1["img"], quantile_percents=self._quantile_percents["s1"])
+            s2 = self._normalize_ms(s2["img"], quantile_percents=self._quantile_percents["s2"])
+            s2_cloudy = self._normalize_ms(s2_cloudy["img"], quantile_percents=self._quantile_percents["s2_cloudy"])
+            sample = {
+                "dataset_name": "sen12cr",
+                "img": s2_cloudy,
+                "gt": s2,
+                "conditions": [s2_cloudy, s1],
+            }
         # No index in, no meta infomation returned
         return sample
 
@@ -453,7 +493,6 @@ def test_sen12_cr_loader():
     print(f"s2 shape: {sample['s2'].shape}")
     print(f"s2_cloudy shape: {sample['s2_cloudy'].shape}")
 
-    # 验证 MetaRowBatched
     if "meta" in sample:
         meta = sample["meta"]
         print(f"\nmeta type: {type(meta)}")

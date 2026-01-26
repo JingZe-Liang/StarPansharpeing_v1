@@ -30,11 +30,12 @@ from tqdm import tqdm, trange
 from src.utilities.logging import configure_logger, log
 from src.stage2.cloud_removal.data.sen12_vis import s1_to_gray_for_display
 from src.stage2.cloud_removal.diffusion.loss import apply_time_shift, pack_conditions
-from src.stage2.cloud_removal.diffusion.vae import CosmosRSVAE
+from src.stage2.cloud_removal.diffusion.vae import CosmosRSVAE, FluxVAE
 from src.stage2.cloud_removal.metrics.basic import CRMetrics
 from src.utilities.logging import dict_round_to_list_str
 from src.utilities.transport.SDB.plan import DiffusionTarget, SDBContinuousPlan, SDBContinuousSampler
 from src.utilities.transport.flow_matching import Sampler, Transport
+from src.utilities.transport.I2SB.diffusion import Diffusion as I2SBDiffusion
 
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, object_scatter
 from src.utilities.train_utils.visualization import visualize_hyperspectral_image
@@ -229,14 +230,17 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         self.sdb_plan: SDBContinuousPlan | None = None
         self.sdb_sampler: SDBContinuousSampler | None = None
         self.sdb_model: nn.Module | None = None
+        self.i2sb_diffusion: I2SBDiffusion | None = None
         if self.train_mode == "diffusion":
             if self.transport_backend == "flow_matching":
                 self.fm_transport = self._build_flow_matching_transport()
                 self.fm_sampler = self._build_flow_matching_sampler(self.fm_transport)
-            else:
+            elif self.transport_backend == "sdb":
                 self.sdb_plan = self._build_sdb_plan()
                 self.sdb_sampler = self._build_sdb_sampler(self.sdb_plan)
                 self.sdb_model = self._build_sdb_precond(self.model)
+            else:
+                self.i2sb_diffusion = self._build_i2sb_diffusion()
 
         interp_to = getattr(self.val_cfg, "metrics_interp_to", None)
         self.cr_metric = CRMetrics(lpips_device=self.device, interp_to=interp_to).to(self.device)
@@ -249,11 +253,17 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             return None
 
         vae = hydra.utils.instantiate(self.cfg.vae)
-        if not isinstance(vae, CosmosRSVAE):
-            raise TypeError(f"cfg.vae must be CosmosRSVAE for now, got {type(vae)}")
+        if not isinstance(vae, (CosmosRSVAE, FluxVAE)):
+            raise TypeError(f"cfg.vae must be CosmosRSVAE or FluxVAEfor now, got {type(vae)}")
         vae = vae.to(device=self.device)
         vae.eval().requires_grad_(False)
         self.log_msg(f"[VAE]: loaded {vae.__class__.__name__}")
+
+        self._vae_only_support_rgb = False
+        if isinstance(vae, FluxVAE):
+            self._vae_only_support_rgb = True
+            logger.warning(f"Using {vae.__class__.__name__}, only supports RGB image.")
+
         return vae
 
     def _build_flow_matching_transport(self) -> Transport:
@@ -270,12 +280,14 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         time_type = str(getattr(getattr(self.cfg, "sampler", None), "sampling_time_type", "uniform"))
         return Sampler(transport, time_type=time_type)
 
-    def _get_transport_backend(self) -> Literal["flow_matching", "sdb"]:
+    def _get_transport_backend(self) -> Literal["flow_matching", "sdb", "i2sb"]:
         raw_backend = str(getattr(self.train_cfg, "transport_backend", "flow_matching")).lower()
         if raw_backend in {"flow_matching", "flow-matching", "fm"}:
             return "flow_matching"
         if raw_backend in {"sdb", "sdb-transport", "sdb_transport"}:
             return "sdb"
+        if raw_backend in {"i2sb"}:
+            return "i2sb"
         raise ValueError(f"Unknown transport_backend: {raw_backend}")
 
     def _build_sdb_plan(self) -> SDBContinuousPlan:
@@ -324,9 +336,31 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         sample_noisy_x1_b = float(getattr(sdb_cfg, "sample_noisy_x1_b", 0.0)) if sdb_cfg is not None else 0.0
         return SDBContinuousSampler(plan, sample_noisy_x1_b=sample_noisy_x1_b)
 
+    def _build_i2sb_diffusion(self) -> I2SBDiffusion:
+        i2sb_cfg = getattr(self.train_cfg, "i2sb", None)
+        if i2sb_cfg is None:
+            raise ValueError("I2SB training requires i2sb config")
+
+        n_timestep = int(getattr(i2sb_cfg, "n_timestep", 1000))
+        linear_start = float(getattr(i2sb_cfg, "linear_start", 1e-4))
+        linear_end = getattr(i2sb_cfg, "linear_end", None)
+        beta_max = getattr(i2sb_cfg, "beta_max", 0.3)
+        model_pred = str(getattr(i2sb_cfg, "model_pred", "x0"))
+        ot_ode = bool(getattr(i2sb_cfg, "ot_ode", False))
+
+        diffusion = I2SBDiffusion(
+            n_timestep=n_timestep,
+            linear_start=linear_start,
+            linear_end=linear_end,
+            beta_max=beta_max,
+            model_pred=model_pred,
+            ot_ode=ot_ode,
+        )
+        return diffusion.to(self.device)
+
     def _build_sdb_precond(self, model: nn.Module) -> nn.Module:
         """Build SDB preconditioner wrapper around model."""
-        from src.utilities.transport.SDB.precond import EDMPrecond
+        from src.utilities.transport.SDB.precond import EDMPrecond, EDMPrecondRawT
 
         if self.sdb_plan is None:
             raise RuntimeError("SDB plan must be initialized before building preconditioner")
@@ -347,8 +381,11 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             adapted_model = SDBModelAdapter(model)
             # Then wrap in EDMPrecond
             return EDMPrecond(model=adapted_model, plan=self.sdb_plan)
+        elif precond_type in {"edm_raw_t", "edm_raw", "edm_t"}:
+            adapted_model = SDBModelAdapter(model)
+            return EDMPrecondRawT(model=adapted_model, plan=self.sdb_plan)
         else:
-            raise ValueError(f"Unknown precond type: {precond_type}. Expected 'none' or 'edm'.")
+            raise ValueError(f"Unknown precond type: {precond_type}. Expected 'none', 'edm', or 'edm_raw_t'.")
 
     def _build_sdb_time_grid(self, num_steps: int, *, device: torch.device) -> Tensor:
         if self.sdb_plan is None:
@@ -371,7 +408,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             sample_kwargs.setdefault("k", 7.0)
 
         time_grid = self.sdb_plan.sample_continous_t(**sample_kwargs)
-        return time_grid.to(device=device)
+        return time_grid.to(device=device, dtype=torch.float32)
 
     def _get_sdb_x1(self, batch: dict[str, Any], *, like: Tensor | None = None) -> Tensor:
         x1_source = str(getattr(self.train_cfg, "sdb_x1_source", "img")).lower()
@@ -392,10 +429,46 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             x1_latent = x1_latent.to(like)
         return x1_latent
 
+    def _get_i2sb_x1(self, batch: dict[str, Any], *, like: Tensor | None = None) -> Tensor:
+        x1_source = str(getattr(self.train_cfg, "i2sb_x1_source", "img")).lower()
+        if x1_source in {"img", "cloud"}:
+            x1_px = batch.get("img", None)
+        elif x1_source == "conditions":
+            x1_px = batch.get("conditions", None)
+        else:
+            raise ValueError(f"Unknown i2sb_x1_source: {x1_source}")
+
+        if x1_px is None or not torch.is_tensor(x1_px):
+            raise KeyError(f"I2SB x1_source='{x1_source}' expects a tensor in the batch.")
+
+        x1_latent = self._encode_if_needed(x1_px)
+        if not torch.is_tensor(x1_latent):
+            raise TypeError("Encoded I2SB x1 must be a tensor.")
+        if like is not None:
+            x1_latent = x1_latent.to(like)
+        return x1_latent
+
     def _get_sdb_model(self, model: nn.Module) -> nn.Module:
+        from src.utilities.transport.SDB.precond import EDMPrecond, EDMPrecondRawT
+
+        if isinstance(model, (SDBModelAdapter, EDMPrecond, EDMPrecondRawT)):
+            return model
+        if self.sdb_plan is None:
+            return SDBModelAdapter(model)
+
+        sdb_cfg = getattr(self.train_cfg, "sdb", None)
+        precond_type = str(getattr(sdb_cfg, "precond", "none")).lower() if sdb_cfg is not None else "none"
+        if precond_type in {"none", "null"}:
+            return SDBModelAdapter(model)
+
         if model is self.model and self.sdb_model is not None:
             return self.sdb_model
-        return SDBModelAdapter(model)
+        return self._build_sdb_precond(model)
+
+    def _get_i2sb_model(self, model: nn.Module) -> nn.Module:
+        if isinstance(model, ModelOutputWrapper):
+            return model
+        return ModelOutputWrapper(model)
 
     def _sdb_model_forward(
         self,
@@ -432,7 +505,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                 raise ValueError(f"Unexpected model output tuple length: {len(model_out)}")
         else:
             # Single tensor output
-            weight = torch.ones_like(model_out[..., 0:1, 0:1, 0:1])  # Shape: (B, 1, 1, 1)
+            weight = torch.tensor(1.0).to(x_t)  # Shape: (B, 1, 1, 1)
             return model_out, weight
 
     def _sdb_pred_to_x0(self, pred: Tensor, *, t: Tensor, x_t: Tensor, x_1: Tensor) -> Tensor:
@@ -493,6 +566,11 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             progress = bool(getattr(sampler_cfg, "progress", False))
             clip_value = bool(getattr(sampler_cfg, "clip_for_x1_pred", False))
 
+        # When sampling in latent space (VAE enabled), clipping to [-1, 1] often collapses
+        # latents into a near-constant decode (e.g., all black). Only clip in pixel space.
+        if self.vae is not None:
+            clip_value = False
+
         time_grid = self._build_sdb_time_grid(num_steps, device=x_1.device)
         cond_tensor = pack_conditions(conditions)
         model_kwargs: dict[str, Any] = {}
@@ -521,6 +599,53 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             )
             return samples
         raise ValueError(f"Unknown sampling type: {sampling_type}")
+
+    def _i2sb_sample_latent(
+        self,
+        *,
+        model: nn.Module,
+        x_1: Tensor,
+        conditions: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
+        sampling_type: str | None = None,
+    ) -> Tensor:
+        if self.i2sb_diffusion is None:
+            raise RuntimeError("I2SB diffusion is not initialized.")
+
+        sampler_cfg = getattr(self.cfg, "sampler", None)
+        if sampling_type is None:
+            sampling_type = "ddpm"
+        if sampling_type not in {"ddpm", "ode", "sde"}:
+            raise ValueError(f"Unknown I2SB sampling type: {sampling_type}")
+
+        if sampler_cfg is None:
+            num_steps = 25
+            progress = False
+            clip_value = False
+        else:
+            num_steps = sampler_cfg.num_steps
+            progress = bool(getattr(sampler_cfg, "progress", False))
+            clip_value = bool(getattr(sampler_cfg, "clip_for_x1_pred", False))
+
+        if num_steps >= self.i2sb_diffusion.n_timestep:
+            raise ValueError("I2SB num_steps must be smaller than i2sb.n_timestep.")
+
+        model_wrapped = self._get_i2sb_model(model)
+        x_1 = self._to_model_device_dtype(x_1, model_wrapped)
+        cond_tensor = pack_conditions(conditions)
+        cond_tensor = self._to_model_device_dtype(cond_tensor, model_wrapped)
+
+        sample_out = self.i2sb_diffusion.sample(
+            model_wrapped,
+            x_1,
+            clip_denoise=clip_value,
+            nfe=int(num_steps),
+            model_kwargs={"conditions": cond_tensor},
+            ot_ode=False,
+            log_count=1,
+            verbose=progress,
+        )
+        sampled = cast(Tensor, sample_out["sampled"])
+        return sampled[:, -1]
 
     def _get_train_mode(self) -> Literal["diffusion", "regression"]:
         raw_mode = str(getattr(self.train_cfg, "train_mode", "diffusion")).lower()
@@ -816,10 +941,9 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         return x.to(device=device, dtype=dtype)
 
     def _get_eval_model(self) -> nn.Module:
-        # if self.no_ema or not hasattr(self, "ema_model"):
-        #     return self.model
-        # return cast(nn.Module, self.ema_model.ema_model)
-        return self.model
+        if self.no_ema or not hasattr(self, "ema_model"):
+            return self.model
+        return cast(nn.Module, self.ema_model.ema_model)
 
     def _to_condition_list(self, conditions: Tensor | list[Tensor] | tuple[Tensor, ...]) -> list[Tensor]:
         if torch.is_tensor(conditions):
@@ -894,18 +1018,25 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             return tuple(self._encode_if_needed(xx) for xx in x)  # type: ignore[return-value]
         if self.vae is None:
             return x
+
+        # If VAE only supports RGB (e.g., Flux VAE), crop to first 3 channels
+        x_vae = x
+        if getattr(self, "_vae_only_support_rgb", False) and x.shape[1] > 3:
+            x_vae = x[:, :3]  # only use RGB channels
+            # logger.debug(f"[VAE Encode]: cropped {x.shape[1]} channels to RGB (3 channels) for RGB-only VAE")
+
         with torch.no_grad():
             if getattr(self, "_check_vae_recon", True):
-                h_ = self.vae.encode(x)
-                recon_ = self.vae.decode(h_, input_shape=x.shape[1]).to(x)
-                psnr_value = peak_signal_noise_ratio(self.to_rgb(recon_), self.to_rgb(x), data_range=1.0).item()
+                h_ = self.vae.encode(x_vae)
+                recon_ = self.vae.decode(h_, input_shape=x_vae.shape[1]).to(x_vae)
+                psnr_value = peak_signal_noise_ratio(self.to_rgb(recon_), self.to_rgb(x_vae), data_range=1.0).item()
                 logger.debug(
                     f"[Check VAE correctness]: PSNR {psnr_value} - latent range {(h_.min().item(), h_.max().item())}"
                 )
                 self._check_vae_recon = False
                 return h_
             else:
-                return self.vae.encode(x).to(dtype=self.dtype)
+                return self.vae.encode(x_vae).to(dtype=self.dtype)
 
     def _decode_if_needed(self, z: Tensor, *, input_shape: torch.Size | int) -> Tensor:
         if self.vae is None:
@@ -943,10 +1074,14 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             return
 
         with torch.no_grad(), self.accelerator.autocast():
-            img_latent = self.vae.encode(img_px).to(dtype=self.dtype)
-            gt_latent = self.vae.encode(gt_px).to(dtype=self.dtype)
-            recon_img = self.vae.decode(img_latent, input_shape=img_px.shape[1]).to(dtype=self.dtype)
-            recon_gt = self.vae.decode(gt_latent, input_shape=gt_px.shape[1]).to(dtype=self.dtype)
+            # Crop to RGB if VAE only supports RGB
+            img_vae = img_px[:, :3] if getattr(self, "_vae_only_support_rgb", False) and img_px.shape[1] > 3 else img_px
+            gt_vae = gt_px[:, :3] if getattr(self, "_vae_only_support_rgb", False) and gt_px.shape[1] > 3 else gt_px
+
+            img_latent = self.vae.encode(img_vae).to(dtype=self.dtype)
+            gt_latent = self.vae.encode(gt_vae).to(dtype=self.dtype)
+            recon_img = self.vae.decode(img_latent, input_shape=img_vae.shape[1]).to(dtype=self.dtype)
+            recon_gt = self.vae.decode(gt_latent, input_shape=gt_vae.shape[1]).to(dtype=self.dtype)
 
         rgb_channels = getattr(self.train_cfg, "visualize_rgb_channels", None)
         if rgb_channels is not None and not isinstance(rgb_channels, (list, str)):
@@ -1031,10 +1166,11 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                     )
                     fm_loss = cast(Tensor, terms["loss"]).mean()
                     sdb_loss_val = torch.tensor(0.0, device=fm_loss.device)
+                    i2sb_loss_val = torch.tensor(0.0, device=fm_loss.device)
                     regression_loss_val = torch.tensor(0.0, device=fm_loss.device)
                     pred_x1 = cast(Tensor, terms.get("pred_x_clean", terms["pred"]))
                     loss = fm_loss
-                else:
+                elif self.transport_backend == "sdb":
                     if self.sdb_plan is None:
                         raise RuntimeError("SDB plan is not initialized.")
                     x1 = self._get_sdb_x1(batch, like=gt)
@@ -1049,9 +1185,29 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                     sdb_loss_val = self._compute_sdb_loss(pred_tgt, target, weight=weight)
                     pred_x0 = self._sdb_pred_to_x0(pred_tgt, t=t, x_t=x_t, x_1=x1)
                     fm_loss = sdb_loss_val
+                    i2sb_loss_val = torch.tensor(0.0, device=sdb_loss_val.device)
                     regression_loss_val = torch.tensor(0.0, device=sdb_loss_val.device)
                     pred_x1 = pred_x0
                     loss = sdb_loss_val
+                else:
+                    if self.i2sb_diffusion is None:
+                        raise RuntimeError("I2SB diffusion is not initialized.")
+                    x1 = self._get_i2sb_x1(batch, like=gt)
+                    model_wrapped = self._get_i2sb_model(self.model)
+                    cond_tensor = self._to_model_device_dtype(cond_tensor, model_wrapped)
+                    terms = self.i2sb_diffusion.training_loss(
+                        model_wrapped,
+                        gt,
+                        x1,
+                        model_kwargs={"conditions": cond_tensor},
+                    )
+                    i2sb_loss_val = cast(Tensor, terms["loss"]).mean()
+                    pred_x1 = cast(Tensor, terms["pred_x0"])
+                    fm_loss = torch.tensor(0.0, device=i2sb_loss_val.device)
+                    sdb_loss_val = torch.tensor(0.0, device=i2sb_loss_val.device)
+                    regression_loss_val = torch.tensor(0.0, device=i2sb_loss_val.device)
+                    t = torch.zeros(gt.shape[0], device=gt.device, dtype=gt.dtype)
+                    loss = i2sb_loss_val
             else:
                 regression_px = self._get_regression_input_px(batch)
                 regression_input = self._encode_if_needed(regression_px)
@@ -1065,6 +1221,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                 regression_loss_val = torch.nn.functional.l1_loss(pred_x1, gt)
                 fm_loss = torch.tensor(0.0, device=regression_loss_val.device)
                 sdb_loss_val = torch.tensor(0.0, device=regression_loss_val.device)
+                i2sb_loss_val = torch.tensor(0.0, device=regression_loss_val.device)
                 t = torch.zeros(
                     regression_input.shape[0],
                     device=regression_input.device,
@@ -1113,6 +1270,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
             "loss/total": loss.detach(),
             "loss/fm": fm_loss.detach(),
             "loss/sdb": sdb_loss_val.detach(),
+            "loss/i2sb": i2sb_loss_val.detach(),
             "loss/regression": regression_loss_val.detach(),
             "loss/pixel": pixel_loss_val.detach(),
             "loss/grad": grad_loss_val.detach(),
@@ -1218,6 +1376,21 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         x0: Tensor | None = None,
         x1: Tensor | None = None,
     ) -> Tensor:
+        # Narrow cases by asserting
+        assert conditions is not None, "Diffusion samplers require conditions for cloud removal."
+
+        if self.transport_backend == "i2sb":
+            if x1 is None:
+                raise ValueError("I2SB sampling requires x1 (cloud) tensor.")
+            if x1.shape != shape:
+                raise ValueError(f"x1 shape {x1.shape} must match target shape {shape}.")
+            return self._i2sb_sample_latent(
+                model=model,
+                x_1=x1,
+                conditions=conditions,
+                sampling_type=sampling_type,
+            )
+
         if self.transport_backend == "sdb":
             if x1 is None:
                 raise ValueError("SDB sampling requires x1 (cloud) tensor.")
@@ -1353,7 +1526,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                             x0_forced=x0_forced,
                         )
                         pred_latent = cast(Tensor, terms.get("pred_x_clean", terms["pred"]))
-                    else:
+                    elif self.transport_backend == "sdb":
                         if self.sdb_plan is None:
                             raise RuntimeError("SDB plan is not initialized.")
                         cond_tensor = pack_conditions(conditions)
@@ -1367,6 +1540,20 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                             conditions=cond_tensor,
                         )
                         pred_latent = self._sdb_pred_to_x0(pred_tgt, t=t, x_t=x_t, x_1=x1)
+                    else:
+                        if self.i2sb_diffusion is None:
+                            raise RuntimeError("I2SB diffusion is not initialized.")
+                        cond_tensor = pack_conditions(conditions)
+                        x1 = self._get_i2sb_x1(batch, like=gt)
+                        model_wrapped = self._get_i2sb_model(model_for_vis)
+                        cond_tensor = self._to_model_device_dtype(cond_tensor, model_wrapped)
+                        terms = self.i2sb_diffusion.training_loss(
+                            model_wrapped,
+                            gt,
+                            x1,
+                            model_kwargs={"conditions": cond_tensor},
+                        )
+                        pred_latent = cast(Tensor, terms["pred_x0"])
                 else:
                     regression_px = self._get_regression_input_px(batch)
                     regression_input = self._encode_if_needed(regression_px)
@@ -1388,9 +1575,19 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                 add_step=True,
             )
 
+    def _convert_rgb_vae_cause(self, batch: dict):
+        if self._vae_only_support_rgb:
+            for n in batch.keys():
+                v = batch[n]
+                if torch.is_tensor(v) and v.ndim == 4:
+                    # is image
+                    batch[n] = v[:, :3]  # assume first 3 channels is RGB.
+        return batch
+
     def infinity_train_loader(self):
         while True:
             for batch in self.train_dataloader:
+                batch = self._convert_rgb_vae_cause(batch)
                 yield batch
 
     def save_state(self) -> None:
@@ -1415,7 +1612,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         ema_path = Path(ema_path)
         accelerate.load_checkpoint_in_model(self.model, ema_path / "cloud_removal_ema_model", strict=strict)
         self.prepare_ema_models()
-        self.log_msg("[Load EMA]: loaded EMA weights")
+        logger.success("[Load EMA]: loaded EMA weights")
 
     def resume(self, path: str) -> None:
         self.log_msg("[Resume]: resume training")
@@ -1437,9 +1634,11 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                 except StopIteration:
                     self._val_loader_iter = iter(self.val_dataloader)
                     batch = next(self._val_loader_iter)
+                batch = self._convert_rgb_vae_cause(batch)
                 yield batch
         else:
             for batch in tqdm(self.val_dataloader, desc="validating ...", disable=not self.accelerator.is_main_process):
+                batch = self._convert_rgb_vae_cause(batch)
                 yield batch
 
     @torch.no_grad()
@@ -1468,10 +1667,20 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
                             conditions=conditions,
                             x0=x0_forced,
                         )
-                    else:
+                    elif self.transport_backend == "sdb":
                         if not torch.is_tensor(gt_latent):
                             raise TypeError("Encoded ground-truth must be a tensor for SDB sampling.")
                         x1 = self._get_sdb_x1(batch, like=gt_latent)
+                        pred_latent = self.general_sampler(
+                            model_for_eval,
+                            gt_latent.shape,
+                            conditions=conditions,
+                            x1=x1,
+                        )
+                    else:
+                        if not torch.is_tensor(gt_latent):
+                            raise TypeError("Encoded ground-truth must be a tensor for I2SB sampling.")
+                        x1 = self._get_i2sb_x1(batch, like=gt_latent)
                         pred_latent = self.general_sampler(
                             model_for_eval,
                             gt_latent.shape,
@@ -1567,28 +1776,33 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         elif self.train_cfg.ema_load_path is not None:
             self.load_from_ema(self.train_cfg.ema_load_path)
 
-        self._save_vae_recon_preview()
+        # self._save_vae_recon_preview()
         self.train_loop()
 
 
-_key = "cuhk_cr1_sdb_cloud_x0_unet"
-_configs_dict = {
-    "cuhk_cr1_fm_cloud_x0": "cloud_removal_cuhk_cr1_fm_x0_cloud",
+_key = "cuhk_cr1_regression_unet"
+_config = {
+    # regression in latent space
     "cuhk_cr1_regression_unet": "cloud_removal_cuhk_cr1_regression_unet",
-    "cuhk_cr1_regression_unet_no_vae_ps2": "cloud_removal_cuhk_cr1_regression_unet_no_vae_ps2",
+    "cuhk_cr1_regression_flux": "cloud_removal_cuhk_cr1_regression_unet_flux_vae",
+    # genrative
+    "cuhk_cr1_fm_cloud_x0": "cloud_removal_cuhk_cr1_fm_x0_cloud",
     "cuhk_cr1_sdb_cloud_x0_unet": "cloud_removal_cuhk_cr1_sdb_x0_cloud_unet",
-    "sen12": "cloud_removal_sen12",
+    "cuhk_cr1_i2sb_cloud_x1_unet": "cloud_removal_cuhk_cr1_i2sb_x0_cloud_unet",
+    # pixel space
+    "cuhk_cr1_regression_unet_no_vae_ps2": "cloud_removal_cuhk_cr1_regression_unet_no_vae_ps2",
+    # "sen12": "cloud_removal_sen12",
 }[_key]
 
 
 if __name__ == "__main__":
     from src.utilities.train_utils.cli import argsparse_cli_args, print_colored_banner
 
-    print_colored_banner("CloudRemoval")
+    print_colored_banner("Cloud Removal")
 
     @hydra.main(
         config_path="../configs/cloud_removal",
-        config_name=_configs_dict,
+        config_name=_config,
         version_base=None,
     )
     def main(cfg: DictConfig):

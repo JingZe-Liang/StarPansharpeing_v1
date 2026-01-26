@@ -367,7 +367,7 @@ class ContinuousImageTokenizer(nn.Module):
                     )
                 if verbose and isinstance(profiler, torch.profiler.profile):
                     logger.info(profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
-                logger.log("NOTE", "load pretrained model done!")
+                logger.success("load pretrained model done!")
 
         # latent regularization
         self.use_channel_drop = cfg.use_channel_drop

@@ -4,13 +4,18 @@ in_channels: 16
 cond_channels: 16
 out_channels: 16
 base_channels: 64
-channel_mults: [1, 2, 4, 8]
-num_res_blocks: 2
+channel_mults: [3, 6, 8]
+num_res_blocks: 5
 block_type: resblock # [resblock, natblock]
-dropout: 0.0
+dropout: 0.1
 num_groups: 32
 # one attention block per stage when enabled; middle block always has attention
-attention_stages: [false, false, false, true]
+attention_stages: [false, false, false]
 num_attention_heads: 16
-act_checkpoint: true
+act_checkpoint: false
 attention_head_dim: null
+use_time_embed: true
+resblock_cfg:
+  norm_layer: rmsnorm2dfp32
+  expand_ratio: 3
+  resblock_act_layer: relu6

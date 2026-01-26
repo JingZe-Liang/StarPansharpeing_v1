@@ -1,0 +1,94 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: us3d_depth
+  - model@depth_model: tokenizer_hybrid_unet_depth
+  - _self_
+
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  _target_: accelerate.Accelerator
+  mixed_precision: bf16
+  log_with: tensorboard
+  dataloader_config:
+    _target_: accelerate.utils.DataLoaderConfiguration
+    split_batches: false
+    even_batches: false
+    non_blocking: true
+    dispatch_batches: null
+    use_seedable_sampler: false
+    use_stateful_dataloader: false
+  project_config:
+    _target_: accelerate.utils.ProjectConfiguration
+    project_dir: runs/stage2_depth_estimation/
+    logging_dir: runs/stage2_depth_estimation/tensorboard
+    total_limit: 2
+    automatic_checkpoint_naming: true
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+    adjust_scheduler: false
+    sync_with_dataloader: false
+    sync_each_batch: false
+
+train:
+  seed: 2025
+  proj_dir: runs/stage2_depth_estimation/
+  max_grad_norm: 1.0
+  max_steps: 200_000
+  save_every: 1000
+  act_checkpoint: true
+
+  loss:
+    _target_: src.stage2.depth_estimation.loss.basic.DepthEstimationLoss
+    # NOTE: dataset.depth is normalized to [0,1] via dataset.scale=64.
+    # Use scale-shift-invariant regression when absolute scale is hard.
+    data_weight: 1.0
+    grad_weight: 0.2
+    smooth_weight: 0.0
+    silog_weight: 0.0
+    ssi_weight: 0.0
+    ssi_reduction: l1
+
+  optim:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true  # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+      # weight_update_method: hyperball
+    oned_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+
+  sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  log:
+    run_comment: us3d_depth_estimation
+    log_with_time: true
+    log_every: 10
+    log_with: ["tensorboard"]
+
+  debug: true
+
+val:
+  every: 500
+  max_val_iters: 20
+  eps: 0.1  # 1e-6 is too small for us3d depth range [0,1] (scaled)

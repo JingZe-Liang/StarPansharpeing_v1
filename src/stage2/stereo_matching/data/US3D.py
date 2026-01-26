@@ -1,5 +1,3 @@
-from typing import Callable, List
-
 import torch
 from torch import Tensor
 from litdata import StreamingDataLoader, StreamingDataset
@@ -56,13 +54,14 @@ class US3DStreamingDataset(_BaseStreamingDataset):
         self,
         transforms: AugmentationSequential | None = None,
         output_size: int = 512,
-        augmentation_prob: float = 0.5,
+        augmentation_prob: float = 0.0,
         to_neg_1_1=True,
         dsp_clamp_kwargs: dict = {"clamp_range": (None, 64), "norm": None},
         *args,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        # NOTE: `_BaseStreamingDataset.__init__` may pre-load `self[0]`, so attributes used by `__getitem__`
+        # must be set before calling `super().__init__`.
         self.to_neg_1_1 = to_neg_1_1
         self.transforms = transforms  # if transforms is not None else self._get_default_transforms(augmentation_prob)
         assert self.transforms is None
@@ -70,6 +69,7 @@ class US3DStreamingDataset(_BaseStreamingDataset):
             size=(output_size, output_size), scale=(0.8, 1.0), ratio=(3 / 4, 4 / 3), p=1, keepdim=True
         )
         self.dsp_clamp_kwargs = dsp_clamp_kwargs
+        super().__init__(*args, **kwargs)
 
     def _get_default_transforms(self, p):
         return stereo_matching_default_transforms(prob=p)
@@ -155,6 +155,17 @@ class US3DStreamingDataset(_BaseStreamingDataset):
 
         # Resize and transforms
         left, right, dsp, agl, seg_label = self._apply_transforms(left, right, dsp, agl, seg_label)
+
+        # Clean NaN values to prevent training crashes
+        # Replace NaN with safe fallback values
+        if torch.isnan(left).any():
+            left = torch.where(torch.isnan(left), torch.zeros_like(left), left)
+        if torch.isnan(right).any():
+            right = torch.where(torch.isnan(right), torch.zeros_like(right), right)
+        if torch.isnan(dsp).any():
+            dsp = torch.where(torch.isnan(dsp), torch.full_like(dsp, -999.0), dsp)
+        if torch.isnan(agl).any():
+            agl = torch.where(torch.isnan(agl), torch.full_like(agl, -999.0), agl)
 
         return {
             "left": left,
@@ -278,8 +289,6 @@ def __test_us3d_dataset():
 
 
 def __test_augmentation_seq():
-    from kornia.constants import Resample
-
     # aug = RandomResizedCrop(size=(64, 64), ratio=(3 / 4, 4 / 3), resample=Resample.BILINEAR)
     x = torch.randn(1, 3, 256, 256)
     y = torch.randint(-64, 64, (1, 1, 64, 64)).float()
@@ -294,9 +303,9 @@ def __test_augmentation_seq():
     # print(x_aug, y_aug)
 
     # version 2.
-    aug = stereo_matching_default_transforms(["input", "mask"], 1.0)
-    x_aug, y_aug = aug(x, y)
-    print(x_aug, y_aug)
+    aug = stereo_matching_default_transforms(prob=1.0)
+    x_aug = aug(x)
+    print(x_aug, y.shape)
 
 
 if __name__ == "__main__":

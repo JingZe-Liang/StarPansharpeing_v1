@@ -7,8 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
+from loguru import logger
+from timm.layers import create_norm_layer
 
 from src.stage2.layers.blocks import build_spatial_block
+
+logger = logger.bind(_name_="Unet")
 
 
 def _timestep_embedding(timesteps: torch.Tensor, dim: int, *, max_period: int = 10000) -> torch.Tensor:
@@ -43,7 +47,7 @@ class TimeEmbedder(nn.Module):
         )
 
     def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
-        timesteps = timesteps * 1000  # rescale to 1000
+        # timesteps = timesteps * 1000  # rescale to 1000
         emb = _timestep_embedding(timesteps, self.time_in_dim)
         return self.mlp(emb)
 
@@ -68,7 +72,7 @@ class AttentionBlock(nn.Module):
             num_heads = channels // head_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.norm = nn.GroupNorm(_pick_num_groups(channels, num_groups), channels)
+        self.norm = create_norm_layer("layernorm2dfp32", channels)
         self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
         self.proj = nn.Conv2d(channels, channels, kernel_size=1)
 
@@ -79,7 +83,7 @@ class AttentionBlock(nn.Module):
         qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=1)
 
-        q = q.reshape(b, self.num_heads, self.head_dim, h * w).permute(0, 1, 3, 2)
+        q = q.reshape(b, self.num_heads, self.head_dim, h * w).permute(0, 1, 3, 2)  # b,nh,l,hd
         k = k.reshape(b, self.num_heads, self.head_dim, h * w).permute(0, 1, 3, 2)
         v = v.reshape(b, self.num_heads, self.head_dim, h * w).permute(0, 1, 3, 2)
 
@@ -310,6 +314,12 @@ class ImageConditionUNet(nn.Module):
                 raise ValueError("If block_type is a list, its length must match channel_mults")
             block_types = block_type
         self.block_types = block_types
+        logger.info(
+            "=" * 60 + f"Unet config: {self.block_types} "
+            f"{channel_mults=}, {num_res_blocks=}, {attention_stages=} "
+            f"{resblock_cfg=}, {nat_cfg=}, {convnext_cfg=}, {cond_channels=}, "
+            f"{time_embed_dim=}, {dropout=}, {num_groups=}, {use_time_embed=} \n" + "=" * 60
+        )
 
         # Down stages
         self.num_res_blocks = num_res_blocks
@@ -409,9 +419,11 @@ class ImageConditionUNet(nn.Module):
             current_channels = stage_channels
         self.up_stages = nn.ModuleList(up_stages)
 
-        self.norm_out = nn.GroupNorm(_pick_num_groups(base_channels, num_groups), base_channels)
-        # self.act = nn.SiLU()
-        self.conv_out = nn.Conv2d(base_channels, self._out_channels_patched, kernel_size=3, padding=1)
+        self.out = nn.Sequential(
+            create_norm_layer("layernorm2dfp32", current_channels),
+            nn.SiLU(),
+            nn.Conv2d(current_channels, self._out_channels_patched, kernel_size=3, padding=1),
+        )
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         if self.patch_size == 1:
@@ -476,7 +488,6 @@ class ImageConditionUNet(nn.Module):
 
         if cond is not None and cond.shape[-2:] != x.shape[-2:]:
             raise ValueError(f"conditions spatial size must match x, got {cond.shape[-2:]} vs {x.shape[-2:]}")
-        res = x
 
         x = self._patchify(x)
         if cond is not None:
@@ -502,12 +513,9 @@ class ImageConditionUNet(nn.Module):
         if skips:
             raise ValueError(f"unused skip tensors remain: {len(skips)}")
 
-        h = self.norm_out(h)
-        # h = self.act(h)
-        h = self.conv_out(h)
+        h = self.out(h)
         h = self._unpatchify(h, out_channels=self.out_channels)
 
-        # h = h + res
         return h, None, None
 
 

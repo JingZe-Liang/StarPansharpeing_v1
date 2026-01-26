@@ -14,11 +14,20 @@ defaults:
   - override hydra/job_logging: disabled
 
 accelerator:
-  mixed_precision: "no"
+  mixed_precision: "bf16"
 
-# vae:
-#   shift_factor: 0.
-#   scaling_factor: 1.
+vae:
+  shift_factor: null
+  scaling_factor: null
+  scale_shift_type: lcr
+
+model:
+  act_checkpoint: false
+  convnext_cfg:
+    use_grn: false
+
+dataset:
+  batch_size_train: 4
 
 ema:
   _target_: ema_pytorch.EMA
@@ -30,13 +39,14 @@ ema:
   allow_different_devices: true
   move_ema_to_online_device: true
   lazy_init_ema: true
+  update_model_with_ema_every: 500
 
 train:
   proj_dir: runs/stage2_cloud_removal/
   max_steps: 300_000
-  save_every: 1_000
+  save_every: 200
   visualize_every: 500
-  max_grad_norm: 1.0
+  max_grad_norm: 0.3
   compile_model: false
   train_mode: regression
 
@@ -56,7 +66,8 @@ train:
   pixel_loss_weight: 0.0
 
   # High-frequency loss weights (to preserve details)
-  grad_loss_weight: 0.0 # Gradient (Sobel edge) loss weight
+  ssim_loss_weight: 0.1
+  grad_loss_weight: 0.1 # Gradient (Sobel edge) loss weight
   fft_loss_weight: 0.0 # FFT high-frequency loss weight (optional, can try 0.05)
   fft_high_freq_ratio: 0.3 # Ratio of high-freq components in FFT (0.3 = top 30%)
 
@@ -65,7 +76,7 @@ train:
   visualize_rgb_channels: [0, 1, 2]
 
   resume_path:
-  ema_load_path:
+  ema_load_path: #runs/stage2_cloud_removal/2026-01-23_02-51-56_unet_regression_cuhk_cr1/ema
 
   cloud_removal_optim:
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
@@ -78,15 +89,10 @@ train:
     muon_params_defaults:
       lr: 3.0e-4
       weight_decay: 0.0
+      weight_update_method: hyperball
     oned_params_defaults:
-      lr: 3.0e-4
+      lr: 1.0e-4
     weight_decay: 0.0
-
-    # _target_: heavyball.AdamW
-    # lr: 3.0e-4
-    # eps: 1e-9
-    # weight_decay: 0.0
-    # caution: true
 
   cloud_removal_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -103,8 +109,8 @@ train:
   debug: true
 
 val:
-  val_duration: 500
-  max_val_iters: 20
+  val_duration: 200
+  max_val_iters: -1
   metrics_interp_to: 256 # baseline uses 256 px
 
 sampler:

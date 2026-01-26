@@ -1,0 +1,114 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: cuhk_cr1
+  - accelerator: base
+  - vae: flux
+  - model: image_condition_unet_latent16_regression #image_condition_unet_latent16_regression
+  - _self_
+
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  mixed_precision: "bf16"
+
+model:
+  act_checkpoint: false
+  convnext_cfg:
+    use_grn: false
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 0
+  update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+  move_ema_to_online_device: true
+  lazy_init_ema: true
+
+train:
+  proj_dir: runs/stage2_cloud_removal/
+  max_steps: 300_000
+  save_every: 1_000
+  visualize_every: 500
+  max_grad_norm: 1.0
+  compile_model: false
+  train_mode: regression
+
+  # Flow Matching / Transport settings (unused in regression mode)
+  model_type: x1 # [noise, score, velocity, x1]
+  path_type: linear # [linear, cosine/gvp, vp]
+  loss_type: none # [none, velocity, likelihood]
+  time_weighting: uniform # [uniform, sigmoid, lognormal, or discrete list like "[0.1, 0.5, 0.9]"]
+  train_eps: 1.0e-4
+  sample_eps: 1.0e-4
+  time_shifting: false
+  shift_base: 4096
+
+  condition_source: auto
+
+  # Pixel-space supervision (decode latent with frozen VAE; gradients flow to cloud-removal model only)
+  pixel_loss_weight: 0.0
+
+  # High-frequency loss weights (to preserve details)
+  grad_loss_weight: 0.0 # Gradient (Sobel edge) loss weight
+  fft_loss_weight: 0.0 # FFT high-frequency loss weight (optional, can try 0.05)
+  fft_high_freq_ratio: 0.3 # Ratio of high-freq components in FFT (0.3 = top 30%)
+
+  # visualization (RGB)
+  is_neg_1_1: true
+  visualize_rgb_channels: [0, 1, 2]
+
+  resume_path:
+  ema_load_path:
+
+  cloud_removal_optim:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.0
+      weight_update_method: hyperball
+    oned_params_defaults:
+      lr: 3.0e-4
+    weight_decay: 0.0
+
+  cloud_removal_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+
+  log:
+    run_comment: unet_regression_cuhk_cr1_flux_vae
+    log_with_time: true
+    log_every: 20
+
+  debug: true
+
+val:
+  val_duration: 500
+  max_val_iters: 20
+  metrics_interp_to: 256 # baseline uses 256 px
+
+sampler:
+  type: ode
+  num_steps: 20
+  cfg_scale: 1.0
+  sampling_time_type: uniform
+  progress: false
+  clip_for_x1_pred: false
+  time_shifting: false
+  shift_base: 4096

@@ -40,6 +40,8 @@ from src.utilities.network_utils import compile_decorator
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
 
+logger = logger.bind(_name_="Naflex")
+
 
 class _DeviceDTypeKwargs(TypedDict, total=False):
     device: torch.device | None
@@ -143,7 +145,7 @@ class _HC_EvaAttention(nn.Module):
         v_residual_v1: Tensor | None = None,
     ) -> Tensor:
         x_normed = self.norm(x)
-        attn_out = self.attention(x_normed, rope=rope, attn_mask=attn_mask)
+        attn_out = self.attention(x_normed, rope=rope, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
         if self.gamma is not None:
             attn_out = self.gamma * attn_out
         return self.drop_path(attn_out)
@@ -635,6 +637,10 @@ class Transformer(NaFlexVit):
                 "naive": (HyperConnections, get_init_and_expand_reduce_stream_functions),
                 "cuda": (HyperConnectionsCUDA, get_init_and_expand_reduce_stream_functions_cuda),
             }[implem]
+            if implem == "cuda":
+                logger.warning(
+                    "Using CUDA implementation for HyperConnections, this is un-tested and may not work correctly."
+                )
 
             self.init_hc_fn, self.hc_expand_stream, self.reduce_stream = init_expand_reduce_fm(hc_streams)
 

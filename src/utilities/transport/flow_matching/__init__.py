@@ -1,3 +1,7 @@
+"""
+SiT implementation of flow matching
+"""
+
 from src.utilities.transport.flow_matching.transport import (
     ModelType,
     PathType,

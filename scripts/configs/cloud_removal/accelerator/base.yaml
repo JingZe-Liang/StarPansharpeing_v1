@@ -14,7 +14,7 @@ project_config:
   # placeholder, will be updated by trainer
   project_dir: runs/stage2_cloud_removal/
   logging_dir: runs/stage2_cloud_removal/tensorboard
-  total_limit: 5
+  total_limit: 2
   automatic_checkpoint_naming: true
 gradient_accumulation_plugin:
   _target_: accelerate.utils.GradientAccumulationPlugin

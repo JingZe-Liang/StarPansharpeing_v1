@@ -209,6 +209,14 @@ class MuonFSDP(Muon):
                 for k, v in self.defaults.items():
                     group.setdefault(k, v)
                 group.update(muon_params_defaults)
+
+                weight_update_method = group.get("weight_update_method", "sgd")
+                if weight_update_method == "hyperball" and float(group.get("weight_decay", 0.0)) > 0.0:
+                    logger.error(
+                        "[MuonFSDP] weight_update_method='hyperball' is incompatible with weight_decay>0. "
+                        "Forcing group['weight_decay']=0.0."
+                    )
+                    group["weight_decay"] = 0.0
             elif group["algorithm"] in ("adamw", "lion"):
                 for k, v in self.defaults.items():
                     group.setdefault(k, v)
@@ -228,10 +236,13 @@ class MuonFSDP(Muon):
         oned_params = []
 
         re_ignore_pats = [re.compile(ik) for ik in ignored_keys_for_muon]
+        iter_named_params: Iterable[tuple[str, torch.nn.Parameter]]
         if isinstance(named_params, dict):
-            named_params = named_params.items()
+            iter_named_params = named_params.items()  # type: ignore[assignment]
+        else:
+            iter_named_params = named_params
 
-        for name, p in named_params:
+        for name, p in iter_named_params:
             if p.requires_grad:
                 # conv, linear weights, and other 2D+ parameters
                 if p.ndim >= 2:

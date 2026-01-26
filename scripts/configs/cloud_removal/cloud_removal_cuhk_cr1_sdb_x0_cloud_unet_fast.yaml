@@ -1,0 +1,81 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: cuhk_cr1
+  - accelerator: base
+  - vae: cosmos_rs
+  - model: image_condition_unet_latent16
+  - _self_
+
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+accelerator:
+  mixed_precision: bf16
+
+vae:
+  shift_factor: 0.0
+  scaling_factor: 1.0
+
+train:
+  proj_dir: runs/stage2_cloud_removal/
+  max_steps: 200_000
+  visualize_every: 500
+  train_mode: diffusion
+
+  # SDB Transport settings
+  transport_backend: sdb
+  sdb_x1_source: cloud
+  sdb_loss_type: mse
+  sdb_loss_weight: 1.0
+
+  sdb:
+    plan_tgt: x_0
+    gamma_max: 0.2
+    eps_eta: 1.0
+    alpha_beta_type: linear
+    diffusion_type: bridge
+    t_train_type: edm
+    t_train_kwargs:
+      clip_t_min_max: [1.0e-4, 0.9999]
+    t_sample_type: edm
+    t_sample_kwargs:
+      rho: 0.3
+    sample_noisy_x1_b: 0.0
+
+  condition_source: auto
+  is_neg_1_1: true
+  visualize_rgb_channels: [0, 1, 2]
+
+  cloud_removal_optim:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 0.0
+    betas: ${tuple:[0.9, 0.999]}
+    eps: 1.0e-8
+    foreach: true
+
+  cloud_removal_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+
+  log:
+    run_comment: fast_sdb_unet_cuhk_cr1
+    log_every: 20
+
+val:
+  val_duration: 500
+  max_val_iters: 20
+
+sampler:
+  type: ode
+  num_steps: 25
+  progress: false
+  clip_for_x1_pred: false

@@ -7,7 +7,7 @@ defaults:
   - dataset: cuhk_cr1
   - accelerator: base
   - vae: cosmos_rs
-  - model: image_condition_unet_latent16
+  - model: unet_convnext_latent_16_cak5 #image_condition_unet_latent16
   - _self_
 
   - override hydra/hydra_logging: disabled
@@ -17,8 +17,8 @@ accelerator:
   mixed_precision: bf16
 
 vae:
-  shift_factor: 0.
-  scaling_factor: 1.
+  shift_factor: null
+  scaling_factor: null
 
 ema:
   _target_: ema_pytorch.EMA
@@ -54,7 +54,7 @@ train:
   condition_source: auto
 
   # High-frequency loss weights (to preserve details)
-  grad_loss_weight: 0.1  # Gradient (Sobel edge) loss weight
+  grad_loss_weight: 0.0  # Gradient (Sobel edge) loss weight
   fft_loss_weight: 0.0   # FFT high-frequency loss weight (optional, can try 0.05)
   fft_high_freq_ratio: 0.3  # Ratio of high-freq components in FFT (0.3 = top 30%)
 
@@ -74,26 +74,26 @@ train:
     # eps: 1.0e-8
     # foreach: true
 
-    _target_: heavyball.AdamW
-    _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.0
-    caution: true
-    betas: ${tuple:[0.95,0.999]}
-
-    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _target_: heavyball.AdamW
     # _partial_: true
-    # betas: [0.9, 0.95]
-    # mu: 0.95
-    # oned_param_algo: lion
-    # use_triton: true
-    # use_preconditioned: true # turbo-muon style preconditioning
-    # muon_params_defaults:
-    #   lr: 4.0e-4
-    #   weight_decay: 0.01
-    # oned_params_defaults:
-    #   lr: 3.0e-4
+    # lr: 3.0e-4
     # weight_decay: 0.0
+    # caution: true
+    # betas: ${tuple:[0.95,0.999]}
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 3.0e-4
+    weight_decay: 0.0
 
   cloud_removal_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -115,7 +115,7 @@ val:
 
 sampler:
   type: ode
-  num_steps: 20
+  num_steps: 10
   cfg_scale: 1.0
   sampling_time_type: uniform
   progress: false

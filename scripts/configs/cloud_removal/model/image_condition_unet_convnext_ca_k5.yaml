@@ -1,0 +1,23 @@
+_target_: src.stage2.cloud_removal.model.image_condition_unet.ImageConditionUNet
+in_channels: 16
+cond_channels: 16
+out_channels: 16
+base_channels: 128
+patch_size: 1
+channel_mults: [2, 2, 4, 8] #[1, 2, 2, 4]
+num_res_blocks: 3
+block_type: convnext
+dropout: 0.1
+num_groups: 32
+# one attention block per stage when enabled; middle block always has attention
+attention_stages: [false, false, false, false]
+num_attention_heads: 16
+act_checkpoint: true
+attention_head_dim: null
+use_time_embed: false
+convnext_cfg:
+  kernel_size: 7 #5
+  use_channel_attention: true
+  mlp_ratio: 4
+  conv_mlp: false
+  use_grn: false

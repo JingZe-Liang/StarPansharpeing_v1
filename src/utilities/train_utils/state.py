@@ -182,6 +182,18 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         loss_metrics_tracked: dict[str, list[float] | float] | None = None,
         **__meta_kwargs,
     ):
+        """
+        Initialize a loss/metric tracker.
+
+        Usage
+        ----------
+        tracker = LossMetricTracker(
+            loss_metrics_values={"loss": 0.0},
+            loss_metrics_tracked={"loss": [0.1, 0.2]},
+        )
+        tracker.add_value("loss", 1.0)
+        tracker.add_tracked("loss", torch.tensor([0.3, 0.4]))
+        """
         if hasattr(self, "_initialized") and self._initialized:
             if not loss_metrics_values and not loss_metrics_tracked:
                 return
@@ -215,7 +227,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
 
     def add_value(self, name: str, value: float, ema: float = 1.0):
         if isinstance(value, (np.ndarray, torch.Tensor)):
-            value = value.item()
+            value = value.item()  # type: ignore[misc]
         elif not isinstance(value, float):
             raise ValueError(f"Expected float for {name}, got {type(value)}")
 
@@ -227,15 +239,17 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             self.loss_metrics_values[name] = value
 
     def add_tracked(self, name: str, value: float | list[float] | np.ndarray | torch.Tensor):
-        if not isinstance(value, (float, list)):
-            raise ValueError(f"Expected float or list for {name}, got {type(value)}")
-        elif isinstance(value, float):
-            value = [value]
-        elif isinstance(value, (np.ndarray, torch.Tensor)):
+        if isinstance(value, (np.ndarray, torch.Tensor)):
             assert value.ndim == 1, f"{name=} with {value} should be 1-d array or tensor"
             if torch.is_tensor(value):
                 value = value.detach().cpu().numpy()
-            value = value.tolist()
+            value = value.tolist()  # type: ignore[assignment]
+        elif isinstance(value, float):
+            value = [value]
+        elif isinstance(value, list):
+            pass
+        else:
+            raise ValueError(f"Expected float, list, ndarray, or tensor for {name}, got {type(value)}")
         value = cast(list[float], value)
 
         if name not in self.loss_metrics_tracked:
@@ -287,7 +301,7 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
         if not isinstance(value, list):
             value = [value]
 
-        if name not in self.loss_metrics_values:
+        if name not in self.loss_metrics_tracked:
             self.loss_metrics_tracked[name] = value
         else:  # name in self.loss_metrics_tracked
             if isinstance(self.loss_metrics_tracked[name], list):
@@ -482,21 +496,30 @@ class LossMetricTracker(metaclass=MultiObjectMeta):
             for name in instance.loss_metrics_values:
                 vs = []
                 for ins in ins_lst:
-                    v: float = ins.loss_metrics_values.get(name, None)
-                    assert v is not None, (
-                        f"Value for {name} is None in instance {ins}, this should not when syncronizing."
-                    )
+                    v = ins.loss_metrics_values.get(name, None)
+                    if v is None:
+                        raise ValueError(
+                            f"Value for {name} is None in instance {ins}, this should not when syncronizing."
+                        )
+                    v = float(v)
                     vs.append(v)
                 instance_cp.loss_metrics_values[name] = sum(vs) / len(vs)
 
             # for the tracked
             for name in instance.loss_metrics_tracked:
                 tracked: list[list[float]] = []
+                expected_len = None
                 for ins in ins_lst:
                     v: list[float] | None = ins.loss_metrics_tracked.get(name, None)
                     assert v is not None, (
                         f"Tracked values for {name} is None in instance {ins}, this should not when syncronizing."
                     )
+                    if expected_len is None:
+                        expected_len = len(v)
+                    elif len(v) != expected_len:
+                        raise ValueError(
+                            f"Tracked values length mismatch for {name}: expected {expected_len}, got {len(v)}."
+                        )
                     tracked.append(v)
 
                 # mean the list of list of float, return the list of float
@@ -562,7 +585,7 @@ def metrics_sync(
             }
             device = metric.device if isinstance(metric, torch.Tensor) else "cpu"
             metric_ = op2metric_cls[reduce_op](**metric_fn_kwargs).to(device)
-            metric_.update(torch.as_tensor(metric).to(device))
+            metric_.update(torch.as_tensor(metric).to(device))  # type: ignore[misc]
             synced_metrics[name] = metric_
 
     if not output_tensor_dict:

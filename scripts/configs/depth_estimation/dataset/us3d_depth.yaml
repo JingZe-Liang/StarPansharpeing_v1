@@ -1,0 +1,65 @@
+dataset_name: "US3D"
+target_key: agl  # agl ~= height/depth, dsp ~= disparity
+invalid_threshold: -500.0
+clamp_range: [0.0, 64.0]
+scale: 64.0
+ignore_mask: true
+norm_depth: false
+
+place: jax_oma
+
+paths:
+  jax:
+    train: "data/Downstreams/US3D_Stereo_Matching/JAX/train"
+    val: "data/Downstreams/US3D_Stereo_Matching/JAX/val"
+    test: "data/Downstreams/US3D_Stereo_Matching/JAX/test"
+  oma:
+    train: "data/Downstreams/US3D_Stereo_Matching/OMA/train"
+    val: "data/Downstreams/US3D_Stereo_Matching/OMA/val"
+    test: "data/Downstreams/US3D_Stereo_Matching/OMA/test"
+  jax_oma:
+    train:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/train"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/train"
+    val:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/val"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/val"
+    test:
+      - "data/Downstreams/US3D_Stereo_Matching/JAX/test"
+      - "data/Downstreams/US3D_Stereo_Matching/OMA/test"
+
+train:
+  _target_: src.stage2.depth_estimation.data.US3DDepthStreamingDataset.create_dataloader
+  input_dir: ${dataset.paths.${dataset.place}.train}
+  stream_ds_kwargs:
+    shuffle: true
+    is_cycled: true
+    output_size: 512
+    target_key: ${dataset.target_key}
+    invalid_threshold: ${dataset.invalid_threshold}
+    clamp_range: ${dataset.clamp_range}
+    scale: ${dataset.scale}
+    ignore_mask: ${dataset.ignore_mask}
+    norm_depth: ${dataset.norm_depth}
+  loader_kwargs:
+    batch_size: 4
+    num_workers: 4
+    persistent_workers: true
+
+val:
+  _target_: src.stage2.depth_estimation.data.US3DDepthStreamingDataset.create_dataloader
+  input_dir: ${dataset.paths.${dataset.place}.test}
+  stream_ds_kwargs:
+    shuffle: true
+    is_cycled: false
+    output_size: 512
+    target_key: ${dataset.target_key}
+    invalid_threshold: ${dataset.invalid_threshold}
+    clamp_range: ${dataset.clamp_range}
+    scale: ${dataset.scale}
+    ignore_mask: ${dataset.ignore_mask}
+    norm_depth: ${dataset.norm_depth}
+  loader_kwargs:
+    batch_size: 4
+    num_workers: 2
+    persistent_workers: true

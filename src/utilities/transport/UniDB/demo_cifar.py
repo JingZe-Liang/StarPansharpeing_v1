@@ -194,7 +194,7 @@ def main():
     print(f"Using device: {device}")
 
     # 1. Setup Data
-    loader = get_dataloader(batch_size=64, noise_std=0.2)
+    loader = get_dataloader(batch_size=32, noise_std=0.2)
     print("Dataloader ready.")
 
     # 2. Setup UniDB (Discrete)

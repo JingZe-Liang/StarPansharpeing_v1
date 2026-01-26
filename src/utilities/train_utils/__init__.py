@@ -25,6 +25,8 @@ try:
     import dowhen
     import lovely_tensors as lt
 
+    lt.set_config(precision=5, threshold_min=-5, threshold_max=4)
+
     LT_ENABLED = True
 except ImportError:
     logger.debug("Lovely tensor or dowhen is not installed.")

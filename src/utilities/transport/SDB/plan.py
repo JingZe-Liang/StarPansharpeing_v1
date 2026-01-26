@@ -85,7 +85,7 @@ def expand_t_as(t: Tensor, x: Tensor, dim_not_match_raise: bool = True) -> Tenso
         shape = "1 " * (x.dim() - t.dim())
         t = rearrange(t, "b -> b " + shape)
 
-    return t.to(device=x.device, dtype=x.dtype)
+    return t.to(device=x.device, dtype=torch.float32)
 
 
 # * Stochastic Control Transport Planner ========================================
@@ -156,7 +156,7 @@ def cosh_t_train(
     global exponential_pdf
 
     t = exponential_pdf.rvs(size=batch_size, a=a)
-    t = torch.from_numpy(t).float().to(device)
+    t = torch.from_numpy(t).float().to(device, torch.float32)
     t = torch.cat([t, 1 - t], dim=0)
     t = t[torch.randperm(t.shape[0])]
     t = t[:batch_size]
@@ -187,7 +187,7 @@ class SDBPlan:
     def gamma_t_with_derivative(self, t: Tensor) -> tuple[Tensor, Tensor]:
         raise NotImplementedError
 
-    def epsion_t(self, t: Tensor) -> Tensor:
+    def epsilon_t(self, t: Tensor) -> Tensor:
         raise NotImplementedError
 
     def sample_continous_t(self, **t_sample_kwargs) -> Tensor:
@@ -366,10 +366,11 @@ class SDBContinuousPlan(SDBPlan):
         self.t_max = float(t_max)
 
     def expand_t_as(self, t: Tensor, x: Tensor) -> Tensor:
-        return expand_t_as(t, x, dim_not_match_raise=False)
+        return expand_t_as(t, x, dim_not_match_raise=False).float()
 
     def alpha_t_with_derivative(self, t: Tensor) -> tuple[Tensor, Tensor]:
         """Return α_t and α̇_t used in the Gaussian bridge kernel."""
+        t = t.float()
         if self.alpha_beta_type == "linear":
             return 1 - t, torch.full_like(t, -1.0)
         if self.alpha_beta_type == "sin":
@@ -378,6 +379,7 @@ class SDBContinuousPlan(SDBPlan):
 
     def beta_t_with_derivative(self, t: Tensor) -> tuple[Tensor, Tensor]:
         """Return β_t and β̇_t used in the Gaussian bridge kernel."""
+        t = t.float()
         if self.alpha_beta_type == "linear":
             return t, torch.ones_like(t)
         if self.alpha_beta_type == "sin":
@@ -390,8 +392,11 @@ class SDBContinuousPlan(SDBPlan):
         For `diffusion_type="bridge"`, this matches the paper's linear-kernel setup:
             γ_t^2 = 4 * γ_max^2 * t * (1 - t)
         """
+        t = t.float()
         if self.diffusion_type == "bridge":
-            # Paper (arXiv:2410.21553v2) uses:
+            # Clamp t to avoid singularities at t=0/1 (gamma_t' -> inf).
+            t = torch.clamp(t, min=self.t_min, max=self.t_max)
+            # Paper (arXiv:2410.21553v2)t. uses:
             #   gamma_t^2 = 4 * gamma_max^2 * t * (1 - t)
             # so that max(gamma_t) = gamma_max at t=0.5.
             return (
@@ -409,7 +414,7 @@ class SDBContinuousPlan(SDBPlan):
                 f"Unsupported diffusion type: {self.diffusion_type}, only support bridge, quad, sin"
             )
 
-    def epsion_t(self, t: Tensor) -> Tensor:
+    def epsilon_t(self, t: Tensor) -> Tensor:
         """Return ϵ_t (paper notation) controlling stochasticity.
 
         Paper: arXiv:2410.21553v2, Section 4.3.
@@ -430,13 +435,17 @@ class SDBContinuousPlan(SDBPlan):
         device = self.t_train_kwargs.get("device", "cuda")
 
         if self.t_sample_type == "uniform":
-            return torch.linspace(t_max, t_min, steps=t_sample_kwargs["n_timesteps"]).to(device)
+            time_grid = torch.linspace(t_max, t_min, steps=t_sample_kwargs["n_timesteps"]).to(
+                device, dtype=torch.float32
+            )
         elif self.t_sample_type == "edm":
-            return edm_t_sample(**t_sample_kwargs).to(device)
+            time_grid = edm_t_sample(**t_sample_kwargs).to(device, dtype=torch.float32)
         elif self.t_sample_type == "sigmoid":
-            return sigmoid_t_sample(**t_sample_kwargs).to(device)
+            time_grid = sigmoid_t_sample(**t_sample_kwargs).to(device, dtype=torch.float32)
         else:
             raise NotImplementedError(f"Unsupported t sample type: {self.t_sample_type}")
+
+        return time_grid
 
     def train_continous_t(self, batch_size: int):
         if self.t_train_type == "uniform":
@@ -500,7 +509,7 @@ class SDBContinuousPlan(SDBPlan):
         if x_1 is None:
             x_1 = torch.randn_like(x_0)
 
-        t = self.expand_t_as(t, x_0)
+        t = self.expand_t_as(t, x_0).to(torch.float32)
 
         # x_t
         alpha_t, alpha_t_prime = self.alpha_t_with_derivative(t)
@@ -516,7 +525,7 @@ class SDBContinuousPlan(SDBPlan):
 
     def get_x_t_with_target(self, t: Tensor, x_0: Tensor, x_1: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Return a training pair (x_t, target) according to `plan_tgt`."""
-        t = self.expand_t_as(t, x_0)
+        t = self.expand_t_as(t, x_0).to(torch.float32)
 
         alpha_t, alpha_t_prime = self.alpha_t_with_derivative(t)
         beta_t, beta_t_prime = self.beta_t_with_derivative(t)
@@ -543,16 +552,19 @@ class SDBContinuousPlan(SDBPlan):
         Paper: arXiv:2410.21553v2, Proposition 4.1 (Eq. (10)) and Euler discretization (Eq. (13)).
         The drift term corresponds to b(t, x_t, x_T) with x̂0 approximated by the network output `x_0`.
         """
-        t = self.expand_t_as(t, x_0)
+        t = self.expand_t_as(t, x_0).to(torch.float32)
 
         # x_0 is the network prediction
         alpha_t, alpha_t_prime = self.alpha_t_with_derivative(t)
         beta_t, beta_t_prime = self.beta_t_with_derivative(t)
         gamma_t, gamma_t_prime = self.gamma_t_with_derivative(t)
-        eps_t = self.epsion_t(t)
+        eps_t = self.epsilon_t(t)
 
         # noise = (x_t - alpha_t * x_0 - beta_t * x_1) / gamma_t
         noise = self.get_noise_from_x_0_x_t(x_0, x_t, t, x_1)
+
+        # Matches Eq. (10) of Proposition 4.1 in arXiv:2410.21553v2
+        # b(t, x_t, x_T) = alpha_dot * x_0 + beta_dot * x_T + (gamma_dot + eps_t / gamma_t) * z_hat
         drift = alpha_t_prime * x_0 + beta_t_prime * x_1 + (gamma_t_prime + eps_t / gamma_t) * noise
 
         diffusion = (2 * eps_t * delta_t).sqrt()
@@ -671,6 +683,7 @@ class SDBContinuousSampler(SDBSampler):
     ):
         """Stochastic reverse step (paper Eq. (13))."""
         model_kwargs = {} if model_kwargs is None else model_kwargs
+        t = t.float()
 
         if prev_x_0_pred is None:
             x_0_pred = self.model_pred_to_x_0(model, x_t, t, x_cond, x_T_base, model_kwargs)
@@ -695,7 +708,7 @@ class SDBContinuousSampler(SDBSampler):
         x_1: Tensor,
         time_grid: Tensor | None = None,
         sample_n_steps: int | None = None,
-        last_n_step_only_mean: int = 2,
+        last_n_step_only_mean: int = 1,
         traj_saved_n: int = 5,
         model_kwargs: dict | None = None,
         clip_value: bool = False,
@@ -718,11 +731,12 @@ class SDBContinuousSampler(SDBSampler):
             time_grid = time_grid.to(device=x_cond.device)
             sample_n_steps = len(time_grid)
 
+        # force time grid to be float32 dtype
+        time_grid = time_grid.float()
         save_indices = _traj_save_indices(len(time_grid), traj_saved_n)
 
-        _remain_n_steps = len(time_grid) - last_n_step_only_mean - 1
-
         # loops
+        _remain_n_steps = len(time_grid) - last_n_step_only_mean - 1
         saved_x0_traj = []
         x_t = x_T_base
         saved_xt_traj = [x_t]
@@ -763,7 +777,7 @@ class SDBContinuousSampler(SDBSampler):
         x_1: Tensor,
         time_grid: Tensor | None = None,
         sample_n_steps: int | None = None,
-        last_n_step_only_mean: int = 2,
+        last_n_step_only_mean: int = 1,
         traj_saved_n: int = 5,
         model_kwargs: dict | None = None,
         clip_value: bool = False,
@@ -790,11 +804,12 @@ class SDBContinuousSampler(SDBSampler):
             time_grid = time_grid.to(device=x_cond.device)
             sample_n_steps = len(time_grid)
 
+        # force time grid to be float32 dtype
+        time_grid = time_grid.float()
         save_indices = _traj_save_indices(len(time_grid), traj_saved_n)
 
-        _remain_n_steps = len(time_grid) - last_n_step_only_mean - 1
-
         # loops
+        _remain_n_steps = len(time_grid) - last_n_step_only_mean - 1
         saved_x0_traj = []
         x_t = x_T_base
         saved_xt_traj = [x_t]
@@ -844,7 +859,7 @@ class SDBContinuousSampler(SDBSampler):
         x_1: Tensor,
         time_grid: Tensor | None = None,
         sample_n_steps: int | None = None,
-        last_n_step_only_mean: int = 2,
+        last_n_step_only_mean: int = 1,
         traj_saved_n: int = 5,
         model_kwargs: dict | None = None,
         clip_value: bool = False,
@@ -868,6 +883,7 @@ class SDBContinuousSampler(SDBSampler):
             time_grid = time_grid.to(device=x_cond.device)
             sample_n_steps = len(time_grid)
 
+        time_grid = time_grid.float()
         save_indices = _traj_save_indices(len(time_grid), traj_saved_n)
 
         _remain_n_steps = len(time_grid) - last_n_step_only_mean - 1
@@ -894,11 +910,16 @@ class SDBContinuousSampler(SDBSampler):
                 x_t_mid, x_0_pred_mid = self.step_sde(
                     model, x_t, t, x_cond, x_T_base, delta_t / 2, model_kwargs, clip_value
                 )
+
+                # prepare t_mid for second step
+                t_mid_scalar = t_scalar - delta_t / 2
+                t_mid = self.plan.expand_t_as(t_mid_scalar.unsqueeze(0).expand(x_t.shape[0]), x_t)
+
                 # second step x_mid -> x_t
                 x_t, x_0_pred = self.step_sde(
                     model,
                     x_t_mid,
-                    t,
+                    t_mid,
                     x_cond,
                     x_T_base,
                     delta_t / 2,

@@ -197,3 +197,18 @@
 [submodule "src/stage2/cloud_removal/third_party/UniDB"]
 	path = src/stage2/cloud_removal/third_party/UniDB
 	url = https://github.com/UniDB-SOC/UniDB.git
+[submodule "src/utilities/optim/nemo_optimizers"]
+	path = src/utilities/optim/nemo_optimizers
+	url = https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git
+[submodule "src/utilities/optim/hyperball_emerging_optimizers"]
+	path = src/utilities/optim/hyperball_emerging_optimizers
+	url = https://github.com/mkhona-nvidia/Emerging-Optimizers.git
+[submodule "src/stage1/VAEs/huvr"]
+	path = src/stage1/VAEs/huvr
+	url = https://github.com/tiktok/huvr.git
+[submodule "src/stage1/VAEs/Scale_RAE"]
+	path = src/stage1/VAEs/Scale_RAE
+	url = https://github.com/ZitengWangNYU/Scale-RAE.git
+[submodule "src/stage2/depth_estimation/third_party/Depth_Anything_v2"]
+	path = src/stage2/depth_estimation/third_party/Depth_Anything_v2
+	url = https://github.com/DepthAnything/Depth-Anything-V2.git

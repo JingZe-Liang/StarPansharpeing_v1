@@ -1,0 +1,54 @@
+defaults:
+  - tokenizer: hybrid
+  - _self_
+
+_target_: src.stage2.segmentation.models.tokenizer_backbone_implicit.TokenizerHybridUNet.create_model
+
+# Tokenizer Feature Configuration
+tokenizer_feature:
+  pretrained_path: null
+  features_per_stage: [512, 512, 512, 512]
+  layer_in_channels: [512, 512, 1152, 1152]
+  model_name: hybrid_tokenizer_b16
+  # encoder settings
+  pretrained_size: 512
+  in_channels: 3
+  conv_inplane: 64
+  drop_path_rate: 0.0
+  with_cffn: true
+  cffn_ratio: 1.0
+  deform_num_heads: 8
+  deform_ratio: 0.5
+  add_vit_feature: true
+  use_extra_extractor: true
+  with_cp: true
+  select_in_all_layers: true
+  interaction_indexes: [1, 2, 4, 5]
+
+# Adapter Configuration
+adapter:
+  adapter_type: default
+  latent_width: 32
+  n_conv_per_stage: 2
+  depth_per_stage: 2
+  norm: layernorm2dfp32
+  act: gelu
+  drop: 0.0
+  act_first: false
+  conv_bias: true
+  block_types: ["mbconv", "mbconv", "mbconv", "mbconv"]
+
+# Implicit Decoder Configuration
+decoder:
+  embed_dim: 256
+  num_fusion_blocks: 2
+  fusion_block_type: mbconv
+  fusion_block_kwargs: {}
+
+num_classes: 1
+input_channels: 3
+use_latent: false
+deep_supervision: false
+# Tokenizer pretrained path (needs to be overridden)
+tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
+_debug: false

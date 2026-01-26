@@ -21,7 +21,7 @@ from src.data import _BaseStreamingDataset
 from src.utilities.config_utils import set_defaults
 
 
-def rgb_nir_transform(
+def rgb_nir_geo_transform(
     p: float,
     *,
     data_keys: list[str | DataKey] = ["input", "input"],
@@ -29,8 +29,20 @@ def rgb_nir_transform(
     return AugmentationSequential(
         RandomHorizontalFlip(p=p),
         RandomVerticalFlip(p=p),
-        # RandomBrightness(p=p, brightness=(0.6, 1.6)),
-        # RandomGamma(gamma=(0.5, 2.0), gain=(1.5, 1.5), p=p),
+        data_keys=data_keys,  # type: ignore[arg-type]
+        keepdim=True,
+        random_apply=1,
+    )
+
+
+def rgb_nir_color_transform(
+    p: float,
+    *,
+    data_keys: list[str | DataKey] = ["input"],
+) -> AugmentationSequential:
+    return AugmentationSequential(
+        RandomBrightness(p=p, brightness=(0.6, 1.6)),
+        RandomGamma(gamma=(0.5, 2.0), gain=(1.5, 1.5), p=p),
         data_keys=data_keys,  # type: ignore[arg-type]
         keepdim=True,
         random_apply=1,
@@ -60,7 +72,8 @@ class CUHK_CR_StreamingDataset(_BaseStreamingDataset):
         self.to_neg_1_1 = to_neg_1_1
         self.interp_to = interp_to
         self.rgb_nir_aug_p = rgb_nir_aug_p
-        self._rgb_nir_aug: AugmentationSequential | None = None
+        self._rgb_nir_geo_aug: AugmentationSequential | None = None
+        self._rgb_nir_color_aug: AugmentationSequential | None = None
         self.force_rgb = force_rgb
         if interp_to is not None:
             self._resize_crop = AugmentationSequential(
@@ -80,10 +93,13 @@ class CUHK_CR_StreamingDataset(_BaseStreamingDataset):
     def _apply_rgb_nir_aug(self, img: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.rgb_nir_aug_p <= 0.0 or self.split != "train":
             return img, gt
-        if self._rgb_nir_aug is None:
-            self._rgb_nir_aug = rgb_nir_transform(self.rgb_nir_aug_p)
-        img_aug, gt_aug = self._rgb_nir_aug(img.unsqueeze(0), gt.unsqueeze(0))
-        return img_aug.squeeze(0), gt_aug.squeeze(0)
+        if self._rgb_nir_geo_aug is None:
+            self._rgb_nir_geo_aug = rgb_nir_geo_transform(self.rgb_nir_aug_p)
+        if self._rgb_nir_color_aug is None:
+            self._rgb_nir_color_aug = rgb_nir_color_transform(self.rgb_nir_aug_p)
+        img_geo, gt_geo = self._rgb_nir_geo_aug(img.unsqueeze(0), gt.unsqueeze(0))
+        img_color = self._rgb_nir_color_aug(img_geo)
+        return img_color.squeeze(0), gt_geo.squeeze(0)
 
     def __getitem__(self, idx):
         sample = super().__getitem__(idx)
@@ -115,7 +131,12 @@ class CUHK_CR_StreamingDataset(_BaseStreamingDataset):
             img = img[:3]
             gt = gt[:3]
 
-        return {"img": img, "gt": gt, "conditions": img}
+        return {
+            # "dataset_name": "cuhkcr",
+            "img": img,
+            "gt": gt,
+            "conditions": img,
+        }
 
 
 class CUHK_CR_StreamingDataset_RandomKey_For_tokenizerPEFT(_BaseStreamingDataset):

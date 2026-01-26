@@ -1,0 +1,45 @@
+cfgs:
+  used: mono_time_cr_uni
+
+batch_size_train: 8
+batch_size_val: 8
+num_workers: 8
+
+train_loader:
+  _target_: src.stage2.cloud_removal.data.mono_time_CR_uni.MonoTimeCRStreamingDataset.create_dataloader
+  cuhk_input_dir: data/Downstreams/CUHK-CR/litdata_out
+  sen12_input_dir: data/SEN12MS-CR
+  cuhk_name: null
+  cuhk_split: null
+  sen12_split: null
+  no_s1: true
+  cuhk_kwargs:
+    to_neg_1_1: true
+    force_rgb: false
+  sen12_kwargs:
+    return_meta: false
+    to_neg_1_1: true
+    rescale_method: default
+    sar_log1p: true
+  combined_kwargs:
+    batching_method: per_stream
+  loader_kwargs:
+    batch_size: ${dataset.batch_size_train}
+    num_workers: ${dataset.num_workers}
+    shuffle: true
+    pin_memory: true
+
+val_loader:
+  _target_: src.stage2.cloud_removal.data.CUHK_CR.CUHK_CR_StreamingDataset.create_dataloader
+  input_dir: data/Downstreams/CUHK-CR/litdata_out
+  loader_kwargs:
+    batch_size: ${dataset.batch_size_val}
+    num_workers: ${dataset.num_workers}
+    pin_memory: true
+  stream_ds_kwargs:
+    name: cr2
+    split: test
+    shuffle: false
+    to_neg_1_1: true
+    interp_to: null
+    force_rgb: false

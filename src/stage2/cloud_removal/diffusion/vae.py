@@ -42,6 +42,7 @@ class CosmosRSVAE(nn.Module):
         lora_path: str | None = None,
         dtype: str = "bf16",
         tokenizer_overrides: dict[str, Any] | None = None,
+        scale_shift_type: str | None = None,
         scaling_factor: list[float] | float | None = None,
         shift_factor: list[float] | float | None = None,
     ) -> None:
@@ -98,7 +99,7 @@ class CosmosRSVAE(nn.Module):
             logger.success("Load LoRA from {} and fused into base model".format(lora_path))
 
         if scaling_factor is None or shift_factor is None:
-            sf, sh = self._get_scale_shift("ae")
+            sf, sh = self._get_scale_shift(ae_type=scale_shift_type)
         else:
             sf = scaling_factor
             sh = shift_factor
@@ -177,8 +178,11 @@ class CosmosRSVAE(nn.Module):
 
         return decoded
 
-    def _get_scale_shift(self, ae_type: str = "ae"):
-        # ae and lcr reg
+    def _get_scale_shift(self, ae_type: str | None = "ae"):
+        if ae_type is None:
+            ae_type = "lcr"
+
+        # ae and lcr reg: two version of pretrained vae
         if ae_type == "lcr":
             shift = [
                 -1.4291600526869297,
@@ -254,7 +258,7 @@ class CosmosRSVAE(nn.Module):
                 0.15534570714645543,
             ]
         else:
-            raise
+            raise ValueError(f"Unsupported ae_type: {ae_type}. Expected 'lcr' or 'ae'.")
 
         return scale, shift
 
@@ -279,7 +283,7 @@ class FluxVAE(nn.Module):
         logger.success("Load Flux VAE from {}".format(model_path))
 
     def _get_factors(self, device: torch.device) -> tuple[Tensor, Tensor]:
-        scaling = getattr(self.vae.config, "scaling_factor", 1.0)
+        scaling = 1 / getattr(self.vae.config, "scaling_factor", 1.0)
         shift = getattr(self.vae.config, "shift_factor", 0.0)
         scaling_t = torch.as_tensor(scaling, device=device, dtype=self._dtype)
         shift_t = torch.as_tensor(shift, device=device, dtype=self._dtype)
@@ -500,8 +504,116 @@ if TEST:
                     value_range=(-1, 1),
                 )
 
+    def test_vae_recon_quality_sen12():
+        """Test VAE reconstruction quality on SEN12_CR dataset."""
+        import litdata as ld
+        from omegaconf import OmegaConf
+        from torchmetrics.functional.image import peak_signal_noise_ratio, structural_similarity_index_measure
+
+        from src.stage2.cloud_removal.data.SEN12_CR import SEN12_CR_StreamingDataset
+
+        vae_config_path: str = "scripts/configs/cloud_removal/vae/cosmos_rs.yaml"
+
+        vae_cfg = OmegaConf.load(vae_config_path)
+        cfg_container = OmegaConf.to_container(vae_cfg, resolve=True)
+        if not isinstance(cfg_container, dict):
+            raise TypeError("VAE config must be a mapping.")
+        vae = CosmosRSVAE(
+            model_path=str(cfg_container["model_path"]),
+            lora_path=str(cfg_container["lora_path"]) if "lora_path" in cfg_container else None,
+            dtype=str(cfg_container.get("dtype", "bf16")),
+            scale_shift_type="ae",
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        vae = vae.to(device)
+
+        input_dir = "data/SEN12MS-CR"
+
+        ds = SEN12_CR_StreamingDataset(
+            input_dir=input_dir,
+            split="train",
+            to_neg_1_1=True,
+            rescale_method="default",
+            sar_log1p=False,
+            return_meta=False,
+            intensity_min_max=(0, 10000),
+        )
+        dl = ld.StreamingDataLoader(ds, batch_size=1, num_workers=0)  # type: ignore[invalid-argument-type]
+
+        for i, sample in enumerate(dl):
+            img = sample["img"].to(device)
+            gt = sample["gt"].to(device)
+
+            img_latent = vae.encode(img)
+            gt_latent = vae.encode(gt)
+
+            img_recon = vae.decode(img_latent, input_shape=img.shape)
+            gt_recon = vae.decode(gt_latent, input_shape=gt.shape)
+
+            # psnr and ssim
+            psnr = peak_signal_noise_ratio((img.to(device) + 1) / 2, (img_recon + 1) / 2, data_range=1.0)
+            ssim = structural_similarity_index_measure((img.to(device) + 1) / 2, (img_recon + 1) / 2, data_range=1.0)
+
+            print(
+                f"img PSNR: {psnr:.4f}, SSIM: {ssim:.4f} | latent: min={img_latent.min():.4f}, max={img_latent.max():.4f}"
+            )
+
+            psnr = peak_signal_noise_ratio((gt.to(device) + 1) / 2, (gt_recon + 1) / 2, data_range=1.0)
+            ssim = structural_similarity_index_measure((gt.to(device) + 1) / 2, (gt_recon + 1) / 2, data_range=1.0)
+
+            print(
+                f"gt PSNR: {psnr:.4f}, SSIM: {ssim:.4f} | latent: min={gt_latent.min():.4f}, max={gt_latent.max():.4f}"
+            )
+            print("-" * 20)
+
+            # plot using sen12_vis
+            from pathlib import Path
+
+            from src.stage2.cloud_removal.data.sen12_vis import s2_to_rgb_for_display
+            import matplotlib.pyplot as plt
+
+            # convert to [0, 1] range for visualization
+            img_disp = ((img[0] + 1) / 2).cpu()
+            gt_disp = ((gt[0] + 1) / 2).cpu()
+            img_recon_disp = ((img_recon[0] + 1) / 2).cpu()
+            gt_recon_disp = ((gt_recon[0] + 1) / 2).cpu()
+
+            # convert S2 to RGB for display
+            img_rgb = s2_to_rgb_for_display(img_disp, rgb_bands_0based=(3, 2, 1))
+            gt_rgb = s2_to_rgb_for_display(gt_disp, rgb_bands_0based=(3, 2, 1))
+            img_recon_rgb = s2_to_rgb_for_display(img_recon_disp, rgb_bands_0based=(3, 2, 1))
+            gt_recon_rgb = s2_to_rgb_for_display(gt_recon_disp, rgb_bands_0based=(3, 2, 1))
+
+            # create plot
+            fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+
+            axes[0, 0].imshow(img_rgb.cpu().numpy())
+            axes[0, 0].set_title("Input (Cloudy)")
+            axes[0, 0].axis("off")
+
+            axes[0, 1].imshow(img_recon_rgb.cpu().numpy())
+            axes[0, 1].set_title("Input Reconstruction")
+            axes[0, 1].axis("off")
+
+            axes[1, 0].imshow(gt_rgb.cpu().numpy())
+            axes[1, 0].set_title("Ground Truth (Clean)")
+            axes[1, 0].axis("off")
+
+            axes[1, 1].imshow(gt_recon_rgb.cpu().numpy())
+            axes[1, 1].set_title("GT Reconstruction")
+            axes[1, 1].axis("off")
+
+            fig.suptitle(f"VAE Reconstruction Quality - Sample {i}", fontsize=16)
+            fig.tight_layout()
+
+            save_path = Path("tmp/recon_quality_test_sen12_{i}.png".format(i=i))
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
 
 if __name__ == "__main__":
     if TEST:
         # test_cosmos_cuhk_cr_mean_std()
-        test_vae_recon_quality()
+        # test_vae_recon_quality()
+        test_vae_recon_quality_sen12()

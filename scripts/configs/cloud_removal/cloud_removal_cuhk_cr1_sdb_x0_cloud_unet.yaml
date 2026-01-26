@@ -16,9 +16,12 @@ defaults:
 accelerator:
   mixed_precision: bf16
 
+model:
+  act_checkpoint: false
+
 vae:
-  shift_factor: 0.
-  scaling_factor: 1.
+  shift_factor: null
+  scaling_factor: null
 
 ema:
   _target_: ema_pytorch.EMA
@@ -34,7 +37,7 @@ ema:
 train:
   proj_dir: runs/stage2_cloud_removal/
   max_steps: 300_000
-  save_every: 1_000
+  save_every: 500
   visualize_every: 500
   max_grad_norm: 1.0
   compile_model: false
@@ -47,14 +50,17 @@ train:
 
   sdb:
     plan_tgt: x_0           # predict x_0 (cloud-free image)
-    gamma_max: 0.2          # max noise std at t=0.5
+    gamma_max: 0.2         # max noise std at t=0.5
     eps_eta: 1.0            # stochasticity parameter
     alpha_beta_type: linear # [linear, sin]
     diffusion_type: bridge  # [bridge, quad, sin, sin_one_side]
-    t_train_type: edm       # [uniform, edm, cosh]
-    t_sample_type: edm      # [uniform, edm, sigmoid]
+    t_train_type: edm   # [uniform, edm, cosh]
+    t_sample_type: edm  # [uniform, edm, sigmoid]
+    t_sample_kwargs:
+      t_min: 1.0e-4
+      t_max: 0.9999
     sample_noisy_x1_b: 0.0  # noise added to x1 during sampling
-    precond: null           # [null, none, edm] - null/none: no preconditioning (weight=1), edm: EDM preconditioning
+    precond: null           # [null, none, edm, edm_raw_t] - edm_raw_t keeps raw t for time-conditioned UNet
     t_train_kwargs:
       clip_t_min_max: [1.0e-4, 0.9999]
 
@@ -82,10 +88,17 @@ train:
     use_preconditioned: true  # turbo-muon style preconditioning
     muon_params_defaults:
       lr: 4.0e-4
-      weight_decay: 0.01
+      weight_decay: 0.0
+      # weight_update_method: hyperball
     oned_params_defaults:
       lr: 3.0e-4
       weight_decay: 0.0
+
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # betas: [0.9, 0.95]
+    # weight_decay: 0.01
 
   cloud_removal_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -97,7 +110,7 @@ train:
   log:
     run_comment: sdb_unet_cuhk_cr1
     log_with_time: true
-    log_every: 20
+    log_every: 10
 
   debug: true
 
