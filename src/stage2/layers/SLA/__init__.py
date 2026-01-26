@@ -13,6 +13,12 @@ Citation (please cite if you use this code):
 }
 """
 
-from .core import SparseLinearAttention, SageSparseLinearAttention
+from .core import LinearCrossAttention, SageSparseLinearAttention, SparseLinearAttention
+from .cross_sparse import SparseLinearCrossAttention
 
-__all__ = ["SparseLinearAttention", "SageSparseLinearAttention"]
+__all__ = [
+    "LinearCrossAttention",
+    "SparseLinearAttention",
+    "SageSparseLinearAttention",
+    "SparseLinearCrossAttention",
+]

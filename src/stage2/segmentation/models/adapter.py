@@ -18,15 +18,17 @@ from timm.layers.squeeze_excite import SqueezeExcite
 from timm.layers.weight_init import lecun_normal_
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
+from torch.utils.checkpoint import checkpoint
 
 from ...layers.dinov3_adapter import DINOv3_Adapter
-from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage
+from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage, ResBlockStage
 
 
 def initialize(module) -> None:
     if isinstance(module, _ConvNd):
         if module.weight.requires_grad:
-            nn.init.xavier_normal_(module.weight)
+            # nn.init.xavier_normal_(module.weight)
+            lecun_normal_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
@@ -43,7 +45,7 @@ def initialize(module) -> None:
 
     if isinstance(module, nn.Linear):
         if module.weight.requires_grad:
-            nn.init.xavier_uniform_(module.weight)
+            nn.init.trunc_normal_(module.weight, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
@@ -203,8 +205,11 @@ class FAPM(nn.Module):
         norm_kwargs: dict | None = None,
         act_kwargs: dict | None = None,
         bias: bool = False,
+        use_se: bool = True,
+        with_cp: bool = False,
     ):
         super().__init__()
+        self.grad_checkpointing = with_cp
         norm_kwargs = {} if norm_kwargs is None else norm_kwargs
         act_kwargs = {"inplace": True} if act_kwargs is None else act_kwargs
 
@@ -258,27 +263,33 @@ class FAPM(nn.Module):
                 # If dimensions are the same, no operation needed
                 self.shortcut_projections.append(nn.Identity())
 
+    def _forward_blocks(self, i, x):
+        # --- Stage 1: Get context features and main features ---
+        z_shared = self.shared_basis(x)
+        z_specific = self.specific_bases[i](x)
+
+        # --- FiLM modulation process ---
+        gamma_beta = self.modulations[i](z_shared)
+        gamma, beta = torch.chunk(gamma_beta, 2, dim=1)
+        z_modulated = gamma * z_specific + beta
+
+        # --- Stage 2: Refine the modulated features ---
+        refined = self.refinement_blocks[i](z_modulated)
+
+        # --- Correct residual connection ---
+        # 1. Project input (shortcut) to match dimensions
+        shortcut = self.shortcut_projections[i](z_modulated)
+        # 2. Add projected shortcut with refinement block output
+        final_output = refined + shortcut
+        return final_output
+
     def forward(self, x_list: List[torch.Tensor]) -> List[torch.Tensor]:
         out = []
         for i, x in enumerate(x_list):
-            # --- Stage 1: Get context features and main features ---
-            z_shared = self.shared_basis(x)
-            z_specific = self.specific_bases[i](x)
-
-            # --- FiLM modulation process ---
-            gamma_beta = self.modulations[i](z_shared)
-            gamma, beta = torch.chunk(gamma_beta, 2, dim=1)
-            z_modulated = gamma * z_specific + beta
-
-            # --- Stage 2: Refine the modulated features ---
-            refined = self.refinement_blocks[i](z_modulated)
-
-            # --- Correct residual connection ---
-            # 1. Project input (shortcut) to match dimensions
-            shortcut = self.shortcut_projections[i](z_modulated)
-            # 2. Add projected shortcut with refinement block output
-            final_output = refined + shortcut
-
+            if self.grad_checkpointing:
+                final_output = checkpoint(self._forward_blocks, i, x, use_reentrant=False)
+            else:
+                final_output = self._forward_blocks(i, x)
             out.append(final_output)
         return out
 
@@ -320,6 +331,7 @@ class DINOv3EncoderAdapter(nn.Module):
         nonlin_kwargs: dict | None = None,
         conv_bias: bool = False,
         keys: list[str] | None = None,
+        with_cp=False,
     ):
         super().__init__()
         self.dinov3_adapter = dinov3_adapter
@@ -349,6 +361,7 @@ class DINOv3EncoderAdapter(nn.Module):
             norm_kwargs=self.norm_op_kwargs,
             act_kwargs=self.nonlin_kwargs,
             bias=conv_bias,
+            with_cp=with_cp,
         )
 
         # Learnable upsampling for spatial alignment
@@ -402,7 +415,7 @@ class UNetDecoder(nn.Module):
         n_conv_per_stage: int | list[int] = 2,
         depths_per_stage: int | list[int] = 2,
         nonlin_first: bool = False,
-        norm_op: str = "layernorm2d",
+        norm_op: str = "layernorm2dfp32",  # keep precision in fp32
         norm_op_kwargs: dict | None = None,
         dropout_op=None,
         dropout_op_kwargs: dict | None = None,
@@ -413,6 +426,7 @@ class UNetDecoder(nn.Module):
         has_latent_condition: bool = False,
         block_types: list[str] = ["mbconv", "mbconv", "mbconv", "mbconv"],
         block_kwargs: dict = {},
+        output_process: str | None = None,
     ):
         """
         This class needs the skips of the encoder as input in its forward.
@@ -434,6 +448,15 @@ class UNetDecoder(nn.Module):
         self.num_classes = num_classes
         conv_op = encoder.conv_op
         n_stages_encoder = len(encoder.output_channels)
+
+        # ------- process output -------- #
+        self.output_processor = {
+            "sigmoid": nn.Sigmoid(),
+            "softmax": nn.Softmax(dim=1),
+            "relu": nn.ReLU(),
+            None: nn.Identity(),
+        }[output_process]
+        logger.debug(f"Using output process: {output_process}")
 
         if isinstance(n_conv_per_stage, int):
             n_conv_per_stage = [n_conv_per_stage] * (n_stages_encoder - 1)
@@ -506,11 +529,24 @@ class UNetDecoder(nn.Module):
                     drop_path=0.0,
                     **block_kwargs,
                 )
+            elif block_type == "resblock":
+                stage = ResBlockStage(
+                    in_chans=2 * input_features_skip,
+                    embed_dim=embed_dim,
+                    depths=depths,
+                    cond_width=latent_width,
+                    out_chans=input_features_skip,
+                    norm_layer=norm_op,
+                    act_layer="relu6",
+                    drop_path=0.0,
+                    expand_ratio=1,
+                    **block_kwargs,
+                )
             else:
                 raise ValueError(f"Unsupported block_type: {block_type}")
             stages.append(stage)
             logger.debug(
-                f"Build stage {s}: {block_type}, inp_chans={2 * input_features_skip},"
+                f"Build stage {s}: {block_type=}, inp_chans={2 * input_features_skip},"
                 f"out_chans={input_features_skip}, depths={depths}, embed_dim={embed_dim}"
             )
 
@@ -559,6 +595,13 @@ class UNetDecoder(nn.Module):
 
         if not self.deep_supervision:
             r = seg_outputs[0]
+            # Buggy: using relu/sigmoid will cause gradient issue when training depth estimation
+            r = self.output_processor(r)
         else:
-            r = seg_outputs
+            r = [self.output_processor(seg_out) for seg_out in seg_outputs]
         return r
+
+    def set_grad_checkpointing(self, enable: bool = True):
+        for blk in self.stages:
+            if hasattr(blk, "set_grad_checkpointing"):
+                blk.set_grad_checkpointing(enable)

@@ -7,14 +7,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loguru import logger
-from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer, get_norm_layer
+from timm.layers.create_conv2d import create_conv2d
 from timm.layers.weight_init import lecun_normal_
 from timm.models._builder import build_model_with_cfg
 from timm.models._manipulate import named_apply
 from timm.models._registry import register_model
 from torch import Tensor
+from loguru import logger
 
 from src.stage2.layers.blocks import Spatial2DNATBlock, Spatial2DNATBlockConditional
 from src.stage2.layers.naf import (

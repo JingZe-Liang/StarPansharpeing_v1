@@ -111,6 +111,7 @@ class SwiGLU(nn.Module):
 
     def _get_x12(self, x):
         if self.packed_weights:
+            assert hasattr(self, "w12") and self.w12 is not None
             x1, x2 = self.w12(x).chunk(2, dim=1 if self.use_conv else -1)
         else:
             x1 = self.w1(x)

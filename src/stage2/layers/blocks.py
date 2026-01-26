@@ -209,90 +209,74 @@ def _resize_like(source: Tensor, target: Tensor) -> Tensor:
     return F.interpolate(source, size=target.shape[-2:], mode="bilinear", align_corners=False)
 
 
-def _zero_init(module: nn.Linear | nn.Conv2d | None) -> None:
-    if module is None:
-        return
-    if module.weight is not None:
-        nn.init.zeros_(module.weight)
-    if module.bias is not None:
-        nn.init.zeros_(module.bias)
-
-
 class TimeCondResBlock(nn.Module):
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        *,
         time_embed_dim: int | None,
         cond_channels: int | None,
-        dropout: float,
-        num_groups: int,
-        output_scale_factor: float = 1.0,
+        norm_layer: str = "groupnorm",
+        expand_ratio: float = 1.0,
+        use_channel_attention: bool = False,
+        dropout: float = 0.0,
+        num_groups: int = 32,
     ) -> None:
         super().__init__()
-        self.output_scale_factor = output_scale_factor
-        self.norm1 = nn.GroupNorm(_pick_num_groups(in_channels, num_groups), in_channels)
-        self.norm2 = nn.GroupNorm(_pick_num_groups(out_channels, num_groups), out_channels)
+        mid_chans = round(in_channels * expand_ratio)
         self.act = nn.SiLU()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm1 = create_norm_layer(norm_layer, in_channels)
+        self.norm2 = create_norm_layer(norm_layer, mid_chans)
+        self.conv1 = nn.Conv2d(in_channels, mid_chans, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(mid_chans, out_channels, kernel_size=3, padding=1)
         self.dropout = nn.Dropout(dropout)
+        self.use_ca = use_channel_attention
+        if use_channel_attention:
+            self.ca = CecaModule(out_channels, 3, 2, 1)
+        else:
+            self.ca = nn.Identity()
 
         # FiLM-style conditioning: produces (scale, shift)
         self.time_proj = self.cond_proj = None
         if time_embed_dim is not None:
-            self.time_proj = nn.Linear(time_embed_dim, out_channels * 2)
+            self.time_proj = nn.Sequential(nn.SiLU(), nn.Linear(time_embed_dim, mid_chans * 2))
         if cond_channels is not None:
-            self.cond_proj = nn.Conv2d(cond_channels, out_channels * 2, kernel_size=1)
+            self.cond_proj = nn.Sequential(nn.SiLU(), nn.Conv2d(cond_channels, mid_chans * 2, kernel_size=1))
 
         self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else None
 
-        self.init_weights()
-
-    def init_weights(self):
-        _zero_init(self.cond_proj)
-        _zero_init(self.time_proj)
-
-    # @torch.compile
     def forward(self, x: Tensor, temb: Tensor | None, cond: Tensor | None) -> Tensor:
+        # ========= Conv1 ==========
         h = self.norm1(x)
         h = self.act(h)
         h = self.conv1(h)
 
+        # ========= Conv2 ==========
         h = self.norm2(h)
 
-        # Scale and Shift components
-        scale: float | Tensor = 0.0
-        shift: float | Tensor = 0.0
-
+        # conditioning
         if self.time_proj is not None:
             if temb is None:
                 raise ValueError("temb must be provided when time embedding is enabled")
             # t_params: [B, C*2, 1, 1]
-            t_params = self.time_proj(self.act(temb))[:, :, None, None]
-            t_scale, t_shift = t_params.chunk(2, dim=1)
-            scale = scale + t_scale
-            shift = shift + t_shift
-
+            t_scale, t_shift = self.time_proj(self.act(temb))[:, :, None, None].chunk(2, dim=1)
+            h = h * (1 + t_scale) + t_shift
         if self.cond_proj is not None and cond is not None:
             cond = _resize_like(cond, h)
             # c_params: [B, C*2, H, W]
-            c_params = self.cond_proj(cond)
-            c_scale, c_shift = c_params.chunk(2, dim=1)
-            scale = scale + c_scale
-            shift = shift + c_shift
-
-        # FiLM modulation: h = h * (1 + scale) + shift
-        h = h * (1.0 + scale) + shift
-
+            c_scale, c_shift = self.cond_proj(cond).chunk(2, dim=1)
+            h = h * (1 + c_scale) + c_shift
         h = self.act(h)
         h = self.dropout(h)
         h = self.conv2(h)
 
+        # ====== Channel Attention ========
+        h = self.ca(h)
+
         if self.skip is not None:
             x = self.skip(x)
-        return (x + h) / self.output_scale_factor
+
+        return x + h
 
 
 class TimeCondNatBlock(nn.Module):
@@ -367,17 +351,7 @@ class TimeCondNatBlock(nn.Module):
 
         if self.requires_cond:
             if cond is None:
-                cond_channels = self.cond_channels
-                if cond_channels is None:
-                    raise ValueError("cond_channels must be set when conditional NAT block is enabled.")
-                cond = torch.zeros(
-                    x.shape[0],
-                    cond_channels,
-                    x.shape[2],
-                    x.shape[3],
-                    device=x.device,
-                    dtype=x.dtype,
-                )
+                raise ValueError("cond must be provided when conditional NAT block is enabled.")
             return self.block(x, cond)
 
         return self.block(x)
@@ -455,12 +429,6 @@ class TimeCondConvNextBlock(ConvNeXtBlock):
         if cond_channels is not None:
             self.cond_proj = nn.Conv2d(cond_channels, actual_out_chs * 2, kernel_size=1)
 
-        self.init_weights()
-
-    def init_weights(self):
-        _zero_init(self.cond_proj)
-        _zero_init(self.time_proj)
-
     def forward(self, x: torch.Tensor, temb: Tensor | None = None, cond: Tensor | None = None) -> torch.Tensor:
         """Forward pass."""
         if self.in_proj is not None:
@@ -477,28 +445,20 @@ class TimeCondConvNextBlock(ConvNeXtBlock):
             x = x.permute(0, 3, 1, 2)
 
         # Scale and Shift components for FiLM
-        scale: float | Tensor = 0.0
-        shift: float | Tensor = 0.0
-
         if self.time_proj is not None:
             if temb is None:
                 raise ValueError("temb must be provided when time embedding is enabled")
             # t_params: [B, C*2, 1, 1]
             t_params = self.time_proj(self.act(temb))[:, :, None, None]
             t_scale, t_shift = t_params.chunk(2, dim=1)
-            scale = scale + t_scale
-            shift = shift + t_shift
+            x = x * (1.0 + t_scale) + t_shift
 
         if self.cond_proj is not None and cond is not None:
             cond = _resize_like(cond, x)
             # c_params: [B, C*2, H, W]
             c_params = self.cond_proj(cond)
             c_scale, c_shift = c_params.chunk(2, dim=1)
-            scale = scale + c_scale
-            shift = shift + c_shift
-
-        # FiLM modulation: x = x * (1 + scale) + shift
-        x = x * (1.0 + scale) + shift
+            x = x * (1.0 + c_scale) + c_shift
 
         if self.use_conv_mlp:
             x = self.mlp(x)
@@ -1211,8 +1171,10 @@ def build_spatial_block(
     convnext_cfg = convnext_cfg or {}
 
     if block_key in {"resblock", "res"}:
-        resblock_norm_layer = str(resblock_cfg.get("norm_layer", "layernorm2d"))
+        resblock_norm_layer = str(resblock_cfg.get("norm_layer", "layernorm2dfp32"))
         resblock_act_layer = str(resblock_cfg.get("act_layer", "relu6"))
+        use_ca = bool(resblock_cfg.get("use_ca", False))
+        expand_ratio = float(resblock_cfg.get("expand_ratio", 2))
         if use_time_block:
             return TimeCondResBlock(
                 in_channels,
@@ -1221,15 +1183,19 @@ def build_spatial_block(
                 cond_channels=cond_channels,
                 dropout=dropout,
                 num_groups=num_groups,
+                use_channel_attention=use_ca,
+                norm_layer=resblock_norm_layer,
+                expand_ratio=expand_ratio,
             )
         else:
             base_block = build_block(
-                "ResBlock@2",
+                f"ResBlock@{expand_ratio}",
                 in_channels,
                 out_channels,
                 norm=resblock_norm_layer,
                 act=resblock_act_layer,
                 cond_channels=cond_channels,
+                use_ca=use_ca,
             )
             return _TimeCondAdapter(base_block, expect_cond=cond_channels is not None)
     elif block_key in {"natblock", "nat"}:
@@ -1239,8 +1205,8 @@ def build_spatial_block(
         nat_num_heads = int(nat_cfg.get("num_heads", 8))
         nat_ffn_ratio = nat_cfg.get("ffn_ratio", 2)
         nat_qkv_bias = bool(nat_cfg.get("qkv_bias", True))
-        nat_qk_norm = str(nat_cfg.get("qk_norm", "layernorm2d"))
-        nat_norm_layer = str(nat_cfg.get("norm_layer", "layernorm2d"))
+        nat_qk_norm = str(nat_cfg.get("qk_norm", "layernorm2dfp32"))
+        nat_norm_layer = str(nat_cfg.get("norm_layer", "layernorm2dfp32"))
         nat_norm_eps = float(nat_cfg.get("norm_eps", 1e-6))
         nat_drop_path = float(nat_cfg.get("drop_path", 0.0))
         nat_latent_cond_type = str(nat_cfg.get("latent_cond_type", "adaln3"))
@@ -1324,6 +1290,7 @@ def build_block(
                 norm=(None, norm),
                 act_func=(act, None),
                 expand_ratio=expand_ratio,
+                use_ca=block_kwargs.get("use_ca", False),
             )
         else:
             main_block = ResBlock(
@@ -1335,6 +1302,7 @@ def build_block(
                 norm=(None, norm),
                 act_func=(act, None),
                 expand_ratio=expand_ratio,
+                use_ca=block_kwargs.get("use_ca", False),
             )
         block = ResidualBlock(
             main_block,

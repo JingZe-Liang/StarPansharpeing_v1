@@ -560,6 +560,7 @@ class ResBlock(nn.Module):
         use_bias: bool | tuple = False,
         norm: tuple[Optional[str], ...] = ("bn2d", "bn2d"),
         act_func: tuple[Optional[str], ...] = ("relu6", None),
+        use_ca: bool = False,
     ):
         super().__init__()
         use_bias = to_2tuple(use_bias)
@@ -586,11 +587,15 @@ class ResBlock(nn.Module):
             norm=norm[1],
             act_func=act_func[1],
         )
+        self.ca = nn.Identity()
+        if use_ca:
+            self.ca = CecaModule(out_channels)
 
     @compile_decorator
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         x = self.conv2(x)
+        x = self.ca(x)
         return x
 
 
@@ -605,6 +610,7 @@ class ResBlockCondition(ResBlock):
         mid_channels: Optional[int] = None,
         expand_ratio: float = 1,
         use_bias: bool | tuple = False,
+        use_ca: bool = False,
         norm: tuple[Optional[str], ...] = ("bn2d", "bn2d"),
         act_func: tuple[Optional[str], ...] = ("relu6", None),
     ):
@@ -622,7 +628,7 @@ class ResBlockCondition(ResBlock):
         mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
         cond_layer = nn.Sequential(
             create_conv2d(cond_channels, mid_channels, kernel_size=1),
-            create_norm_act_layer("layernorm2d", mid_channels, act_layer="silu", eps=1e-6),
+            create_norm_act_layer("layernorm2dfp32", mid_channels, act_layer="silu", eps=1e-6),
             create_conv2d(mid_channels, mid_channels * 2, kernel_size=3, groups=mid_channels),
         )
         self.conv2 = ConditionalBlock(
@@ -631,10 +637,14 @@ class ResBlockCondition(ResBlock):
             condition_types="adaln2",
             process_cond_before="interpolate_as_x",
         )
+        self.ca = nn.Identity()
+        if use_ca:
+            self.ca = CecaModule(channels=out_channels)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         x = self.conv2(x, cond)
+        x = self.ca(x)
         return x
 
 

@@ -9,6 +9,7 @@
 
 import sys
 from functools import partial
+from typing import Any, Callable, Literal
 
 import torch
 import torch.nn as nn
@@ -21,10 +22,15 @@ from timm.layers import LayerNorm2dFp32, create_norm_act_layer, create_norm_laye
 from timm.layers.weight_init import lecun_normal_
 from torchvision.transforms import Normalize
 
+# ----- Deformable attention ----- #
 sys.path.append("src/stage1/utilities/losses/dinov3")
 from dinov3.eval.segmentation.models.utils.ms_deform_attn import (  # type: ignore
     MSDeformAttn,
 )
+
+from .SLA import LinearCrossAttention, SageSparseLinearAttention, SparseLinearAttention, SparseLinearCrossAttention
+
+logger = logger.bind(_name_="dinov3_adapter")
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -47,6 +53,12 @@ class DropPath(nn.Module):
 
     def forward(self, x):
         return drop_path(x, self.drop_prob, self.training)
+
+
+def _build_token_norm(norm_layer: Callable[[int], nn.Module] | str, dim: int) -> nn.Module:
+    if isinstance(norm_layer, str):
+        return nn.LayerNorm(dim, eps=1e-6)
+    return norm_layer(dim)
 
 
 def get_reference_points(spatial_shapes, device):
@@ -155,11 +167,12 @@ class ConvFFN(nn.Module):
 
 
 class DWConv(nn.Module):
-    def __init__(self, dim=768):
+    def __init__(self, dim: int = 768, kernel_size: int = 3) -> None:
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+        padding = kernel_size // 2
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size, 1, padding, bias=True, groups=dim)
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         B, N, C = x.shape
         # 256 / 8 = 32
         # 256 / 16 = 16
@@ -185,12 +198,14 @@ class SharedDWConv(DWConv):
     Avoid the hard-coded factor.
     """
 
-    def __init__(self, dim, ratios=[2, 1, 1 / 2]):
-        super().__init__(dim)
+    def __init__(self, dim: int, ratios: list[float] | None = None, kernel_size: int = 3) -> None:
+        if ratios is None:
+            ratios = [2, 1, 0.5]
+        super().__init__(dim, kernel_size=kernel_size)
         self.ratios = ratios
         self._checked = False
 
-    def _to_2d_img(self, x, idx, H, W, st: int = 0):
+    def _to_2d_img(self, x: torch.Tensor, idx: int, H: int, W: int, st: int = 0) -> tuple[torch.Tensor, int]:
         r = self.ratios[idx]
         h, w = int(H * r), int(W * r)
         l = h * w
@@ -199,10 +214,10 @@ class SharedDWConv(DWConv):
         x_r = rearrange(x_r, "b (h w) c -> b c h w", h=h, w=w)
         return x_r, l
 
-    def _to_1d_img(self, x):
+    def _to_1d_img(self, x: torch.Tensor) -> torch.Tensor:
         return rearrange(x, "b c h w -> b (h w) c")
 
-    def _assertion(self, x, H, W):
+    def _assertion(self, x: torch.Tensor, H: int, W: int) -> None:
         len_exp_rs = [int(H * r * W * r) for r in self.ratios]
         len_expected = sum(len_exp_rs)
         assert x.shape[1] == len_expected, (
@@ -211,7 +226,7 @@ class SharedDWConv(DWConv):
         )
         self._checked = True
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         if not self._checked:
             self._assertion(x, H, W)
 
@@ -228,7 +243,7 @@ class SharedDWConv(DWConv):
         return x
 
 
-class Extractor(nn.Module):
+class DeformAttentionExtractor(nn.Module):
     def __init__(
         self,
         dim,
@@ -290,27 +305,352 @@ class Extractor(nn.Module):
         return query
 
 
+class ConvnextExtractor(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        k_size: int = 7,
+        expansion: int = 2,
+        norm_layer: Callable[[int], nn.Module] | str = partial(nn.LayerNorm, eps=1e-6),
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        with_cffn: bool = True,
+        cffn_ratio: float = 0.25,
+        dw_ratios: list[float] | None = None,
+    ):
+        super().__init__()
+        if dw_ratios is None:
+            dw_ratios = [2, 1, 0.5]
+
+        self.dw_ratios = dw_ratios
+        self.dwconv = SharedDWConv(dim, ratios=dw_ratios, kernel_size=k_size)
+        self.norm = _build_token_norm(norm_layer, dim)
+        self.pwconv1 = nn.Linear(dim, dim * expansion)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(dim * expansion, dim)
+        self.drop = nn.Dropout(drop)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        # Lightweight conv fusion: inject x (ViT tokens) into c (SPM multi-scale tokens).
+        self.fuse_pw = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.fuse_norm = create_norm_layer("layernorm2d", dim)
+        self.fuse_act = nn.GELU()
+        self.fuse_dw = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
+
+        self.with_cffn = with_cffn
+        if with_cffn:
+            self.ffn = ConvFFN(
+                in_features=dim,
+                hidden_features=int(dim * cffn_ratio),
+                drop=drop,
+                dw_ratios=dw_ratios,
+            )
+            self.ffn_norm = _build_token_norm(norm_layer, dim)
+
+    def _split_query(self, query: torch.Tensor, H: int, W: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # query packs multi-scale tokens in order: (2H,2W), (H,W), (H//2,W//2)
+        h2, w2 = H * 2, W * 2
+        h3, w3 = H, W
+        h4, w4 = H // 2, W // 2
+        len2, len3, len4 = h2 * w2, h3 * w3, h4 * w4
+        if query.shape[1] != len2 + len3 + len4:
+            raise ValueError(
+                f"Expected query length {len2 + len3 + len4} from {(h2, w2, h3, w3, h4, w4)=}, got {query.shape[1]}"
+            )
+        c2 = query[:, :len2]
+        c3 = query[:, len2 : len2 + len3]
+        c4 = query[:, len2 + len3 :]
+        return c2, c3, c4
+
+    def _reshape_tokens_to_2d(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
+        # x: (B, H*W, C) -> (B, C, H, W)
+        return rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
+
+    def _reshape_2d_to_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, H, W) -> (B, H*W, C)
+        return rearrange(x, "b c h w -> b (h w) c")
+
+    def _fuse_scale(self, c: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        # c/x: (B, C, H, W)
+        u = self.fuse_pw(torch.cat([c, x], dim=1))
+        u = self.fuse_norm(u)
+        u = self.fuse_act(u)
+        u = self.fuse_dw(u)
+        return c + self.drop_path(u)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        reference_points: torch.Tensor | None,
+        feat: torch.Tensor | None,
+        spatial_shapes: torch.Tensor | None,
+        level_start_index: torch.Tensor | None,
+        H: int,
+        W: int,
+    ) -> torch.Tensor:
+        del reference_points, level_start_index
+        if feat is None:
+            raise ValueError("Expected feat to be provided for conv fusion extractor.")
+        if spatial_shapes is None or spatial_shapes.numel() < 2:
+            raise ValueError("Expected spatial_shapes to provide (Htoks, Wtoks) for feat.")
+
+        htoks = int(spatial_shapes[0, 0].item())
+        wtoks = int(spatial_shapes[0, 1].item())
+        if feat.shape[1] != htoks * wtoks:
+            raise ValueError(f"Expected feat length {htoks * wtoks} from {(htoks, wtoks)=}, got {feat.shape[1]}")
+
+        # (B, Ltoks, C) -> (B, C, Htoks, Wtoks)
+        x2d = rearrange(feat, "b (h w) c -> b c h w", h=htoks, w=wtoks)
+
+        # Split query into multi-scale maps.
+        c2, c3, c4 = self._split_query(query, H, W)
+        c2_2d = self._reshape_tokens_to_2d(c2, H * 2, W * 2)
+        c3_2d = self._reshape_tokens_to_2d(c3, H, W)
+        c4_2d = self._reshape_tokens_to_2d(c4, H // 2, W // 2)
+
+        # Resize x tokens to each scale and fuse by depthwise conv.
+        x2_2d = F.interpolate(x2d, size=(H * 2, W * 2), mode="bilinear", align_corners=False)
+        x3_2d = F.interpolate(x2d, size=(H, W), mode="bilinear", align_corners=False)
+        x4_2d = F.interpolate(x2d, size=(H // 2, W // 2), mode="bilinear", align_corners=False)
+
+        c2_2d = self._fuse_scale(c2_2d, x2_2d)
+        c3_2d = self._fuse_scale(c3_2d, x3_2d)
+        c4_2d = self._fuse_scale(c4_2d, x4_2d)
+
+        query = torch.cat(
+            [self._reshape_2d_to_tokens(c2_2d), self._reshape_2d_to_tokens(c3_2d), self._reshape_2d_to_tokens(c4_2d)],
+            dim=1,
+        )
+
+        # ConvNeXt-style token mixing on multi-scale tokens (local refinement).
+        residual = query
+        x = self.dwconv(query, H, W)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.pwconv2(x)
+        x = self.drop(x)
+        x = residual + self.drop_path(x)
+
+        if self.with_cffn:
+            x = x + self.drop_path(self.ffn(self.ffn_norm(x), H, W))
+        return x
+
+
+class SLAExtractor(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        topk_ratio: float = 0.25,
+        feature_map: str = "softmax",
+        use_sage: bool = False,
+        use_bf16: bool = True,
+        qkv_bias: bool = True,
+        norm_layer: Callable[[int], nn.Module] | str = partial(nn.LayerNorm, eps=1e-6),
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        with_cffn: bool = True,
+        cffn_ratio: float = 0.25,
+        dw_ratios: list[float] | None = None,
+        tie_feature_map_qk: bool = True,
+    ) -> None:
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
+        if dw_ratios is None:
+            dw_ratios = [2, 1, 0.5]
+
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.norm = _build_token_norm(norm_layer, dim)
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        if use_sage:
+            self.attn = SageSparseLinearAttention(
+                head_dim=self.head_dim,
+                topk=topk_ratio,
+                feature_map=feature_map,
+                use_bf16=use_bf16,
+                tie_feature_map_qk=tie_feature_map_qk,
+            )
+        else:
+            self.attn = SparseLinearAttention(
+                head_dim=self.head_dim,
+                topk=topk_ratio,
+                feature_map=feature_map,
+                use_bf16=use_bf16,
+                tie_feature_map_qk=tie_feature_map_qk,
+            )
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(drop)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.with_cffn = with_cffn
+        if with_cffn:
+            self.ffn = ConvFFN(
+                in_features=dim,
+                hidden_features=int(dim * cffn_ratio),
+                drop=drop,
+                dw_ratios=dw_ratios,
+            )
+            self.ffn_norm = _build_token_norm(norm_layer, dim)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        reference_points: torch.Tensor | None,
+        feat: torch.Tensor | None,
+        spatial_shapes: torch.Tensor | None,
+        level_start_index: torch.Tensor | None,
+        H: int,
+        W: int,
+    ) -> torch.Tensor:
+        del reference_points, feat, spatial_shapes, level_start_index
+        residual = query
+        x = self.norm(query)
+        b, n, c = x.shape
+        qkv = self.qkv(x).reshape(b, n, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = self.attn(q, k, v, return_sparsity=False)
+        attn = attn.transpose(1, 2).reshape(b, n, c)
+        attn = self.proj_drop(self.proj(attn))
+        x = residual + self.drop_path(attn)
+
+        if self.with_cffn:
+            x = x + self.drop_path(self.ffn(self.ffn_norm(x), H, W))
+        return x
+
+
+class SLALinearCrossExtractor(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        attn_mode: Literal["linear", "sparse_linear"] = "linear",
+        feature_map: str = "softmax",
+        use_bf16: bool = True,
+        qkv_bias: bool = True,
+        norm_layer: Callable[[int], nn.Module] | str = partial(nn.LayerNorm, eps=1e-6),
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        with_cffn: bool = True,
+        cffn_ratio: float = 0.25,
+        dw_ratios: list[float] | None = None,
+        tie_feature_map_qk: bool = True,
+        sparse_topk_ratio: float = 0.25,
+        sparse_blkq: int = 64,
+        sparse_blkk: int = 64,
+    ) -> None:
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
+        if dw_ratios is None:
+            dw_ratios = [2, 1, 0.5]
+
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.q_norm = _build_token_norm(norm_layer, dim)
+        self.kv_norm = _build_token_norm(norm_layer, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        if attn_mode == "linear":
+            self.attn: nn.Module = LinearCrossAttention(
+                feature_map=feature_map,
+                use_bf16=use_bf16,
+                tie_feature_map_qk=tie_feature_map_qk,
+            )
+        elif attn_mode == "sparse_linear":
+            self.attn = SparseLinearCrossAttention(
+                head_dim=self.head_dim,
+                topk=sparse_topk_ratio,
+                feature_map=feature_map,
+                BLKQ=sparse_blkq,
+                BLKK=sparse_blkk,
+                use_bf16=use_bf16,
+                tie_feature_map_qk=tie_feature_map_qk,
+            )
+        else:
+            raise ValueError(f"Unknown {attn_mode=}.")
+        self.attn_mode = attn_mode
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(drop)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.with_cffn = with_cffn
+        if with_cffn:
+            self.ffn = ConvFFN(
+                in_features=dim,
+                hidden_features=int(dim * cffn_ratio),
+                drop=drop,
+                dw_ratios=dw_ratios,
+            )
+            self.ffn_norm = _build_token_norm(norm_layer, dim)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        reference_points: torch.Tensor | None,
+        feat: torch.Tensor | None,
+        spatial_shapes: torch.Tensor | None,
+        level_start_index: torch.Tensor | None,
+        H: int,
+        W: int,
+    ) -> torch.Tensor:
+        del reference_points, spatial_shapes, level_start_index
+        if feat is None:
+            raise ValueError("Expected feat to be provided for cross attention.")
+        if self.attn_mode == "sparse_linear" and not (query.is_cuda and feat.is_cuda):
+            raise ValueError("Sparse cross attention requires CUDA tensors (Triton kernel).")
+
+        residual = query
+        q_inp = self.q_norm(query)
+        kv_inp = self.kv_norm(feat)
+
+        b, lq, c = q_inp.shape
+        lk = kv_inp.shape[1]
+        if kv_inp.shape[0] != b or kv_inp.shape[2] != c:
+            raise ValueError(f"Expected feat to have shape (B, Lk, {c}), got {feat.shape}")
+
+        q = self.q_proj(q_inp).reshape(b, lq, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, Lq, D)
+        kv = (
+            self.kv_proj(kv_inp).reshape(b, lk, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        )  # (2, B, H, Lk, D)
+        k, v = kv[0], kv[1]
+
+        attn = self.attn(q, k, v)  # (B, H, Lq, D)
+        attn = attn.transpose(1, 2).reshape(b, lq, c)
+        attn = self.proj_drop(self.proj(attn))
+        x = residual + self.drop_path(attn)
+
+        if self.with_cffn:
+            x = x + self.drop_path(self.ffn(self.ffn_norm(x), H, W))
+        return x
+
+
 class InteractionBlockWithCls(nn.Module):
     def __init__(
         self,
-        dim,
-        num_heads=6,
-        n_points=4,
+        dim: int,
+        num_heads: int = 6,
+        n_points: int = 4,
+        extractor_type: Literal["deform_attention", "sla", "convnext"] = "convnext",
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        drop=0.0,
-        drop_path=0.0,
-        with_cffn=True,
-        cffn_ratio=0.25,
-        init_values=0.0,
-        dw_ratios=[2, 1, 0.5],
-        deform_ratio=1.0,
-        extra_extractor=False,
-        with_cp=False,
-    ):
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        with_cffn: bool = True,
+        cffn_ratio: float = 0.25,
+        init_values: float = 0.0,
+        dw_ratios: list[float] | None = None,
+        deform_ratio: float = 1.0,
+        extra_extractor: bool = False,
+        with_cp: bool = False,
+        **other_blk_kwargs,
+    ) -> None:
         super().__init__()
-        self.extractor = Extractor(
+        if dw_ratios is None:
+            dw_ratios = [2, 1, 0.5]
+
+        general_kwargs = dict(
             dim=dim,
-            n_levels=1,
             num_heads=num_heads,
             n_points=n_points,
             norm_layer=norm_layer,
@@ -322,31 +662,73 @@ class InteractionBlockWithCls(nn.Module):
             with_cp=with_cp,
             dw_ratios=dw_ratios,
         )
-        if extra_extractor:
-            self.extra_extractors = nn.Sequential(
-                *[
-                    Extractor(
-                        dim=dim,
-                        num_heads=num_heads,
-                        n_points=n_points,
-                        norm_layer=norm_layer,
-                        with_cffn=with_cffn,
-                        cffn_ratio=cffn_ratio,
-                        deform_ratio=deform_ratio,
-                        drop=drop,
-                        drop_path=drop_path,
-                        with_cp=with_cp,
-                        dw_ratios=dw_ratios,
-                    )
-                    for _ in range(2)
-                ]
-            )
-        else:
-            self.extra_extractors = None
 
-    def forward(self, x, c, cls, deform_inputs1, deform_inputs2, H_c, W_c, H_toks, W_toks):
-        c = self.extractor(
-            query=c,
+        self.extra_extractors: nn.Sequential | None = None
+        if extractor_type == "deform_attention":
+            self.extractor: nn.Module = DeformAttentionExtractor(n_levels=1, **general_kwargs)
+            if extra_extractor:
+                self.extra_extractors = nn.Sequential(
+                    *[DeformAttentionExtractor(n_levels=1, **general_kwargs) for _ in range(2)]
+                )
+        elif extractor_type == "sla":
+            self.extractor = SLALinearCrossExtractor(
+                dim=dim,
+                num_heads=num_heads,
+                drop=drop,
+                drop_path=drop_path,
+                with_cffn=with_cffn,
+                cffn_ratio=cffn_ratio,
+                dw_ratios=dw_ratios,
+                **other_blk_kwargs,
+            )
+            if extra_extractor:
+                self.extra_extractors = nn.Sequential(
+                    *[
+                        SLALinearCrossExtractor(
+                            dim=dim,
+                            num_heads=num_heads,
+                            drop=drop,
+                            drop_path=drop_path,
+                            with_cffn=with_cffn,
+                            cffn_ratio=cffn_ratio,
+                            dw_ratios=dw_ratios,
+                            **other_blk_kwargs,
+                        )
+                        for _ in range(2)
+                    ]
+                )
+        elif extractor_type == "convnext":
+            self.extractor = ConvnextExtractor(
+                dim=dim,
+                drop=drop,
+                drop_path=drop_path,
+                with_cffn=with_cffn,
+                cffn_ratio=cffn_ratio,
+                dw_ratios=dw_ratios,
+                **other_blk_kwargs,
+            )
+            if extra_extractor:
+                self.extra_extractors = nn.Sequential(
+                    *[
+                        ConvnextExtractor(
+                            dim=dim,
+                            drop=drop,
+                            drop_path=drop_path,
+                            with_cffn=with_cffn,
+                            cffn_ratio=cffn_ratio,
+                            dw_ratios=dw_ratios,
+                            **other_blk_kwargs,
+                        )
+                        for _ in range(2)
+                    ]
+                )
+        else:
+            raise ValueError(f"Unknown {extractor_type=}.")
+
+    def forward(self, x, q, cls, deform_inputs1, deform_inputs2, H_c, W_c, H_toks, W_toks):
+        del deform_inputs1, H_toks, W_toks
+        q = self.extractor(
+            query=q,
             reference_points=deform_inputs2[0],
             feat=x,
             spatial_shapes=deform_inputs2[1],
@@ -354,10 +736,11 @@ class InteractionBlockWithCls(nn.Module):
             H=H_c,
             W=W_c,
         )
+
         if self.extra_extractors is not None:
             for extractor in self.extra_extractors:
-                c = extractor(
-                    query=c,
+                q = extractor(
+                    query=q,
                     reference_points=deform_inputs2[0],
                     feat=x,
                     spatial_shapes=deform_inputs2[1],
@@ -365,7 +748,8 @@ class InteractionBlockWithCls(nn.Module):
                     H=H_c,
                     W=W_c,
                 )
-        return x, c, cls
+
+        return x, q, cls
 
 
 class SpatialPriorModule(nn.Module):
@@ -521,6 +905,8 @@ class DINOv3_Adapter(nn.Module):
         with_cp=True,
         use_bn=False,
         freeze_backbone=True,
+        extractor_type: Literal["deform_attention", "sla", "convnext"] = "convnext",
+        extractor_kwargs: dict[str, Any] | None = None,
     ):
         super(DINOv3_Adapter, self).__init__()
 
@@ -531,7 +917,7 @@ class DINOv3_Adapter(nn.Module):
             add_vit_feature,
             freeze_backbone,
         )
-        logger.log("NOTE", "setup backbone")
+        logger.info("setup backbone")
 
         self._setup_interactions(
             in_channels=in_channels,
@@ -551,6 +937,8 @@ class DINOv3_Adapter(nn.Module):
             dw_ratios=dw_ratios,
             with_cp=with_cp,
             use_bn=use_bn,
+            extractor_type=extractor_type,
+            extractor_kwargs=extractor_kwargs,
         )
 
     def _setup_backbone(
@@ -597,11 +985,16 @@ class DINOv3_Adapter(nn.Module):
         with_cp=True,
         use_bn=False,
         inp_mean_std: tuple | None = None,  # (IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        extractor_type: Literal["deform_attention", "sla", "convnext"] = "convnext",
+        extractor_kwargs: dict[str, Any] | None = None,
     ):
+        logger.info("Use extractor type: {}".format(extractor_type))
+
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
         self.spm = SpatialPriorModule(
-            in_channels=in_channels, inplanes=conv_inplane, embed_dim=embed_dim, with_cp=False
+            in_channels=in_channels, inplanes=conv_inplane, embed_dim=embed_dim, with_cp=with_cp
         )
+        extractor_kwargs = extractor_kwargs or {}
         self.interactions = nn.Sequential(
             *[
                 InteractionBlockWithCls(
@@ -619,6 +1012,8 @@ class DINOv3_Adapter(nn.Module):
                         (True if i == len(self.interaction_indexes) - 1 else False) and use_extra_extractor
                     ),
                     with_cp=with_cp,
+                    extractor_type=extractor_type,
+                    **extractor_kwargs,
                 )
                 for i in range(len(self.interaction_indexes))
             ]
@@ -691,6 +1086,17 @@ class DINOv3_Adapter(nn.Module):
                 )
         return all_layers
 
+    def _build_deform_inputs2_from_hw(
+        self,
+        reference_points: torch.Tensor,
+        h_toks: int,
+        w_toks: int,
+        device: torch.device,
+    ):
+        spatial_shapes = torch.as_tensor([(h_toks, w_toks)], dtype=torch.long, device=device)
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        return [reference_points, spatial_shapes, level_start_index]
+
     def forward(self, x):
         x = self._input_norm(x)  # for input is 0-1
         deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
@@ -706,7 +1112,9 @@ class DINOv3_Adapter(nn.Module):
         H_toks, W_toks = x.shape[2] // self.patch_size, x.shape[3] // self.patch_size
         bs, C, h, w = x.shape
 
+        # get all layers' features
         all_layers = self._forward_backbone_intermediate_features(x)
+
         others = None
         if isinstance(all_layers, tuple):
             all_layers, others = all_layers
@@ -714,20 +1122,35 @@ class DINOv3_Adapter(nn.Module):
 
         outs = list()
         for i, layer in enumerate(self.interactions):
-            x, cls = all_layers[i]
+            layer_out = all_layers[i]
+            if len(layer_out) == 2:
+                x, cls = layer_out
+                layer_hw = None
+            else:
+                x, cls, layer_hw = layer_out
+
+            layer_deform_inputs2 = deform_inputs2
+            if layer_hw is not None:
+                layer_deform_inputs2 = self._build_deform_inputs2_from_hw(
+                    deform_inputs2[0],
+                    layer_hw[0],
+                    layer_hw[1],
+                    x.device,
+                )
             # print(f"{x.shape=}, {cls.shape=}, ")
             _, c, _ = layer(
                 x,
                 c,
                 cls,
                 deform_inputs1,
-                deform_inputs2,
+                layer_deform_inputs2,
                 H_c,
                 W_c,
                 H_toks,
                 W_toks,
             )
-            outs.append(x.transpose(1, 2).view(bs, dim, H_toks, W_toks).contiguous())
+            tok_h, tok_w = (H_toks, W_toks) if layer_hw is None else layer_hw
+            outs.append(x.transpose(1, 2).view(bs, dim, tok_h, tok_w).contiguous())
 
         # Split & Reshape
         c2 = c[:, 0 : c2.size(1), :]
@@ -807,6 +1230,8 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
         use_extra_extractor=True,
         with_cp=True,
         use_bn=True,
+        extractor_type: Literal["deform_attention", "sla", "convnext"] = "convnext",
+        extractor_kwargs: dict[str, Any] | None = None,
     ):
         # Call parent init first
         super().__init__(
@@ -826,6 +1251,8 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
             dw_ratios=dw_ratios,  # the last layer scale is only 16, c4 = c3
             with_cp=with_cp,
             use_bn=use_bn,
+            extractor_type=extractor_type,
+            extractor_kwargs=extractor_kwargs,
         )
 
         # Replace SPM with 16x downsampling version

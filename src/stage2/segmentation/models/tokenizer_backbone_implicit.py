@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from jaxtyping import Float
 from loguru import logger
 from omegaconf import OmegaConf
@@ -10,6 +9,7 @@ from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.module import _IncompatibleKeys
+from torch.utils.checkpoint import checkpoint
 
 from src.stage1.cosmos.cosmos_hybrid import CosmosHybridTokenizer
 from src.utilities.config_utils import (
@@ -17,9 +17,9 @@ from src.utilities.config_utils import (
     function_config_to_basic_types,
 )
 
-from ...layers import DINOv3_Adapter
 from ...layers.implicit_block import FusionBlock
 from .adapter import DINOv3EncoderAdapter
+from .tokenizer_backbone_adapted import HybridTokenizerEncoderAdapter
 
 TOKENIZER_INTERACTION_INDEXES = {
     "hybrid_tokenizer_b16": [3, 6, 8, 11],
@@ -95,6 +95,7 @@ def _create_default_cfg():
         pretrained_size: 512
         in_channels: 3
         conv_inplane: 64
+        layer_in_channels: [512, 512, 1152, 1152]
         drop_path_rate: 0.3
         with_cffn: True
         cffn_ratio: 0.25
@@ -103,6 +104,8 @@ def _create_default_cfg():
         add_vit_feature: True
         use_extra_extractor: True
         with_cp: True
+        select_in_all_layers: True
+        interaction_indexes: [1, 2, 4, 5]
 
     adapter:
         adapter_type: default
@@ -137,94 +140,6 @@ def _create_default_cfg():
 # *==============================================================
 # * Tokenizer Unet
 # *==============================================================
-
-
-class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
-    # def __init__(
-    #     self,
-    #     backbone: CosmosHybridTokenizer,  # Dinov3 backbone original
-    #     interaction_indexes=[9, 19, 29, 39],
-    #     pretrain_size=512,
-    #     conv_inplane=64,
-    #     n_points=4,
-    #     deform_num_heads=16,
-    #     drop_path_rate=0.3,
-    #     init_values=0.0,
-    #     with_cffn=True,
-    #     cffn_ratio=0.25,
-    #     deform_ratio=0.5,
-    #     add_vit_feature=True,
-    #     use_extra_extractor=True,
-    #     dw_ratios=[2, 1, 0.5],
-    #     with_cp=True,
-    #     use_bn=True,
-    # ):
-    #     ...
-
-    def _setup_backbone(
-        self,
-        backbone: CosmosHybridTokenizer,
-        pretrain_size: int,
-        interaction_indexes: list[int],
-        add_vit_feature=True,
-        freeze_backbone=True,
-    ):
-        self.backbone = backbone
-        if freeze_backbone:
-            self.backbone.requires_grad_(False)
-        # Load pretrained weights
-
-        self.pretrain_size = (pretrain_size, pretrain_size)
-        self.interaction_indexes = interaction_indexes
-        self.add_vit_feature = add_vit_feature
-        self.embed_dim = backbone.semantic_enc_transformer.embed_dim
-        self.freeze_backbone = freeze_backbone
-        self.patch_size = 16  # TODO: in config
-
-        logger.info(f"[Tokenizer backbone adapted]: embed dim={self.embed_dim}")
-        logger.info(f"[Tokenizer backbone adapted]: interaction_indexes={self.interaction_indexes}")
-
-        return self.embed_dim
-
-    def _forward_backbone_intermediate_features(self, x):
-        # NOTE: cls feature is None
-        grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
-
-        # Ensure eval mode for backbone if frozen to save memory from dropout/norm buffers
-        if self.freeze_backbone:
-            self.backbone.eval()
-
-        with torch.autocast("cuda", torch.bfloat16):
-            with grad_ctx():
-                enc_out = self.backbone.encode(x, get_intermediate_features=True)
-                all_layers = enc_out.sem_z  # use semantic z not low-level z
-                final_latent = enc_out.latent
-
-        # IMPORTANT: Clearing the backbone internal cache to free VRAM
-        if hasattr(self.backbone, "z"):
-            self.backbone.z = None
-        if hasattr(self.backbone, "sem_z"):
-            self.backbone.sem_z = None
-
-        # reorganize all_layers
-        assert all_layers is not None, "all_layers is None"
-        assert len(all_layers) == len(self.interaction_indexes), (
-            f"{len(all_layers)=} != {len(self.interaction_indexes)=}"
-        )
-
-        # None stands for cls feature
-        for i in range(len(self.interaction_indexes)):
-            token_feat = all_layers[i]
-            if token_feat.ndim == 4:
-                token_feat = rearrange(token_feat, "b c h w -> b (h w) c")
-
-            # if getattr(self, "norm_backbone_features", False):
-            #     norm_layer = self.backbone.semantic_enc_transformer.head[0]
-            #     token_feat = norm_layer(token_feat)
-
-            cls_feat = None
-            all_layers[i] = [token_feat, cls_feat]
-        return all_layers, final_latent
 
 
 class TokenizerHybridUNet(nn.Module):
@@ -297,7 +212,12 @@ class TokenizerHybridUNet(nn.Module):
         # Get model information
         model_name = f_cfg.model_name
         interaction_indexes = TOKENIZER_INTERACTION_INDEXES[model_name]
-        logger.info(f"Creating tokenizer encoder: {model_name}")
+        interaction_indexes = f_cfg.get("interaction_indexes", None) or interaction_indexes
+        select_in_all_layers = f_cfg.get("select_in_all_layers", False)
+        logger.info(
+            f"Creating tokenizer encoder: {model_name}\n"
+            f"taken interaction indexes: {interaction_indexes}, select in all layers: {select_in_all_layers}"
+        )
 
         # Load DINOv3 backbone
         tok_backbone = CosmosHybridTokenizer.create_model(
@@ -314,6 +234,9 @@ class TokenizerHybridUNet(nn.Module):
             logger.warning(f"Using debug mode, using random weights for tokenizer backbone")
         else:
             raise ValueError("pretrained_path must be specified for tokenizer backbone")
+
+        # freeze the tokenizer
+        tok_backbone.requires_grad_(False)
 
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
@@ -332,6 +255,9 @@ class TokenizerHybridUNet(nn.Module):
             add_vit_feature=f_cfg.add_vit_feature,
             use_extra_extractor=f_cfg.use_extra_extractor,
             with_cp=f_cfg.with_cp,
+            select_in_all_layers=select_in_all_layers,
+            interp_ratio=f_cfg.get("interp_ratio", None),
+            layer_in_channels=f_cfg.get("layer_in_channels", None),
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -341,6 +267,7 @@ class TokenizerHybridUNet(nn.Module):
             nonlin=get_act_layer(a_cfg.act),
             dropout_op=a_cfg.drop,
             conv_bias=a_cfg.conv_bias,
+            with_cp=f_cfg.with_cp,
         )
         logger.info("Created tokenizer encoder adapter.")
 
@@ -432,6 +359,15 @@ class TokenizerHybridUNet(nn.Module):
         # Ensure accelerate state loading
         return _IncompatibleKeys(missing_ks, unexpected_ks) if return_not_loaded_keys else _IncompatibleKeys([], [])
 
+    def set_grad_checkpointing(self, enable=True):
+        """
+        Enable or disable gradient checkpointing for the PyTorch model.
+
+        Args:
+            enable (bool): whether to enable gradient checkpointing
+        """
+        self.decoder.set_grad_checkpointing(enable)
+
 
 class ImplicitQueryDecoder(nn.Module):
     """
@@ -459,7 +395,7 @@ class ImplicitQueryDecoder(nn.Module):
         cond_dim: int | None = None,
     ) -> None:
         super().__init__()
-
+        self.grad_checkpointing = False
         if fusion_block_kwargs is None:
             fusion_block_kwargs = {}
 
@@ -613,9 +549,12 @@ class ImplicitQueryDecoder(nn.Module):
             # hidden (fused so far) + next_feat (detail from current scale)
             fusion_stack = self.fusion_stacks[i]
 
-            for block in fusion_stack:
+            for block in fusion_stack:  # type: ignore[not-iterable]
                 # FusionBlock expects inputs in (B, C, H, W) format
-                hidden = block(hidden, next_feat, cond=cond_sampled)
+                if self.grad_checkpointing:
+                    hidden = checkpoint(block, hidden, next_feat, cond_sampled)
+                else:
+                    hidden = block(hidden, next_feat, cond=cond_sampled)
 
             if self.deep_supervision:
                 # Decode intermediate result
@@ -635,8 +574,11 @@ class ImplicitQueryDecoder(nn.Module):
         # Usually we return [Final, ..., Low]
         return seg_outputs[::-1]
 
+    def set_grad_checkpointing(self, enable: bool = True):
+        self.grad_checkpointing = enable
 
-def __test_model():
+
+def test_inr_decoder():
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
     from fvcore.nn import parameter_count_table
 
@@ -682,7 +624,7 @@ def __test_model():
 
 if __name__ == "__main__":
     """
-    python -m src.stage2.segmentation.models.tokenizer_backbone_implicit
+    LOVELY_TENSORS=1 python -m src.stage2.segmentation.models.tokenize-pr_backbone_implicit
     """
     with logger.catch():
-        __test_model()
+        test_inr_decoder()

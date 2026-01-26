@@ -16,7 +16,10 @@ from src.utilities.logging import log
 from .cross_attn import CrossAttention
 from .patcher import create_unpatcher
 
+from src.utilities.network_utils import compile_decorator
 
+
+@compile_decorator
 def modulate(x, shift, scale):
     return x * (scale + 1) + shift
 
@@ -133,6 +136,7 @@ class NAFBlockConditional(NAFBlock):
     def forward(self, inp, mod_cond, ms_cond=None):
         """input, latent_modulation, multispectral_add_condition"""
 
+        @compile_decorator
         def forward_closure(inp, latent, ms_cond=None):
             x = inp
 
@@ -146,8 +150,11 @@ class NAFBlockConditional(NAFBlock):
             x = self.norm1(x)
             x = self.conv1(x)
             x = self.conv2(x)
+
+            # simulate the GELU function
             x = self.sg(x)
             x = x * self.sca(x)
+
             x = self.conv3(x)
             x = self.dropout1(x)
             y = inp + x * self.beta
@@ -314,9 +321,13 @@ class NAFNet(nn.Module):
 
         for num in cfg.dec_blk_nums:
             self.ups.append(
+                # nn.Sequential(
+                #     nn.Conv2d(chan, chan * 2, 1, bias=False),
+                #     nn.PixelShuffle(2),
+                # )
                 nn.Sequential(
-                    nn.Conv2d(chan, chan * 2, 1, bias=False),
-                    nn.PixelShuffle(2),
+                    nn.UpsamplingNearest2d(scale_factor=2),
+                    nn.Conv2d(chan, chan // 2, 1, bias=False),
                 )
             )
             chan = chan // 2

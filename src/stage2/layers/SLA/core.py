@@ -16,17 +16,125 @@ Citation (please cite if you use this code):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Callable
 
 SAGESLA_ENABLED = True
 try:
-    import spas_sage_attn._fused as fused
-    import spas_sage_attn._qattn as qattn
+    import spas_sage_attn._fused as fused  # type: ignore[import-not-found]
+    import spas_sage_attn._qattn as qattn  # type: ignore[import-not-found]
     from spas_sage_attn.utils import block_map_lut_triton, get_vanilla_qk_quant
 except ImportError:
     SAGESLA_ENABLED = False
 
+
+SAGE2PP_ENABLED = True
+try:
+    from spas_sage_attn._qattn import (  # type: ignore[import-not-found]
+        qk_int8_sv_f8_accum_f16_block_sparse_attn_inst_buf_fuse_v_scale_with_pv_threshold,
+    )
+except ImportError:
+    SAGE2PP_ENABLED = False
+
+
 from .kernel import _attention
 from .utils import get_block_map, get_cuda_arch
+
+
+def _get_feature_map(
+    feature_map: str, *, tie_feature_map_qk: bool
+) -> tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    if feature_map == "elu":
+
+        def elu_feature_map(x: torch.Tensor) -> torch.Tensor:
+            return F.elu(x) + 1
+
+        feature_map_q = elu_feature_map
+        feature_map_k = elu_feature_map
+    elif feature_map == "relu":
+        feature_map_q = nn.ReLU()
+        feature_map_k = nn.ReLU()
+    elif feature_map == "softmax":
+
+        def softmax_feature_map(x: torch.Tensor) -> torch.Tensor:
+            return F.softmax(x, dim=-1)
+
+        feature_map_q = softmax_feature_map
+        feature_map_k = softmax_feature_map
+    else:
+        raise NotImplementedError(f"Not supported feature map {feature_map}.")
+
+    if tie_feature_map_qk:
+        feature_map_k = feature_map_q
+    return feature_map_q, feature_map_k
+
+
+def _linear_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    eps: float,
+) -> torch.Tensor:
+    # q: (B, H, Lq, D), k/v: (B, H, Lk, D)
+    kvsum = k.transpose(-1, -2) @ v  # (B, H, D, D)
+    ksum = k.sum(dim=-2, keepdim=True)  # (B, H, 1, D)
+    denom = eps + (q * ksum).sum(dim=-1, keepdim=True)  # (B, H, Lq, 1)
+    return (q @ kvsum) / denom
+
+
+class LinearCrossAttention(nn.Module):
+    def __init__(
+        self,
+        *,
+        feature_map: str = "softmax",
+        use_bf16: bool = True,
+        tie_feature_map_qk: bool = True,
+        eps: float = 1e-5,
+    ) -> None:
+        super().__init__()
+        self.dtype = torch.bfloat16 if use_bf16 else torch.float16
+        self.eps = eps
+        self.feature_map_q, self.feature_map_k = _get_feature_map(feature_map, tie_feature_map_qk=tie_feature_map_qk)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        q : torch.Tensor
+            Queries of shape (B, H, Lq, D)
+        k : torch.Tensor
+            Keys of shape (B, H, Lk, D)
+        v : torch.Tensor
+            Values of shape (B, H, Lk, D)
+        """
+        if q.shape[:2] != k.shape[:2] or k.shape[:2] != v.shape[:2]:
+            raise ValueError(f"Expected matching (B, H), got {q.shape[:2]=}, {k.shape[:2]=}, {v.shape[:2]=}")
+        if k.shape[-2] != v.shape[-2]:
+            raise ValueError(f"Expected k/v to share the same length, got {k.shape[-2]=} and {v.shape[-2]=}")
+        if q.shape[-1] != k.shape[-1] or k.shape[-1] != v.shape[-1]:
+            raise ValueError(f"Expected matching head_dim, got {q.shape[-1]=}, {k.shape[-1]=}, {v.shape[-1]=}")
+
+        dtype = q.dtype
+
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        # Keep CPU path in fp32 for broad operator support; cast on CUDA for speed.
+        compute_dtype = self.dtype if q.is_cuda else q.dtype
+        q = q.to(compute_dtype)
+        k = k.to(compute_dtype)
+        v = v.to(compute_dtype)
+
+        q = self.feature_map_q(q).contiguous().to(compute_dtype)
+        k = self.feature_map_k(k).contiguous().to(compute_dtype)
+
+        # Accumulate in fp32 for stability.
+        o = _linear_attention(q.float(), k.float(), v.float(), eps=self.eps).to(compute_dtype)
+        return o.to(dtype)
+
+
+# --------------- Original sparse self-attention + linear attention --------------- #
 
 
 class SparseLinearAttention(nn.Module):
@@ -88,30 +196,30 @@ class SparseLinearAttention(nn.Module):
         """
         dtype = q.dtype
 
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
         sparse_map, lut, real_topk = get_block_map(q, k, topk_ratio=self.topk, BLKQ=self.BLKQ, BLKK=self.BLKK)
 
         q = q.to(self.dtype)
         k = k.to(self.dtype)
         v = v.to(self.dtype)
-        c_q = self.feature_map_q(q).contiguous().to(self.dtype)
-        c_k = self.feature_map_k(k).contiguous().to(self.dtype)
-
         o_s = _attention.apply(q, k, v, sparse_map, lut, real_topk, self.BLKQ, self.BLKK)
+
+        q = self.feature_map_q(q).contiguous().to(self.dtype)  # c_q
+        k = self.feature_map_k(k).contiguous().to(self.dtype)  # c_k
 
         def calc_linear(q, k, v):
             kvsum = k.transpose(-1, -2) @ v
             ksum = torch.sum(k, dim=-2, keepdim=True)
             return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
 
-        o_l = calc_linear(c_q, c_k, v)
+        o_l = calc_linear(q, k, v)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
-            o_proj = self.proj_l(o_l)
-        o = (o_s + o_proj).to(dtype).transpose(1, 2)
+            o_l = self.proj_l(o_l)
+        o = (o_s + o_l).to(dtype)
 
         if return_sparsity:
             return o, real_topk / sparse_map.shape[-1]
@@ -182,9 +290,9 @@ class SageSparseLinearAttention(nn.Module):
 
         dtype = q.dtype
 
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
         arch = get_cuda_arch(q.device.index)
         if arch == "sm90":
@@ -195,8 +303,6 @@ class SageSparseLinearAttention(nn.Module):
         q = q.to(self.dtype)
         k = k.to(self.dtype)
         v = v.to(self.dtype)
-        c_q = self.feature_map_q(q).contiguous().to(self.dtype)
-        c_k = self.feature_map_k(k).contiguous().to(self.dtype)
 
         ########## SPARGE BEGIN ##########
 
@@ -214,52 +320,82 @@ class SageSparseLinearAttention(nn.Module):
             "headdim should be in [64, 128]. For other headdim, you can use padding and specify the softmax scale."
         )
 
-        ## quant v
-        b, h_kv, kv_len, head_dim = v.shape
-        padded_len = (kv_len + 127) // 128 * 128
-        v_transposed_permutted = torch.empty((b, h_kv, head_dim, padded_len), dtype=v.dtype, device=v.device)
-        fused.transpose_pad_permute_cuda(v, v_transposed_permutted, 1)
-        v_fp8 = torch.empty(v_transposed_permutted.shape, dtype=torch.float8_e4m3fn, device=v.device)
-        v_scale = torch.empty((b, h_kv, head_dim), dtype=torch.float32, device=v.device)
-        fused.scale_fuse_quant_cuda(v_transposed_permutted, v_fp8, v_scale, kv_len, 2.25, 1)
-
         o_s = torch.empty_like(q)
-        if arch == "sm90":
-            qattn.qk_int8_sv_f8_accum_f32_block_sparse_attn_inst_buf_fuse_v_scale_sm90(
-                q_int8, k_int8, v_fp8, o_s, lut, valid_block_num, q_scale, k_scale, v_scale, 1, False, 1, scale
+
+        if arch in ("sm80", "sm86", "sm87"):
+            pvthreshold = torch.full((q.shape[-3],), 1e6, dtype=torch.float32, device=q.device)
+            v_fp16 = v.to(torch.float16)
+            qattn.qk_int8_sv_f16_accum_f16_block_sparse_attn_inst_buf_with_pv_threshold(
+                q_int8, k_int8, v_fp16, o_s, lut, valid_block_num, pvthreshold, q_scale, k_scale, 1, False, 1, scale, 0
             )
         else:
-            pvthreshold = torch.full((q.shape[-3],), 1e6, dtype=torch.float32, device=q.device)
-            qattn.qk_int8_sv_f8_accum_f16_block_sparse_attn_inst_buf_fuse_v_scale_with_pv_threshold(
-                q_int8,
-                k_int8,
-                v_fp8,
-                o_s,
-                lut,
-                valid_block_num,
-                pvthreshold,
-                q_scale,
-                k_scale,
-                v_scale,
-                1,
-                False,
-                1,
-                scale,
-                0,
-            )
+            b, h_kv, kv_len, head_dim = v.shape
+            padded_len = (kv_len + 127) // 128 * 128
+            v_transposed_permutted = torch.empty((b, h_kv, head_dim, padded_len), dtype=v.dtype, device=v.device)
+            fused.transpose_pad_permute_cuda(v, v_transposed_permutted, 1)
+            v_fp8 = torch.empty(v_transposed_permutted.shape, dtype=torch.float8_e4m3fn, device=v.device)
+            v_scale = torch.empty((b, h_kv, head_dim), dtype=torch.float32, device=v.device)
+            fused.scale_fuse_quant_cuda(v_transposed_permutted, v_fp8, v_scale, kv_len, 2.25, 1)
+
+            if arch == "sm90":
+                qattn.qk_int8_sv_f8_accum_f32_block_sparse_attn_inst_buf_fuse_v_scale_sm90(
+                    q_int8, k_int8, v_fp8, o_s, lut, valid_block_num, q_scale, k_scale, v_scale, 1, False, 1, scale
+                )
+            else:
+                pvthreshold = torch.full((q.shape[-3],), 1e6, dtype=torch.float32, device=q.device)
+                if SAGE2PP_ENABLED:
+                    qk_int8_sv_f8_accum_f16_block_sparse_attn_inst_buf_fuse_v_scale_with_pv_threshold(
+                        q_int8,
+                        k_int8,
+                        v_fp8,
+                        o_s,
+                        lut,
+                        valid_block_num,
+                        pvthreshold,
+                        q_scale,
+                        k_scale,
+                        v_scale,
+                        1,
+                        False,
+                        1,
+                        scale,
+                        0,
+                    )
+                else:
+                    qattn.qk_int8_sv_f8_accum_f32_block_sparse_attn_inst_buf_fuse_v_scale_with_pv_threshold(
+                        q_int8,
+                        k_int8,
+                        v_fp8,
+                        o_s,
+                        lut,
+                        valid_block_num,
+                        pvthreshold,
+                        q_scale,
+                        k_scale,
+                        v_scale,
+                        1,
+                        False,
+                        1,
+                        scale,
+                        0,
+                    )
 
         ########## SPARGE END ##########
+
+        q = self.feature_map_q(q).contiguous().to(self.dtype)  # c_q
+        k = self.feature_map_k(k).contiguous().to(self.dtype)  # c_k
 
         def calc_linear(q, k, v):
             kvsum = k.transpose(-1, -2) @ v
             ksum = torch.sum(k, dim=-2, keepdim=True)
-            return (q @ kvsum) / (q * ksum).sum(dim=-1, keepdim=True)
+            return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
 
-        o_l = calc_linear(c_q, c_k, v)
+        breakpoint()
+        o_l = calc_linear(q, k, v)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
-            o_proj = self.proj_l(o_l)
-        o = (o_s + o_proj).to(dtype).transpose(1, 2)
+            o_l = self.proj_l(o_l)
+        o = (o_s + o_l).to(dtype)
 
         if return_sparsity:
             return o, real_topk / sparse_map.shape[-1]
@@ -273,9 +409,11 @@ if __name__ == "__main__":
     """
     # net = SparseLinearAttention(1024 // 16, topk=16).cuda()
     net = SageSparseLinearAttention(1024 // 16, topk=16).cuda()
-    q = torch.randn(2, 16, 512, 1024 // 16).cuda()
-    k = torch.randn(2, 16, 512, 1024 // 16).cuda()
-    v = torch.randn(2, 16, 512, 1024 // 16).cuda()
+    L = 64 * 64
+    bs = 16
+    q = torch.randn(bs, 16, L, 1024 // 16).cuda()
+    k = torch.randn(bs, 16, L, 1024 // 16).cuda()
+    v = torch.randn(bs, 16, L, 1024 // 16).cuda()
 
     out = net(q, k, v, return_sparsity=False)
     print(out.shape)

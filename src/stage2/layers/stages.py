@@ -227,6 +227,7 @@ class ResBlockStage(_BasicStages):
         norm_eps: float = 1e-6,
         act_layer: str = "relu6",
         drop_path: float = 0.0,
+        expand_ratio: int = 4,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -245,6 +246,7 @@ class ResBlockStage(_BasicStages):
                     cond_chs=cond_width,
                     norm_layer=norm_layer,
                     act_layer=act_layer,
+                    expand_ratio=expand_ratio,
                 )
                 for i in range(depths[s])
             ]
@@ -265,9 +267,10 @@ class ResBlockStage(_BasicStages):
         cond_chs: int | None = None,
         norm_layer: str = "layernorm2d",
         act_layer: str = "relu6",
+        expand_ratio: int = 4,
     ) -> nn.Module:
         blk = build_block(
-            "ResBlock@2",  # expand_ratio=2
+            f"ResBlock@{expand_ratio}",
             in_chs,
             out_chs,
             norm=norm_layer,

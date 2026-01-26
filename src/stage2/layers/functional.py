@@ -5,12 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import create_act_layer
 from torch import Tensor
+import numpy as np
 
 # * --- Functional blocks --- #
 
 
 def list_sum(x: list) -> Any:
-    return x[0] if len(x) == 1 else x[0] + list_sum(x[1:])
+    return sum(x)
 
 
 class ResidualBlock(nn.Module):
@@ -190,7 +191,6 @@ class ConditionalBlock(nn.Module):
             return cond
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor):
-        breakpoint()
         cond = self._forward_condition(x, condition)
 
         if self.condition_types == "add":
