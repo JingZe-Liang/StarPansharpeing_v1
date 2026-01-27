@@ -1,3 +1,4 @@
+import math
 from typing import Any, Callable, Optional, no_type_check, Union, Tuple
 
 import torch
@@ -25,6 +26,7 @@ from timm.layers.drop import DropPath
 from timm.layers.weight_init import trunc_normal_
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
+from timm.layers.helpers import to_2tuple, to_3tuple
 
 from src.utilities.network_utils import safe_init_weights, compile_decorator
 
@@ -38,162 +40,18 @@ from .attention import (
     SoftmaxAttention2D,
 )
 from .conv import (
-    ChannelAttentionResBlock,
     GLUMBConv,
-    GLUResBlock,
     MBConv,
     MbConvLNBlock,
     MBStem,
-    ResBlock,
-    ResBlockCondition,
+    ConvLayer,
+    SEModule_,
+    CoordAttnModule_,
 )
 from .cross_attn import CrossAttention, SoftmaxCrossAttention2D
 from .functional import ConditionalBlock, ResidualBlock
 from .mlp import ClipSwiGLUMlp
 from .mlp import SwiGLU as SwiGLU_Custom
-
-# Attentions and Blocks
-
-
-class AttentionBlock(nn.Module):
-    def __init__(
-        self,
-        dim,
-        mlp_ratio=4.0,
-        num_heads=8,
-        attn_type="1d",
-        qkv_bias=True,
-        kernel_size=8,
-        stride=2,
-        dilation=2,
-        qk_norm: type[nn.Module] | None | bool = None,
-        drop=0.0,
-        attn_drop=0.0,
-        drop_path=0.0,
-        norm_layer=nn.LayerNorm,
-        mlp_norm_layer=None,
-        act_layer=nn.SiLU,
-        layer_scale_value=1e-5,
-        use_layerscale=False,
-        mlp_type: str = "swiglu",
-        is_causal=False,
-    ):
-        super().__init__()
-        self.grad_checkpointing = False
-        self.norm1 = norm_layer(dim)
-
-        # Attention
-        if attn_type == "1d":
-            self.attn = Attention(
-                dim,
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm is not None,
-                norm_layer=norm_layer,
-                attn_drop=attn_drop,
-                proj_drop=drop,
-                attn_type="sdpa",
-                is_causal=is_causal,
-            )
-        elif attn_type == "1d_gated":
-            self.attn = Qwen3SdpaAttention(
-                dim,
-                num_heads,
-                num_heads,
-                use_qk_norm=qk_norm is not None,
-                qkv_bias=qkv_bias,
-                headwise_attn_output_gate=True,
-                elementwise_attn_output_gate=False,
-            )
-        elif attn_type == "nat_1d":
-            # NatAttention expects norm layer object, not boolean
-            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
-            self.attn = NatAttention1d(
-                dim,
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                qk_norm=nat_qk_norm,
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                norm_layer=norm_layer,
-                attn_drop=attn_drop,
-                proj_drop=drop,
-            )
-        elif attn_type == "nat_2d":
-            # NatAttention expects norm layer object, not boolean
-            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
-            self.attn = NatAttention2d(
-                dim,
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                qk_norm=nat_qk_norm,
-                norm_layer=norm_layer,
-                proj_bias=True,
-                attn_drop=attn_drop,
-                proj_drop=drop,
-            )
-        self.norm2 = norm_layer(dim)
-
-        # Mlp
-        hidden_dim = int(dim * mlp_ratio)
-        if mlp_type == "swiglu_custom":
-            self.mlp = ClipSwiGLUMlp(
-                in_features=dim,
-                hidden_features=hidden_dim,
-                act_layer=act_layer,
-                drop=drop,
-                norm_layer=mlp_norm_layer,
-                use_conv=attn_type != "1d",
-            )
-        elif mlp_type == "mlp":
-            self.mlp = Mlp(
-                in_features=dim,
-                hidden_features=hidden_dim,
-                act_layer=act_layer,
-                drop=drop,
-                norm_layer=mlp_norm_layer,
-                use_conv=attn_type != "1d",
-            )
-        elif mlp_type == "glumlp":
-            self.mlp = GluMlp(
-                in_features=dim,
-                hidden_features=hidden_dim,
-                act_layer=nn.SiLU,
-                drop=drop,
-                norm_layer=mlp_norm_layer,
-                use_conv=attn_type != "1d",
-            )
-        elif mlp_type == "swiglu":
-            self.mlp = SwiGLU(
-                in_features=dim,
-                hidden_features=hidden_dim,
-                act_layer=nn.SiLU,
-                norm_layer=None,
-                bias=True,
-                drop=drop,
-            )
-        else:
-            raise ValueError(f"mlp_type {mlp_type} is not supported")
-
-        self.ls1 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
-        self.ls2 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
-
-        self.drop_path = DropPath(drop_path)
-
-    def forward_(self, x, mask=None, pe=None):
-        x = x + self.drop_path(self.ls1(self.attn(self.norm1(x), mask=mask, rope=pe)))
-        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
-        return x
-
-    def forward(self, x, mask=None, pe=None, **kwargs):
-        if self.grad_checkpointing and self.training:
-            return checkpoint(self.forward_, x, mask, pe, use_reentrant=False)
-        else:
-            return self.forward_(x, mask, pe)
 
 
 def _pick_num_groups(num_channels: int, max_groups: int) -> int:
@@ -207,6 +65,222 @@ def _resize_like(source: Tensor, target: Tensor) -> Tensor:
     if source.shape[-2:] == target.shape[-2:]:
         return source
     return F.interpolate(source, size=target.shape[-2:], mode="bilinear", align_corners=False)
+
+
+class ResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        mid_channels: Optional[int] = None,
+        expand_ratio: float = 1,
+        use_bias: bool | tuple = False,
+        norm: tuple[Optional[str], ...] = ("bn2d", "bn2d"),
+        act_func: tuple[Optional[str], ...] = ("relu6", None),
+        use_ca: bool = False,
+    ):
+        super().__init__()
+        use_bias = to_2tuple(use_bias)
+        norm = to_2tuple(norm)
+        act_func = to_2tuple(act_func)
+
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
+
+        self.conv1 = ConvLayer(
+            in_channels,
+            mid_channels,
+            kernel_size,
+            stride,
+            use_bias=use_bias[0],
+            norm=norm[0],
+            act_func=act_func[0],
+        )
+        self.conv2 = ConvLayer(
+            mid_channels,
+            out_channels,
+            kernel_size,
+            1,
+            use_bias=use_bias[1],
+            norm=norm[1],
+            act_func=act_func[1],
+        )
+        self.ca = nn.Identity()
+        if use_ca:
+            self.ca = CecaModule(out_channels)
+
+    @compile_decorator
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.ca(x)
+        return x
+
+
+class ResBlockCondition(ResBlock):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        cond_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        mid_channels: Optional[int] = None,
+        expand_ratio: float = 1,
+        use_bias: bool | tuple = False,
+        use_ca: bool = False,
+        norm: tuple[Optional[str], ...] = ("bn2d", "bn2d"),
+        act_func: tuple[Optional[str], ...] = ("relu6", None),
+    ):
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            mid_channels,
+            expand_ratio,
+            use_bias,
+            norm,
+            act_func,
+        )
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
+        cond_layer = nn.Sequential(
+            create_conv2d(cond_channels, mid_channels, kernel_size=1),
+            create_norm_act_layer("layernorm2dfp32", mid_channels, act_layer="silu", eps=1e-6),
+            create_conv2d(mid_channels, mid_channels * 2, kernel_size=3, groups=mid_channels),
+        )
+        self.conv2 = ConditionalBlock(
+            self.conv2,
+            cond_layer,
+            condition_types="adaln2",
+            process_cond_before="interpolate_as_x",
+        )
+        self.ca = nn.Identity()
+        if use_ca:
+            self.ca = CecaModule(channels=out_channels)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.conv2(x, cond)
+        x = self.ca(x)
+        return x
+
+
+class GLUResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        gate_kernel_size: int = 3,
+        stride: int = 1,
+        mid_channels: Optional[int] = None,
+        expand_ratio: float = 1,
+        use_bias: bool | tuple = False,
+        norm: tuple[Optional[str], ...] = (None, "trms2d"),
+        act_func: tuple[Optional[str], ...] = ("silu", None),
+    ):
+        super().__init__()
+        use_bias = to_3tuple(use_bias)
+        norm = to_3tuple(norm)
+        act_func = to_3tuple(act_func)
+
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
+
+        self.conv1 = ConvLayer(
+            in_channels,
+            mid_channels,
+            kernel_size,
+            stride,
+            use_bias=use_bias[0],
+            norm=norm[0],
+            act_func=None,
+        )
+        self.conv_gate = ConvLayer(
+            in_channels,
+            mid_channels,
+            gate_kernel_size,
+            stride,
+            use_bias=use_bias[0],
+            norm=norm[0],
+            act_func=act_func[0],
+        )
+        self.conv2 = ConvLayer(
+            mid_channels,
+            out_channels,
+            kernel_size,
+            1,
+            use_bias=use_bias[1],
+            norm=norm[1],
+            act_func=act_func[1],
+        )
+
+    @compile_decorator
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x) * self.conv_gate(x)
+        x = self.conv2(x)
+        return x
+
+
+class ChannelAttentionResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        mid_channels: Optional[int] = None,
+        expand_ratio: float = 1,
+        use_bias: bool | tuple = False,
+        norm: tuple[Optional[str], ...] = ("bn2d", "bn2d"),
+        act_func: tuple[Optional[str], ...] = ("relu6", None),
+        channel_attention_operation: str = "SEModule",
+        channel_attention_position: int = 2,
+    ):
+        super().__init__()
+        use_bias = to_2tuple(use_bias)
+        norm = to_2tuple(norm)
+        act_func = to_2tuple(act_func)
+
+        mid_channels = round(in_channels * expand_ratio) if mid_channels is None else mid_channels
+
+        self.conv1 = ConvLayer(
+            in_channels,
+            mid_channels,
+            kernel_size,
+            stride,
+            use_bias=use_bias[0],
+            norm=norm[0],
+            act_func=act_func[0],
+        )
+        self.conv2 = ConvLayer(
+            mid_channels,
+            out_channels,
+            kernel_size,
+            1,
+            use_bias=use_bias[1],
+            norm=norm[1],
+            act_func=act_func[1],
+        )
+        if channel_attention_operation == "SEModule":
+            self.channel_attention = SEModule_(out_channels, reduction=4)
+        elif channel_attention_operation == "CoordAttnModule":
+            self.channel_attention = CoordAttnModule_(out_channels, out_channels, groups=4)
+        elif channel_attention_operation == "CECAModule":
+            self.channel_attention = CecaModule(out_channels, 3, 2, 1)
+        else:
+            raise ValueError(f"channel_attention_operation {channel_attention_operation} is not supported")
+        self.channel_attention_position = channel_attention_position
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        if self.channel_attention_position == 1:
+            x = self.channel_attention(x)
+        x = self.conv2(x)
+        if self.channel_attention_position == 2:
+            x = self.channel_attention(x)
+        return x
 
 
 class TimeCondResBlock(nn.Module):
@@ -478,66 +552,6 @@ class TimeCondConvNextBlock(ConvNeXtBlock):
         return x
 
 
-class MbConvStages(nn.Module):
-    """MobileConv for stage 1 and stage 2 of ViTamin"""
-
-    def __init__(
-        self,
-        in_chans: int,
-        stem_width: int,
-        embed_dim: list[int],
-        depths: list[int],
-        cond_width: int,
-        stride: int = 1,
-        drop_path: float = 0.0,
-        kernel_size: int = 3,
-        norm_layer: str = "layernorm2d",
-        norm_eps: float = 1e-6,
-        act_layer: str = "gelu",
-        expand_ratio: float = 4.0,
-        **kwargs,
-    ):
-        super().__init__()
-        self.stem = MBStem(
-            in_chs=in_chans,
-            out_chs=stem_width,
-        )
-        stages = {}
-        self.num_stages = len(embed_dim)
-        for s, dim in enumerate(embed_dim):  # stage
-            stage_in_chs = embed_dim[s - 1] if s > 0 else stem_width
-            blocks = [
-                MbConvLNBlock(
-                    in_chs=stage_in_chs if d == 0 else dim,
-                    out_chs=dim,
-                    cond_chs=stem_width,
-                    stride=stride,  # 2 if d == 0 else 1,
-                    drop_path=drop_path,
-                    norm_layer=norm_layer,
-                    norm_eps=norm_eps,
-                    act_layer=act_layer,
-                    expand_ratio=expand_ratio,
-                )
-                for d in range(depths[s])
-            ]
-            stages[f"stage_{s}"] = nn.ModuleList(blocks)
-        self.stages = nn.ModuleDict(stages)
-
-    def forward(self, x, cond=None):
-        x = self.stem(x)
-
-        # interpolate the condition
-        if cond is not None:
-            cond = torch.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
-
-        # stages
-        for stage in self.stages.values():
-            for block in stage:  # type: ignore
-                x = block(x, cond)
-
-        return x
-
-
 class Spatial2DNATBlock(nn.Module):
     def __init__(
         self,
@@ -713,6 +727,147 @@ class Spatial2DNATBlockConditional(Spatial2DNATBlock):
         return x
 
 
+class AttentionBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        mlp_ratio=4.0,
+        num_heads=8,
+        attn_type="1d",
+        qkv_bias=True,
+        kernel_size=8,
+        stride=2,
+        dilation=2,
+        qk_norm: type[nn.Module] | None | bool = None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        norm_layer=nn.LayerNorm,
+        mlp_norm_layer=None,
+        act_layer=nn.SiLU,
+        layer_scale_value=1e-5,
+        use_layerscale=False,
+        mlp_type: str = "swiglu",
+        is_causal=False,
+    ):
+        super().__init__()
+        self.grad_checkpointing = False
+        self.norm1 = norm_layer(dim)
+
+        # Attention
+        if attn_type == "1d":
+            self.attn = Attention(
+                dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm is not None,
+                norm_layer=norm_layer,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+                attn_type="sdpa",
+                is_causal=is_causal,
+            )
+        elif attn_type == "1d_gated":
+            self.attn = Qwen3SdpaAttention(
+                dim,
+                num_heads,
+                num_heads,
+                use_qk_norm=qk_norm is not None,
+                qkv_bias=qkv_bias,
+                headwise_attn_output_gate=True,
+                elementwise_attn_output_gate=False,
+            )
+        elif attn_type == "nat_1d":
+            # NatAttention expects norm layer object, not boolean
+            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
+            self.attn = NatAttention1d(
+                dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_norm=nat_qk_norm,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                norm_layer=norm_layer,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+            )
+        elif attn_type == "nat_2d":
+            # NatAttention expects norm layer object, not boolean
+            nat_qk_norm = qk_norm if isinstance(qk_norm, (type, nn.Module)) else (norm_layer if qk_norm else None)
+            self.attn = NatAttention2d(
+                dim,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_norm=nat_qk_norm,
+                norm_layer=norm_layer,
+                proj_bias=True,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+            )
+        self.norm2 = norm_layer(dim)
+
+        # Mlp
+        hidden_dim = int(dim * mlp_ratio)
+        if mlp_type == "swiglu_custom":
+            self.mlp = ClipSwiGLUMlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "mlp":
+            self.mlp = Mlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "glumlp":
+            self.mlp = GluMlp(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=nn.SiLU,
+                drop=drop,
+                norm_layer=mlp_norm_layer,
+                use_conv=attn_type != "1d",
+            )
+        elif mlp_type == "swiglu":
+            self.mlp = SwiGLU(
+                in_features=dim,
+                hidden_features=hidden_dim,
+                act_layer=nn.SiLU,
+                norm_layer=None,
+                bias=True,
+                drop=drop,
+            )
+        else:
+            raise ValueError(f"mlp_type {mlp_type} is not supported")
+
+        self.ls1 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
+        self.ls2 = LayerScale(dim, layer_scale_value) if use_layerscale else nn.Identity()
+
+        self.drop_path = DropPath(drop_path)
+
+    def forward_(self, x, mask=None, pe=None):
+        x = x + self.drop_path(self.ls1(self.attn(self.norm1(x), mask=mask, rope=pe)))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+        return x
+
+    def forward(self, x, mask=None, pe=None, **kwargs):
+        if self.grad_checkpointing and self.training:
+            return checkpoint(self.forward_, x, mask, pe, use_reentrant=False)
+        else:
+            return self.forward_(x, mask, pe)
+
+
 class CrossAttentionBlock(nn.Module):
     def __init__(
         self,
@@ -874,12 +1029,82 @@ class LiteLA_GLUMB_Block(nn.Module):
             return _closure(x, HW)
 
 
+class GhostBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 1,
+        ratio: int = 2,
+        dw_kernel_size: int = 3,
+        stride: int = 1,
+        use_bias: bool = False,
+        norm: Optional[str] = "bn2d",
+        act_func: Optional[str] = "relu6",
+        cond_channels: int | None = None,
+    ) -> None:
+        super().__init__()
+        if ratio < 1:
+            raise ValueError("ratio must be >= 1.")
+
+        self.out_channels = out_channels
+        primary_channels = int(math.ceil(out_channels / ratio))
+        cheap_channels = out_channels - primary_channels
+
+        self.primary_conv = ConvLayer(
+            in_channels,
+            primary_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            use_bias=use_bias,
+            norm=norm,
+            act_func=act_func,
+        )
+
+        self.cheap_conv = None
+        if cheap_channels > 0:
+            self.cheap_conv = ConvLayer(
+                primary_channels,
+                cheap_channels,
+                kernel_size=dw_kernel_size,
+                stride=1,
+                groups=primary_channels,
+                use_bias=use_bias,
+                norm=norm,
+                act_func=act_func,
+            )
+
+        self.cond = None
+        if cond_channels is not None:
+            cond_layer = nn.Sequential(
+                create_conv2d(cond_channels, out_channels, kernel_size=1),
+                create_norm_act_layer("layernorm2dfp32", out_channels, act_layer="silu", eps=1e-6),
+                create_conv2d(out_channels, out_channels * 2, kernel_size=3, groups=out_channels),
+            )
+            self.cond = ConditionalBlock(
+                main=nn.Identity(),
+                condition_module=cond_layer,
+                condition_types="adaln2",
+                process_cond_before="interpolate_as_x",
+            )
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        x_primary = self.primary_conv(x)
+        if self.cheap_conv is not None:
+            x_cheap = self.cheap_conv(x_primary)
+            x_out = torch.cat([x_primary, x_cheap], dim=1)
+        else:
+            x_out = x_primary
+
+        x_out = x_out[:, : self.out_channels, :, :]
+        if self.cond is not None and cond is not None:
+            x_out = self.cond(x_out, cond)
+        return x_out
+
+
 IdentityLayer = nn.Identity  # alias
 
-# * --- interface --- #
 
-
-# effiecient vit interface
 class EfficientViTBlock(nn.Module):
     def __init__(
         self,
@@ -1444,6 +1669,25 @@ def build_block(
             kv_in_channels=int(cfg[1]),
             out_channels=out_channels,
             norm=(None, norm),
+        )
+
+    elif block_name == "GhostBlock":
+        ratio = int(cfg[1]) if len(cfg) > 1 else 2
+        kernel_size = int(cfg[2]) if len(cfg) > 2 else 1
+        dw_kernel_size = int(cfg[3]) if len(cfg) > 3 else 3
+        main_block = GhostBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            ratio=ratio,
+            dw_kernel_size=dw_kernel_size,
+            norm=norm,
+            act_func=act,
+            cond_channels=cond_channels,
+        )
+        block = ResidualBlock(
+            main_block,
+            _create_conv_out_blk(in_channels, out_channels),
         )
     else:
         raise ValueError(f"block_name {block_name} is not supported")

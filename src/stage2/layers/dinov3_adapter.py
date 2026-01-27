@@ -21,6 +21,7 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import LayerNorm2dFp32, create_norm_act_layer, create_norm_layer
 from timm.layers.weight_init import lecun_normal_
 from torchvision.transforms import Normalize
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
 
 # ----- Deformable attention ----- #
 sys.path.append("src/stage1/utilities/losses/dinov3")
@@ -28,6 +29,7 @@ from dinov3.eval.segmentation.models.utils.ms_deform_attn import (  # type: igno
     MSDeformAttn,
 )
 
+# ----- SLA ----- #
 from .SLA import LinearCrossAttention, SageSparseLinearAttention, SparseLinearAttention, SparseLinearCrossAttention
 
 logger = logger.bind(_name_="dinov3_adapter")
@@ -67,6 +69,7 @@ def get_reference_points(spatial_shapes, device):
         ref_y, ref_x = torch.meshgrid(
             torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
             torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
+            indexing="ij",
         )
         ref_y = ref_y.reshape(-1)[None] / H_
         ref_x = ref_x.reshape(-1)[None] / W_
@@ -257,7 +260,6 @@ class DeformAttentionExtractor(nn.Module):
         drop_path=0.0,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         dw_ratios=[2, 1, 0.5],
-        with_cp=False,
     ):
         super().__init__()
         self.query_norm = norm_layer(dim)
@@ -270,7 +272,6 @@ class DeformAttentionExtractor(nn.Module):
             ratio=deform_ratio,
         )
         self.with_cffn = with_cffn
-        self.with_cp = with_cp
         if with_cffn:
             self.ffn = ConvFFN(
                 in_features=dim,
@@ -297,10 +298,7 @@ class DeformAttentionExtractor(nn.Module):
                 query = query + self.drop_path(self.ffn(self.ffn_norm(query), H, W))
             return query
 
-        if self.with_cp and query.requires_grad:
-            query = cp.checkpoint(_inner_forward, query, feat, use_reentrant=False)
-        else:
-            query = _inner_forward(query, feat)
+        query = _inner_forward(query, feat)
 
         return query
 
@@ -456,6 +454,9 @@ class SLAExtractor(nn.Module):
         dw_ratios: list[float] | None = None,
         tie_feature_map_qk: bool = True,
     ) -> None:
+        """
+        Used as Self-attention block, not a Cross-attention block version.
+        """
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
@@ -595,7 +596,8 @@ class SLALinearCrossExtractor(nn.Module):
         H: int,
         W: int,
     ) -> torch.Tensor:
-        del reference_points, spatial_shapes, level_start_index
+        del reference_points, spatial_shapes, level_start_index  # sla does not require these
+
         if feat is None:
             raise ValueError("Expected feat to be provided for cross attention.")
         if self.attn_mode == "sparse_linear" and not (query.is_cuda and feat.is_cuda):
@@ -647,24 +649,23 @@ class InteractionBlockWithCls(nn.Module):
     ) -> None:
         super().__init__()
         if dw_ratios is None:
-            dw_ratios = [2, 1, 0.5]
-
-        general_kwargs = dict(
-            dim=dim,
-            num_heads=num_heads,
-            n_points=n_points,
-            norm_layer=norm_layer,
-            deform_ratio=deform_ratio,
-            with_cffn=with_cffn,
-            cffn_ratio=cffn_ratio,
-            drop=drop,
-            drop_path=drop_path,
-            with_cp=with_cp,
-            dw_ratios=dw_ratios,
-        )
+            dw_ratios = [2, 1, 0.5]  # hierarchical ratios
 
         self.extra_extractors: nn.Sequential | None = None
+        assert extractor_type in ["deform_attention", "sla", "convnext"], f"{extractor_type} is not supported"
         if extractor_type == "deform_attention":
+            general_kwargs = dict(
+                dim=dim,
+                num_heads=num_heads,
+                n_points=n_points,
+                norm_layer=norm_layer,
+                deform_ratio=deform_ratio,
+                with_cffn=with_cffn,
+                cffn_ratio=cffn_ratio,
+                drop=drop,
+                drop_path=drop_path,
+                dw_ratios=dw_ratios,
+            )
             self.extractor: nn.Module = DeformAttentionExtractor(n_levels=1, **general_kwargs)
             if extra_extractor:
                 self.extra_extractors = nn.Sequential(
@@ -725,6 +726,14 @@ class InteractionBlockWithCls(nn.Module):
         else:
             raise ValueError(f"Unknown {extractor_type=}.")
 
+        # if checkpointing
+        if with_cp:
+            self.extractor = CheckpointWrapper(self.extractor)
+            if self.extra_extractors is not None:
+                self.extra_extractors = nn.ModuleList(
+                    [CheckpointWrapper(extractor) for extractor in self.extra_extractors]
+                )
+
     def forward(self, x, q, cls, deform_inputs1, deform_inputs2, H_c, W_c, H_toks, W_toks):
         del deform_inputs1, H_toks, W_toks
         q = self.extractor(
@@ -753,7 +762,7 @@ class InteractionBlockWithCls(nn.Module):
 
 
 class SpatialPriorModule(nn.Module):
-    def __init__(self, in_channels=3, inplanes=64, embed_dim=384, with_cp=False, final_downsample=32):
+    def __init__(self, in_channels=3, inplanes=64, embed_dim=384, final_downsample=32):
         """
         Spatial Prior Module for generating multi-scale features.
 
@@ -769,7 +778,6 @@ class SpatialPriorModule(nn.Module):
             Final downsampling ratio (16 or 32)
         """
         super().__init__()
-        self.with_cp = with_cp
         self.final_downsample = final_downsample
 
         _create_norm_act = lambda chans: create_norm_act_layer(
@@ -877,10 +885,7 @@ class SpatialPriorModule(nn.Module):
 
             return c1, c2, c3, c4
 
-        if self.with_cp and self.training:
-            outs = cp.checkpoint(_inner_forward, x, use_reentrant=False)
-        else:
-            outs = _inner_forward(x)
+        outs = _inner_forward(x)
         return outs
 
 
@@ -959,9 +964,9 @@ class DINOv3_Adapter(nn.Module):
         self.add_vit_feature = add_vit_feature
         embed_dim = self.backbone.embed_dim
         self.patch_size = self.backbone.patch_size
-        print("embed dim", embed_dim)
-        print("interaction_indexes", self.interaction_indexes)
-        print("patch_size", self.patch_size)
+        logger.info("embed dim", embed_dim)
+        logger.info("interaction_indexes", self.interaction_indexes)
+        logger.info("patch_size", self.patch_size)
 
         return embed_dim
 
@@ -989,11 +994,10 @@ class DINOv3_Adapter(nn.Module):
         extractor_kwargs: dict[str, Any] | None = None,
     ):
         logger.info("Use extractor type: {}".format(extractor_type))
+        assert extractor_type in ["deform_attention", "sla", "convnext"], f"{extractor_type} is not supported"
 
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
-        self.spm = SpatialPriorModule(
-            in_channels=in_channels, inplanes=conv_inplane, embed_dim=embed_dim, with_cp=with_cp
-        )
+        self.spm = SpatialPriorModule(in_channels=in_channels, inplanes=conv_inplane, embed_dim=embed_dim)
         extractor_kwargs = extractor_kwargs or {}
         self.interactions = nn.Sequential(
             *[
@@ -1024,20 +1028,23 @@ class DINOv3_Adapter(nn.Module):
         self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
 
-        # print(f"[Dinov3 Adapter]: Use norm type {type(self.norm1)}")
         if use_bn:
-            # FIXME: bn mismatch
             logger.warning(f"Use BN in module, may cause train/test running mean/var difference.")
 
         self._input_norm = Normalize(*inp_mean_std) if inp_mean_std is not None else nn.Identity()
         self.norm_backbone_features = True
 
+        # checkpointing
+        if with_cp:
+            self.spm = CheckpointWrapper(self.spm)
+
         self.init_weights()
 
     def init_weights(self):
-        self.up.apply(self._init_weights)
-        self.spm.apply(self._init_weights)
-        self.interactions.apply(self._init_weights)
+        self.up.apply(self._init_weights_fn)
+        self.spm.apply(self._init_weights_fn)
+        self.interactions.apply(self._init_weights_fn)
+
         self.apply(self._init_deform_weights)
         torch.nn.init.normal_(self.level_embed)
 
@@ -1045,7 +1052,7 @@ class DINOv3_Adapter(nn.Module):
         if isinstance(m, MSDeformAttn):
             m._reset_parameters()
 
-    def _init_weights(self, m):
+    def _init_weights_fn(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -1054,9 +1061,6 @@ class DINOv3_Adapter(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
         elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-            # fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            # fan_out //= m.groups
-            # m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             lecun_normal_(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
@@ -1101,10 +1105,9 @@ class DINOv3_Adapter(nn.Module):
         x = self._input_norm(x)  # for input is 0-1
         deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
 
-        # SPM forward
+        # ------- SPM forward: extract the shallow feature to query or fuse ------- #
         c1, c2, c3, c4 = self.spm(x)
         c2, c3, c4 = self._add_level_embed(c2, c3, c4)
-
         c = torch.cat([c2, c3, c4], dim=1)
 
         # Code for matching with oss
@@ -1112,7 +1115,7 @@ class DINOv3_Adapter(nn.Module):
         H_toks, W_toks = x.shape[2] // self.patch_size, x.shape[3] // self.patch_size
         bs, C, h, w = x.shape
 
-        # get all layers' features
+        # ---------- get all layers' features ----------- #
         all_layers = self._forward_backbone_intermediate_features(x)
 
         others = None
@@ -1120,6 +1123,7 @@ class DINOv3_Adapter(nn.Module):
             all_layers, others = all_layers
         bs, _, dim = all_layers[0][0].shape  # [x, cls] per layer out
 
+        # ---------------- interaction or fuse ---------------- #
         outs = list()
         for i, layer in enumerate(self.interactions):
             layer_out = all_layers[i]
@@ -1137,7 +1141,8 @@ class DINOv3_Adapter(nn.Module):
                     layer_hw[1],
                     x.device,
                 )
-            # print(f"{x.shape=}, {cls.shape=}, ")
+
+            # Iteraction layer forward
             _, c, _ = layer(
                 x,
                 c,
@@ -1152,7 +1157,7 @@ class DINOv3_Adapter(nn.Module):
             tok_h, tok_w = (H_toks, W_toks) if layer_hw is None else layer_hw
             outs.append(x.transpose(1, 2).view(bs, dim, tok_h, tok_w).contiguous())
 
-        # Split & Reshape
+        # ---------------- Split & Reshape ---------------- #
         c2 = c[:, 0 : c2.size(1), :]
         c3 = c[:, c2.size(1) : c2.size(1) + c3.size(1), :]
         c4 = c[:, c2.size(1) + c3.size(1) :, :]
@@ -1171,7 +1176,7 @@ class DINOv3_Adapter(nn.Module):
             x4 = F.interpolate(x4, size=(H_c // 2, W_c // 2), mode="bilinear", align_corners=False)
             c1, c2, c3, c4 = c1 + x1, c2 + x2, c3 + x3, c4 + x4
 
-        # Final Norm
+        # ---------------- Final Norm ---------------- #
         f1 = self.norm1(c1)
         f2 = self.norm2(c2)
         f3 = self.norm3(c3)
@@ -1181,6 +1186,9 @@ class DINOv3_Adapter(nn.Module):
         if others is None:
             return ret
         return ret, others
+
+
+# ================= Varaint of MS Down ===================== #
 
 
 class UpsampleBlock(nn.Module):
@@ -1259,9 +1267,10 @@ class DINOv3_Adapter_MS_Down(DINOv3_Adapter):
         self.spm = SpatialPriorModule(
             inplanes=conv_inplane,
             embed_dim=self.backbone.embed_dim,
-            with_cp=False,
             final_downsample=16,  # Use 16x downsampling instead of 32x
         )
+        if with_cp:
+            self.spm = CheckpointWrapper(self.spm)
 
         delattr(self, "up")
         self.downs = nn.ModuleList([DownsampleBlock(self.backbone.embed_dim) for _ in range(2)])

@@ -31,6 +31,13 @@ from scripts.trainer.hyper_latent_change_detection_trainer import (
 )
 from scripts.trainer.hyper_latent_change_detection_trainer import _key as cd_key
 
+# Classification
+from scripts.trainer.hyper_latent_classification_trainer import HyperClassificationTrainer
+from scripts.trainer.hyper_latent_classification_trainer import (
+    _configs_dict as classification_configs,
+)
+from scripts.trainer.hyper_latent_classification_trainer import _key as classification_key
+
 # Denoising
 from scripts.trainer.hyper_latent_denoise_trainer import DenoisingTrainer
 from scripts.trainer.hyper_latent_denoise_trainer import (
@@ -78,6 +85,7 @@ trainer_mapping = {
     "unmixing": UnmixingTrainer,
     "segmentation": HyperSegmentationTrainer,
     "change_detection": HyperCDTrainer,
+    "classification": HyperClassificationTrainer,
 }
 cfg_mapping = {
     "tokenize": tokenizer_configs,
@@ -86,6 +94,7 @@ cfg_mapping = {
     "unmixing": unmixing_configs,
     "segmentation": seg_configs,
     "change_detection": cd_configs,
+    "classification": classification_configs,
 }
 default_cfg_mapping = {
     "tokenize": tokenizer_key,
@@ -94,6 +103,7 @@ default_cfg_mapping = {
     "unmixing": unmixing_key,
     "segmentation": seg_key,
     "change_detection": cd_key,
+    "classification": classification_key,
 }
 config_path_mapping = {
     "tokenize": "../configs/tokenizer_gan",
@@ -102,16 +112,13 @@ config_path_mapping = {
     "unmixing": "../configs/unmixing",
     "segmentation": "../configs/segmentation",
     "change_detection": "../configs/change_detection",
+    "classification": "../configs/classification",
 }
 
 
 def task_trainer():
-    parser = argparse.ArgumentParser(
-        description="Trainer for different hyperspectral image tasks"
-    )
-    parser.add_argument(
-        "-t", "--task", type=str, choices=list(trainer_mapping.keys()), required=True
-    )
+    parser = argparse.ArgumentParser(description="Trainer for different hyperspectral image tasks")
+    parser.add_argument("-t", "--task", type=str, choices=list(trainer_mapping.keys()), required=True)
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
 
@@ -125,7 +132,7 @@ def task_trainer():
         "config_name": default_cfg,
         "only_rank_zero_catch": True,
     }
-    chosen_cfg, cli_args = argsparse_cli_args(cfg_dict, cli_default_dict)
+    chosen_cfg, cli_args = argsparse_cli_args(cfg_dict, cli_default_dict)  # type: ignore[arg-type]
     config_path = config_path_mapping[args.task]
     breakpoint()
 

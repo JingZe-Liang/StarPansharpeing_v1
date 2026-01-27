@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -299,7 +301,7 @@ def laplace_nll_loss(
         raise ValueError(f"scale/target shape mismatch: {scale.shape} vs {target.shape}")
 
     scale_safe = scale.clamp_min(eps)
-    loss = (pred - target).abs() / scale_safe + torch.log(scale_safe)
+    loss = (pred - target).abs() / scale_safe + torch.log(scale_safe) + math.log(2.0)
     return _masked_mean(loss, valid_mask)
 
 

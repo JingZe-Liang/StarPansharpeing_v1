@@ -327,7 +327,7 @@ def _loguru_log_func(
 def loguru_print_func_name(record: Record):
     name = record.get("extra", {}).get("_name_", None)
     if name is not None:
-        msg = f"{name} - {record['message']}"
+        msg = f"[{name}] | {record['message']}"
         record["message"] = msg
         del record["extra"]["_name_"]
     return record

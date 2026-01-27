@@ -11,7 +11,7 @@ from timm.layers import (
 )
 from timm.layers.create_conv2d import create_conv2d
 from timm.layers.create_norm import create_norm_layer
-from timm.layers.helpers import make_divisible
+from timm.layers.helpers import make_divisible, to_2tuple
 from timm.models import checkpoint_seq, named_apply
 from timm.models.vitamin import (
     Downsample2d,
@@ -31,6 +31,9 @@ class _BasicStages(nn.Module):
         self.grad_checkpointing = False
         self._use_condition = False
 
+        self.stages: nn.ModuleList
+        self.out_conv: nn.Module
+
     def set_grad_checkpointing(self, enable: bool = True):
         self.grad_checkpointing = enable
 
@@ -48,6 +51,66 @@ class _BasicStages(nn.Module):
                     x = block(x, cond)
 
         return self.out_conv(x)
+
+
+class MbConvStages(nn.Module):
+    """MobileConv for stage 1 and stage 2 of ViTamin"""
+
+    def __init__(
+        self,
+        in_chans: int,
+        stem_width: int,
+        embed_dim: list[int],
+        depths: list[int],
+        cond_width: int,
+        stride: int = 1,
+        drop_path: float = 0.0,
+        kernel_size: int = 3,
+        norm_layer: str = "layernorm2d",
+        norm_eps: float = 1e-6,
+        act_layer: str = "gelu",
+        expand_ratio: float = 4.0,
+        **kwargs,
+    ):
+        super().__init__()
+        self.stem = MBStem(
+            in_chs=in_chans,
+            out_chs=stem_width,
+        )
+        stages = {}
+        self.num_stages = len(embed_dim)
+        for s, dim in enumerate(embed_dim):  # stage
+            stage_in_chs = embed_dim[s - 1] if s > 0 else stem_width
+            blocks = [
+                MbConvLNBlock(
+                    in_chs=stage_in_chs if d == 0 else dim,
+                    out_chs=dim,
+                    cond_chs=stem_width,
+                    stride=stride,  # 2 if d == 0 else 1,
+                    drop_path=drop_path,
+                    norm_layer=norm_layer,
+                    norm_eps=norm_eps,
+                    act_layer=act_layer,
+                    expand_ratio=expand_ratio,
+                )
+                for d in range(depths[s])
+            ]
+            stages[f"stage_{s}"] = nn.ModuleList(blocks)
+        self.stages = nn.ModuleDict(stages)
+
+    def forward(self, x, cond=None):
+        x = self.stem(x)
+
+        # interpolate the condition
+        if cond is not None:
+            cond = th.nn.functional.interpolate(cond, size=x.shape[2:], mode="bilinear", align_corners=False)
+
+        # stages
+        for stage in self.stages.values():
+            for block in stage:  # type: ignore
+                x = block(x, cond)
+
+        return x
 
 
 class MbConvSequentialCond(_BasicStages):
@@ -223,7 +286,7 @@ class ResBlockStage(_BasicStages):
         depths: list[int],
         cond_width: int | None = None,
         out_chans: int | None = None,
-        norm_layer: str = "layernorm2d",
+        norm_layer: str = "groupnorm32",
         norm_eps: float = 1e-6,
         act_layer: str = "relu6",
         drop_path: float = 0.0,
@@ -279,6 +342,51 @@ class ResBlockStage(_BasicStages):
         )
 
         return blk
+
+
+class GhostBlockStage(_BasicStages):
+    def __init__(
+        self,
+        in_chans: int,
+        embed_dim: list[int],
+        depths: list[int],
+        cond_width: int | None = None,
+        out_chans: int | None = None,
+        norm_layer: str = "layernorm2d",
+        act_layer: str = "relu6",
+        drop_path: float = 0.0,
+        ratio: int = 2,
+        kernel_size: int = 1,
+        dw_kernel_size: int = 3,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+
+        self._use_condition = cond_width is not None
+        self.num_stages = len(embed_dim)
+
+        stages = []
+        for s, dim in enumerate(embed_dim):
+            stage_in_chs = embed_dim[s - 1] if s > 0 else in_chans
+            blocks = [
+                build_block(
+                    f"GhostBlock@{ratio}@{kernel_size}@{dw_kernel_size}",
+                    stage_in_chs if i == 0 else dim,
+                    dim,
+                    norm=norm_layer,
+                    act=act_layer,
+                    cond_channels=cond_width,
+                )
+                for i in range(depths[s])
+            ]
+            stages.append(nn.ModuleList(blocks))
+
+        self.stages = nn.ModuleList(stages)
+
+        if out_chans is not None:
+            self.out_conv = nn.Conv2d(embed_dim[-1], out_chans, kernel_size=1)
+        else:
+            self.out_conv = nn.Identity()
 
 
 def __test_resblock_stage():

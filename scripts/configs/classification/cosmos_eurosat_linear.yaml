@@ -1,0 +1,73 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: eurosat_torchgeo
+  - accelerator: base
+  - model: cosmos_tokenizer_classifier
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+  allow_different_devices: true
+  lazy_init_ema: true
+
+metric:
+  num_classes: ${dataset.consts.num_classes}
+  top_k: 1
+
+train:
+  proj_dir: runs/stage2_classification/
+  model_name: cosmos_tokenizer_probe
+  max_grad_norm: 1.0
+  max_steps: 5_000
+  save_every: 500
+  grad_check: true
+  label_smoothing: 0.0
+  class_weights: null
+
+  tokenizer_pretrained_path:
+  freeze_tokenizer: true
+  use_quantizer: false
+  latent_proj_dim:
+
+  resume_path:
+  ema_load_path:
+  is_neg_1_1: ${dataset.consts.to_neg_1_1}
+
+  model_optim:
+    _target_: heavyball.ForeachAdamW
+    _partial_: true
+    lr: 1.0e-3
+    weight_decay: 0.0
+    betas: ${tuple:[0.9, 0.95]}
+    caution: true
+    foreach: true
+
+  model_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+
+  log:
+    run_comment: ${dataset.dataset_name}_cosmos_probe
+    log_with_time: true
+    log_every: 20
+    log_with: [wandb]
+
+  debug: false
+
+val:
+  val_duration: 500
+  max_val_iters: 20
+  use_ema: false

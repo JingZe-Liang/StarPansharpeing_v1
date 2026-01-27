@@ -19,9 +19,9 @@ accelerator:
 
 dataset:
   cfgs:
-    used: GF2
+    used: QB
     batch_size_train: 16
-    norm: 1023
+    norm: 2047
 
 ema:
   _target_: ema_pytorch.EMA
@@ -72,6 +72,8 @@ train:
     use_triton: true
     nesterov: false
     oned_param_algo: lion
+    ignored_keys_for_muon:
+      - head_out # fix `head_out` using lion optimizer
 
     # _target_: heavyball.ForeachAdamW
     # _partial_: true

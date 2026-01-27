@@ -23,9 +23,6 @@ from .conv import (
     MBConv,
     FusedMBConv,
     GLUMBConv,
-    GLUResBlock,
-    ChannelAttentionResBlock,
-    ResBlock,
     DSConv,
 )
 from .attention import (
@@ -43,11 +40,13 @@ from .blocks import (
     AttentionBlock,
     LiteLA_GLUMB_Block,
     CrossAttentionBlock,
-    MbConvStages,
     Spatial2DNATBlock,
     Spatial2DNATBlockConditional,
     build_block,
     ConditionalBlock,
+    GLUResBlock,
+    ChannelAttentionResBlock,
+    ResBlock,
 )
 from .resample import create_downsample_layer, create_upsample_layer
 
@@ -56,6 +55,7 @@ from .dinov3_adapter import DINOv3_Adapter, DINOv3_Adapter_MS_Down
 
 # Stages
 from .stages import (
+    MbConvStages,
     MbConvSequentialCond,
     MbConvStagesCond,
     Spatial2DNatStage,

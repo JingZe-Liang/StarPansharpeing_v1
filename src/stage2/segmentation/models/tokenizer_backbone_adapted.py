@@ -93,34 +93,35 @@ def _create_default_cfg():
             latent_straight_through_skip: true
     tokenizer_feature:
         pretrained_path: null
-        features_per_stage: [512, 512, 512, 512]
         model_name: hybrid_tokenizer_b16
         pretrained_size: 512
         in_channels: 3
-        conv_inplane: 64
+        interp_ratio: null
+        interaction_indexes: [1,2,4,5]  # [2,3,8,16]
         layer_in_channels: [512, 512, 1152, 1152]
+        features_per_stage: [256,384,512, 512]
+        conv_inplane: 64
         drop_path_rate: 0.3
         with_cffn: true
         cffn_ratio: 0.25
-        deform_num_heads: 8
+        deform_num_heads: 16
         deform_ratio: 0.5
         add_vit_feature: true
         use_extra_extractor: true
         with_cp: true
         select_in_all_layers: true
-        interp_ratio: null
-        interaction_indexes: [1,2,4,5]  # [2,3,8,16]
+        extractor_type: deform_attention  # [sla, convnext, deform_attention]
+        extractor_kwargs: {}
     adapter:
-        adapter_type: default
         latent_width: 32
-        n_conv_per_stage: 1
-        depth_per_stage: 1
+        n_conv_per_stage: 2
+        depth_per_stage: 2
         norm: layernorm2d
         act: gelu
         drop: 0.0
         act_first: false
         conv_bias: false
-        block_types: [nat, nat, mbconv, mbconv]
+        block_types: [mbconv, mbconv, mbconv, mbconv]
     tokenizer_pretrained_path: null
     input_channels: 155
     num_classes: 2
@@ -351,9 +352,10 @@ class TokenizerHybridUNet(nn.Module):
             self.adapter_cfg.n_conv_per_stage,
             self.adapter_cfg.depth_per_stage,
             nonlin_first=self.adapter_cfg.act_first,
-            deep_supervision=cfg.deep_supervision,
             block_types=self.adapter_cfg.block_types,
+            deep_supervision=cfg.deep_supervision,
             output_process=self.adapter_cfg.get("output_process", None),
+            additional_head=self.adapter_cfg.get("additional_head", None),
         )
         logger.info(f"Created Unet decoder with 4 stages - with Nparams={parameter_count(self.decoder)['']}")
 
@@ -402,21 +404,23 @@ class TokenizerHybridUNet(nn.Module):
             backbone=tok_backbone,
             in_channels=f_cfg.in_channels,
             interaction_indexes=interaction_indexes,
-            pretrain_size=512,
-            conv_inplane=f_cfg.conv_inplane,
+            init_values=0.0,
             n_points=4,
+            pretrain_size=512,
+            select_in_all_layers=select_in_all_layers,
+            conv_inplane=f_cfg.conv_inplane,
             deform_num_heads=f_cfg.deform_num_heads,
             drop_path_rate=f_cfg.drop_path_rate,
-            init_values=0.0,
             with_cffn=f_cfg.with_cffn,
             cffn_ratio=f_cfg.cffn_ratio,
             deform_ratio=f_cfg.deform_ratio,
             add_vit_feature=f_cfg.add_vit_feature,
             use_extra_extractor=f_cfg.use_extra_extractor,
             with_cp=f_cfg.with_cp,
-            select_in_all_layers=select_in_all_layers,
             interp_ratio=f_cfg.get("interp_ratio", None),
             layer_in_channels=f_cfg.get("layer_in_channels", None),
+            extractor_type=f_cfg.get("extractor_type", "deform_attention"),
+            extractor_kwargs=f_cfg.get("extractor_kwargs", {}),
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -526,9 +530,47 @@ class TokenizerHybridUNet(nn.Module):
 
 
 def test_seg_decoder_model():
+    from fvcore.nn import parameter_count_table
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
 
-    dl = get_fast_test_hyperspectral_data("fmow_RGB")
+    def _bytes_to_gb(num_bytes: int) -> float:
+        return num_bytes / (1024**3)
+
+    def _log_cuda_mem(tag: str) -> None:
+        torch.cuda.synchronize()
+        allocated_gb = _bytes_to_gb(torch.cuda.memory_allocated())
+        peak_gb = _bytes_to_gb(torch.cuda.max_memory_allocated())
+        logger.info(f"[mem] {tag}: alloc={allocated_gb:.2f}G peak={peak_gb:.2f}G")
+
+    def _forward_decoder_with_mem(
+        decoder: UNetDecoder,
+        skips: list[Float[Tensor, "b c h w"]],
+        cond: Float[Tensor, "b latent_ch h w"] | None,
+        log_mem: bool,
+    ) -> Tensor | list[Tensor]:
+        lres_input = skips[-1]
+        seg_outputs = []
+        for s in range(len(decoder.stages)):
+            x = decoder.transpconvs[s](lres_input)
+            x = torch.cat((x, skips[-(s + 2)]), 1)
+            x = decoder.stages[s](x, cond)
+            if log_mem:
+                _log_cuda_mem(f"decoder stage {s} after stage")
+            if decoder.deep_supervision:
+                seg_outputs.append(decoder.seg_layers[s](x))
+            elif s == (len(decoder.stages) - 1):
+                seg_outputs.append(decoder.seg_layers[-1](x))
+            lres_input = x
+
+        seg_outputs = seg_outputs[::-1]
+        if not decoder.deep_supervision:
+            r = seg_outputs[0]
+            r = decoder.output_processor(r)
+        else:
+            r = [decoder.output_processor(seg_out) for seg_out in seg_outputs]
+        return r
+
+    dl = get_fast_test_hyperspectral_data("fmow_RGB", batch_size=4)
     sample = next(iter(dl))
     x = sample["img"].cuda()
     x = F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
@@ -537,18 +579,17 @@ def test_seg_decoder_model():
     cfg._debug = True
     cfg.tokenizer_pretrained_path = "runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors"
     unet = TokenizerHybridUNet(cfg).cuda()
-    unet.eval()
 
     # model info
-    from fvcore.nn import parameter_count_table
 
     print(parameter_count_table(unet))
 
-    with torch.autocast("cuda", torch.bfloat16):
-        with torch.no_grad():
-            y = unet(x)
-    print(y.shape)
-    assert y.shape[-2:] == x.shape[-2:], "Output shape mismatch"
+    # unet.eval()
+    # with torch.autocast("cuda", torch.bfloat16):
+    #     with torch.no_grad():
+    #         y = unet(x)
+    # print(y.shape)
+    # assert y.shape[-2:] == x.shape[-2:], "Output shape mismatch"
 
     #         y_recon = unet.encoder.dinov3_adapter.backbone(x)
     # from torchmetrics import PeakSignalNoiseRatio
@@ -560,10 +601,49 @@ def test_seg_decoder_model():
     # psnr = psnr_fn((y_recon + 1) / 2, (x + 1) / 2)
     # logger.info(f"Reconstruction PSNR: {psnr}")
 
+    optim = torch.optim.AdamW(
+        unet.parameters(),
+        lr=1e-4,
+        weight_decay=0.01,
+    )
+    unet.set_grad_checkpointing(True)
+    unet.train()
+
+    # deform: 69G
+    # convnext: 74G
+    # sla: 74G
+    for i in range(100):
+        optim.zero_grad()
+        if i == 0:
+            torch.cuda.reset_peak_memory_stats()
+            _log_cuda_mem("after reset")
+        with torch.autocast("cuda", torch.bfloat16):
+            encoder_out = unet.encoder(x)
+            if isinstance(encoder_out, tuple):
+                skips, final_h = encoder_out
+            else:
+                skips, final_h = encoder_out, None
+            if i == 0:
+                _log_cuda_mem("after encoder")
+            y = _forward_decoder_with_mem(unet.decoder, skips, final_h, log_mem=i == 0)
+            if i == 0:
+                _log_cuda_mem("after decoder")
+            y_for_loss = y[0] if isinstance(y, list) else y
+            loss = F.mse_loss(torch.randn_like(y_for_loss), y_for_loss)
+            if i == 0:
+                _log_cuda_mem("after loss")
+        loss.backward()
+        if i == 0:
+            _log_cuda_mem("after backward")
+        optim.step()
+
+        if i % 10 == 0:
+            logger.info(f"Loss: {loss.item()}")
+
 
 if __name__ == "__main__":
     """
-    LOVELY_TENSORS=1 python -m src.stage2.segmentation.models.tokenizer_backbone_adapted
+    CUDA_VISIBLE_DEVICES=1 LOVELY_TENSORS=1 python -m src.stage2.segmentation.models.tokenizer_backbone_adapted
     """
     with logger.catch():
         test_seg_decoder_model()

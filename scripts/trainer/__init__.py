@@ -9,6 +9,9 @@ os.environ["SHELL_LOG_LEVEL"] = "DEBUG"  # set shell log level to DEBUG to reduc
 
 # Define aliases for direct mapping: alias_name -> (module_name, original_name)
 _aliases = {
+    # Classification
+    "classification_configs": ("hyper_latent_classification_trainer", "_configs_dict"),
+    "classification_key": ("hyper_latent_classification_trainer", "_key"),
     # Change Detection
     "cd_configs": ("hyper_latent_change_detection_trainer", "_configs_dict"),
     "cd_key": ("hyper_latent_change_detection_trainer", "_key"),
@@ -32,6 +35,7 @@ _aliases = {
 _lazy_getattr, _lazy_dir, _lazy_all = lazy_loader.attach(
     __name__,
     submod_attrs={
+        "hyper_latent_classification_trainer": ["HyperClassificationTrainer"],
         "hyper_latent_change_detection_trainer": ["HyperCDTrainer"],
         "hyper_latent_denoise_trainer": ["DenoisingTrainer"],
         "hyper_latent_pansharpening_trainer": ["PansharpeningTrainer"],

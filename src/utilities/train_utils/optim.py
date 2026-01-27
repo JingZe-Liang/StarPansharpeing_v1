@@ -7,6 +7,7 @@ from typing import Sequence, Union, cast
 import torch
 import torch.nn as nn
 from loguru import logger
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper, CheckpointImpl
 from torch.autograd import profiler
 
 
@@ -46,6 +47,11 @@ def filter_no_wds_into_optim_groups(
             "weight_decay": 0.0,
         },  # without weight decay
     ]
+
+
+def wrap_module_checkpoint(model: nn.Module):
+    """Wrap module in activation checkpoint"""
+    return CheckpointWrapper(model, CheckpointImpl.NO_REENTRANT)
 
 
 if __name__ == "__main__":

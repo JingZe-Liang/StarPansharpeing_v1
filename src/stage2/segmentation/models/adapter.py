@@ -21,7 +21,7 @@ from torch.nn.modules.conv import _ConvNd
 from torch.utils.checkpoint import checkpoint
 
 from ...layers.dinov3_adapter import DINOv3_Adapter
-from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage, ResBlockStage
+from ...layers.stages import MbConvSequentialCond, Spatial2DNatStage, ResBlockStage, GhostBlockStage
 
 
 def initialize(module) -> None:
@@ -350,7 +350,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.dropout_op_kwargs = dropout_op_kwargs
 
         # in_ch = self.dinov3_adapter.backbone.embed_dim
-        in_ch = int(self.dinov3_adapter.embed_dim)
+        in_ch = int(self.dinov3_adapter.embed_dim)  # type: ignore[invalid-argument-type]
 
         self.fapm = FAPM(
             in_ch,
@@ -414,6 +414,7 @@ class UNetDecoder(nn.Module):
         latent_width: int | None = None,
         n_conv_per_stage: int | list[int] = 2,
         depths_per_stage: int | list[int] = 2,
+        expand_ratio: int | None = None,
         nonlin_first: bool = False,
         norm_op: str = "layernorm2dfp32",  # keep precision in fp32
         norm_op_kwargs: dict | None = None,
@@ -427,6 +428,7 @@ class UNetDecoder(nn.Module):
         block_types: list[str] = ["mbconv", "mbconv", "mbconv", "mbconv"],
         block_kwargs: dict = {},
         output_process: str | None = None,
+        additional_head: str | None = None,
     ):
         """
         This class needs the skips of the encoder as input in its forward.
@@ -446,6 +448,10 @@ class UNetDecoder(nn.Module):
         super().__init__()
         self.deep_supervision = deep_supervision
         self.num_classes = num_classes
+
+        # for other tasks like depth estimation
+        self.additional_head = additional_head
+        self.predict_uncertainty = additional_head == "depth_scale"
         conv_op = encoder.conv_op
         n_stages_encoder = len(encoder.output_channels)
 
@@ -474,7 +480,7 @@ class UNetDecoder(nn.Module):
         norm_op_kwargs = encoder.norm_op_kwargs if norm_op_kwargs is None else norm_op_kwargs
         dropout_op = encoder.dropout_op if dropout_op is None else dropout_op
         dropout_op_kwargs = encoder.dropout_op_kwargs if dropout_op_kwargs is None else dropout_op_kwargs
-        nonlin = encoder.nonlin if nonlin is None else nonlin
+        nonlin = encoder.nonlin if nonlin is None else nonlin  # type: ignore[invalid-assignment]
         if isinstance(nonlin, str):
             nonlin = get_act_layer(nonlin)
 
@@ -482,28 +488,23 @@ class UNetDecoder(nn.Module):
         stages = []
         transpconvs = []
         seg_layers = []
+        scale_layers = []
         for s in range(1, n_stages_encoder):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
             block_type = block_types[s - 1]
-            transpconvs.append(
-                nn.Sequential(
-                    nn.UpsamplingBilinear2d(scale_factor=2),
-                    nn.Conv2d(input_features_below, input_features_skip, 1, 1, 0, bias=conv_bias),
-                )
-                # nn.ConvTranspose2d(
-                #     input_features_below,
-                #     input_features_skip,
-                #     stride_for_transpconv,
-                #     stride_for_transpconv,
-                #     bias=conv_bias,
-                # )
+
+            conv_up_blk = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                nn.Conv2d(input_features_below, input_features_skip, 1, 1, 0, bias=conv_bias),
             )
+            transpconvs.append(conv_up_blk)
 
             # input features to conv is 2x input_features_skip (concat input_features_skip with transpconv output)
             embed_dim = [2 * input_features_skip] * depths_per_stage[s - 1]
             depths = [n_conv_per_stage[s - 1]] * depths_per_stage[s - 1]
+            exp_ratio = expand_ratio if expand_ratio is not None else 1
 
             ###### Build blocks ######
             if block_type == "mbconv":
@@ -515,8 +516,8 @@ class UNetDecoder(nn.Module):
                     embed_dim=embed_dim,
                     depths=depths,
                     norm_layer=norm_op,
-                    act_layer=nonlin,
-                    expand_ratio=1,
+                    act_layer=nonlin,  # type: ignore[invalid-argument-type]
+                    expand_ratio=exp_ratio,
                 )
             elif block_type == "nat":
                 stage = Spatial2DNatStage(
@@ -539,7 +540,19 @@ class UNetDecoder(nn.Module):
                     norm_layer=norm_op,
                     act_layer="relu6",
                     drop_path=0.0,
-                    expand_ratio=1,
+                    expand_ratio=exp_ratio,
+                    **block_kwargs,
+                )
+            elif block_type == "ghost":
+                stage = GhostBlockStage(
+                    in_chans=2 * input_features_skip,
+                    embed_dim=embed_dim,
+                    depths=depths,
+                    cond_width=latent_width,
+                    out_chans=input_features_skip,
+                    norm_layer=norm_op,
+                    act_layer="relu6",
+                    drop_path=0.0,
                     **block_kwargs,
                 )
             else:
@@ -562,10 +575,20 @@ class UNetDecoder(nn.Module):
                     )
                 )
                 logger.debug(f"Make segmentation layer at layer {s}")
+                if self.predict_uncertainty:
+                    scale_layers.append(
+                        nn.Sequential(
+                            create_norm_act_layer("layernorm2d", input_features_skip, "silu"),
+                            conv_op(input_features_skip, num_classes, 1, 1, 0, bias=True),
+                        )
+                    )
+                    logger.debug(f"Make scale layer at layer {s}")
 
         self.stages = nn.ModuleList(stages)
         self.transpconvs = nn.ModuleList(transpconvs)
         self.seg_layers = nn.ModuleList(seg_layers)
+        if self.predict_uncertainty:
+            self.scale_layers = nn.ModuleList(scale_layers)
 
     def forward(
         self,
@@ -579,6 +602,7 @@ class UNetDecoder(nn.Module):
         """
         lres_input = skips[-1]
         seg_outputs = []
+        scale_outputs = []
 
         for s in range(len(self.stages)):
             x = self.transpconvs[s](lres_input)
@@ -586,22 +610,42 @@ class UNetDecoder(nn.Module):
             x = self.stages[s](x, cond)
             if self.deep_supervision:
                 seg_outputs.append(self.seg_layers[s](x))
+                if self.predict_uncertainty:
+                    scale_outputs.append(self.scale_layers[s](x))
             elif s == (len(self.stages) - 1):
                 seg_outputs.append(self.seg_layers[-1](x))
+                if self.predict_uncertainty:
+                    scale_outputs.append(self.scale_layers[-1](x))
             lres_input = x
 
         # invert seg outputs so that the largest segmentation prediction is returned first
         seg_outputs = seg_outputs[::-1]
+        if self.predict_uncertainty:
+            scale_outputs = [self._postprocess_scale(scale) for scale in scale_outputs[::-1]]
 
         if not self.deep_supervision:
             r = seg_outputs[0]
             # Buggy: using relu/sigmoid will cause gradient issue when training depth estimation
             r = self.output_processor(r)
+            if self.predict_uncertainty:
+                return {
+                    "depth": r,
+                    "scale": scale_outputs[0],
+                }
         else:
             r = [self.output_processor(seg_out) for seg_out in seg_outputs]
+            if self.predict_uncertainty:
+                return {
+                    "depth": r,
+                    "scale": scale_outputs,
+                }
         return r
+
+    def _postprocess_scale(self, scale: Tensor) -> Tensor:
+        return F.softplus(scale) + 1e-6
 
     def set_grad_checkpointing(self, enable: bool = True):
         for blk in self.stages:
             if hasattr(blk, "set_grad_checkpointing"):
-                blk.set_grad_checkpointing(enable)
+                blk.set_grad_checkpointing(enable)  # type: ignore[call-non-callable]
+                logger.trace(f"Set grad_checkpoint={enable} for {blk.__class__.__name__}")

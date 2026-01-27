@@ -72,6 +72,14 @@ def masked_rmse(pred: Tensor, target: Tensor, valid_mask: Tensor) -> Tensor:
     return torch.sqrt(mse.clamp_min(0.0))
 
 
+def _select_first_tensor(value: Tensor | list[Tensor] | tuple[Tensor, ...] | None) -> Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return value[0]
+    return value
+
+
 def _normalize_rgb(img: Tensor) -> np.ndarray:
     img_np = img.detach().float().cpu().numpy()
     if img_np.shape[0] > 3:
@@ -278,11 +286,30 @@ class US3DDepthEstimationTrainer:
 
         return optim, sched
 
-    def _forward(self, img: Tensor) -> Tensor:
+    def _unpack_model_output(self, out: Any) -> tuple[Tensor, Tensor | None]:
+        if isinstance(out, dict):
+            depth_out = _select_first_tensor(out.get("depth"))
+            if depth_out is None:
+                raise ValueError("Expected `depth` in model output.")
+            scale_out = _select_first_tensor(out.get("scale"))
+            return depth_out, scale_out
+
+        if isinstance(out, (list, tuple)):
+            if len(out) == 2 and isinstance(out[0], Tensor) and isinstance(out[1], Tensor):
+                return out[0], out[1]
+            depth_out = _select_first_tensor(out[0])
+            if depth_out is None:
+                raise ValueError("Expected tensor output from model.")
+            return depth_out, None
+
+        if isinstance(out, Tensor):
+            return out, None
+
+        raise ValueError(f"Unsupported model output type: {type(out)}")
+
+    def _forward(self, img: Tensor) -> tuple[Tensor, Tensor | None]:
         out = self.model(img)
-        if isinstance(out, list | tuple):
-            out = out[0]
-        return cast(Tensor, out)
+        return self._unpack_model_output(out)
 
     def train_step(self, batch: dict[str, Tensor]) -> DepthEstimationOutput:
         img = batch["img"].to(self.device, dtype=self.dtype)
@@ -299,7 +326,7 @@ class US3DDepthEstimationTrainer:
         #     )
 
         with self.accelerator.autocast():
-            pred = self._forward(img)
+            pred, uncertainty_scale = self._forward(img)
 
             # Check for NaN in model output
             # if torch.isnan(pred).any():
@@ -311,18 +338,25 @@ class US3DDepthEstimationTrainer:
                     f"Iterpolated prediction to match depth_gt shape: {pred.shape[-2:]} -> {depth_gt.shape[-2:]}"
                 )
                 pred = F.interpolate(pred, size=depth_gt.shape[-2:], mode="bilinear", align_corners=False)
+                if uncertainty_scale is not None:
+                    uncertainty_scale = F.interpolate(
+                        uncertainty_scale,
+                        size=depth_gt.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
 
-                # Check after interpolation
-                # if torch.isnan(pred).any():
-                #     self._log("WARNING: NaN detected after interpolation!", level="WARNING")
+            # Check after interpolation
+            # if torch.isnan(pred).any():
+            #     self._log("WARNING: NaN detected after interpolation!", level="WARNING")
 
             if self.accelerator.is_main_process and self.global_step % 500 == 0:
                 vis_path = self.proj_dir / "vis" / "train" / f"train_step_{self.global_step:09d}.webp"
-                scale = self.depth_scale if self.depth_scale is not None else 1.0
+                vis_scale = self.depth_scale if self.depth_scale is not None else 1.0
                 align_for_vis = bool(getattr(self.loss_fn, "ssi_weight", 0.0) > 0.0) if self.loss_fn else False
                 save_agl_visualization(
-                    pred[:1] * scale,
-                    depth_gt[:1] * scale,
+                    pred[:1] * vis_scale,
+                    depth_gt[:1] * vis_scale,
                     valid_mask[:1],
                     img[:1],
                     vis_path,
@@ -338,6 +372,7 @@ class US3DDepthEstimationTrainer:
                     depth_gt,
                     valid_mask=valid_mask,
                     image=img,
+                    scale=uncertainty_scale,
                     return_logs=True,
                 )
                 if isinstance(loss_out, tuple):
@@ -345,6 +380,12 @@ class US3DDepthEstimationTrainer:
                 else:
                     loss = loss_out
                     log_losses = {"loss": loss.detach()}
+
+            if uncertainty_scale is not None:
+                scale_stats = uncertainty_scale.detach().float()
+                log_losses["scale_min"] = scale_stats.amin()
+                log_losses["scale_mean"] = scale_stats.mean()
+                log_losses["scale_max"] = scale_stats.amax()
 
             # Check for NaN in loss
             # if torch.isnan(loss):
@@ -387,7 +428,7 @@ class US3DDepthEstimationTrainer:
             valid_mask = batch["valid_mask"].to(self.device)
 
             with self.accelerator.autocast():
-                pred = self._forward(img)
+                pred, _ = self._forward(img)
                 if pred.shape[-2:] != depth_gt.shape[-2:]:
                     pred = F.interpolate(pred, size=depth_gt.shape[-2:], mode="bilinear", align_corners=False)
 

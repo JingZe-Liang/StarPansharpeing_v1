@@ -50,6 +50,7 @@ train:
     # Use scale-shift-invariant regression when absolute scale is hard.
     data_weight: 1.0
     grad_weight: 0.2
+    laplace_weight: 0.01
     smooth_weight: 0.0
     silog_weight: 0.0
     ssi_weight: 0.0
@@ -70,6 +71,8 @@ train:
     oned_params_defaults:
       lr: 2.0e-4
       weight_decay: 0.0
+    ignored_keys_for_muon:
+      - "seg_layers"
 
   sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup

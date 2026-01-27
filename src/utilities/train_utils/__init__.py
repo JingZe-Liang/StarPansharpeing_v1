@@ -6,6 +6,11 @@ from .lr_scheduler import (
     get_cosine_schedule_reduced_restart_with_warmup,
     get_cosine_schedule_reduced_with_warmup,
 )
+from .optim import (
+    filter_no_wds_into_optim_groups,
+    filter_params_by_name,
+    wrap_module_checkpoint,
+)
 from .state import (
     LossMetricTracker,
     StepsCounter,

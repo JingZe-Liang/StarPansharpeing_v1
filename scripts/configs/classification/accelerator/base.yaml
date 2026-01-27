@@ -1,0 +1,23 @@
+_target_: accelerate.Accelerator
+mixed_precision: bf16
+log_with: tensorboard
+dataloader_config:
+  _target_: accelerate.utils.DataLoaderConfiguration
+  split_batches: false
+  even_batches: false
+  non_blocking: true
+  dispatch_batches: null
+  use_seedable_sampler: false
+  use_stateful_dataloader: false
+project_config:
+  _target_: accelerate.utils.ProjectConfiguration
+  project_dir: runs/stage2/
+  logging_dir: runs/stage2/tensorboard
+  total_limit: 5
+  automatic_checkpoint_naming: true
+gradient_accumulation_plugin:
+  _target_: accelerate.utils.GradientAccumulationPlugin
+  num_steps: 1
+  adjust_scheduler: false
+  sync_with_dataloader: false
+  sync_each_batch: false

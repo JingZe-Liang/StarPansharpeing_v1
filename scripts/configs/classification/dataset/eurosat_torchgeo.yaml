@@ -1,0 +1,46 @@
+train_bs: 64
+val_bs: 64
+
+dataset_name: EuroSAT
+img_size: 64
+channels: 13
+num_classes: 10
+to_neg_1_1: false
+
+consts:
+  img_size: ${..img_size}
+  channels: ${..channels}
+  num_classes: ${..num_classes}
+  to_neg_1_1: ${..to_neg_1_1}
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.classification.data.builder.create_dataloader
+  dataset:
+    _target_: src.stage2.classification.data.EuroSAT_torchgeo.EuroSATWithAug
+    root: data/Downstreams/EuroSAT_torchgeo
+    split: train
+    to_neg_1_1: ${...consts.to_neg_1_1}
+    download: true
+    checksum: false
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 4
+    shuffle: true
+    pin_memory: true
+
+val:
+  _target_: src.stage2.classification.data.builder.create_dataloader
+  dataset:
+    _target_: src.stage2.classification.data.EuroSAT_torchgeo.EuroSATWithAug
+    root: data/Downstreams/EuroSAT_torchgeo
+    split: val
+    to_neg_1_1: ${...consts.to_neg_1_1}
+    download: true
+    checksum: false
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 4
+    shuffle: false
+    pin_memory: true

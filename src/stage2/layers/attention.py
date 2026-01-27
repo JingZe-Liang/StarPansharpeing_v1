@@ -43,7 +43,11 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Annotated
 
-from .conv import ConvLayer, GLUMBConv, MBConv, ResBlock
+from .conv import ConvLayer, GLUMBConv, MBConv
+
+# Defer ResBlock import to avoid circular dependency with blocks.py
+# Import from parent to use __init__.py's export after blocks.py loads
+
 
 IdentityLayer = nn.Identity  # alias
 
