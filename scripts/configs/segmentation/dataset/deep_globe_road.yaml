@@ -1,0 +1,68 @@
+train_bs: 8
+val_bs: 4
+
+# Configs
+data_type: null
+label_mode: seg
+dataset_name: DeepGlobeRoadExtraction
+
+img_size: 512
+augmentation_prob: 0.5
+norm_mean_std: [[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]
+num_classes: 2
+
+consts:
+  is_single_image: false
+  img_size: ${..img_size}
+  augmentation_prob: ${..augmentation_prob}
+  norm_mean_std: ${..norm_mean_std}
+  num_classes: ${..num_classes}
+  bands: 3
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/train
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: ${...consts.augmentation_prob}
+    norm_mean_std: ${...consts.norm_mean_std}
+  combined_kwargs:
+    batching_method: per_stream
+    is_cycled: true
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 6
+    shuffle: true
+    pin_memory: true
+
+val:
+  _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/valid
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: 0.0
+    norm_mean_std: ${...consts.norm_mean_std}
+  combined_kwargs:
+    batching_method: per_stream
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 2
+    shuffle: false
+    pin_memory: true
+
+test:
+  _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
+  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/test
+  stream_ds_kwargs:
+    img_size: ${...consts.img_size}
+    augmentation_prob: 0.0
+    norm_mean_std: ${...consts.norm_mean_std}
+  combined_kwargs:
+    batching_method: per_stream
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 2
+    shuffle: false
+    pin_memory: true

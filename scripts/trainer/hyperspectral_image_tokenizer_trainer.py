@@ -43,7 +43,6 @@ from tqdm import trange
 
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.data import _TimedLoaderIterator
-from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.self_supervised import (
     LeJEPAAugmentation,
     MaskCollator,
@@ -208,7 +207,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # if compile the model
         if self.train_cfg.compile_model:
-            self.tokenizer = torch.compile(self.tokenizer)
+            self.tokenizer = torch.compile(self.tokenizer)  # type: ignore[invalid-assignment]
             self.log_msg(f"Compiled tokenizer {self.tokenizer.__class__.__name__}")
             self.vq_loss_fn.discriminator = torch.compile(self.vq_loss_fn.discriminator)
             self.log_msg(f"Compiled discriminator {self.vq_loss_fn.discriminator.__class__.__name__}")
@@ -347,9 +346,6 @@ class CosmosHyperspectralTokenizerTrainer:
             from src.stage1.self_supervised.dino.layers.dino_head import DINOHead
             from src.stage1.self_supervised.dino.loss.dino_clstoken_loss import DINOLoss
 
-            if self.sep_enc_dec:
-                raise NotImplementedError("当前trainer仅支持在非`seperate_enc_dec`模式下使用dino_cls。")
-
             # dino_cls 依赖 multi-crop augmentation；当任务组合为 ijepa+dino_cls 时，
             # 这里需要显式初始化，否则 forward_proxy_task 会找不到 proxy_aug_pipeline。
             self.proxy_aug_pipeline = _create_aug_pipline()
@@ -394,90 +390,43 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def setup_tokenizer(self):
         tokenizer_name = self.train_cfg.tokenizer_name
-        self.sep_enc_dec = self.train_cfg.seperate_enc_dec
+        sep_enc_dec = bool(getattr(self.train_cfg, "seperate_enc_dec", False))
         self.quantizer_type: str | None = self.cfg.vq_loss.quantizer_type
         self.log_msg(f"[Tokenizer] tokenizer name: {tokenizer_name}]")
         self.log_msg(f"[Train Tokenizer Setter]: quantizer_type={self.quantizer_type}")
 
-        if self.train_cfg.seperate_enc_dec:
-            self.log_msg("[Tokenizer]: use pretrained cosmos tokenizer with seperate encoder and decoder")
-            tokenizer_config = to_cont(self.tokenizer_cfg.config)
-            self.tokenizer_encoder, self._enc_model_mody_keys = load_jit_model_shape_matched(
-                self.cfg.tokenizer.enc_path,
-                tokenizer_config,
-                device=self.device,
-                part="encoder",
+        if sep_enc_dec:
+            raise ValueError(
+                "当前 trainer 已不再支持 `train.seperate_enc_dec=True`（encoder/decoder 分离加载）。"
+                "请使用 unified tokenizer（encoder+decoder 合并在同一个 model 内）并将其设为 False。"
             )
-            self.tokenizer_decoder, self._dec_model_mody_keys = load_jit_model_shape_matched(
-                self.cfg.tokenizer.dec_path,
-                tokenizer_config,
-                device=self.device,
-                part="decoder",
+        if tokenizer_name in {"cosmos_sep"}:
+            raise ValueError(
+                f"tokenizer_name={tokenizer_name} 需要 separate encoder/decoder，但该 trainer 已移除该模式；"
+                "请改用 unified tokenizer 配置（例如 cosmos_uni / dcae 等）。"
             )
-            self.tokenizer_encoder: nn.Module
-            self.tokenizer_decoder: nn.Module
 
-            # quantizer
-            if self.cfg.quantizer.quant is not None:
-                self.quantizer = hydra.utils.instantiate(self.cfg.quantizer.quant).to(self.device)
-            elif hasattr(self.tokenizer, "quantizer"):
-                self.quantizer = self.tokenizer.quantizer
-            else:
-                self.quantizer = None
+        self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
 
-            self.use_quantizer = self.quantizer is not None
-            self.norm_z = self.cfg.quantizer.norm_z
-            if not self.sep_enc_dec:
-                assert not self.norm_z, "norm_z is not supported when sep_enc_dec is False"
-            if not self.use_quantizer:
-                assert not self.norm_z, "norm_z can not be set when quantizer is not used"
-            if self.norm_z:
-                self.log_msg(
-                    "norm_z is set to True in the trainer, which is not recommanded",
-                    level="WARNING",
-                )
+        # Init tokenizer model
+        self.tokenizer: nn.Module = hydra.utils.instantiate(self.tokenizer_cfg)
+        if self.train_cfg.finetune_strategy == "decoder_only" and hasattr(self.tokenizer, "encoder"):
+            self.tokenizer.encoder.requires_grad_(False)
+            logger.log("NOTE", "freeze the tokenizer encoder.")
 
-            self.log_msg(
-                f"[Tokenizer Encoder]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer_encoder)}"
-            )
-            self.log_msg(
-                f"[Tokenizer Decoder]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer_decoder)}"
-            )
-            if (
-                self.use_quantizer
-                and isinstance(self.quantizer, nn.Module)
-                and len(list(self.quantizer.parameters())) > 0
-            ):
-                self.log_msg("[Quantizer]: quantizer has parameters")
-                self.log_msg(
-                    "[Quantizer]: quantizer parameter table:\n{}".format(parameter_count_table(self.quantizer))
-                )
+        # quantizer in the tokenizer, not handled by this trainer
+        self.use_quantizer = getattr(self.tokenizer, "quantizer", None) is not None  # vq, bsq, fsq, kl
+        self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
+        if self.use_quantizer:
+            self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
 
-        # the encoder and decoder is one class or lora mixin
-        else:
-            self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
-            self.norm_z = False  # in the model, not in trainer
+        # Gradient checkpointing
+        if self.train_cfg.grad_checkpoint and hasattr(self.tokenizer, "set_grad_checkpointing"):
+            self.tokenizer.set_grad_checkpointing()
+            self.log_msg("Set tokenizer gradient checkpointing enabled")
 
-            # Init tokenizer model
-            self.tokenizer: nn.Module = hydra.utils.instantiate(self.tokenizer_cfg)
-            if self.train_cfg.finetune_strategy == "decoder_only":
-                self.tokenizer.encoder.requires_grad_(False)
-                logger.log("NOTE", "freeze the tokenizer encoder.")
-
-            # quantizer in the tokenizer, not handled by this trainer
-            self.use_quantizer = getattr(self.tokenizer, "quantizer", None) is not None  # vq, bsq, fsq, kl
-            self.quantizer = None
-            self.log_msg(f"[Tokenizer]: init tokenizer {self.tokenizer.__class__.__name__}")
-            if self.use_quantizer:
-                self.log_msg(f"[Tokenizer]: has quantizer {self.tokenizer.quantizer.__class__}")
-
-            # Gradient checkpointing
-            if self.train_cfg.grad_checkpoint:
-                self.tokenizer.set_grad_checkpointing()
-                self.log_msg("Set tokenizer gradient checkpointing enabled")
-
-            # the params
-            self.log_msg(f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}")
+        # the params
+        self.log_msg(f"[Tokenizer]: tokenizer parameter table:\n{parameter_count_table(self.tokenizer)}")
 
     def setup_aug_pipe_and_anti_degradation_network(self):
         self.use_training_aug = False
@@ -511,12 +460,7 @@ class CosmosHyperspectralTokenizerTrainer:
             return
 
         ema_partial = hydra.utils.instantiate(self.cfg.ema)
-
-        if self.sep_enc_dec:
-            self.ema_encoder = ema_partial(self.tokenizer_encoder).to(self.device)
-            self.ema_decoder = ema_partial(self.tokenizer_decoder).to(self.device)
-        else:
-            self.ema_tokenizer: EMA = ema_partial(self.tokenizer).to(self.device)
+        self.ema_tokenizer: EMA = ema_partial(self.tokenizer).to(self.device)
 
         # Disc need ema?
         self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
@@ -546,11 +490,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 input_lst = [log_file] * self.accelerator.num_processes
             else:
                 input_lst = [None] * self.accelerator.num_processes
-            output_lst = [None]
+            output_lst: list[Path | None] = [None]
             torch.distributed.scatter_object_list(output_lst, input_lst, src=0)
-            output_lst: list[Path]
-            log_file: Path = output_lst[0]
-            assert isinstance(log_file, Path), "log_file type should be Path"
+            log_file_obj = output_lst[0]
+            assert isinstance(log_file_obj, Path), "log_file type should be Path"
+            log_file = log_file_obj
 
         # logger
         if not self.train_cfg.debug:
@@ -604,7 +548,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     self.swanlab_logger = swanlab.init(
                         project="RSTokenizer",
                         workspace="iamzihan",
-                        experiment_name=exp_name,
+                        experiment_name=str(exp_name) if exp_name is not None else "default",
                         logdir=str(Path(log_dir) / "swanlab"),
                         resume="never",
                         config=exp_cfg,
@@ -743,7 +687,6 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def _wrap_peft_tokenizer(self):
         assert "peft" in self.cfg, "peft_cfg not in the config"
-        assert not self.sep_enc_dec, "peft_cfg not supported for sep enc dec"
         assert self.accelerator.distributed_type != accelerate.utils.DistributedType.DEEPSPEED, (
             "Deepspeed PEFT tuning supports not implemented yet"
         )
@@ -778,7 +721,7 @@ class CosmosHyperspectralTokenizerTrainer:
         self.log_msg(f"[PEFT]: peft_cfg is {peft_cfg}, wrapping the tokenizer... \n\n")
         adapter_name = getattr(self.dataset_cfg, "used", "default")
         self.tokenizer_peft_wrapped = get_peft_model(
-            self.tokenizer,
+            self.tokenizer,  # type: ignore[invalid-argument-type]
             peft_config=peft_cfg,
             adapter_name=adapter_name,  # dataset name ?
             low_cpu_mem_usage=False,  # do not use meta device to load, since the tokenizer is not huge.
@@ -788,175 +731,75 @@ class CosmosHyperspectralTokenizerTrainer:
         # base model to train
         self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()  # type: ignore
 
-    def _get_tokenizer_params(self, for_optimizer=False, with_name: bool = False):
-        # key to params
-        def get_tokenizer_params_from_keys(keys: list[str]):
-            return [p for name, p in self.tokenizer_encoder.named_parameters() if name in keys]
+    def _get_tokenizer_params(self, for_optimizer: bool = False, with_name: bool = False):
+        if for_optimizer:
+            return self.tokenizer.state_dict()
 
-        def get_tokenizer_params_not_from_keys(keys: list[str]):
-            return [p for name, p in self.tokenizer_encoder.named_parameters() if name not in keys]
+        ft_strategy = self.train_cfg.finetune_strategy
+        if ft_strategy == "decoder_only":
+            self.log_msg("Only decoder parameters are tunable.")
+            return get_parameters_encoder_frozen(model=self.tokenizer, with_name=with_name)
 
-        # quantizer
-        if self.use_quantizer and self.sep_enc_dec:
-            quant_params = list(self.quantizer.parameters())
-            self.log_msg("[Optim]: add quantizer params into optimizer")
-            for quant_p in quant_params:
-                self.log_msg(f"[Optim]: quantizer param - {quant_p.shape}")
-        else:
-            quant_params = []
+        # PEFT will handle the learnable parameters on its own, but we still need to provide params to the optimizer.
+        if ft_strategy in ("finetune_all", "peft"):
+            self.log_msg("All parameters are trainable")
+            return get_model_learnable_params(self.tokenizer, with_name=with_name)
 
-        if not for_optimizer:
-            if self.sep_enc_dec:
-                assert not with_name, "with_name is not supported for sep enc dec"
-
-                not_pretrained_keys = [
-                    *self._enc_model_mody_keys["not_pretrained_keys"],
-                    *self._dec_model_mody_keys["not_pretrained_keys"],
-                ]
-
-                # * finetune all, different layers, first conv ===================
-                if self.train_cfg.finetune_strategy == "finetune_all":
-                    params = [
-                        *list(self.tokenizer_encoder.parameters()),
-                        *list(self.tokenizer_decoder.parameters()),
-                    ]
-                elif self.train_cfg.finetune_strategy == "hier_finetune":
-                    params = [
-                        {
-                            "lr": self.train_cfg.tokenizer_optimizer.hier_base_lr,
-                            "params": get_tokenizer_params_from_keys(not_pretrained_keys),
-                            "weight_decay": self.train_cfg.tokenizer_optimizer.weight_decay,
-                        },
-                        {
-                            "lr": self.train_cfg.tokenizer_optimizer.hier_small_lr,
-                            "params": get_tokenizer_params_not_from_keys(not_pretrained_keys),
-                            "weight_decay": self.train_cfg.tokenizer_optimizer.weight_decay,
-                        },
-                    ]
-                elif self.train_cfg.finetune_strategy == "finetune_first_conv":
-                    # performs poor, and still consume GPU mem.
-                    params = get_tokenizer_params_from_keys(not_pretrained_keys)
-                    # gradient not required
-                    for p in self.tokenizer.parameters():
-                        if p not in not_pretrained_keys:
-                            p.requires_grad = False
-
-                # * finetune decoder output head, or encoder output head + decoder input head =======
-                # * from DCAE training phases 2 and 3
-                elif self.train_cfg.finetune_strategy == "dcae_refine_decoder_head":
-                    # decoder head is only refined for low-resolution images
-                    # use l1, perceptual, gan losses
-
-                    n_layer_ft = self.train_cfg.finetune_cfg.refine_decoder_head_n_layers
-                    if isinstance(n_layer_ft, str):
-                        assert n_layer_ft in ["all"], 'n_layer_ft must be "all"'
-                        self.log_msg(
-                            f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, refine the whole decoder"
-                        )
-                    else:
-                        assert n_layer_ft >= 0, "n_layer_ft must be equal or bigger than 0"
-                        self.log_msg(
-                            f"[Finetune Strategy]: {self.train_cfg.finetune_strategy}, "
-                            "use DCAE refine decoder head (phase 3) stragety for low-resolution images. "
-                            f"finetune the decoder last {n_layer_ft} layers and last output convs"
-                        )
-
-                    # fix the codebook if any is learnable
-                    quant_params = []
-                    if self.use_quantizer and isinstance(self.quantizer, nn.Module):
-                        self.quantizer.eval()
-
-                    # get decoder head params
-                    params = []
-                    match self.train_cfg.tokenizer_name:
-                        case "cosmos_sep":
-                            # let encoder fixed
-                            self.tokenizer_encoder.eval()
-
-                            if n_layer_ft == "all":
-                                return self.tokenizer_decoder.parameters()
-
-                            # add the conv_out layer and unpatcher layer
-                            params.extend(
-                                list(self.tokenizer_decoder[1].norm_out.parameters())
-                                + list(self.tokenizer_decoder[1].unpatcher.parameters())
-                                + list(self.tokenizer_decoder[1].conv_out.parameters())
-                            )
-
-                            # last n_layers decoder layers
-                            if n_layer_ft > 0:
-                                all_layers = list(self.tokenizer_decoder[1].up)
-                                selected_layers = all_layers[-n_layer_ft:]
-                                params.extend([p for layer in selected_layers for p in layer.parameters()])
-                        case "cosmos_uni":
-                            self.tokenizer.encoder.eval()
-
-                            if n_layer_ft == "all":
-                                return self.tokenizer.decoder.parameters()
-
-                            params.extend(
-                                list(self.tokenizer.decoder.norm_out.parameters())
-                                + list(self.tokenizer.decoder.unpatcher.parameters())
-                                + list(self.tokenizer.decoder.conv_out.parameters())
-                            )
-
-                            # last n_layers decoder layers
-                            if n_layer_ft > 0:
-                                all_layers = list(self.tokenizer.decoder.up)
-                                selected_layers = all_layers[-n_layer_ft:]
-                                params.extend([p for layer in selected_layers for p in layer.parameters()])
-                        case "dcae":
-                            self.tokenizer.encoder.eval()
-
-                            if n_layer_ft == "all":
-                                return self.tokenizer.decoder.parameters()
-
-                            params.extend(
-                                # proj out layer
-                                list(self.tokenizer.decoder.project_out)
-                            )
-
-                            if n_layer_ft > 0:
-                                stages = self.tokenizer.decoder.stages
-                                selected_layers = stages[-n_layer_ft:]
-                                for layer in selected_layers:
-                                    params.extend(list(layer.parameters()))
-                        case _:
-                            raise ValueError(f"Unknown tokenizer name: {self.train_cfg.tokenizer_name}")
-
-                elif self.train_cfg.finetune_strategy == "dcae_adapt_latent":
-                    # adapt latents
-                    # by finetuning encoder head and decoder for high-resolution images
-                    # use l1, perceptual losses (w/o gan loss)
-
-                    raise NotImplementedError("not implemented yet")
-
-                else:
-                    raise ValueError(f"Unknown finetune strategy: {self.train_cfg.finetune_strategy}")
-
-                self.log_msg(f"[Optimizer]: finetune strategy: {self.train_cfg.finetune_strategy}")
+        if ft_strategy == "dcae_refine_decoder_head":
+            n_layer_ft = self.train_cfg.finetune_cfg.refine_decoder_head_n_layers
+            if isinstance(n_layer_ft, str):
+                assert n_layer_ft in {"all"}, 'n_layer_ft must be "all"'
+                self.log_msg(f"[Finetune Strategy]: {ft_strategy}, refine the whole decoder")
             else:
-                if self.train_cfg.finetune_strategy == "decoder_only":
-                    self.log_msg("Only decoder parameters are tunable.")
-                    params = get_parameters_encoder_frozen(
-                        model=self.tokenizer,
-                        with_name=with_name,
+                assert n_layer_ft >= 0, "n_layer_ft must be equal or bigger than 0"
+                self.log_msg(
+                    f"[Finetune Strategy]: {ft_strategy}, "
+                    "use DCAE refine decoder head (phase 3) strategy for low-resolution images. "
+                    f"finetune the decoder last {n_layer_ft} layers and last output convs"
+                )
+
+            params: list[torch.nn.Parameter] = []
+            match self.train_cfg.tokenizer_name:
+                case "cosmos_uni":
+                    self.tokenizer.encoder.eval()
+
+                    if n_layer_ft == "all":
+                        return self.tokenizer.decoder.parameters()
+
+                    params.extend(
+                        list(self.tokenizer.decoder.norm_out.parameters())
+                        + list(self.tokenizer.decoder.unpatcher.parameters())
+                        + list(self.tokenizer.decoder.conv_out.parameters())
                     )
-                # peft will handle the learnable parameters
-                elif self.train_cfg.finetune_strategy in ("finetune_all", "peft"):
-                    self.log_msg("All parameters are trainable")
-                    params = get_model_learnable_params(self.tokenizer, with_name=with_name)
-                else:
-                    raise ValueError(f"Unknown training/finetuning strategy {self.train_cfg.finetune_strategy}")
 
-            # add with quantizer params
-            if self.sep_enc_dec:
-                assert isinstance(params, list)
-                params += quant_params
-        else:
-            raise NotImplementedError("not implemented")
+                    if n_layer_ft > 0:
+                        all_layers = list(self.tokenizer.decoder.up)  # type: ignore[invalid-argument-type]
+                        selected_layers = all_layers[-n_layer_ft:]
+                        params.extend([p for layer in selected_layers for p in layer.parameters()])
+                case "dcae":
+                    self.tokenizer.encoder.eval()
 
-        return params
+                    if n_layer_ft == "all":
+                        return self.tokenizer.decoder.parameters()
+
+                    params.extend(list(self.tokenizer.decoder.project_out))  # type: ignore[invalid-argument-type]
+
+                    if n_layer_ft > 0:
+                        stages = self.tokenizer.decoder.stages
+                        selected_layers = stages[-n_layer_ft:]  # type: ignore[non-subscriptable]
+                        for layer in selected_layers:
+                            params.extend(list(layer.parameters()))
+                case _:
+                    raise ValueError(
+                        f"finetune_strategy={ft_strategy} does not support tokenizer_name={self.train_cfg.tokenizer_name}"
+                    )
+
+            return params
+
+        if ft_strategy == "dcae_adapt_latent":
+            raise NotImplementedError("dcae_adapt_latent is not implemented yet")
+
+        raise ValueError(f"Unknown training/finetuning strategy {ft_strategy}")
 
     def _get_disc_params(self, for_optimizer=False, with_name: bool = False):
         if not for_optimizer:
@@ -975,7 +818,7 @@ class CosmosHyperspectralTokenizerTrainer:
         if disable_heavyball_compile:
             import heavyball
 
-            heavyball.utils.compile_mode = None
+            heavyball.utils.compile_mode = None  # type: ignore[invalid-assignment]
 
         # optimizers
         if (
@@ -1072,39 +915,13 @@ class CosmosHyperspectralTokenizerTrainer:
         ################ for FSDP2 accelerator wrapper ############
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
-            # set models with property dtype
-            _get_model_dtype = lambda model: next(model.parameters()).dtype
-            if self.sep_enc_dec:
-                self.tokenizer_encoder.dtype = torch.float  # self.dtype
-                self.tokenizer_decoder.dtype = torch.float  # self.dtype
-            else:
-                self.tokenizer.dtype = torch.float  # self.dtype
-            self.vq_loss_fn.discriminator.dtype = self.dtype
+            self.tokenizer.dtype = torch.float  # self.dtype
+            self.vq_loss_fn.discriminator.dtype = self.dtype  # type: ignore[invalid-assignment]
 
         ########### Tokenizer, Quantizer, Discriminator preparation ###########
         # tokenizer
-        if self.sep_enc_dec:
-            # FIXME: FSDP2 missing mapping for a parameter in the optmizer
-            self.tokenizer_encoder, self.tokenizer_optim = self.accelerator.prepare(
-                self.tokenizer_encoder, self.tokenizer_optim
-            )
-            self.tokenizer_decoder, self.tokenizer_optim = self.accelerator.prepare(
-                self.tokenizer_decoder, self.tokenizer_optim
-            )
-            # self.tokenizer_encoder = self.set_fsdp_cpu_local_tensor_to_each_rank(
-            #     self.tokenizer_encoder
-            # )
-            # self.tokenizer_decoder = self.set_fsdp_cpu_local_tensor_to_each_rank(
-            #     self.tokenizer_decoder
-            # )
-        else:
-            self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(self.tokenizer, self.tokenizer_optim)
-            # self.tokenizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
-
-        # quantizer already in the tokenizer  ##### !! Do no use it
-        if self.quantizer is not None:
-            self.quantizer = self.accelerator.prepare(self.quantizer)
-            # self.quantizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.quantizer)
+        self.tokenizer, self.tokenizer_optim = self.accelerator.prepare(self.tokenizer, self.tokenizer_optim)
+        # self.tokenizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
 
         # discriminator
         (self.vq_loss_fn.discriminator, self.disc_optim) = self.accelerator.prepare(
@@ -1180,11 +997,7 @@ class CosmosHyperspectralTokenizerTrainer:
             return
 
         if mode == "tokenizer":
-            if self.sep_enc_dec:
-                self.ema_encoder.update()
-                self.ema_decoder.update()
-            else:
-                self.ema_tokenizer.update()
+            self.ema_tokenizer.update()
 
         elif mode == "disc":
             self.ema_vq_disc.update()
@@ -1279,7 +1092,7 @@ class CosmosHyperspectralTokenizerTrainer:
             mae_img_size = 224
             x_mae = F.interpolate(x, size=mae_img_size, mode="bilinear")
             with self.accelerator.autocast():
-                mae_loss, mae_recon = self.tokenizer.encode_mae(x_mae)
+                mae_loss, mae_recon = self.tokenizer.encode_mae(x_mae)  # type: ignore[call-non-callable]
             if "latent_mae" in proxy_tasks:
                 # if works on pixel space, the `mae_recon` is the image
                 mae_recon = None
@@ -1452,7 +1265,6 @@ class CosmosHyperspectralTokenizerTrainer:
             assert hasattr(self, "dino_cls_loss"), "dino_cls_loss is not initialized; check proxy_task config"
             assert hasattr(self.tokenizer, "dino_cls_head"), "tokenizer.dino_cls_head is not initialized"
             assert not self.no_ema, "dino_cls requires EMA teacher; current training config has no_ema=True"
-            assert not self.sep_enc_dec, "dino_cls currently does not support separate_enc_dec mode"
 
             dino_cfg = cfg.dino_cls
             dino_img_size = int(getattr(dino_cfg, "img_size", 224))
@@ -1478,7 +1290,9 @@ class CosmosHyperspectralTokenizerTrainer:
             with torch.no_grad():
                 with self.accelerator.autocast():
                     # Global views
-                    teacher_cls = self._encode_dino_cls(self.ema_tokenizer.ema_model, global_x)
+                    teacher_model = self.ema_tokenizer.ema_model
+                    assert isinstance(teacher_model, nn.Module), "EMA teacher model is not initialized"
+                    teacher_cls = self._encode_dino_cls(teacher_model, global_x)
                     teacher_logits = self.ema_tokenizer.ema_model.dino_cls_head(  # type: ignore[attr-defined]
                         teacher_cls
                     )
@@ -1524,7 +1338,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 x_nepa = x
 
             with self.accelerator.autocast():
-                nepa_out = self.tokenizer.encode_nepa(x_nepa)
+                nepa_out = self.tokenizer.encode_nepa(x_nepa)  # type: ignore[call-non-callable]
                 loss = nepa_out["nepa_loss"]
 
             proxy_loss = proxy_loss + loss * cfg.loss_weights["nepa"]
@@ -1538,57 +1352,23 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def forward_tokenizer(self, x: torch.Tensor, ema: bool = False, is_testing: bool = False) -> edict:
         out_d = edict()
-        dec_out = {}
-        q_loss = None
-        q_info = None
+        _ = is_testing  # kept for backward compatibility; prefer `ema`
 
         with self.accelerator.autocast():
-            # `is_testing` is deprecated, use `ema` instead
-            if self.sep_enc_dec:
-                ## This logic is total deprecated, right now the encoder and decoder are unified
-                # into a single model.
-                if not ema:
-                    if is_testing:
-                        self.tokenizer_encoder.eval()
-                        self.tokenizer_decoder.eval()
-                    to_enc = lambda x: self.tokenizer_encoder(x)[0]
-                    to_dec = lambda x: self.tokenizer_decoder(x)
-                else:
-                    if is_testing:
-                        self.ema_encoder.eval()
-                        self.ema_decoder.eval()
-                    to_enc = lambda x: self.ema_encoder(x)[0]
-                    to_dec = lambda x: self.ema_decoder(x)
-
-                latent = to_enc(x)
-
-                if self.norm_z:  # only norm for seperated encoder and decoder
-                    latent = torch.nn.functional.normalize(latent, dim=1)
-
-                if self.quantizer is not None:
-                    latent_q, q_loss, q_info = self.quantizer(latent)
-                else:
-                    latent_q = latent
-                recon = to_dec(latent_q)
-                dec_out = {"latent": latent, "q_loss": q_loss, "q_loss_breakdown": q_info}
+            if not self.no_ema and ema:
+                tokenizer = self.ema_tokenizer.ema_model
+                tokenizer.eval()
             else:
-                if not self.no_ema and ema:
-                    tokenizer = self.ema_tokenizer.ema_model
-                    tokenizer.eval()
-                else:
-                    tokenizer = self.tokenizer
+                tokenizer = self.tokenizer
 
-                # Forward tokenizer
-                dec_out = tokenizer(x)
-                recon = dec_out["recon"]
-                # _raise_if_nonfinite_tensor(recon, tensor_name="tokenizer.recon", model=tokenizer)
-                # _raise_if_nonfinite_tensor(dec_out["latent"], tensor_name="tokenizer.latent", model=tokenizer)
+            assert isinstance(tokenizer, nn.Module), "tokenizer must be a torch.nn.Module"
+            dec_out = tokenizer(x)
+            recon = dec_out["recon"]
 
-                # Is deep supervision
-                _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
-                if getattr(_unwrap_tok, "_is_deep_supervision", False):
-                    assert isinstance(dec_out, dict), "dec_out must be a dict for deep supervision"
-                    out_d.deep_supervision_outputs = dec_out["deep_supervision_outputs"]
+            _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
+            if getattr(_unwrap_tok, "_is_deep_supervision", False):
+                assert isinstance(dec_out, dict), "dec_out must be a dict for deep supervision"
+                out_d.deep_supervision_outputs = dec_out["deep_supervision_outputs"]
         _unwrap_tok = self.accelerator.unwrap_model(self.tokenizer)
 
         # basic out
@@ -1704,16 +1484,12 @@ class CosmosHyperspectralTokenizerTrainer:
                 if not w.requires_grad:
                     raise ValueError(f"The last layer weight must be enabled requires_grad {mode=}")
 
+        _ = use_ema  # preserved API; last-layer is always taken from the online tokenizer in this trainer
+
         if mode == "dec":
-            if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(self.tokenizer_decoder).decoder.get_last_layer()
-            else:
-                w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
+            w = self.accelerator.unwrap_model(self.tokenizer).get_last_layer()
         else:  # encoder last conv out weight
-            if self.sep_enc_dec:
-                w = self.accelerator.unwrap_model(self.tokenizer_encoder).encoder.conv_out.weight
-            else:
-                w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
+            w = self.accelerator.unwrap_model(self.tokenizer).get_last_enc_layer()
         _check_req_grad(w)
 
         return w
@@ -1750,7 +1526,7 @@ class CosmosHyperspectralTokenizerTrainer:
             elif (
                 self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP or self.accelerator.is_fsdp2
             ) and isinstance(model, FSDP):
-                FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
+                model.clip_grad_norm_(_max_grad_norm)
 
     def _raise_if_nonfinite_params(self, model: nn.Module, *, model_name: str, max_items: int = 30) -> None:
         bad_params: list[str] = []
@@ -1832,11 +1608,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # gradient check
         if self.accelerator.sync_gradients:
-            if self.sep_enc_dec:
-                self.gradient_check(self.tokenizer_encoder)
-                self.gradient_check(self.tokenizer_decoder)
-            else:
-                self.gradient_check(self.tokenizer)
+            self.gradient_check(self.tokenizer)
 
         # optimizer step
         self.tokenizer_optim.step()
@@ -1872,13 +1644,15 @@ class CosmosHyperspectralTokenizerTrainer:
         self.disc_optim.zero_grad()
         self.accelerator.backward(disc_loss)
         if self.accelerator.sync_gradients:
-            self.gradient_check(self.vq_loss_fn.discriminator)
+            disc = self.vq_loss_fn.discriminator
+            assert isinstance(disc, nn.Module), "discriminator must be a torch.nn.Module"
+            self.gradient_check(disc)
 
         self.disc_optim.step()
         if getattr(self.train_cfg, "grad_check", False):
-            self._raise_if_nonfinite_params(
-                self.vq_loss_fn.discriminator, model_name="discriminator (after optimizer.step)"
-            )
+            disc = self.vq_loss_fn.discriminator
+            assert isinstance(disc, nn.Module), "discriminator must be a torch.nn.Module"
+            self._raise_if_nonfinite_params(disc, model_name="discriminator (after optimizer.step)")
         self.disc_sched.step()
 
         # ema update
@@ -1911,7 +1685,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.gradient_check(self.proxy_model)
 
         if "dino_cls" in self._proxy_tasks and self.global_step % 10 == 0:
-            logger.debug(f"dino head grad: {self.tokenizer.dino_cls_head.last_layer.weight.grad.abs().mean()}")
+            dino_head_grad = self.tokenizer.dino_cls_head.last_layer.weight.grad.abs().mean()  # type: ignore[call-non-callable]
+            logger.debug(f"dino head grad: {dino_head_grad}")
 
         # NOTE: set the unused parameters' gradients to zero for DDP
         # _unwrap_model = self.accelerator.unwrap_model(self.tokenizer)
@@ -1958,7 +1733,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self._psnr_fn.update(x_q, recon_q)
                 self._ssim_fn.update(x_q, recon_q)
 
-        _accum_models = [self.tokenizer_encoder, self.tokenizer_decoder] if self.sep_enc_dec else [self.tokenizer]
+        _accum_models = [self.tokenizer]
         _accum_models.append(self.vq_loss_fn.discriminator)
         if hasattr(self, "proxy_model"):
             _accum_models.append(self.proxy_model)
@@ -2118,7 +1893,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
 
         if quality_track_n >= 0 and self.global_step % quality_track_n == 0 and self.global_step >= quality_track_after:
-            self.log_msg(f"[Train Metrics]: PSNR: {self._psnr_fn.compute():.3f}, SSIM: {self._ssim_fn.compute():.3f}")
+            psnr_val = self._psnr_fn.compute()  # type: ignore[missing-argument]
+            ssim_val = self._ssim_fn.compute()  # type: ignore[missing-argument]
+            self.log_msg(f"[Train Metrics]: PSNR: {psnr_val:.3f}, SSIM: {ssim_val:.3f}")
 
         if self.global_step % self.train_cfg.log.visualize_every == 0:
             self.visualize_reconstruction(
@@ -2133,10 +1910,11 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
 
     def format_log(self, log_token_loss: dict | None = None, log_disc_loss: dict | None = None) -> str:
-        def dict_round_to_list_str(d: dict, n_round: int = 3, select: list[str] | None = None):
+        def dict_round_to_list_str(d: dict, n_round: int = 3):
             strings = []
             for k, v in d.items():
-                if select is not None and k not in select:
+                # Filter out None or values close to zero
+                if v is None:
                     continue
 
                 if isinstance(v, (float, torch.Tensor)):
@@ -2148,6 +1926,11 @@ class CosmosHyperspectralTokenizerTrainer:
                             )
                             continue
                         v = v.item()
+
+                    # Filter out values close to zero
+                    if abs(v) < 1e-6:
+                        continue
+
                     strings.append(f"<cyan>{k}</>: {v:.{n_round}f}")  # colorize the key
                 else:
                     strings.append(f"<cyan>{k}</>: {v}")
@@ -2156,83 +1939,12 @@ class CosmosHyperspectralTokenizerTrainer:
         n_round = 4
         strings = []
 
-        # * tokenzier losses
+        # * tokenizer losses
         if log_token_loss is not None:
-            _selects = ["reconstruct_loss", "g_loss", "d_weight"]
-            if self.vq_loss_fn.use_lcr:
-                _selects.append("lcr_loss")
-            if self.vq_loss_fn.use_sigreg:
-                _selects.append("sigreg_loss")
-            if self.vq_loss_fn.use_latent_sparsity:
-                _selects.append("latent_sparsity_loss")
-            if self.vq_loss_fn.use_latent_reg:
-                _selects.append("h_value_reg_loss")
-            if self.vq_loss_fn.use_ssim:
-                _selects.append("ssim_loss")
-            if self.vq_loss_fn.use_perceptual_loss:
-                _selects.append("perceptual_loss")
-                _selects.append("gram_loss")
-            if self.vq_loss_fn.use_repa:
-                _selects.append("repa_loss")
-            if self.vq_loss_fn.use_vf:
-                _selects.append("vf_loss")
-            if self.vq_loss_fn.use_sem_distill:
-                _selects.append("sem_dist_loss")
-
-            _log_token = dict_round_to_list_str(
-                log_token_loss,
-                n_round=n_round,
-                select=_selects,
-            )
-            strings.extend(_log_token)
-
-            if self.use_quantizer:
-                _quant_logs_out_select = {
-                    "bsq": [
-                        "q_loss",
-                        "entropy",
-                        "avg_prob",
-                        "commit_loss",
-                    ],
-                    "lfq": [
-                        "q_loss",
-                        "commit_loss",
-                        "batch_entropy",
-                        "per_sample_entropy",
-                    ],
-                    "vq_advance": [
-                        "q_loss",
-                        "commitment",
-                        "code_diversity",
-                        "orthogonal_reg",
-                        "learn_code_opt_loss",
-                    ],  # none is all to be selected
-                    "kl": ["kl_loss"],
-                    "fsq": ["fsq_loss"],  # is zero for FSQ
-                    "psd": ["kl_loss"],
-                }
-
-                _log_q = dict_round_to_list_str(
-                    log_token_loss,
-                    n_round,
-                    select=_quant_logs_out_select.get(self.quantizer_type or "", None),
-                )
-                strings.extend(_log_q)
+            strings.extend(dict_round_to_list_str(log_token_loss, n_round=n_round))
         # * discriminator losses
         elif log_disc_loss is not None:
-            _selects = ["disc_loss", "logits_real", "logits_fake", "lecam_loss"]
-            if log_disc_loss.get("r1_scale", 0.0) != 0.0:
-                _selects.append("r1_scale")
-            if log_disc_loss.get("r2_scale", 0.0) != 0.0:
-                _selects.append("r2_scale")
-
-            _disc_reg_logs = dict_round_to_list_str(
-                log_disc_loss,
-                n_round,
-                _selects,
-            )
-            strings.extend(_disc_reg_logs)
-
+            strings.extend(dict_round_to_list_str(log_disc_loss, n_round=n_round))
         else:
             raise ValueError("At least one of the logs should be provided")
 
@@ -2321,20 +2033,12 @@ class CosmosHyperspectralTokenizerTrainer:
         # set all mode
         def _set_all_model_modes(train=False):
             if not train:  # eval
-                if self.sep_enc_dec:
-                    self.ema_encoder.eval()
-                    self.ema_decoder.eval()
-                    self.tokenizer_encoder.eval()
-                    self.tokenizer_decoder.eval()
-                else:
-                    self.tokenizer.eval()
+                self.tokenizer.eval()
+                if not self.no_ema:
+                    self.ema_tokenizer.ema_model.eval()
 
             else:  # train
-                if self.sep_enc_dec:
-                    self.tokenizer_encoder.train()
-                    self.tokenizer_decoder.train()
-                else:
-                    self.tokenizer.train()
+                self.tokenizer.train()
 
         # track psnr and ssim
         if self.train_cfg.track_metrics:
@@ -2379,15 +2083,15 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # recon loss
             loss = nn.functional.l1_loss(recon, batch["img"].to(recon))
-            loss_metrics.update(loss)
+            loss_metrics.update(loss)  # type: ignore[invalid-argument-type]
 
         if self.train_cfg.track_metrics:
-            psnr_val = psnr_fn.compute()
-            ssim_val = ssim_fn.compute()
+            psnr_val = psnr_fn.compute()  # type: ignore[missing-argument]
+            ssim_val = ssim_fn.compute()  # type: ignore[missing-argument]
         else:
             psnr_val = torch.tensor(0.0).to(self.device)
             ssim_val = torch.tensor(0.0).to(self.device)
-        loss_val = loss_metrics.compute()
+        loss_val = loss_metrics.compute()  # type: ignore[missing-argument]
 
         # gather
         if self.accelerator.use_distributed:
@@ -2451,11 +2155,9 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.accelerator.is_main_process:
             ema_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.sep_enc_dec:
-            self.accelerator.save_model(self.ema_encoder.ema_model, ema_path / "encoder")
-            self.accelerator.save_model(self.ema_decoder.ema_model, ema_path / "decoder")
-        else:
-            self.accelerator.save_model(self.ema_tokenizer.ema_model, ema_path / "tokenizer")
+        ema_tok_model = self.ema_tokenizer.ema_model
+        assert isinstance(ema_tok_model, nn.Module), "ema_tokenizer.ema_model must be a torch.nn.Module"
+        self.accelerator.save_model(ema_tok_model, ema_path / "tokenizer")
 
         self.accelerator.save_model(self.ema_vq_disc.ema_model, ema_path / "discriminator")
 
@@ -2477,131 +2179,116 @@ class CosmosHyperspectralTokenizerTrainer:
         _ema_path_state_train.parent.mkdir(parents=True, exist_ok=True)
         accelerate.utils.save(self.train_state.state_dict(), _ema_path_state_train)
 
-        if self.use_quantizer and self.quantizer is not None and isinstance(self.quantizer, nn.Module):
-            self.accelerator.save_model(self.quantizer, ema_path / "quantizer")
-
         self.log_msg(f"[ckpt]: save ema at {ema_path}")
 
     def load_from_ema_or_lora(self, ema_path: str | Path, strict: bool = False):
         ema_path = Path(ema_path)
-        if self.sep_enc_dec:
-            if self._is_fsdp:
-                raise NotImplementedError("FSDP2 loading for separated encoder and decoder is not implemented yet")
+        assert self.accelerator.distributed_type != accelerate.utils.DistributedType.DEEPSPEED, (
+            "Deepspeed does not support PEFT yet."
+        )
+        logger.info("Loading EMA tokenizer ...")
 
-            # Load encoder to online model
-            accelerate.load_checkpoint_in_model(self.tokenizer_encoder, ema_path / "encoder")
-            # Load decoder to online model
-            accelerate.utils.load_checkpoint_in_model(self.tokenizer_decoder, ema_path / "decoder")
+        tokenizer_dir = ema_path / "tokenizer"
+        if tokenizer_dir.exists():
+            # Load combined tokenizer (includes encoder/decoder/quantizer in one model).
+            self.log_msg("loading bin or safetensors checkpoint into model ...")
+            try:
+                accelerate.utils.load_checkpoint_in_model(
+                    self.accelerator.unwrap_model(self.tokenizer),
+                    tokenizer_dir,
+                    strict=strict,
+                )
+            except Exception as e:
+                self.log_msg(
+                    f"loading bin or safetensors checkpoint into tokenizer failed: {e}, "
+                    f"trying to load partial of the weights ..."
+                )
+                load_weights_with_shape_check(
+                    self.accelerator.unwrap_model(self.tokenizer),
+                    accelerate.utils.load_state_dict((tokenizer_dir / "model.safetensors").as_posix()),
+                )
         else:
-            assert self.accelerator.distributed_type != accelerate.utils.DistributedType.DEEPSPEED, (
-                "Deepspeed does not support PEFT yet."
-            )
-            logger.info("Loading EMA tokenizer ...")
-
-            _assume_path = ema_path / "tokenizer"
-            if not _assume_path.exists():
-                if self._is_peft_tuning:
-                    _assume_path = ema_path / "model"
-                    # we are working on loading the peft model (only lora layers)
-                    if self._is_fsdp:
-                        # depend on if there is a full state dict
-                        if not getattr(self.train_cfg, "load_weight_shard", True):
-                            _not_shard_weights = "model" in _assume_path.as_posix()
-                        else:
-                            _not_shard_weights = False  # shard loaded
+            if self._is_peft_tuning:
+                peft_dir = ema_path / "model"
+                # we are working on loading the peft model (only lora layers)
+                if self._is_fsdp:
+                    if not getattr(self.train_cfg, "load_weight_shard", True):
+                        _not_shard_weights = "model" in peft_dir.as_posix()
                     else:
-                        _not_shard_weights = True
+                        _not_shard_weights = False  # shard loaded
+                else:
+                    _not_shard_weights = True
 
-                    self.log_msg("loading peft checkpoint into model", only_rank_zero=False)
-                    if _not_shard_weights:  # is shard weights
-                        if self._is_fsdp:
-                            loaded_res = load_fsdp_model(
-                                self.accelerator.state.fsdp_plugin,
-                                self.accelerator,
-                                self.tokenizer_peft_wrapped,
-                                ema_path.as_posix(),
-                                model_index=0,
-                                adapter_only=True,
-                            )
-                        else:  # is ddp or one gpu
-                            loaded_res = set_peft_model_state_dict(
-                                self.tokenizer_peft_wrapped,
-                                accelerate.utils.load_state_dict(ema_path.as_posix()),
-                                adapter_name=getattr(self.dataset_cfg, "used", "default"),
-                                ignore_mismatched_sizes=not strict,
-                                low_cpu_mem_usage=False,
-                            )
-
-                    else:  # not shard weights
-                        peft_path = _assume_path / "pytorch_model_fsdp.bin"
-                        assert peft_path.exists(), (
-                            "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
-                        )
-
-                        # ensure there is model/pytorch_model_fsdp.bin file
-                        _fsdp_plugin_cp = deepcopy(self.accelerator.state.fsdp_plugin)
-                        _fsdp_plugin_cp.state_dict_type = StateDictType.FULL_STATE_DICT
+                self.log_msg("loading peft checkpoint into model", only_rank_zero=False)
+                if _not_shard_weights:
+                    if self._is_fsdp:
                         loaded_res = load_fsdp_model(
-                            _fsdp_plugin_cp,
+                            self.accelerator.state.fsdp_plugin,
                             self.accelerator,
                             self.tokenizer_peft_wrapped,
                             ema_path.as_posix(),
                             model_index=0,
-                            adapter_only=True,  # warn: loading from shard only-lora-layer weights does not work.
+                            adapter_only=True,
                         )
-
-                    self.log_msg(
-                        f"[Warning]: {loaded_res} keys are incompatible with the model",
-                        level="warning",
-                    )
-
-                    # is refer
-                    # NOTE: forcing to get the base model, not sure if this is referencing the same model
-                    assert self.tokenizer_peft_wrapped is not None, "tokenizer_peft_wrapped is None"
-                    self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
-
-                # TODO: test it, this will not work
-                elif self._is_fsdp:
-                    _assume_path = ema_path / "pytorch_model_fsdp_0"  # model_idx=0
-                    if _assume_path.exists():
-                        assert _assume_path.exists(), "FSDP checkpoint dir not found"
-                        self.log_msg("loading FSDP checkpoint into model", only_rank_zero=False)
-                        incomp_keys = accelerate.utils.load_fsdp_model(
-                            self.accelerator.state.fsdp_plugin,
-                            self.accelerator,
-                            self.tokenizer,
-                            ema_path.as_posix(),
-                            model_index=0,
+                    else:
+                        loaded_res = set_peft_model_state_dict(
+                            self.tokenizer_peft_wrapped,
+                            accelerate.utils.load_state_dict(ema_path.as_posix()),
+                            adapter_name=getattr(self.dataset_cfg, "used", "default"),
+                            ignore_mismatched_sizes=not strict,
+                            low_cpu_mem_usage=False,
                         )
-                        if incomp_keys:
-                            self.log_msg(
-                                f"[Warning]: {incomp_keys} keys are incompatible with the model",
-                                level="warning",
-                            )
                 else:
-                    raise RuntimeError("load FSDP or LoRA weights failed")
-            else:
-                # Load combined model
-                self.log_msg("loading bin or safetensors checkpoint into model ...")
-                try:
-                    accelerate.utils.load_checkpoint_in_model(
-                        self.accelerator.unwrap_model(self.tokenizer),
-                        _assume_path,
-                        strict=strict,
-                    )
-                except Exception as e:
-                    self.log_msg(
-                        f"loading bin or safetensors checkpoint into tokenizer failed: {e}, "
-                        f"trying to load partial of the weights ..."
-                    )
-                    load_weights_with_shape_check(
-                        self.accelerator.unwrap_model(self.tokenizer),
-                        accelerate.utils.load_state_dict((ema_path / "tokenizer" / "model.safetensors").as_posix()),
+                    peft_path = peft_dir / "pytorch_model_fsdp.bin"
+                    assert peft_path.exists(), "peft checkpoint dir not found, use accelerate-merge-weights CLI first"
+
+                    fsdp_plugin = self.accelerator.state.fsdp_plugin
+                    assert fsdp_plugin is not None, "FSDP plugin is required for FSDP PEFT loading"
+                    _fsdp_plugin_cp = deepcopy(fsdp_plugin)
+                    _fsdp_plugin_cp.state_dict_type = StateDictType.FULL_STATE_DICT
+                    loaded_res = load_fsdp_model(
+                        _fsdp_plugin_cp,
+                        self.accelerator,
+                        self.tokenizer_peft_wrapped,
+                        ema_path.as_posix(),
+                        model_index=0,
+                        adapter_only=True,  # warn: loading from shard only-lora-layer weights does not work.
                     )
 
-            if self.train_cfg.finetune_strategy == "decoder_only":
-                logger.log("NOTE", f"Freeze the tokenizer's encoder")
-                self.accelerator.unwrap_model(self.tokenizer).encoder.requires_grad_(False)
+                self.log_msg(
+                    f"[Warning]: {loaded_res} keys are incompatible with the model",
+                    level="warning",
+                )
+
+                assert self.tokenizer_peft_wrapped is not None, "tokenizer_peft_wrapped is None"
+                self.tokenizer = self.tokenizer_peft_wrapped.get_base_model()
+            elif self._is_fsdp:
+                # TODO: test it, this may not work as-is for all setups
+                fsdp_dir = ema_path / "pytorch_model_fsdp_0"  # model_idx=0
+                if fsdp_dir.exists():
+                    self.log_msg("loading FSDP checkpoint into model", only_rank_zero=False)
+                    incomp_keys = accelerate.utils.load_fsdp_model(
+                        self.accelerator.state.fsdp_plugin,
+                        self.accelerator,
+                        self.tokenizer,
+                        ema_path.as_posix(),
+                        model_index=0,
+                    )
+                    if incomp_keys:
+                        self.log_msg(
+                            f"[Warning]: {incomp_keys} keys are incompatible with the model",
+                            level="warning",
+                        )
+                else:
+                    raise RuntimeError("FSDP checkpoint dir not found")
+            else:
+                raise RuntimeError("load tokenizer weights failed (no tokenizer dir and not peft/fsdp)")
+
+        if self.train_cfg.finetune_strategy == "decoder_only":
+            logger.log("NOTE", "Freeze the tokenizer's encoder")
+            _tok = self.accelerator.unwrap_model(self.tokenizer)
+            if hasattr(_tok, "encoder"):
+                _tok.encoder.requires_grad_(False)
 
         # Load discriminator to online model
         if (
@@ -2639,17 +2326,6 @@ class CosmosHyperspectralTokenizerTrainer:
                     ema_path / "proxy_model",
                     strict=strict,
                 )
-
-        # Load quantizer if exists
-        if self.use_quantizer and self.quantizer is not None and isinstance(self.quantizer, nn.Module):
-            if (ema_path / "quantizer").exists():
-                accelerate.utils.load_checkpoint_in_model(
-                    self.accelerator.unwrap_model(self.quantizer),
-                    ema_path / "quantizer",
-                    strict=strict,
-                )
-            else:
-                raise RuntimeError("Quantizer not found in the checkpoint, please check your checkpoint.")
 
         # Prepare models
         self.prepare_ema_models()  # This will update EMA models with online models' weights

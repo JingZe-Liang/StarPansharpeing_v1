@@ -1,0 +1,22 @@
+defaults:
+  - tokenizer/hybrid@tokenizer_cfg
+  - _self_
+
+_target_: src.stage2.classification.model.CosmosTokenizerClassifier
+
+num_classes: ${dataset.consts.num_classes}
+
+# Tokenizer pretrained path
+tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
+
+# Use intermediate features from semantic encoder blocks (like DINOv3)
+use_intermediate_features: true
+n_last_blocks: 1  # Use last 1 block
+use_avgpool: false
+
+use_z: false
+freeze_tokenizer: true
+
+# Classifier configuration (DINOv3 style Linear Probe: BN + Linear)
+classifier:
+  classifier_type: linear_probe

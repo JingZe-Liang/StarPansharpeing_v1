@@ -19,7 +19,7 @@
     url = https://github.com/hustvl/LightningDiT
 
 [submodule "src/stage2/denoise/HyperSIGMA"]
-    path = src/stage2/HyperSIGMA
+    path = src/stage2/SSL_third_party/HyperSIGMA
     url = https://github.com/WHU-Sigma/HyperSIGMA
 
 [submodule "src/stage2/generative/HSIGene"]
@@ -212,3 +212,9 @@
 [submodule "src/stage2/depth_estimation/third_party/Depth_Anything_v2"]
 	path = src/stage2/depth_estimation/third_party/Depth_Anything_v2
 	url = https://github.com/DepthAnything/Depth-Anything-V2.git
+[submodule "src/stage2/SSL_third_party/SpectralGPT"]
+	path = src/stage2/SSL_third_party/SpectralGPT
+	url = https://github.com/danfenghong/IEEE_TPAMI_SpectralGPT.git
+[submodule "src/stage2/SSL_third_party/SatMAE"]
+	path = src/stage2/SSL_third_party/SatMAE
+	url = https://github.com/sustainlab-group/SatMAE.git

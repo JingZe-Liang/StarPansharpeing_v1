@@ -1,0 +1,46 @@
+train_bs: 32
+val_bs: 32
+
+dataset_name: RESISC45
+img_size: 256
+channels: 3
+num_classes: 45
+to_neg_1_1: true
+
+consts:
+  img_size: ${..img_size}
+  channels: ${..channels}
+  num_classes: ${..num_classes}
+  to_neg_1_1: ${..to_neg_1_1}
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.classification.data.builder.create_dataloader
+  dataset:
+    _target_: src.stage2.classification.data.RESISC45_torchgeo.RESISC45
+    root: data/Downstreams/RESISC45
+    split: train
+    to_neg_1_1: ${...consts.to_neg_1_1}
+    download: false
+    checksum: false
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 4
+    shuffle: true
+    pin_memory: true
+
+val:
+  _target_: src.stage2.classification.data.builder.create_dataloader
+  dataset:
+    _target_: src.stage2.classification.data.RESISC45_torchgeo.RESISC45
+    root: data/Downstreams/RESISC45
+    split: val
+    to_neg_1_1: ${...consts.to_neg_1_1}
+    download: false
+    checksum: false
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 4
+    shuffle: false
+    pin_memory: true

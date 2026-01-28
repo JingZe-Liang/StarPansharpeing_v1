@@ -2,12 +2,12 @@
 
 ## 参考文章
 
-**Revisiting Multi-Task Visual Representation Learning**
+1. **Revisiting Multi-Task Visual Representation Learning**
 https://www.alphaxiv.org/overview/2601.13886?chatId=019bfbaf-514c-7c42-97b4-ccf3c3d98fe3
 
 > Multi-task SSL pretraining, language grounding + ssl + dense
 
-**OpenVision3**
+2. **OpenVision3**
 Language (next token prediction, CLIP contrastive loss) + reconstruction loss (VAE recon and pixel recon).
 
 ---

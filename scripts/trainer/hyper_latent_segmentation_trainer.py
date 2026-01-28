@@ -220,10 +220,11 @@ class HyperSegmentationTrainer:
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
+            input_list: list[Path | None]
             if self.accelerator.is_main_process:
-                input_list: list[Path | None] = [log_file] * self.accelerator.num_processes
+                input_list = [log_file] * self.accelerator.num_processes
             else:
-                input_list: list[Path | None] = [None] * self.accelerator.num_processes
+                input_list = [None] * self.accelerator.num_processes
             output_list: list[Path | None] = [None]
             torch.distributed.scatter_object_list(output_list, input_list, src=0)
             log_file = cast(Path, output_list[0])
@@ -1304,6 +1305,7 @@ class HyperSegmentationTrainer:
 
 _key = "unet_seg"
 _configs_dict = {
+    "deep_globe_road_unet_seg": "deep_globe_road_unet_seg",
     "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
     "deeplabv3_seg": "deeplabv3_seg",
     "unet_seg": "unet_seg",

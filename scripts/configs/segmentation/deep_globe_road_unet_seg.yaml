@@ -1,0 +1,99 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  # wrapper ==========
+  - dataset: deep_globe_road
+  - accelerator: base
+  - model@segment_model: unet
+  # self ===============
+  - _self_
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+  allow_different_devices: true
+  lazy_init_ema: true
+
+metric:
+  _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
+  n_classes: ${dataset.consts.num_classes}
+  ignore_index: null
+  include_bg: true
+  input_format: index
+  task: multiclass
+
+train:
+  # Wrapper-based training
+  val_slide_window: false
+  grad_check: false
+  act_checkpoint: true
+  val_slide_window_kwargs:
+    patch_size: 128 #${dataset.consts.patch_size}
+    stride: 32 #${dataset.consts.stride}
+
+  use_single_img_indexing: false
+  patches_per_image:
+  macro_batch_size: 2 #4
+
+  proj_dir: runs/stage2_classification/
+  finetune_strategy: finetune_all
+  max_grad_norm: 1.0
+
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 500
+  max_steps: 40_000
+  save_every: 500
+  is_neg_1_1: true
+
+  resume_path:
+  ema_load_path:
+
+  bootstrap_ratio: 0.
+  bootstrap_start_step: 0
+
+  segment_optim:
+    _target_: heavyball.ForeachAdamW
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 0.0
+    betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    caution: true
+    foreach: true
+
+  segment_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 3
+
+  segment_loss:
+    _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
+    num_classes: ${dataset.consts.num_classes}
+    ignore_index: 255
+    ce_weight: null
+    loss_weights: [1.0, 1.0, 0, 0]
+    mode: multiclass
+    dynamic_mode: null
+    ema_decay: 0.99
+
+  log:
+    run_comment: ${dataset.dataset_name}_unet
+    log_with_time: true
+    log_every: 10
+    log_with: [wandb]
+  debug: true
+
+val:
+  val_duration: 500
+  max_val_iters: 20

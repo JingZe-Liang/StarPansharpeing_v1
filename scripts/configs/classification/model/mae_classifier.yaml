@@ -1,0 +1,18 @@
+_target_: src.stage2.classification.model.mae_classifier.MAEClassifier
+
+# Backbone type (from timm):
+# - vit_base_patch16_224.mae
+# - vit_large_patch16_224.mae
+# - vit_huge_patch14_224.mae
+backbone_type: vit_base_patch16_224.mae
+
+pretrained: true
+
+# Freeze backbone for linear probing
+freeze_backbone: true
+
+num_classes: ${dataset.consts.num_classes}
+img_size: 224
+
+# Input preprocessing
+img_is_neg_1_1: ${dataset.consts.to_neg_1_1}

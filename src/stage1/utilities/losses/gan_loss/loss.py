@@ -921,38 +921,40 @@ class VQLPIPSWithDiscriminator(nn.Module):
         quantizer_logs: dict | None = None,
         add_prefix: bool = False,
     ):
+        def _detach_if_not_None(v):
+            if torch.is_tensor(v):
+                return v.detach().mean()
+            elif isinstance(v, float | int):
+                return v
+            else:
+                return None
+
         if disc_factor == 0:
             log = {
                 "total_loss": total_loss.clone().detach(),
                 # Reconstructions loss
                 "nll_loss": nll_loss.detach(),
                 "reconstruct_loss": reconstruction_loss.detach().mean(),
-                "ssim_loss": ssim_loss.detach().mean() if ssim_loss is not None else self.zero,
+                "ssim_loss": _detach_if_not_None(ssim_loss),
                 # Perceptual loss
-                "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
+                "perceptual_loss": _detach_if_not_None(percep_loss),
                 # Feature distillation loss
-                "repa_loss": repa_loss.detach().mean() if repa_loss is not None else self.zero,
-                "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
-                "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
+                "repa_loss": _detach_if_not_None(repa_loss),
+                "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
+                "vf_loss": _detach_if_not_None(vf_loss),
                 # Latent regularization loss
-                "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
-                "latent_sparsity_loss": latent_sparsity_loss.detach().mean()
-                if latent_sparsity_loss is not None
-                else self.zero,
-                "h_value_reg_loss": latent_value_reg_loss.detach().mean()
-                if latent_value_reg_loss is not None and self.use_latent_reg
-                else self.zero,
-                "sigreg_loss": sigreg_loss.detach().mean()
-                if sigreg_loss is not None and self.use_sigreg
-                else self.zero,
+                "lcr_loss": _detach_if_not_None(lcr_loss),
+                "latent_sparsity_loss": _detach_if_not_None(latent_sparsity_loss),
+                "h_value_reg_loss": _detach_if_not_None(latent_value_reg_loss) if self.use_latent_reg else None,
+                "sigreg_loss": _detach_if_not_None(sigreg_loss) if self.use_sigreg else None,
                 # ---------------
                 # Generator loss
-                "g_loss": self.zero,
+                "g_loss": None,
                 # Deprecation
-                "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
+                "gram_loss": _detach_if_not_None(gram_loss),  # TODO: see the dinov3 anchor loss?
                 # Others
-                "d_weight": self.zero,
-                "disc_factor": self.zero,
+                "d_weight": None,
+                "disc_factor": None,
             }
         else:
             if self.training:
@@ -961,20 +963,16 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     # image losses
                     "nll_loss": nll_loss.detach(),
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
-                    "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
-                    "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
-                    "ssim_loss": ssim_loss.detach().mean() if ssim_loss is not None else self.zero,
-                    "repa_loss": repa_loss.detach().mean() if repa_loss is not None else self.zero,
-                    "sem_dist_loss": sem_dist_loss.detach().mean() if sem_dist_loss is not None else self.zero,
-                    "vf_loss": vf_loss.detach().mean() if vf_loss is not None else self.zero,
-                    "lcr_loss": lcr_loss.detach().mean() if lcr_loss is not None else self.zero,
-                    "latent_sparsity_loss": latent_sparsity_loss.detach().mean()
-                    if latent_sparsity_loss is not None
-                    else self.zero,
-                    "h_value_reg_loss": latent_value_reg_loss.detach().mean()
-                    if latent_value_reg_loss is not None
-                    else self.zero,
-                    "sigreg_loss": sigreg_loss.detach().mean() if sigreg_loss is not None else self.zero,
+                    "perceptual_loss": _detach_if_not_None(percep_loss),
+                    "gram_loss": _detach_if_not_None(gram_loss),
+                    "ssim_loss": _detach_if_not_None(ssim_loss),
+                    "repa_loss": _detach_if_not_None(repa_loss),
+                    "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
+                    "vf_loss": _detach_if_not_None(vf_loss),
+                    "lcr_loss": _detach_if_not_None(lcr_loss),
+                    "latent_sparsity_loss": _detach_if_not_None(latent_sparsity_loss),
+                    "h_value_reg_loss": _detach_if_not_None(latent_value_reg_loss),
+                    "sigreg_loss": _detach_if_not_None(sigreg_loss),
                     # discriminator loss
                     "d_weight": disc_weight,
                     "disc_factor": torch.tensor(disc_factor),
@@ -987,8 +985,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
                 log = {
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
-                    "perceptual_loss": percep_loss.detach().mean() if percep_loss is not None else self.zero,
-                    "gram_loss": gram_loss.detach().mean() if gram_loss is not None else self.zero,
+                    "perceptual_loss": _detach_if_not_None(percep_loss),
+                    "gram_loss": _detach_if_not_None(gram_loss),
                     "g_loss": real_g_loss.detach(),
                 }
 

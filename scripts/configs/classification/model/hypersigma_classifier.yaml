@@ -1,0 +1,20 @@
+_target_: src.stage2.classification.model.hypersigma_classifier.HyperSIGMAClassifier
+
+# Backbone type: spat_vit_b, spat_vit_l, spat_vit_h
+backbone_type: spat_vit_l
+
+# Path to pretrained HyperSIGMA weights
+# Should be updated by user or in the main config
+weights_path: /Data2/ZihanCao/Checkpoints/Hypersigma/spat-vit-large-ultra-checkpoint-1599.pth
+
+pretrained: true
+
+# Freeze backbone for linear probing / partial finetuning
+# If true, only patch_embed and classifier are trained
+freeze_backbone: true
+
+num_classes: ${dataset.consts.num_classes}
+img_size: 224
+
+# Input preprocessing
+img_is_neg_1_1: ${dataset.consts.to_neg_1_1}

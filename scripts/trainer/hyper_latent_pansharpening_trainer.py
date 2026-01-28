@@ -702,28 +702,26 @@ class PansharpeningTrainer:
             )
 
     def format_log(self, log_sr_loss: dict) -> str:
-        def dict_round_to_list_str(d: dict, n_round: int = 4, select: list[str] | None = None):
+        def dict_round_to_list_str(d: dict, n_round: int = 4):
             strings = []
             for k, v in d.items():
-                if select is not None and k not in select:
+                # Filter out None or 0 values
+                if v is None:
                     continue
-
                 if isinstance(v, (float, torch.Tensor)):
                     if torch.is_tensor(v):
                         if v.numel() > 1:
-                            self.log_msg(
-                                f'logs has non-scalar tensor "{k}", skip it',
-                                level="WARNING",
-                            )
                             continue
                         v = v.item()
-                    strings.append(f"{k}: {v:.{n_round}f}")
+                    # Filter out values close to zero
+                    if abs(v) < 1e-6:
+                        continue
+                    strings.append(f"<cyan>{k}</>: {v:.{n_round}f}")
                 else:
-                    strings.append(f"{k}: {v}")
+                    strings.append(f"<cyan>{k}</>: {v}")
             return strings
 
-        strings = dict_round_to_list_str(log_sr_loss, select=list(log_sr_loss.keys()))
-
+        strings = dict_round_to_list_str(log_sr_loss)
         return " - ".join(strings)
 
     def infinity_train_loader(self):

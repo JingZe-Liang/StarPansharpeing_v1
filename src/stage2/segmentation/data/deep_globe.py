@@ -102,7 +102,9 @@ class DeepGlobeRoadExtractionStreamingDataset(_BaseStreamingDataset):
             # Squeeze channel dim if it's 1
             if mask.shape[0] == 1:
                 mask = mask.squeeze(0)
-            sample["mask"] = mask.long()
+            mask = mask.long()
+            sample["gt"] = mask
+            sample.pop("mask", None)
         else:
             # If no mask, we might need different handling or just resize img
             # Ideally we should have a resize_image_only pipeline if mask is None
@@ -114,22 +116,22 @@ class DeepGlobeRoadExtractionStreamingDataset(_BaseStreamingDataset):
         return sample
 
 
-def __test_dataloader():
+def test_dataloader():
     import lovely_tensors as lt
     import matplotlib.pyplot as plt
 
     lt.monkey_patch()
     ds = DeepGlobeRoadExtractionStreamingDataset(input_dir="data/Downstreams/RoadExtraction/DeepGlobe_Litdata/train")
-    print(len(ds))
+    print(len(ds))  # type: ignore[arg-type]
 
     sample = ds[100]
     print(sample["img"].shape)
-    print(sample["mask"].shape)
-    print(sample["mask"].unique())
+    print(sample["gt"].shape)
+    print(sample["gt"].unique())
 
     # 绘制图像和掩码
     img = sample["img"]  # (C, H, W)
-    mask = sample["mask"]  # (H, W)
+    mask = sample["gt"]  # (H, W)
 
     # 转换为 numpy 并调整维度 (C, H, W) -> (H, W, C)
     img_np = img.permute(1, 2, 0).numpy()
@@ -156,4 +158,4 @@ def __test_dataloader():
 
 
 if __name__ == "__main__":
-    __test_dataloader()
+    test_dataloader()

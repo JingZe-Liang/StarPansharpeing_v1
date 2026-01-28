@@ -2,42 +2,45 @@ _target_: src.stage2.classification.model.CosmosTokenizerClassifier
 num_classes: ${dataset.consts.num_classes}
 tokenizer_pretrained_path: ${train.tokenizer_pretrained_path}
 freeze_tokenizer: ${train.freeze_tokenizer}
-use_quantizer: ${train.use_quantizer}
-latent_proj_dim: ${train.latent_proj_dim}
+use_quantizer: false
+use_z: true
+latent_proj_dim: null
 
 classifier:
-  classifier_type: default
+  classifier_type: norm_mlp
+  hidden_size: 1024
   pool_type: avg
   drop_rate: 0.0
-  use_conv: false
-  input_fmt: NCHW
 
 # ContinuousImageTokenizer config (minimal)
 tokenizer_cfg:
   model:
-    in_channels: ${dataset.consts.channels}
-    out_channels: ${dataset.consts.channels}
-    resolution: ${dataset.consts.img_size}
+    attn_resolutions: [32]
     channels: 128
+    in_channels: 512
+    out_channels: 512
     channels_mult: [2, 4, 4]
+    spatial_compression: 8
+    dropout: 0.0
     num_res_blocks: 2
+    resolution: 1024
     z_channels: 256
     latent_channels: 16
-    spatial_compression: 8
-    patch_size: 1
-    patch_method: haar
-    attn_type: none
-    norm_type: gn
-    norm_groups: 32
     act_checkpoint: false
+    norm_type: rmsnorm2dfp32
+    act_type: silu
+    block_name: res_block
+    use_residual_factor: false
+    patch_method: haar
+    patch_size: 1
+    attn_type: none
     padding_mode: reflect
-  quantizer_type: null
-  random_quant: 0.0
-  norm_in_quant_conv: false
-  use_latent_mask: false
-  use_channel_drop: false
-  name: ContinuousImageTokenizer
-  decoder_type: default
+    adaptive_mode: interp
+  uni_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
+  loading_type: pretrained
+  qunatizer_type: null
+  hook_for_repa: false
+  use_repa_loss: false
+  use_vf_loss: false
+  vf_on_z_or_module: z
   z_factor: 1
-  uni_path: ""
-  loading_type: null

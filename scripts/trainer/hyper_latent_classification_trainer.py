@@ -1,3 +1,4 @@
+import itertools
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,12 +275,14 @@ class HyperClassificationTrainer:
                 params = params_getter(with_name=False)
                 return hydra.utils.instantiate(optimizer_cfg)(params)
 
-            _get_model_params = (
-                lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
-            )
+            def _get_model_params(with_name: bool):
+                if with_name:
+                    return [(name, param) for name, param in self.model.named_parameters() if param.requires_grad]
+                return [param for param in self.model.parameters() if param.requires_grad]
+
             model_opt = _optimizer_creater(self.train_cfg.model_optim, _get_model_params)
         else:
-            model_opt = DummyOptim([{"params": list(self.model.parameters())}])
+            model_opt = DummyOptim([{"params": [param for param in self.model.parameters() if param.requires_grad]}])
 
         if (
             self.accelerator.state.deepspeed_plugin is None
@@ -438,17 +441,12 @@ class HyperClassificationTrainer:
 
     def get_val_loader_iter(self):
         if self.val_cfg.max_val_iters > 0:
-            self._val_loader_iter = iter(self.val_dataloader)
             self.log_msg(
                 f"[Val]: start validating with only {self.val_cfg.max_val_iters} batches",
                 only_rank_zero=False,
             )
 
-            def _loading():
-                for _ in range(self.val_cfg.max_val_iters):
-                    yield next(self._val_loader_iter)
-
-            return _loading()
+            return itertools.islice(self.val_dataloader, self.val_cfg.max_val_iters)
         if self.val_cfg.max_val_iters <= 0:
             self.log_msg("[Val]: start validating with the whole val set", only_rank_zero=False)
             return self.finite_val_loader()
@@ -562,10 +560,14 @@ class HyperClassificationTrainer:
         self.train_loop()
 
 
-_key = "cosmos_ucmerced_linear"
+_key = "dinov3_ucmerced_linear"
 _configs_dict = {
     "cosmos_ucmerced_linear": "cosmos_ucmerced_linear",
     "cosmos_eurosat_linear": "cosmos_eurosat_linear",
+    "dinov3_ucmerced_linear": "dinov3_ucmerced_linear",
+    "cosmos_ucmerced_hybrid_linear": "cosmos_ucmerced_hybrid_linear",
+    "hypersigma_ucmerced": "hypersigma_ucmerced",
+    "mae_ucmerced": "mae_ucmerced",
 }
 
 
@@ -593,7 +595,7 @@ if __name__ == "__main__":
     )
 
     @hydra.main(
-        config_path="configs/classification",
+        config_path="../configs/classification",
         config_name=chosen_cfg,
         version_base=None,
     )

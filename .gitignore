@@ -160,6 +160,7 @@ logs/
 **.pt
 **.pth
 nohup.out
+env.yaml
 
 # weight dirs
 src/stage2/generative/tools/conditions/caption/weights/*

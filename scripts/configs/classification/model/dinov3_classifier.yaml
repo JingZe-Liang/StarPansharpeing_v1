@@ -1,0 +1,34 @@
+_target_: src.stage2.classification.model.DINOv3Classifier
+
+# Number of output classes - will be overridden by dataset config
+num_classes: ${dataset.consts.num_classes}
+
+# Backbone configuration
+# Options:
+#   - vits16, vitb16, vitl16 (ViT variants)
+#   - convnext_tiny, convnext_small, convnext_base, convnext_large
+backbone_type: vitl16
+
+# Pretrained weights
+# Options:
+#   - SAT493M: Remote sensing pretrained (only for vitl16, vit7b16)
+#   - LVD1689M: General pretrained (for all backbones)
+#   - path/to/weights.pth: Local weights file
+weights: SAT493M
+
+# Whether to load pretrained weights
+pretrained: true
+
+# Whether to freeze backbone during training (linear probing)
+freeze_backbone: true
+
+# ViT-specific settings
+# Number of last blocks to use for feature extraction
+n_last_blocks: 1
+
+# Whether to concatenate avgpooled patch tokens with CLS tokens
+use_avgpool: true
+
+# Input image preprocessing
+# Set to true if input images are in [-1, 1] range
+img_is_neg_1_1: ${dataset.consts.to_neg_1_1}

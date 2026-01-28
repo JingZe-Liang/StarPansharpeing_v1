@@ -1,0 +1,70 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: ucmerced
+  - accelerator: base
+  - model: dinov3_classifier
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+  allow_different_devices: true
+  lazy_init_ema: true
+
+metric:
+  num_classes: ${dataset.consts.num_classes}
+  top_k: 1
+
+train:
+  proj_dir: runs/stage2_classification/
+  model_name: dinov3_probe
+  max_grad_norm: 1.0
+  max_steps: 5_000
+  save_every: 500
+  grad_check: false  # backbone is frozen, no need for gradient checkpointing
+  label_smoothing: 0.0
+  class_weights: null
+
+  resume_path:
+  ema_load_path:
+  is_neg_1_1: ${dataset.consts.to_neg_1_1}
+
+  # SGD optimizer following DINOv3 linear eval protocol
+  model_optim:
+    # _target_: torch.optim.SGD
+    # _partial_: true
+    # lr: 0.01  # linear probe typically uses higher lr
+    # momentum: 0.9
+    # weight_decay: 0.0
+
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 1e-3
+    weight_decay: 0.01
+
+
+  model_sched:
+    _target_: transformers.optimization.get_constant_schedule
+    _partial_: true
+
+  log:
+    run_comment: ${dataset.dataset_name}_dinov3_probe
+    log_with_time: true
+    log_every: 20
+    log_with: [wandb]
+
+  debug: false
+
+val:
+  val_duration: 500
+  max_val_iters: -1
+  use_ema: false

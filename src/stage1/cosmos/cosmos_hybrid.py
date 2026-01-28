@@ -444,7 +444,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             h = z_low_lvl
             h = self.latent_aug(h)
 
-        tokens = self.semantic_enc_transformer.forward_features(h, masks=None)  # type: ignore[arg-type]
+        tokens = self.semantic_enc_transformer.forward_features(h)  # type: ignore[arg-type]
         tokens = cast(torch.Tensor, tokens)
         if getattr(self.semantic_enc_transformer, "num_prefix_tokens", 0) <= 0:
             raise ValueError("semantic_enc_transformer未启用cls token（请在配置中设置`class_token: true`）。")
