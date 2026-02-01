@@ -1027,7 +1027,6 @@ class DINOv3_Adapter(nn.Module):
         self.norm2 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm3 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
         self.norm4 = nn.SyncBatchNorm(embed_dim) if use_bn else create_norm_layer("layernorm2d", embed_dim)
-
         if use_bn:
             logger.warning(f"Use BN in module, may cause train/test running mean/var difference.")
 

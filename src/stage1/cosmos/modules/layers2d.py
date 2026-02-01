@@ -47,6 +47,8 @@ from src.utilities.network_utils import (
     unwrap_model_recursive,
 )
 
+from src.utilities.network_utils import safe_init_weights
+
 from .blocks import (
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,

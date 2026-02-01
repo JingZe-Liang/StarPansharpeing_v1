@@ -8,8 +8,6 @@ from __future__ import annotations
 import random
 from contextlib import nullcontext
 from functools import partial, wraps
-from typing import List, Tuple
-
 import einx
 import torch
 import torch.nn as nn
@@ -83,11 +81,16 @@ class FSQ(Module):
         force_quantization_f32=True,
         preserve_symmetry=False,
         noise_dropout=0.0,
+        bound_alpha: float | None = None,
+        fsq_mode: str = "ifsq",
     ):
         super().__init__()
 
         if isinstance(levels, tuple):
             levels = list(levels)
+
+        self._levels: Tensor
+        self._basis: Tensor
 
         _levels = tensor(levels, dtype=int32)
         self.register_buffer("_levels", _levels, persistent=False)
@@ -99,6 +102,15 @@ class FSQ(Module):
 
         self.preserve_symmetry = preserve_symmetry
         self.noise_dropout = noise_dropout
+        if bound_alpha is None:
+            if fsq_mode == "fsq":
+                bound_alpha = 2.0
+            elif fsq_mode == "ifsq":
+                bound_alpha = 1.6
+            else:
+                raise ValueError(f"Unsupported fsq_mode: {fsq_mode}")
+
+        self.bound_alpha = float(bound_alpha)
 
         codebook_dim = len(levels)
         self.codebook_dim = codebook_dim
@@ -135,22 +147,31 @@ class FSQ(Module):
         self.allowed_dtypes = allowed_dtypes
         self.force_quantization_f32 = force_quantization_f32
 
-    def bound(self, z, eps=1e-3):
+    def _bound_act(self, x: Tensor) -> Tensor:
+        alpha = self.bound_alpha
+        return 2.0 * torch.sigmoid(alpha * x) - 1.0
+
+    def _bound_act_inv(self, y: Tensor, eps: float = 1e-6) -> Tensor:
+        alpha = self.bound_alpha
+        t = ((y + 1.0) * 0.5).clamp(eps, 1.0 - eps)
+        return torch.log(t / (1.0 - t)) / alpha
+
+    def bound(self, z: Tensor, eps: float = 1e-3) -> Tensor:
         """Bound `z`, an array of shape (..., d)."""
         half_l = (self._levels - 1) * (1 + eps) / 2
         offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
-        shift = (offset / half_l).atanh()
-        bounded_z = (z + shift).tanh() * half_l - offset
+        shift = self._bound_act_inv(offset / half_l)
+        bounded_z = self._bound_act(z + shift) * half_l - offset
         half_width = self._levels // 2
         return round_ste(bounded_z) / half_width
 
     # symmetry-preserving and noise-approximated quantization, section 3.2 in https://arxiv.org/abs/2411.19842
 
-    def symmetry_preserving_bound(self, z):
+    def symmetry_preserving_bound(self, z: Tensor) -> Tensor:
         """QL(x) = 2 / (L - 1) * [(L - 1) * (tanh(x) + 1) / 2 + 0.5] - 1"""
         levels_minus_1 = self._levels - 1
         scale = 2.0 / levels_minus_1
-        bracket = (levels_minus_1 * (z.tanh() + 1) / 2.0) + 0.5
+        bracket = (levels_minus_1 * (self._bound_act(z) + 1) / 2.0) + 0.5
         bracket = floor_ste(bracket)
         return scale * bracket - 1.0
 

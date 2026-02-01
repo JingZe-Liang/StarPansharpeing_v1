@@ -6,10 +6,17 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
+try:
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from megatron.core.transformer.spec_utils import ModuleSpec
+    from megatron.core.transformer.transformer_config import TransformerConfig
+    from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
+except ImportError:
+    ProcessGroupCollection = None
+    ModuleSpec = None
+    TransformerConfig = None
+    MoELayer = None
+    MoESubmodules = None
 
 from .variants.mlp import SwiGLU
 

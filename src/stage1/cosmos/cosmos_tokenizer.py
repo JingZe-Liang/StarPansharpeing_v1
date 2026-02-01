@@ -1271,6 +1271,8 @@ class ContinuousImageTokenizer(nn.Module):
             cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, config, strict=False)
         else:
             cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
+        if hasattr(cfg, "__post_init__"):
+            cfg.__post_init__()  # check the configs
         return cls(cfg)
 
     def set_grad_checkpointing(self, enabled: bool = True):

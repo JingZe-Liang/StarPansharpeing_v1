@@ -218,3 +218,6 @@
 [submodule "src/stage2/SSL_third_party/SatMAE"]
 	path = src/stage2/SSL_third_party/SatMAE
 	url = https://github.com/sustainlab-group/SatMAE.git
+[submodule "src/stage2/change_detection/third_party/GVLM"]
+	path = src/stage2/change_detection/third_party/GVLM
+	url = https://github.com/zxk688/GVLM.git
