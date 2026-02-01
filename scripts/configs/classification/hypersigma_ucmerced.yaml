@@ -11,6 +11,10 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+dataset:
+  train_bs: 8
+  val_bs: 8
+
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
@@ -39,10 +43,11 @@ train:
   is_neg_1_1: ${dataset.consts.to_neg_1_1}
 
   model_optim:
-    _target_: torch.optim.AdamW
+    _target_: torch.optim.SGD
     _partial_: true
-    lr: 1e-3
-    weight_decay: 0.01
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0
 
   model_sched:
     _target_: transformers.optimization.get_constant_schedule
@@ -54,7 +59,7 @@ train:
     log_every: 20
     log_with: [wandb]
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 500

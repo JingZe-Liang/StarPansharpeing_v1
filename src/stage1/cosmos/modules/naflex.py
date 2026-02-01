@@ -2,7 +2,7 @@ from timm.layers.create_norm import create_norm_layer
 import math
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast, TypedDict
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast, TypedDict, Literal
 
 import einops
 import torch
@@ -197,10 +197,13 @@ class EvaBlock(nn.Module):
         act_layer: type[nn.Module] = nn.GELU,
         norm_layer: type[nn.Module] = nn.LayerNorm,
         attn_head_dim: Optional[int] = None,
+        block_norm_type: Literal["pre", "post"] = "pre",
         is_causal: bool = False,
         v_residual: bool = False,
         layer_idx: int | None = None,
         hyperconnection_kwargs: dict[str, Any] | None = None,
+        post_norm_alpha: float | None = None,
+        post_norm_skip_first_layer: bool = True,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
         **kwargs,
@@ -234,6 +237,12 @@ class EvaBlock(nn.Module):
 
         self.layer_idx = layer_idx
         self.v_residual = v_residual
+        self.block_norm_type = block_norm_type
+        assert block_norm_type in ["pre", "post"], f"block_norm_type must be 'pre' or 'post', got {block_norm_type}"
+        if self.block_norm_type == "post":
+            # using Bytesdance SEED `keel` post-norm: arxiv, 2601.19895
+            assert hyperconnection_kwargs is None, "hyperconnection_kwargs must be None when block_norm_type is 'post'"
+            assert post_norm_alpha is not None, "post_norm_alpha must be provided for post-norm blocks"
 
         self.norm1 = norm_layer(dim, **dd)
         logger.trace(f"Layer uses attention type {attn_type}")
@@ -297,8 +306,27 @@ class EvaBlock(nn.Module):
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        if self.block_norm_type == "post":
+            post_norm_alpha_value = float(post_norm_alpha) if post_norm_alpha is not None else 1.0
+            self.register_buffer(
+                "post_norm_alpha",
+                torch.tensor(post_norm_alpha_value, **dd),
+                persistent=False,
+            )
+            self.post_norm1 = norm_layer(dim, **dd)
+            self.post_norm2 = norm_layer(dim, **dd)
+            self._post_norm_skip_first_layer = bool(post_norm_skip_first_layer) and self.layer_idx == 0
+        else:
+            self.register_buffer("post_norm_alpha", torch.tensor(1.0, **dd), persistent=False)
+            self.post_norm1 = nn.Identity()
+            self.post_norm2 = nn.Identity()
+            self._post_norm_skip_first_layer = False
+
         # Determine forward type
         self._forward_type = "eva_block" if hyperconnection_kwargs is None else "eva_block_mhc"
+        self._forward_eva_block = (
+            self._forward_eva_block_prenorm if self.block_norm_type == "pre" else self._forward_eva_block_postnorm
+        )
 
         # Hyper-connection mHC
         self.hyperconnection_kwargs = hyperconnection_kwargs
@@ -327,7 +355,7 @@ class EvaBlock(nn.Module):
                 **init_hc_kwargs,
             )
 
-    def _forward_eva_block(
+    def _forward_eva_block_prenorm(
         self,
         x: torch.Tensor,
         rope: Optional[torch.Tensor] = None,
@@ -340,6 +368,30 @@ class EvaBlock(nn.Module):
         else:
             x = x + self.drop_path1(self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
             x = x + self.drop_path2(self.gamma_2 * self.mlp(self.norm2(x)))
+        return x
+
+    def _forward_eva_block_postnorm(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        v_residual_v1: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self._post_norm_skip_first_layer:
+            return self._forward_eva_block_prenorm(x, rope=rope, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
+
+        alpha: Tensor = self.post_norm_alpha  # ty: ignore[assignment]
+        if self.gamma_1 is None:
+            attn_out = self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)
+        else:
+            attn_out = self.gamma_1 * self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)
+        x = self.post_norm1(alpha * x + self.drop_path1(attn_out))
+
+        if self.gamma_2 is None:
+            mlp_out = self.mlp(self.norm2(x))
+        else:
+            mlp_out = self.gamma_2 * self.mlp(self.norm2(x))
+        x = self.post_norm2(alpha * x + self.drop_path2(mlp_out))
         return x
 
     def _forward_eva_block_mhc(
@@ -378,6 +430,18 @@ def get_block_fn(cfg) -> Callable:
     Returns a partially applied block constructor with EVA-specific
     or conflicting parameters pre-configured if needed.
     """
+
+    def _wrap_with_layer_idx(block_cls: type[nn.Module], **fixed_kwargs: Any) -> Callable:
+        layer_counter = {"idx": 0}
+
+        def _factory(*args: Any, **kwargs: Any) -> nn.Module:
+            if kwargs.get("layer_idx") is None:
+                kwargs["layer_idx"] = layer_counter["idx"]
+            layer_counter["idx"] += 1
+            return block_cls(*args, **fixed_kwargs, **kwargs)
+
+        return _factory
+
     # Check if we need EVA block features
     use_eva_features = (
         cfg.attn_type in ("eva", "rope", "gated")
@@ -392,7 +456,13 @@ def get_block_fn(cfg) -> Callable:
             attn_type = "rope"
 
         num_prefix_tokens = (1 if cfg.class_token else 0) + cfg.reg_tokens
-        return partial(
+        block_norm_type = "pre" if cfg.pre_norm else "post"
+        post_norm_alpha = (
+            cfg.post_norm_alpha
+            if cfg.post_norm_alpha is not None
+            else (cfg.depth * 2 if block_norm_type == "post" else None)
+        )
+        return _wrap_with_layer_idx(
             EvaBlock,
             attn_type=attn_type,
             swiglu_mlp=cfg.swiglu_mlp,
@@ -401,6 +471,9 @@ def get_block_fn(cfg) -> Callable:
             qkv_fused=cfg.qkv_fused,
             num_prefix_tokens=num_prefix_tokens,
             is_causal=getattr(cfg, "is_causal", False),  # despite the 'nepa' pretrained task, `is_causal` is False
+            block_norm_type=block_norm_type,
+            post_norm_alpha=post_norm_alpha,
+            post_norm_skip_first_layer=cfg.post_norm_skip_first_layer,
         )
     else:
         # Standard ViT block
@@ -480,6 +553,8 @@ class NaFlexVitCfg:
     pre_norm: bool = True  # Whether to apply normalization before attention/MLP layers (start of blocks)
     final_norm: bool = True  # Whether to apply final normalization before pooling and classifier (end of blocks)
     fc_norm: Optional[bool] = None  # Whether to normalize features before final classifier (after pooling)
+    post_norm_alpha: float | None = None  # Keel post-norm alpha, defaults to 2 * depth when None
+    post_norm_skip_first_layer: bool = True  # Skip post-norm on the first block (Keel init trick)
 
     # Global pooling setup
     global_pool: str = ""  # Type of global pooling for final sequence

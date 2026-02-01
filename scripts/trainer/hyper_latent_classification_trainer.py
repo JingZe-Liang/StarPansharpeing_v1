@@ -107,9 +107,20 @@ class HyperClassificationTrainer:
         model_name = getattr(self.train_cfg, "model_name", None) or self.model.__class__.__name__
         self.log_msg(f"use classification model: {model_name}")
 
-        from fvcore.nn import parameter_count_table
-
-        self.log_msg("\n" + parameter_count_table(self.model))
+        # Initialize lazy modules with a dummy forward pass
+        # This is necessary for optimizer creation when using nn.LazyConv2d
+        self.model.to(self.device)
+        self.model.eval()
+        try:
+            batch = next(iter(self.train_dataloader))
+            image, _ = self._parse_batch(batch)
+            with torch.no_grad():
+                self.model(image)
+            self.log_msg("Model parameters initialized with a dummy forward pass")
+        except Exception as e:
+            self.log_msg(f"Dummy forward pass failed: {e}", level="WARNING")
+        finally:
+            self.model.train()
 
     def prepare_ema_models(self) -> None:
         if self.no_ema:
@@ -255,8 +266,10 @@ class HyperClassificationTrainer:
         top_k = getattr(self.metric_cfg, "top_k", 1)
         acc_metric = Accuracy(task="multiclass", num_classes=num_classes, top_k=top_k, average="micro")
         f1_metric = F1Score(task="multiclass", num_classes=num_classes, top_k=top_k, average="macro")
+        acc_metric_top5 = Accuracy(task="multiclass", num_classes=num_classes, top_k=5, average="micro")
         self.acc_metric: Accuracy = acc_metric.to(self.device)
         self.f1_metric: F1Score = f1_metric.to(self.device)
+        self.acc_metric_top5: Accuracy = acc_metric_top5.to(self.device)
 
     def get_optimizer_lr_scheduler(
         self,
@@ -461,27 +474,29 @@ class HyperClassificationTrainer:
         image, label = self._parse_batch(batch)
         logits = self._forward_model(image, is_eval=True)
         loss = self.loss_fn(logits, label)
-        pred = torch.argmax(logits, dim=1)
-        return loss, pred, label
+        return loss, logits, label
 
     def val_loop(self) -> None:
         self.model.eval()
         loss_metric = MeanMetric().to(device=self.device)
         self.acc_metric.reset()
         self.f1_metric.reset()
+        self.acc_metric_top5.reset()
 
         for batch in self.get_val_loader_iter():
-            loss, pred, label = self.val_step(batch)
-            gathered_pred = self.accelerator.gather_for_metrics(pred)
+            loss, logits, label = self.val_step(batch)
+            gathered_logits = self.accelerator.gather_for_metrics(logits)
             gathered_label = self.accelerator.gather_for_metrics(label)
-            self.acc_metric.update(gathered_pred, gathered_label)
-            self.f1_metric.update(gathered_pred, gathered_label)
+            self.acc_metric.update(gathered_logits, gathered_label)
+            self.f1_metric.update(gathered_logits, gathered_label)
+            self.acc_metric_top5.update(gathered_logits, gathered_label)
             loss_metric.update(loss.detach())  # type: ignore[arg-type]
             self.step_train_state("val")
 
         metrics = {
             "val_acc": self.acc_metric.compute(),  # type: ignore[call-arg]
             "val_f1": self.f1_metric.compute(),  # type: ignore[call-arg]
+            "val_acc_top5": self.acc_metric_top5.compute(),  # type: ignore[call-arg]
             "val_loss": loss_metric.compute(),  # type: ignore[call-arg]
         }
 
@@ -560,14 +575,16 @@ class HyperClassificationTrainer:
         self.train_loop()
 
 
-_key = "dinov3_ucmerced_linear"
+_key = "spectralgpt_ucmerced"
 _configs_dict = {
     "cosmos_ucmerced_linear": "cosmos_ucmerced_linear",
     "cosmos_eurosat_linear": "cosmos_eurosat_linear",
     "dinov3_ucmerced_linear": "dinov3_ucmerced_linear",
     "cosmos_ucmerced_hybrid_linear": "cosmos_ucmerced_hybrid_linear",
+    # Other SSL models
     "hypersigma_ucmerced": "hypersigma_ucmerced",
     "mae_ucmerced": "mae_ucmerced",
+    "spectralgpt_ucmerced": "spectralgpt_ucmerced",
 }
 
 

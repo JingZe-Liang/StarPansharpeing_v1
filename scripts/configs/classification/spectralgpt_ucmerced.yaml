@@ -6,10 +6,19 @@ hydra:
 defaults:
   - dataset: ucmerced
   - accelerator: base
-  - model: dinov3_classifier
+  - model: spectral_gpt_classifier
   - _self_
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
+
+model:
+  input_scale: null
+  input_mean: null
+  input_std: null
+
+dataset:
+  train_bs: 4
+  val_bs: 4
 
 ema:
   _target_: ema_pytorch.EMA
@@ -26,11 +35,11 @@ metric:
 
 train:
   proj_dir: runs/stage2_classification/
-  model_name: dinov3_probe
+  model_name: spectralgpt_vit_base_patch8
   max_grad_norm: 1.0
   max_steps: 5_000
   save_every: 500
-  grad_check: false  # backbone is frozen, no need for gradient checkpointing
+  grad_check: false
   label_smoothing: 0.0
   class_weights: null
 
@@ -38,30 +47,24 @@ train:
   ema_load_path:
   is_neg_1_1: ${dataset.consts.to_neg_1_1}
 
-  # SGD optimizer following DINOv3 linear eval protocol
   model_optim:
     _target_: torch.optim.SGD
     _partial_: true
-    lr: 0.01  # linear probe typically uses higher lr
+    lr: 0.01
     momentum: 0.9
     weight_decay: 0.0
-
-    # _target_: torch.optim.AdamW
-    # _partial_: true
-    # lr: 1e-3
-    # weight_decay: 0.01
 
   model_sched:
     _target_: transformers.optimization.get_constant_schedule
     _partial_: true
 
   log:
-    run_comment: ${dataset.dataset_name}_dinov3_probe
+    run_comment: ${dataset.dataset_name}_spectralgpt
     log_with_time: true
     log_every: 20
     log_with: [wandb]
 
-  debug: false
+  debug: true
 
 val:
   val_duration: 500

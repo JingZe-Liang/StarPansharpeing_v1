@@ -14,7 +14,13 @@ pretrained: true
 freeze_backbone: true
 
 num_classes: ${dataset.consts.num_classes}
-img_size: 224
+img_size: 64
+patch_size: 8
+use_abs_pos_emb: true
+ssa_interval: 6
+use_ssa: false  # Pretrained weights don't have SSA parameters
+expected_in_chans: 100
+enable_input_proj: true
 
 # Input preprocessing
 img_is_neg_1_1: ${dataset.consts.to_neg_1_1}

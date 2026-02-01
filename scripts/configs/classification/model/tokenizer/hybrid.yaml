@@ -3,8 +3,8 @@
 cnn_cfg:
   model:
     resolution: 1024
-    in_channels: 3
-    out_channels: 3
+    in_channels: 512
+    out_channels: 512
     z_channels: 768
     latent_channels: 32
     channels: 128
@@ -50,7 +50,7 @@ trans_enc_cfg:
   unpatch_size: 2
   reg_tokens: 4
   attn_type: gated
-  class_token: true  # Enable CLS token for classification
+  class_token: false  # Enable CLS token for classification
 
 trans_dec_cfg: null
 

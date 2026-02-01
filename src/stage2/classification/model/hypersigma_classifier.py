@@ -7,12 +7,13 @@ a consistent interface for scene classification tasks.
 
 import math
 from functools import partial
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
+from timm.layers import resample_abs_pos_embed
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 
 
@@ -370,6 +371,7 @@ class SpatViT(nn.Module):
         out_indices: list[int] | None = None,
         interval: int = 3,
         n_points: int = 4,
+        use_ssa: bool = True,
     ) -> None:
         super().__init__()
         if out_indices is None:
@@ -414,7 +416,7 @@ class SpatViT(nn.Module):
                     drop_path=dpr[i],
                     norm_layer=norm_layer,
                     init_values=init_values,
-                    sample=((i + 1) % interval != 0),
+                    sample=(use_ssa and ((i + 1) % interval != 0)),
                     n_points=n_points,
                 )
                 for i in range(depth)
@@ -459,7 +461,8 @@ class SpatViT(nn.Module):
         x, (Hp, Wp) = self.patch_embed(x)
 
         if self.pos_embed is not None:
-            x = x + self.pos_embed
+            pos_embed = self._resize_pos_embed(self.pos_embed, (Hp, Wp))
+            x = x + pos_embed
         x = self.pos_drop(x)
 
         features = []
@@ -474,6 +477,15 @@ class SpatViT(nn.Module):
 
         features = [feat.permute(0, 2, 1).reshape(B, -1, Hp, Wp) for feat in features]
         return img + features
+
+    def _resize_pos_embed(self, pos_embed: torch.Tensor, new_size: tuple[int, int]) -> torch.Tensor:
+        num_patches = pos_embed.shape[1]
+        old_size = int(num_patches**0.5)
+        if old_size * old_size != num_patches:
+            return pos_embed
+        if (old_size, old_size) == new_size:
+            return pos_embed
+        return resample_abs_pos_embed(pos_embed, new_size=new_size, old_size=(old_size, old_size), num_prefix_tokens=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass returning logits."""
@@ -509,7 +521,16 @@ class HyperSIGMAClassifier(nn.Module):
         freeze_backbone: Whether to freeze backbone during training
         num_classes: Number of output classes
         img_size: Input image size
+        patch_size: Patch size for SpatViT backbone.
+        use_abs_pos_emb: Whether to enable absolute positional embedding.
+        ssa_interval: Interval for SSA sampling blocks.
+        use_ssa: Whether to enable SSA sampling attention.
+        expected_in_chans: Expected input channels for HyperSIGMA pretrain (default: 100).
+        enable_input_proj: If True, create a 1x1 conv when input channels != expected_in_chans.
         img_is_neg_1_1: Whether input is in [-1, 1] range
+        input_scale: Optional scale factor applied after range mapping, before normalization.
+        input_mean: Per-channel mean for input normalization (applied after range mapping).
+        input_std: Per-channel std for input normalization (applied after range mapping).
     """
 
     SUPPORTED_BACKBONES: dict[str, dict[str, int | list[int]]] = {
@@ -544,7 +565,16 @@ class HyperSIGMAClassifier(nn.Module):
         freeze_backbone: bool = True,
         num_classes: int = 21,
         img_size: int = 224,
+        patch_size: int = 16,
+        use_abs_pos_emb: bool = False,
+        ssa_interval: int = 6,
+        use_ssa: bool = True,
+        expected_in_chans: int = 100,
+        enable_input_proj: bool = True,
         img_is_neg_1_1: bool = True,
+        input_scale: float | None = None,
+        input_mean: list[float] | None = None,
+        input_std: list[float] | None = None,
     ) -> None:
         super().__init__()
 
@@ -556,13 +586,17 @@ class HyperSIGMAClassifier(nn.Module):
         self.backbone_type = backbone_type
         self.freeze_backbone = freeze_backbone
         self.img_is_neg_1_1 = img_is_neg_1_1
+        self.expected_in_chans = expected_in_chans
+        self.enable_input_proj = enable_input_proj
+        self.input_scale = self._validate_input_scale(input_scale)
+        self._set_input_norm(input_mean, input_std)
 
         # Build backbone
         config = self.SUPPORTED_BACKBONES[backbone_type]
         self.backbone = SpatViT(
             img_size=img_size,
-            in_chans=3,
-            patch_size=16,
+            in_chans=expected_in_chans,
+            patch_size=patch_size,
             drop_path_rate=0.1,
             out_indices=config["out_indices"],  # type: ignore[arg-type]
             embed_dim=config["embed_dim"],  # type: ignore[arg-type]
@@ -574,10 +608,13 @@ class HyperSIGMAClassifier(nn.Module):
             drop_rate=0.0,
             attn_drop_rate=0.0,
             use_checkpoint=False,
-            use_abs_pos_emb=False,
-            interval=config["interval"],  # type: ignore[arg-type]
+            use_abs_pos_emb=use_abs_pos_emb,
+            interval=ssa_interval if use_ssa else 1,
             num_classes=num_classes,
+            use_ssa=use_ssa,
         )
+
+        self.input_proj = self._build_input_proj()
 
         if pretrained and weights_path:
             self.load_pretrained_weights(weights_path)
@@ -625,13 +662,16 @@ class HyperSIGMAClassifier(nn.Module):
         if sorted(list(state_dict.keys()))[0].startswith("encoder"):
             state_dict = {k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")}
 
-        # Filter out incompatible layers for RGB inputs
+        model_state = self.backbone.state_dict()
+
+        # Filter out incompatible layers for RGB inputs or mismatched configs
         # HyperSIGMA pretrained weights are for hyperspectral images (~100 channels)
         keys_to_remove = []
         for k in list(state_dict.keys()):
             # Remove patch embedding layers (channel mismatch: 100 -> 3)
             if "patch_embed" in k:
-                keys_to_remove.append(k)
+                if k not in model_state or model_state[k].shape != state_dict[k].shape:
+                    keys_to_remove.append(k)
             # Remove MAE decoder layers (not needed for classification)
             elif "decoder" in k or "mask_token" in k:
                 keys_to_remove.append(k)
@@ -639,20 +679,36 @@ class HyperSIGMAClassifier(nn.Module):
             elif "classifier" in k or "DR" in k or "cls" in k or "fpn" in k:
                 keys_to_remove.append(k)
 
-        for k in keys_to_remove:
-            del state_dict[k]
-
-        print(f"📦 Loading HyperSIGMA pretrained weights from:")
+        print(f"Loading HyperSIGMA pretrained weights from:")
         print(f"   {weights_path}")
-        print(f"   ✅ Loading {len(state_dict)} compatible Transformer parameters")
-        print(f"   ⚠️  Skipping {len(keys_to_remove)} incompatible layers:")
-        print(f"      - patch_embed (channel mismatch: 100ch -> 3ch RGB)")
-        print(f"      - decoder layers (MAE pretraining only)")
-        print(f"      - classifier (task-specific)")
+        print(f"   Loading {len(state_dict)} compatible Transformer parameters")
+        print(f"   Skipping {len(keys_to_remove)} incompatible layers:")
+        for k in keys_to_remove:
+            print(f"      - {k}")
+            if k in state_dict:
+                del state_dict[k]
+
+        if "pos_embed" in state_dict and self.backbone.pos_embed is not None:
+            ckpt_pos = state_dict["pos_embed"]
+            model_pos = self.backbone.pos_embed
+            if ckpt_pos.shape != model_pos.shape:
+                num_patches = ckpt_pos.shape[1]
+                old_size = int(num_patches**0.5)
+                if old_size * old_size == num_patches:
+                    state_dict["pos_embed"] = resample_abs_pos_embed(
+                        ckpt_pos,
+                        new_size=self.backbone.patch_embed.patch_shape,
+                        old_size=(old_size, old_size),
+                        num_prefix_tokens=0,
+                    )
 
         msg = self.backbone.load_state_dict(state_dict, strict=False)
-        print(f"   📊 Missing: {len(msg.missing_keys)} keys (patch_embed, classifier, etc.)")
-        print(f"   📊 Unexpected: {len(msg.unexpected_keys)} keys")
+        print(f"   Missing: {len(msg.missing_keys)} keys (patch_embed, classifier, etc.)")
+        for k in msg.missing_keys:
+            print(f"      - {k}")
+        print(f"   Unexpected: {len(msg.unexpected_keys)} keys")
+        for k in msg.unexpected_keys:
+            print(f"      - {k}")
 
     def train(self, mode: bool = True) -> "HyperSIGMAClassifier":
         super().train(mode)
@@ -674,6 +730,7 @@ class HyperSIGMAClassifier(nn.Module):
             Dictionary with "logits" key
         """
         x = self._preprocess_input(x)
+        x = self._maybe_project_input(x)
         logits = self.backbone(x)
         return {"logits": logits}
 
@@ -681,18 +738,71 @@ class HyperSIGMAClassifier(nn.Module):
         """Preprocess input: convert [-1,1] to [0,1] if needed."""
         if self.img_is_neg_1_1:
             x = (x + 1) / 2  # [-1, 1] -> [0, 1]
-        return x
+        x = self._scale_input(x)
+        return self._normalize_input(x)
+
+    @staticmethod
+    def _validate_input_scale(input_scale: float | None) -> float | None:
+        if input_scale is None:
+            return None
+        if input_scale <= 0:
+            raise ValueError("input_scale must be a positive number.")
+        return float(input_scale)
+
+    def _set_input_norm(
+        self,
+        input_mean: list[float] | None,
+        input_std: list[float] | None,
+    ) -> None:
+        if (input_mean is None) != (input_std is None):
+            raise ValueError("input_mean and input_std must both be set or both be None.")
+        if input_mean is None:
+            return
+        mean = torch.tensor(input_mean).view(1, -1, 1, 1)
+        std = torch.tensor(input_std).view(1, -1, 1, 1)
+        self.register_buffer("_input_mean", mean, persistent=False)
+        self.register_buffer("_input_std", std, persistent=False)
+
+    def _scale_input(self, x: torch.Tensor) -> torch.Tensor:
+        if self.input_scale is None:
+            return x
+        return x * self.input_scale
+
+    def _normalize_input(self, x: torch.Tensor) -> torch.Tensor:
+        if not hasattr(self, "_input_mean") or not hasattr(self, "_input_std"):
+            return x
+        mean = cast(torch.Tensor, getattr(self, "_input_mean")).to(device=x.device, dtype=x.dtype)
+        std = cast(torch.Tensor, getattr(self, "_input_std")).to(device=x.device, dtype=x.dtype)
+        if mean.numel() not in (1, x.shape[1]):
+            raise ValueError(f"input_mean channels {mean.numel()} do not match input channels {x.shape[1]}.")
+        if std.numel() not in (1, x.shape[1]):
+            raise ValueError(f"input_std channels {std.numel()} do not match input channels {x.shape[1]}.")
+        return (x - mean) / std
+
+    def _maybe_project_input(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] == self.expected_in_chans:
+            return x
+        if not self.enable_input_proj:
+            raise ValueError(
+                f"Input channels {x.shape[1]} != expected {self.expected_in_chans}, and enable_input_proj is False."
+            )
+        return self.input_proj(x)
+
+    def _build_input_proj(self) -> nn.Module:
+        if not self.enable_input_proj:
+            return nn.Identity()
+        return nn.LazyConv2d(self.expected_in_chans, kernel_size=1, bias=False)
 
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
         """Return only classifier weights for checkpoint."""
         full_state = super().state_dict(*args, **kwargs)
-        return {k: v for k, v in full_state.items() if "classifier" in k}
+        return {k: v for k, v in full_state.items() if (not k.startswith("backbone.") or "classifier" in k)}
 
     def load_state_dict(
         self, state_dict: dict[str, torch.Tensor], strict: bool = True
     ) -> torch.nn.modules.module._IncompatibleKeys:
         """Load classifier weights only."""
-        filtered_state = {k: v for k, v in state_dict.items() if "classifier" in k}
+        filtered_state = {k: v for k, v in state_dict.items() if (not k.startswith("backbone.") or "classifier" in k)}
         if not filtered_state:
             # If state_dict doesn't have backbone.classifier prefix, add it
             filtered_state = {f"backbone.classifier.{k}": v for k, v in state_dict.items()}
@@ -748,5 +858,75 @@ def test_hypersigma_classifier() -> None:
         print(f"✅ {backbone_type} test passed!")
 
 
+def test_hypersigma_checkpoint_match() -> None:
+    """Test pretrained checkpoint key matching for HyperSIGMA."""
+    from pathlib import Path
+
+    ckpt_path = Path("/Data2/ZihanCao/Checkpoints/Hypersigma/spat-vit-large-ultra-checkpoint-1599.pth")
+    if not ckpt_path.exists():
+        print(f"checkpoint not found: {ckpt_path}")
+        return
+
+    model = HyperSIGMAClassifier(
+        backbone_type="spat_vit_l",
+        weights_path=None,
+        pretrained=False,
+        freeze_backbone=True,
+        num_classes=21,
+        img_size=64,
+        patch_size=8,
+        use_abs_pos_emb=True,
+        ssa_interval=6,
+        use_ssa=False,  # Pretrained weights don't have SSA parameters
+        expected_in_chans=100,
+        enable_input_proj=True,
+    )
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+    if list(state_dict.keys())[0].startswith("module."):
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+    if sorted(list(state_dict.keys()))[0].startswith("encoder"):
+        state_dict = {k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")}
+
+    model_state = model.backbone.state_dict()
+    matched = 0
+    missing: list[str] = []
+    unexpected: list[str] = []
+    mismatched: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+
+    for key, value in state_dict.items():
+        if key not in model_state:
+            unexpected.append(key)
+            continue
+        if model_state[key].shape != value.shape:
+            mismatched.append((key, tuple(value.shape), tuple(model_state[key].shape)))
+            continue
+        matched += 1
+
+    for key in model_state.keys():
+        if key not in state_dict:
+            missing.append(key)
+
+    print(f"matched: {matched}")
+    print(f"missing: {len(missing)}")
+    print(f"unexpected: {len(unexpected)}")
+    print(f"mismatched: {len(mismatched)}")
+    if missing:
+        print(f"missing sample: {missing[:10]}")
+    if unexpected:
+        print(f"unexpected sample: {unexpected[:10]}")
+    if mismatched:
+        print(f"mismatched sample: {mismatched[:10]}")
+
+    x = torch.randn(2, 100, 64, 64)
+    model.eval()
+    with torch.no_grad():
+        output = model(x)
+    logits = output["logits"]
+    print(f"forward logits shape: {logits.shape}")
+
+
 if __name__ == "__main__":
-    test_hypersigma_classifier()
+    # test_hypersigma_classifier()
+    test_hypersigma_checkpoint_match()

@@ -1,0 +1,43 @@
+_target_: src.stage2.classification.model.spectral_gpt_classifier.SpectralGPTClassifier
+
+model_type: tensor
+model_name: vit_base_patch8
+checkpoint_path: /Data2/ZihanCao/Checkpoints/SpectralGPT/SpectralGPT.pth
+pretrained: true
+freeze_backbone: true
+num_classes: ${dataset.consts.num_classes}
+classifier_type: linear
+backbone_kwargs:
+  sep_pos_embed: true
+  img_size: ${dataset.consts.img_size}
+expected_in_chans: 12
+enable_input_proj: true
+
+img_is_neg_1_1: ${dataset.consts.to_neg_1_1}
+input_scale: 10000.0
+input_mean:
+  - 1370.19151926
+  - 1184.3824625
+  - 1120.77120066
+  - 1136.26026392
+  - 1263.73947144
+  - 1645.40315151
+  - 1846.87040806
+  - 1762.59530783
+  - 1972.62420416
+  - 582.72633433
+  - 1732.16362238
+  - 1247.91870117
+input_std:
+  - 633.15169573
+  - 650.2842772
+  - 712.12507725
+  - 965.23119807
+  - 948.9819932
+  - 1108.06650639
+  - 1258.36394548
+  - 1233.1492281
+  - 1364.38688993
+  - 472.37967789
+  - 1310.36996126
+  - 1087.6020813

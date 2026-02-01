@@ -997,6 +997,12 @@ class REPALoss(torch.nn.Module):
         self.img_is_neg1_1 = img_is_neg1_1
         if self.repa_model_type == "pe":
             self.normalize = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        elif self.repa_model_type == "dinov3" and dino_pretrained_on == "satellite":
+            # dinov3 satellite nromalization mean/std.
+            self.normalize = Normalize(
+                mean=(0.430, 0.411, 0.296),
+                std=(0.213, 0.156, 0.143),
+            )
         else:
             self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 

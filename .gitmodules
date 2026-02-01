@@ -18,7 +18,7 @@
     path = src/stage1/discretization/LightningDiT
     url = https://github.com/hustvl/LightningDiT
 
-[submodule "src/stage2/denoise/HyperSIGMA"]
+[submodule "src/stage2/SSL_third_party/HyperSIGMA"]
     path = src/stage2/SSL_third_party/HyperSIGMA
     url = https://github.com/WHU-Sigma/HyperSIGMA
 
@@ -146,8 +146,8 @@
 [submodule "src/stage1/featups/loftup"]
 	path = src/stage1/featups/loftup
 	url = git@github.com:294coder/loftup-mod.git
-[submodule "src/stage2/Hyperspectral-Classification"]
-	path = src/stage2/Hyperspectral-Classification
+[submodule "src/stage2/segmentation/third_party/Hyperspectral-Classification"]
+	path = src/stage2/segmentation/third_party/Hyperspectral-Classification
 	url = https://github.com/eecn/Hyperspectral-Classification.git
 [submodule "src/stage2/layers/nested_learning"]
 	path = src/stage2/layers/nested_learning

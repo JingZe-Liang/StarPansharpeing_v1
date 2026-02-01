@@ -4,7 +4,7 @@ hydra:
     dir: .
 
 defaults:
-  - dataset: ucmerced
+  - dataset: resisc45  # [ucmerced, eurosat, resisc45]
   - accelerator: base
   - model: cosmos_hybrid_tokenizer_classifier
   - _self_
