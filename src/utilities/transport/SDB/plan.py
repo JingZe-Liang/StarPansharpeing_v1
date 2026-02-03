@@ -21,10 +21,11 @@ from einops import rearrange
 
 # * Type hint ======================================================================
 
-type X0 = Tensor
-type Score = Tensor
-type Noise = Tensor
-type Xt = Tensor
+# NOTE: `type X0 = Tensor` (PEP 695) requires Python 3.12+. Use assignment for 3.11 and below.
+X0 = Tensor
+Score = Tensor
+Noise = Tensor
+Xt = Tensor
 
 
 def _maybe_add_condition_kwargs(model: nn.Module, model_kwargs: dict, *, x_1: Tensor) -> dict:
@@ -123,17 +124,35 @@ def sigmoid_t_sample(
     k: float = 7.0,
     t_min: float = 1e-5,
     t_max: float = 1 - 1e-5,
+    device: torch.device | str = "cuda",
     force_to_last_zero: bool = False,
 ) -> Tensor:
-    """Sigmoid-shaped monotone decreasing time grid (not required by the paper)."""
-    step_indices = torch.linspace(0, 1, n_timesteps - 1, dtype=torch.float64)
-    k_tensor = torch.tensor(k, dtype=step_indices.dtype, device=step_indices.device)
+    """Sigmoid-shaped monotone decreasing time grid in [t_max -> t_min] (optionally ending at 0).
+
+    Notes:
+        - Returns a tensor of length `n_timesteps`.
+        - `force_to_last_zero=True` sets the last element to exactly 0.0.
+          This is sometimes useful for DDIM-like formulations, but beware of
+          singularities if your schedule has terms like 1/t or 1/(1-t).
+    """
+    if n_timesteps < 2:
+        raise ValueError(f"n_timesteps must be >= 2, but got {n_timesteps}")
+
+    step_indices = torch.linspace(0, 1, n_timesteps, dtype=torch.float64, device=device)
+    k_tensor = torch.as_tensor(k, dtype=step_indices.dtype, device=step_indices.device)
+
     numerator = torch.sigmoid(k_tensor * (step_indices - 0.5)) - torch.sigmoid(-k_tensor * 0.5)
     denominator = torch.sigmoid(k_tensor * 0.5) - torch.sigmoid(-k_tensor * 0.5)
-    time_vec = numerator / denominator
+    s = numerator / denominator  # in [0, 1], increasing
+
+    # Map to [t_max -> t_min], decreasing.
+    t_grid = t_max - s * (t_max - t_min)
+    t_grid = torch.clamp(t_grid, min=t_min, max=t_max)
+
     if force_to_last_zero:
-        time_vec = torch.cat([time_vec.clip(min=t_min, max=t_max).flip(0), torch.zeros_like(time_vec[:1])])
-    return time_vec.to(torch.float32)
+        t_grid[-1] = 0.0
+
+    return t_grid.to(torch.float32)
 
 
 # Define a custom probability density function
@@ -433,6 +452,7 @@ class SDBContinuousPlan(SDBPlan):
         t_sample_kwargs["t_min"] = t_min
         t_sample_kwargs["t_max"] = t_max
         device = self.t_train_kwargs.get("device", "cuda")
+        t_sample_kwargs.setdefault("device", device)
 
         if self.t_sample_type == "uniform":
             time_grid = torch.linspace(t_max, t_min, steps=t_sample_kwargs["n_timesteps"]).to(
@@ -450,7 +470,8 @@ class SDBContinuousPlan(SDBPlan):
     def train_continous_t(self, batch_size: int):
         if self.t_train_type == "uniform":
             t_min, t_max = self.t_train_kwargs["clip_t_min_max"]
-            return torch.rand(batch_size, device="cuda") * (t_max - t_min) + t_min
+            device = self.t_train_kwargs.get("device", "cuda")
+            return torch.rand(batch_size, device=device) * (t_max - t_min) + t_min
         elif self.t_train_type == "edm":
             return edm_t_train(batch_size, **self.t_train_kwargs)
         elif self.t_train_type == "cosh":
@@ -950,3 +971,271 @@ class SDBContinuousSampler(SDBSampler):
         if self.sample_noisy_x1_b <= 0:
             return x_1
         return x_1 + torch.randn_like(x_1) * self.sample_noisy_x1_b
+
+
+# * UDBM (Uncertainty-Aware Diffusion Bridge Model) =================================
+#
+# This section implements the uncertainty-aware schedules and the DDPM/DDIM-compatible
+# inference update (Algorithm 2) from:
+#   "Unifying Heterogeneous Degradations: Uncertainty-Aware Diffusion Bridge Model
+#    for All-in-One Image Restoration"
+#
+# The key idea is to make the bridge coefficients spatially adaptive via a pixel-wise
+# uncertainty map `u` (typically in [0, 1]).
+
+
+class UDBMPlan:
+    """Uncertainty-aware schedules used by UDBM.
+
+    Notation follows the paper's Eq. (7), (9), (10):
+        x_t = α_t(u) ⊙ x_lq + γ_t(u) ⊙ x_hq + β_t(u) ⊙ ε,   ε ~ N(0, I)
+
+    with:
+        π(u) = (1-u)π_OT + uπ_EOT
+        α_t(u) = t^{π(u)} / (t^{π(u)} + (1-t)^{π(u)})
+        γ_t(u) = 1 - α_t(u)
+        β_t(u) = (1+u) ⊙ (λ_b t(1-t) + t^2) * sigma_base
+
+    Notes:
+        - All multiplications/divisions are element-wise (⊙, ⊘).
+        - `u` can be (B,1,H,W) or (B,C,H,W); it will broadcast to `x_*` if possible.
+        - If your pixel range is [-1,1] or [0,1], you may want to tune `sigma_base`
+          and/or the scale of `u`, depending on how your network was trained.
+    """
+
+    def __init__(
+        self,
+        *,
+        pi_ot: float = 1.0,
+        pi_eot: float = 0.5,
+        lambda_b: float = 1.0,
+        sigma_base: float = 1.0,
+        clip_u: bool = True,
+        u_min: float = 0.0,
+        u_max: float = 1.0,
+        eps: float = 1e-12,
+    ) -> None:
+        self.pi_ot = float(pi_ot)
+        self.pi_eot = float(pi_eot)
+        self.lambda_b = float(lambda_b)
+        self.sigma_base = float(sigma_base)
+
+        self.clip_u = bool(clip_u)
+        self.u_min = float(u_min)
+        self.u_max = float(u_max)
+        self.eps = float(eps)
+
+    def expand_t_as(self, t: Tensor, x: Tensor) -> Tensor:
+        return expand_t_as(t, x, dim_not_match_raise=False).float()
+
+    def _sanitize_u(self, u: Tensor | None, x_like: Tensor) -> Tensor:
+        if u is None:
+            u = torch.zeros_like(x_like[:, :1])  # (B,1,...) broadcastable
+        u = u.to(device=x_like.device, dtype=torch.float32)
+        if self.clip_u:
+            u = u.clamp(self.u_min, self.u_max)
+        return u
+
+    def pi_u(self, u: Tensor | None, x_like: Tensor) -> Tensor:
+        u = self._sanitize_u(u, x_like)
+        return (1.0 - u) * self.pi_ot + u * self.pi_eot
+
+    def alpha_lq(self, t: Tensor, u: Tensor | None, x_like: Tensor) -> Tensor:
+        """Return α_t(u): coefficient on x_lq in Eq. (7)/(10)."""
+        t = self.expand_t_as(t, x_like)
+        u = self._sanitize_u(u, x_like)
+        pi = (1.0 - u) * self.pi_ot + u * self.pi_eot
+
+        # α_t(u) = t^π / (t^π + (1-t)^π)
+        t_pow = torch.pow(t, pi)
+        omt_pow = torch.pow(1.0 - t, pi)
+        return t_pow / (t_pow + omt_pow + self.eps)
+
+    def gamma_hq(self, t: Tensor, u: Tensor | None, x_like: Tensor) -> Tensor:
+        """Return γ_t(u) = 1 - α_t(u): coefficient on x_hq."""
+        return 1.0 - self.alpha_lq(t, u, x_like)
+
+    def beta_noise(self, t: Tensor, u: Tensor | None, x_like: Tensor) -> Tensor:
+        """Return β_t(u): noise c(oefficient (std) in Eq. (7)/(9)."""
+        t = self.expand_t_as(t, x_like)
+        u = self._sanitize_u(u, x_like)
+        core = self.lambda_b * t * (1.0 - t) + t * t
+        return self.sigma_base * (1.0 + u) * core
+
+    def coeffs(self, t: Tensor, u: Tensor | None, x_like: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Return (α_t(u), γ_t(u), β_t(u)) for Eq. (7)."""
+        a = self.alpha_lq(t, u, x_like)
+        g = 1.0 - a
+        b = self.beta_noise(t, u, x_like)
+        return a, g, b
+
+    def init_x1(self, x_lq: Tensor, u: Tensor | None, z: Tensor | None = None) -> Tensor:
+        """Initialize x_{t=1} = x_lq + β_1(u) ε (Algorithm 2, line 6)."""
+        u_s = self._sanitize_u(u, x_lq)
+        if z is None:
+            z = torch.randn_like(x_lq)
+        beta_1 = self.sigma_base * (1.0 + u_s)
+        return x_lq + beta_1 * z
+
+    def sample_xt(
+        self, x_hq: Tensor, x_lq: Tensor, t: Tensor, u: Tensor | None, z: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """Sample x_t given (x_hq, x_lq, u): x_t = α x_lq + γ x_hq + β ε."""
+        if z is None:
+            z = torch.randn_like(x_hq)
+        a, g, b = self.coeffs(t, u, x_hq)
+        x_t = a * x_lq + g * x_hq + b * z
+        return x_t, z
+
+
+class UDBMSampler:
+    """DDPM/DDIM-compatible UDBM sampler (paper Algorithm 2).
+
+    This sampler expects:
+        - x_lq : degraded input image (paper x_lq, corresponds to the terminal observation)
+        - u    : pixel-wise uncertainty map in [0,1] (or any range if `clip_u=False`)
+        - model: a denoiser that predicts x̂0 (clean / HQ image) from (x_t, t, u)
+
+    For η=0, the update reduces to DDIM-style deterministic sampling.
+    For η>0, it injects noise with the paper's posterior std σ̃_t (Algorithm 2, line 10).
+    """
+
+    def __init__(self, plan: UDBMPlan, *, eta: float = 0.0) -> None:
+        self.plan = plan
+        self.eta = float(eta)
+
+    def _model_pred_x0(
+        self,
+        model: nn.Module,
+        x_t: Tensor,
+        t: Tensor,
+        *,
+        x_lq: Tensor,
+        u: Tensor | None,
+        model_kwargs: dict | None,
+    ) -> Tensor:
+        model_kwargs = {} if model_kwargs is None else model_kwargs
+
+        # Best-effort provide x_lq as x_1 (optional) and u (required for UDBM schedules).
+        cond_kwargs = _maybe_add_condition_kwargs(model, model_kwargs, x_1=x_lq)
+        if "u" not in cond_kwargs:
+            cond_kwargs = {**cond_kwargs, "u": u}
+
+        with torch.no_grad():
+            out = model(x_t, t, **cond_kwargs)
+            if isinstance(out, Sequence):
+                out = out[0]
+        return out
+
+    def sample(
+        self,
+        model: nn.Module,
+        x_lq: Tensor,
+        *,
+        u: Tensor | None = None,
+        time_grid: Tensor | None = None,
+        sample_n_steps: int = 1,
+        traj_saved_n: int = 5,
+        model_kwargs: dict | None = None,
+        eta: float | None = None,
+        clip_value: bool = True,
+        clip_min: float = -1.0,
+        clip_max: float = 1.0,
+        progress: bool = True,
+    ) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """Run UDBM inference (Algorithm 2).
+
+        Args:
+            model: denoiser predicting x̂0.
+            x_lq: degraded input image (B,C,H,W).
+            u: pixel-wise uncertainty map (B,1,H,W) or (B,C,H,W). If None, treated as 0.
+            time_grid: monotone decreasing tensor, e.g. [1, ..., 0]. If None, uses linspace.
+            sample_n_steps: number of reverse steps (N). `time_grid` will have N+1 points.
+            traj_saved_n: how many trajectory snapshots to save (including endpoints).
+            eta: stochasticity parameter η in the paper (0=DDIM, 1≈DDPM). Defaults to self.eta.
+            clip_value: clamp predicted x̂0 into [clip_min, clip_max].
+        """
+        model_kwargs = {} if model_kwargs is None else model_kwargs
+        eta = self.eta if eta is None else float(eta)
+
+        bsz = x_lq.shape[0]
+        device = x_lq.device
+
+        if time_grid is None:
+            # τ_N=1 -> τ_0=0 (length N+1)
+            time_grid = torch.linspace(1.0, 0.0, steps=sample_n_steps + 1, device=device, dtype=torch.float32)
+        else:
+            time_grid = time_grid.to(device=device, dtype=torch.float32)
+            if time_grid.numel() < 2:
+                raise ValueError("time_grid must have at least 2 points (e.g. [1, 0]).")
+
+        save_indices = _traj_save_indices(len(time_grid), traj_saved_n)
+
+        # Initialize x_{τ_N} (t=1)
+        x_t = self.plan.init_x1(x_lq, u)
+        saved_xt_traj: list[Tensor] = [x_t]
+        saved_x0_traj: list[Tensor] = []
+
+        if not progress:
+            tbar = enumerate(zip(time_grid[:-1], time_grid[1:]), start=1)
+        else:
+            from tqdm.auto import tqdm
+
+            tbar = tqdm(
+                enumerate(zip(time_grid[:-1], time_grid[1:]), start=1),
+                total=len(time_grid) - 1,
+                leave=False,
+            )
+
+        last_i = 0
+        for i, (t_scalar, s_scalar) in tbar:
+            last_i = i
+
+            # Expand t/s to match x_t for coefficient computations & model input.
+            t_vec = torch.full((bsz,), float(t_scalar), device=device, dtype=torch.float32)
+            s_vec = torch.full((bsz,), float(s_scalar), device=device, dtype=torch.float32)
+            t = self.plan.expand_t_as(t_vec, x_t)
+
+            # Predict x̂0 at time t
+            x0_hat = self._model_pred_x0(model, x_t, t, x_lq=x_lq, u=u, model_kwargs=model_kwargs)
+            if clip_value:
+                x0_hat = x0_hat.clamp(clip_min, clip_max)
+
+            # Compute ε_pred at time t:
+            #   ε_pred = (x_t - α_t x_lq - γ_t x̂0) ⊘ β_t
+            a_t, g_t, b_t = self.plan.coeffs(t_vec, u, x_t)
+            eps_pred = (x_t - a_t * x_lq - g_t * x0_hat) / (b_t + self.plan.eps)
+
+            # Coefficients at s
+            a_s, g_s, b_s = self.plan.coeffs(s_vec, u, x_t)
+
+            # Posterior std σ̃_t (Algorithm 2 line 10), element-wise.
+            #   σ̃_t = η * sqrt( β_s^2 * (β_t^2 - β_s^2) / β_t^2 )
+            if eta > 0:
+                b_t2 = b_t * b_t
+                b_s2 = b_s * b_s
+                diff = (b_t2 - b_s2).clamp(min=0.0)
+                sigma_tilde = eta * torch.sqrt((b_s2 * diff) / (b_t2 + self.plan.eps))
+            else:
+                sigma_tilde = torch.zeros_like(b_s)
+
+            # x_mean = α_s x_lq + γ_s x̂0 + sqrt(β_s^2 - σ̃_t^2) * ε_pred
+            det_coeff = torch.sqrt((b_s * b_s - sigma_tilde * sigma_tilde).clamp(min=0.0))
+            x_mean = a_s * x_lq + g_s * x0_hat + det_coeff * eps_pred
+
+            # Sample x_s
+            if float(s_scalar) > 0.0:
+                x_t = x_mean + sigma_tilde * torch.randn_like(x_t)
+            else:
+                # At s=0, return x̂0
+                x_t = x0_hat
+
+            if i in save_indices:
+                saved_x0_traj.append(x0_hat)
+                saved_xt_traj.append(x_t)
+
+        if last_i not in save_indices:
+            saved_x0_traj.append(x_t)
+            saved_xt_traj.append(x_t)
+
+        return x_t, saved_x0_traj, saved_xt_traj

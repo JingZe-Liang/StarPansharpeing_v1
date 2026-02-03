@@ -221,3 +221,9 @@
 [submodule "src/stage2/change_detection/third_party/GVLM"]
 	path = src/stage2/change_detection/third_party/GVLM
 	url = https://github.com/zxk688/GVLM.git
+[submodule "src/stage2/SSL_third_party/SkySensePlusPlus"]
+	path = src/stage2/SSL_third_party/SkySensePlusPlus
+	url = https://github.com/kang-wu/SkySensePlusPlus.git
+[submodule "src/stage1/featups/featsharp"]
+	path = src/stage1/featups/featsharp
+	url = https://github.com/NVlabs/FeatSharp.git

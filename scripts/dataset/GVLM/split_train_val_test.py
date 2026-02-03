@@ -5,6 +5,8 @@ import random
 import shutil
 from pathlib import Path
 
+from tqdm import tqdm
+
 
 def list_images(root: Path) -> list[Path]:
     return sorted([p for p in root.iterdir() if p.is_file()])
@@ -54,7 +56,7 @@ def split_indices(n: int, train_ratio: float, val_ratio: float, seed: int) -> tu
 def write_list(paths: list[Path], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
-        for p in paths:
+        for p in tqdm(paths, desc=f"write {out_path.name}", unit="patch"):
             f.write(f"{p.name}\n")
 
 
@@ -77,7 +79,7 @@ def copy_split(
         (out_root / split_name / "im1").mkdir(parents=True, exist_ok=True)
         (out_root / split_name / "im2").mkdir(parents=True, exist_ok=True)
         (out_root / split_name / "label").mkdir(parents=True, exist_ok=True)
-        for i in idxs:
+        for i in tqdm(idxs, desc=f"copy {split_name}", unit="patch"):
             stem = stems[i]
             a_path = next(a_dir.glob(f"{stem}.*"))
             b_path = next(b_dir.glob(f"{stem}.*"))
@@ -153,4 +155,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    """
+    python scripts/dataset/GVLM/split_train_val_test.py \
+    --input-root data/Downstreams/滑坡检测-GVLM/GVLM_CD256_0.3neg \
+    --train-ratio 0.7 \
+    --val-ratio 0.1 \
+    --test-ratio 0.2 \
+    --seed 42 \
+    --mode list \
+    --list-dir list \
+    """
     main()

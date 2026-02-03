@@ -9,6 +9,7 @@ __getattr__, __dir__, __all__ = lazy_loader.attach(
         "deep_globe": ["DeepGlobeRoadExtractionStreamingDataset"],
         "single_mat_loader": ["SingleMatDataset"],
         "oil_leakage": ["get_oil_leakage_dataloaders"],
+        "flood3i": ["Flood3IDataset", "get_flood3i_dataloader"],
         "data_split": [
             "single_image_split_dataset",
             "oversample_weak_classes",
