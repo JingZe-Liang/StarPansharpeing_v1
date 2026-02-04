@@ -1,0 +1,63 @@
+train_bs: 8
+val_bs: 4
+
+# Configs
+data_type: null
+label_mode: seg
+dataset_name: Flood3I
+
+img_size: 256
+num_classes: 10
+ignore_index: 255
+normalize: true
+
+consts:
+  is_single_image: false
+  img_size: ${..img_size}
+  num_classes: ${..num_classes}
+  bands: 3
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+  ignore_index: ${..ignore_index}
+
+list_files:
+  train: data/Downstreams/Flood-3i/val.txt
+  val: data/Downstreams/Flood-3i/val.txt
+
+train:
+  _target_: src.stage2.segmentation.data.flood3i.get_flood3i_dataloader
+  batch_size: ${...consts.train_bs}
+  num_workers: 4
+  split: train
+  root: data/Downstreams/Flood-3i
+  list_file: ${...list_files.train}
+  transform:
+    _target_: src.stage2.segmentation.data.flood3i.Flood3IKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  normalize: ${...normalize}
+  return_name: false
+  pin_memory: true
+
+val:
+  _target_: src.stage2.segmentation.data.flood3i.get_flood3i_dataloader
+  batch_size: ${...consts.val_bs}
+  num_workers: 2
+  split: val
+  root: data/Downstreams/Flood-3i
+  list_file: ${...list_files.val}
+  transform:
+    _target_: src.stage2.segmentation.data.flood3i.Flood3IKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  normalize: ${...normalize}
+  return_name: false
+  pin_memory: true

@@ -8,7 +8,7 @@ import torch
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomVerticalFlip
 from kornia.constants import DataKey
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,42 @@ class GVLMLandslideDataset(Dataset):
         if self.return_name:
             out["name"] = sample.name
         return out
+
+
+def create_gvlm_landslide_dataloader(
+    data_root: str | Path,
+    split: str,
+    list_dir: str = "list",
+    batch_size: int = 4,
+    shuffle: bool = True,
+    num_workers: int = 4,
+    transform: AugmentationSequential | None | str = "default",
+    normalize: bool = True,
+    img_to_neg1_1: bool = False,
+    label_threshold: int = 0,
+    return_name: bool = False,
+    pin_memory: bool = True,
+    drop_last: bool = False,
+) -> tuple[GVLMLandslideDataset, DataLoader]:
+    dataset = GVLMLandslideDataset(
+        data_root=data_root,
+        split=split,
+        list_dir=list_dir,
+        transform=transform,
+        normalize=normalize,
+        img_to_neg1_1=img_to_neg1_1,
+        label_threshold=label_threshold,
+        return_name=return_name,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+    )
+    return dataset, dataloader
 
 
 def test_dataloader():

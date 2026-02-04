@@ -1,8 +1,63 @@
-from torchgeo.datasets import CaBuAr
-from torch.utils.data import DataLoader
-from torch import Tensor
 from collections.abc import Callable
 from typing import Any
+
+import torch
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset
+from torchgeo.datasets import CaBuAr
+
+
+def _normalize_cabuar_image(image: Tensor, to_neg_1_1: bool) -> Tensor:
+    img_min = image.amin(dim=(0, 2, 3), keepdim=True)
+    img_max = image.amax(dim=(0, 2, 3), keepdim=True)
+    img_range = (img_max - img_min).clamp(min=1e-6)
+    image = (image - img_min) / img_range
+    image = image.clamp(0.0, 1.0)
+    if to_neg_1_1:
+        image = image * 2.0 - 1.0
+    return image
+
+
+class CaBuArChangeDetectionDataset(Dataset):
+    def __init__(
+        self,
+        root: str,
+        mode: str,
+        bands: tuple[str, ...] | None = None,
+        transforms: Callable[[dict[str, Tensor]], dict[str, Tensor]] | None = None,
+        download: bool = False,
+        normalize: bool = True,
+        to_neg_1_1: bool = False,
+        return_name: bool = False,
+    ) -> None:
+        if bands is None:
+            bands = CaBuAr.all_bands
+        self.dataset = CaBuAr(
+            root=root,
+            split=mode,
+            bands=bands,
+            transforms=transforms,
+            download=download,
+        )
+        self.normalize = normalize
+        self.to_neg_1_1 = to_neg_1_1
+        self.return_name = return_name
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> dict[str, Tensor | str]:
+        sample = self.dataset[index]
+        image = sample["image"].float()
+        mask = sample["mask"].long()
+        if self.normalize:
+            image = _normalize_cabuar_image(image, to_neg_1_1=self.to_neg_1_1)
+        img1 = image[0]
+        img2 = image[1]
+        out: dict[str, Tensor | str] = {"img1": img1, "img2": img2, "gt": mask}
+        if self.return_name:
+            out["name"] = self.dataset.uuids[index]
+        return out
 
 
 def get_dataloader(
@@ -54,6 +109,43 @@ def get_dataloader(
         **loader_kwargs,
     )
 
+    return dataset, dataloader
+
+
+def create_cabuar_change_detection_dataloader(
+    batch_size: int,
+    num_workers: int,
+    mode: str = "train",
+    root: str = "data/Downstreams/FireBurn-CaBuAr",
+    bands: tuple[str, ...] | None = None,
+    transforms: Callable[[dict[str, Tensor]], dict[str, Tensor]] | None = None,
+    download: bool = False,
+    normalize: bool = True,
+    to_neg_1_1: bool = False,
+    return_name: bool = False,
+    pin_memory: bool = True,
+    drop_last: bool = False,
+    **loader_kwargs: Any,
+) -> tuple[CaBuArChangeDetectionDataset, DataLoader]:
+    dataset = CaBuArChangeDetectionDataset(
+        root=root,
+        mode=mode,
+        bands=bands,
+        transforms=transforms,
+        download=download,
+        normalize=normalize,
+        to_neg_1_1=to_neg_1_1,
+        return_name=return_name,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=(mode == "train"),
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+        **loader_kwargs,
+    )
     return dataset, dataloader
 
 

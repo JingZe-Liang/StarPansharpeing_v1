@@ -1209,6 +1209,8 @@ _key = "tokenizer_hybrid_adaptor"
 _configs_dict = {
     "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
     "tokenizer_hybrid_adaptor": "tokenizer_hybrid_adaptor",
+    "tokenizer_hybrid_adaptor_gvlm": "tokenizer_hybrid_adaptor_gvlm",
+    "tokenizer_hybrid_adaptor_cabuar": "tokenizer_hybrid_adaptor_cabuar",
 }
 
 

@@ -1,0 +1,46 @@
+train_bs: 3
+val_bs: 1
+
+data_type: null
+label_mode: seg
+patch_size: 128
+micro_batch_size: 12
+dataset_name: GVLMLandslide
+
+consts:
+  num_classes: 2
+  bands: 3
+  unchanged_label: 0
+  changed_label: 1
+
+train:
+  _target_: src.stage2.change_detection.data.gvlm_land_slide.create_gvlm_landslide_dataloader
+  data_root: data/Downstreams/滑坡检测-GVLM/GVLM_CD256_0.3neg
+  split: train
+  list_dir: list
+  batch_size: ${dataset.train_bs}
+  shuffle: true
+  num_workers: 4
+  transform: default
+  normalize: true
+  img_to_neg1_1: true
+  label_threshold: 0
+  return_name: false
+  pin_memory: true
+  drop_last: false
+
+val:
+  _target_: src.stage2.change_detection.data.gvlm_land_slide.create_gvlm_landslide_dataloader
+  data_root: data/Downstreams/滑坡检测-GVLM/GVLM_CD256_0.3neg
+  split: val
+  list_dir: list
+  batch_size: ${dataset.val_bs}
+  shuffle: false
+  num_workers: 2
+  transform: null
+  normalize: true
+  img_to_neg1_1: true
+  label_threshold: 0
+  return_name: false
+  pin_memory: true
+  drop_last: false

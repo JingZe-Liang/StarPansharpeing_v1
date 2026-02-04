@@ -1,0 +1,201 @@
+tokenizer:
+  cnn_cfg:
+    model:
+      resolution: 1024
+      in_channels: 512
+      out_channels: 512
+      z_channels: 768
+      latent_channels: 32
+      channels: 128
+      channels_mult: [2, 4, 4]
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      spatial_compression: 8
+      patch_size: 1
+      block_name: res_block
+      norm_type: rmsnorm2d
+      act_type: silu
+      norm_groups: 32
+      adaptive_mode: interp
+      downsample_kwargs:
+        padconv_use_manually_pad: false
+      upsample_kwargs:
+        interp_type: nearest_interp
+    quantizer_type: null
+    vf_on_z_or_module: z
+    use_repa_loss: false
+    dino_feature_dim: 1024
+  trans_enc_cfg:
+    embed_dim: 1152
+    depth: 24
+    num_heads: 16
+    mlp_ratio: 4.0
+    qkv_bias: true
+    patch_size: 2
+    norm_layer: flarmsnorm
+    pos_embed: learned
+    rope_type: axial
+    pos_embed_grid_size: [32, 32]
+    img_size: 32
+    in_chans: 768
+    out_chans: 768
+    unpatch_size: 2
+    reg_tokens: 4
+    attn_type: gated
+  trans_dec_cfg: null
+  distill_cfg:
+    dino_feature_dim: 1024
+    semantic_feature_dim: 1024
+    cache_layers:
+      low_level: [0, 1, 2, -1]
+      semantic: [5, 11, 14, 19]
+  hybrid_tokenizer_cfg:
+    latent_bottleneck_type: before_semantic
+    latent_straight_through_skip: true
+
+tokenizer_feature:
+  pretrained_path: null
+  model_name: hybrid_tokenizer_b16
+  pretrained_size: 512
+  in_channels: 155
+  interp_ratio: null
+  interaction_indexes: [1, 2, 4, 5]
+  layer_in_channels: [512, 512, 1152, 1152]
+  features_per_stage: [256, 384, 512, 512]
+  conv_inplane: 64
+  drop_path_rate: 0.3
+  with_cffn: true
+  cffn_ratio: 0.25
+  deform_num_heads: 16
+  deform_ratio: 0.5
+  add_vit_feature: true
+  use_extra_extractor: true
+  with_cp: true
+  select_in_all_layers: true
+  extractor_type: deform_attention
+  extractor_kwargs: {}
+
+adapter:
+  latent_width: 32
+  n_conv_per_stage: 2
+  depth_per_stage: 2
+  norm: layernorm2d
+  act: gelu
+  drop: 0.0
+  act_first: false
+  conv_bias: false
+  block_types: [mbconv, mbconv, mbconv, mbconv]
+
+tokenizer_pretrained_path: null
+input_channels: ${tokenizer_feature.in_channels}
+feature_keys: [res2, res3, res4, res5]
+encoder_feature_strides: [4, 8, 16, 32]
+feature_strides: [2, 4, 8, 16]
+fpn_out_features: [p2, p3, p4, p5]
+fpn_out_channels: 256
+num_classes: 2
+pixel_mean: 0.0
+pixel_std: 1.0
+freeze_backbone: true
+device: cpu
+_debug: false
+
+obb:
+  angle_version: le90
+
+# NOTE: This base config assumes rotated components are provided by mmrotate.
+# You can also set detector.base_config_path to a mmrotate config file.
+detector:
+  fpn_num_outs: 5
+  base_cfg:
+    model:
+      type: RotatedFasterRCNN
+      data_preprocessor:
+        type: DetDataPreprocessor
+        mean: [0.0]
+        std: [1.0]
+        bgr_to_rgb: false
+      backbone:
+        type: HybridTokenizerBackboneMMDet
+      neck:
+        type: FPN
+        in_channels: [256, 384, 512, 512]
+        out_channels: 256
+        num_outs: 5
+        add_extra_convs: on_output
+      rpn_head:
+        type: RotatedRPNHead
+        in_channels: 256
+        feat_channels: 256
+        anchor_generator:
+          type: AnchorGenerator
+          strides: [16, 16, 16, 16, 32]
+          ratios: [0.5, 1.0, 2.0]
+          scales: [8]
+      roi_head:
+        type: RotatedStandardRoIHead
+        bbox_roi_extractor:
+          type: RotatedSingleRoIExtractor
+          roi_layer:
+            type: RoIAlignRotated
+            output_size: 7
+            sampling_ratio: 0
+          out_channels: 256
+          featmap_strides: [4, 8, 16, 32]
+        bbox_head:
+          type: RotatedShared2FCBBoxHead
+          in_channels: 256
+          fc_out_channels: 1024
+          roi_feat_size: 7
+          num_classes: 2
+          angle_version: ${obb.angle_version}
+      train_cfg:
+        rpn:
+          assigner:
+            type: MaxIoUAssigner
+            pos_iou_thr: 0.7
+            neg_iou_thr: 0.3
+            min_pos_iou: 0.3
+            match_low_quality: true
+          sampler:
+            type: RandomSampler
+            num: 256
+            pos_fraction: 0.5
+            neg_pos_ub: -1
+            add_gt_as_proposals: false
+          allowed_border: 0
+        rpn_proposal:
+          nms_pre: 2000
+          max_per_img: 2000
+          nms:
+            type: rnms
+            iou_threshold: 0.7
+          min_bbox_size: 0
+        rcnn:
+          assigner:
+            type: MaxIoUAssigner
+            pos_iou_thr: 0.5
+            neg_iou_thr: 0.5
+            min_pos_iou: 0.5
+            match_low_quality: false
+          sampler:
+            type: RandomSampler
+            num: 512
+            pos_fraction: 0.25
+            neg_pos_ub: -1
+            add_gt_as_proposals: true
+      test_cfg:
+        rpn:
+          nms_pre: 2000
+          max_per_img: 2000
+          nms:
+            type: rnms
+            iou_threshold: 0.7
+          min_bbox_size: 0
+        rcnn:
+          score_thr: 0.05
+          nms:
+            type: rnms
+            iou_threshold: 0.1
+          max_per_img: 100

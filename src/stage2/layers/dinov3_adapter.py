@@ -8,6 +8,7 @@
 # UESTC. All Rights Reserved.
 
 import sys
+from pathlib import Path
 from functools import partial
 from typing import Any, Callable, Literal
 
@@ -23,8 +24,15 @@ from timm.layers.weight_init import lecun_normal_
 from torchvision.transforms import Normalize
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
 
+
 # ----- Deformable attention ----- #
-sys.path.append("src/stage1/utilities/losses/dinov3")
+def _append_dinov3_repo_to_path() -> None:
+    repo_dir = Path(__file__).resolve().parents[2] / "stage1" / "utilities" / "losses" / "dinov3"
+    if repo_dir.exists():
+        sys.path.insert(0, str(repo_dir))
+
+
+_append_dinov3_repo_to_path()
 from dinov3.eval.segmentation.models.utils.ms_deform_attn import (  # type: ignore
     MSDeformAttn,
 )

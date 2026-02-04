@@ -20,6 +20,31 @@ class Flood3ISample:
     name: str
 
 
+@dataclass(frozen=True)
+class Flood3IKeyTransform:
+    image_key: str = "image"
+    mask_key: str = "mask"
+    img_key: str = "img"
+    gt_key: str = "gt"
+    squeeze_mask: bool = True
+    keep_extra: bool = True
+
+    def __call__(self, sample: dict[str, torch.Tensor | str]) -> dict[str, torch.Tensor | str]:
+        if self.image_key not in sample or self.mask_key not in sample:
+            raise KeyError(f"Missing keys: {self.image_key} or {self.mask_key}")
+        img = sample[self.image_key]
+        mask = sample[self.mask_key]
+        if self.squeeze_mask and isinstance(mask, torch.Tensor) and mask.ndim == 3 and mask.shape[0] == 1:
+            mask = mask.squeeze(0)
+        out: dict[str, torch.Tensor | str] = {self.img_key: img, self.gt_key: mask}
+        if self.keep_extra:
+            for key, value in sample.items():
+                if key in (self.image_key, self.mask_key):
+                    continue
+                out[key] = value
+        return out
+
+
 def _read_pairs_from_list(root: Path, list_path: Path) -> list[Flood3ISample]:
     if not list_path.exists():
         raise FileNotFoundError(f"List file not found: {list_path}")
@@ -41,7 +66,8 @@ def _read_pairs_from_list(root: Path, list_path: Path) -> list[Flood3ISample]:
 
 
 def _mask_name_from_image(image_name: str) -> str:
-    parts = image_name.split("_")
+    stem = Path(image_name).stem
+    parts = stem.split("_")
     if len(parts) < 2:
         raise ValueError(f"Unexpected image name: {image_name}")
     return f"{parts[0]}_lab_{'_'.join(parts[1:])}.png"

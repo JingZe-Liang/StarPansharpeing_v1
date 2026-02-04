@@ -1,7 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from fvcore.nn.parameter_count import parameter_count
 from jaxtyping import Float
 from loguru import logger
 from omegaconf import OmegaConf
@@ -31,88 +34,116 @@ TOKENIZER_INTERACTION_INDEXES = {
 
 
 def _create_default_cfg():
-    # cm244c384
-    _cnn_model_str = (
-        "resolution=512 in_channels=384 out_channels=384 z_channels=512 latent_channels=64 "
-        "channels=128 channels_mult=[2,4,4] num_res_blocks=2 attn_resolutions=[] "
-        "dropout=0.0 spatial_compression=8 patch_size=1 block_name=res_block "
-        "norm_type=gn norm_groups=32 adaptive_mode=interp downsample_kwargs.padconv_use_manually_pad=false "
-        "upsample_kwargs.interp_type=nearest_interp"
-    )
-    _cnn_model_cfg = OmegaConf.from_dotlist(_cnn_model_str.split(" "))
-    _cnn_str = "quantizer_type=null vf_on_z_or_module=z use_repa_loss=false dino_feature_dim=1024 cache_type=h"
-    _cnn_cfg = OmegaConf.from_dotlist(_cnn_str.split(" "))
-    tokenizer_cfg = OmegaConf.create({"cnn_cfg": {"model": _cnn_model_cfg, **_cnn_cfg}})
+    yaml_cfg = """
+    tokenizer:
+      cnn_cfg:
+        model:
+          resolution: 1024
+          in_channels: 512
+          out_channels: 512
+          z_channels: 768
+          latent_channels: 32
+          channels: 128
+          channels_mult: [2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+          spatial_compression: 8
+          patch_size: 1
+          block_name: res_block
+          norm_type: rmsnorm2d
+          act_type: silu
+          norm_groups: 32
+          adaptive_mode: interp
+          downsample_kwargs:
+            padconv_use_manually_pad: false
+          upsample_kwargs:
+            interp_type: nearest_interp
+        quantizer_type: null
+        vf_on_z_or_module: z
+        use_repa_loss: false
+        dino_feature_dim: 1024
+      trans_enc_cfg:
+        embed_dim: 1152
+        depth: 24
+        num_heads: 16
+        mlp_ratio: 4.0
+        qkv_bias: true
+        patch_size: 2
+        norm_layer: flarmsnorm
+        pos_embed: learned
+        rope_type: axial
+        pos_embed_grid_size: [32, 32]
+        img_size: 32
+        in_chans: 768
+        out_chans: 768
+        unpatch_size: 2
+        reg_tokens: 4
+        attn_type: gated
+      trans_dec_cfg: null
+      distill_cfg:
+        dino_feature_dim: 1024
+        semantic_feature_dim: 1024
+        cache_layers:
+          low_level: [0, 1, 2, -1]
+          semantic: [5, 11, 14, 19]
+      hybrid_tokenizer_cfg:
+        latent_bottleneck_type: before_semantic
+        latent_straight_through_skip: true
 
-    # h16d12c1024
-    _trans_enc_str = (
-        "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=2 norm_layer=layernorm pos_embed=learned rope_type=axial "
-        "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
-        "out_chans=512 unpatch_size=1 reg_tokens=0"
-    )
-    _trans_enc_cfg = OmegaConf.from_dotlist(_trans_enc_str.split(" "))
-    tokenizer_cfg.trans_enc_cfg = _trans_enc_cfg
+    tokenizer_feature:
+      pretrained_path: null
+      model_name: hybrid_tokenizer_b16
+      pretrained_size: 512
+      in_channels: 3
+      interp_ratio: null
+      interaction_indexes: [1, 2, 4, 5]
+      layer_in_channels: [512, 512, 1152, 1152]
+      features_per_stage: [256, 384, 512, 512]
+      conv_inplane: 64
+      drop_path_rate: 0.3
+      with_cffn: true
+      cffn_ratio: 0.25
+      deform_num_heads: 16
+      deform_ratio: 0.5
+      add_vit_feature: true
+      use_extra_extractor: true
+      with_cp: true
+      select_in_all_layers: true
+      extractor_type: deform_attention
+      extractor_kwargs: {}
 
-    # h16d12c1024
-    _trans_dec_str = (
-        "embed_dim=1024 depth=12 num_heads=16 mlp_ratio=4.0 qkv_bias=true "
-        "patch_size=1 norm_layer=layernorm pos_embed=learned rope_type=axial "
-        "pos_embed_grid_size=[32,32] img_size=32 in_chans=512 "
-        "out_chans=512 unpatch_size=2 reg_tokens=0"
-    )
-    _trans_dec_cfg = OmegaConf.from_dotlist(_trans_dec_str.split(" "))
-    tokenizer_cfg.trans_dec_cfg = _trans_dec_cfg
+    adapter:
+      latent_width: 32
+      n_conv_per_stage: 2
+      depth_per_stage: 2
+      norm: layernorm2d
+      act: gelu
+      drop: 0.0
+      act_first: false
+      conv_bias: false
+      block_types: [mbconv, mbconv, mbconv, mbconv]
 
-    _distill_str = "dino_feature_dim=1024 semantic_feature_dim=1024"
-    distill_cfg = OmegaConf.from_dotlist(_distill_str.split(" "))
-    tokenizer_cfg.distill_cfg = distill_cfg
+    cd_stage:
+      channels: [256, 384, 512, 512]
+      stride: 1
+      kernel_size: 3
+      norm_layer: layernorm2d
+      act_layer: gelu
+      expand_ratio: 2.0
+      block_type: mbconv
+      depth: 1
 
-    # * ----------------------------------------------
-
-    _tokenizer_feature_str = (
-        "pretrained_path=null features_per_stage=[512,512,512,512] "
-        "model_name=hybrid_tokenizer_b16 "
-        # encoder
-        "pretrained_size=512 in_channels=155 conv_inplane=64 drop_path_rate=0.3 with_cffn=true "
-        "cffn_ratio=0.25 deform_num_heads=16 deform_ratio=0.5 add_vit_feature=true "
-        "use_extra_extractor=true with_cp=true "
-    )
-    tokenizer_feature_cfg = OmegaConf.from_dotlist(_tokenizer_feature_str.split(" "))
-
-    # * ----------------------------------------------
-
-    _adapter_str = (
-        "adapter_type=default latent_width=64 n_conv_per_stage=1 "
-        "depth_per_stage=1 norm=layernorm2d act=gelu drop=0.0 "
-        "act_first=false conv_bias=false block_types=[nat,nat,mbconv,mbconv]"
-    )
-    adapter_cfg = OmegaConf.from_dotlist(_adapter_str.split(" "))
-
-    # * ----------------------------------------------
-
-    _cd_stage_str = (
-        "channels=[512,512,512,512] stride=1 kernel_size=3 norm_layer=layernorm2d "
-        "act_layer=gelu expand_ratio=2.0 block_type=mbconv depth=1"
-    )
-    cd_stage_cfg = OmegaConf.from_dotlist(_cd_stage_str.split(" "))
-
-    _unet_str = (
-        "input_channels=155 num_classes=2 deep_supervision=false n_stages=4 "
-        "use_latent=true ensure_rgb_type=null _debug=false"
-    )
-    unet_cfg = OmegaConf.from_dotlist(_unet_str.split(" "))
-
-    # composite the all configs
-    cfg = OmegaConf.create()
-    cfg.tokenizer = tokenizer_cfg
-    cfg.tokenizer_feature = tokenizer_feature_cfg
-    cfg.cd_stage = cd_stage_cfg
-    cfg.adapter = adapter_cfg
-    cfg.tokenizer_pretrained_path = None  # need to override
-    cfg.merge_with(unet_cfg)
-
-    return cfg
+    tokenizer_pretrained_path: null
+    input_channels: 3
+    num_classes: 2
+    deep_supervision: false
+    n_stages: 4
+    use_latent: true
+    ensure_rgb_type: null
+    _debug: false
+    """
+    return OmegaConf.create(yaml_cfg)
 
 
 # *==============================================================
@@ -120,7 +151,51 @@ def _create_default_cfg():
 # *==============================================================
 
 
+class TokenLayerProjector(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        if in_ch == out_ch:
+            self.proj_2d = nn.Identity()
+            self.proj_1d = nn.Identity()
+        else:
+            self.proj_2d = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False)
+            self.proj_1d = nn.Linear(in_ch, out_ch, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim == 4:
+            return self.proj_2d(x)
+        if x.ndim == 3:
+            return self.proj_1d(x)
+        raise ValueError(f"Expected 3D or 4D tensor, got ndim={x.ndim}")
+
+
 class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
+    def __init__(
+        self,
+        backbone: CosmosHybridTokenizer,
+        select_in_all_layers: bool = False,
+        interp_ratio: None | list[float] = None,
+        layer_in_channels: list[int] | None = None,
+        **adapter_kwargs,
+    ):
+        self.layer_in_channels = layer_in_channels
+        self.select_in_all_layers = select_in_all_layers
+        self.interp_ratio = interp_ratio
+        self.layer_projs: nn.ModuleList | None = None
+        super().__init__(backbone=backbone, **adapter_kwargs)
+
+    def _build_layer_projs(self) -> None:
+        if self.layer_in_channels is None:
+            self.layer_projs = None
+            return
+        if len(self.layer_in_channels) != len(self.interaction_indexes):
+            raise ValueError(
+                f"{len(self.layer_in_channels)=} must match {len(self.interaction_indexes)=} for layer projections."
+            )
+        self.layer_projs = nn.ModuleList(
+            [TokenLayerProjector(in_ch, self.embed_dim) for in_ch in self.layer_in_channels]
+        )
+
     def _setup_backbone(
         self,
         backbone: CosmosHybridTokenizer,
@@ -133,49 +208,106 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         if freeze_backbone:
             self.backbone.requires_grad_(False)
 
-        # Load pretrained weights
-        # Do loading weight
-
         self.pretrain_size = (pretrain_size, pretrain_size)
         self.interaction_indexes = interaction_indexes
         self.add_vit_feature = add_vit_feature
         self.embed_dim = backbone.semantic_enc_transformer.embed_dim
         self.freeze_backbone = freeze_backbone
-        self.patch_size = 16  # TODO: in config
+        self.patch_size = 16  # TODO: set in config
 
         logger.info(f"[Tokenizer backbone adapted]: embed dim={self.embed_dim}")
         logger.info(f"[Tokenizer backbone adapted]: interaction_indexes={self.interaction_indexes}")
 
+        if freeze_backbone:
+            self.backbone.eval()
+
+        self._build_layer_projs()
+
         return self.embed_dim
 
-    def _forward_backbone_intermediate_features(self, x):
-        """Get the intermediate features from the backbone."""
-
-        # TODO: If the image (x) is [0, 1], normalize to [-1, 1]
-        ...
-
-        # NOTE: cls feature is None
+    def _forward_backbone_intermediate_features(self, x: Float[Tensor, "b c h w"]):
         grad_ctx = torch.no_grad if self.freeze_backbone else torch.enable_grad
+        select_in_all_layers: bool = self.select_in_all_layers
+        interp_ratio = self.interp_ratio
+
         with torch.autocast("cuda", torch.bfloat16):
             with grad_ctx():
                 enc_out = self.backbone.encode(x, get_intermediate_features=True)
-                all_layers = enc_out.sem_z
-                final_latent = enc_out.latent
+                if select_in_all_layers:
+                    if isinstance(enc_out, dict):
+                        all_layers = []
+                        all_layers += enc_out.low_lvl_z
+                        all_layers += enc_out.sem_z
+                        final_latent = enc_out.latent
+                    elif isinstance(enc_out, list | tuple):
+                        all_layers = list(enc_out[0]) + list(enc_out[1])
+                        final_latent = None
+                else:
+                    assert isinstance(enc_out, dict)
+                    all_layers = enc_out.sem_z
+                    final_latent = enc_out.latent
 
-        # reorganize all_layers
+        # Clear backbone cache to free VRAM
+        if hasattr(self.backbone, "z"):
+            self.backbone.z = None  # type: ignore[assignment]
+        if hasattr(self.backbone, "sem_z"):
+            self.backbone.sem_z = None  # type: ignore[assignment]
+
         assert all_layers is not None, "all_layers is None"
-        assert len(all_layers) == len(self.interaction_indexes), (
-            f"{len(all_layers)=} != {len(self.interaction_indexes)=}"
+        if interp_ratio is not None:
+            assert len(interp_ratio) == len(self.interaction_indexes), (
+                f"{interp_ratio=} length must be equal to {len(self.interaction_indexes)=}"
+            )
+
+        max_index = len(all_layers) - 1
+        out_of_range = [idx for idx in self.interaction_indexes if idx < 0 or idx > max_index]
+        if out_of_range:
+            raise IndexError(
+                f"interaction_indexes has out-of-range values: {out_of_range}, valid range is [0, {max_index}]"
+            )
+        selected_layers = [all_layers[idx] for idx in self.interaction_indexes]
+
+        for i, token_feat in enumerate(selected_layers):
+            feat_hw: tuple[int, int] | None = None
+            if token_feat.ndim == 4:
+                if interp_ratio is not None:
+                    token_feat = self._interp_4d(token_feat, interp_ratio[i])
+                if self.layer_projs is not None:
+                    token_feat = self.layer_projs[i](token_feat)
+                feat_hw = (token_feat.shape[2], token_feat.shape[3])
+                token_feat = rearrange(token_feat, "b c h w -> b (h w) c")
+            else:
+                assert token_feat.ndim == 3
+                if interp_ratio is not None:
+                    h = w = int(math.sqrt(token_feat.shape[1]))
+                    if h * w != token_feat.shape[1]:
+                        raise ValueError(
+                            f"Token length {token_feat.shape[1]} is not a square; cannot infer spatial shape."
+                        )
+                    token_feat = rearrange(token_feat, "b (h w) c -> b c h w", h=h, w=w)
+                    token_feat = self._interp_4d(token_feat, interp_ratio[i])
+                    feat_hw = (token_feat.shape[2], token_feat.shape[3])
+                    token_feat = rearrange(token_feat, "b c h w -> b (h w) c")
+                else:
+                    h = w = int(math.sqrt(token_feat.shape[1]))
+                    if h * w != token_feat.shape[1]:
+                        raise ValueError(
+                            f"Token length {token_feat.shape[1]} is not a square; cannot infer spatial shape."
+                        )
+                    feat_hw = (h, w)
+                if self.layer_projs is not None:
+                    token_feat = self.layer_projs[i](token_feat)
+
+            cls_feat = None
+            selected_layers[i] = (token_feat, cls_feat, feat_hw)
+
+        assert len(selected_layers) == len(self.interaction_indexes), (
+            f"{len(selected_layers)=} != {len(self.interaction_indexes)=}"
         )
+        return selected_layers, final_latent
 
-        # None stands for cls feature
-        # Hybrid model now do no use cls token
-        # TODO: training an SSL model will use it.
-        all_layers = [
-            [rearrange(all_layers[i], "b c h w -> b (h w) c"), None] for i in range(len(self.interaction_indexes))
-        ]
-
-        return all_layers, final_latent
+    def _interp_4d(self, x, r: float):
+        return F.interpolate(x, scale_factor=r, mode="bilinear", align_corners=False)
 
 
 class TokenizerHybridUNet(nn.Module):
@@ -251,7 +383,7 @@ class TokenizerHybridUNet(nn.Module):
         # Init weights
         self.init_weights()
 
-    def _create_tok_encoder(self):
+    def _create_tok_encoder(self) -> DINOv3EncoderAdapter:
         """Create DINOv3 encoder"""
         cfg = self.cfg
         f_cfg = self.tok_f_cfg
@@ -261,7 +393,13 @@ class TokenizerHybridUNet(nn.Module):
         # Get model information
         model_name = f_cfg.model_name
         interaction_indexes = TOKENIZER_INTERACTION_INDEXES[model_name]
-        logger.info(f"Creating tokenizer encoder: {model_name}")
+        interaction_indexes = f_cfg.get("interaction_indexes", None) or interaction_indexes
+        select_in_all_layers = f_cfg.get("select_in_all_layers", False)
+
+        logger.info(
+            f"Creating tokenizer encoder: {model_name}\n"
+            f"taken interaction indexes: {interaction_indexes}, select in all layers: {select_in_all_layers}"
+        )
 
         # Load DINOv3 backbone
         tok_backbone = CosmosHybridTokenizer.create_model(
@@ -269,21 +407,29 @@ class TokenizerHybridUNet(nn.Module):
             trans_enc_cfg=t_cfg.trans_enc_cfg,
             trans_dec_cfg=t_cfg.trans_dec_cfg,
             distillation_cfg=t_cfg.distill_cfg,
+            hybrid_tokenizer_cfg=t_cfg.get("hybrid_tokenizer_cfg", None),
         )
         if self.cfg.tokenizer_pretrained_path is not None:
             tok_backbone.load_pretrained(self.cfg.tokenizer_pretrained_path)
             logger.info(f"Loaded tokenizer backbone from: {self.cfg.tokenizer_pretrained_path}")
         elif cfg._debug:
-            logger.warning(f"Using debug mode, using random weights for tokenizer backbone")
+            logger.warning("Using debug mode, using random weights for tokenizer backbone")
         else:
             raise ValueError("pretrained_path must be specified for tokenizer backbone")
+
+        # Freeze the tokenizer
+        tok_backbone.requires_grad_(False)
 
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
             backbone=tok_backbone,
             in_channels=f_cfg.in_channels,
-            conv_inplane=f_cfg.conv_inplane,
             interaction_indexes=interaction_indexes,
+            init_values=0.0,
+            n_points=4,
+            pretrain_size=512,
+            select_in_all_layers=select_in_all_layers,
+            conv_inplane=f_cfg.conv_inplane,
             deform_num_heads=f_cfg.deform_num_heads,
             drop_path_rate=f_cfg.drop_path_rate,
             with_cffn=f_cfg.with_cffn,
@@ -292,10 +438,10 @@ class TokenizerHybridUNet(nn.Module):
             add_vit_feature=f_cfg.add_vit_feature,
             use_extra_extractor=f_cfg.use_extra_extractor,
             with_cp=f_cfg.with_cp,
-            pretrain_size=512,
-            n_points=4,
-            init_values=0.0,
-            use_bn=False,
+            interp_ratio=f_cfg.get("interp_ratio", None),
+            layer_in_channels=f_cfg.get("layer_in_channels", None),
+            extractor_type=f_cfg.get("extractor_type", "deform_attention"),
+            extractor_kwargs=f_cfg.get("extractor_kwargs", {}),
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -305,6 +451,7 @@ class TokenizerHybridUNet(nn.Module):
             nonlin=get_act_layer(a_cfg.act),
             dropout_op=a_cfg.drop,
             conv_bias=a_cfg.conv_bias,
+            with_cp=f_cfg.with_cp,
         )
         logger.info("Created tokenizer encoder adapter.")
 

@@ -1,0 +1,44 @@
+train_bs: 3
+val_bs: 1
+
+data_type: null
+label_mode: seg
+patch_size: 128
+micro_batch_size: 12
+dataset_name: CaBuAr
+
+consts:
+  num_classes: 2
+  bands: 12
+  unchanged_label: 0
+  changed_label: 1
+
+train:
+  _target_: src.stage2.change_detection.data.cabuar.create_cabuar_change_detection_dataloader
+  root: data/Downstreams/FireBurn-CaBuAr
+  mode: train
+  bands: null
+  transforms: null
+  download: false
+  normalize: true
+  to_neg_1_1: true
+  return_name: false
+  batch_size: ${dataset.train_bs}
+  num_workers: 4
+  pin_memory: true
+  drop_last: false
+
+val:
+  _target_: src.stage2.change_detection.data.cabuar.create_cabuar_change_detection_dataloader
+  root: data/Downstreams/FireBurn-CaBuAr
+  mode: val
+  bands: null
+  transforms: null
+  download: false
+  normalize: true
+  to_neg_1_1: true
+  return_name: false
+  batch_size: ${dataset.val_bs}
+  num_workers: 2
+  pin_memory: true
+  drop_last: false

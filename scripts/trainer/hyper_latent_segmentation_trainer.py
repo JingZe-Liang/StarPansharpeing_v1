@@ -1305,6 +1305,7 @@ class HyperSegmentationTrainer:
 
 _key = "unet_seg"
 _configs_dict = {
+    "flood3i_unet_seg": "flood3i_unet_seg",
     "deep_globe_road_unet_seg": "deep_globe_road_unet_seg",
     "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
     "deeplabv3_seg": "deeplabv3_seg",
