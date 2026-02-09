@@ -485,7 +485,7 @@ def visualize_segmentation_map(
             colors = _get_coco_colors()
         else:
             colors = np.array(plt.get_cmap(cmap)(np.linspace(0, 1, n_class)))
-    elif colors in ("coco", "gid"):
+    elif isinstance(colors, str) and colors in ("coco", "gid"):
         if colors == "coco":
             colors = _get_coco_colors()
             assert n_class <= 30, f"n_class {n_class} <= 30, COCO dataset requires `n_class`<=30."
@@ -496,9 +496,12 @@ def visualize_segmentation_map(
             )
 
     custom_cmap = ListedColormap(colors)
+    if colors.shape[0] > n_class:
+        colors = colors[:n_class]
+        custom_cmap = ListedColormap(colors)
     custom_cmap.colors = custom_cmap.colors * np.array([1, 1, 1, alpha])
     assert n_class <= custom_cmap.N, f"n_class {n_class} > cmap.N {custom_cmap.N}"
-    assert colors.shape == (n_class, 4), f"colors shape {colors.shape} != (n_class, 4)"
+    assert colors.shape[0] == n_class and colors.shape[1] == 4, f"colors shape {colors.shape} != (n_class, 4)"
 
     # Convert 0-class to be black
     if bg_black:

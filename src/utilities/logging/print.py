@@ -22,17 +22,26 @@ from functools import lru_cache, partial, wraps
 from pathlib import Path
 from types import FunctionType, MethodType
 from collections.abc import Callable
-from typing import Any, Literal, LiteralString, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, LiteralString, Optional, TypeAlias, Union
 
 import loguru
 import torch.distributed as dist
 from beartype import beartype
 from loguru import logger
+from loguru._logger import Logger as LoguruLogger
+from loguru._recattrs import RecordLevel
 from rich.console import Console
 
 from .functions import default, once
 
-type Record = dict[str, Any]
+if TYPE_CHECKING:
+    from loguru import Record as LoguruRecord
+
+    Record: TypeAlias = LoguruRecord
+else:
+    Record: TypeAlias = dict[str, Any]
+
+RecordFilter = Callable[[Record], bool]
 
 # Define a type hint for allowed log levels
 LogLevel = Literal["trace", "debug", "info", "warning", "error", "critical"] | str
@@ -143,12 +152,11 @@ def rank0_filter(record: Record) -> bool:
     return False
 
 
-def process_id_patcher(record: Record):
+def process_id_patcher(record: Record) -> None:
     if record["extra"] is None:
         record["extra"] = {}
 
     record["extra"]["proc"] = get_dist_rank()[1]
-    return record
 
 
 def print_once_filter(record: Record):
@@ -164,7 +172,11 @@ def print_once_filter(record: Record):
     once_pattern = record["extra"].get("once_pattern", None)
 
     if log_once or once_pattern is not None:
-        record["level"] = "warning" if is_warn_once_ else record["level"]
+        if is_warn_once_:
+            warn_level = logger.level("WARNING")
+            record["level"] = RecordLevel(  # type: ignore[invalid-assignment]
+                warn_level.name, warn_level.no, warn_level.icon
+            )
         msg = record["message"]
 
         global __warn_once_pattern_set, __warn_once_set
@@ -184,8 +196,8 @@ def print_once_filter(record: Record):
     return True
 
 
-def filter_cat(filters: list[Callable[[Record], bool] | None]):
-    def cat_filters(record):
+def filter_cat(filters: list[RecordFilter | None]) -> RecordFilter:
+    def cat_filters(record: Record) -> bool:
         for f in filters:
             if f is None:
                 continue
@@ -199,7 +211,7 @@ def filter_cat(filters: list[Callable[[Record], bool] | None]):
 
 def log_level_range_filters(
     level_range: tuple[LogLevel, LogLevel],
-) -> Callable[[Record], bool]:
+) -> RecordFilter:
     level_order = {
         "TRACE": 10,
         "DEBUG": 20,
@@ -231,12 +243,12 @@ def tqdm_undisrupt_print_filter(record: Record):
     return is_false(record["extra"].get("tqdm", False))
 
 
-def format_extra_patcher(record: Record, preserve_keys=PreservedKeys):
+def format_extra_patcher(record: Record, preserve_keys=PreservedKeys) -> None:
     if record["extra"] is None:
-        return record
+        return
 
     if len(record["extra"]) == 0:
-        return {}
+        return
 
     if preserve_keys is not None:
         extras_to_msg = {}
@@ -258,18 +270,16 @@ def format_extra_patcher(record: Record, preserve_keys=PreservedKeys):
         # Add extra dict string to msg
         record["message"] = f"[{extras_msg}] {record['message']}"
 
-    return record
-
 
 def add_logger_filters_(
     only_rank_one: bool,
     main_log_lvl_range: tuple | None,
     add_tqdm_filter: bool,
     add_print_once_filter: bool,
-    filters: list[Callable] | Callable | None = None,
+    filters: list[RecordFilter] | RecordFilter | None = None,
 ):
     # Filter concate
-    main_ft: list[Callable[[Record], bool] | None] = []
+    main_ft: list[RecordFilter | None] = []
 
     # Add level range filter if specified
     if main_log_lvl_range is not None:
@@ -289,10 +299,10 @@ def add_logger_filters_(
 
     # Add custom filter if provided
     if filters is not None:
-        if callable(filters):
-            main_ft.append(filters)
+        if isinstance(filters, list):
+            main_ft.extend(filters)  # type: ignore[invalid-argument-type]
         else:
-            main_ft.extend(filters)
+            main_ft.append(filters)
 
     # Combine all filters
     if len(main_ft) != 0:
@@ -304,7 +314,7 @@ def add_logger_filters_(
 
 
 def _loguru_log_func(
-    __self: type[logger],
+    __self: LoguruLogger,
     level: str,
     message: str,
     # original params
@@ -324,13 +334,12 @@ def _loguru_log_func(
         )
 
 
-def loguru_print_func_name(record: Record):
+def loguru_print_func_name(record: Record) -> None:
     name = record.get("extra", {}).get("_name_", None)
     if name is not None:
         msg = f"[{name}] | {record['message']}"
         record["message"] = msg
         del record["extra"]["_name_"]
-    return record
 
 
 @once
@@ -437,7 +446,7 @@ def configure_logger(
 
     # TODO: check this.
     if patch_log_func:
-        logger.log = _loguru_log_func
+        logger.log = _loguru_log_func  # type: ignore[invalid-assignment]
 
     setattr(loguru, "logger", logger)
 
@@ -506,7 +515,7 @@ def set_logger_file(
         mode=mode,
         filter=file_filter,
     )
-    loguru.logger = logger.patch(format_extra_patcher)
+    loguru.logger = logger
 
     log_print(
         f"Set logger to log to file: {file} with level {level}, handler id: {handler}",

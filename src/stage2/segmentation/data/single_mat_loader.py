@@ -21,8 +21,8 @@ def label_background_convert(label: Tensor | np.ndarray, convert_bg: bool = True
     if convert_bg:
         # Convert background (0) to 255, but preserve existing 255 (padding)
         # This ensures padding values remain 255 and don't become 254
-        fixed_padded_label = where_fn(label == 255, 255, label - 1)
-        result = where_fn(label == 0, 255, fixed_padded_label)
+        fixed_padded_label = where_fn(label == 255, 255, label - 1)  # type: ignore[no-matching-overload]
+        result = where_fn(label == 0, 255, fixed_padded_label)  # type: ignore[no-matching-overload]
     else:
         result = label
     return result
@@ -30,7 +30,7 @@ def label_background_convert(label: Tensor | np.ndarray, convert_bg: bool = True
 
 def label_background_recover(label: Tensor | np.ndarray, convert_bg: bool = True):
     where_fn = th.where if th.is_tensor(label) else np.where
-    result = where_fn(label == 255, 0, label + 1) if convert_bg else label
+    result = where_fn(label == 255, 0, label + 1) if convert_bg else label  # type: ignore[no-matching-overload]
     return result
 
 
@@ -39,7 +39,7 @@ def get_default_transform(p=0.5):
     transform = AugmentationSequential(
         RandomHorizontalFlip(p=p),
         RandomVerticalFlip(p=p),
-        RandomRotation(degrees=90, p=p),
+        RandomRotation(degrees=90, p=p, align_corners=False),
         data_keys=["input", "mask"],
         same_on_batch=False,
         keepdim=True,

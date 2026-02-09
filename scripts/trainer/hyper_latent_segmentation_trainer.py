@@ -1,6 +1,7 @@
 import math
 import sys
 import time
+import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
@@ -35,7 +36,6 @@ from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset, lab
 from src.stage2.segmentation.loss.seg_loss import boost_strap_update_label
 from src.stage2.segmentation.metrics import HyperSegmentationScore
 from src.stage2.utilities.loss import HyperSegmentationLoss
-from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import dict_round_to_list_str, log, log_any_into_writter, set_logger_file
 from src.utilities.network_utils import load_peft_model_checkpoint
@@ -43,7 +43,16 @@ from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync
 from src.utilities.train_utils.visualization import get_rgb_image, visualize_segmentation_map
+
+# import after patching
 from loguru import logger
+
+# Silence known PyTorch warning from third-party spatial transforms that omit align_corners.
+warnings.filterwarnings(
+    "ignore",
+    message="Default grid_sample and affine_grid behavior has changed to align_corners=False since 1.3.0.*",
+    category=UserWarning,
+)
 
 
 @dataclass
@@ -148,10 +157,10 @@ class HyperSegmentationTrainer:
         self.val_dataset: SingleMatDataset
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
         if hasattr(self.dataset_cfg, "val"):
-            logger.info(f"[Data]: get independent validation dataset.")
+            logger.info(f"[Data]: get independent validation dataset.", once=True)
             self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         else:
-            logger.info(f"[Data]: use single image dataset.")
+            logger.info(f"[Data]: use single image dataset.", once=True)
             self.val_dataset, self.val_dataloader = self.train_dataset, self.train_dataloader
 
         self.ds_is_single_image = getattr(self.dataset_cfg.consts, "is_single_image", False)
@@ -245,22 +254,6 @@ class HyperSegmentationTrainer:
             set_logger_file(
                 log_file.parent / "debug.log", level="debug", filter=lambda record: record["level"].no <= 10
             )
-        #     self.logger.add(
-        #         log_file,
-        #         format=log_format_in_file,
-        #         level="INFO",
-        #         rotation="10 MB",
-        #         enqueue=True,
-        #         backtrace=True,
-        #         colorize=False,
-        #     )
-        # self.logger.add(
-        #     sys.stdout,
-        #     format=log_format_in_cmd,
-        #     level="DEBUG",
-        #     backtrace=True,
-        #     colorize=True,
-        # )
 
         # make log dir
         log_dir = log_file.parent
@@ -375,6 +368,14 @@ class HyperSegmentationTrainer:
         self,
     ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         # optimizers
+        disable_heavyball_compile = getattr(self.train_cfg, "disable_heavyball_compile", True)
+        optimizer_target = getattr(self.train_cfg.segment_optim, "_target_", "")
+        if disable_heavyball_compile and isinstance(optimizer_target, str) and "heavyball" in optimizer_target:
+            import heavyball
+
+            heavyball.utils.compile_mode = None  # type: ignore
+            self.log_msg("[Optimizer]: disable heavyball compile_mode before init", level="WARNING")
+
         if (
             self.accelerator.state.deepspeed_plugin is None
             or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
@@ -973,22 +974,24 @@ class HyperSegmentationTrainer:
 
             def _val_model_closure(batch):
                 # forward the segmentation network
-                pred_pixel = self.forward_segment_model(batch["img"], batch["gt"], True).pred_pixel
+                pred_pixel = self._forward_val_logits(batch)
                 return {"pred_logits": pred_pixel}
 
             # slide windows
             if getattr(self.train_cfg, "val_slide_window", False):
                 logger.info(f"[Val]: using slide window validation")
+                val_slide_window_kwargs = dict(getattr(self.train_cfg, "val_slide_window_kwargs", {}))
+                val_slide_window_kwargs.setdefault("online_merge", True)
                 model_outputs = model_predict_patcher(
                     _val_model_closure,
                     batch,
                     patch_keys=["img", "gt"],
                     merge_keys=["pred_logits"],
-                    **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
+                    **val_slide_window_kwargs,
                 )
                 pred_logits = model_outputs["pred_logits"]
             else:
-                logger.info(f"[Val]: using full image validation")
+                logger.info(f"[Val]: using full image validation", once=True)
                 pred_logits = _val_model_closure(batch)["pred_logits"]
 
             img_h, img_w = batch["img"].shape[-2:]
@@ -1001,21 +1004,6 @@ class HyperSegmentationTrainer:
         return pred_seg
 
     def _resize_to(self, x, mode="nearest"):
-        """
-        Resize tensor to target size if specified in dataset config.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor to resize
-        mode : str
-            Interpolation mode
-
-        Returns
-        -------
-        torch.Tensor
-            Resized tensor
-        """
         inp_ndim = x.ndim
         if getattr(self.dataset_cfg, "resize_to", None):
             tgt_sz = self.dataset_cfg.consts.shape
@@ -1025,6 +1013,33 @@ class HyperSegmentationTrainer:
             if inp_ndim == 3:
                 x = x.squeeze(1)
         return x
+
+    def _forward_val_logits(self, val_batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        img = val_batch["img"]
+        gt = val_batch["gt"]
+        orig_hw = img.shape[-2:]
+
+        resize_scale = float(getattr(self.train_cfg, "val_patch_resize_scale", 1.0))
+        if resize_scale <= 0:
+            raise ValueError(f"train.val_patch_resize_scale must be > 0, got {resize_scale}")
+
+        if not math.isclose(resize_scale, 1.0):
+            img = torch.nn.functional.interpolate(
+                img,
+                scale_factor=resize_scale,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        pred_logits = self.forward_segment_model(img, gt, True).pred_pixel
+        if pred_logits.shape[-2:] != orig_hw:
+            pred_logits = torch.nn.functional.interpolate(
+                pred_logits,
+                size=orig_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return pred_logits
 
     def val_loop(self):
         self.model.eval()
@@ -1042,31 +1057,30 @@ class HyperSegmentationTrainer:
 
         val_iter = self.get_val_loader_iter()
         for batch in val_iter:
-            batch = self._cast_to_dtype(batch)
-            batch = cast(dict[str, torch.Tensor], batch)
-            gt = batch.get("gt", batch.get("gt_full", None))
-            assert gt is not None, "gt or gt_full not found in the val batch"
+            batch: dict[str, torch.Tensor] = self._cast_to_dtype(batch)
+            gt = self._resolve_val_gt(batch)
 
             # Define validation model closure for slide window
             def _val_model_closure(val_batch):
                 """Model closure for slide window validation."""
                 with torch.no_grad():
-                    output = self.forward_segment_model(val_batch["img"], gt, True)
-                    return {"pred_logits": output.pred_pixel}
+                    return {"pred_logits": self._forward_val_logits(val_batch)}
 
             # Use slide window or full image validation
             if getattr(self.train_cfg, "val_slide_window", False):
-                self.log_msg("[Val]: using slide window validation")
+                logger.debug("[Val]: using slide window validation", once=True)
+                val_slide_window_kwargs = dict(getattr(self.train_cfg, "val_slide_window_kwargs", {}))
+                val_slide_window_kwargs.setdefault("online_merge", True)
                 model_outputs = model_predict_patcher(
                     _val_model_closure,
                     batch,
                     patch_keys=["img", "gt"],
                     merge_keys=["pred_logits"],
-                    **getattr(self.train_cfg, "val_slide_window_kwargs", {}),
+                    **val_slide_window_kwargs,
                 )
                 pred_logits = model_outputs["pred_logits"]
             else:
-                self.log_msg("[Val]: using full image validation")
+                logger.debug("[Val]: using full image validation", once=True)
                 pred_logits = _val_model_closure(batch)["pred_logits"]
 
             # resize to target size if needed
@@ -1142,6 +1156,20 @@ class HyperSegmentationTrainer:
                 only_vis_n=2,
                 img_name="val/segmentation",
             )
+
+    def _resolve_val_gt(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        gt = None
+        for key in ("gt", "gt_full", "mask", "label"):
+            if key in batch:
+                gt = batch[key]
+                break
+
+        if gt is None:
+            keys = ", ".join(sorted(batch.keys()))
+            raise KeyError(f"gt or gt_full not found in the val batch. Available keys: {keys}")
+        if "gt" not in batch:
+            batch["gt"] = gt
+        return gt
 
     def save_state(self):
         self.accelerator.save_state()
@@ -1303,11 +1331,13 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "unet_seg"
+_key = "cross_city_multimodal_hybrid_tokenizer_seg"
 _configs_dict = {
-    "flood3i_unet_seg": "flood3i_unet_seg",
+    "flood3i_hybrid_tokenizer_seg": "flood3i_hybrid_tokenizer_seg",
+    "hybrid_tokenizer_seg": "five_billion_hybrid_tokenizer_seg",
+    "cross_city_multimodal_hybrid_tokenizer_seg": "cross_city_multimodal_hybrid_tokenizer_seg",
     "deep_globe_road_unet_seg": "deep_globe_road_unet_seg",
-    "hybrid_tokenizer_seg": "hybrid_tokenizer_seg",
+    "atlantic_forest_hybrid_tokenizer_seg": "atlantic_forest_hybrid_tokenizer_seg",
     "deeplabv3_seg": "deeplabv3_seg",
     "unet_seg": "unet_seg",
 }

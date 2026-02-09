@@ -42,7 +42,7 @@ class HyperSegmentationScore(nn.Module):
         if ignore_index is not None:
             if include_bg:
                 logger.warning(
-                    "include_bg=True might conflict when ignoed_index is set, if class 0 is intended "
+                    "include_bg=True might conflict when ignored_index is set, if class 0 is intended "
                     "as valid background. Ensure ignore_index is distinct from valid class indices."
                 )
             self.seg_n_classes = n_classes + 1
@@ -62,6 +62,7 @@ class HyperSegmentationScore(nn.Module):
 
         ## Metrics
         # Init all metrics to None
+        # OA, and macro f1 ...
         self.accuracy, self.precision, self.recall, self.cohen_kappa, self.f1_score, self.dice_score, self.mean_iou = (
             None,
             None,

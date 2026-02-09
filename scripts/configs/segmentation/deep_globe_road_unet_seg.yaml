@@ -7,7 +7,7 @@ defaults:
   # wrapper ==========
   - dataset: deep_globe_road
   - accelerator: base
-  - model@segment_model: unet
+  - model@segment_model: tokenizer_hybrid_decoder
   # self ===============
   - _self_
   # hydra overrides ====
@@ -44,7 +44,7 @@ train:
   patches_per_image:
   macro_batch_size: 2 #4
 
-  proj_dir: runs/stage2_classification/
+  proj_dir: runs/stage2_segmentation/
   finetune_strategy: finetune_all
   max_grad_norm: 1.0
 
@@ -56,19 +56,32 @@ train:
   is_neg_1_1: true
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_segmentation/2026-02-04_21-41-22_DeepGlobeRoadExtraction_hybrid_tokenizer/ema
 
   bootstrap_ratio: 0.
   bootstrap_start_step: 0
 
   segment_optim:
-    _target_: heavyball.ForeachAdamW
+    # _target_: heavyball.ForeachAdamW
+    # _partial_: true
+    # lr: 3.0e-4
+    # weight_decay: 0.0
+    # betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
+    # caution: true
+    # foreach: true
+
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.0
-    betas: ${tuple:[0.9, 0.95]} #[0.5, 0.9], gan training beta1 is zero
-    caution: true
-    foreach: true
+    betas: [0.95, 0.99]
+    oned_param_algo: lion
+    use_preconditioned: true
+    muon_params_defaults:
+      lr: 3.0e-4
+      weight_decay: 0.0
+    oned_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+
 
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -81,14 +94,14 @@ train:
     _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
     num_classes: ${dataset.consts.num_classes}
     ignore_index: 255
-    ce_weight: null
-    loss_weights: [1.0, 1.0, 0, 0]
+    ce_weight: [0.01, 1.0]
+    loss_weights: [1.0, 3.0, 0.3, 0.1]
     mode: multiclass
     dynamic_mode: null
     ema_decay: 0.99
 
   log:
-    run_comment: ${dataset.dataset_name}_unet
+    run_comment: ${dataset.dataset_name}_hybrid_tokenizer
     log_with_time: true
     log_every: 10
     log_with: [wandb]
@@ -96,4 +109,4 @@ train:
 
 val:
   val_duration: 500
-  max_val_iters: 20
+  max_val_iters: -1

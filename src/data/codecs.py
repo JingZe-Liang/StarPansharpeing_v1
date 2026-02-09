@@ -148,9 +148,7 @@ class JPEGGeneralSerializer(serializers.JPEGSerializer):
                 return None
             elif arr.ndim == 3:
                 arr = arr.transpose([-1, 0, 1])
-
             arr = self._force_to_rgb(arr)
-
             return torch.from_numpy(arr)
         finally:
             # Restore stdout and stderr
@@ -160,7 +158,7 @@ class JPEGGeneralSerializer(serializers.JPEGSerializer):
             os.close(saved_stderr)
 
 
-def _load_list_img_bytes(img_bytes_list: bytes, decode_type: str = "tiff"):
+def _load_list_img_bytes(img_bytes_list: bytes, decode_type: Literal["tiff", "img"] = "tiff"):
     # list of bytes of images
     # pickle load into a list of image bytes
     img_lst = pickle.loads(img_bytes_list)
@@ -230,16 +228,13 @@ class JPEGSequenceGeneralSerializer(serializers.Serializer):
         return isinstance(obj, list) and all(isinstance(item, np.ndarray) for item in obj)
 
 
+# register in litdata serializers
 serializers._SERIALIZERS["jsonl"] = JsonlSerializer()  # type: ignore
 serializers._SERIALIZERS["tifffile"] = TiffFileSerializer()
 serializers._SERIALIZERS["jpeg"] = JPEGGeneralSerializer()
+serializers._SERIALIZERS["jpea"] = serializers._SERIALIZERS["jpeg"]  # alias for typo in some datasets json files
 serializers._SERIALIZERS["tifffile_seq"] = TiffSequenceFileSerializer()
 serializers._SERIALIZERS["jpeg_seq"] = JPEGSequenceGeneralSerializer()
-
-# logger.debug("Registered JsonlSerializer for litdata")
-# logger.debug("Modified TiffFileSerializer for litdata")
-# logger.debug("Modified JPEGGeneralSerializer for litdata")
-
 
 # *==============================================================
 # * Utilities
@@ -771,7 +766,10 @@ def wids_caption_embed_decode(sample: dict[str, Any], max_length=300) -> dict[st
     # features
     embeds: dict[str, torch.Tensor] = {}
     if features_key is not None:
-        embeds = safetensors_decode_io(sample.pop(features_key).getvalue(), return_dict=True)
+        embeds_raw = safetensors_decode_io(sample.pop(features_key).getvalue(), return_dict=True)
+        if not isinstance(embeds_raw, dict):
+            raise TypeError("Expected safetensors decode to return a dict when return_dict=True.")
+        embeds = embeds_raw  # type: ignore[assignment]
         # pad right
         cap_f = embeds["caption_feature"].squeeze(0)  # [n, d]
         if cap_f.shape[0] < max_length:

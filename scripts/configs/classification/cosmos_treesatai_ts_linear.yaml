@@ -1,0 +1,73 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: treesatai_ts
+  - accelerator: base
+  - model: cosmos_tokenizer_classifier_ts
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+  allow_different_devices: true
+  lazy_init_ema: true
+
+metric:
+  task: multilabel
+  num_classes: ${dataset.consts.num_classes}
+  num_labels: ${dataset.consts.num_labels}
+  threshold: 0.5
+  map_average: macro
+
+train:
+  proj_dir: runs/stage2_classification/
+  model_name: cosmos_tokenizer_ts
+  max_grad_norm: 1.0
+  max_steps: 10_000
+  save_every: 500
+  grad_check: true
+  label_key: label
+  label_smoothing: 0.0
+  class_weights: null
+  pos_weight: null
+  freeze_tokenizer: true
+  tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
+
+  resume_path:
+  ema_load_path:
+  is_neg_1_1: ${dataset.consts.to_neg_1_1}
+
+  model_optim:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 4.0e-4
+    weight_decay: 0.0
+
+  model_sched:
+    _target_: transformers.optimization.get_constant_schedule
+    _partial_: true
+
+  log:
+    run_comment: ${dataset.dataset_name}_cosmos_ts
+    log_with_time: true
+    log_every: 20
+    log_with: [wandb]
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: -1
+  use_ema: false
+
+dataset:
+  max_t_s1: null
+  max_t_s2: null

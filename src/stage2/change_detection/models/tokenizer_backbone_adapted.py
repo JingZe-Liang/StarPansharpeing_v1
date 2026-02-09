@@ -338,21 +338,6 @@ class TokenizerHybridUNet(nn.Module):
         if cfg.n_stages != 4:
             logger.error(f"Warning: Adapter outputs 4 scales, but n_stages={n_stages}. Adjusting to 4.")
             raise ValueError("n_stages must be 4")
-            # n_stages = 4
-            # if isinstance(self.tok_cfg.feature_per_stage, int):
-            #     self.cfg.tok.features_per_stages = [
-            #         self.tok_cfg.features_per_stage * (2**i) for i in range(4)
-            #     ]
-            # elif len(self.tok_cfg.features_per_stage) != 4:
-            #     # Adjust features_per_stage to 4 stages
-            #     base_features = (
-            #         self.tok_cfg.features_per_stage[0]
-            #         if self.tok_cfg.features_per_stage
-            #         else 32
-            #     )
-            #     self.cfg.dino.features_per_stage = [
-            #         base_features * (2**i) for i in range(4)
-            #     ]
 
         # Create tokenzier encoder
         self.encoder = self._create_tok_encoder()
@@ -461,7 +446,7 @@ class TokenizerHybridUNet(nn.Module):
         """Two time-series images for change detection"""
 
         # Encode two images
-        assert len(x) == 2, "Input must be a tuple of two tensors (x1, x2)"
+        assert len(x) == 2, "Input must be a tuple of two tensors (x1, x2) for change detection."
         x1, x2 = x
         skips1, final_h1 = self.encoder(x1)
         skips2, final_h2 = self.encoder(x2)

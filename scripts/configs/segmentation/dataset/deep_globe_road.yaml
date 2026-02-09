@@ -1,5 +1,5 @@
-train_bs: 8
-val_bs: 4
+train_bs: 4
+val_bs: 2
 
 # Configs
 data_type: null
@@ -23,7 +23,7 @@ consts:
 
 train:
   _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
-  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/train
+  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/new_splits/train
   stream_ds_kwargs:
     img_size: ${...consts.img_size}
     augmentation_prob: ${...consts.augmentation_prob}
@@ -39,7 +39,7 @@ train:
 
 val:
   _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
-  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/valid
+  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/new_splits/val
   stream_ds_kwargs:
     img_size: ${...consts.img_size}
     augmentation_prob: 0.0
@@ -52,17 +52,17 @@ val:
     shuffle: false
     pin_memory: true
 
-test:
-  _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
-  input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/test
-  stream_ds_kwargs:
-    img_size: ${...consts.img_size}
-    augmentation_prob: 0.0
-    norm_mean_std: ${...consts.norm_mean_std}
-  combined_kwargs:
-    batching_method: per_stream
-  loader_kwargs:
-    batch_size: ${...consts.val_bs}
-    num_workers: 2
-    shuffle: false
-    pin_memory: true
+# test:
+#   _target_: src.stage2.segmentation.data.deep_globe.DeepGlobeRoadExtractionStreamingDataset.create_dataloader
+#   input_dir: data/Downstreams/RoadExtraction/DeepGlobe_Litdata/test
+#   stream_ds_kwargs:
+#     img_size: ${...consts.img_size}
+#     augmentation_prob: 0.0
+#     norm_mean_std: ${...consts.norm_mean_std}
+#   combined_kwargs:
+#     batching_method: per_stream
+#   loader_kwargs:
+#     batch_size: ${...consts.val_bs}
+#     num_workers: 2
+#     shuffle: false
+#     pin_memory: true

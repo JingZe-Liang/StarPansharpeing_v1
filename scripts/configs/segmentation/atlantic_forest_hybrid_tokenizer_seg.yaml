@@ -5,14 +5,26 @@ hydra:
 
 defaults:
   # wrapper ==========
-  - dataset: flood3i
+  - dataset: atlantic_forest
   - accelerator: base
-  - model@segment_model: unet
+  - model@segment_model: tokenizer_hybrid_decoder
   # self ===============
   - _self_
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
+
+segment_model:
+  tokenizer_feature:
+    conv_inplane: 64
+    drop_path_rate: 0.2
+    cffn_ratio: 0.25
+    deform_ratio: 0.5
+
+  adapter:
+    depth_per_stage: 1
+    n_conv_per_stage: 1
+    drop: 0.1
 
 ema:
   _target_: ema_pytorch.EMA
@@ -26,8 +38,8 @@ ema:
 metric:
   _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
   n_classes: ${dataset.consts.num_classes}
-  ignore_index: null
-  include_bg: true
+  ignore_index: ${dataset.consts.ignore_index}
+  include_bg: false
   input_format: index
   task: multiclass
 
@@ -53,7 +65,7 @@ train:
   visualize_every: 500
   max_steps: 40_000
   save_every: 500
-  is_neg_1_1: false
+  is_neg_1_1: ${dataset.consts.is_neg_1_1}
 
   resume_path:
   ema_load_path:
@@ -62,13 +74,16 @@ train:
   bootstrap_start_step: 0
 
   segment_optim:
-    _target_: heavyball.ForeachAdamW
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
-    lr: 3.0e-4
-    weight_decay: 0.0
-    betas: ${tuple:[0.9, 0.95]}
-    caution: true
-    foreach: true
+    betas: [0.95, 0.99]
+    oned_param_algo: lion
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
 
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -82,13 +97,13 @@ train:
     num_classes: ${dataset.consts.num_classes}
     ignore_index: ${dataset.consts.ignore_index}
     ce_weight: null
-    loss_weights: [1.0, 1.0, 0, 0]
+    loss_weights: [1.0, 3.0, 0.0, 0.0]
     mode: multiclass
     dynamic_mode: null
     ema_decay: 0.99
 
   log:
-    run_comment: ${dataset.dataset_name}_unet
+    run_comment: ${dataset.dataset_name}_hybrid_tokenizer
     log_with_time: true
     log_every: 10
     log_with: [wandb]
@@ -96,4 +111,4 @@ train:
 
 val:
   val_duration: 500
-  max_val_iters: 20
+  max_val_iters: -1

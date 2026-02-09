@@ -13,15 +13,16 @@ _target_: src.stage2.change_detection.models.tokenizer_backbone_adapted.Tokenize
 # Tokenizer Feature Configuration
 tokenizer_feature:
   pretrained_path: null
-  features_per_stage: [512, 512, 512, 512]
+  features_per_stage: [384, 384, 512, 512]
   model_name: hybrid_tokenizer_b16
+  interaction_indexes: [1, 2, 4, 5]
   # encoder settings
   pretrained_size: 512
   in_channels: ${dataset.consts.bands}
   conv_inplane: 64
   drop_path_rate: 0.2
   with_cffn: true
-  cffn_ratio: 0.25
+  cffn_ratio: 1.0
   deform_num_heads: 16
   deform_ratio: 0.5
   add_vit_feature: true
@@ -31,26 +32,27 @@ tokenizer_feature:
 # Adapter Configuration
 adapter:
   adapter_type: default
-  latent_width: 64
+  latent_width: 32
   n_conv_per_stage: 1
   depth_per_stage: 1
-  norm: layernorm2d
+  norm: layernorm2dfp32
   act: gelu
   drop: 0.0
   act_first: false
-  conv_bias: false
-  block_types: ["nat", "nat", "mbconv", "mbconv"]
+  conv_bias: true
+  block_types: ["mbconv", "mbconv", "mbconv", "mbconv"]
 
 # Change Detection Stage Configuration
 cd_stage:
-  channels: [512, 512, 512, 512]
+  channels: [384, 384, 512, 512]
   stride: 1
   kernel_size: 3
-  norm_layer: layernorm2d
+  norm_layer: layernorm2dfp32
   act_layer: gelu
   expand_ratio: 2.0
   block_type: mbconv
-  depth: 1
+  depth: 2
+  fuse_mode: cat_abs
 
 # UNet Configuration
 input_channels: ${dataset.consts.bands}
@@ -62,4 +64,4 @@ ensure_rgb_type: null
 _debug: false
 
 # Tokenizer pretrained path (needs to be overridden)
-tokenizer_pretrained_path: runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors
+tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors

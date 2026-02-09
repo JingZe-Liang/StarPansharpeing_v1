@@ -1,0 +1,92 @@
+train_bs: 4
+val_bs: 8
+
+# Configs
+data_type: null
+label_mode: seg
+dataset_name: AtlanticForestSegmentation
+
+img_size: 512
+num_classes: 2
+ignore_index: 255
+is_neg_1_1: true
+norm_const: null
+augmentation_prob: 0.5
+
+consts:
+  is_single_image: false
+  img_size: ${..img_size}
+  num_classes: ${..num_classes}
+  bands: 4
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+  ignore_index: ${..ignore_index}
+  is_neg_1_1: ${..is_neg_1_1}
+  norm_const: ${..norm_const}
+  augmentation_prob: ${..augmentation_prob}
+
+train:
+  _target_: src.stage2.segmentation.data.atlantic_forest.get_atlantic_forest_dataloader
+  batch_size: ${..consts.train_bs}
+  num_workers: 4
+  split: train
+  root: data/Downstreams/AtlanticForeastSegmentation
+  transform:
+    _target_: src.stage2.segmentation.data.atlantic_forest.AtlanticForestKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  is_neg_1_1: ${..consts.is_neg_1_1}
+  norm_const: ${..consts.norm_const}
+  augmentation: true
+  augmentation_prob: ${..consts.augmentation_prob}
+  return_name: false
+  pin_memory: true
+  shuffle: true
+
+val:
+  _target_: src.stage2.segmentation.data.atlantic_forest.get_atlantic_forest_dataloader
+  batch_size: ${..consts.val_bs}
+  num_workers: 2
+  split: val
+  root: data/Downstreams/AtlanticForeastSegmentation
+  transform:
+    _target_: src.stage2.segmentation.data.atlantic_forest.AtlanticForestKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  is_neg_1_1: ${..consts.is_neg_1_1}
+  norm_const: ${..consts.norm_const}
+  augmentation: false
+  augmentation_prob: 0.0
+  return_name: false
+  pin_memory: true
+  shuffle: false
+
+test:
+  _target_: src.stage2.segmentation.data.atlantic_forest.get_atlantic_forest_dataloader
+  batch_size: ${..consts.val_bs}
+  num_workers: 2
+  split: test
+  root: data/Downstreams/AtlanticForeastSegmentation
+  transform:
+    _target_: src.stage2.segmentation.data.atlantic_forest.AtlanticForestKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  is_neg_1_1: ${..consts.is_neg_1_1}
+  norm_const: ${..consts.norm_const}
+  augmentation: false
+  augmentation_prob: 0.0
+  return_name: true
+  pin_memory: true
+  shuffle: false

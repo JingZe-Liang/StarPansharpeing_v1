@@ -1,5 +1,5 @@
-train_bs: 3
-val_bs: 1
+train_bs: 6
+val_bs: 4
 
 data_type: null
 label_mode: seg
@@ -32,7 +32,7 @@ train:
 val:
   _target_: src.stage2.change_detection.data.gvlm_land_slide.create_gvlm_landslide_dataloader
   data_root: data/Downstreams/滑坡检测-GVLM/GVLM_CD256_0.3neg
-  split: val
+  split: test  # val, test
   list_dir: list
   batch_size: ${dataset.val_bs}
   shuffle: false

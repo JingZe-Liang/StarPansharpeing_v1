@@ -39,11 +39,11 @@ def read_list(list_path: Path) -> list[str]:
 
 
 def load_rgb(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("RGB"))
+    return np.array(Image.open(path).convert("RGB"), dtype=np.uint8, copy=True)
 
 
 def load_label(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("L"))
+    return np.array(Image.open(path).convert("L"), dtype=np.uint8, copy=True)
 
 
 def build_sample_paths(root: Path, list_dir: str, split: str) -> list[GVLMSamplePaths]:

@@ -7,3 +7,4 @@ from .mat_cd_loader import (
 )
 from .gvlm_land_slide import GVLMLandslideDataset, create_gvlm_landslide_dataloader
 from .cabuar import create_cabuar_change_detection_dataloader, get_dataloader
+from .DSIFN import DSIFNChangeDetectionDataset, create_dsifn_change_detection_dataloader

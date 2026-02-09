@@ -1,6 +1,6 @@
 import sys
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ class DinoConfig:
     features_per_stage: Any = (512, 512, 512, 512)
     pretrained_path: Any = field(default=None)  # path to pretrained weights
     model_name: str = "dinov3_vits16"
-    pretrained_on: str = "web"
+    pretrained_on: Literal["satellite", "web"] = "web"
 
 
 @dataclass
@@ -71,6 +71,7 @@ class MultiscaleMBConvStageConfig:
     expand_ratio: float = 2.0
     block_type: str = "mbconv"
     depth: int = 1
+    fuse_mode: str = "sub"
 
 
 @dataclass
@@ -121,9 +122,29 @@ class MultiscaleMBConvSkipsStage(nn.Module):
         self.grad_checkpointing = False
         self.channels = cfg.channels
         self.stages = len(cfg.channels)
+        self.fuse_mode = cfg.fuse_mode
+        self._fuse_channel_multiplier = {
+            "sub": 1,
+            "abs_sub": 1,
+            "cat": 2,
+            "cat_sub": 3,
+            "cat_abs": 3,
+        }
+        if self.fuse_mode not in self._fuse_channel_multiplier:
+            raise ValueError(
+                f"Unknown fuse mode: {self.fuse_mode}, supported: {tuple(self._fuse_channel_multiplier.keys())}"
+            )
 
         self.stage = nn.ModuleDict()
+        self.fuse_proj = nn.ModuleDict()
         for i in range(self.stages):
+            in_ch = cfg.channels[i] * self._fuse_channel_multiplier[self.fuse_mode]
+            out_ch = cfg.channels[i]
+            if in_ch == out_ch:
+                self.fuse_proj[f"stage_{i}"] = nn.Identity()
+            else:
+                self.fuse_proj[f"stage_{i}"] = create_conv2d(in_ch, out_ch, kernel_size=1, bias=False)
+
             if cfg.block_type == "mbconv":
                 self.stage[f"stage_{i}"] = nn.Sequential(
                     *[
@@ -155,12 +176,26 @@ class MultiscaleMBConvSkipsStage(nn.Module):
             else:
                 raise ValueError(f"Unknown block type: {cfg.block_type}, supported: ('mbconv', 'conv')")
 
+    def _fuse_pair(self, skip_1: Tensor, skip_2: Tensor) -> Tensor:
+        if self.fuse_mode == "sub":
+            return skip_1 - skip_2
+        if self.fuse_mode == "abs_sub":
+            return (skip_1 - skip_2).abs()
+        if self.fuse_mode == "cat":
+            return torch.cat((skip_1, skip_2), dim=1)
+        if self.fuse_mode == "cat_sub":
+            return torch.cat((skip_1, skip_2, skip_1 - skip_2), dim=1)
+        if self.fuse_mode == "cat_abs":
+            return torch.cat((skip_1, skip_2, (skip_1 - skip_2).abs()), dim=1)
+        raise ValueError(f"Unknown fuse mode: {self.fuse_mode}")
+
     def forward(self, skip1, skip2):
         def _closure(skip1, skip2):
             outs = []
-            res_skips = [s1 - s2 for s1, s2 in zip(skip1, skip2)]
             for i in range(self.stages):
-                outs.append(self.stage[f"stage_{i}"](res_skips[i]))
+                fused_skip = self._fuse_pair(skip1[i], skip2[i])
+                fused_skip = self.fuse_proj[f"stage_{i}"](fused_skip)
+                outs.append(self.stage[f"stage_{i}"](fused_skip))
             return outs
 
         if self.grad_checkpointing and self.training:

@@ -5,17 +5,20 @@ defaults:
 _target_: src.stage2.segmentation.models.tokenizer_backbone_adapted.TokenizerHybridUNet.create_model
 # Tokenizer Feature Configuration
 tokenizer_feature:
+  model_name: hybrid_tokenizer_b16
   pretrained_path: null
   features_per_stage: [256, 384, 384, 384]
-  model_name: hybrid_tokenizer_b16
+  interaction_indexes: [1,2,4,5]
+  layer_in_channels: [512, 512, 1152, 1152]
+  extractor_type: deform_attention  # [sla, convnext, deform_attention]
   # encoder settings
   pretrained_size: 512
   in_channels: ${dataset.consts.bands}
   conv_inplane: 64
   drop_path_rate: 0.0
   with_cffn: true
-  cffn_ratio: 0.25
-  deform_num_heads: 8
+  cffn_ratio: 0.5
+  deform_num_heads: 16
   deform_ratio: 0.5
   add_vit_feature: true
   use_extra_extractor: true
@@ -26,16 +29,16 @@ adapter:
   adapter_type: default
   latent_width: 32
   n_conv_per_stage: 2
-  depth_per_stage: 1
-  norm: layernorm2d
+  depth_per_stage: 2
+  norm: rmsnorm2dfp32
   act: gelu
   drop: 0.0
   act_first: false
   conv_bias: true
-  block_types: ["nat", "nat", "mbconv", "mbconv"]
+  block_types: ["mbconv", "mbconv", "mbconv", "mbconv"]
 
 num_classes: ${dataset.consts.num_classes}
 input_channels: ${dataset.consts.bands}
-use_latent: false
+use_latent: true
 # Tokenizer pretrained path (needs to be overridden)
 tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors

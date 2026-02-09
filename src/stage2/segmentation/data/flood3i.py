@@ -92,11 +92,19 @@ def _read_pairs_from_folders(root: Path) -> list[Flood3ISample]:
 
 
 def _load_rgb(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("RGB"))
+    return np.asarray(Image.open(path).convert("RGB")).copy()
 
 
 def _load_mask(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("L"))
+    return np.asarray(Image.open(path).convert("L")).copy()
+
+
+def _to_binary_mask(mask: np.ndarray, *, target_class: int, ignore_index: int) -> np.ndarray:
+    binary = np.zeros(mask.shape, dtype=np.uint8)
+    binary[mask == target_class] = 1
+    if 0 <= ignore_index <= 255:
+        binary[mask == ignore_index] = np.uint8(ignore_index)
+    return binary
 
 
 class Flood3IDataset(Dataset):
@@ -108,6 +116,8 @@ class Flood3IDataset(Dataset):
         transform: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None = None,
         normalize: bool = True,
         return_name: bool = False,
+        binary_target_class: int | None = None,
+        ignore_index: int = 255,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -115,6 +125,10 @@ class Flood3IDataset(Dataset):
         self.transform = transform
         self.normalize = normalize
         self.return_name = return_name
+        self.binary_target_class = binary_target_class
+        self.ignore_index = ignore_index
+        if self.binary_target_class is not None and self.binary_target_class < 0:
+            raise ValueError(f"binary_target_class must be >= 0, got {self.binary_target_class}")
         self.samples = self._build_samples()
 
     def _build_samples(self) -> list[Flood3ISample]:
@@ -132,6 +146,8 @@ class Flood3IDataset(Dataset):
         sample = self.samples[index]
         image = _load_rgb(sample.image)
         mask = _load_mask(sample.mask)
+        if self.binary_target_class is not None:
+            mask = _to_binary_mask(mask, target_class=self.binary_target_class, ignore_index=self.ignore_index)
 
         image_t = torch.from_numpy(image).float()
         if self.normalize:
@@ -156,6 +172,9 @@ def get_flood3i_dataloader(
     transform: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None = None,
     normalize: bool = True,
     return_name: bool = False,
+    binary_target_class: int | None = None,
+    ignore_index: int = 255,
+    shuffle: bool | None = None,
     **loader_kwargs: Any,
 ) -> tuple[Flood3IDataset, DataLoader]:
     dataset = Flood3IDataset(
@@ -165,12 +184,14 @@ def get_flood3i_dataloader(
         transform=transform,
         normalize=normalize,
         return_name=return_name,
+        binary_target_class=binary_target_class,
+        ignore_index=ignore_index,
     )
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=(split == "train"),
+        shuffle=(split == "train") if shuffle is None else shuffle,
         **loader_kwargs,
     )
     return dataset, dataloader

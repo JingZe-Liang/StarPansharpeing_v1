@@ -8,6 +8,7 @@ import einops
 import torch
 
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from easydict import EasyDict as edict
 from einx import get_at
@@ -20,7 +21,7 @@ from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.layers import get_act_layer, Mlp, LayerScale
 from timm.models import eva, naflexvit
 from timm.models._manipulate import named_apply
-from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU
+from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU, apply_rot_embed_cat
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from timm.models.naflexvit import (
     Block,
@@ -39,6 +40,7 @@ from src.utilities.network_utils import compile_decorator
 
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
+from .SLA import LinearCrossAttention, SparseLinearAttention
 
 logger = logger.bind(_name_="Naflex")
 
@@ -121,6 +123,266 @@ class GatedAttentionTimmWrapped(GatedAttention):
         )
 
 
+def _apply_linear_attn_mask(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if attn_mask is None:
+        return q, k, v
+
+    mask = attn_mask == 0
+    valid_k = mask.any(dim=-2)  # [B, 1, Lk]
+    valid_q = mask.any(dim=-1)  # [B, 1, Lq]
+
+    q = q * valid_q.unsqueeze(1).to(dtype=q.dtype).unsqueeze(-1)
+    k = k * valid_k.unsqueeze(1).to(dtype=k.dtype).unsqueeze(-1)
+    v = v * valid_k.unsqueeze(1).to(dtype=v.dtype).unsqueeze(-1)
+    return q, k, v
+
+
+class EvaLinearAttention(nn.Module):
+    """Eva-style attention with SLA linear attention backend."""
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        qkv_fused: bool = True,
+        qkv_bias_separate: bool = False,
+        num_prefix_tokens: int = 1,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        attn_head_dim: Optional[int] = None,
+        norm_layer: Optional[Callable] = None,
+        qk_norm: bool = False,
+        scale_norm: bool = True,
+        rotate_half: bool = False,
+        feature_map: str = "softmax",
+        use_bf16: bool = True,
+        tie_feature_map_qk: bool = True,
+        eps: float = 1e-5,
+        device=None,
+        dtype=None,
+    ):
+        dd: _DeviceDTypeKwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.LayerNorm
+        if scale_norm or qk_norm:
+            assert norm_layer is not None, "norm_layer must be provided if qk_norm or scale_norm is True"
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        if attn_head_dim is not None:
+            head_dim = attn_head_dim
+        self.head_dim = head_dim
+        attn_dim = head_dim * self.num_heads
+        self.num_prefix_tokens = num_prefix_tokens
+        self.qkv_bias_separate = qkv_bias_separate
+        self.rotate_half = rotate_half
+
+        if qkv_fused:
+            self.qkv = nn.Linear(dim, attn_dim * 3, bias=False, **dd)
+            self.q_proj = self.k_proj = self.v_proj = None
+            if qkv_bias:
+                self.q_bias = nn.Parameter(torch.zeros(attn_dim, **dd))
+                self.register_buffer("k_bias", torch.zeros(attn_dim, **dd), persistent=False)
+                self.v_bias = nn.Parameter(torch.zeros(attn_dim, **dd))
+            else:
+                self.q_bias = self.k_bias = self.v_bias = None
+        else:
+            self.q_proj = nn.Linear(dim, attn_dim, bias=qkv_bias, **dd)
+            self.k_proj = nn.Linear(dim, attn_dim, bias=False, **dd)
+            self.v_proj = nn.Linear(dim, attn_dim, bias=qkv_bias, **dd)
+            self.qkv = None
+            self.q_bias = self.k_bias = self.v_bias = None
+
+        self.q_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
+        self.attn = LinearCrossAttention(
+            feature_map=feature_map,
+            use_bf16=use_bf16,
+            tie_feature_map_qk=tie_feature_map_qk,
+            eps=eps,
+        )
+        self.norm = norm_layer(attn_dim, **dd) if scale_norm else nn.Identity()
+        self.proj = nn.Linear(attn_dim, dim, **dd)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, N, C = x.shape
+
+        if self.qkv is not None:
+            if self.q_bias is None:
+                qkv = self.qkv(x)
+            else:
+                assert self.q_bias is not None
+                assert self.k_bias is not None
+                assert self.v_bias is not None
+                qkv_bias = torch.cat((self.q_bias, self.k_bias, self.v_bias))
+                if self.qkv_bias_separate:
+                    qkv = self.qkv(x)
+                    qkv += qkv_bias
+                else:
+                    qkv = F.linear(x, weight=self.qkv.weight, bias=qkv_bias)
+            qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
+        else:
+            assert self.q_proj is not None
+            assert self.k_proj is not None
+            assert self.v_proj is not None
+            q = self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            k = self.k_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if rope is not None:
+            npt = self.num_prefix_tokens
+            half = getattr(self, "rotate_half", False)
+            q = torch.cat([q[:, :, :npt, :], apply_rot_embed_cat(q[:, :, npt:, :], rope, half=half)], dim=2).type_as(v)
+            k = torch.cat([k[:, :, :npt, :], apply_rot_embed_cat(k[:, :, npt:, :], rope, half=half)], dim=2).type_as(v)
+
+        q, k, v = _apply_linear_attn_mask(q, k, v, attn_mask)
+        x = self.attn(q, k, v)
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.norm(x)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class EvaSparseLinearAttention(nn.Module):
+    """Eva-style attention with SLA sparse linear attention backend."""
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        qkv_fused: bool = True,
+        qkv_bias_separate: bool = False,
+        num_prefix_tokens: int = 1,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        attn_head_dim: Optional[int] = None,
+        norm_layer: Optional[Callable] = None,
+        qk_norm: bool = False,
+        scale_norm: bool = True,
+        rotate_half: bool = False,
+        topk: float = 0.25,
+        feature_map: str = "softmax",
+        BLKQ: int = 64,
+        BLKK: int = 64,
+        use_bf16: bool = True,
+        tie_feature_map_qk: bool = True,
+        device=None,
+        dtype=None,
+    ):
+        dd: _DeviceDTypeKwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.LayerNorm
+        if scale_norm or qk_norm:
+            assert norm_layer is not None, "norm_layer must be provided if qk_norm or scale_norm is True"
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        if attn_head_dim is not None:
+            head_dim = attn_head_dim
+        self.head_dim = head_dim
+        attn_dim = head_dim * self.num_heads
+        self.num_prefix_tokens = num_prefix_tokens
+        self.qkv_bias_separate = qkv_bias_separate
+        self.rotate_half = rotate_half
+
+        if qkv_fused:
+            self.qkv = nn.Linear(dim, attn_dim * 3, bias=False, **dd)
+            self.q_proj = self.k_proj = self.v_proj = None
+            if qkv_bias:
+                self.q_bias = nn.Parameter(torch.zeros(attn_dim, **dd))
+                self.register_buffer("k_bias", torch.zeros(attn_dim, **dd), persistent=False)
+                self.v_bias = nn.Parameter(torch.zeros(attn_dim, **dd))
+            else:
+                self.q_bias = self.k_bias = self.v_bias = None
+        else:
+            self.q_proj = nn.Linear(dim, attn_dim, bias=qkv_bias, **dd)
+            self.k_proj = nn.Linear(dim, attn_dim, bias=False, **dd)
+            self.v_proj = nn.Linear(dim, attn_dim, bias=qkv_bias, **dd)
+            self.qkv = None
+            self.q_bias = self.k_bias = self.v_bias = None
+
+        self.q_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
+        self.attn = SparseLinearAttention(
+            head_dim,
+            topk=topk,
+            feature_map=feature_map,
+            BLKQ=BLKQ,
+            BLKK=BLKK,
+            use_bf16=use_bf16,
+            tie_feature_map_qk=tie_feature_map_qk,
+        )
+        self.norm = norm_layer(attn_dim, **dd) if scale_norm else nn.Identity()
+        self.proj = nn.Linear(attn_dim, dim, **dd)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, N, C = x.shape
+
+        if self.qkv is not None:
+            if self.q_bias is None:
+                qkv = self.qkv(x)
+            else:
+                assert self.q_bias is not None
+                assert self.k_bias is not None
+                assert self.v_bias is not None
+                qkv_bias = torch.cat((self.q_bias, self.k_bias, self.v_bias))
+                if self.qkv_bias_separate:
+                    qkv = self.qkv(x)
+                    qkv += qkv_bias
+                else:
+                    qkv = F.linear(x, weight=self.qkv.weight, bias=qkv_bias)
+            qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
+        else:
+            assert self.q_proj is not None
+            assert self.k_proj is not None
+            assert self.v_proj is not None
+            q = self.q_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            k = self.k_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+            v = self.v_proj(x).reshape(B, N, self.num_heads, -1).transpose(1, 2)
+
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if rope is not None:
+            npt = self.num_prefix_tokens
+            half = getattr(self, "rotate_half", False)
+            q = torch.cat([q[:, :, :npt, :], apply_rot_embed_cat(q[:, :, npt:, :], rope, half=half)], dim=2).type_as(v)
+            k = torch.cat([k[:, :, :npt, :], apply_rot_embed_cat(k[:, :, npt:, :], rope, half=half)], dim=2).type_as(v)
+
+        q, k, v = _apply_linear_attn_mask(q, k, v, attn_mask)
+        x = self.attn(q, k, v)
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.norm(x)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
 class _HC_EvaAttention(nn.Module):
     """Helper class to wrap EvaBlock attention branch for mHC."""
 
@@ -183,7 +445,8 @@ class EvaBlock(nn.Module):
         qkv_bias: bool = True,
         qkv_fused: bool = True,
         mlp_ratio: float = 4.0,
-        swiglu_mlp: bool = False,
+        ffn_type: str | None = None,
+        swiglu_mlp: bool = False,  # legacy args
         swiglu_align_to: int = 0,
         scale_mlp: bool = False,
         scale_attn_inner: bool = False,
@@ -246,11 +509,25 @@ class EvaBlock(nn.Module):
 
         self.norm1 = norm_layer(dim, **dd)
         logger.trace(f"Layer uses attention type {attn_type}")
-        attn_cls = {"rope": AttentionRope, "eva": EvaAttention, "gated": GatedAttentionTimmWrapped}[attn_type]
+        attn_cls = {
+            "rope": AttentionRope,
+            "eva": EvaAttention,
+            "gated": GatedAttentionTimmWrapped,
+            "linear": EvaLinearAttention,
+            "sparse_linear": EvaSparseLinearAttention,
+        }[attn_type]
 
         attn_kwargs = {}
         if attn_type == "gated":
             attn_kwargs["is_causal"] = is_causal
+        elif attn_type == "linear":
+            linear_kwargs = kwargs.get("linear_attn")
+            if linear_kwargs is not None:
+                attn_kwargs.update(linear_kwargs)
+        elif attn_type == "sparse_linear":
+            sparse_linear_kwargs = kwargs.get("sparse_linear_attn")
+            if sparse_linear_kwargs is not None:
+                attn_kwargs.update(sparse_linear_kwargs)
 
         self.attn = attn_cls(
             dim,
@@ -272,7 +549,7 @@ class EvaBlock(nn.Module):
 
         self.norm2 = norm_layer(dim, **dd)
         hidden_features = int(dim * mlp_ratio)
-        if swiglu_mlp:
+        if swiglu_mlp or ffn_type == "swiglu":
             if scale_mlp or swiglu_align_to:
                 # when norm in SwiGLU used or alignment enabled, an impl with separate fc for gate & x is used
                 self.mlp = SwiGLU(
@@ -294,7 +571,25 @@ class EvaBlock(nn.Module):
                     drop=proj_drop,
                     **dd,
                 )
-        else:
+
+        elif ffn_type == "moe":
+            moe_kwargs = dict(kwargs.get("moe", {}) or {})
+            from .moe import MoEFFN
+
+            num_layers = moe_kwargs.pop("num_layers", 12)
+            self.mlp = MoEFFN(
+                dim=dim,
+                n_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                num_layers=num_layers,
+                layer_idx=layer_idx if layer_idx is not None else 0,
+                ffn_drop=proj_drop,
+                fused_type=None,
+                assume_bsh=True,
+                **moe_kwargs,
+            )
+
+        elif ffn_type == "mlp":
             self.mlp = Mlp(
                 in_features=dim,
                 hidden_features=hidden_features,
@@ -380,7 +675,7 @@ class EvaBlock(nn.Module):
         if self._post_norm_skip_first_layer:
             return self._forward_eva_block_prenorm(x, rope=rope, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
 
-        alpha: Tensor = self.post_norm_alpha  # ty: ignore[assignment]
+        alpha: Tensor = self.post_norm_alpha  # ty: ignore[invalid-assignment]
         if self.gamma_1 is None:
             attn_out = self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)
         else:
@@ -444,7 +739,7 @@ def get_block_fn(cfg) -> Callable:
 
     # Check if we need EVA block features
     use_eva_features = (
-        cfg.attn_type in ("eva", "rope", "gated")
+        cfg.attn_type in ("eva", "rope", "gated", "linear", "sparse_linear")
         or cfg.rope_type not in ("", "none")  # Any ROPE type requires EVA blocks
         or cfg.swiglu_mlp
     )
@@ -474,6 +769,8 @@ def get_block_fn(cfg) -> Callable:
             block_norm_type=block_norm_type,
             post_norm_alpha=post_norm_alpha,
             post_norm_skip_first_layer=cfg.post_norm_skip_first_layer,
+            linear_attn=cfg.linear_attn,
+            sparse_linear_attn=cfg.sparse_linear_attn,
         )
     else:
         # Standard ViT block
@@ -516,6 +813,12 @@ class NaFlexVitCfg:
     proj_bias: bool = True
     attn_drop_rate: float = 0.0
     scale_attn_inner_norm: bool = False  # Apply scaling norm to attn context
+    linear_attn: dict[str, Any] | None = (
+        None  # kwargs for EvaLinearAttention (feature_map/use_bf16/tie_feature_map_qk/eps)
+    )
+    sparse_linear_attn: dict[str, Any] | None = (
+        None  # kwargs for EvaSparseLinearAttention (topk/feature_map/BLKQ/BLKK/use_bf16/tie_feature_map_qk)
+    )
 
     # Regularization
     init_values: Optional[float] = None  # Layer-scale init values (layer-scale enabled if not None)
@@ -578,7 +881,7 @@ class NaFlexVitCfg:
     mlp_layer: Optional[str] = None  # MLP implementation class name
 
     # EVA-specific parameters
-    attn_type: str = "eva"  # Attention type: 'standard', 'eva', 'rope'
+    attn_type: str = "eva"  # Attention type: 'standard', 'eva', 'rope', 'gated', 'linear', 'sparse_linear'
     swiglu_mlp: bool = True  # Use SwiGLU MLP variant
     qkv_fused: bool = True  # Whether to use fused QKV projections
 
@@ -1068,8 +1371,8 @@ class Transformer(NaFlexVit):
         x = self.norm(x)
         return x, intermediates
 
-    def init_weights(self, mode="jax"):
-        super().init_weights(mode=mode)
+    def init_weights(self, mode: str = "jax", needs_reset: bool = True):
+        super().init_weights(mode=mode, needs_reset=needs_reset)
 
         def rescale(p, layer_id):
             p.div_(math.sqrt(2.0 * layer_id))

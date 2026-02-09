@@ -1,0 +1,52 @@
+model:
+  _target_: src.stage2.object_detection.model.mmdetect.factory.build_hybrid_model_from_yaml
+  model_type: fcos
+  cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_fcos.yaml}
+  overrides:
+    num_classes: 18
+    input_channels: 3
+    tokenizer_feature:
+      in_channels: 3
+
+dataloader:
+  train:
+    _target_: src.stage2.object_detection.data.dota_mmdet.build_dataloader
+    dataset:
+      _target_: src.stage2.object_detection.data.dota_mmdet.DotaMMDetDataset
+      root: data/Downstreams/DOTA
+      split: train
+      version: "2.0"
+      bbox_orientation: horizontal
+      target_size: 512
+      use_obb: false
+    batch_size: 2
+    num_workers: 2
+    shuffle: true
+  val:
+    _target_: src.stage2.object_detection.data.dota_mmdet.build_dataloader
+    dataset:
+      _target_: src.stage2.object_detection.data.dota_mmdet.DotaMMDetDataset
+      root: data/Downstreams/DOTA
+      split: val
+      version: "2.0"
+      bbox_orientation: horizontal
+      target_size: 512
+      use_obb: false
+    batch_size: 2
+    num_workers: 2
+    shuffle: false
+
+optimizer:
+  type: AdamW
+  lr: 1e-4
+  weight_decay: 0.05
+
+runner:
+  work_dir: output/mmdet_dota
+  max_epochs: 12
+  val_interval: 1
+  log_interval: 50
+  checkpoint_interval: 1
+  launcher: none
+  seed: 2025
+  do_val: true

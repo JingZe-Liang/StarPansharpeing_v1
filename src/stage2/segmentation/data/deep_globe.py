@@ -10,6 +10,7 @@ from kornia.augmentation import (
     RandomBoxBlur,
     Normalize,
 )
+from collections.abc import Sequence
 from functools import partial
 from src.data import _BaseStreamingDataset
 
@@ -26,9 +27,11 @@ class DeepGlobeRoadExtractionStreamingDataset(_BaseStreamingDataset):
         super().__init__(*args, **kwargs)
         self.img_size = img_size
 
+        mean, std = _normalize_mean_std(norm_mean_std)
+
         # Define Augmentations
         self.resize = AugmentationSequential(
-            Normalize(mean=norm_mean_std[0], std=norm_mean_std[1]),
+            Normalize(mean=mean, std=std),
             RandomResizedCrop(
                 size=(img_size, img_size),
                 scale=(0.5, 1.0),
@@ -114,6 +117,14 @@ class DeepGlobeRoadExtractionStreamingDataset(_BaseStreamingDataset):
         sample.pop("__key__", None)
 
         return sample
+
+
+def _normalize_mean_std(norm_mean_std: Sequence[Sequence[float]]) -> tuple[list[float], list[float]]:
+    if len(norm_mean_std) != 2:
+        raise ValueError("norm_mean_std must be a sequence with [mean, std].")
+    mean = [float(v) for v in norm_mean_std[0]]
+    std = [float(v) for v in norm_mean_std[1]]
+    return mean, std
 
 
 def test_dataloader():

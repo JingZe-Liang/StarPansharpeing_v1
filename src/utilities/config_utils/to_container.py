@@ -100,7 +100,6 @@ def function_config_to_easy_dict(func):
     def wrapper(*args, **kwargs):
         new_args = [kwargs_to_basic_types(arg, easydict_type=True) for arg in args]
         new_kwargs = kwargs_to_basic_types(kwargs, easydict_type=True)
-
         return func(*new_args, **new_kwargs)
 
     return wrapper

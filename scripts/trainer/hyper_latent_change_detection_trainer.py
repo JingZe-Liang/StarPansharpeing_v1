@@ -924,7 +924,7 @@ class HyperCDTrainer:
 
             # slide windows
             if self.train_cfg.val_slide_window:
-                logger.info(f"[Val]: using slide window validation")
+                logger.info(f"[Val]: using slide window validation", once=True)
                 model_outputs = model_predict_patcher(
                     _val_model_closure,
                     batch,
@@ -934,7 +934,7 @@ class HyperCDTrainer:
                 )
                 pred_seg = model_outputs["pred_logits"].argmax(1)
             else:
-                logger.info(f"[Val]: using full image validation")
+                logger.info(f"[Val]: using full image validation", once=True)
                 pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
 
         return pred_seg
@@ -949,6 +949,13 @@ class HyperCDTrainer:
             if inp_ndim == 3:
                 x = x.squeeze(1)
         return x
+
+    def _to_label_map_3d(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4 and x.shape[1] == 1:
+            return x.squeeze(1)
+        if x.ndim == 3:
+            return x
+        raise ValueError(f"Expected label map shaped [B,H,W] or [B,1,H,W], but got {tuple(x.shape)}")
 
     @torch.inference_mode()
     def val_loop(self):
@@ -972,6 +979,8 @@ class HyperCDTrainer:
 
             gt = self._resize_to(gt, mode="nearest")
             pred_seg = self._resize_to(pred_seg, mode="nearest")
+            gt = self._to_label_map_3d(gt)
+            pred_seg = self._to_label_map_3d(pred_seg)
 
             # metrics - use segmentation predictions and ground truth
             # self.update_metrics(pred_seg, gt)
@@ -1056,7 +1065,7 @@ class HyperCDTrainer:
         add_step: bool = False,
         only_vis_n: int | None = None,
         n_class: int = 2,
-        use_coco_colors: bool = True,
+        use_coco_colors: bool = False,
     ):
         """Visualize predicted and ground truth segmentation maps side by side.
 
@@ -1115,11 +1124,22 @@ class HyperCDTrainer:
         img1_rgb = convert_to_hwc_format(img1_rgb)
         img2_rgb = convert_to_hwc_format(img2_rgb)
 
+        seg_colors = None
+        if n_class == 2:
+            seg_colors = np.array(
+                [
+                    [0.0, 0.0, 0.0, 1.0],  # class 0 -> black
+                    [1.0, 1.0, 1.0, 1.0],  # class 1 -> white
+                ],
+                dtype=np.float32,
+            )
+
         # Visualize segmentation maps for entire batch
         pred_vis = visualize_segmentation_map(
             pred_map,
             n_class=n_class,
             use_coco_colors=use_coco_colors,
+            colors=seg_colors,
             to_pil=False,
             bg_black=True,
         )
@@ -1128,6 +1148,7 @@ class HyperCDTrainer:
             gt_map,
             n_class=n_class,
             use_coco_colors=use_coco_colors,
+            colors=seg_colors,
             to_pil=False,
             bg_black=True,
         )
@@ -1205,12 +1226,13 @@ class HyperCDTrainer:
         self.train_loop()
 
 
-_key = "tokenizer_hybrid_adaptor"
+_key = "tokenizer_hybrid_adaptor_gvlm"
 _configs_dict = {
     "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
     "tokenizer_hybrid_adaptor": "tokenizer_hybrid_adaptor",
     "tokenizer_hybrid_adaptor_gvlm": "tokenizer_hybrid_adaptor_gvlm",
     "tokenizer_hybrid_adaptor_cabuar": "tokenizer_hybrid_adaptor_cabuar",
+    "tokenizer_hybrid_adaptor_dsifn": "tokenizer_hybrid_adaptor_dsifn",
 }
 
 

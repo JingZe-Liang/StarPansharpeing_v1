@@ -528,22 +528,221 @@ def model_predict_patcher(
     overlap: float | None = None,
     label_mode: str = "seg",
     use_tqdm: bool = False,
+    online_merge: bool = True,
 ):
     assert callable(postprocess_model_out) or postprocess_model_out is None, (
         "postprocess_model_out must be callable or None"
     )
     slider = WindowSlider(slide_keys=patch_keys, window_size=patch_size, stride=stride, overlap=overlap)
     windowed_samples = slider.slide_windows(model_in, use_tqdm=use_tqdm)
-    model_outs: list[dict] = []
+    if not online_merge:
+        model_outs: list[dict] = []
+        for sample in windowed_samples:
+            model_out = model(sample)
+            if postprocess_model_out is not None:
+                model_out = postprocess_model_out(model_out, label_mode=label_mode)
+            # Combine model output with window info
+            model_out_combined = {**model_out, "window_info": sample["window_info"]}
+            model_outs.append(model_out_combined)
+        merged_output = slider.merge_windows(model_outs, merge_method=merge_method, merged_keys=merge_keys)
+        return merged_output
+
+    merged_results: dict[str, Any] = {}
+    merge_states: dict[str, dict[str, Any]] = {}
+
     for sample in windowed_samples:
         model_out = model(sample)
         if postprocess_model_out is not None:
             model_out = postprocess_model_out(model_out, label_mode=label_mode)
-        # Combine model output with window info
-        model_out_combined = {**model_out, "window_info": sample["window_info"]}
-        model_outs.append(model_out_combined)
-    merged_output = slider.merge_windows(model_outs, merge_method=merge_method, merged_keys=merge_keys)
-    return merged_output
+
+        info = sample["window_info"]
+        original_shape = info["original_shape"]
+        has_batch = info["has_batch"]
+        batch_size = info["batch_size"]
+        window_size = info["window_size"]
+        h_start, h_end = info["h_start"], info["h_end"]
+        w_start, w_end = info["w_start"], info["w_end"]
+
+        for key in merge_keys:
+            if key not in model_out:
+                continue
+
+            first_data = model_out[key]
+            if not torch.is_tensor(first_data) and not isinstance(first_data, np.ndarray):
+                merged_results.setdefault(key, first_data)
+                continue
+
+            data_tensor = torch.as_tensor(first_data) if not torch.is_tensor(first_data) else first_data
+            should_merge_spatially = False
+            if data_tensor.ndim == 4:
+                should_merge_spatially = data_tensor.shape[2] == window_size and data_tensor.shape[3] == window_size
+            elif data_tensor.ndim == 3:
+                should_merge_spatially = data_tensor.shape[1] == window_size and data_tensor.shape[2] == window_size
+            elif data_tensor.ndim == 2:
+                should_merge_spatially = data_tensor.shape[0] == window_size and data_tensor.shape[1] == window_size
+
+            if not should_merge_spatially:
+                merged_results.setdefault(key, first_data)
+                continue
+
+            if key not in merge_states:
+                merged_tensor_dtype = data_tensor.dtype if merge_method != "average" else torch.float32
+                if data_tensor.ndim == 4:
+                    output_shape = (data_tensor.shape[1],) + original_shape
+                    merged_tensor = torch.zeros(
+                        (data_tensor.shape[0],) + output_shape,
+                        dtype=merged_tensor_dtype,
+                        device=data_tensor.device,
+                    )
+                elif data_tensor.ndim == 3:
+                    output_shape = (data_tensor.shape[0],) + original_shape
+                    if has_batch:
+                        merged_tensor = torch.zeros(
+                            (batch_size,) + output_shape,
+                            dtype=merged_tensor_dtype,
+                            device=data_tensor.device,
+                        )
+                    else:
+                        merged_tensor = torch.zeros(
+                            output_shape,
+                            dtype=merged_tensor_dtype,
+                            device=data_tensor.device,
+                        )
+                elif data_tensor.ndim == 2:
+                    output_shape = original_shape
+                    if has_batch:
+                        merged_tensor = torch.zeros(
+                            (batch_size, 1) + output_shape,
+                            dtype=merged_tensor_dtype,
+                            device=data_tensor.device,
+                        )
+                    else:
+                        merged_tensor = torch.zeros(
+                            output_shape,
+                            dtype=merged_tensor_dtype,
+                            device=data_tensor.device,
+                        )
+                else:
+                    merged_tensor = torch.zeros(
+                        data_tensor.shape,
+                        dtype=merged_tensor_dtype,
+                        device=data_tensor.device,
+                    )
+
+                count_tensor = None
+                if merge_method == "average":
+                    if has_batch:
+                        count_tensor = torch.zeros(
+                            (batch_size,) + original_shape,
+                            dtype=torch.float32,
+                            device=data_tensor.device,
+                        )
+                    else:
+                        count_tensor = torch.zeros(original_shape, dtype=torch.float32, device=data_tensor.device)
+
+                merge_states[key] = {
+                    "merged_tensor": merged_tensor,
+                    "count_tensor": count_tensor,
+                    "original_dtype": data_tensor.dtype,
+                    "original_type": type(first_data),
+                    "has_batch": has_batch,
+                }
+
+            state = merge_states[key]
+            merged_tensor = state["merged_tensor"]
+            count_tensor = state["count_tensor"]
+            data_for_merge = data_tensor.to(merged_tensor.dtype)
+
+            if merge_method == "average" and count_tensor is not None:
+                if data_for_merge.dim() == 4:
+                    merged_tensor[:, :, h_start:h_end, w_start:w_end] += data_for_merge
+                    if has_batch:
+                        count_tensor[:, h_start:h_end, w_start:w_end] += 1
+                    else:
+                        count_tensor[h_start:h_end, w_start:w_end] += 1
+                elif data_for_merge.dim() == 3:
+                    if has_batch:
+                        merged_tensor[:, :, h_start:h_end, w_start:w_end] += data_for_merge.unsqueeze(0)
+                        count_tensor[:, h_start:h_end, w_start:w_end] += 1
+                    else:
+                        merged_tensor[:, h_start:h_end, w_start:w_end] += data_for_merge
+                        count_tensor[h_start:h_end, w_start:w_end] += 1
+                elif data_for_merge.dim() == 2:
+                    if has_batch:
+                        merged_tensor[:, 0, h_start:h_end, w_start:w_end] += data_for_merge
+                        count_tensor[:, h_start:h_end, w_start:w_end] += 1
+                    else:
+                        merged_tensor[h_start:h_end, w_start:w_end] += data_for_merge
+                        count_tensor[h_start:h_end, w_start:w_end] += 1
+            elif merge_method == "first":
+                if data_for_merge.dim() == 4:
+                    mask = merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(dim=(0, 1)) == 0
+                    if mask.any():
+                        merged_tensor[:, :, h_start:h_end, w_start:w_end][:, :, mask] = data_for_merge[:, :, mask]
+                elif data_for_merge.dim() == 3:
+                    if has_batch:
+                        mask = merged_tensor[:, :, h_start:h_end, w_start:w_end].sum(dim=(0, 1)) == 0
+                        if mask.any():
+                            merged_tensor[:, :, h_start:h_end, w_start:w_end][:, :, mask] = data_for_merge.unsqueeze(0)[
+                                :, :, mask
+                            ]
+                    else:
+                        mask = merged_tensor[:, h_start:h_end, w_start:w_end].sum(dim=0) == 0
+                        if mask.any():
+                            merged_tensor[:, h_start:h_end, w_start:w_end][:, mask] = data_for_merge[:, mask]
+                elif data_for_merge.dim() == 2:
+                    if has_batch:
+                        mask = merged_tensor[:, 0, h_start:h_end, w_start:w_end] == 0
+                        if mask.any():
+                            merged_tensor[:, 0, h_start:h_end, w_start:w_end][:, mask] = data_for_merge[mask]
+                    else:
+                        mask = merged_tensor[h_start:h_end, w_start:w_end] == 0
+                        if mask.any():
+                            merged_tensor[h_start:h_end, w_start:w_end][mask] = data_for_merge[mask]
+            elif merge_method == "last":
+                if data_for_merge.dim() == 4:
+                    merged_tensor[:, :, h_start:h_end, w_start:w_end] = data_for_merge
+                elif data_for_merge.dim() == 3:
+                    if has_batch:
+                        merged_tensor[:, :, h_start:h_end, w_start:w_end] = data_for_merge.unsqueeze(0)
+                    else:
+                        merged_tensor[:, h_start:h_end, w_start:w_end] = data_for_merge
+                elif data_for_merge.dim() == 2:
+                    if has_batch:
+                        merged_tensor[:, 0, h_start:h_end, w_start:w_end] = data_for_merge
+                    else:
+                        merged_tensor[h_start:h_end, w_start:w_end] = data_for_merge
+
+    for key, state in merge_states.items():
+        merged_tensor = state["merged_tensor"]
+        count_tensor = state["count_tensor"]
+
+        if merge_method == "average" and count_tensor is not None:
+            count_tensor = count_tensor.clamp(min=1)
+            if merged_tensor.dim() == 4:
+                if count_tensor.dim() == 2:
+                    count_tensor = count_tensor.unsqueeze(0).unsqueeze(0)
+                elif count_tensor.dim() == 3:
+                    count_tensor = count_tensor.unsqueeze(1)
+                merged_tensor = merged_tensor / count_tensor
+            elif merged_tensor.dim() == 3:
+                if count_tensor.dim() == 2:
+                    count_tensor = count_tensor.unsqueeze(0)
+                merged_tensor = merged_tensor / count_tensor
+            else:
+                merged_tensor = merged_tensor / count_tensor
+
+        if merge_method == "average" or (
+            merge_method in {"first", "last"} and merged_tensor.dtype != state["original_dtype"]
+        ):
+            merged_tensor = merged_tensor.to(state["original_dtype"])
+
+        if state["original_type"] is np.ndarray:
+            merged_results[key] = merged_tensor.cpu().numpy()
+        else:
+            merged_results[key] = merged_tensor
+
+    return merged_results
 
 
 def __test_model_predict_patcher():

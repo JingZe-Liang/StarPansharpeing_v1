@@ -10,6 +10,16 @@ __getattr__, __dir__, __all__ = lazy_loader.attach(
         "single_mat_loader": ["SingleMatDataset"],
         "oil_leakage": ["get_oil_leakage_dataloaders"],
         "flood3i": ["Flood3IDataset", "get_flood3i_dataloader"],
+        "atlantic_forest": ["AtlanticForestSegmentationDataset", "get_atlantic_forest_dataloader"],
+        "cross_city_multimodal": [
+            "CrossCityMultimodalSegmentationDataset",
+            "CrossCityMultimodalPatchStreamingDataset",
+            "CrossCityTrainLitDataConfig",
+            "CrossCityLitDataStreamKwargs",
+            "CrossCityLitDataCombinedKwargs",
+            "CrossCityLitDataLoaderKwargs",
+            "export_cross_city_train_patches_to_litdata",
+        ],
         "data_split": [
             "single_image_split_dataset",
             "oversample_weak_classes",

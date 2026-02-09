@@ -51,7 +51,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
         n_classes: int = 2,
         ignore_index: int | None = None,
         top_k: int = 1,
-        reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
+        reduction: Literal["micro", "macro", "weighted", "none"] | None = "macro",
         per_class: bool = False,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",

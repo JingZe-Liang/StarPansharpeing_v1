@@ -40,7 +40,7 @@ metric:
 
 train:
   # Wrapper-based training
-  val_slide_window: true
+  val_slide_window: false
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:

@@ -227,3 +227,9 @@
 [submodule "src/stage1/featups/featsharp"]
 	path = src/stage1/featups/featsharp
 	url = https://github.com/NVlabs/FeatSharp.git
+[submodule "src/stage1/self_supervised/rectified_lpjepa"]
+	path = src/stage1/self_supervised/rectified_lpjepa
+	url = https://github.com/YilunKuang/rectified-lp-jepa.git
+[submodule "src/stage2/segmentation/third_party/RSE_cross_city"]
+	path = src/stage2/segmentation/third_party/RSE_cross_city
+	url = https://github.com/danfenghong/RSE_Cross-city.git

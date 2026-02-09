@@ -1,0 +1,72 @@
+train_bs: 8
+val_bs: 8
+
+dataset_name: TreeSatAI_TS
+root: data/Downstreams/TreeSatAI_TimeSeries
+num_classes: 15
+to_neg_1_1: true
+sensors: [aerial, s1_asc, s1_des, s2]
+aerial_hw: [304, 304]
+s1_hw: [32, 32]
+s2_hw: [32, 32]
+max_t_s1: 4
+max_t_s2: 4
+scale_mode: minmax_neg1_1
+image_interp_mode: bilinear
+s2_mask_interp_mode: nearest
+strict_files: true
+
+consts:
+  num_classes: ${..num_classes}
+  num_labels: ${..num_classes}
+  to_neg_1_1: ${..to_neg_1_1}
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.classification.data.TreeSatAI_timeseries.TreeSatAITimeSeriesDataset.create_dataloader
+  dataset_kwargs:
+    root: ${...root}
+    split: train
+    sensors: ${...sensors}
+    label_mode: multi_hot
+    scale_mode: ${...scale_mode}
+    aerial_hw: ${...aerial_hw}
+    s1_hw: ${...s1_hw}
+    s2_hw: ${...s2_hw}
+    max_t_s1: ${...max_t_s1}
+    max_t_s2: ${...max_t_s2}
+    image_interp_mode: ${...image_interp_mode}
+    s2_mask_interp_mode: ${...s2_mask_interp_mode}
+    s2_to_neg_1_1: ${...to_neg_1_1}
+    strict_files: ${...strict_files}
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 4
+    shuffle: true
+    pin_memory: true
+  pad_time_series: true
+
+val:
+  _target_: src.stage2.classification.data.TreeSatAI_timeseries.TreeSatAITimeSeriesDataset.create_dataloader
+  dataset_kwargs:
+    root: ${...root}
+    split: val
+    sensors: ${...sensors}
+    label_mode: multi_hot
+    scale_mode: ${...scale_mode}
+    aerial_hw: ${...aerial_hw}
+    s1_hw: ${...s1_hw}
+    s2_hw: ${...s2_hw}
+    max_t_s1: ${...max_t_s1}
+    max_t_s2: ${...max_t_s2}
+    image_interp_mode: ${...image_interp_mode}
+    s2_mask_interp_mode: ${...s2_mask_interp_mode}
+    s2_to_neg_1_1: ${...to_neg_1_1}
+    strict_files: ${...strict_files}
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 4
+    shuffle: false
+    pin_memory: true
+  pad_time_series: true

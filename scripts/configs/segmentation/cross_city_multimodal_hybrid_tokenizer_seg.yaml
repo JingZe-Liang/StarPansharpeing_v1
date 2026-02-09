@@ -1,0 +1,99 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: cross_city_multimodal
+  - accelerator: base
+  - model@segment_model: tokenizer_hybrid_decoder_multimodal
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.995
+  update_after_step: 1000
+  update_every: 2
+  allow_different_devices: true
+  lazy_init_ema: true
+
+metric:
+  _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
+  n_classes: ${dataset.consts.num_classes}
+  ignore_index: ${dataset.consts.ignore_index}
+  include_bg: false
+  input_format: index
+  task: multiclass
+
+train:
+  val_slide_window: true
+  val_patch_resize_scale: 1.0
+  grad_check: false
+  act_checkpoint: true
+  val_slide_window_kwargs:
+    patch_size: ${dataset.consts.patch_size}
+    stride: ${dataset.consts.stride}
+    online_merge: true
+
+  use_single_img_indexing: false
+  patches_per_image:
+  macro_batch_size: 2
+
+  proj_dir: runs/stage2_segmentation/
+  finetune_strategy: finetune_all
+  max_grad_norm: 1.0
+
+  track_metrics_duration: -1
+  track_metrics_after: 500
+  visualize_every: 200
+  max_steps: 20_000
+  save_every: 500
+  is_neg_1_1: ${dataset.to_neg_1_1}
+
+  resume_path:
+  ema_load_path:
+
+  bootstrap_ratio: 0.0
+  bootstrap_start_step: 0
+
+  segment_optim:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.95, 0.99]
+    oned_param_algo: lion
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.01
+    oned_params_defaults:
+      lr: 2.0e-4
+      weight_decay: 0.0
+
+  segment_sched:
+    _target_: transformers.optimization.get_cosine_schedule_with_warmup
+    _partial_: true
+    num_warmup_steps: 0
+    num_training_steps: ${train.max_steps}
+    num_cycles: 2
+
+  segment_loss:
+    _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
+    ignore_index: ${dataset.consts.ignore_index}
+    ce_weight: null
+    loss_weights: [1.0, 1.0, 0.2, 0.0]
+    mode: multiclass
+    dynamic_mode: null
+    ema_decay: 0.99
+
+  log:
+    run_comment: ${dataset.dataset_name}_cross_city_multimodal
+    log_with_time: true
+    log_every: 10
+    log_with: [wandb]
+  debug: true
+
+val:
+  val_duration: 20
+  max_val_iters: 1

@@ -1,5 +1,5 @@
-train_bs: 8
-val_bs: 4
+train_bs: 5
+val_bs: 16
 
 # Configs
 data_type: null
@@ -7,8 +7,10 @@ label_mode: seg
 dataset_name: Flood3I
 
 img_size: 256
-num_classes: 10
+num_classes: 2  # few-shot binary classification
 ignore_index: 255
+binary_target_class: 2
+n_shots: 5
 normalize: true
 
 consts:
@@ -19,18 +21,19 @@ consts:
   train_bs: ${..train_bs}
   val_bs: ${..val_bs}
   ignore_index: ${..ignore_index}
+  binary_target_class: ${..binary_target_class}
 
 list_files:
-  train: data/Downstreams/Flood-3i/val.txt
+  train: data/Downstreams/Flood-3i/few_shot_list/support_class_${..binary_target_class}_${..n_shots}.txt
   val: data/Downstreams/Flood-3i/val.txt
 
 train:
   _target_: src.stage2.segmentation.data.flood3i.get_flood3i_dataloader
-  batch_size: ${...consts.train_bs}
+  batch_size: ${..consts.train_bs}
   num_workers: 4
   split: train
   root: data/Downstreams/Flood-3i
-  list_file: ${...list_files.train}
+  list_file: ${..list_files.train}
   transform:
     _target_: src.stage2.segmentation.data.flood3i.Flood3IKeyTransform
     image_key: image
@@ -39,17 +42,20 @@ train:
     gt_key: gt
     squeeze_mask: true
     keep_extra: true
-  normalize: ${...normalize}
+  normalize: ${..normalize}
+  binary_target_class: ${..consts.binary_target_class}
+  ignore_index: ${..consts.ignore_index}
   return_name: false
   pin_memory: true
+  shuffle: true
 
 val:
   _target_: src.stage2.segmentation.data.flood3i.get_flood3i_dataloader
-  batch_size: ${...consts.val_bs}
+  batch_size: ${..consts.val_bs}
   num_workers: 2
   split: val
   root: data/Downstreams/Flood-3i
-  list_file: ${...list_files.val}
+  list_file: ${..list_files.val}
   transform:
     _target_: src.stage2.segmentation.data.flood3i.Flood3IKeyTransform
     image_key: image
@@ -58,6 +64,9 @@ val:
     gt_key: gt
     squeeze_mask: true
     keep_extra: true
-  normalize: ${...normalize}
+  normalize: ${..normalize}
+  binary_target_class: ${..consts.binary_target_class}
+  ignore_index: ${..consts.ignore_index}
   return_name: false
   pin_memory: true
+  shuffle: true

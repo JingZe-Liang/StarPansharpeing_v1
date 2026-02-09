@@ -17,7 +17,15 @@ from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.classification import Accuracy, F1Score
+from torchmetrics.classification import (
+    Accuracy,
+    F1Score,
+    MultilabelAccuracy,
+    MultilabelAveragePrecision,
+    MultilabelF1Score,
+)
+from torchmetrics.functional.classification import multilabel_average_precision, multilabel_f1_score
+from tqdm.auto import tqdm
 
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import dict_round_to_list_str, log_any_into_writter, set_logger_file
@@ -46,6 +54,11 @@ class HyperClassificationTrainer:
         self.ema_cfg = cfg.ema
         self.val_cfg = cfg.val
         self.metric_cfg = cfg.metric
+        self.metric_task: Literal["multiclass", "multilabel"] = getattr(self.metric_cfg, "task", "multiclass")
+        if self.metric_task not in {"multiclass", "multilabel"}:
+            raise ValueError(f"Unsupported metric.task={self.metric_task}, expected multiclass or multilabel.")
+        self.multilabel_threshold = float(getattr(self.metric_cfg, "threshold", 0.5))
+        self.label_key = str(getattr(self.train_cfg, "label_key", "label"))
 
         self.accelerator = cast(Accelerator, hydra.utils.instantiate(cfg.accelerator))
         self._trackers_name = self.train_cfg.log.log_with
@@ -114,6 +127,7 @@ class HyperClassificationTrainer:
         try:
             batch = next(iter(self.train_dataloader))
             image, _ = self._parse_batch(batch)
+            image = self._cast_model_input_dtype(image, dtype=torch.float32)
             with torch.no_grad():
                 self.model(image)
             self.log_msg("Model parameters initialized with a dummy forward pass")
@@ -253,6 +267,21 @@ class HyperClassificationTrainer:
                 log_fn(msg_string, **kwargs)
 
     def build_loss_fn(self) -> nn.Module:
+        if self.metric_task == "multilabel":
+            class_weights = getattr(self.train_cfg, "class_weights", None)
+            pos_weight_cfg = getattr(self.train_cfg, "pos_weight", None)
+            weight = (
+                torch.tensor(class_weights, dtype=torch.float32, device=self.device)
+                if class_weights is not None
+                else None
+            )
+            pos_weight = (
+                torch.tensor(pos_weight_cfg, dtype=torch.float32, device=self.device)
+                if pos_weight_cfg is not None
+                else None
+            )
+            return nn.BCEWithLogitsLoss(weight=weight, pos_weight=pos_weight)
+
         label_smoothing = getattr(self.train_cfg, "label_smoothing", 0.0)
         class_weights = getattr(self.train_cfg, "class_weights", None)
         if class_weights is not None:
@@ -262,14 +291,43 @@ class HyperClassificationTrainer:
         return nn.CrossEntropyLoss(weight=weight, label_smoothing=label_smoothing)
 
     def init_metrics(self) -> None:
+        if self.metric_task == "multilabel":
+            num_labels = int(getattr(self.metric_cfg, "num_labels", self.metric_cfg.num_classes))
+            self.multilabel_num_labels = num_labels
+            self.map_average = str(getattr(self.metric_cfg, "map_average", "macro"))
+            self.acc_metric: Any = MultilabelAccuracy(
+                num_labels=num_labels,
+                threshold=self.multilabel_threshold,
+                average="micro",
+            ).to(self.device)
+            self.f1_metric: Any = MultilabelF1Score(
+                num_labels=num_labels,
+                threshold=self.multilabel_threshold,
+                average="macro",
+            ).to(self.device)
+            if self.map_average not in {"micro", "macro", "weighted", "none"}:
+                raise ValueError(f"Unsupported metric.map_average={self.map_average}")
+            self.map_metric: Any = MultilabelAveragePrecision(
+                num_labels=num_labels,
+                average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
+            ).to(self.device)
+            self.acc_metric_top5: Any = None
+            return
+
         num_classes = self.metric_cfg.num_classes
         top_k = getattr(self.metric_cfg, "top_k", 1)
-        acc_metric = Accuracy(task="multiclass", num_classes=num_classes, top_k=top_k, average="micro")
-        f1_metric = F1Score(task="multiclass", num_classes=num_classes, top_k=top_k, average="macro")
-        acc_metric_top5 = Accuracy(task="multiclass", num_classes=num_classes, top_k=5, average="micro")
-        self.acc_metric: Accuracy = acc_metric.to(self.device)
-        self.f1_metric: F1Score = f1_metric.to(self.device)
-        self.acc_metric_top5: Accuracy = acc_metric_top5.to(self.device)
+        self.acc_metric: Any = Accuracy(task="multiclass", num_classes=num_classes, top_k=top_k, average="micro").to(
+            self.device
+        )
+        self.f1_metric: Any = F1Score(task="multiclass", num_classes=num_classes, top_k=top_k, average="macro").to(
+            self.device
+        )
+        self.acc_metric_top5: Any = Accuracy(task="multiclass", num_classes=num_classes, top_k=5, average="micro").to(
+            self.device
+        )
+        self.map_metric: Any = None
+        self.multilabel_num_labels = 0
+        self.map_average = "macro"
 
     def get_optimizer_lr_scheduler(
         self,
@@ -376,16 +434,54 @@ class HyperClassificationTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)  # type: ignore
 
-    def _parse_batch(self, batch: Any) -> tuple[Tensor, Tensor]:
+    def _to_model_tensor(self, key: str, value: Tensor) -> Tensor:
+        if key.endswith("_valid"):
+            return value.to(device=self.device, dtype=torch.bool)
+        if value.dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
+            return value.to(device=self.device, dtype=self.dtype)
+        return value.to(device=self.device)
+
+    def _cast_model_input_dtype(self, image: Any, dtype: torch.dtype) -> Any:
+        if isinstance(image, Tensor):
+            if image.dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
+                return image.to(device=self.device, dtype=dtype)
+            return image.to(device=self.device)
+        if isinstance(image, dict):
+            output: dict[str, Any] = {}
+            for key, value in image.items():
+                if isinstance(value, Tensor):
+                    if key.endswith("_valid"):
+                        output[key] = value.to(device=self.device, dtype=torch.bool)
+                    elif value.dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
+                        output[key] = value.to(device=self.device, dtype=dtype)
+                    else:
+                        output[key] = value.to(device=self.device)
+                else:
+                    output[key] = value
+            return output
+        return image
+
+    def _parse_batch(self, batch: Any) -> tuple[Any, Tensor]:
         if isinstance(batch, dict):
-            image = batch.get("image", None)
-            if image is None:
-                image = batch.get("img", None)
-            label = batch.get("label", None)
+            label = batch.get(self.label_key, None)
+            if label is None:
+                label = batch.get("label", None)
             if label is None:
                 label = batch.get("gt", None)
             if label is None:
                 label = batch.get("target", None)
+
+            image = batch.get("image", None)
+            if image is None:
+                image = batch.get("img", None)
+            if image is None:
+                model_inputs: dict[str, Tensor] = {}
+                for key, value in batch.items():
+                    if key == self.label_key or key in {"label", "gt", "target"}:
+                        continue
+                    if isinstance(value, Tensor):
+                        model_inputs[key] = self._to_model_tensor(key, value)
+                image = model_inputs
         elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
             image, label = batch[0], batch[1]
         else:
@@ -394,13 +490,17 @@ class HyperClassificationTrainer:
         if image is None or label is None:
             raise ValueError("Batch missing image/label fields")
 
-        image = image.to(device=self.device, dtype=self.dtype)
+        if isinstance(image, Tensor):
+            image = image.to(device=self.device, dtype=self.dtype)
+
         label = label.to(device=self.device)
-        if label.dtype != torch.long:
+        if self.metric_task == "multilabel":
+            label = label.float()
+        elif label.dtype != torch.long:
             label = label.long()
         return image, label
 
-    def _forward_model(self, image: Tensor, is_eval: bool = False) -> Tensor:
+    def _forward_model(self, image: Any, is_eval: bool = False) -> Tensor:
         if is_eval and not self.no_ema and getattr(self.val_cfg, "use_ema", False):
             model = self.ema_model.ema_model
         else:
@@ -414,7 +514,7 @@ class HyperClassificationTrainer:
                     raise ValueError("Model output dict must contain 'logits'")
             else:
                 logits = output
-        return logits
+        return torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
 
     def _optimize_step(self, loss: Tensor) -> None:
         if self.accelerator.sync_gradients:
@@ -425,6 +525,12 @@ class HyperClassificationTrainer:
             self.sched.step()
             self.ema_update()
 
+    @staticmethod
+    def _reduce_metric_tensor(metric: Tensor) -> Tensor:
+        if metric.ndim == 0:
+            return metric
+        return metric.mean()
+
     def train_step(self, batch: Any) -> ClassificationOutput:
         with self.accelerator.accumulate(self.model):
             image, label = self._parse_batch(batch)
@@ -432,9 +538,34 @@ class HyperClassificationTrainer:
             loss = self.loss_fn(logits, label)
             self._optimize_step(loss)
 
-        pred = torch.argmax(logits, dim=1)
-        acc = (pred == label).float().mean()
-        log_losses = {"cls_loss": loss.detach(), "acc": acc.detach()}
+        if self.metric_task == "multilabel":
+            probs = torch.sigmoid(logits)
+            pred = (probs >= self.multilabel_threshold).float()
+            acc = (pred == label).float().mean()
+            target = label.int()
+            train_f1 = multilabel_f1_score(
+                probs.detach(),
+                target,
+                num_labels=self.multilabel_num_labels,
+                threshold=self.multilabel_threshold,
+                average="macro",
+            )
+            train_map = multilabel_average_precision(
+                probs.detach(),
+                target,
+                num_labels=self.multilabel_num_labels,
+                average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
+            )
+            log_losses = {
+                "cls_loss": loss.detach(),
+                "acc": acc.detach(),
+                "mf1": self._reduce_metric_tensor(train_f1).detach(),
+                "map": self._reduce_metric_tensor(train_map).detach(),
+            }
+        else:
+            pred = torch.argmax(logits, dim=1)
+            acc = (pred == label).float().mean()
+            log_losses = {"cls_loss": loss.detach(), "acc": acc.detach()}
         return ClassificationOutput(loss=loss, logits=logits, log_losses=log_losses)
 
     def format_log(self, log_loss: dict[str, Tensor], sync: bool = False) -> str:
@@ -481,24 +612,57 @@ class HyperClassificationTrainer:
         loss_metric = MeanMetric().to(device=self.device)
         self.acc_metric.reset()
         self.f1_metric.reset()
-        self.acc_metric_top5.reset()
+        if self.metric_task == "multiclass" and self.acc_metric_top5 is not None:
+            self.acc_metric_top5.reset()
+        if self.metric_task == "multilabel" and self.map_metric is not None:
+            self.map_metric.reset()
 
-        for batch in self.get_val_loader_iter():
+        val_iter = self.get_val_loader_iter()
+        val_total: int | None = None
+        if self.val_cfg.max_val_iters > 0:
+            val_total = int(self.val_cfg.max_val_iters)
+        else:
+            try:
+                val_total = len(self.val_dataloader)  # type: ignore[arg-type]
+            except TypeError:
+                val_total = None
+        val_iter = tqdm(
+            val_iter,
+            desc="Val",
+            total=val_total,
+            disable=not self.accelerator.is_main_process,
+            dynamic_ncols=True,
+            leave=False,
+        )
+
+        for batch in val_iter:
             loss, logits, label = self.val_step(batch)
             gathered_logits = self.accelerator.gather_for_metrics(logits)
             gathered_label = self.accelerator.gather_for_metrics(label)
-            self.acc_metric.update(gathered_logits, gathered_label)
-            self.f1_metric.update(gathered_logits, gathered_label)
-            self.acc_metric_top5.update(gathered_logits, gathered_label)
+            if self.metric_task == "multilabel":
+                probs = torch.sigmoid(gathered_logits)
+                target = gathered_label.int()
+                self.acc_metric.update(probs, target)
+                self.f1_metric.update(probs, target)
+                if self.map_metric is not None:
+                    self.map_metric.update(probs, target)
+            else:
+                self.acc_metric.update(gathered_logits, gathered_label)
+                self.f1_metric.update(gathered_logits, gathered_label)
+                if self.acc_metric_top5 is not None:
+                    self.acc_metric_top5.update(gathered_logits, gathered_label)
             loss_metric.update(loss.detach())  # type: ignore[arg-type]
             self.step_train_state("val")
 
-        metrics = {
+        metrics: dict[str, Any] = {
             "val_acc": self.acc_metric.compute(),  # type: ignore[call-arg]
             "val_f1": self.f1_metric.compute(),  # type: ignore[call-arg]
-            "val_acc_top5": self.acc_metric_top5.compute(),  # type: ignore[call-arg]
             "val_loss": loss_metric.compute(),  # type: ignore[call-arg]
         }
+        if self.metric_task == "multiclass" and self.acc_metric_top5 is not None:
+            metrics["val_acc_top5"] = self.acc_metric_top5.compute()  # type: ignore[call-arg]
+        if self.metric_task == "multilabel" and self.map_metric is not None:
+            metrics["val_map"] = self.map_metric.compute()  # type: ignore[call-arg]
 
         if self.accelerator.is_main_process:
             metric_str = " - ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
@@ -575,9 +739,10 @@ class HyperClassificationTrainer:
         self.train_loop()
 
 
-_key = "spectralgpt_ucmerced"
+_key = "cosmos_treesatai_ts_linear"
 _configs_dict = {
     "cosmos_ucmerced_linear": "cosmos_ucmerced_linear",
+    "cosmos_treesatai_ts_linear": "cosmos_treesatai_ts_linear",
     "cosmos_eurosat_linear": "cosmos_eurosat_linear",
     "dinov3_ucmerced_linear": "dinov3_ucmerced_linear",
     "cosmos_ucmerced_hybrid_linear": "cosmos_ucmerced_hybrid_linear",

@@ -1,0 +1,52 @@
+defaults:
+  - tokenizer/hybrid@tokenizer_cfg
+  - _self_
+
+_target_: src.stage2.classification.model.CosmosTokenizerClassifierTS
+num_classes: ${dataset.consts.num_classes}
+tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
+freeze_tokenizer: ${train.freeze_tokenizer}
+use_quantizer: false
+use_z: true
+latent_proj_dim: null
+expected_in_chans: 512
+enable_input_proj: true
+max_frames_per_forward: 16
+modality_order: [aerial, s1_asc, s1_des, s2]
+modality_fusion: concat
+
+classifier:
+  classifier_type: linear_probe
+
+# Keep backbone cfg identical to cosmos_tokenizer_classifier.yaml
+# tokenizer_cfg:
+#   model:
+#     attn_resolutions: [32]
+#     channels: 128
+#     in_channels: 512
+#     out_channels: 512
+#     channels_mult: [2, 4, 4]
+#     spatial_compression: 8
+#     dropout: 0.0
+#     num_res_blocks: 2
+#     resolution: 1024
+#     z_channels: 256
+#     latent_channels: 16
+#     act_checkpoint: false
+#     norm_type: rmsnorm2dfp32
+#     act_type: silu
+#     block_name: res_block
+#     use_residual_factor: false
+#     patch_method: haar
+#     patch_size: 1
+#     attn_type: none
+#     padding_mode: reflect
+#     adaptive_mode: interp
+#   uni_path: runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors
+#   loading_type: pretrained
+#   qunatizer_type: null
+#   hook_for_repa: false
+#   use_repa_loss: false
+#   use_vf_loss: false
+#   vf_on_z_or_module: z
+#   z_factor: 1

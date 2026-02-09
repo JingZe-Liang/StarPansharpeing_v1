@@ -3,11 +3,11 @@
 # _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 cnn_cfg:
   model:
-    resolution: 512
-    in_channels: 384
-    out_channels: 384
-    z_channels: 512
-    latent_channels: 64
+    resolution: 1024
+    in_channels: 512
+    out_channels: 512
+    z_channels: 768
+    latent_channels: 32
     channels: 128
     channels_mult:
       - 2
@@ -19,66 +19,52 @@ cnn_cfg:
     spatial_compression: 8
     patch_size: 1
     block_name: res_block
-    norm_type: gn
+    norm_type: rmsnorm2d
+    act_type: silu
     norm_groups: 32
     adaptive_mode: interp
     downsample_kwargs:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
-    per_layer_noise: false
   quantizer_type: null
   vf_on_z_or_module: z
-  use_repa_loss: true
+  use_repa_loss: false
   dino_feature_dim: 1024
-  cache_type: h
-  decoder_type: default
-  use_channel_drop: false
-  channel_drop_config:
-    drop_type:
-      - 16
-      - 32
-      - 48
-    max_channels: 64
-    drop_prob: 0.5
 trans_enc_cfg:
-  embed_dim: 1024
-  depth: 12
+  embed_dim: 1152
+  depth: 24
   num_heads: 16
   mlp_ratio: 4.0
   qkv_bias: true
   patch_size: 2
-  norm_layer: layernorm
+  norm_layer: flarmsnorm
   pos_embed: learned
+  rope_type: axial
   pos_embed_grid_size:
     - 32
     - 32
-  rope_type: axial
   img_size: 32
-  in_chans: 512
-  out_chans: 512
-  unpatch_size: 1
-  reg_tokens: 0
-  compile_model: false
-trans_dec_cfg:
-  embed_dim: 1024
-  depth: 12
-  num_heads: 16
-  mlp_ratio: 4.0
-  qkv_bias: true
-  patch_size: 1
-  norm_layer: layernorm
-  pos_embed: learned
-  pos_embed_grid_size:
-    - 32
-    - 32
-  rope_type: axial
-  img_size: 32
-  in_chans: 512
-  out_chans: 512
+  in_chans: 768
+  out_chans: 768
   unpatch_size: 2
-  reg_tokens: 0
-  compile_model: false
+  reg_tokens: 4
+  attn_type: gated
+trans_dec_cfg: null  # keep None, means no transformer decoder
 distillation_cfg:
   dino_feature_dim: 1024
   semantic_feature_dim: 1024
+  cache_layers:
+    low_level:
+      - 0
+      - 1
+      - 2
+      - -1
+    semantic:
+      - 5
+      - 11
+      - 17
+      - 23
+hybrid_tokenizer_cfg:
+  latent_bottleneck_type: before_semantic
+  latent_straight_through_skip: true
