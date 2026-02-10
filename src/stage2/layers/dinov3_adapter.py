@@ -8,6 +8,7 @@
 # UESTC. All Rights Reserved.
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from functools import partial
 from typing import Any, Callable, Literal
@@ -770,7 +771,7 @@ class InteractionBlockWithCls(nn.Module):
 
 
 class SpatialPriorModule(nn.Module):
-    def __init__(self, in_channels=3, inplanes=64, embed_dim=384, final_downsample=32):
+    def __init__(self, in_channels: int | list[int] = 3, inplanes=64, embed_dim=384, final_downsample=32):
         """
         Spatial Prior Module for generating multi-scale features.
 
@@ -787,30 +788,18 @@ class SpatialPriorModule(nn.Module):
         """
         super().__init__()
         self.final_downsample = final_downsample
+        if isinstance(in_channels, int):
+            self._is_multiple_stem = False
+            self.stem = self._create_one_stem(in_channels, inplanes)
+        else:
+            if not isinstance(in_channels, Sequence):
+                raise TypeError(f"in_channels must be int or sequence of int, got {type(in_channels)}")
+            channel_list = [int(c) for c in in_channels]
+            if len(channel_list) == 0:
+                raise ValueError("in_channels sequence must not be empty")
+            self._is_multiple_stem = True
+            self.stem = nn.ModuleDict({f"chan_{c}": self._create_one_stem(c, inplanes) for c in channel_list})
 
-        _create_norm_act = lambda chans: create_norm_act_layer(
-            "layernorm2d",
-            chans,
-            "silu",
-        )
-        self.stem = nn.Sequential(
-            *[
-                nn.Conv2d(
-                    in_channels,
-                    inplanes,
-                    kernel_size=3,
-                    stride=2,
-                    padding=1,
-                    bias=False,
-                ),
-                _create_norm_act(inplanes),
-                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
-                _create_norm_act(inplanes),
-                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
-                _create_norm_act(inplanes),
-                nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-            ]
-        )
         self.conv2 = nn.Sequential(
             *[
                 nn.Conv2d(
@@ -821,7 +810,7 @@ class SpatialPriorModule(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                _create_norm_act(2 * inplanes),
+                self._create_norm_act(2 * inplanes),
             ]
         )
         self.conv3 = nn.Sequential(
@@ -834,7 +823,7 @@ class SpatialPriorModule(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                _create_norm_act(4 * inplanes),
+                self._create_norm_act(4 * inplanes),
             ]
         )
 
@@ -850,7 +839,7 @@ class SpatialPriorModule(nn.Module):
                         padding=1,
                         bias=False,
                     ),
-                    _create_norm_act(4 * inplanes),
+                    self._create_norm_act(4 * inplanes),
                 ]
             )
         else:
@@ -865,7 +854,7 @@ class SpatialPriorModule(nn.Module):
                         padding=1,
                         bias=False,
                     ),
-                    _create_norm_act(4 * inplanes),
+                    self._create_norm_act(4 * inplanes),
                 ]
             )
 
@@ -874,34 +863,63 @@ class SpatialPriorModule(nn.Module):
         self.fc3 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
         self.fc4 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
+    def _create_one_stem(self, in_channels: int, inplanes: int):
+        stem = nn.Sequential(
+            *[
+                nn.Conv2d(
+                    in_channels,
+                    inplanes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    bias=False,
+                ),
+                self._create_norm_act(inplanes),
+                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+                self._create_norm_act(inplanes),
+                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+                self._create_norm_act(inplanes),
+                nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            ]
+        )
+        return stem
+
+    def _create_norm_act(self, chans: int):
+        return create_norm_act_layer("layernorm2d", chans, "silu")
+
     def forward(self, x):
-        def _inner_forward(x):
+        if isinstance(self.stem, nn.ModuleDict):
+            stem_key = f"chan_{int(x.shape[1])}"
+            if stem_key not in self.stem:
+                raise KeyError(
+                    f"SpatialPriorModule stem key '{stem_key}' not found. Available keys: {list(self.stem.keys())}"
+                )
+            c1 = self.stem[stem_key](x)
+        else:
             c1 = self.stem(x)
-            c2 = self.conv2(c1)
-            c3 = self.conv3(c2)
-            c4 = self.conv4(c3)
-            c1 = self.fc1(c1)
-            c2 = self.fc2(c2)
-            c3 = self.fc3(c3)
-            c4 = self.fc4(c4)
 
-            bs, dim, _, _ = c1.shape
-            # c1 = c1.view(bs, dim, -1).transpose(1, 2)  # 4s
-            c2 = c2.view(bs, dim, -1).transpose(1, 2)  # 8s
-            c3 = c3.view(bs, dim, -1).transpose(1, 2)  # 16s
-            c4 = c4.view(bs, dim, -1).transpose(1, 2)  # 32s
+        c2 = self.conv2(c1)
+        c3 = self.conv3(c2)
+        c4 = self.conv4(c3)
+        c1 = self.fc1(c1)
+        c2 = self.fc2(c2)
+        c3 = self.fc3(c3)
+        c4 = self.fc4(c4)
 
-            return c1, c2, c3, c4
+        bs, dim, _, _ = c1.shape
+        # c1 = c1.view(bs, dim, -1).transpose(1, 2)  # 4s
+        c2 = c2.view(bs, dim, -1).transpose(1, 2)  # 8s
+        c3 = c3.view(bs, dim, -1).transpose(1, 2)  # 16s
+        c4 = c4.view(bs, dim, -1).transpose(1, 2)  # 32s
 
-        outs = _inner_forward(x)
-        return outs
+        return c1, c2, c3, c4
 
 
 class DINOv3_Adapter(nn.Module):
     def __init__(
         self,
         backbone,
-        in_channels=3,
+        in_channels: int | list[int] = 3,
         interaction_indexes=[9, 19, 29, 39],
         pretrain_size=512,
         conv_inplane=64,
@@ -980,7 +998,7 @@ class DINOv3_Adapter(nn.Module):
 
     def _setup_interactions(
         self,
-        in_channels: int,
+        in_channels: int | list[int],
         embed_dim: int,
         interaction_indexes=[9, 19, 29, 39],
         pretrain_size=512,

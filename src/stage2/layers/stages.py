@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from typing import Tuple, Union
+from typing import Tuple, Union, cast
 
 import torch as th
 import torch.nn as nn
@@ -44,6 +44,7 @@ class _BasicStages(nn.Module):
 
         # stages
         for stage in self.stages:
+            stage = cast(nn.ModuleList, stage)
             for block in stage:
                 if self.grad_checkpointing and self.training:
                     x = checkpoint(block, x, cond, use_reentrant=False)

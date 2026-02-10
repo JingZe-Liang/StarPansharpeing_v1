@@ -35,7 +35,7 @@ adapter:
   latent_width: 32
   n_conv_per_stage: 1
   depth_per_stage: 1
-  norm: layernorm2dfp32
+  norm: rmsnorm2dfp32
   act: gelu
   drop: 0.0
   act_first: false
@@ -47,7 +47,7 @@ cd_stage:
   channels: [384, 384, 512, 512]
   stride: 1
   kernel_size: 3
-  norm_layer: layernorm2dfp32
+  norm_layer: rmsnorm2dfp32
   act_layer: gelu
   expand_ratio: 2.0
   block_type: mbconv

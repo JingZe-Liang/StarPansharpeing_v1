@@ -373,7 +373,7 @@ class DINOv3EncoderAdapter(nn.Module):
         self.strides = [[2, 2]] * len(target_channels)
         self.kernel_sizes = [[3, 3]] * len(target_channels)
 
-    def forward(self, x: Float[Tensor, "b 3 h w"]):
+    def forward(self, x: Float[Tensor, "b c h w"]):
         H, W = x.shape[-2:]
         feats = self.dinov3_adapter(x)
 

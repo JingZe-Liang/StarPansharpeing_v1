@@ -1,5 +1,5 @@
-train_bs: 2
-val_bs: 1
+train_bs: 8
+val_bs: 4
 
 # Configs
 data_type: null
@@ -7,7 +7,7 @@ label_mode: seg
 dataset_name: beijing # [augsburg, beijing]
 
 data_root: data/Downstreams/CrossCitySegmentation
-litdata_train_root: ${dataset.data_root}/litdata_train
+litdata_root: ${dataset.data_root}/litdata
 normalize_per_band: true
 to_neg_1_1: true
 infos:
@@ -15,21 +15,25 @@ infos:
     hsi_channels: 242
     modal_channels: [242, 4, 2]
     bands: 248
+    rgb_bands: [242, 243, 244]
   beijing:
     hsi_channels: 116
     modal_channels: [116, 4, 2]
     bands: 122
+    rgb_bands: [116, 117, 118]
 
 consts:
   num_classes: 13
   modal_channels: ${dataset.infos.${dataset.dataset_name}.modal_channels}
   bands: ${dataset.infos.${dataset.dataset_name}.bands}
   patch_size: 256
-  patch_resize_to: 512
+  patch_resize_to: null
   full_image_upsample_scale: 1.0
-  stride: 128
+  stride: 128  # no used
   ignore_index: 255
-  litdata_train_dir: ${dataset.litdata_train_root}/${dataset.dataset_name}/train
+  litdata_train_dir: ${dataset.litdata_root}/${dataset.dataset_name}/train
+  litdata_val_dir: ${dataset.litdata_root}/${dataset.dataset_name}/val
+  rgb_bands: ${dataset.infos.${dataset.dataset_name}.rgb_bands}
 
 train:
   _target_: src.stage2.segmentation.data.cross_city_multimodal.CrossCityMultimodalPatchStreamingDataset.from_config
@@ -51,24 +55,19 @@ train:
       pin_memory: true
 
 val:
-  _target_: src.stage2.segmentation.data.cross_city_multimodal.CrossCityMultimodalSegmentationDataset.from_config
+  _target_: src.stage2.segmentation.data.cross_city_multimodal.CrossCityMultimodalPatchStreamingDataset.from_config
   cfg:
-    dataset_kwargs:
-      data_root: ${dataset.data_root}
-      dataset_name: ${dataset.dataset_name}
-      split: test
-      patch_size: ${dataset.consts.patch_size}
+    input_dir: ${dataset.consts.litdata_val_dir}
+    stream_ds_kwargs:
+      transform: null
       patch_resize_to: null
-      full_image_upsample_scale: ${dataset.consts.full_image_upsample_scale}
-      stride: ${dataset.consts.stride}
-      normalize_per_band: ${dataset.normalize_per_band}
       to_neg_1_1: ${dataset.to_neg_1_1}
       convert_bg_to_ignore: true
       ignore_index: ${dataset.consts.ignore_index}
       upsample_hsi_to_msi: true
-      transform: null
-      return_modalities: false
-    dataloader_kwargs:
+    combined_kwargs:
+      batching_method: per_stream
+    loader_kwargs:
       batch_size: ${dataset.val_bs}
       num_workers: 0
       shuffle: false

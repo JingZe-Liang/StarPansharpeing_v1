@@ -19,7 +19,7 @@ tokenizer_feature:
   extractor_type: deform_attention  # [sla, convnext, deform_attention]
   # encoder settings
   pretrained_size: 512
-  in_channels: ${dataset.infos.${dataset.dataset_name}.hsi_channels}
+  in_channels: ${dataset.consts.modal_channels}
   conv_inplane: 64
   drop_path_rate: 0.0
   with_cffn: true

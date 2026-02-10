@@ -187,6 +187,29 @@ def _get_gid_colors():
     return gid_colors / 255.0
 
 
+def _get_landcover_colors():
+    landcover_colors = np.array(
+        [
+            [0, 0, 0],
+            [0, 255, 255],
+            [255, 255, 255],
+            [255, 0, 0],
+            [221, 160, 221],
+            [148, 0, 211],
+            [255, 0, 255],
+            [255, 255, 0],
+            [205, 133, 63],
+            [189, 183, 107],
+            [0, 255, 0],
+            [154, 205, 50],
+            [139, 69, 19],
+            [72, 61, 139],
+        ]
+    )
+    landcover_colors = np.concatenate((landcover_colors, np.ones((landcover_colors.shape[0], 1))), axis=1)
+    return landcover_colors / 255.0
+
+
 @beartype
 def _choose_largest_bands(
     img: Float[Tensor, "... c h w"] | Float[NDArray, "h w c"],
@@ -394,7 +417,7 @@ def visualize_segmentation_map(
     cmap: str = "tab20",
     n_class: int = 20,
     bg_black=True,
-    colors: Float32[NDArray, "n_class 4"] | list[list[int | float]] | Literal["coco", "gid"] | None = None,
+    colors: Float32[NDArray, "n_class 4"] | list[list[int | float]] | str | None = None,
     use_coco_colors=False,  # deprecated
     alpha: float = 1.0,
     to_rgba=False,
@@ -482,47 +505,50 @@ def visualize_segmentation_map(
     """
     if colors is None:
         if use_coco_colors:
-            colors = _get_coco_colors()
+            palette = _get_coco_colors()
         else:
-            colors = np.array(plt.get_cmap(cmap)(np.linspace(0, 1, n_class)))
-    elif isinstance(colors, str) and colors in ("coco", "gid"):
+            palette = np.array(plt.get_cmap(cmap)(np.linspace(0, 1, n_class)))
+    elif isinstance(colors, str) and colors in ("coco", "gid", "landcover"):
         if colors == "coco":
-            colors = _get_coco_colors()
+            palette = _get_coco_colors()
             assert n_class <= 30, f"n_class {n_class} <= 30, COCO dataset requires `n_class`<=30."
         elif colors == "gid":
-            colors = _get_gid_colors()
+            palette = _get_gid_colors()
             assert n_class == 24, (
                 f"n_class {n_class} != 24, `five billion/GID` remote sensing segmentation dataset requires `n_class`=24."
             )
+        elif colors == "landcover":
+            palette = _get_landcover_colors()
+            assert n_class == 14, f"n_class {n_class} != 14, landcover palette requires `n_class`=14."
+    else:
+        palette = np.asarray(colors)
 
-    custom_cmap = ListedColormap(colors)
-    if colors.shape[0] > n_class:
-        colors = colors[:n_class]
-        custom_cmap = ListedColormap(colors)
+    custom_cmap = ListedColormap(palette)
+    if palette.shape[0] > n_class:
+        palette = palette[:n_class]
+        custom_cmap = ListedColormap(palette)
     custom_cmap.colors = custom_cmap.colors * np.array([1, 1, 1, alpha])
     assert n_class <= custom_cmap.N, f"n_class {n_class} > cmap.N {custom_cmap.N}"
-    assert colors.shape[0] == n_class and colors.shape[1] == 4, f"colors shape {colors.shape} != (n_class, 4)"
+    assert palette.shape[0] == n_class and palette.shape[1] == 4, f"colors shape {palette.shape} != (n_class, 4)"
 
     # Convert 0-class to be black
     if bg_black:
         alpha_bg = 1.0
-        colors[0] = [0, 0, 0, alpha_bg]  # the first class is black
+        palette[0] = [0, 0, 0, alpha_bg]  # the first class is black
 
     norm = BoundaryNorm(boundaries=np.arange(0, n_class), ncolors=n_class)
     if torch.is_tensor(gt_map):
         # (b, c, h, w)
         gt_map.squeeze_(1)
         assert gt_map.ndim == 3, f"Invalid gt_map shape: {gt_map.shape}"
-
-        gt_map = gt_map.unbind(0)
-        gt_map = [g.cpu().numpy() for g in gt_map]
+        gt_list = [g.cpu().numpy() for g in gt_map.unbind(0)]
     else:
-        gt_map = [gt_map]
+        gt_list = [gt_map]
 
     # Convert to RGB/RGBA color maps
     ms = []
-    gt_map = cast(list[np.ndarray], gt_map)  # type: ignore
-    for m in gt_map:
+    gt_list = cast(list[np.ndarray], gt_list)  # type: ignore
+    for m in gt_list:
         m = norm(m)
         m = custom_cmap(m)
         if not to_rgba:

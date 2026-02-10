@@ -9,6 +9,11 @@ __getattr__, __dir__, __all__ = lazy_loader.attach(
         "deep_globe": ["DeepGlobeRoadExtractionStreamingDataset"],
         "single_mat_loader": ["SingleMatDataset"],
         "oil_leakage": ["get_oil_leakage_dataloaders"],
+        "sos_oil_leakage": [
+            "SOSOilLeakageDataset",
+            "SOSOilLeakageKeyTransform",
+            "get_sos_oil_leakage_dataloader",
+        ],
         "flood3i": ["Flood3IDataset", "get_flood3i_dataloader"],
         "atlantic_forest": ["AtlanticForestSegmentationDataset", "get_atlantic_forest_dataloader"],
         "cross_city_multimodal": [

@@ -4,14 +4,11 @@ hydra:
     dir: .
 
 defaults:
-  # wrapper ==========
-  - dataset: cabuar
+  - dataset: xview2
   - accelerator: base
   - segment_model: tokenizer_hybrid
-  # self ===============
   - _self_
 
-  # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
@@ -26,25 +23,24 @@ ema:
 
 segment_loss:
   _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
-  ignore_index: 255
+  ignore_index: -100
   ce_weight: [1.0, 10.0]
-  loss_weights: [0.5, 1.0, 0.5]
+  loss_weights: [1.0, 3.0, 0.3]
   mode: multiclass
 
 metric:
   _target_: src.stage2.change_detection.metrics.basic.ChangeDetectionScore
   n_classes: ${dataset.consts.num_classes}
-  ignore_index: 255
-  include_bg: true # false not include unchanged area
+  ignore_index: null
+  include_bg: true
   input_format: index
 
 train:
-  # Wrapper-based training
-  val_slide_window: false
+  val_slide_window: true
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:
-    patch_size: 128
+    patch_size: 512
     stride: 128
 
   use_single_img_indexing: false
@@ -62,29 +58,20 @@ train:
   save_every: 500
   is_neg_1_1: true
 
-  resume_path: #runs/stage2_CD_wrapper/2025-11-26_21-00-34_FarmLand_tokenizer_hybrid_adaptor/checkpoints/checkpoint_1
-  ema_load_path: #runs/stage2_CD_wrapper/2025-11-28_00-20-03_FarmLand_tokenizer_hybrid_adaptor/ema
+  resume_path: runs/stage2_CD_wrapper/2026-02-10_14-14-45_xView2_tokenizer_hybrid_adaptor/checkpoints/checkpoint_3
+  ema_load_path:
 
   segment_optim:
-    # _target_: heavyball.ForeachAdamW
-    # _partial_: true
-    # lr: 6.0e-4
-    # weight_decay: 1.0e-4
-    # eps: 1e-10
-    # betas: ${tuple:[0.9, 0.99]} #[0.5, 0.9], gan training beta1 is zero
-    # caution: true
-    # foreach: true
-
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
     _partial_: true
     betas: [0.95, 0.99]
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 6.0e-4
-      weight_decay: 0.01
+      lr: 4.0e-4
+      weight_decay: 0.0
     oned_params_defaults:
-      lr: 6.0e-4
+      lr: 4.0e-4
       weight_decay: 0.0
 
   segment_sched:
@@ -92,7 +79,7 @@ train:
     _partial_: true
     num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
-    num_cycles: 3
+    num_cycles: 2
 
   log:
     run_comment: ${dataset.dataset_name}_tokenizer_hybrid_adaptor
@@ -103,3 +90,4 @@ train:
 val:
   val_duration: 500
   max_val_iters: -1
+tmp

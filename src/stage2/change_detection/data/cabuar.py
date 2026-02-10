@@ -141,7 +141,7 @@ def create_cabuar_change_detection_dataloader(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=(mode == "train"),
+        shuffle=(mode == "train") or loader_kwargs.pop("shuffle", False),
         pin_memory=pin_memory,
         drop_last=drop_last,
         **loader_kwargs,

@@ -1071,6 +1071,7 @@ class HyperSegmentationTrainer:
                 logger.debug("[Val]: using slide window validation", once=True)
                 val_slide_window_kwargs = dict(getattr(self.train_cfg, "val_slide_window_kwargs", {}))
                 val_slide_window_kwargs.setdefault("online_merge", True)
+                val_slide_window_kwargs.setdefault("use_tqdm", True)
                 model_outputs = model_predict_patcher(
                     _val_model_closure,
                     batch,
@@ -1090,6 +1091,17 @@ class HyperSegmentationTrainer:
             if pred_logits.shape[-2:] != gt.shape[-2:]:
                 pred_logits = torch.nn.functional.interpolate(
                     pred_logits, size=gt.shape[-2:], mode="bilinear", align_corners=False
+                )
+
+            val_loss_out = self.compute_segmentation_loss(pred_logits, gt)
+            val_loss = val_loss_out[0] if isinstance(val_loss_out, tuple) else val_loss_out
+            if torch.isfinite(val_loss).all():
+                loss_metrics.update(val_loss.detach())
+            else:
+                logger.warning(
+                    f"[Val]: skip non-finite loss value={val_loss.detach().float().item():.6g}, "
+                    f"gt_min={int(gt.min().item())}, gt_max={int(gt.max().item())}",
+                    once=True,
                 )
 
             pred_seg = pred_logits.argmax(1)
@@ -1146,6 +1158,11 @@ class HyperSegmentationTrainer:
                     log_dict[f"val/{k}"] = v
 
             self.tenb_log_any("metric", log_dict, step=self.global_step)
+            logger.info(
+                "---------------- Validation infomation ----------------\n"
+                f"{log_dict}\n"
+                "-------------------------------------------------------\n"
+            )
 
             # visualize the last val batch
             self.visualize_segmentation(
@@ -1255,9 +1272,11 @@ class HyperSegmentationTrainer:
         if gt_map.dim() == 4:  # (B, C, H, W)
             gt_map = gt_map.squeeze(1)  # (B, H, W)
 
-        # Convert the 255 background class to 0
-        gt_map = label_background_recover(gt_map)
-        pred_map += 1
+        # For legacy datasets with ignore-index remapping (255->ignore, classes shifted by -1),
+        # recover original labels only when ignore-index is actually present.
+        if (gt_map == 255).any():
+            gt_map = label_background_recover(gt_map)
+            pred_map = pred_map + 1
 
         # Only visualize the first few samples
         pred_map = pred_map[:_only_n]
@@ -1268,7 +1287,9 @@ class HyperSegmentationTrainer:
 
         # Visualize input image to RGB
         img_rgb = self.to_rgb(img)
-        img_rgb = get_rgb_image(img, "mean", use_linstretch=True)
+        vis_bands = getattr(self.train_cfg, "vis_rgb_channels", "mean")
+        logger.info(f"[Val]: use visible bands: {vis_bands}")
+        img_rgb = get_rgb_image(img, rgb_channels=vis_bands, use_linstretch=True)
         img_rgb_grid = make_grid(img_rgb, n_row).permute(1, 2, 0).cpu().numpy()
 
         # Visualize segmentation maps for entire batch
@@ -1311,7 +1332,7 @@ class HyperSegmentationTrainer:
         img_to_save = Image.fromarray(img)
 
         if add_step:
-            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.png"
+            img_name = f"{img_name}_step_{str(self.global_step).zfill(6)}.webp"
         else:
             img_name = f"{img_name}.png"
 
@@ -1331,11 +1352,12 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "cross_city_multimodal_hybrid_tokenizer_seg"
+_key = "sos_oil_leakage_sentinel_hybrid_tokenizer_seg"
 _configs_dict = {
     "flood3i_hybrid_tokenizer_seg": "flood3i_hybrid_tokenizer_seg",
     "hybrid_tokenizer_seg": "five_billion_hybrid_tokenizer_seg",
     "cross_city_multimodal_hybrid_tokenizer_seg": "cross_city_multimodal_hybrid_tokenizer_seg",
+    "sos_oil_leakage_sentinel_hybrid_tokenizer_seg": "sos_oil_leakage_sentinel_hybrid_tokenizer_seg",
     "deep_globe_road_unet_seg": "deep_globe_road_unet_seg",
     "atlantic_forest_hybrid_tokenizer_seg": "atlantic_forest_hybrid_tokenizer_seg",
     "deeplabv3_seg": "deeplabv3_seg",

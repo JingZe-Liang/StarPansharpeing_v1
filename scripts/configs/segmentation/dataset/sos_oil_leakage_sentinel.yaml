@@ -1,0 +1,68 @@
+train_bs: 8
+val_bs: 16
+
+# Configs
+data_type: null
+label_mode: seg
+dataset_name: SOS-OilLeakage-Sentinel
+
+img_size: 256
+num_classes: 2
+ignore_index: 255
+normalize: true
+to_neg_1_1: true
+binarize_mask: true
+
+consts:
+  is_single_image: false
+  img_size: ${..img_size}
+  num_classes: ${..num_classes}
+  bands: 3
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+  ignore_index: ${..ignore_index}
+  rgb_bands: [0, 1, 2]
+
+train:
+  _target_: src.stage2.segmentation.data.sos_oil_leakage.get_sos_oil_leakage_dataloader
+  batch_size: ${..consts.train_bs}
+  num_workers: 4
+  split: train
+  root: data/Downstreams/SOS_OilLeakage
+  modality: sentinel
+  transform:
+    _target_: src.stage2.segmentation.data.sos_oil_leakage.SOSOilLeakageKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  normalize: ${..normalize}
+  to_neg_1_1: ${..to_neg_1_1}
+  binarize_mask: ${..binarize_mask}
+  return_name: false
+  pin_memory: true
+  shuffle: true
+
+val:
+  _target_: src.stage2.segmentation.data.sos_oil_leakage.get_sos_oil_leakage_dataloader
+  batch_size: ${..consts.val_bs}
+  num_workers: 2
+  split: val
+  root: data/Downstreams/SOS_OilLeakage
+  modality: sentinel
+  transform:
+    _target_: src.stage2.segmentation.data.sos_oil_leakage.SOSOilLeakageKeyTransform
+    image_key: image
+    mask_key: mask
+    img_key: img
+    gt_key: gt
+    squeeze_mask: true
+    keep_extra: true
+  normalize: ${..normalize}
+  to_neg_1_1: ${..to_neg_1_1}
+  binarize_mask: ${..binarize_mask}
+  return_name: false
+  pin_memory: true
+  shuffle: true

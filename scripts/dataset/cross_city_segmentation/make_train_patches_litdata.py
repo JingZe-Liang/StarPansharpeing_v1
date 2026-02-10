@@ -14,10 +14,8 @@ import tifffile
 import torch
 import torch.nn.functional as F
 from litdata.processing.data_processor import ALL_DONE
-from tqdm import tqdm
-import safetensors as st
 from safetensors.numpy import load_file
-import os
+from tqdm import tqdm
 
 from src.stage2.segmentation.data.cross_city_multimodal import generate_patch_coords
 
@@ -35,7 +33,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         choices=["augsburg", "beijing"],
         default="augsburg",
-        help="CrossCity source domain for training",
+        help="CrossCity source domain",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["train", "val"],
+        default="train",
+        help="Dataset split to export. val+beijing will export wuhan as validation set.",
     )
     parser.add_argument(
         "--output-dir",
@@ -50,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--queue-size", type=int, default=1024)
-    parser.add_argument("--mode", type=str, choices=["overwrite", "append"], default="overwrite")
+    parser.add_argument("--write-mode", type=str, choices=["overwrite", "append"], default="overwrite")
     return parser.parse_args()
 
 
@@ -59,7 +64,7 @@ def _resolve_output_dir(args: argparse.Namespace) -> str:
         return args.output_dir
     resize_tag = "none" if int(args.patch_resize_to) <= 0 else str(args.patch_resize_to)
     suffix = f"{args.dataset_name}_ps{args.patch_size}_rs{resize_tag}_s{args.stride}_split_modal"
-    return str(Path(args.data_root) / "litdata_train" / suffix / "train")
+    return str(Path(args.data_root) / "litdata_train" / suffix / args.mode)
 
 
 def _read_h5_cube(h5_file: h5py.File, key: str) -> np.ndarray:
@@ -78,30 +83,52 @@ def _upsample_hsi(hsi: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
     return up.squeeze(0).permute(1, 2, 0).numpy().astype(np.float32, copy=False)
 
 
-def _load_train_modalities(
+def _resolve_beijing_files(data_root: Path, mode: Literal["train", "val"]) -> tuple[Path, Path]:
+    data_dir = data_root / "data2"
+    if mode == "train":
+        return data_dir / "beijing.safetensors", data_dir / "beijing_label.mat"
+
+    wuhan_mat_file = data_dir / "wuhan.mat"
+    if wuhan_mat_file.exists():
+        return wuhan_mat_file, data_dir / "wuhan_label.mat"
+
+    wuhan_safe_file = data_dir / "wuhan.safetensors"
+    if wuhan_safe_file.exists():
+        return wuhan_safe_file, data_dir / "wuhan_label.mat"
+    raise FileNotFoundError(f"Cannot find wuhan data file under {data_dir}")
+
+
+def _load_modalities(
     data_root: Path,
     dataset_name: Literal["augsburg", "beijing"],
+    mode: Literal["train", "val"],
     upsample_hsi_to_msi: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if dataset_name == "augsburg":
-        train_file = data_root / "data1" / "augsburg_multimodal.mat"
-        print(f"File has size {Path(train_file).stat().st_size / (1024**3)} Gb")
+        file_name = "augsburg_multimodal.mat" if mode == "train" else "berlin_multimodal.mat"
+        train_file = data_root / "data1" / file_name
+        print(f"File {train_file} has size {Path(train_file).stat().st_size / (1024**3)} Gb")
         data = sio.loadmat(train_file)
         hsi = data["HSI"]
         msi = data["MSI"]
         sar = data["SAR"]
         gt = data["label"]
     elif dataset_name == "beijing":
-        train_file = data_root / "data2" / "beijing.safetensors"
-        label_file = data_root / "data2" / "beijing_label.mat"
-        print(f"File has size {Path(train_file).stat().st_size / (1024**3)} Gb")
-        f = load_file(train_file)
-        hsi = f["HSI"].transpose(1, 2, 0)
-        msi = f["MSI"].transpose(1, 2, 0)
-        sar = f["SAR"].transpose(1, 2, 0)
+        train_file, label_file = _resolve_beijing_files(data_root, mode)
+        print(f"File {train_file} has size {Path(train_file).stat().st_size / (1024**3)} Gb")
+        if train_file.suffix == ".safetensors":
+            f = load_file(train_file)
+            hsi = f["HSI"].transpose(1, 2, 0)
+            msi = f["MSI"].transpose(1, 2, 0)
+            sar = f["SAR"].transpose(1, 2, 0)
+        elif train_file.suffix == ".mat":
+            with h5py.File(train_file, "r") as f:
+                hsi = _read_h5_cube(f, "HSI")
+                msi = _read_h5_cube(f, "MSI")
+                sar = _read_h5_cube(f, "SAR")
+        else:
+            raise ValueError(f"Unsupported file suffix for beijing/wuhan: {train_file.suffix}")
 
-        # with h5py.File(train_file, "r") as f:
-        #     gt = _read_h5_cube(f, "label") if "label" in f else None
         if label_file.exists():
             with h5py.File(label_file, "r") as f_label:
                 gt = _read_h5_cube(f_label, "label")
@@ -227,9 +254,10 @@ def main() -> None:
 
     data_root = Path(args.data_root)
     print("loading full data.")
-    hsi, msi, sar, gt = _load_train_modalities(
+    hsi, msi, sar, gt = _load_modalities(
         data_root=data_root,
         dataset_name=args.dataset_name,
+        mode=args.mode,
         upsample_hsi_to_msi=args.upsample_hsi_to_msi,
     )
     print("start preparing litdata.")
@@ -243,7 +271,7 @@ def main() -> None:
             msi,
             sar,
             gt,
-            args.dataset_name,
+            f"{args.dataset_name}_{args.mode}",
             args.patch_size,
             args.stride,
             int(args.patch_resize_to),
@@ -257,7 +285,7 @@ def main() -> None:
         output_dir=output_dir,
         num_workers=args.num_workers,
         chunk_bytes="512Mb",
-        mode=args.mode,
+        mode=args.write_mode,
         start_method="fork",
     )
     worker.join()

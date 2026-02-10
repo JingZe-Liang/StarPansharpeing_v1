@@ -41,14 +41,20 @@ def _create_default_cfg() -> Any:
 
 class MultimodalTokenizerHybridUNet(TokenizerHybridUNet):
     def __init__(self, cfg) -> None:
+        mm_cfg = cfg.get("multimodal", None)
+        if mm_cfg is None:
+            raise ValueError("Missing multimodal config.")
+        modal_channels = [int(c) for c in mm_cfg.get("modal_channels", [])]
+        if len(modal_channels) == 0:
+            raise ValueError("multimodal.modal_channels must not be empty.")
+        cfg.tokenizer_feature.in_channels = modal_channels
+
         super().__init__(cfg)
 
-        self.mm_cfg = cfg.get("multimodal", None)
-        if self.mm_cfg is None:
-            raise ValueError("Missing multimodal config.")
+        self.mm_cfg = mm_cfg
 
         self.modalities: tuple[str, ...] = tuple(self.mm_cfg.get("modalities", []))
-        self.modal_channels: list[int] = [int(c) for c in self.mm_cfg.get("modal_channels", [])]
+        self.modal_channels: list[int] = modal_channels
         self.fusion_type: str = str(self.mm_cfg.get("fusion_type", "concat"))
 
         if len(self.modalities) == 0:
@@ -60,9 +66,8 @@ class MultimodalTokenizerHybridUNet(TokenizerHybridUNet):
         if self.fusion_type not in {"concat", "mean"}:
             raise ValueError(f"Unsupported fusion_type={self.fusion_type}, expected concat/mean")
 
-        self.encoder_in_channels: int = int(self.tok_f_cfg.in_channels)
-        if self.encoder_in_channels <= 0:
-            raise ValueError(f"tokenizer_feature.in_channels must be > 0, got {self.encoder_in_channels}")
+        self._spm_supported_modal_channels = self._resolve_spm_supported_modal_channels()
+        self.encoder_in_channels: int = max(self.modal_channels)
 
         n_modal = len(self.modal_channels)
         skip_channels = [int(c) for c in self.tok_f_cfg.features_per_stage]
@@ -149,6 +154,12 @@ class MultimodalTokenizerHybridUNet(TokenizerHybridUNet):
 
     def _align_modal_channels(self, modal_x: Tensor) -> Tensor:
         in_ch = int(modal_x.shape[1])
+        if self._spm_supported_modal_channels is not None:
+            if in_ch not in self._spm_supported_modal_channels:
+                raise ValueError(
+                    f"Modal channels {in_ch} are not configured in SPM stems {sorted(self._spm_supported_modal_channels)}."
+                )
+            return modal_x
         tgt_ch = self.encoder_in_channels
         if in_ch == tgt_ch:
             return modal_x
@@ -159,6 +170,33 @@ class MultimodalTokenizerHybridUNet(TokenizerHybridUNet):
             )
         pad = modal_x.new_zeros((modal_x.shape[0], tgt_ch - in_ch, modal_x.shape[2], modal_x.shape[3]))
         return torch.cat([modal_x, pad], dim=1)
+
+    @staticmethod
+    def _unwrap_checkpoint_module(module: nn.Module) -> nn.Module:
+        unwrapped = module
+        if hasattr(unwrapped, "_checkpoint_wrapped_module"):
+            inner = getattr(unwrapped, "_checkpoint_wrapped_module")
+            if isinstance(inner, nn.Module):
+                unwrapped = inner
+        if hasattr(unwrapped, "module"):
+            inner = getattr(unwrapped, "module")
+            if isinstance(inner, nn.Module):
+                unwrapped = inner
+        return unwrapped
+
+    def _resolve_spm_supported_modal_channels(self) -> set[int] | None:
+        spm = self.encoder.dinov3_adapter.spm
+        spm = self._unwrap_checkpoint_module(spm)
+        if not getattr(spm, "_is_multiple_stem", False):
+            return None
+        stems = getattr(spm, "stem", None)
+        if not isinstance(stems, nn.ModuleDict):
+            return None
+        supported: set[int] = set()
+        for key in stems.keys():
+            if key.startswith("chan_"):
+                supported.add(int(key.replace("chan_", "")))
+        return supported or None
 
     def forward(self, x: Float[Tensor, "b c h w"] | dict[str, Tensor] | tuple[Tensor, ...] | list[Tensor]) -> Tensor:
         modal_inputs = self._prepare_modal_inputs(x)

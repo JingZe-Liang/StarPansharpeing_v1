@@ -8,7 +8,7 @@ from fvcore.nn.parameter_count import parameter_count
 from jaxtyping import Float
 from loguru import logger
 from omegaconf import OmegaConf
-from timm.layers import create_conv2d, get_act_layer, get_norm_layer
+from timm.layers import create_conv2d, get_act_layer, get_norm_layer, create_norm_act_layer
 from timm.models._manipulate import named_apply
 from torch import Tensor
 from torch.nn.modules.conv import _ConvNd
@@ -126,6 +126,7 @@ def _create_default_cfg():
 
     cd_stage:
       channels: [256, 384, 512, 512]
+      fuse_mode: cat_abs
       stride: 1
       kernel_size: 3
       norm_layer: layernorm2d
@@ -346,10 +347,11 @@ class TokenizerHybridUNet(nn.Module):
         # Change detection stages
         self.cd_stage = MultiscaleMBConvSkipsStage(self.cfg.cd_stage)
         latent_chans = self.cfg.tokenizer.cnn_cfg.model.latent_channels
-        # self.latent_fuse = MbConvLNBlock(
-        #     in_chs=latent_chans * 2, out_chs=latent_chans, cond_chs=None
-        # )
-        self.latent_fuse = create_conv2d(latent_chans * 2, latent_chans, 1)
+        self.latent_fuse = nn.Sequential(
+            create_conv2d(latent_chans * 2, latent_chans, 1, bias=False),
+            create_norm_act_layer(self.adapter_cfg.norm, latent_chans, act_layer=self.adapter_cfg.act),
+            create_conv2d(latent_chans, latent_chans, 1, bias=True),
+        )
         logger.info(f"Created change detection stage")
 
         # Create decoder
@@ -442,20 +444,39 @@ class TokenizerHybridUNet(nn.Module):
 
         return encoder_adapter
 
-    def forward(self, x: tuple[Tensor, Tensor]):
+    @staticmethod
+    def _validate_cd_inputs(x: tuple[Tensor, Tensor] | list[Tensor]) -> tuple[Tensor, Tensor]:
+        if not isinstance(x, (tuple, list)):
+            raise TypeError(f"Input for change detection must be a tuple/list of two tensors (x1, x2), got {type(x)}")
+        if len(x) != 2:
+            raise ValueError(f"Input must contain exactly two tensors (x1, x2), got len={len(x)}")
+        x1, x2 = x
+        if not isinstance(x1, Tensor) or not isinstance(x2, Tensor):
+            raise TypeError(f"Both inputs must be Tensor, got {type(x1)} and {type(x2)}")
+        if x1.shape != x2.shape:
+            raise ValueError(f"Input tensors must share shape, got {tuple(x1.shape)} vs {tuple(x2.shape)}")
+        return x1, x2
+
+    def _fuse_latent(self, final_h1: Tensor | None, final_h2: Tensor | None) -> Tensor | None:
+        if not self.use_latent:
+            return None
+        if final_h1 is None and final_h2 is None:
+            return None
+        if final_h1 is None or final_h2 is None:
+            raise ValueError("Mixed latent states detected: one branch latent is None while the other is not.")
+        return self.latent_fuse(torch.cat((final_h1, final_h2), dim=1))
+
+    def forward(self, x: tuple[Tensor, Tensor] | list[Tensor]):
         """Two time-series images for change detection"""
 
         # Encode two images
-        assert len(x) == 2, "Input must be a tuple of two tensors (x1, x2) for change detection."
-        x1, x2 = x
+        x1, x2 = self._validate_cd_inputs(x)
         skips1, final_h1 = self.encoder(x1)
         skips2, final_h2 = self.encoder(x2)
 
         # Fuse the skips in CD stages
         fused_skips = self.cd_stage(skips1, skips2)
-        latent = self.latent_fuse(
-            torch.cat((final_h1, final_h2), dim=1),
-        )
+        latent = self._fuse_latent(final_h1, final_h2)
 
         # Decode
         output = self.decoder(fused_skips, latent)

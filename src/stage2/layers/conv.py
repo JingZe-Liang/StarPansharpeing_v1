@@ -103,7 +103,7 @@ class MbConvLNBlock(nn.Module):
             cond_out_chs = out_chs * 2 if cond_type == "adaln2" else out_chs
             self.cond_conv_kxk = nn.Sequential(
                 create_conv2d(cond_chs, out_chs, 1, bias=True),
-                create_norm_act_layer("layernorm2d", out_chs, "silu"),
+                create_norm_act_layer(norm_layer, out_chs, "silu"),
                 create_conv2d(out_chs, cond_out_chs, 3, bias=False, groups=out_chs),
             )
 
@@ -463,7 +463,7 @@ class GLUMBConv(nn.Module):
 
 
 class GLUMBConv1D(GLUMBConv):
-    @compile_decorator
+    # @compile_decorator
     def forward(self, x: torch.Tensor, HW: Optional[tuple[int, int]] = None) -> torch.Tensor:
         B, N, C = x.shape
         if HW is None:

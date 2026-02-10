@@ -518,6 +518,7 @@ class CrossCityMultimodalPatchStreamingDataset(_BaseStreamingDataset):
             img, gt = self._resize_img_gt(img, gt, self.patch_resize_to)
         if self.to_neg_1_1:
             img = img * 2.0 - 1.0
+        img = torch.nan_to_num(img, nan=0.0)
         if self.convert_bg_to_ignore:
             bg = gt == 0
             gt = gt.clone()
@@ -610,9 +611,9 @@ class CrossCityMultimodalPatchStreamingDataset(_BaseStreamingDataset):
 
 
 def test_dataset_plot():
-    input_dir = Path("data/Downstreams/CrossCitySegmentation/litdata_train/beijing/train")
+    input_dir = Path("data/Downstreams/CrossCitySegmentation/litdata/beijing/val")
     if not input_dir.exists():
-        raise FileNotFoundError(f"LitData train dir not found: {input_dir}")
+        raise FileNotFoundError(f"LitData dir not found: {input_dir}")
 
     ds = CrossCityMultimodalPatchStreamingDataset(
         input_dir=str(input_dir),

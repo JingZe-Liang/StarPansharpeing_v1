@@ -42,3 +42,4 @@ val:
   num_workers: 2
   pin_memory: true
   drop_last: false
+  shuffle: true  # shuffle val

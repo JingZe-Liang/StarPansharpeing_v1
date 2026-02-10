@@ -22,7 +22,6 @@ from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
 from easydict import EasyDict as edict
 from einops import rearrange
 from ema_pytorch import EMA
-from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -45,6 +44,8 @@ from src.utilities.network_utils import load_peft_model_checkpoint
 from src.utilities.network_utils.Dtensor import safe_dtensor_operation
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync, metrics_sync, object_scatter
 from src.utilities.train_utils.visualization import get_rgb_image, visualize_segmentation_map
+
+from loguru import logger
 
 heavyball = lazy_loader.load("heavyball")
 
@@ -1226,13 +1227,14 @@ class HyperCDTrainer:
         self.train_loop()
 
 
-_key = "tokenizer_hybrid_adaptor_gvlm"
+_key = "tokenizer_hybrid_adaptor_xview2"
 _configs_dict = {
     "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
     "tokenizer_hybrid_adaptor": "tokenizer_hybrid_adaptor",
     "tokenizer_hybrid_adaptor_gvlm": "tokenizer_hybrid_adaptor_gvlm",
     "tokenizer_hybrid_adaptor_cabuar": "tokenizer_hybrid_adaptor_cabuar",
     "tokenizer_hybrid_adaptor_dsifn": "tokenizer_hybrid_adaptor_dsifn",
+    "tokenizer_hybrid_adaptor_xview2": "tokenizer_hybrid_adaptor_xview2",
 }
 
 
