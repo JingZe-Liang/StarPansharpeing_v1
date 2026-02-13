@@ -6,7 +6,7 @@ import torch.nn as nn
 from jaxtyping import Int
 from loguru import logger
 from torch import Tensor
-from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Precision, Recall
+from torchmetrics.classification import Accuracy, CohenKappa, F1Score, Precision, Recall, JaccardIndex
 from torchmetrics.segmentation import GeneralizedDiceScore, MeanIoU
 
 
@@ -54,26 +54,28 @@ class HyperSegmentationScore(nn.Module):
         # Classification metrics support ignore_index directly
         # If per_class is True, we want to return the metric for each class (average="none")
         average_arg = "none" if self.per_class else reduction
-        self.cal_metrics = (
-            cal_metrics
-            if cal_metrics is not None
-            else ["accuracy", "precision", "recall", "kappa", "f1", "dict", "miou"]
-        )
+        all_metric_keys = ["accuracy", "precision", "recall", "kappa", "f1", "dice", "miou", "jaccard"]
+        # internal attribute names for setattr initialization
+        all_attr_names = [
+            "accuracy",
+            "precision",
+            "recall",
+            "cohen_kappa",
+            "f1_score",
+            "jaccard_score",
+            "dice_score",
+            "mean_iou",
+        ]
+        self.cal_metrics = cal_metrics if cal_metrics is not None else all_metric_keys
 
         ## Metrics
         # Init all metrics to None
         # OA, and macro f1 ...
-        self.accuracy, self.precision, self.recall, self.cohen_kappa, self.f1_score, self.dice_score, self.mean_iou = (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        for m in all_attr_names:
+            setattr(self, m, None)
 
         if "accuracy" in self.cal_metrics:
+            # micro: overall-accuracy; macro: mean-accuracy
             self.accuracy = Accuracy(
                 task=task, num_classes=n_classes, ignore_index=ignore_index, top_k=top_k, average=average_arg
             )
@@ -90,7 +92,12 @@ class HyperSegmentationScore(nn.Module):
             self.cohen_kappa = CohenKappa(task=task, num_classes=n_classes, ignore_index=ignore_index)
         if "f1" in self.cal_metrics:
             self.f1_score = F1Score(
-                task=task, num_classes=n_classes, average="macro", top_k=top_k, ignore_index=ignore_index
+                task=task, num_classes=n_classes, average="none", top_k=top_k, ignore_index=ignore_index
+            )
+        if "jaccard" in self.cal_metrics:
+            # micro, used by 2-class metrics that computes on changed pixels
+            self.jaccard_score = JaccardIndex(
+                task=task, num_classes=n_classes, ignore_index=ignore_index, average="none"
             )
 
         # Segmentation metrics
@@ -114,9 +121,10 @@ class HyperSegmentationScore(nn.Module):
             precision=self.precision,
             recall=self.recall,
             kappa=self.cohen_kappa,
+            f1=self.f1_score,
             dice=self.dice_score,
-            mean_iou=self.mean_iou,
-            f1_score=self.f1_score,
+            miou=self.mean_iou,
+            jaccard=self.jaccard_score,
         )
 
     def _infer_metrics_device(self) -> torch.device:
@@ -150,11 +158,12 @@ class HyperSegmentationScore(nn.Module):
             "precision": self.precision,
             "recall": self.recall,
             "kappa": self.cohen_kappa,
-            "f1_score": self.f1_score,
+            "f1": self.f1_score,
+            "jaccard": self.jaccard_score,
         }
 
         # Segmentation metrics need special handling
-        segmentation_metrics = {"dice": self.dice_score, "mean_iou": self.mean_iou}
+        segmentation_metrics = {"dice": self.dice_score, "miou": self.mean_iou}
 
         self._ensure_metrics_on_device(pred.device)
 
@@ -179,7 +188,7 @@ class HyperSegmentationScore(nn.Module):
 
             for metric in segmentation_metrics.values():
                 if metric is not None:
-                    metric.update(pred_processed, gt_processed)
+                    metric.update(pred_processed, gt_processed)  # type: ignore[reportCallIssue]
         else:
             # No ignore_index, use original data
             for metric in segmentation_metrics.values():
@@ -187,7 +196,7 @@ class HyperSegmentationScore(nn.Module):
                     metric.update(pred, gt)
 
     def _compute_all_metrics(self):
-        return {name: metric.compute() for name, metric in self._all_metric_fns.items() if metric is not None}
+        return {name: metric.compute() for name, metric in self._all_metric_fns.items() if metric is not None}  # type: ignore[reportCallIssue]
 
     def _reset_all_metrics(self):
         for metric in self._all_metric_fns.values():
@@ -249,7 +258,6 @@ def test_metrics():
         reduction="macro",
         per_class=True,
         include_bg=True,
-        use_aggregation=True,
     )
 
     # Calculate metrics
@@ -262,7 +270,7 @@ def test_metrics():
         # Cohen's kappa can be negative, so we don't check >= 0 for it
         if metric_name != "kappa":
             assert (value >= 0).all(), f"{metric_name} should be non-negative"
-        if metric_name in ["accuracy", "recall", "dice", "mean_iou", "f1_score"]:
+        if metric_name in ["accuracy", "recall", "dice", "miou", "f1"]:
             assert (value <= 1).all(), f"{metric_name} should be <= 1"
         # Cohen's kappa should be between -1 and 1
         if metric_name == "kappa":
@@ -285,15 +293,14 @@ def test_perfect_prediction():
         reduction="macro",
         per_class=False,
         include_bg=True,
-        use_aggregation=False,
     )
 
     results = metrics(pred, gt)
 
     # Perfect predictions should give maximum scores
     assert results["accuracy"] == 1.0, "Perfect prediction should give accuracy=1"
-    assert results["f1_score"] == 1.0, "Perfect prediction should give F1=1"
-    assert results["mean_iou"] == 1.0, "Perfect prediction should give IoU=1"
+    assert results["f1"] == 1.0, "Perfect prediction should give F1=1"
+    assert results["miou"] == 1.0, "Perfect prediction should give IoU=1"
     assert results["dice"] == 1.0, "Perfect prediction should give Dice=1"
     assert results["recall"] == 1.0, "Perfect prediction should give recall=1"
     assert results["kappa"] == 1.0, "Perfect prediction should give kappa=1"
@@ -314,15 +321,14 @@ def test_wrong_prediction():
         reduction="macro",
         per_class=False,
         include_bg=True,
-        use_aggregation=False,
     )
 
     results = metrics(pred, gt)
 
     # All wrong predictions should give minimum scores
     assert results["accuracy"] == 0.0, "All wrong prediction should give accuracy=0"
-    assert results["f1_score"] == 0.0, "All wrong prediction should give F1=0"
-    assert results["mean_iou"] == 0.0, "All wrong prediction should give IoU=0"
+    assert results["f1"] == 0.0, "All wrong prediction should give F1=0"
+    assert results["miou"] == 0.0, "All wrong prediction should give IoU=0"
     assert results["dice"] == 0.0, "All wrong prediction should give Dice=0"
     assert results["recall"] == 0.0, "All wrong prediction should give recall=0"
 
@@ -341,7 +347,6 @@ def test_ignore_index():
         reduction="macro",
         per_class=False,
         include_bg=True,
-        use_aggregation=False,
     )
 
     results = metrics(pred, gt)

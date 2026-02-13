@@ -38,8 +38,8 @@ ema:
 metric:
   _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
   n_classes: ${dataset.consts.num_classes}
-  ignore_index: ${dataset.consts.ignore_index}
-  include_bg: false
+  ignore_index: null
+  include_bg: true
   input_format: index
   task: multiclass
 
@@ -68,7 +68,7 @@ train:
   is_neg_1_1: ${dataset.consts.is_neg_1_1}
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_segmentation/2026-02-06_12-27-55_AtlanticForestSegmentation_hybrid_tokenizer/ema
 
   bootstrap_ratio: 0.
   bootstrap_start_step: 0
@@ -110,5 +110,5 @@ train:
   debug: true
 
 val:
-  val_duration: 500
+  val_duration: 40
   max_val_iters: -1

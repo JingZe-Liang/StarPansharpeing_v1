@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, TypedDict
 import re
 
 import torch
@@ -19,6 +19,14 @@ from ..config_utils import function_config_to_basic_types
 @dataclass
 class MuonConfig:
     name: str = "su"
+
+
+QKClipSelector = Callable[[torch.Tensor], torch.Tensor]
+
+
+class QKClipOption(TypedDict):
+    p_name: str | tuple[str, ...]
+    p_func: QKClipSelector
 
 
 def gen_muon_consts(cfg: MuonConfig) -> list[tuple]:
@@ -159,11 +167,81 @@ class MuonFSDP(Muon):
         use_preconditioned: bool = False,
         newton_schulz_func: Callable | None = zeropower_via_newtonschulz6_diff_abc,
         muon_steps: int = 5,
+        enable_qk_clip: bool = False,
+        qk_clip_threshold: float = 100.0,
+        qk_clip_alpha: float = 0.5,
         *,
         # muon and adamw/lion param group defaults
         muon_params_defaults: dict[str, Any] | None = None,
         oned_params_defaults: dict[str, Any] | None = None,
+        qk_clip_options: dict[str, QKClipOption] | None = None,
     ):
+        """
+        Create a Muon optimizer with optional Kimi-style QK-Clip.
+
+        Args:
+            params: Parameter groups passed to torch optimizer.
+            distributed_mesh: Device mesh or process group used by distributed Muon.
+            lr: Base learning rate.
+            mu: Momentum factor for Muon updates.
+            betas: Betas for one-dimensional fallback algorithms (AdamW/Lion groups).
+            weight_decay: Weight decay coefficient.
+            cautious_wd: Whether to apply cautious weight decay.
+            epsilon: Numerical epsilon used by Muon updates.
+            nesterov: Whether to enable Nesterov momentum for Muon.
+            adjust_lr: Muon LR adjustment mode. One of {"rms_norm", "spectral_norm", None}.
+            flatten: Whether to flatten 3D+ tensors for Muon matrix updates.
+            use_triton: Whether to use Triton kernels in Newton-Schulz.
+            use_preconditioned: Whether to use the preconditioned Newton-Schulz path.
+            newton_schulz_func: Custom Newton-Schulz function. If provided, this wrapper injects
+                the configured `muon_steps`, `use_triton`, and `use_preconditioned`.
+            muon_steps: Number of Newton-Schulz iterations.
+            enable_qk_clip: Enable QK-Clip post optimizer step.
+            qk_clip_threshold: QK-Clip threshold `tau`.
+            qk_clip_alpha: Split exponent between query/key context branch. `Wq_c` uses `gamma**alpha`,
+                `Wk_c` uses `gamma**(1-alpha)`.
+            muon_params_defaults: Extra defaults for Muon param groups.
+            oned_params_defaults: Extra defaults for one-dimensional param groups.
+            qk_clip_options: Mapping that defines how parameter names and tensor slices map to
+                semantic branches {"Wq_c", "Wk_c", "Wq_r", optional "Wk_r"}.
+                - `p_name`: str or tuple[str, ...], used to match parameter names.
+                - `p_func`: callable that receives the full parameter tensor and returns the
+                  tensor/view to be scaled.
+
+                DeepSeek-MLA style example:
+                ```python
+                qk_nope = config.qk_nope_head_dim
+                qk_rope = config.qk_rope_head_dim
+                v_dim = config.v_head_dim
+                q_head_dim = qk_nope + qk_rope
+                kv_out_head_dim = qk_nope + v_dim
+
+                qk_clip_options = {
+                    # q_proj or q_b_proj output layout per head: [q_nope, q_rope]
+                    "Wq_c": {"p_name": ("q_proj.weight", "q_b_proj.weight"), "p_func": lambda w: w},
+                    "Wq_r": {"p_name": ("q_proj.weight", "q_b_proj.weight"), "p_func": lambda w: w},
+                    # kv_b_proj output layout per head: [k_nope, value]
+                    "Wk_c": {
+                        "p_name": "kv_b_proj.weight",
+                        "p_func": lambda w: w.view(-1, kv_out_head_dim, w.shape[1])[:, :qk_nope, :].reshape(-1, w.shape[1]),
+                    },
+                    # shared key-rope branch from kv_a_proj_with_mqa, usually skipped in clipping
+                    "Wk_r": {
+                        "p_name": "kv_a_proj_with_mqa.weight",
+                        "p_func": lambda w: w[-qk_rope:, :],
+                    },
+                }
+                ```
+
+                Note:
+                For models where query/key are fully RoPE (no NOPE split), you can map
+                `q_proj` to `Wq_r` and `k_proj` to `Wk_r` directly without sub-slicing.
+        """
+        if qk_clip_threshold <= 0.0:
+            raise ValueError(f"Invalid qk_clip_threshold: {qk_clip_threshold}. Must be > 0.")
+        if not 0.0 <= qk_clip_alpha <= 1.0:
+            raise ValueError(f"Invalid qk_clip_alpha: {qk_clip_alpha}. Must be in [0, 1].")
+
         muon_params_defaults = {} if muon_params_defaults is None else muon_params_defaults
         oned_params_defaults = {} if oned_params_defaults is None else oned_params_defaults
         # muon_abcs = gen_muon_consts(
@@ -201,6 +279,12 @@ class MuonFSDP(Muon):
             newton_schulz_func,
         )
 
+        self.defaults["enable_qk_clip"] = enable_qk_clip
+        self.defaults["qk_clip_threshold"] = qk_clip_threshold
+        self.defaults["qk_clip_alpha"] = qk_clip_alpha
+        self._param_to_name: dict[int, str] = {}
+        self.qk_clip_options = qk_clip_options
+
         self._init_param_groups_defaults(muon_params_defaults, oned_params_defaults)
 
     def _init_param_groups_defaults(self, muon_params_defaults: dict, oned_params_defaults: dict):
@@ -224,6 +308,27 @@ class MuonFSDP(Muon):
             else:
                 raise ValueError(f"Unknown algorithm: {group['algorithm']}")
 
+    @staticmethod
+    def _normalize_named_parameters(
+        named_parameters: Iterable[tuple[str, torch.nn.Parameter]] | dict[str, torch.nn.Parameter],
+    ) -> list[tuple[str, torch.nn.Parameter]]:
+        normalized_items: list[tuple[str, torch.nn.Parameter]] = []
+        if isinstance(named_parameters, dict):
+            for name, param in named_parameters.items():
+                if not isinstance(name, str) or not isinstance(param, torch.nn.Parameter):
+                    raise TypeError("`named_parameters` dict must map `str` to `torch.nn.Parameter`.")
+                normalized_items.append((name, param))
+            return normalized_items
+
+        for item in named_parameters:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("`named_parameters` iterable must contain `(name, parameter)` tuples.")
+            name, param = item
+            if not isinstance(name, str) or not isinstance(param, torch.nn.Parameter):
+                raise TypeError("`named_parameters` iterable must contain `(str, torch.nn.Parameter)` tuples.")
+            normalized_items.append((name, param))
+        return normalized_items
+
     @classmethod
     @function_config_to_basic_types
     def clear_muon_adamw_params(
@@ -236,11 +341,7 @@ class MuonFSDP(Muon):
         oned_params = []
 
         re_ignore_pats = [re.compile(ik) for ik in ignored_keys_for_muon]
-        iter_named_params: Iterable[tuple[str, torch.nn.Parameter]]
-        if isinstance(named_params, dict):
-            iter_named_params = named_params.items()  # type: ignore[assignment]
-        else:
-            iter_named_params = named_params
+        iter_named_params = cls._normalize_named_parameters(named_params)
 
         for name, p in iter_named_params:
             if p.requires_grad:
@@ -268,19 +369,133 @@ class MuonFSDP(Muon):
 
         return muon_params_g, oned_params_g
 
+    @torch.no_grad()
+    def step(
+        self,
+        closure: Callable[[], torch.Tensor] | None = None,
+        attention_max_logits: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor | None:
+        loss = super().step(closure)
+
+        # apply qk-clip from kimi-k2 paper
+        if self.defaults["enable_qk_clip"] and attention_max_logits is not None:
+            self._apply_qk_clip(attention_max_logits)
+
+        return loss
+
+    @torch.no_grad()
+    def _apply_qk_clip(self, attention_max_logits: dict[str, torch.Tensor]) -> None:
+        tau = float(self.defaults["qk_clip_threshold"])
+        alpha = float(self.defaults["qk_clip_alpha"])
+        assert self.qk_clip_options is not None
+
+        def _name_filter(candidates: str | tuple[str, ...], param_name: str) -> bool:
+            if isinstance(candidates, str):
+                return candidates in param_name
+            for c in candidates:
+                if c in param_name:
+                    return True
+            return False
+
+        def _parse_option(name: str) -> tuple[str | tuple[str, ...], QKClipSelector]:
+            option = self.qk_clip_options.get(name)
+            if option is None:
+                raise ValueError(f"Missing qk_clip_options[{name!r}].")
+            p_name = option["p_name"]
+            p_func = option["p_func"]
+            return p_name, p_func
+
+        for group in self.param_groups:
+            for p in group["params"]:
+                param_name = self._get_param_name(p)
+                if param_name == "" or param_name not in attention_max_logits:
+                    continue
+
+                max_logits = attention_max_logits[param_name]
+                if max_logits.numel() == 0:
+                    continue
+
+                max_logits = max_logits.to(device=p.device, dtype=torch.float32)
+                needs_clip = max_logits > tau
+                if not bool(needs_clip.any().item()):
+                    continue
+
+                gamma = torch.clamp(tau / max_logits, max=1.0)
+
+                wq_c_names, wq_c_func = _parse_option("Wq_c")
+                wk_c_names, wk_c_func = _parse_option("Wk_c")
+                wq_r_names, wq_r_func = _parse_option("Wq_r")
+
+                # query/key context and query-rope can coexist in the same packed weight
+                if _name_filter(wq_c_names, param_name):
+                    self._scale_attention_heads(wq_c_func(p), torch.pow(gamma, alpha), needs_clip)
+                if _name_filter(wk_c_names, param_name):
+                    self._scale_attention_heads(wk_c_func(p), torch.pow(gamma, 1.0 - alpha), needs_clip)
+                if _name_filter(wq_r_names, param_name):
+                    self._scale_attention_heads(wq_r_func(p), gamma, needs_clip)
+
+                # key-rope branch is usually shared and kept untouched
+                wk_r_option = self.qk_clip_options.get("Wk_r")
+                if wk_r_option is not None:
+                    wk_r_names = wk_r_option["p_name"]
+                    if _name_filter(wk_r_names, param_name):
+                        continue
+
+    @staticmethod
+    def _scale_attention_heads(param: torch.Tensor, scale_factors: torch.Tensor, mask: torch.Tensor) -> None:
+        num_heads = int(scale_factors.shape[0])
+        if num_heads == 0:
+            return
+
+        scale_factors = scale_factors.to(device=param.device, dtype=param.dtype)
+        mask = mask.to(device=param.device, dtype=torch.bool)
+
+        if param.dim() == 2:
+            if param.shape[0] % num_heads != 0:
+                logger.warning(
+                    f"[MuonFSDP] Skip QK-Clip: param first dim {param.shape[0]} not divisible by num_heads {num_heads}."
+                )
+                return
+            head_dim = param.shape[0] // num_heads
+            for h in range(num_heads):
+                if not bool(mask[h].item()):
+                    continue
+                start_idx = h * head_dim
+                end_idx = (h + 1) * head_dim
+                param[start_idx:end_idx].mul_(scale_factors[h])
+        elif param.dim() == 3:
+            if param.shape[0] != num_heads:
+                logger.warning(
+                    f"[MuonFSDP] Skip QK-Clip: param head dim {param.shape[0]} mismatches num_heads {num_heads}."
+                )
+                return
+            for h in range(num_heads):
+                if bool(mask[h].item()):
+                    param[h].mul_(scale_factors[h])
+
+    def _get_param_name(self, param: torch.Tensor) -> str:
+        return self._param_to_name.get(id(param), "")
+
+    def register_attention_params(self, param_name_mapping: dict[str, torch.nn.Parameter]) -> None:
+        for name, param in param_name_mapping.items():
+            self._param_to_name[id(param)] = name
+
     @classmethod
     @function_config_to_basic_types
     def create_muon_optimizer(
         cls,
-        named_parameters: ParamsT,
-        ignored_keys_for_muon: tuple | list = (),
+        named_parameters: Iterable[tuple[str, torch.nn.Parameter]] | dict[str, torch.nn.Parameter],
+        ignored_keys_for_muon: tuple[str, ...] | list[str] = (),
         oned_param_algo: str = "lion",
         **kwargs,
     ):
+        named_parameters_items = cls._normalize_named_parameters(named_parameters)
+
         muon_params_g, oned_params_g = cls.clear_muon_adamw_params(
-            named_parameters, ignored_keys_for_muon, oned_param_algo
+            named_parameters_items, ignored_keys_for_muon, oned_param_algo
         )
         optimizer = cls(params=(muon_params_g, oned_params_g), **kwargs)
+        optimizer.register_attention_params({name: param for name, param in named_parameters_items})
         return optimizer
 
     def __repr__(self) -> str:

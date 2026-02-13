@@ -26,6 +26,7 @@ class CRMetrics(torchmetrics.Metric):
             self._lpips_fn.to(self._lpips_device)
         self._lpips_on_device = self._lpips_device is not None
         self.interp_to = interp_to
+        # baseline: some works use 256 pixels
         if interp_to not in {None, 256}:
             raise ValueError(f"interp_to must be None or 256 to match baseline, got {interp_to=}")
 

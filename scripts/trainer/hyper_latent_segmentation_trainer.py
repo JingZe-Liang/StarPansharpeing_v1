@@ -572,7 +572,19 @@ class HyperSegmentationTrainer:
             ) and isinstance(model, FSDP):
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)  # type: ignore
 
+    def _normalize_gt_for_loss(self, gt: Tensor) -> Tensor:
+        """
+        Normalize GT shape for segmentation losses.
+
+        CrossEntropy-style losses expect spatial targets as [B, H, W] (or [N] for 1D indexed mode),
+        while some datasets provide [B, 1, H, W].
+        """
+        if gt.ndim == 4 and gt.shape[1] == 1:
+            gt = gt.squeeze(1)
+        return gt.long()
+
     def compute_segmentation_loss(self, out, gt):
+        gt = self._normalize_gt_for_loss(gt)
         loss = self.segment_loss(out, gt)
         return loss
 
@@ -1086,6 +1098,7 @@ class HyperSegmentationTrainer:
 
             # resize to target size if needed
             gt = self._resize_to(gt, mode="nearest")
+            gt = self._normalize_gt_for_loss(gt)
 
             # Upsample logits to match GT size using bilinear interpolation for smoother results
             if pred_logits.shape[-2:] != gt.shape[-2:]:
@@ -1126,8 +1139,12 @@ class HyperSegmentationTrainer:
             _metric_str = ""
             for k, v in metrics_overall.items():
                 if isinstance(v, torch.Tensor):
-                    v_val = v.item()
-                    _metric_str += f"{k}: {v_val:.4f} - "
+                    if v.numel() == 1:
+                        v_val = v.item()
+                        _metric_str += f"{k}: {v_val:.4f} - "
+                    else:
+                        v_val = v.tolist()
+                        _metric_str += f"{k}: {v_val} - "
                 else:
                     _metric_str += f"{k}: {v:.4f} - "
             self.log_msg(f"[Val] OA (micro): {_metric_str}loss: {loss_val:.3e}")
@@ -1138,7 +1155,7 @@ class HyperSegmentationTrainer:
             # Log OA (micro-average) metrics
             for k, v in metrics_overall.items():
                 if isinstance(v, torch.Tensor):
-                    log_dict[f"val/{k}"] = v.item()
+                    log_dict[f"val/{k}"] = v.item() if v.numel() == 1 else v.tolist()
                 else:
                     log_dict[f"val/{k}"] = v
 
@@ -1159,7 +1176,7 @@ class HyperSegmentationTrainer:
 
             self.tenb_log_any("metric", log_dict, step=self.global_step)
             logger.info(
-                "---------------- Validation infomation ----------------\n"
+                "\n---------------- Validation infomation ----------------\n"
                 f"{log_dict}\n"
                 "-------------------------------------------------------\n"
             )
@@ -1230,7 +1247,7 @@ class HyperSegmentationTrainer:
 
     def resume(self, path: str):
         self.log_msg("[Resume]: resume training")
-        self.accelerator.load_state(path)
+        self.accelerator.load_state(path, load_kwargs={"weights_only": False})
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
@@ -1352,10 +1369,11 @@ class HyperSegmentationTrainer:
         self.train_loop()
 
 
-_key = "sos_oil_leakage_sentinel_hybrid_tokenizer_seg"
+_key = "atlantic_forest_hybrid_tokenizer_seg"
 _configs_dict = {
     "flood3i_hybrid_tokenizer_seg": "flood3i_hybrid_tokenizer_seg",
     "hybrid_tokenizer_seg": "five_billion_hybrid_tokenizer_seg",
+    "c2smsfloods_s1_hybrid_tokenizer_seg": "c2smsfloods_s1_hybrid_tokenizer_seg",
     "cross_city_multimodal_hybrid_tokenizer_seg": "cross_city_multimodal_hybrid_tokenizer_seg",
     "sos_oil_leakage_sentinel_hybrid_tokenizer_seg": "sos_oil_leakage_sentinel_hybrid_tokenizer_seg",
     "deep_globe_road_unet_seg": "deep_globe_road_unet_seg",

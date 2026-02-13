@@ -36,8 +36,8 @@ ema:
 metric:
   _target_: src.stage2.segmentation.metrics.basic.HyperSegmentationScore
   n_classes: ${dataset.consts.num_classes}
-  ignore_index: ${dataset.consts.ignore_index}
-  include_bg: false
+  ignore_index: null
+  include_bg: true
   input_format: index
   task: multiclass
 
@@ -66,7 +66,7 @@ train:
   is_neg_1_1: ${dataset.to_neg_1_1}
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_segmentation/2026-02-09_19-28-22_SOS-OilLeakage-Sentinel_hybrid_tokenizer/ema
 
   bootstrap_ratio: 0.0
   bootstrap_start_step: 0
@@ -77,7 +77,7 @@ train:
     betas: [0.95, 0.99]
     oned_param_algo: lion
     muon_params_defaults:
-      lr: 6.0e-4
+      lr: 2.0e-4
       weight_decay: 0.01
     oned_params_defaults:
       lr: 2.0e-4
@@ -108,5 +108,5 @@ train:
   debug: true
 
 val:
-  val_duration: 500
+  val_duration: 40
   max_val_iters: -1

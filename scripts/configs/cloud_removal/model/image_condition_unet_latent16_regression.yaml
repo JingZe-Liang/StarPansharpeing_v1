@@ -5,9 +5,9 @@ cond_channels: 16
 out_channels: 16
 base_channels: 64
 channel_mults: [3, 4, 8]
-num_res_blocks: 5
+num_res_blocks: 6
 block_type: resblock # [resblock, natblock]
-dropout: 0.1
+dropout: 0.0
 num_groups: 32
 # one attention block per stage when enabled; middle block always has attention
 attention_stages: [false, false, false]
@@ -19,3 +19,9 @@ resblock_cfg:
   norm_layer: rmsnorm2dfp32
   expand_ratio: 3
   resblock_act_layer: relu6
+# nat_cfg:
+#   k_size: 4
+#   stride: 1
+#   dilation: 1
+#   ffn_ratio: 4
+#   num_heads: 16

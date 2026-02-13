@@ -7,12 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
-from loguru import logger
 from timm.layers import create_norm_layer
+from loguru import logger
 
 from src.stage2.layers.blocks import build_spatial_block
 
-logger = logger.bind(_name_="Unet")
+logger = logger.bind(_name_="UNet")
 
 
 def _timestep_embedding(timesteps: torch.Tensor, dim: int, *, max_period: int = 10000) -> torch.Tensor:
@@ -113,7 +113,7 @@ class Upsample(nn.Module):
         self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = F.interpolate(x, scale_factor=2.0, mode="bilinear")
         return self.conv(x)
 
 

@@ -4,7 +4,7 @@ from typing import Literal
 
 import torch
 from torch import Tensor
-from torchmetrics.classification import ConfusionMatrix
+from torchmetrics.classification import ConfusionMatrix, JaccardIndex
 
 from ...segmentation.metrics import HyperSegmentationScore
 
@@ -15,13 +15,13 @@ class ChangeDetectionScore(HyperSegmentationScore):
         n_classes: int = 2,
         ignore_index: int | None = None,
         top_k: int = 1,
-        reduction: Literal["micro", "macro", "weighted", "none"] | None = "macro",
+        reduction: Literal["micro", "macro", "weighted", "none"] | None = "micro",
         per_class: bool = False,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",
     ) -> None:
         super().__init__(
-            task="binary",
+            task="multiclass",
             n_classes=n_classes,
             ignore_index=ignore_index,
             top_k=top_k,
@@ -35,6 +35,9 @@ class ChangeDetectionScore(HyperSegmentationScore):
             num_classes=n_classes,
             ignore_index=ignore_index,
         )
+        if hasattr(self, "jaccard_score"):
+            self.jaccard_score = JaccardIndex(task="multiclass", num_classes=2, ignore_index=None, average="none")
+            self._all_metric_fns["jaccard"] = self.jaccard_score
 
     def _compute_custom_from_cm(self, cm: Tensor) -> dict[str, Tensor]:
         if cm.ndim != 2:

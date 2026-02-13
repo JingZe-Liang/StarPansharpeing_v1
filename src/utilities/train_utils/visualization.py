@@ -265,12 +265,45 @@ def _select_bands_by_low_correlation(img: torch.Tensor, n_bands: int = 3) -> lis
     return torch.argsort(correlation_scores)[:n_bands].tolist()
 
 
+def _vis_sar_image(
+    img: torch.Tensor,
+    is_neg_1_1=True,
+    s1_min: float = -77.0,
+    s1_max: float = 26.0,
+    norm_strategy: str = "default",
+) -> torch.Tensor:
+    img = img.float()
+    if img.ndim != 4 or img.shape[1] != 2:
+        raise ValueError(f"Expected (B,2,H,W) for S1 visualization, got {tuple(img.shape)}")
+
+    if is_neg_1_1:
+        img_01 = ((img + 1.0) / 2.0).clamp(0.0, 1.0)
+    else:
+        img_01 = img
+
+    if norm_strategy == "default":
+        vv = img_01[:, 0] * (s1_max - s1_min) + s1_min
+        vh = img_01[:, 1] * (s1_max - s1_min) + s1_min
+    else:
+        vv = img[:, 0]
+        vh = img[:, 1]
+
+    ratio = torch.nan_to_num(vv / (vh + 1e-6), nan=0.0, posinf=0.0, neginf=0.0)
+    rgb = torch.stack([vv, vh, ratio], dim=1)
+
+    min_values = torch.tensor([-23.0, -28.0, 0.2], device=rgb.device, dtype=rgb.dtype).view(1, 3, 1, 1)
+    max_values = torch.tensor([0.0, -5.0, 1.0], device=rgb.device, dtype=rgb.dtype).view(1, 3, 1, 1)
+    rgb = (rgb - min_values) / (max_values - min_values + 1e-8)
+    return rgb.clamp(0.0, 1.0)
+
+
 @function_config_to_basic_types
 def get_rgb_image(
     img: torch.Tensor,
     rgb_channels: list[int] | str | None = None,
     use_linstretch: bool = False,
     linstretch_tol: list[float] | None = None,
+    s1_vis_kwargs: dict | None = None,
 ):
     """
     Convert hyperspectral image to RGB format with optional linear stretching.
@@ -314,13 +347,25 @@ def get_rgb_image(
 
     # If not defined the rgb channels, use mean
     rgb_channels = rgb_channels or RGB_CHANNELS_BY_BANDS.get(c, "mean")
-    if isinstance(rgb_channels, (list, tuple)):
+    if img.shape[1] == 2:
+        rgb_img = _vis_sar_image(img, **(s1_vis_kwargs or {}))
+    elif isinstance(rgb_channels, (list, tuple)):
         rgb_img = img[:, rgb_channels, :, :]
     elif rgb_channels == "mean":
-        # split three parts
-        c_3 = c // 3
-        bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
-        rgb_img = torch.stack(bands, dim=1)
+        if c < 3:
+            # Fallback for low-channel inputs to avoid empty-slice mean() -> NaN.
+            if c == 2:
+                ch0 = img[:, 0, :, :]
+                ch1 = img[:, 1, :, :]
+                ch2 = (ch0 + ch1) * 0.5
+                rgb_img = torch.stack([ch0, ch1, ch2], dim=1)
+            else:
+                rgb_img = img.repeat(1, 3, 1, 1)
+        else:
+            # split three parts
+            c_3 = c // 3
+            bands = [img[:, i * c_3 : (i + 1) * c_3, :, :].mean(dim=1) for i in range(3)]
+            rgb_img = torch.stack(bands, dim=1)
     elif rgb_channels == "largest":
         indices = _choose_largest_bands(img)
         rgb_img = img[:, indices, :, :]

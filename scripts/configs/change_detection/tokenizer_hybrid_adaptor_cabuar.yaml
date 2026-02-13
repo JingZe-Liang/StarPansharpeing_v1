@@ -34,7 +34,7 @@ segment_loss:
 metric:
   _target_: src.stage2.change_detection.metrics.basic.ChangeDetectionScore
   n_classes: ${dataset.consts.num_classes}
-  ignore_index: 255
+  ignore_index: null
   include_bg: true # false not include unchanged area
   input_format: index
 
@@ -63,7 +63,7 @@ train:
   is_neg_1_1: true
 
   resume_path: #runs/stage2_CD_wrapper/2025-11-26_21-00-34_FarmLand_tokenizer_hybrid_adaptor/checkpoints/checkpoint_1
-  ema_load_path: #runs/stage2_CD_wrapper/2025-11-28_00-20-03_FarmLand_tokenizer_hybrid_adaptor/ema
+  ema_load_path: runs/stage2_CD_wrapper/2026-02-10_10-07-51_CaBuAr_tokenizer_hybrid_adaptor/ema
 
   segment_optim:
     # _target_: heavyball.ForeachAdamW
@@ -81,10 +81,10 @@ train:
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 6.0e-4
+      lr: 4.0e-4
       weight_decay: 0.01
     oned_params_defaults:
-      lr: 6.0e-4
+      lr: 4.0e-4
       weight_decay: 0.0
 
   segment_sched:
@@ -101,5 +101,5 @@ train:
   debug: true
 
 val:
-  val_duration: 500
+  val_duration: 40
   max_val_iters: -1

@@ -508,7 +508,7 @@ class EvaBlock(nn.Module):
             assert post_norm_alpha is not None, "post_norm_alpha must be provided for post-norm blocks"
 
         self.norm1 = norm_layer(dim, **dd)
-        logger.trace(f"Layer uses attention type {attn_type}")
+        logger.trace(f"Layer {self.__class__.__name__} uses attention type {attn_type}")
         attn_cls = {
             "rope": AttentionRope,
             "eva": EvaAttention,

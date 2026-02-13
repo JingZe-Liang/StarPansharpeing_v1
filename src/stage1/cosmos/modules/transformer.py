@@ -105,17 +105,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
 
 
-# _transformer_compiled_flag = bool(int(os.getenv("TRANSFORMER_COMPILED", "0")))
-# _transformer_compile_decorator = (
-#     compile_decorator if (model_compiled_flag and _transformer_compiled_flag) else null_decorator_no_any_kwgs
-# )
-# if model_compiled_flag and not _transformer_compiled_flag:
-#     logger.warning(
-#         "torch.compile 已启用 (MODEL_COMPILED=1)，但 Transformer 默认不编译以避免 Dynamo/Triton 不兼容；"
-#         "如需启用请设置 TRANSFORMER_COMPILED=1。"
-#     )
-
-
 def _jvp_math_attention(
     module: torch.nn.Module,
     query: torch.Tensor,

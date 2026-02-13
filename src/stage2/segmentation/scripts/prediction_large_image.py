@@ -352,8 +352,8 @@ def print_metrics_comparison(metrics: dict[str, dict[str, torch.Tensor]]) -> Non
     # Define metric mappings for comparison
     metric_mappings = [
         ("Accuracy", "accuracy", "oa"),
-        ("F1 Score", "f1_score", "mf1"),
-        ("Mean IoU", "mean_iou", "miou"),
+        ("F1 Score", "f1", "mf1"),
+        ("Mean IoU", "miou", "miou"),
         ("Precision", "precision", "ua"),
         ("Recall", "recall", "pa"),
         ("Kappa", "kappa", "kappa"),

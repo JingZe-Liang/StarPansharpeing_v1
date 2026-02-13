@@ -4,15 +4,15 @@ cond_channels: 4
 out_channels: 4
 base_channels: 128
 patch_size: 1
-channel_mults: [1, 2, 2, 4]
+channel_mults: [1, 2, 4, 4]
 num_res_blocks: 3
-block_type: [resblock, resblock, natblock, natblock] # list of strings, e.g., [resblock, natblock]
-dropout: 0.0
+block_type: [resblock, resblock, resblock, natblock] # list of strings, e.g., [resblock, natblock]
+dropout: 0.1
 num_groups: 32
 # one attention block per stage when enabled; middle block always has attention
 attention_stages: [false, false, false, false]
 num_attention_heads: 16
-act_checkpoint: true
+act_checkpoint: false
 attention_head_dim: null
 use_time_embed: false
 nat_cfg:

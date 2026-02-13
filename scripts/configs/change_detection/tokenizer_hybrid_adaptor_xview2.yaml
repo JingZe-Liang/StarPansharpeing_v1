@@ -88,6 +88,5 @@ train:
   debug: true
 
 val:
-  val_duration: 500
+  val_duration: 40
   max_val_iters: -1
-tmp

@@ -731,12 +731,15 @@ class HyperCDTrainer:
                     x[k] = v.to(device=self.device)
             return x
 
-    def get_metrics(self, metrics_fn: ChangeDetectionScore | HyperSegmentationScore):
+    def get_metrics(self, metrics_fn: ChangeDetectionScore | HyperSegmentationScore) -> dict[str, float | list[float]]:
         metrics = metrics_fn.compute()
         metrics_item = {}
         for k, v in metrics.items():
-            if torch.is_tensor(v) and v.numel() == 1:
-                metrics_item[k] = v.item()
+            if torch.is_tensor(v):
+                if v.numel() == 1:
+                    metrics_item[k] = v.item()
+                else:
+                    metrics_item[k] = v.tolist()
             elif isinstance(v, (int, float)):
                 metrics_item[k] = v
         return metrics_item
@@ -925,7 +928,7 @@ class HyperCDTrainer:
 
             # slide windows
             if self.train_cfg.val_slide_window:
-                logger.info(f"[Val]: using slide window validation", once=True)
+                # logger.info(f"[Val]: using slide window validation", once=True)
                 model_outputs = model_predict_patcher(
                     _val_model_closure,
                     batch,
@@ -935,7 +938,7 @@ class HyperCDTrainer:
                 )
                 pred_seg = model_outputs["pred_logits"].argmax(1)
             else:
-                logger.info(f"[Val]: using full image validation", once=True)
+                # logger.info(f"[Val]: using full image validation", once=True)
                 pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
 
         return pred_seg
@@ -998,7 +1001,7 @@ class HyperCDTrainer:
         if self.accelerator.is_main_process:
             _metric_str = ""
             for k, v in metrics.items():
-                _metric_str += f"{k}: {v:.4f} - "
+                _metric_str += f"{k}: {v} - "
             self.log_msg(f"[Val]: {_metric_str} loss: {loss_val:.3e}")
             self.tenb_log_any("metric", metrics, step=self.global_step)
 
@@ -1227,7 +1230,7 @@ class HyperCDTrainer:
         self.train_loop()
 
 
-_key = "tokenizer_hybrid_adaptor_xview2"
+_key = "tokenizer_hybrid_adaptor_dsifn"
 _configs_dict = {
     "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
     "tokenizer_hybrid_adaptor": "tokenizer_hybrid_adaptor",

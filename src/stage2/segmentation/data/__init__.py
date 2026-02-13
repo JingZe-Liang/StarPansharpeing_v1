@@ -15,6 +15,7 @@ __getattr__, __dir__, __all__ = lazy_loader.attach(
             "get_sos_oil_leakage_dataloader",
         ],
         "flood3i": ["Flood3IDataset", "get_flood3i_dataloader"],
+        "c2smsfloods": ["C2SMSFloodChangeDetectionDataset", "create_c2smsfloods_change_detection_dataloader"],
         "atlantic_forest": ["AtlanticForestSegmentationDataset", "get_atlantic_forest_dataloader"],
         "cross_city_multimodal": [
             "CrossCityMultimodalSegmentationDataset",

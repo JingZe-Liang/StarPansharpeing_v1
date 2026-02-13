@@ -1608,7 +1608,7 @@ class HyperLatentDiffusiveCloudRemovalTrainer:
         accelerate.utils.save(self.train_state.state_dict(), ema_path / "train_state.pth")
         self.log_msg(f"[EMA]: save ema at {ema_path}")
 
-    def load_from_ema(self, ema_path: str | Path, *, strict: bool = True) -> None:
+    def load_from_ema(self, ema_path: str | Path, *, strict: bool = False) -> None:
         ema_path = Path(ema_path)
         accelerate.load_checkpoint_in_model(self.model, ema_path / "cloud_removal_ema_model", strict=strict)
         self.prepare_ema_models()
